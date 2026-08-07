@@ -995,127 +995,8 @@ bool RendererBackend::createPipePipeline() {
         return true;
     }
 
-    constexpr const char* kGrassBillboardVertexShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
-    constexpr const char* kGrassBillboardFragmentShaderPath = "../src/render/shaders/grass_billboard.frag.slang.spv";
-    std::array<VkShaderModule, 2> grassShaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    VkShaderModule& grassVertShaderModule = grassShaderModules[0];
-    VkShaderModule& grassFragShaderModule = grassShaderModules[1];
-    const std::array<ShaderModuleLoadSpec, 2> grassShaderLoadSpecs = {{
-        {kGrassBillboardVertexShaderPath, "grass_billboard.vert"},
-        {kGrassBillboardFragmentShaderPath, "grass_billboard.frag"},
-    }};
-    if (!createShaderModulesFromFiles(m_device, grassShaderLoadSpecs, grassShaderModules)) {
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
-        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
-        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
-        }
-        vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
-        vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
-        if (importedWaterPipelineRt != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, importedWaterPipelineRt, nullptr);
-        }
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo grassVertexShaderStage{};
-    grassVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    grassVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    grassVertexShaderStage.module = grassVertShaderModule;
-    grassVertexShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo grassFragmentShaderStage{};
-    grassFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    grassFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    grassFragmentShaderStage.module = grassFragShaderModule;
-    grassFragmentShaderStage.pName = "main";
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> grassShaderStages = {
-        grassVertexShaderStage,
-        grassFragmentShaderStage
-    };
-
-    VkVertexInputBindingDescription grassBindings[2]{};
-    grassBindings[0].binding = 0;
-    grassBindings[0].stride = sizeof(GrassBillboardVertex);
-    grassBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    grassBindings[1].binding = 1;
-    grassBindings[1].stride = sizeof(GrassBillboardInstance);
-    grassBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription grassAttributes[5]{};
-    grassAttributes[0].location = 0;
-    grassAttributes[0].binding = 0;
-    grassAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
-    grassAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
-    grassAttributes[1].location = 1;
-    grassAttributes[1].binding = 0;
-    grassAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
-    grassAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
-    grassAttributes[2].location = 2;
-    grassAttributes[2].binding = 0;
-    grassAttributes[2].format = VK_FORMAT_R32_SFLOAT;
-    grassAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
-    grassAttributes[3].location = 3;
-    grassAttributes[3].binding = 1;
-    grassAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    grassAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
-    grassAttributes[4].location = 4;
-    grassAttributes[4].binding = 1;
-    grassAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    grassAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
-    VkPipelineVertexInputStateCreateInfo grassVertexInputInfo{};
-    grassVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    grassVertexInputInfo.vertexBindingDescriptionCount = 2;
-    grassVertexInputInfo.pVertexBindingDescriptions = grassBindings;
-    grassVertexInputInfo.vertexAttributeDescriptionCount = 5;
-    grassVertexInputInfo.pVertexAttributeDescriptions = grassAttributes;
-
-    VkGraphicsPipelineCreateInfo grassPipelineCreateInfo = pipelineCreateInfo;
-    grassPipelineCreateInfo.stageCount = static_cast<uint32_t>(grassShaderStages.size());
-    grassPipelineCreateInfo.pStages = grassShaderStages.data();
-    grassPipelineCreateInfo.pVertexInputState = &grassVertexInputInfo;
-    VkPipelineRasterizationStateCreateInfo grassRasterizer = rasterizer;
-    grassRasterizer.cullMode = VK_CULL_MODE_NONE;
-    grassPipelineCreateInfo.pRasterizationState = &grassRasterizer;
-    VkPipelineDepthStencilStateCreateInfo grassDepthStencil = depthStencil;
-    grassDepthStencil.depthWriteEnable = VK_TRUE;
-    grassPipelineCreateInfo.pDepthStencilState = &grassDepthStencil;
-    VkPipelineMultisampleStateCreateInfo grassMultisampling = multisampling;
-    grassMultisampling.alphaToCoverageEnable = VK_FALSE;
-    grassPipelineCreateInfo.pMultisampleState = &grassMultisampling;
-
-    VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
-    const VkResult grassPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &grassPipelineCreateInfo,
-        nullptr,
-        &grassBillboardPipeline
-    );
-    destroyShaderModules(m_device, grassShaderModules);
-    if (grassPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(grassBillboard)", grassPipelineResult);
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
-        vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
-        if (importedStaticPipelineRt != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
-        }
-        vkDestroyPipeline(m_device, skyCloudPipeline, nullptr);
-        vkDestroyPipeline(m_device, importedWaterPipeline, nullptr);
-        if (importedWaterPipelineRt != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, importedWaterPipelineRt, nullptr);
-        }
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (grassBillboard): samples=" << static_cast<uint32_t>(m_colorSampleCount)
-              << ", cullMode=" << static_cast<uint32_t>(grassRasterizer.cullMode)
-              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
-              << "\n";
+    // (removed) grass billboard main-pass pipeline — nothing binds it since the
+    // scatter and its draws were removed (see chunk_upload.cc, frame_pass_main.cc).
 
     if (m_pipePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
@@ -1135,16 +1016,12 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr);
     }
-    if (m_grassBillboardPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_grassBillboardPipeline, nullptr);
-    }
     m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;
     m_importedWaterPipelineRt = importedWaterPipelineRt;
-    m_grassBillboardPipeline = grassBillboardPipeline;
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
@@ -1155,7 +1032,6 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
     }
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_grassBillboardPipeline), "pipeline.grass.billboard");
     // Legacy pipe lit pipeline (prior factory sim) is bound by no render pass anymore.
     if (m_pipePipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
@@ -1190,12 +1066,8 @@ bool RendererBackend::createAoPipelines() {
     constexpr const char* kImportedStaticNormalDepthFragShaderPath = "../src/render/shaders/imported_static_normaldepth.frag.slang.spv";
     constexpr const char* kImportedWaterVertShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
     constexpr const char* kImportedWaterNormalDepthFragShaderPath = "../src/render/shaders/imported_water_normaldepth.frag.slang.spv";
-    constexpr const char* kGrassBillboardVertShaderPath = "../src/render/shaders/grass_billboard.vert.slang.spv";
-    constexpr const char* kGrassBillboardNormalDepthFragShaderPath = "../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv";
 
-    std::array<VkShaderModule, 10> shaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
+    std::array<VkShaderModule, 8> shaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1209,20 +1081,16 @@ bool RendererBackend::createAoPipelines() {
     VkShaderModule& voxelNormalDepthFragShaderModule = shaderModules[1];
     VkShaderModule& pipeVertShaderModule = shaderModules[2];
     VkShaderModule& pipeNormalDepthFragShaderModule = shaderModules[3];
-    VkShaderModule& grassBillboardVertShaderModule = shaderModules[4];
-    VkShaderModule& grassBillboardNormalDepthFragShaderModule = shaderModules[5];
-    VkShaderModule& importedStaticVertShaderModule = shaderModules[6];
-    VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[7];
-    VkShaderModule& importedWaterVertShaderModule = shaderModules[8];
-    VkShaderModule& importedWaterNormalDepthFragShaderModule = shaderModules[9];
+    VkShaderModule& importedStaticVertShaderModule = shaderModules[4];
+    VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[5];
+    VkShaderModule& importedWaterVertShaderModule = shaderModules[6];
+    VkShaderModule& importedWaterNormalDepthFragShaderModule = shaderModules[7];
 
-    const std::array<ShaderModuleLoadSpec, 10> shaderLoadSpecs = {{
+    const std::array<ShaderModuleLoadSpec, 8> shaderLoadSpecs = {{
         {kVoxelVertShaderPath, "voxel_packed.vert"},
         {kVoxelNormalDepthFragShaderPath, "voxel_normaldepth.frag"},
         {kPipeVertShaderPath, "pipe_instanced.vert"},
         {kPipeNormalDepthFragShaderPath, "pipe_normaldepth.frag"},
-        {kGrassBillboardVertShaderPath, "grass_billboard.vert"},
-        {kGrassBillboardNormalDepthFragShaderPath, "grass_billboard_normaldepth.frag"},
         {kImportedStaticVertShaderPath, "imported_static.vert"},
         {kImportedStaticNormalDepthFragShaderPath, "imported_static_normaldepth.frag"},
         {kImportedWaterVertShaderPath, "imported_water.vert"},
@@ -1234,7 +1102,6 @@ bool RendererBackend::createAoPipelines() {
 
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
@@ -1249,10 +1116,6 @@ bool RendererBackend::createAoPipelines() {
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedWaterNormalDepthPipeline, nullptr);
             importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
-        }
-        if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, grassBillboardNormalDepthPipeline, nullptr);
-            grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (voxelNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, voxelNormalDepthPipeline, nullptr);
@@ -1454,74 +1317,7 @@ bool RendererBackend::createAoPipelines() {
         return false;
     }
 
-    // Grass billboard normal-depth pipeline.
-    VkPipelineShaderStageCreateInfo grassNormalDepthStageInfos[2]{};
-    grassNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    grassNormalDepthStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    grassNormalDepthStageInfos[0].module = grassBillboardVertShaderModule;
-    grassNormalDepthStageInfos[0].pName = "main";
-    grassNormalDepthStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    grassNormalDepthStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    grassNormalDepthStageInfos[1].module = grassBillboardNormalDepthFragShaderModule;
-    grassNormalDepthStageInfos[1].pName = "main";
-
-    VkVertexInputBindingDescription grassBindings[2]{};
-    grassBindings[0].binding = 0;
-    grassBindings[0].stride = sizeof(GrassBillboardVertex);
-    grassBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    grassBindings[1].binding = 1;
-    grassBindings[1].stride = sizeof(GrassBillboardInstance);
-    grassBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription grassAttributes[5]{};
-    grassAttributes[0].location = 0;
-    grassAttributes[0].binding = 0;
-    grassAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
-    grassAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
-    grassAttributes[1].location = 1;
-    grassAttributes[1].binding = 0;
-    grassAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
-    grassAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
-    grassAttributes[2].location = 2;
-    grassAttributes[2].binding = 0;
-    grassAttributes[2].format = VK_FORMAT_R32_SFLOAT;
-    grassAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
-    grassAttributes[3].location = 3;
-    grassAttributes[3].binding = 1;
-    grassAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    grassAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
-    grassAttributes[4].location = 4;
-    grassAttributes[4].binding = 1;
-    grassAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    grassAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
-
-    VkPipelineVertexInputStateCreateInfo grassVertexInputInfo{};
-    grassVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    grassVertexInputInfo.vertexBindingDescriptionCount = 2;
-    grassVertexInputInfo.pVertexBindingDescriptions = grassBindings;
-    grassVertexInputInfo.vertexAttributeDescriptionCount = 5;
-    grassVertexInputInfo.pVertexAttributeDescriptions = grassAttributes;
-
-    VkPipelineRasterizationStateCreateInfo grassRasterizer = rasterizer;
-    grassRasterizer.cullMode = VK_CULL_MODE_NONE;
-
-    pipelineCreateInfo.pStages = grassNormalDepthStageInfos;
-    pipelineCreateInfo.pVertexInputState = &grassVertexInputInfo;
-    pipelineCreateInfo.pRasterizationState = &grassRasterizer;
-    const VkResult grassNormalDepthPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &grassBillboardNormalDepthPipeline
-    );
-    if (grassNormalDepthPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(grassBillboardNormalDepth)", grassNormalDepthPipelineResult);
-        destroyNewPipelines();
-        destroyShaderModules(m_device, shaderModules);
-        return false;
-    }
+    // (removed) grass billboard normal-depth prepass pipeline.
 
     VkPipelineShaderStageCreateInfo importedNormalDepthStageInfos[2]{};
     importedNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1655,15 +1451,11 @@ bool RendererBackend::createAoPipelines() {
     if (m_importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedWaterNormalDepthPipeline, nullptr);
     }
-    if (m_grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_grassBillboardNormalDepthPipeline, nullptr);
-    }
 
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
     m_importedWaterNormalDepthPipeline = importedWaterNormalDepthPipeline;
-    m_grassBillboardNormalDepthPipeline = grassBillboardNormalDepthPipeline;
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_voxelNormalDepthPipeline),
@@ -1684,17 +1476,12 @@ bool RendererBackend::createAoPipelines() {
         vkHandleToUint64(m_importedWaterNormalDepthPipeline),
         "pipeline.prepass.importedWaterNormalDepth"
     );
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_grassBillboardNormalDepthPipeline),
-        "pipeline.prepass.grassBillboardNormalDepth"
-    );
-    // Legacy voxel + pipe normal-depth prepass pipelines (prior game) are bound by no
-    // pass anymore; free the freshly built handles and null the members.
-    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
-        m_voxelNormalDepthPipeline = VK_NULL_HANDLE;
-    }
+    // The voxel normal-depth pipeline is live again: it is what puts VoxelCraft's
+    // chunks into the AO input buffer. Without it the prepass only ever saw imported
+    // statics and skinned actors, so ambient occlusion had nothing to occlude against
+    // anywhere the world is made of voxels.
+    //
+    // The pipe normal-depth pipeline stays dead -- legacy factory sim, no caller.
     if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
         m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
@@ -1769,8 +1556,6 @@ bool RendererBackend::createGraphicsPipeline() {
     constexpr const char* kShadowVertexShaderPath = "../src/render/shaders/shadow_depth.vert.slang.spv";
     constexpr const char* kPipeShadowVertexShaderPath = "../src/render/shaders/pipe_shadow.vert.slang.spv";
     constexpr const char* kImportedStaticShadowVertexShaderPath = "../src/render/shaders/imported_static_shadow.vert.slang.spv";
-    constexpr const char* kGrassShadowVertexShaderPath = "../src/render/shaders/grass_billboard_shadow.vert.slang.spv";
-    constexpr const char* kGrassShadowFragmentShaderPath = "../src/render/shaders/grass_billboard_shadow.frag.slang.spv";
 
     std::array<VkShaderModule, 8> sceneShaderModules = {
         VK_NULL_HANDLE,
@@ -2567,122 +2352,7 @@ bool RendererBackend::createGraphicsPipeline() {
               << ", depthBias=" << (shadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
               << "\n";
 
-    std::array<VkShaderModule, 2> grassShadowShaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    VkShaderModule& grassShadowVertShaderModule = grassShadowShaderModules[0];
-    VkShaderModule& grassShadowFragShaderModule = grassShadowShaderModules[1];
-    const std::array<ShaderModuleLoadSpec, 2> grassShadowShaderLoadSpecs = {{
-        {kGrassShadowVertexShaderPath, "grass_billboard_shadow.vert"},
-        {kGrassShadowFragmentShaderPath, "grass_billboard_shadow.frag"},
-    }};
-    if (!createShaderModulesFromFiles(m_device, grassShadowShaderLoadSpecs, grassShadowShaderModules)) {
-        vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo grassShadowVertexShaderStage{};
-    grassShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    grassShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    grassShadowVertexShaderStage.module = grassShadowVertShaderModule;
-    grassShadowVertexShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo grassShadowFragmentShaderStage{};
-    grassShadowFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    grassShadowFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    grassShadowFragmentShaderStage.module = grassShadowFragShaderModule;
-    grassShadowFragmentShaderStage.pName = "main";
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> grassShadowShaderStages = {
-        grassShadowVertexShaderStage,
-        grassShadowFragmentShaderStage
-    };
-
-    VkVertexInputBindingDescription grassShadowBindings[2]{};
-    grassShadowBindings[0].binding = 0;
-    grassShadowBindings[0].stride = sizeof(GrassBillboardVertex);
-    grassShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    grassShadowBindings[1].binding = 1;
-    grassShadowBindings[1].stride = sizeof(GrassBillboardInstance);
-    grassShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription grassShadowAttributes[5]{};
-    grassShadowAttributes[0].location = 0;
-    grassShadowAttributes[0].binding = 0;
-    grassShadowAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
-    grassShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, corner));
-    grassShadowAttributes[1].location = 1;
-    grassShadowAttributes[1].binding = 0;
-    grassShadowAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
-    grassShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, uv));
-    grassShadowAttributes[2].location = 2;
-    grassShadowAttributes[2].binding = 0;
-    grassShadowAttributes[2].format = VK_FORMAT_R32_SFLOAT;
-    grassShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(GrassBillboardVertex, plane));
-    grassShadowAttributes[3].location = 3;
-    grassShadowAttributes[3].binding = 1;
-    grassShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    grassShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, worldPosYaw));
-    grassShadowAttributes[4].location = 4;
-    grassShadowAttributes[4].binding = 1;
-    grassShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    grassShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(GrassBillboardInstance, colorTint));
-
-    VkPipelineVertexInputStateCreateInfo grassShadowVertexInputInfo{};
-    grassShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    grassShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
-    grassShadowVertexInputInfo.pVertexBindingDescriptions = grassShadowBindings;
-    grassShadowVertexInputInfo.vertexAttributeDescriptionCount = 5;
-    grassShadowVertexInputInfo.pVertexAttributeDescriptions = grassShadowAttributes;
-
-    VkGraphicsPipelineCreateInfo grassShadowPipelineCreateInfo = shadowPipelineCreateInfo;
-    grassShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(grassShadowShaderStages.size());
-    grassShadowPipelineCreateInfo.pStages = grassShadowShaderStages.data();
-    grassShadowPipelineCreateInfo.pVertexInputState = &grassShadowVertexInputInfo;
-    VkPipelineRasterizationStateCreateInfo grassShadowRasterizer = shadowRasterizer;
-    grassShadowRasterizer.cullMode = VK_CULL_MODE_NONE;
-    grassShadowPipelineCreateInfo.pRasterizationState = &grassShadowRasterizer;
-
-    VkPipeline grassShadowPipeline = VK_NULL_HANDLE;
-    const VkResult grassShadowPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &grassShadowPipelineCreateInfo,
-        nullptr,
-        &grassShadowPipeline
-    );
-
-    destroyShaderModules(m_device, grassShadowShaderModules);
-
-    if (grassShadowPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        if (worldRtPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, worldRtPipeline, nullptr);
-        }
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        logVkFailure("vkCreateGraphicsPipelines(grassShadow)", grassShadowPipelineResult);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (grassShadow): cullMode="
-              << static_cast<uint32_t>(grassShadowRasterizer.cullMode)
-              << ", depthBias=" << (grassShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
-              << "\n";
+    // (removed) grass billboard shadow-caster pipeline.
 
     VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
     if (!m_strategyMapMode) {
@@ -2699,7 +2369,6 @@ bool RendererBackend::createGraphicsPipeline() {
         {kTerrainFragmentShaderPath, "terrain_heightmap.frag"},
     }};
     auto destroyNewScenePipelines = [&]() {
-        vkDestroyPipeline(m_device, grassShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
         vkDestroyPipeline(m_device, shadowPipeline, nullptr);
@@ -2925,9 +2594,6 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticShadowPipeline, nullptr);
     }
-    if (m_grassBillboardShadowPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_grassBillboardShadowPipeline, nullptr);
-    }
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
     }
@@ -2954,7 +2620,6 @@ bool RendererBackend::createGraphicsPipeline() {
     m_shadowPipeline = shadowPipeline;
     m_pipeShadowPipeline = pipeShadowPipeline;
     m_importedStaticShadowPipeline = importedStaticShadowPipeline;
-    m_grassBillboardShadowPipeline = grassShadowPipeline;
     m_tonemapPipeline = toneMapPipeline;
     m_previewAddPipeline = previewAddPipeline;
     m_previewRemovePipeline = previewRemovePipeline;
@@ -2975,11 +2640,6 @@ bool RendererBackend::createGraphicsPipeline() {
         vkHandleToUint64(m_importedStaticShadowPipeline),
         "pipeline.shadow.importedStatic"
     );
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_grassBillboardShadowPipeline),
-        "pipeline.shadow.grass"
-    );
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
@@ -2988,13 +2648,16 @@ bool RendererBackend::createGraphicsPipeline() {
         vkHandleToUint64(m_previewFaceOutlinePipeline),
         "pipeline.preview.faceOutline"
     );
-    // Legacy voxel world/shadow + voxel-edit preview + pipe-shadow pipelines (prior
-    // voxel/factory game) are bound by no render pass anymore. Free the freshly built
-    // handles and null the members so nothing can bind them; the strategy map renders via
-    // the hex/imported/sky/tonemap path. (The creation code itself stays in this shared
-    // builder — removing it is a separate, larger refactor.)
-    for (VkPipeline* deadPipeline : {&m_pipeline, &m_pipelineRt, &m_shadowPipeline,
-                                     &m_pipeShadowPipeline, &m_previewAddPipeline,
+    // The voxel world + voxel shadow pipelines (m_pipeline / m_pipelineRt /
+    // m_shadowPipeline) are NOT dead: src/games/voxelcraft draws voxel chunks through
+    // them. They were listed here when the strategy map was the only consumer, which
+    // destroyed them immediately after creation and left VoxelCraft rendering nothing but
+    // sky. Games without voxel chunks never bind them -- prepareFrameChunkDrawData yields
+    // no indirect commands, so the draw is skipped on its own.
+    //
+    // The pipe-shadow and voxel-edit preview pipelines below genuinely have no caller
+    // left; their draw sites are still removed from the main and shadow passes.
+    for (VkPipeline* deadPipeline : {&m_pipeShadowPipeline, &m_previewAddPipeline,
                                      &m_previewRemovePipeline, &m_previewFaceOutlinePipeline}) {
         if (*deadPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, *deadPipeline, nullptr);

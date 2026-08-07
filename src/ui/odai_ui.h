@@ -6,6 +6,7 @@
 // Core
 #include "ui/animation.h"
 #include "ui/cached_rich_text.h"
+#include "ui/color_scale.h"
 #include "ui/font.h"
 #include "ui/icon_atlas.h"
 #include "ui/resource_style.h"

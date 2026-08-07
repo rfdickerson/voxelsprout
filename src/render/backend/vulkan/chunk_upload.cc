@@ -6,7 +6,6 @@
 #include "math/math.h"
 #include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
-#include "world/grass_scatter.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -2002,7 +2001,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         m_chunkDrawRanges.clear();
         m_chunkResidentKeys.clear();
         m_chunkLodMeshCache.clear();
-        m_chunkGrassInstanceCache.clear();
         m_rtChunkSceneRecords.clear();
         m_chunkLodMeshCacheValid = false;
         m_debugChunkMeshVertexCount = 0;
@@ -2039,15 +2037,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             }
             m_chunkIndexBufferHandle = kInvalidBufferHandle;
         }
-        if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-            if (m_lastGraphicsTimelineValue == 0) {
-                m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
-            } else {
-                scheduleBufferRelease(m_grassBillboardInstanceBufferHandle, m_lastGraphicsTimelineValue);
-            }
-            m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
-        }
-        m_grassBillboardInstanceCount = 0;
         m_pendingTransferTimelineValue = 0;
         m_currentChunkReadyTimelineValue = 0;
         return true;
@@ -2068,33 +2057,14 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     }
     const std::vector<ChunkResidentKey> previousResidentKeys = std::move(m_chunkResidentKeys);
     const std::vector<odai::world::ChunkLodMeshes> previousChunkLodMeshCache = std::move(m_chunkLodMeshCache);
-    const std::vector<std::vector<GrassBillboardInstance>> previousChunkGrassInstanceCache = std::move(m_chunkGrassInstanceCache);
     std::vector<RtChunkSceneRecord> previousRtChunkSceneRecords = std::move(m_rtChunkSceneRecords);
-    int previousResidentCenterChunkX = 0;
-    int previousResidentCenterChunkZ = 0;
-    if (!previousResidentKeys.empty()) {
-        int previousMinChunkX = std::numeric_limits<int>::max();
-        int previousMaxChunkX = std::numeric_limits<int>::min();
-        int previousMinChunkZ = std::numeric_limits<int>::max();
-        int previousMaxChunkZ = std::numeric_limits<int>::min();
-        for (const ChunkResidentKey& key : previousResidentKeys) {
-            previousMinChunkX = std::min(previousMinChunkX, key.chunkX);
-            previousMaxChunkX = std::max(previousMaxChunkX, key.chunkX);
-            previousMinChunkZ = std::min(previousMinChunkZ, key.chunkZ);
-            previousMaxChunkZ = std::max(previousMaxChunkZ, key.chunkZ);
-        }
-        previousResidentCenterChunkX = (previousMinChunkX + previousMaxChunkX) / 2;
-        previousResidentCenterChunkZ = (previousMinChunkZ + previousMaxChunkZ) / 2;
-    }
 
     m_chunkResidentKeys.assign(chunks.size(), ChunkResidentKey{});
     m_chunkLodMeshCache.assign(chunks.size(), odai::world::ChunkLodMeshes{});
-    m_chunkGrassInstanceCache.assign(chunks.size(), std::vector<GrassBillboardInstance>{});
     m_rtChunkSceneRecords.assign(chunks.size(), RtChunkSceneRecord{});
 
     std::vector<std::uint8_t> remeshMask(chunks.size(), 0u);
     bool reusedAnyChunkCache = false;
-    bool residentSetChanged = previousResidentKeys.size() != chunks.size();
     for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
         const ChunkResidentKey key = chunkResidentKeyForChunk(chunks[chunkArrayIndex]);
         m_chunkResidentKeys[chunkArrayIndex] = key;
@@ -2102,7 +2072,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         const auto previousIt = std::find(previousResidentKeys.begin(), previousResidentKeys.end(), key);
         if (previousIt == previousResidentKeys.end()) {
             remeshMask[chunkArrayIndex] = 1u;
-            residentSetChanged = true;
             continue;
         }
 
@@ -2112,12 +2081,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
             reusedAnyChunkCache = true;
         } else {
             remeshMask[chunkArrayIndex] = 1u;
-        }
-        if (previousIndex < previousChunkGrassInstanceCache.size()) {
-            m_chunkGrassInstanceCache[chunkArrayIndex] = previousChunkGrassInstanceCache[previousIndex];
-        }
-        if (previousIndex != chunkArrayIndex) {
-            residentSetChanged = true;
         }
         const auto previousRtIt = std::find_if(
             previousRtChunkSceneRecords.begin(),
@@ -2142,6 +2105,8 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
         remeshMask[chunkIndex] = 1u;
     }
 
+    // Centre chunk of the resident set — the ray-tracing active/retained radii below
+    // measure against it.
     int minChunkX = std::numeric_limits<int>::max();
     int maxChunkX = std::numeric_limits<int>::min();
     int minChunkZ = std::numeric_limits<int>::max();
@@ -2155,32 +2120,12 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     const int residentCenterChunkX = (minChunkX + maxChunkX) / 2;
     const int residentCenterChunkZ = (minChunkZ + maxChunkZ) / 2;
 
-    auto rebuildGrassInstancesForChunk = [&](std::size_t chunkArrayIndex) {
-        if (chunkArrayIndex >= chunks.size()) {
-            return;
-        }
-        static_assert(
-            sizeof(odai::world::GrassInstance) == sizeof(GrassBillboardInstance),
-            "world::GrassInstance must match the renderer's per-instance vertex layout"
-        );
-        std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
-        odai::world::GrassScatterParams grassParams{};
-        grassParams.residentCenterChunkX = residentCenterChunkX;
-        grassParams.residentCenterChunkZ = residentCenterChunkZ;
-        grassParams.activeRadius = kGrassActiveChunkRadius;
-        grassParams.retainedRadius = kGrassRetainedChunkRadius;
-        grassParams.previouslyActive = !grassInstances.empty();
-        const std::vector<odai::world::GrassInstance> builtInstances =
-            odai::world::buildGrassInstances(chunks[chunkArrayIndex], grassParams);
-        grassInstances.resize(builtInstances.size());
-        if (!builtInstances.empty()) {
-            std::memcpy(
-                grassInstances.data(),
-                builtInstances.data(),
-                builtInstances.size() * sizeof(GrassBillboardInstance)
-            );
-        }
-    };
+    // (removed) grass billboard scatter. The billboards read as invisible from the
+    // camera while their shadow casters smeared dark streaks across the ground, and
+    // the feature is not wanted for the voxel game. world::buildGrassInstances and
+    // its tests are untouched -- the generator still works if it is ever wanted back.
+    // The PREVIOUS frame's resident centre went with it -- the scatter's retained
+    // radius was its only reader; the ray-tracing path only needs the current one.
 
     std::size_t remeshedChunkCount = 0;
     std::size_t remeshedActiveVertexCount = 0;
@@ -2204,7 +2149,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
                 m_chunkLodMeshCache[chunkArrayIndex] =
                     odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
             }
-            rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
@@ -2231,7 +2175,6 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
                 m_chunkLodMeshCache[chunkArrayIndex] =
                     odai::world::buildChunkLodMeshes(chunks[chunkArrayIndex], m_chunkMeshingOptions, &meshingStats);
             }
-            rebuildGrassInstancesForChunk(chunkArrayIndex);
             countMeshGeometry(
                 m_chunkLodMeshCache[chunkArrayIndex],
                 remeshedActiveVertexCount,
@@ -2258,95 +2201,8 @@ bool RendererBackend::createChunkBuffers(const odai::world::ChunkGrid& chunkGrid
     }
     if (fullRemesh) {
         m_debugChunkLastFullRemeshMs = remeshMs.count();
-    } else if (residentSetChanged) {
-        for (std::size_t chunkArrayIndex = 0; chunkArrayIndex < chunks.size(); ++chunkArrayIndex) {
-            if (remeshMask[chunkArrayIndex] == 0u) {
-                const odai::world::Chunk& chunk = chunks[chunkArrayIndex];
-                const std::vector<GrassBillboardInstance>& grassInstances = m_chunkGrassInstanceCache[chunkArrayIndex];
-                const bool previouslyGrassActive = !grassInstances.empty();
-                const bool currentlyGrassActive =
-                    std::abs(chunk.chunkX() - residentCenterChunkX) <=
-                        (previouslyGrassActive ? kGrassRetainedChunkRadius : kGrassActiveChunkRadius) &&
-                    std::abs(chunk.chunkZ() - residentCenterChunkZ) <=
-                        (previouslyGrassActive ? kGrassRetainedChunkRadius : kGrassActiveChunkRadius);
-                const bool previouslyWithinRetainedRadius =
-                    std::abs(chunk.chunkX() - previousResidentCenterChunkX) <= kGrassRetainedChunkRadius &&
-                    std::abs(chunk.chunkZ() - previousResidentCenterChunkZ) <= kGrassRetainedChunkRadius;
-                if (previouslyGrassActive != currentlyGrassActive ||
-                    (currentlyGrassActive && !previouslyWithinRetainedRadius)) {
-                    rebuildGrassInstancesForChunk(chunkArrayIndex);
-                }
-            }
-        }
     }
 
-    std::vector<GrassBillboardInstance> combinedGrassInstances;
-    {
-        std::size_t totalGrassInstanceCount = 0;
-        for (const std::vector<GrassBillboardInstance>& chunkGrass : m_chunkGrassInstanceCache) {
-            totalGrassInstanceCount += chunkGrass.size();
-        }
-        combinedGrassInstances.reserve(totalGrassInstanceCount);
-        for (const std::vector<GrassBillboardInstance>& chunkGrass : m_chunkGrassInstanceCache) {
-            combinedGrassInstances.insert(combinedGrassInstances.end(), chunkGrass.begin(), chunkGrass.end());
-        }
-    }
-    if (combinedGrassInstances.empty()) {
-        if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-            const uint64_t grassReleaseValue = m_lastGraphicsTimelineValue;
-            scheduleBufferRelease(m_grassBillboardInstanceBufferHandle, grassReleaseValue);
-            m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
-        }
-        m_grassBillboardInstanceCount = 0;
-    } else {
-        if (fullRemesh) {
-            float minR = std::numeric_limits<float>::max();
-            float minG = std::numeric_limits<float>::max();
-            float minB = std::numeric_limits<float>::max();
-            float maxR = std::numeric_limits<float>::lowest();
-            float maxG = std::numeric_limits<float>::lowest();
-            float maxB = std::numeric_limits<float>::lowest();
-            for (const GrassBillboardInstance& instance : combinedGrassInstances) {
-                minR = std::min(minR, instance.colorTint[0]);
-                minG = std::min(minG, instance.colorTint[1]);
-                minB = std::min(minB, instance.colorTint[2]);
-                maxR = std::max(maxR, instance.colorTint[0]);
-                maxG = std::max(maxG, instance.colorTint[1]);
-                maxB = std::max(maxB, instance.colorTint[2]);
-            }
-            VOX_LOGI("render") << "grass tint range rgb min=("
-                              << minR << ", " << minG << ", " << minB
-                              << "), max=("
-                              << maxR << ", " << maxG << ", " << maxB
-                              << "), instances=" << combinedGrassInstances.size() << "\n";
-        }
-
-        BufferCreateDesc grassInstanceCreateDesc{};
-        grassInstanceCreateDesc.size = static_cast<VkDeviceSize>(combinedGrassInstances.size() * sizeof(GrassBillboardInstance));
-        grassInstanceCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        grassInstanceCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        grassInstanceCreateDesc.initialData = combinedGrassInstances.data();
-
-        const BufferHandle newGrassInstanceBufferHandle = m_bufferAllocator.createBuffer(grassInstanceCreateDesc);
-        if (newGrassInstanceBufferHandle != kInvalidBufferHandle) {
-            const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(newGrassInstanceBufferHandle);
-            if (grassInstanceBuffer != VK_NULL_HANDLE) {
-                setObjectName(
-                    VK_OBJECT_TYPE_BUFFER,
-                    vkHandleToUint64(grassInstanceBuffer),
-                    "mesh.grassBillboard.instances"
-                );
-            }
-            if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-                const uint64_t grassReleaseValue = m_lastGraphicsTimelineValue;
-                scheduleBufferRelease(m_grassBillboardInstanceBufferHandle, grassReleaseValue);
-            }
-            m_grassBillboardInstanceBufferHandle = newGrassInstanceBufferHandle;
-            m_grassBillboardInstanceCount = static_cast<uint32_t>(combinedGrassInstances.size());
-        } else {
-            VOX_LOGE("render") << "grass billboard instance buffer allocation failed";
-        }
-    }
 
     std::vector<odai::world::PackedVoxelVertex> combinedVertices;
     std::vector<std::uint32_t> combinedIndices;

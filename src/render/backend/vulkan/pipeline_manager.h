@@ -13,7 +13,6 @@ public:
     VkPipeline hexTerrainPipeline = VK_NULL_HANDLE;
     VkPipeline shadowPipeline = VK_NULL_HANDLE;
     VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
-    VkPipeline grassBillboardShadowPipeline = VK_NULL_HANDLE;
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;
     VkPipeline skyCloudPipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
@@ -22,16 +21,18 @@ public:
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
-    VkPipeline grassBillboardPipeline = VK_NULL_HANDLE;
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
+    // One pipeline per AO estimator (see ODAI_AO_MODE in ssao.comp.slang). All three
+    // share the ssao pipeline layout and descriptor set -- only the shader differs.
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
+    VkPipeline ssaoHbaoPipeline = VK_NULL_HANDLE;
+    VkPipeline ssaoGtaoPipeline = VK_NULL_HANDLE;
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipeline previewAddPipeline = VK_NULL_HANDLE;
     VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
@@ -53,6 +54,14 @@ public:
             vkDestroyPipeline(device, ssaoBlurPipeline, nullptr);
             ssaoBlurPipeline = VK_NULL_HANDLE;
         }
+        if (ssaoGtaoPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, ssaoGtaoPipeline, nullptr);
+            ssaoGtaoPipeline = VK_NULL_HANDLE;
+        }
+        if (ssaoHbaoPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, ssaoHbaoPipeline, nullptr);
+            ssaoHbaoPipeline = VK_NULL_HANDLE;
+        }
         if (ssaoPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, ssaoPipeline, nullptr);
             ssaoPipeline = VK_NULL_HANDLE;
@@ -68,10 +77,6 @@ public:
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedWaterNormalDepthPipeline, nullptr);
             importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
-        }
-        if (grassBillboardNormalDepthPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, grassBillboardNormalDepthPipeline, nullptr);
-            grassBillboardNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (voxelNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, voxelNormalDepthPipeline, nullptr);
@@ -100,10 +105,6 @@ public:
         if (importedStaticShadowPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticShadowPipeline, nullptr);
             importedStaticShadowPipeline = VK_NULL_HANDLE;
-        }
-        if (grassBillboardShadowPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, grassBillboardShadowPipeline, nullptr);
-            grassBillboardShadowPipeline = VK_NULL_HANDLE;
         }
         if (previewRemovePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, previewRemovePipeline, nullptr);
@@ -136,10 +137,6 @@ public:
         if (importedWaterPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedWaterPipelineRt, nullptr);
             importedWaterPipelineRt = VK_NULL_HANDLE;
-        }
-        if (grassBillboardPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, grassBillboardPipeline, nullptr);
-            grassBillboardPipeline = VK_NULL_HANDLE;
         }
         if (magicaPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, magicaPipeline, nullptr);

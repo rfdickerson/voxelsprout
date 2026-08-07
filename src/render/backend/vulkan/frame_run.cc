@@ -794,7 +794,7 @@ void RendererBackend::renderFrame(
     mvpUniform.shadowConfig1[3] = m_shadowDebugSettings.cascadeBlendFactor;
 
     mvpUniform.shadowConfig2[0] = m_shadowDebugSettings.ssaoRadius;
-    mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.ssaoBias;
+    mvpUniform.shadowConfig2[1] = m_shadowDebugSettings.activeAoBias();
     mvpUniform.shadowConfig2[2] = m_shadowDebugSettings.ssaoIntensity;
     constexpr float kVoxelGiInjectSunScale = 0.70f;
     constexpr float kVoxelGiInjectShScale = 0.95f;

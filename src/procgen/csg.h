@@ -57,6 +57,11 @@ struct Polygon {
     Color3 color;
     float metallic = 0.0f;
     float roughness = 1.0f;
+    // Optional index into the scene's named material library. 0 means "no
+    // library material" and the metallic/roughness above are used directly.
+    // When set, those two stay as the fallback the shader uses if the table
+    // ever fails to load, so this is additive rather than a replacement.
+    std::uint32_t materialIndex = 0u;
 
     void flip();
 };
@@ -80,5 +85,9 @@ void scaleMesh(CsgMesh& mesh, const Vector3& factors);  // about the origin
 void rotateY(CsgMesh& mesh, float radiansAngle);        // about the origin
 void paint(CsgMesh& mesh, const Color3& color);
 void setMaterial(CsgMesh& mesh, float metallic, float roughness);
+// Same, plus a named-library index. The coefficients are still stored as the
+// shader's fallback, so a library that fails to load degrades to this pair
+// rather than to a flat default.
+void setMaterial(CsgMesh& mesh, float metallic, float roughness, std::uint32_t materialIndex);
 
 }  // namespace odai::procgen

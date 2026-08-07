@@ -32,7 +32,7 @@ namespace odai::render {
 
 namespace {
 
-constexpr const char* kSkinningShaderPath = "src/render/shaders/skinning.comp.slang.spv";
+constexpr const char* kSkinningShaderPath = "../src/render/shaders/skinning.comp.slang.spv";
 
 struct SkinningPushConstants {
     std::uint32_t vertexCount;

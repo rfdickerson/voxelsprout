@@ -16,11 +16,16 @@ constexpr std::array<const char*, 1> kValidationLayers = {"VK_LAYER_KHRONOS_vali
 // Promoted-to-core features (timelineSemaphore/1.2, synchronization2/1.3,
 // dynamicRendering/1.3, maintenance4/1.3) are enabled via VkPhysicalDeviceVulkan1xFeatures
 // chains in init.cc and do not need extension strings at 1.4+.
-constexpr std::array<const char*, 3> kDeviceExtensions = {
+constexpr std::array<const char*, 2> kDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
-    VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME,
 };
+// VK_EXT_memory_priority is a residency *hint* to the allocator, not something
+// any pass depends on: VMA drops the priority plumbing and allocates normally
+// without it. Requiring it disqualified otherwise-capable hardware (Mesa's Intel
+// driver does not expose it), so it is probed per candidate and enabled only
+// where present -- same treatment as descriptor buffer and ray tracing.
+constexpr const char* kOptionalMemoryPriorityExtension = VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME;
 constexpr uint32_t kBindlessTargetTextureCapacity = 1024;
 constexpr uint32_t kBindlessMinTextureCapacity = 64;
 constexpr uint32_t kBindlessReservedSampledDescriptors = 16;
@@ -34,7 +39,20 @@ constexpr uint32_t kBindlessTextureIndexPlantDiffuse = 6;
 constexpr uint32_t kBindlessTextureIndexSkyDaylight = 7;
 constexpr uint32_t kBindlessTextureIndexWaterNormal = 8;
 constexpr uint32_t kBindlessTextureIndexTerrainDetail = 9;
-constexpr uint32_t kBindlessTextureStaticCount = 10;
+constexpr uint32_t kBindlessTextureIndexFogMap = 10;
+// Number of fixed singleton slots at the head of the bindless table; imported
+// scene textures are assigned from here upward (chunk_upload.cc).
+//
+// MIRRORED, and not enforced by the compiler — this header is included inside
+// `namespace odai::render` by some TUs and not at all by others, so each copy is
+// a distinct entity and a mismatch is silent. Keep these three in sync:
+//   * this block,
+//   * the private copy in backend/vulkan/descriptors.cc (which writes the
+//     descriptors these indices name),
+//   * kBindlessIndexFogMap in shaders/imported_static.frag.slang.
+// They were out of step until now: this header lacked FogMap and stopped at 10
+// while descriptors.cc wrote at 11+i, so imported texture 0 sampled the fog map.
+constexpr uint32_t kBindlessTextureStaticCount = 11;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
 constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};

@@ -5886,6 +5886,18 @@ void App::updateUiOverlay(float dt) {
 
     double mouseX = 0.0, mouseY = 0.0;
     glfwGetCursorPos(m_window, &mouseX, &mouseY);
+    // Window coordinates -> framebuffer pixels. Everything downstream (UI
+    // mousePx, and pickHexFromMouse/rayToGroundPlane, which divide by fbW/fbH)
+    // works in framebuffer space; the two spaces coincide only at 1x scale.
+    // At 1.5x the bottom/right third of the window was unreachable.
+    {
+        int winW = 0, winH = 0;
+        glfwGetWindowSize(m_window, &winW, &winH);
+        if (winW > 0 && winH > 0) {
+            mouseX *= static_cast<double>(fbW) / static_cast<double>(winW);
+            mouseY *= static_cast<double>(fbH) / static_cast<double>(winH);
+        }
+    }
     const bool leftDown = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
     m_uiInput.beginFrame();

@@ -22,8 +22,13 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkViewport& viewport = context.viewport;
     const VkRect2D& scissor = context.scissor;
     const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
-    // Legacy voxel/magica/pipe per-frame draw inputs are still present on MainPassInputs
-    // but no longer consumed here — those passes were removed (prior voxel/factory game).
+    // Voxel chunk inputs: consumed by the chunk draw below (VoxelCraft). The magica/pipe
+    // inputs are still present on MainPassInputs but remain unconsumed here.
+    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
+    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
+    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
+    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
+    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -38,6 +43,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const bool useRtMainShadows =
         m_shadowStats.activeMode == ShadowMode::RayTraced &&
         m_shadowStats.mainPassRayTracingReady;
+    const bool useRtVoxelShadows = useRtMainShadows && m_pipelineRt != VK_NULL_HANDLE;
     m_shadowStats.mainPassRayTracingActive = useRtMainShadows;
 
     if (useRtMainShadows) {
@@ -204,8 +210,40 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         }
     }
 
-    // (removed) voxel chunk + magica model main-pass draws — legacy from the prior
-    // voxel/factory game; the strategy map renders hex terrain + imported scene instead.
+    // Voxel chunk draws (VoxelCraft). Games with no voxel chunks produce no indirect
+    // commands, so canDrawChunksIndirect is false and this whole block is skipped.
+    // (Magica model main-pass draws remain removed -- no current game uploads them.)
+    if (frameChunkDrawData.canDrawChunksIndirect &&
+        m_pipeline != VK_NULL_HANDLE &&
+        chunkVertexBuffer != VK_NULL_HANDLE &&
+        chunkIndexBuffer != VK_NULL_HANDLE &&
+        chunkInstanceBuffer != VK_NULL_HANDLE &&
+        chunkInstanceSliceOpt.has_value()) {
+        vkCmdBindPipeline(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            useRtVoxelShadows ? m_pipelineRt : m_pipeline
+        );
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
+        const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        // Per-chunk offsets ride the instance buffer; the push constant block stays zeroed
+        // so the shader's chunkOffset/cascadeData path matches the shadow pass.
+        ChunkPushConstants chunkPushConstants{};
+        vkCmdPushConstants(
+            commandBuffer,
+            m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(ChunkPushConstants),
+            &chunkPushConstants
+        );
+        drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsMain, frameChunkDrawData);
+    }
+
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
         importedVertexBuffer != VK_NULL_HANDLE &&
         importedIndexBuffer != VK_NULL_HANDLE &&
@@ -336,26 +374,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // (removed) pipe / belt / transport instanced main-pass draws — legacy factory-sim
     // rendering from the prior game; the strategy map has no pipes or conveyors.
 
-    if (m_grassBillboardPipeline != VK_NULL_HANDLE &&
-        m_grassBillboardIndexCount > 0 &&
-        m_grassBillboardInstanceCount > 0 &&
-        m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-        const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-        const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-        const VkBuffer grassInstanceBuffer = m_bufferAllocator.getBuffer(m_grassBillboardInstanceBufferHandle);
-        if (grassVertexBuffer != VK_NULL_HANDLE &&
-            grassIndexBuffer != VK_NULL_HANDLE &&
-            grassInstanceBuffer != VK_NULL_HANDLE) {
-            const VkBuffer vertexBuffers[2] = {grassVertexBuffer, grassInstanceBuffer};
-            const VkDeviceSize vertexOffsets[2] = {0, 0};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_grassBillboardPipeline);
-            bindGraphicsDescriptorBuffers(commandBuffer);
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, vertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, grassIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, m_grassBillboardIndexCount, m_grassBillboardInstanceCount, 0, 0, 0);
-        }
-    }
+    // (removed) grass billboard main-pass draw. The billboards contributed nothing legible
+    // from the camera while their shadow casters scattered dark streaks across the ground;
+    // chunk_upload.cc no longer scatters instances, so this had nothing left to draw.
 
     const bool canCaptureWaterRefraction =
         canDrawImportedWater &&

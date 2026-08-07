@@ -207,6 +207,9 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    if (!runStep("createImportedMaterialResources", [&] { return createImportedMaterialResources(); })) {
+        return false;
+    }
     if (!runStep("createAutoExposureResources", [&] { return createAutoExposureResources(); })) {
         VOX_LOGE("render") << "init failed at createAutoExposureResources\n";
         shutdown();
@@ -353,7 +356,7 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 26> kRuntimeAssetSpecs = {{
+    constexpr std::array<RuntimeAssetSpec, 21> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
         {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
         {"../src/render/shaders/terrain_heightmap.vert.slang.spv", "terrain heightmap vertex shader", true},
@@ -368,13 +371,9 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         {"../src/render/shaders/tone_map.frag.slang.spv", "tonemap fragment shader", true},
         {"../src/render/shaders/shadow_depth.vert.slang.spv", "shadow vertex shader", true},
         {"../src/render/shaders/pipe_shadow.vert.slang.spv", "pipe shadow vertex shader", true},
-        {"../src/render/shaders/grass_billboard_shadow.vert.slang.spv", "grass shadow vertex shader", true},
-        {"../src/render/shaders/grass_billboard_shadow.frag.slang.spv", "grass shadow fragment shader", true},
         {"../src/render/shaders/pipe_instanced.vert.slang.spv", "pipe vertex shader", true},
         {"../src/render/shaders/pipe_instanced.frag.slang.spv", "pipe fragment shader", true},
-        {"../src/render/shaders/grass_billboard.vert.slang.spv", "grass vertex shader", true},
-        {"../src/render/shaders/grass_billboard.frag.slang.spv", "grass fragment shader", true},
-        {"../src/render/shaders/grass_billboard_normaldepth.frag.slang.spv", "grass normal-depth shader", true},
+        // (removed) the five grass_billboard* shaders — no pipeline compiles them any more.
         {"../src/render/shaders/imported_water_normaldepth.frag.slang.spv", "imported water normal-depth shader", true},
         {"../src/render/shaders/pipe_normaldepth.frag.slang.spv", "pipe normal-depth shader", true},
         {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
@@ -506,6 +505,7 @@ bool RendererBackend::pickPhysicalDevice() {
         bool supportsTessellationShader = false;
         bool supportsDisplayTiming = false;
         bool hasDisplayTimingExtension = false;
+        bool supportsMemoryPriority = false;
         uint32_t bindlessTextureCapacity = 0;
         float maxSamplerAnisotropy = 1.0f;
         VkFormat depthFormat = VK_FORMAT_UNDEFINED;
@@ -659,10 +659,6 @@ bool RendererBackend::pickPhysicalDevice() {
             VOX_LOGI("render") << "skip GPU: bufferDeviceAddress not supported\n";
             continue;
         }
-        if (memoryPriorityFeatures.memoryPriority != VK_TRUE) {
-            VOX_LOGI("render") << "skip GPU: memoryPriority not supported\n";
-            continue;
-        }
         if (features2.features.drawIndirectFirstInstance != VK_TRUE) {
             VOX_LOGI("render") << "skip GPU: drawIndirectFirstInstance not supported\n";
             continue;
@@ -705,6 +701,11 @@ bool RendererBackend::pickPhysicalDevice() {
         const bool displayTimingExtensionAvailable =
             isDeviceExtensionAvailable(candidate, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
         const bool supportsDisplayTiming = displayTimingExtensionAvailable;
+        // Both halves matter: the feature bit is only meaningful when the driver
+        // actually advertises the extension.
+        const bool supportsMemoryPriority =
+            isDeviceExtensionAvailable(candidate, kOptionalMemoryPriorityExtension) &&
+            memoryPriorityFeatures.memoryPriority == VK_TRUE;
         DesktopCapabilityProbe capabilityProbe{};
         capabilityProbe.descriptorBufferExtension =
             isDeviceExtensionAvailable(candidate, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME);
@@ -772,6 +773,7 @@ bool RendererBackend::pickPhysicalDevice() {
         candidateSelection.supportsTessellationShader = features2.features.tessellationShader == VK_TRUE;
         candidateSelection.supportsDisplayTiming = supportsDisplayTiming;
         candidateSelection.hasDisplayTimingExtension = displayTimingExtensionAvailable;
+        candidateSelection.supportsMemoryPriority = supportsMemoryPriority;
         if (supportsDisplayTiming) {
             anyCandidateSupportsDisplayTiming = true;
         }
@@ -834,6 +836,7 @@ bool RendererBackend::pickPhysicalDevice() {
         m_supportsDisplayTiming = selected.supportsDisplayTiming;
         m_hasDisplayTimingExtension = selected.hasDisplayTimingExtension;
         m_enableDisplayTiming = m_supportsDisplayTiming;
+        m_supportsMemoryPriority = selected.supportsMemoryPriority;
         m_bindlessTextureCapacity = selected.bindlessTextureCapacity;
         m_maxSamplerAnisotropy = selected.maxSamplerAnisotropy;
         m_depthFormat = selected.depthFormat;
@@ -860,6 +863,7 @@ bool RendererBackend::pickPhysicalDevice() {
                            << ", bindlessTextureCapacity=" << m_bindlessTextureCapacity
                            << ", displayTiming=" << (m_supportsDisplayTiming ? "yes" : "no")
                            << "(ext=" << (selected.hasDisplayTimingExtension ? "yes" : "no") << ")"
+                           << ", memoryPriority=" << (m_supportsMemoryPriority ? "yes" : "no")
                            << ", maxSamplerAnisotropy=" << m_maxSamplerAnisotropy
                            << ", msaaSamples=" << static_cast<uint32_t>(m_colorSampleCount)
                            << ", shadowDepthFormat=" << static_cast<int>(m_shadowDepthFormat)
@@ -985,21 +989,32 @@ bool RendererBackend::createLogicalDevice() {
         vulkan14Features.hostImageCopy = VK_TRUE;
     }
 
-    VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
-    memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
-    memoryPriorityFeatures.pNext = &vulkan14Features;
-    memoryPriorityFeatures.memoryPriority = VK_TRUE;
+    // Optional feature structs are pushed onto this chain head bottom-up, so a
+    // struct whose extension the device lacks never enters the chain at all.
+    // Enabling a feature without its extension is a vkCreateDevice error, which
+    // is why none of these can be linked unconditionally.
+    void* optionalFeatureChainHead = &vulkan14Features;
 
     // Enable the descriptor-buffer feature so the renderer can back all descriptor
     // sets with mapped descriptor buffers (VK_EXT_descriptor_buffer) instead of
-    // pool-allocated sets. Inserted between memoryPriority and vulkan14 — every
-    // chain path (VRS/RT/base) flows through memoryPriorityFeatures.
+    // pool-allocated sets.
     VkPhysicalDeviceDescriptorBufferFeaturesEXT descriptorBufferFeatures{};
     descriptorBufferFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT;
     if (m_desktopCapabilityProbe.descriptorBufferExtension) {
         descriptorBufferFeatures.descriptorBuffer = VK_TRUE;
-        descriptorBufferFeatures.pNext = &vulkan14Features;
-        memoryPriorityFeatures.pNext = &descriptorBufferFeatures;
+        descriptorBufferFeatures.pNext = optionalFeatureChainHead;
+        optionalFeatureChainHead = &descriptorBufferFeatures;
+    }
+
+    // VK_EXT_memory_priority: allocator residency hint only. Absent on Mesa's
+    // Intel driver, so it is probed rather than required; VMA simply allocates
+    // without priorities when it is off.
+    VkPhysicalDeviceMemoryPriorityFeaturesEXT memoryPriorityFeatures{};
+    memoryPriorityFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT;
+    if (m_supportsMemoryPriority) {
+        memoryPriorityFeatures.memoryPriority = VK_TRUE;
+        memoryPriorityFeatures.pNext = optionalFeatureChainHead;
+        optionalFeatureChainHead = &memoryPriorityFeatures;
     }
 
     // Vulkan Roadmap 2026: variable rate shading. Gated on the chosen device's probe
@@ -1010,11 +1025,11 @@ bool RendererBackend::createLogicalDevice() {
     const bool enableVrs = m_desktopCapabilityProbe.fragmentShadingRateExtension;
     if (enableVrs) {
         fragmentShadingRateFeatures.pipelineFragmentShadingRate = VK_TRUE;
-        fragmentShadingRateFeatures.pNext = &memoryPriorityFeatures;
+        fragmentShadingRateFeatures.pNext = optionalFeatureChainHead;
+        optionalFeatureChainHead = &fragmentShadingRateFeatures;
     }
-    VkBaseOutStructure* const featureChainTail = enableVrs
-        ? reinterpret_cast<VkBaseOutStructure*>(&fragmentShadingRateFeatures)
-        : reinterpret_cast<VkBaseOutStructure*>(&memoryPriorityFeatures);
+    VkBaseOutStructure* const featureChainTail =
+        static_cast<VkBaseOutStructure*>(optionalFeatureChainHead);
     m_enabledAccelerationStructureFeatures = {};
     m_enabledAccelerationStructureFeatures.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -1031,6 +1046,9 @@ bool RendererBackend::createLogicalDevice() {
     }
 
     std::vector<const char*> enabledDeviceExtensions(kDeviceExtensions.begin(), kDeviceExtensions.end());
+    if (m_supportsMemoryPriority) {
+        appendDeviceExtensionIfMissing(enabledDeviceExtensions, kOptionalMemoryPriorityExtension);
+    }
     if (m_supportsDisplayTiming && m_hasDisplayTimingExtension) {
         appendDeviceExtensionIfMissing(enabledDeviceExtensions, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME);
     }
@@ -1064,7 +1082,9 @@ bool RendererBackend::createLogicalDevice() {
     }
     VOX_LOGI("render") << "Vulkan 1.4 device created\n";
     VOX_LOGI("render") << "device features enabled: dynamicRendering=1, synchronization2=1, maintenance4=1, "
-        << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority=1, shaderDrawParameters=1, drawIndirectFirstInstance=1, "
+        << "timelineSemaphore=1, bufferDeviceAddress=1, memoryPriority="
+        << (m_supportsMemoryPriority ? 1 : 0)
+        << ", shaderDrawParameters=1, drawIndirectFirstInstance=1, "
         << "multiDrawIndirect=" << (m_supportsMultiDrawIndirect ? 1 : 0)
         << ", tessellationShader=1"
         << ", descriptorIndexing=" << (m_supportsBindlessDescriptors ? 1 : 0)
@@ -1198,8 +1218,12 @@ bool RendererBackend::createLogicalDevice() {
         VmaAllocatorCreateInfo allocatorCreateInfo{};
         allocatorCreateInfo.flags =
             VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT |
-            VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT |
-            VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
+            VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+        // VMA asserts the extension was enabled on the device before it will
+        // honor this bit, so it tracks the probe rather than being unconditional.
+        if (m_supportsMemoryPriority) {
+            allocatorCreateInfo.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
+        }
         allocatorCreateInfo.physicalDevice = m_physicalDevice;
         allocatorCreateInfo.device = m_device;
         allocatorCreateInfo.instance = m_instance;
@@ -1210,7 +1234,8 @@ bool RendererBackend::createLogicalDevice() {
             return false;
         }
         VOX_LOGI("render") << "VMA allocator created: flags="
-            << "BUFFER_DEVICE_ADDRESS|EXT_MEMORY_BUDGET|EXT_MEMORY_PRIORITY\n";
+            << "BUFFER_DEVICE_ADDRESS|EXT_MEMORY_BUDGET"
+            << (m_supportsMemoryPriority ? "|EXT_MEMORY_PRIORITY" : "") << "\n";
     }
     return true;
 }
@@ -1577,9 +1602,7 @@ bool RendererBackend::createPipeBuffers() {
     if (m_pipeVertexBufferHandle != kInvalidBufferHandle &&
         m_pipeIndexBufferHandle != kInvalidBufferHandle &&
         m_transportVertexBufferHandle != kInvalidBufferHandle &&
-        m_transportIndexBufferHandle != kInvalidBufferHandle &&
-        m_grassBillboardVertexBufferHandle != kInvalidBufferHandle &&
-        m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
+        m_transportIndexBufferHandle != kInvalidBufferHandle) {
         return true;
     }
 
@@ -1647,62 +1670,8 @@ bool RendererBackend::createPipeBuffers() {
         return false;
     }
 
-    if (m_grassBillboardVertexBufferHandle == kInvalidBufferHandle ||
-        m_grassBillboardIndexBufferHandle == kInvalidBufferHandle) {
-        constexpr std::array<GrassBillboardVertex, 8> kGrassBillboardVertices = {{
-            // Plane 0 (X axis).
-            GrassBillboardVertex{{-0.38f, 0.0f}, {0.0f, 1.0f}, 0.0f},
-            GrassBillboardVertex{{ 0.38f, 0.0f}, {1.0f, 1.0f}, 0.0f},
-            GrassBillboardVertex{{-0.38f, 0.88f}, {0.0f, 0.0f}, 0.0f},
-            GrassBillboardVertex{{ 0.38f, 0.88f}, {1.0f, 0.0f}, 0.0f},
-            // Plane 1 (Z axis).
-            GrassBillboardVertex{{-0.38f, 0.0f}, {0.0f, 1.0f}, 1.0f},
-            GrassBillboardVertex{{ 0.38f, 0.0f}, {1.0f, 1.0f}, 1.0f},
-            GrassBillboardVertex{{-0.38f, 0.88f}, {0.0f, 0.0f}, 1.0f},
-            GrassBillboardVertex{{ 0.38f, 0.88f}, {1.0f, 0.0f}, 1.0f},
-        }};
-        constexpr std::array<std::uint32_t, 12> kGrassBillboardIndices = {{
-            0u, 1u, 2u, 2u, 1u, 3u,
-            4u, 5u, 6u, 6u, 5u, 7u
-        }};
-
-        BufferCreateDesc grassVertexCreateDesc{};
-        grassVertexCreateDesc.size = static_cast<VkDeviceSize>(kGrassBillboardVertices.size() * sizeof(GrassBillboardVertex));
-        grassVertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        grassVertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        grassVertexCreateDesc.initialData = kGrassBillboardVertices.data();
-        m_grassBillboardVertexBufferHandle = m_bufferAllocator.createBuffer(grassVertexCreateDesc);
-        if (m_grassBillboardVertexBufferHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "grass billboard vertex buffer allocation failed\n";
-            return false;
-        }
-        {
-            const VkBuffer grassVertexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardVertexBufferHandle);
-            if (grassVertexBuffer != VK_NULL_HANDLE) {
-                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(grassVertexBuffer), "mesh.grassBillboard.vertex");
-            }
-        }
-
-        BufferCreateDesc grassIndexCreateDesc{};
-        grassIndexCreateDesc.size = static_cast<VkDeviceSize>(kGrassBillboardIndices.size() * sizeof(std::uint32_t));
-        grassIndexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-        grassIndexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        grassIndexCreateDesc.initialData = kGrassBillboardIndices.data();
-        m_grassBillboardIndexBufferHandle = m_bufferAllocator.createBuffer(grassIndexCreateDesc);
-        if (m_grassBillboardIndexBufferHandle == kInvalidBufferHandle) {
-            VOX_LOGE("render") << "grass billboard index buffer allocation failed\n";
-            m_bufferAllocator.destroyBuffer(m_grassBillboardVertexBufferHandle);
-            m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
-            return false;
-        }
-        {
-            const VkBuffer grassIndexBuffer = m_bufferAllocator.getBuffer(m_grassBillboardIndexBufferHandle);
-            if (grassIndexBuffer != VK_NULL_HANDLE) {
-                setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(grassIndexBuffer), "mesh.grassBillboard.index");
-            }
-        }
-        m_grassBillboardIndexCount = static_cast<uint32_t>(kGrassBillboardIndices.size());
-    }
+    // (removed) the shared grass billboard quad (8 verts / 12 indices). Nothing
+    // scatters instances or binds a grass pipeline any more.
 
     m_pipeIndexCount = static_cast<uint32_t>(pipeMesh.indices.size());
     m_transportIndexCount = static_cast<uint32_t>(transportMesh.indices.size());
@@ -2243,15 +2212,6 @@ void RendererBackend::destroyImportedBuffers() {
 
 
 void RendererBackend::destroyPipeBuffers() {
-    if (m_grassBillboardIndexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_grassBillboardIndexBufferHandle);
-        m_grassBillboardIndexBufferHandle = kInvalidBufferHandle;
-    }
-    if (m_grassBillboardVertexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_grassBillboardVertexBufferHandle);
-        m_grassBillboardVertexBufferHandle = kInvalidBufferHandle;
-    }
-    m_grassBillboardIndexCount = 0;
 
     if (m_transportIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_transportIndexBufferHandle);
@@ -2292,13 +2252,7 @@ void RendererBackend::destroyChunkBuffers() {
 
     m_chunkDrawRanges.clear();
     m_chunkLodMeshCache.clear();
-    m_chunkGrassInstanceCache.clear();
     m_chunkLodMeshCacheValid = false;
-    if (m_grassBillboardInstanceBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_grassBillboardInstanceBufferHandle);
-        m_grassBillboardInstanceBufferHandle = kInvalidBufferHandle;
-    }
-    m_grassBillboardInstanceCount = 0;
     m_bufferAllocator.destroyBuffer(m_chunkVertexBufferHandle);
     m_chunkVertexBufferHandle = kInvalidBufferHandle;
     m_bufferAllocator.destroyBuffer(m_chunkIndexBufferHandle);

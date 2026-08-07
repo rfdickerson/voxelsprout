@@ -1388,13 +1388,18 @@ bool RendererBackend::createDiffuseTextureResources() {
             samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
             samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
             samplerCreateInfo.mipLodBias = 0.0f;
-            samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
-            samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
-                ? std::min(8.0f, m_maxSamplerAnisotropy)
-                : 1.0f;
+            // Anisotropy off: the anisotropic filter takes many weighted taps along the
+            // footprint's major axis, which reintroduces exactly the smoothing NEAREST is
+            // here to avoid -- blocks read as blurred mush at grazing angles. The blocky
+            // look is the point.
+            samplerCreateInfo.anisotropyEnable = VK_FALSE;
+            samplerCreateInfo.maxAnisotropy = 1.0f;
             samplerCreateInfo.compareEnable = VK_FALSE;
             samplerCreateInfo.minLod = 0.0f;
-            samplerCreateInfo.maxLod = static_cast<float>(diffuseMipLevels - 1u);
+            // Cap the mip chain: this is a 512x32 tile atlas, so mips past a few levels
+            // shrink each 32px tile toward a single texel AND bleed neighbouring tiles
+            // together, which is what turns distant ground into flat colour smears.
+            samplerCreateInfo.maxLod = std::min(static_cast<float>(diffuseMipLevels - 1u), 2.0f);
             samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
             samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
             result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_diffuseTextureSampler);

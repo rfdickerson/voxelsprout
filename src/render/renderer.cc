@@ -204,6 +204,16 @@ bool Renderer::isVertexAoEnabled() const {
     return m_backend->isVertexAoEnabled();
 }
 
+void Renderer::setImportedMaterial(std::uint32_t index,
+                                   const odai::importer::ImportedSceneMaterial& material) {
+    m_backend->setImportedMaterial(index, material);
+}
+
+void Renderer::setImportedMaterialTable(
+    const std::vector<odai::importer::ImportedSceneMaterial>& materials) {
+    m_backend->setImportedMaterialTable(materials);
+}
+
 void Renderer::setSsaoEnabled(bool enabled) {
     m_backend->setSsaoEnabled(enabled);
 }
@@ -214,6 +224,14 @@ bool Renderer::isSsaoEnabled() const {
 
 void Renderer::setAmbientOcclusionTuning(float radius, float bias, float intensity) {
     m_backend->setAmbientOcclusionTuning(radius, bias, intensity);
+}
+
+void Renderer::setAmbientOcclusionMode(AoMode mode) {
+    m_backend->setAmbientOcclusionMode(mode);
+}
+
+AoMode Renderer::ambientOcclusionMode() const {
+    return m_backend->ambientOcclusionMode();
 }
 
 void Renderer::setShadowSettings(const ShadowSettings& settings) {

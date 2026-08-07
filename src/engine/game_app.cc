@@ -143,9 +143,21 @@ void GameApp::run() {
 
             int fbW = 0, fbH = 0;
             glfwGetFramebufferSize(m_window, &fbW, &fbH);
+            int winW = 0, winH = 0;
+            glfwGetWindowSize(m_window, &winW, &winH);
 
             double mx = 0.0, my = 0.0;
             glfwGetCursorPos(m_window, &mx, &my);
+            // glfwGetCursorPos reports window coordinates, but the UI viewport
+            // set below -- and every widget rect measured against it -- is in
+            // framebuffer pixels. The two are equal only at 1x scale. On a
+            // fractional/HiDPI display (1.5x: 1280x720 window, 1920x1080
+            // framebuffer) an unscaled cursor tops out at 2/3 of the viewport,
+            // so the bottom and right of the UI cannot be reached at all.
+            if (winW > 0 && winH > 0) {
+                mx *= static_cast<double>(fbW) / static_cast<double>(winW);
+                my *= static_cast<double>(fbH) / static_cast<double>(winH);
+            }
 
             m_uiInput.beginFrame();
             m_uiInput.mousePx = {static_cast<float>(mx), static_cast<float>(my)};
@@ -221,7 +233,8 @@ bool GameApp::loadFonts(const std::string& regularPath,
                         const std::string& boldPath,
                         const std::string& italicPath,
                         const std::string& numericPath,
-                        float bodySize, float numericSize) {
+                        float bodySize, float numericSize, float captionSize,
+                        float displaySize) {
     if (!m_uiFont.loadFromFile(regularPath, bodySize)    ||
         !m_uiFontBold.loadFromFile(boldPath, bodySize)   ||
         !m_uiFontItalic.loadFromFile(italicPath, bodySize) ||
@@ -245,6 +258,19 @@ bool GameApp::loadFonts(const std::string& regularPath,
     m_uiFontBold.setTextureId(boldTex);
     m_uiFontItalic.setTextureId(italicTex);
     m_uiFontNumeric.setTextureId(numTex);
+
+    // Optional type-scale steps. A failed bake is not fatal: the game falls back
+    // to body size for that step, which loses hierarchy but never the text.
+    if (captionSize > 0.0f && m_uiFontCaption.loadFromFile(regularPath, captionSize)) {
+        m_uiFontCaption.setTextureId(m_renderer.registerUiFontAtlas(
+            m_uiFontCaption.atlasPixels().data(), m_uiFontCaption.atlasWidth(),
+            m_uiFontCaption.atlasHeight()));
+    }
+    if (displaySize > 0.0f && m_uiFontDisplay.loadFromFile(boldPath, displaySize)) {
+        m_uiFontDisplay.setTextureId(m_renderer.registerUiFontAtlas(
+            m_uiFontDisplay.atlasPixels().data(), m_uiFontDisplay.atlasWidth(),
+            m_uiFontDisplay.atlasHeight()));
+    }
 
     m_uiFonts.regular = &m_uiFont;
     m_uiFonts.bold    = &m_uiFontBold;

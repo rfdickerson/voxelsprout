@@ -24,7 +24,8 @@ struct SkinnedMeshBuilder {
     std::vector<ImportedSkinnedMeshVertex>& vertices;
     std::vector<std::uint32_t>& indices;
 
-    std::uint32_t addVertex(const Vector3& p, const Vector3& n, const Vector3& color, std::uint16_t boneIndex) {
+    std::uint32_t addVertex(const Vector3& p, const Vector3& n, const Vector3& color,
+                            std::uint32_t materialFlags, std::uint16_t boneIndex) {
         ImportedSkinnedMeshVertex v{};
         v.position[0] = p.x;
         v.position[1] = p.y;
@@ -36,7 +37,7 @@ struct SkinnedMeshBuilder {
         v.color[1] = color.y;
         v.color[2] = color.z;
         v.textureIndex = 0xffffffffu;  // packed vertex-color path, no texture.
-        v.flags = 0u;
+        v.flags = materialFlags;
         v.boneIndices[0] = boneIndex;
         v.boneIndices[1] = 0;
         v.boneIndices[2] = 0;
@@ -57,18 +58,19 @@ struct SkinnedMeshBuilder {
     }
 
     void addFlatTriangle(const Vector3& a, const Vector3& b, const Vector3& c,
-                          const Vector3& color, std::uint16_t boneIndex) {
+                          const Vector3& color, std::uint32_t materialFlags, std::uint16_t boneIndex) {
         const Vector3 n = odai::math::normalize(odai::math::cross(b - a, c - a));
-        addTriangle(addVertex(a, n, color, boneIndex), addVertex(b, n, color, boneIndex),
-                    addVertex(c, n, color, boneIndex));
+        addTriangle(addVertex(a, n, color, materialFlags, boneIndex),
+                    addVertex(b, n, color, materialFlags, boneIndex),
+                    addVertex(c, n, color, materialFlags, boneIndex));
     }
 
     // a-b-c-d wound counter-clockwise when viewed from the face's outward
     // side -- same convention as CityMeshBuilder::addQuad (citybuilder_app.cc).
     void addQuad(const Vector3& a, const Vector3& b, const Vector3& c, const Vector3& d,
-                 const Vector3& color, std::uint16_t boneIndex) {
-        addFlatTriangle(a, d, c, color, boneIndex);
-        addFlatTriangle(a, c, b, color, boneIndex);
+                 const Vector3& color, std::uint32_t materialFlags, std::uint16_t boneIndex) {
+        addFlatTriangle(a, d, c, color, materialFlags, boneIndex);
+        addFlatTriangle(a, c, b, color, materialFlags, boneIndex);
     }
 };
 
@@ -88,7 +90,8 @@ void perpendicularBasis(const Vector3& axis, Vector3& outRight, Vector3& outUp) 
 // capped at both ends, every vertex bound to `boneIndex`.
 void addCylinderSegment(
     SkinnedMeshBuilder& builder, const Vector3& pointA, const Vector3& pointB,
-    float radiusA, float radiusB, int segments, const Vector3& color, std::uint16_t boneIndex
+    float radiusA, float radiusB, int segments, const Vector3& color,
+    std::uint32_t materialFlags, std::uint16_t boneIndex
 ) {
     const Vector3 delta = pointB - pointA;
     const float len = odai::math::length(delta);
@@ -115,7 +118,7 @@ void addCylinderSegment(
         builder.addQuad(
             ringA[static_cast<std::size_t>(i)], ringA[static_cast<std::size_t>(next)],
             ringB[static_cast<std::size_t>(next)], ringB[static_cast<std::size_t>(i)],
-            color, boneIndex);
+            color, materialFlags, boneIndex);
     }
 
     // End caps: fans wound so addFlatTriangle's derived normal points
@@ -123,16 +126,16 @@ void addCylinderSegment(
     for (int i = 0; i < segments; ++i) {
         const int next = (i + 1) % segments;
         builder.addFlatTriangle(pointA, ringA[static_cast<std::size_t>(next)], ringA[static_cast<std::size_t>(i)],
-                                 color, boneIndex);
+                                 color, materialFlags, boneIndex);
         builder.addFlatTriangle(pointB, ringB[static_cast<std::size_t>(i)], ringB[static_cast<std::size_t>(next)],
-                                 color, boneIndex);
+                                 color, materialFlags, boneIndex);
     }
 }
 
 // Axis-aligned box centered at `center` with `halfExtents`, every vertex
 // bound to `boneIndex`. Mirrors CityMeshBuilder's addBox winding.
 void addBox(SkinnedMeshBuilder& builder, const Vector3& center, const Vector3& halfExtents,
-            const Vector3& color, std::uint16_t boneIndex) {
+            const Vector3& color, std::uint32_t materialFlags, std::uint16_t boneIndex) {
     const float minX = center.x - halfExtents.x, maxX = center.x + halfExtents.x;
     const float minY = center.y - halfExtents.y, maxY = center.y + halfExtents.y;
     const float minZ = center.z - halfExtents.z, maxZ = center.z + halfExtents.z;
@@ -140,12 +143,12 @@ void addBox(SkinnedMeshBuilder& builder, const Vector3& center, const Vector3& h
         {minX, minY, minZ}, {maxX, minY, minZ}, {maxX, minY, maxZ}, {minX, minY, maxZ},
         {minX, maxY, minZ}, {maxX, maxY, minZ}, {maxX, maxY, maxZ}, {minX, maxY, maxZ},
     };
-    builder.addQuad(corners[4], corners[5], corners[6], corners[7], color, boneIndex);  // top
-    builder.addQuad(corners[3], corners[2], corners[1], corners[0], color, boneIndex);  // bottom
-    builder.addQuad(corners[0], corners[1], corners[5], corners[4], color, boneIndex);  // -Z
-    builder.addQuad(corners[2], corners[3], corners[7], corners[6], color, boneIndex);  // +Z
-    builder.addQuad(corners[3], corners[0], corners[4], corners[7], color, boneIndex);  // -X
-    builder.addQuad(corners[1], corners[2], corners[6], corners[5], color, boneIndex);  // +X
+    builder.addQuad(corners[4], corners[5], corners[6], corners[7], color, materialFlags, boneIndex);  // top
+    builder.addQuad(corners[3], corners[2], corners[1], corners[0], color, materialFlags, boneIndex);  // bottom
+    builder.addQuad(corners[0], corners[1], corners[5], corners[4], color, materialFlags, boneIndex);  // -Z
+    builder.addQuad(corners[2], corners[3], corners[7], corners[6], color, materialFlags, boneIndex);  // +Z
+    builder.addQuad(corners[3], corners[0], corners[4], corners[7], color, materialFlags, boneIndex);  // -X
+    builder.addQuad(corners[1], corners[2], corners[6], corners[5], color, materialFlags, boneIndex);  // +X
 }
 
 // Bind-pose bone hierarchy carries no rotation anywhere in makeBipedSkeleton
@@ -203,7 +206,8 @@ constexpr std::array<Segment, 2> kBootSegments = {{
 }  // namespace
 
 HumanoidSkinnedMesh buildHumanoidSkinnedMesh(
-    const odai::anim::Skeleton& skeleton, const HumanoidMeshColors& colors
+    const odai::anim::Skeleton& skeleton, const HumanoidMeshColors& colors,
+    const HumanoidMeshMaterials& materials
 ) {
     HumanoidSkinnedMesh mesh;
     mesh.boneCount = static_cast<std::uint32_t>(skeleton.bones.size());
@@ -211,6 +215,14 @@ HumanoidSkinnedMesh buildHumanoidSkinnedMesh(
 
     const std::vector<Vector3> bindWorldPositions = computeBindWorldPositions(skeleton);
     const std::array<Vector3, 3> colorByGroup = {colors.torso, colors.limbs, colors.accent};
+    // Parallel to colorByGroup and indexed by the same Segment::colorGroup. A
+    // default material packs to 0, so groups nobody assigned keep the pre-PBR
+    // shading path exactly.
+    const std::array<std::uint32_t, 3> materialFlagsByGroup = {
+        odai::importer::packImportedSceneMaterialFlags(materials.torso),
+        odai::importer::packImportedSceneMaterialFlags(materials.limbs),
+        odai::importer::packImportedSceneMaterialFlags(materials.accent)
+    };
 
     const auto emitSegment = [&](const Segment& segment) {
         const int parentIndex = skeleton.findBone(segment.parentBone);
@@ -225,6 +237,7 @@ HumanoidSkinnedMesh buildHumanoidSkinnedMesh(
             segment.radiusAtParent, segment.radiusAtChild,
             (segment.colorGroup == 0) ? kCylinderSegmentsTorso : kCylinderSegmentsLimb,
             colorByGroup[static_cast<std::size_t>(segment.colorGroup)],
+            materialFlagsByGroup[static_cast<std::size_t>(segment.colorGroup)],
             static_cast<std::uint16_t>(parentIndex));
     };
     for (const Segment& segment : kSegments) {
@@ -241,7 +254,7 @@ HumanoidSkinnedMesh buildHumanoidSkinnedMesh(
         const Vector3 headJoint = bindWorldPositions[static_cast<std::size_t>(headIndex)];
         const Vector3 headCenter = headJoint + Vector3{0.0f, 0.08f, 0.0f};
         addBox(builder, headCenter, Vector3{0.08f, 0.09f, 0.09f}, colors.limbs,
-               static_cast<std::uint16_t>(headIndex));
+               materialFlagsByGroup[1], static_cast<std::uint16_t>(headIndex));
     }
 
     return mesh;

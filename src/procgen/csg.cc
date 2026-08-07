@@ -369,4 +369,12 @@ void setMaterial(CsgMesh& mesh, float metallic, float roughness) {
     }
 }
 
+void setMaterial(CsgMesh& mesh, float metallic, float roughness, std::uint32_t materialIndex) {
+    for (Polygon& p : mesh.polygons) {
+        p.metallic = metallic;
+        p.roughness = roughness;
+        p.materialIndex = materialIndex;
+    }
+}
+
 }  // namespace odai::procgen

@@ -1,7 +1,9 @@
 #pragma once
 
+#include "core/file_watch.h"
 #include "engine/game_app.h"
 #include "games/citybuilder/citybuilder_citizens.h"
+#include "games/citybuilder/citybuilder_fields.h"
 #include "games/citybuilder/script/city_script.h"
 #include "import/imported_scene.h"
 #include "procgen/building_generator.h"
@@ -9,6 +11,7 @@
 #include "ui/ui_types.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -30,13 +33,12 @@
 // camera — the same "CPU state -> ImportedScene -> Renderer::uploadImportedScene"
 // path the hex strategy map uses, so no new Vulkan code is needed. Chrome
 // (top bar, palette, controls, minimap, reports) and thin per-frame overlays
-// (hover outline, stalled-tile tooltip, land-value legend) stay in the 2-D
+// (hover outline, stalled-tile tooltip, data-layer legend) stay in the 2-D
 // UI draw list, composited over the 3-D frame in the UI pass.
+//
+// Terrain / Zone / Building and the spatial-field math live in
+// citybuilder_fields.h so they can be tested headlessly.
 namespace odai::games::citybuilder {
-
-enum class Terrain : std::uint8_t { Grass, Water };
-enum class Zone : std::uint8_t { None, Residential, Commercial, Industrial };
-enum class Building : std::uint8_t { None, Police, Fire, Clinic, School, Park, Library, Amphitheater, Power };
 
 struct Tile {
     Terrain terrain = Terrain::Grass;
@@ -61,6 +63,11 @@ struct Tile {
 };
 
 class CityBuilderApp : public engine::GameApp {
+    // The serializer reaches into the whole city state by design; giving it
+    // friendship beats widening thirty members to public for one caller.
+    friend bool saveCity(const CityBuilderApp&, const std::string&);
+    friend bool loadCity(CityBuilderApp&, const std::string&);
+
 public:
     static constexpr int kGridW = 56;
     static constexpr int kGridH = 56;
@@ -109,7 +116,12 @@ private:
     // whole avenue shares one name with no stored per-tile state.
     const std::string& streetNameAt(int c, int r);
     void recomputeStats();   // power/road coverage, population, jobs, eased city stats
-    void computeDesirability();  // per-tile spatial land value (amenities vs. nuisances)
+    void recomputeParcels(); // plot layout from the zone map — sim state, feeds naming
+    void reloadMaterialLibrary();  // re-applies assets/materials/library.json by name
+    // Rebuilds every per-tile spatial field in one pass: land value (amenities
+    // vs. nuisances), pollution, the three service-coverage fields, and the
+    // population weight the citywide averages are taken against.
+    void computeFields();
     void pushHistory();      // append a sample to each metric series
     void stepMonth();
     void stepFire();         // ignition, spread, burn-out, and rubble aging
@@ -132,6 +144,18 @@ private:
     void clampCameraFocus();
     void handleCamera(const Layout& lo);
     void handleMapPaint(const Layout& lo);
+    void handlePaletteInput(const Layout& lo);  // tool selection — input, not drawing
+
+    // Solved palette geometry, shared by computePaletteLayout()'s two callers
+    // (the hit-test in onTick and the drawing pass) so a tool's chip and its
+    // click target are the same rect by construction rather than by agreement.
+    struct PaletteLayout {
+        ui::UiRect rows[static_cast<std::size_t>(Tool::Count)]{};
+        float  headerY[20]{};
+        float  btnH = 0.0f, gap = 0.0f, hdrH = 0.0f, padX = 0.0f;
+        bool   twoLine = false;
+    };
+    [[nodiscard]] PaletteLayout computePaletteLayout(const Layout& lo) const;
     bool edgeDown(int key);
 
     // ── 3-D scene / camera ───────────────────────────────────────────────────
@@ -348,7 +372,7 @@ private:
         float intensity = 1.0f;     // decays; faster over water/parks/open land
     };
     void updateSevereWeather(float dt);  // funnel spawn/motion — sim-time, respects pause
-    void stepTornadoDamage();            // monthly damage, feeds the charred/fire loops
+    void stepTornadoDamage(float dt);    // continuous damage, feeds the charred/fire loops
 
     // Appends this frame's transformed car geometry and weather particles into
     // the actor scratch buffers and returns the frame data for submitFrame.
@@ -359,7 +383,20 @@ private:
     [[nodiscard]] ui::UiVec2 worldToScreen(float wx, float wy, float wz, const Layout& lo) const;
 
     // ── Drawing ──────────────────────────────────────────────────────────────
-    void drawWorldOverlay(const Layout& lo);  // hover outline, tooltip, land-value legend
+    void drawWorldOverlay(const Layout& lo);  // hover outline, tooltip, data-layer panel
+    // The data-map panel (layer chips + gradient legend), top-left of the map.
+    // Its rect is computed separately from its drawing so the input pass can
+    // add it to m_mouseOverUi before the frame is drawn — clicking a chip must
+    // not also paint the tile behind it.
+    [[nodiscard]] ui::UiRect dataPanelRect(const Layout& lo) const;
+    void drawDataPanel(const Layout& lo);
+    // Raw 0..1 value of the active data layer at (c, r): 0 is none of the field
+    // the layer names, 1 is the most. Never re-oriented — the ramp runs the same
+    // direction on every layer (see DataLayerDesc::ramp).
+    [[nodiscard]] float dataLayerValue(int c, int r) const;
+    // The tint is baked into the uploaded scene, so switching layers has to
+    // dirty it — every caller goes through here rather than assigning the field.
+    void setDataLayer(DataLayer layer);
     void drawTopBar(const Layout& lo);
     void drawPalette(const Layout& lo);
     void drawControls(const Layout& lo);
@@ -379,13 +416,25 @@ private:
     [[nodiscard]] const std::vector<float>& history(Metric m) const;
 
     // ── State ────────────────────────────────────────────────────────────────
-    std::array<Tile, static_cast<std::size_t>(kGridW) * kGridH> m_tiles{};
+    using Grid = std::array<Tile, static_cast<std::size_t>(kGridW) * kGridH>;
+    Grid m_tiles{};
+
+    // Per-tile scalar fields, all indexed r * kGridW + c and all refreshed
+    // together by computeFields(). Land value lives on the Tile itself (the
+    // growth step reads it per parcel); these are the ones only the stats and
+    // the data-layer overlay consume.
+    using Field = std::array<float, static_cast<std::size_t>(kGridW) * kGridH>;
+    Field m_pollution{};   // industry / power / congestion, 0..1
+    Field m_popWeight{};   // residents per tile — the weight for citywide averages
+    std::array<Field, static_cast<std::size_t>(Service::Count)> m_coverage{};
 
     // Per-tile plot membership, re-derived from the zone map every scene rebuild
     // (see buildCityScene's parceling). Lets the hover tooltip and citizen
     // destinations name a whole building consistently instead of per tile.
     struct PlotInfo { short c = -1, r = -1; std::uint8_t w = 1, d = 1; };
-    mutable std::array<PlotInfo, static_cast<std::size_t>(kGridW) * kGridH> m_tilePlots{};
+    // Plot layout, owned by recomputeParcels() in the sim phase. Not mutable:
+    // buildCityScene() reads this, it no longer writes it.
+    std::array<PlotInfo, static_cast<std::size_t>(kGridW) * kGridH> m_tilePlots{};
 
     Tool   m_tool = Tool::ZoneR;
     double m_money = 50000.0;
@@ -429,6 +478,20 @@ private:
     // player edits (bulldoze/zone/road/building) still set m_sceneDirty instantly.
     bool  m_growthDirty = false;
     float m_sceneRebuildCooldown = 0.0f;
+    // True while a freeform paint drag (Road) is in progress: rebuilds are
+    // coalesced onto the growth cadence for the duration and settled on release.
+    bool  m_paintDragging = false;
+    // Named material library mirrored on the CPU so an edit can be applied to
+    // one entry without rebuilding the whole table.
+    std::vector<importer::ImportedSceneMaterial> m_materials;
+    core::FileWatch m_materialWatch;
+    // Solved once per tick and reused by onRender: pointer input needs a Layout
+    // to map pixels onto the world, and input runs in the tick phase.
+    Layout m_layout{};
+    // Packed-stream sizes from the last buildCityScene(), so the next rebuild
+    // reserves once instead of growing into a ~35 MiB buffer from empty.
+    mutable std::size_t m_lastSceneVertexCount = 0;
+    mutable std::size_t m_lastSceneIndexCount = 0;
     mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_buildingCache;
     mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_civicCache;
     mutable std::unordered_map<std::uint32_t, procgen::TriMesh> m_treeCache;
@@ -499,7 +562,7 @@ private:
     // Reports start closed: the first thing a new mayor should see is their
     // city, not a chart floating over it (G or the Reports button opens it).
     bool   m_reportsOpen = false;
-    bool   m_showLandValue = false;        // toggle the desirability data overlay
+    DataLayer m_dataLayer = DataLayer::None;  // which field washes the map (L cycles)
     Metric m_metric = Metric::Population;
 
     float       m_flashTimer = 0.0f;

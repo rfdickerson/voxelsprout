@@ -1,5 +1,7 @@
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <iterator>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -9,6 +11,7 @@
 
 #include "import/gpu_scene.h"
 #include "import/imported_scene.h"
+#include "import/imported_scene_query.h"
 
 namespace {
 
@@ -598,6 +601,142 @@ void testPageRangeBuildAndRoundTrip() {
     fs::remove(scenePath);
 }
 
+// The v18 material library, through both loaders, plus the back-compatibility
+// contract that makes the version bump safe: an older file must load to an
+// empty table with its vertex flags untouched.
+void testMaterialLibraryRoundTrip() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer;
+
+    ImportedScene scene;
+    scene.sourceTag = "materials";
+    scene.packedVertices.resize(3);
+    for (std::size_t i = 0; i < scene.packedVertices.size(); ++i) {
+        scene.packedVertices[i].position[0] = static_cast<float>(i);
+        // Every vertex references library slot 2 and keeps fallback coefficients.
+        scene.packedVertices[i].flags =
+            packImportedSceneMaterialFlags(ImportedSceneSurfaceMaterial{0.5f, 0.25f}, 2u);
+    }
+    scene.packedIndices = {0u, 1u, 2u};
+    ImportedScenePackedDraw draw{};
+    draw.indexCount = 3u;
+    scene.packedDraws.push_back(draw);
+
+    scene.materials.resize(3);
+    scene.materials[1].name = "brick_1890";
+    scene.materials[1].roughness = 0.82f;
+    scene.materials[1].baseColorTint[0] = 0.62f;
+    scene.materials[2].name = "mullion_aluminum";
+    scene.materials[2].metallic = 0.90f;
+    scene.materials[2].roughness = 0.34f;
+    scene.materials[2].emissive[0] = 0.25f;
+    scene.materials[2].emissiveStrength = 4.0f;
+
+    const fs::path scenePath =
+        fs::temp_directory_path() / "odai_material_library_roundtrip.bin";
+    expectTrue(saveImportedScene(scene, scenePath), "Material scene saves");
+
+    const auto verify = [](const ImportedScene& s, const char* who) {
+        expectTrue(s.materials.size() == 3, who);
+        if (s.materials.size() != 3) return;
+        expectTrue(s.materials[0].name.empty(), "slot 0 stays the reserved sentinel");
+        expectTrue(s.materials[1].name == "brick_1890", "material name round trip");
+        expectNear(s.materials[1].roughness, 0.82f, 1e-6f, "roughness round trip");
+        expectNear(s.materials[1].baseColorTint[0], 0.62f, 1e-6f, "base color round trip");
+        expectTrue(s.materials[2].name == "mullion_aluminum", "second material name");
+        expectNear(s.materials[2].metallic, 0.90f, 1e-6f, "metallic round trip");
+        expectNear(s.materials[2].emissiveStrength, 4.0f, 1e-6f, "emissive strength round trip");
+        expectTrue(!s.packedVertices.empty() &&
+                       importedSceneMaterialIndex(s.packedVertices[0].flags) == 2u,
+                   "vertex material index survives the round trip");
+    };
+
+    ImportedScene loaded;
+    expectTrue(loadImportedScene(scenePath, loaded), "Material scene loads (full loader)");
+    verify(loaded, "full loader sees 3 materials");
+
+    ImportedScene runtime;
+    expectTrue(loadImportedSceneRuntime(scenePath, runtime),
+               "Material scene loads (runtime loader)");
+    verify(runtime, "runtime loader sees 3 materials");
+
+    // Back-compat: rewrite the header version as 17 and confirm the file still
+    // loads, with an empty table and vertex flags untouched. This is the whole
+    // reason the section is appended and version-gated.
+    const fs::path legacyPath = fs::temp_directory_path() / "odai_material_library_v17.bin";
+    {
+        std::ifstream in(scenePath, std::ios::binary);
+        std::vector<char> bytes((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+        const std::uint32_t seventeen = 17u;
+        std::memcpy(bytes.data() + sizeof(std::uint32_t), &seventeen, sizeof(seventeen));
+        std::ofstream out(legacyPath, std::ios::binary);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    ImportedScene legacy;
+    expectTrue(loadImportedScene(legacyPath, legacy), "A v17 file still loads");
+    expectTrue(legacy.materials.empty(), "v17 file loads with an empty material table");
+    expectTrue(!legacy.packedVertices.empty() &&
+                   legacy.packedVertices[0].flags == scene.packedVertices[0].flags,
+               "v17 file keeps its vertex flags byte-identical");
+
+    fs::remove(scenePath);
+    fs::remove(legacyPath);
+}
+
+// Ray picking against packed geometry -- the material editor's selection path,
+// exercised with no window and no Vulkan.
+void testImportedSceneRaycast() {
+    using namespace odai::importer;
+
+    ImportedScene scene;
+    // Two quads facing +Y at different heights, so a downward ray must pick the
+    // nearer one. Each carries a distinct material index.
+    const auto addQuad = [&scene](float y, std::uint32_t materialIndex) {
+        const std::uint32_t base = static_cast<std::uint32_t>(scene.packedVertices.size());
+        const float xs[4] = {-1.0f, 1.0f, 1.0f, -1.0f};
+        const float zs[4] = {-1.0f, -1.0f, 1.0f, 1.0f};
+        for (int i = 0; i < 4; ++i) {
+            ImportedScenePackedVertex v{};
+            v.position[0] = xs[i];
+            v.position[1] = y;
+            v.position[2] = zs[i];
+            v.normal[1] = 1.0f;
+            v.flags = packImportedSceneMaterialFlags(ImportedSceneSurfaceMaterial{}, materialIndex);
+            scene.packedVertices.push_back(v);
+        }
+        for (const std::uint32_t o : {0u, 1u, 2u, 0u, 2u, 3u}) {
+            scene.packedIndices.push_back(base + o);
+        }
+    };
+    addQuad(0.0f, 3u);   // lower
+    addQuad(5.0f, 7u);   // upper -- the one a downward ray from above hits first
+    ImportedScenePackedDraw draw{};
+    draw.firstIndex = 0u;
+    draw.indexCount = static_cast<std::uint32_t>(scene.packedIndices.size());
+    scene.packedDraws.push_back(draw);
+
+    const odai::math::Ray down{{0.0f, 10.0f, 0.0f}, {0.0f, -1.0f, 0.0f}};
+    const ImportedSceneRayHit hit = raycastImportedScene(scene, down, 100.0f);
+    expectTrue(hit.hit, "ray hits the stacked quads");
+    expectNear(hit.distance, 5.0f, 1e-3f, "ray picks the NEAREST surface");
+    expectTrue(hit.materialIndex == 7u, "hit reports the material index of the nearest surface");
+    expectNear(hit.position.y, 5.0f, 1e-3f, "hit position lands on the surface");
+
+    // maxDistance must actually bound the search.
+    const ImportedSceneRayHit shortRay = raycastImportedScene(scene, down, 2.0f);
+    expectTrue(!shortRay.hit, "a ray shorter than the surface distance misses");
+
+    // A ray pointing away hits nothing.
+    const odai::math::Ray up{{0.0f, 10.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
+    expectTrue(!raycastImportedScene(scene, up, 100.0f).hit, "a ray pointing away misses");
+
+    // Degenerate inputs are handled rather than crashing.
+    const odai::math::Ray zero{{0.0f, 10.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    expectTrue(!raycastImportedScene(scene, zero, 100.0f).hit, "a zero-length ray misses");
+    expectTrue(!raycastImportedScene(ImportedScene{}, down, 100.0f).hit, "an empty scene misses");
+}
+
 }  // namespace
 
 int main() {
@@ -608,6 +747,8 @@ int main() {
     testTextureFormatRoundTrip();
     testBlockCompressedAlphaCutoutDetection();
     testPageRangeBuildAndRoundTrip();
+    testMaterialLibraryRoundTrip();
+    testImportedSceneRaycast();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

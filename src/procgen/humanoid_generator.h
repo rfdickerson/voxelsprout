@@ -1,6 +1,7 @@
 #pragma once
 
 #include "anim/skeleton.h"
+#include "import/imported_scene.h"
 #include "math/math.h"
 #include "render/renderer_types.h"
 
@@ -23,6 +24,22 @@ struct HumanoidMeshColors {
     odai::math::Vector3 accent{0.35f, 0.25f, 0.12f}; // boots / helmet / trim
 };
 
+// Metallic-roughness material per color group, packed into each vertex's flags
+// by packImportedSceneMaterialFlags (import/imported_scene.h) and shaded by
+// pbr.slang through imported_static.frag.slang. The flags survive the GPU
+// skinning prepass verbatim (skinning.comp.slang forwards them), so a skinned
+// actor shades with the same material a static mesh would.
+//
+// Every member defaults to ImportedSceneSurfaceMaterial's legacy default -- a
+// fully rough dielectric -- which packs to flags == 0, leaves the PBR opt-in bit
+// clear, and shades bit-for-bit as this generator did before materials existed.
+// A caller that sets nothing gets exactly the old mesh.
+struct HumanoidMeshMaterials {
+    odai::importer::ImportedSceneSurfaceMaterial torso{};
+    odai::importer::ImportedSceneSurfaceMaterial limbs{};
+    odai::importer::ImportedSceneSurfaceMaterial accent{};
+};
+
 struct HumanoidSkinnedMesh {
     std::vector<odai::render::ImportedSkinnedMeshVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -37,7 +54,8 @@ struct HumanoidSkinnedMesh {
 // environment; segments read as distinct rigid capsules, in keeping with
 // this project's stylized low-poly look (docs/stylized_low_poly.md).
 [[nodiscard]] HumanoidSkinnedMesh buildHumanoidSkinnedMesh(
-    const odai::anim::Skeleton& skeleton, const HumanoidMeshColors& colors
+    const odai::anim::Skeleton& skeleton, const HumanoidMeshColors& colors,
+    const HumanoidMeshMaterials& materials = HumanoidMeshMaterials{}
 );
 
 }  // namespace odai::procgen

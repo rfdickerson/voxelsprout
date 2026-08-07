@@ -53,9 +53,27 @@ protected:
     bool wantsMinimalRendering() const override { return true; }
 
 private:
+    // ── DPI ───────────────────────────────────────────────────────────────────
+    // Every chrome dimension in ui_editor_app.cc is authored in logical pixels
+    // at 100 % DPI and passed through scaled() before it reaches the draw list,
+    // which works in framebuffer pixels. m_scale is resolved once in onInit()
+    // because the font atlases are baked at that size and are not re-baked.
+    [[nodiscard]] float scaled(float logicalPx) const { return logicalPx * m_scale; }
+
+    // Pane dimensions, in framebuffer pixels.
+    [[nodiscard]] float paletteW() const;
+    [[nodiscard]] float propsW() const;
+    [[nodiscard]] float toolbarH() const;
+    [[nodiscard]] float statusH() const;
+    [[nodiscard]] float paletteRowH() const;
+    [[nodiscard]] float outlinerRowH() const;
+    // Bottom edge of the palette section of the left column.
+    [[nodiscard]] float paletteBottom() const;
+
     // ── Coordinate spaces ─────────────────────────────────────────────────────
     // Document space is the design surface (the root node's own width/height).
     // Canvas space is where that surface sits inside the centre pane on screen.
+    // One document unit is m_viewScale framebuffer pixels.
     [[nodiscard]] ui::UiVec2 docToScreen(float x, float y) const;
     [[nodiscard]] ui::UiVec2 screenToDoc(float x, float y) const;
     [[nodiscard]] ui::UiRect docRectToScreen(const ui::UiRect& r) const;
@@ -138,6 +156,15 @@ private:
 
     std::string m_documentPath;
     std::string m_statusMessage;
+
+    // Framebuffer pixels per logical pixel (the OS content scale: 1.5 at 150 %).
+    float m_scale = 1.0f;
+    // Framebuffer pixels per document unit. Equal to m_scale so the design
+    // surface is previewed at the size the running game would draw it, but
+    // shrunk below that when the surface would otherwise overflow the canvas
+    // pane — this editor has no pan or zoom, so an overflowing document would
+    // put its right/bottom edge permanently out of reach.
+    float m_viewScale = 1.0f;
 
     // Pane rects, recomputed on resize.
     float m_canvasX = 0, m_canvasY = 0, m_canvasW = 0, m_canvasH = 0;

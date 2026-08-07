@@ -36,6 +36,31 @@ static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
 static const uint kInvalidImportedTextureIndex = 0xffffffffu;
 
+// Named material library. Bits 24-31 of the flags word index this table; 0 means
+// "no library material" and the legacy bits 8-23 are used instead. Mirrored from
+// src/import/imported_material.h -- the struct below must stay 32 bytes and keep
+// this field order, because the CPU side memcpys the whole table in.
+//
+// Slot 0 is a reserved sentinel and is never read: it exists so the index stored
+// in the vertex flags and the index into this array are the same number, with no
+// -1 to reproduce identically here, in the packer and in the loader.
+static const uint kImportedMaterialIndexShift = 24u;
+static const uint kImportedMaterialIndexMask = 0xffu;
+
+struct GpuImportedMaterial
+{
+    float4 baseColorMetallic;  // rgb = base color tint, w = metallic
+    float4 emissiveRoughness;  // rgb = emissive radiance, w = roughness
+};
+
+[[vk::binding(13, 0)]]
+StructuredBuffer<GpuImportedMaterial> importedMaterials;
+
+uint importedMaterialIndex(uint flags)
+{
+    return (flags >> kImportedMaterialIndexShift) & kImportedMaterialIndexMask;
+}
+
 bool importedMaterialHasPbr(uint flags)
 {
     return (flags & kImportedMaterialFlagPbr) != 0u;
@@ -54,6 +79,31 @@ PbrSurface unpackImportedMaterial(uint flags)
         float((flags >> kImportedMaterialRoughnessShift) & kImportedMaterialChannelMask) / 255.0;
     surface.metallic =
         float((flags >> kImportedMaterialMetallicShift) & kImportedMaterialChannelMask) / 255.0;
+    return surface;
+}
+
+// Resolves a surface through the material library when the flags carry an index,
+// and through the legacy per-vertex bits otherwise. The packer forces the PBR bit
+// whenever it writes a nonzero index, so callers can keep testing
+// importedMaterialHasPbr() as the single "is this PBR" condition.
+PbrSurface resolveImportedMaterial(uint flags, out float3 baseColorTint, out float3 emissive)
+{
+    baseColorTint = float3(1.0, 1.0, 1.0);
+    emissive = float3(0.0, 0.0, 0.0);
+
+    const uint index = importedMaterialIndex(flags);
+    if (index == 0u)
+    {
+        return unpackImportedMaterial(flags);
+    }
+
+    const GpuImportedMaterial entry = importedMaterials[index];
+    baseColorTint = entry.baseColorMetallic.rgb;
+    emissive = entry.emissiveRoughness.rgb;
+
+    PbrSurface surface;
+    surface.metallic = saturate(entry.baseColorMetallic.w);
+    surface.roughness = saturate(entry.emissiveRoughness.w);
     return surface;
 }
 
@@ -362,8 +412,11 @@ float3 evaluateImportedLocalLights(
         {
             const float3 radiance =
                 colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation * visibility);
+            // kPbrDiffuseConventionScale: pbrDirectSpecular returns a normalized
+            // BRDF, the diffuse term two lines up does not. See pbr.slang.
             outSpecular +=
-                radiance * pbrDirectSpecular(surface, albedo, normal, viewDirection, lightDirection);
+                radiance * kPbrDiffuseConventionScale *
+                pbrDirectSpecular(surface, albedo, normal, viewDirection, lightDirection);
         }
     }
     return lighting;
@@ -487,7 +540,18 @@ float4 main(FragmentInput input) : SV_Target0
     // read as exposed rock or lighter cliff stone; flat faces are unaffected.
     // The welded terrain's smooth normals make this correct at elevation transitions.
     const float slope = saturate(1.0 - normal.y);
-    float3 albedo = albedoFull.rgb;
+
+    // The material is resolved here rather than down in the shading block,
+    // because the library's base-color tint modulates the *sampled* albedo and
+    // so has to land before the terrain slope lerps below — those deliberately
+    // override albedo on cliff faces, and tinting afterwards would fight them.
+    float3 materialTint = float3(1.0, 1.0, 1.0);
+    float3 materialEmissive = float3(0.0, 0.0, 0.0);
+    const PbrSurface surface =
+        resolveImportedMaterial(input.inFlags, materialTint, materialEmissive);
+    const bool usePbr = importedMaterialHasPbr(input.inFlags);
+
+    float3 albedo = albedoFull.rgb * materialTint;
     albedo = lerp(albedo, float3(0.40, 0.39, 0.36), smoothstep(0.35, 0.66, slope) * 0.6);
     albedo = lerp(albedo, float3(0.52, 0.51, 0.47), smoothstep(0.66, 0.92, slope) * 0.5);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
@@ -573,8 +637,8 @@ float4 main(FragmentInput input) : SV_Target0
     // flag decode to a rough dielectric and take the branch-free legacy path:
     // specular stays zero, diffuse keeps its full weight, and the old fake-rim
     // term is preserved. See docs/ROADMAP.md (Core Rendering / PBR).
-    const PbrSurface surface = unpackImportedMaterial(input.inFlags);
-    const bool usePbr = importedMaterialHasPbr(input.inFlags);
+    // surface / usePbr are resolved up at the albedo site above, so the library
+    // tint can be applied before the terrain slope lerps.
 
     float3 specular = float3(0.0, 0.0, 0.0);
     const float3 importedLights =
@@ -601,10 +665,19 @@ float4 main(FragmentInput input) : SV_Target0
         const float3 sunRadiance =
             camera.sunColorShadow.xyz *
             (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
-        specular += sunRadiance * pbrDirectSpecular(surface, albedo, normal, viewDir, -sunDirection);
+        // kPbrDiffuseConventionScale converts pbrDirectSpecular's normalized BRDF
+        // into the same units as the `direct` diffuse term above, which omits the
+        // Lambert 1/pi. Without it a metal loses all of its diffuse to
+        // pbrDiffuseScale() and gets back only 1/pi of the specular that should
+        // replace it, so it renders ~3x dark. See pbr.slang for the derivation.
+        specular += sunRadiance * kPbrDiffuseConventionScale *
+                    pbrDirectSpecular(surface, albedo, normal, viewDir, -sunDirection);
 
         // Ambient/GI specular so metals still read as metal with no analytic
-        // light on them. Fed by the same irradiance the diffuse term uses.
+        // light on them. Fed by the same irradiance the diffuse term uses --
+        // which is exactly why this one takes NO kPbrDiffuseConventionScale: the
+        // split-sum factor is a reflectance, and being handed irradiance instead
+        // of radiance already carries the pi. See pbr.slang.
         const float ndotv = saturate(dot(normal, viewDir));
         specular += pbrAmbientSpecular(
             surface,
@@ -617,9 +690,12 @@ float4 main(FragmentInput input) : SV_Target0
     // The rim term is a stand-in Fresnel for surfaces with no real material;
     // PBR surfaces get a physical one from pbrFresnelSchlick instead.
     const float rimWeight = usePbr ? 0.0 : (interiorMode ? 0.010 : 0.022);
+    // Emissive is added after the lighting sum, not folded into albedo: it is
+    // radiance the surface produces, so it must not be scaled by incoming light
+    // or by pbrDiffuseScale (a fully metallic emitter still glows).
     float3 shaded =
         ((diffuseLight * albedo * pbrDiffuseScale(surface.metallic)) + specular +
-         (float3(1.0, 0.98, 0.94) * (rim * rimWeight)));
+         (float3(1.0, 0.98, 0.94) * (rim * rimWeight)) + materialEmissive);
 
     // Fog-of-war visibility blend. Only applied when the fog map is active
     // (strategy map mode). The fog texture is a blurred per-tile R8 map where
