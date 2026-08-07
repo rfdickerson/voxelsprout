@@ -7,6 +7,10 @@
 #include <unordered_map>
 #include <vector>
 
+// Material-index bit layout and the GPU table record. Kept in its own header so
+// tests (which never link Vulkan) and the renderer can share one definition.
+#include "import/imported_material.h"
+
 namespace odai::importer {
 
 struct ImportedSceneVertex {
@@ -119,6 +123,47 @@ inline std::uint32_t packImportedSceneMaterialFlags(const ImportedSceneSurfaceMa
            (quantize(material.metallic) << kImportedSceneMaterialMetallicShift);
 }
 
+// Library-material variant: stamps a material-table index into bits 24-31 and
+// forces the PBR opt-in bit whenever that index is nonzero, so the shader's
+// "does this surface use PBR" test stays the single unchanged condition it
+// already is. The quantized metallic/roughness are still written into bits
+// 8-23 as a fallback, so a scene whose material table failed to load shades
+// approximately right instead of going flat.
+//
+// Index 0 means "no library material" and this reduces exactly to the overload
+// above — in particular a default material with index 0 still packs to 0u,
+// which is what keeps every pre-existing cooked scene bit-identical.
+inline std::uint32_t packImportedSceneMaterialFlags(const ImportedSceneSurfaceMaterial& material,
+                                                    std::uint32_t materialIndex) {
+    const std::uint32_t indexBits = (materialIndex & kImportedSceneMaterialIndexMask)
+                                    << kImportedSceneMaterialIndexShift;
+    if (indexBits == 0u) {
+        return packImportedSceneMaterialFlags(material);
+    }
+    const auto quantize = [](float value) -> std::uint32_t {
+        const float clamped = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
+        return static_cast<std::uint32_t>((clamped * 255.0f) + 0.5f) & kImportedSceneMaterialChannelMask;
+    };
+    return kImportedSceneMaterialFlagPbr | indexBits |
+           (quantize(material.roughness) << kImportedSceneMaterialRoughnessShift) |
+           (quantize(material.metallic) << kImportedSceneMaterialMetallicShift);
+}
+
+// One named entry in a scene's material library. Names are carried in the
+// cooked .bin so nothing needs the authoring JSON at runtime, and so a live
+// editor can match by name across a hot reload rather than by position — a
+// reorder in the source file is then harmless.
+//
+// Entry 0 is a reserved sentinel with an empty name; see imported_material.h.
+struct ImportedSceneMaterial {
+    std::string name;
+    float baseColorTint[3] = {1.0f, 1.0f, 1.0f};  // multiplies sampled/vertex albedo
+    float metallic = 0.0f;
+    float roughness = 1.0f;
+    float emissive[3] = {0.0f, 0.0f, 0.0f};
+    float emissiveStrength = 0.0f;
+};
+
 // Inverse of the above. Flags without the PBR bit decode to the legacy default
 // regardless of what the material bit ranges happen to hold.
 inline ImportedSceneSurfaceMaterial unpackImportedSceneMaterialFlags(std::uint32_t flags) {
@@ -197,6 +242,12 @@ struct ImportedScene {
     std::vector<std::uint32_t> packedIndices;
     std::vector<ImportedScenePackedDraw> packedDraws;
     std::vector<ImportedScenePageRange> pageRanges;
+    // Named material library, indexed by vertex flag bits 24-31. Entry 0 is a
+    // reserved sentinel so the flag index and the vector index are the same
+    // number; empty means "this scene predates materials" and every surface
+    // takes the legacy per-vertex path. Never exceeds
+    // kImportedSceneMaterialTableCapacity.
+    std::vector<ImportedSceneMaterial> materials;
     std::uint32_t sourceTextureCount = 0;
     std::uint32_t sourceFileVersion = 0;
     std::uint32_t sourceMeshCount = 0;

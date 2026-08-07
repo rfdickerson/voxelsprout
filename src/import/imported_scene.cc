@@ -28,13 +28,26 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v16 -> v17: per-texture TextureFormat byte (BC data no longer reloads as
 // RGBA8) and a trailing pageRanges section (per-page frustum culling survives
 // the save/load round trip).
-constexpr std::uint32_t kImportedSceneVersion = 17u;
+// v17 -> v18: a trailing named material library. Appended and version-gated, so
+// v15-v17 files load with an empty table; their vertices have material index 0
+// in flag bits 24-31 and take the legacy per-vertex path, rendering unchanged.
+constexpr std::uint32_t kImportedSceneVersion = 18u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
     static_cast<std::uint8_t>(TextureFormat::BC7);
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
+// packedVertices is blitted to disk field-for-field with no version gate, so a
+// size change silently reinterprets every existing file. Nothing caught that
+// before; this does.
+static_assert(sizeof(ImportedScenePackedVertex) == 52u);
+
+// Materials are NOT raw-blitted -- ImportedSceneMaterial holds a std::string --
+// so they are written field by field. Both loaders must stay in step with this.
+bool readString(std::istream& input, std::string& out);
+void writeSceneMaterials(std::ostream& output, const std::vector<ImportedSceneMaterial>& materials);
+bool readSceneMaterials(std::istream& input, std::vector<ImportedSceneMaterial>& out);
 
 std::string g_lastImportedSceneError;
 
@@ -255,6 +268,57 @@ void writeString(std::ostream& output, const std::string& value) {
     if (!value.empty()) {
         output.write(value.data(), static_cast<std::streamsize>(value.size()));
     }
+}
+
+void writeSceneMaterials(std::ostream& output,
+                         const std::vector<ImportedSceneMaterial>& materials) {
+    writeValue(output, static_cast<std::uint32_t>(materials.size()));
+    for (const ImportedSceneMaterial& m : materials) {
+        writeString(output, m.name);
+        writeValue(output, m.baseColorTint[0]);
+        writeValue(output, m.baseColorTint[1]);
+        writeValue(output, m.baseColorTint[2]);
+        writeValue(output, m.metallic);
+        writeValue(output, m.roughness);
+        writeValue(output, m.emissive[0]);
+        writeValue(output, m.emissive[1]);
+        writeValue(output, m.emissive[2]);
+        writeValue(output, m.emissiveStrength);
+    }
+}
+
+bool readSceneMaterials(std::istream& input, std::vector<ImportedSceneMaterial>& out) {
+    std::uint32_t count = 0;
+    if (!readValue(input, count)) {
+        return false;
+    }
+    if (count > kImportedSceneMaterialTableCapacity) {
+        // Refuse rather than truncate: the vertex indices in this same file
+        // reference these slots, so silently dropping entries would repaint
+        // whatever geometry pointed past the cut.
+        setLastImportedSceneError("Material table has " + std::to_string(count) +
+                                  " entries, more than the " +
+                                  std::to_string(kImportedSceneMaterialTableCapacity) +
+                                  "-slot capacity");
+        return false;
+    }
+    out.resize(count);
+    for (ImportedSceneMaterial& m : out) {
+        if (!readString(input, m.name) || !readValue(input, m.baseColorTint[0]) ||
+            !readValue(input, m.baseColorTint[1]) || !readValue(input, m.baseColorTint[2]) ||
+            !readValue(input, m.metallic) || !readValue(input, m.roughness) ||
+            !readValue(input, m.emissive[0]) || !readValue(input, m.emissive[1]) ||
+            !readValue(input, m.emissive[2]) || !readValue(input, m.emissiveStrength)) {
+            return false;
+        }
+    }
+    // Slot 0 is the reserved sentinel; a file claiming otherwise is malformed.
+    // Normalise rather than reject -- the geometry is still good, and every
+    // consumer already treats index 0 as "no library material".
+    if (!out.empty() && !out[0].name.empty()) {
+        out[0] = ImportedSceneMaterial{};
+    }
+    return true;
 }
 
 bool readString(std::istream& input, std::string& out) {
@@ -833,6 +897,10 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
             static_cast<std::streamsize>(scene.pageRanges.size() * sizeof(ImportedScenePageRange)));
     }
 
+    // v18: named material library. Last section, so older readers that stop
+    // after pageRanges are unaffected by its presence.
+    writeSceneMaterials(output, scene.materials);
+
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
         return false;
@@ -1067,6 +1135,13 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         buildImportedScenePageRanges(scene);
     }
 
+    // v18 material library. Absent in older files, which leaves the table empty
+    // -- every vertex then carries material index 0 and shades through the
+    // legacy per-vertex path exactly as it always did.
+    if (version >= 18u && !readSceneMaterials(input, scene.materials)) {
+        return false;
+    }
+
     applyTextureAlphaCutoutFlags(scene);
     outScene = std::move(scene);
     return true;
@@ -1274,6 +1349,10 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     }
     if (scene.pageRanges.empty() && scene.packedDraws.size() > 1u) {
         buildImportedScenePageRanges(scene);
+    }
+    // v18 material library -- see the note in loadImportedScene().
+    if (version >= 18u && !readSceneMaterials(input, scene.materials)) {
+        return false;
     }
     if (version < 3u) {
         computeImportedSceneBoundsFromPackedData(scene);

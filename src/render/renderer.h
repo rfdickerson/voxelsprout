@@ -42,6 +42,19 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+
+    // Named material library, indexed by vertex flag bits 24-31 (see
+    // import/imported_material.h). Index 0 is a reserved sentinel and is
+    // ignored; out-of-range indices are ignored.
+    //
+    // setImportedMaterial() writes one 32-byte record and touches no geometry:
+    // this is the live-edit path, and the reason it exists is that changing a
+    // coefficient must NOT go through uploadImportedScene(), which deep-copies
+    // the whole scene and drains the device mid-frame.
+    void setImportedMaterial(std::uint32_t index,
+                             const odai::importer::ImportedSceneMaterial& material);
+    void setImportedMaterialTable(
+        const std::vector<odai::importer::ImportedSceneMaterial>& materials);
     // GPU skeletal animation (Dragon Age: Origins touchstone, see
     // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once per
     // instance slot, device-local; pose it per-frame via setSkinnedActorPose
@@ -120,6 +133,12 @@ public:
     void setSsaoEnabled(bool enabled);
     [[nodiscard]] bool isSsaoEnabled() const;
     void setAmbientOcclusionTuning(float radius, float bias, float intensity);
+    // Picks the AO estimator (see AoMode in renderer_types.h). Orthogonal to
+    // setSsaoEnabled(), which gates the pass entirely — both must be on for AO
+    // to appear. Radius is in world units, so re-tune it with the mode if the
+    // world scale is unusual (setAmbientOcclusionTuning).
+    void setAmbientOcclusionMode(AoMode mode);
+    [[nodiscard]] AoMode ambientOcclusionMode() const;
     void setShadowSettings(const ShadowSettings& settings);
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;

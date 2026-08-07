@@ -173,6 +173,95 @@ struct SsaoComputePushConstants {
 
 } // namespace
 
+// Material library table (set 0, binding 13). Created unconditionally at init,
+// before any scene exists: the binding is declared in the descriptor layout for
+// every pipeline, so it must resolve to a real buffer from the first frame
+// rather than only once something has materials.
+//
+// One buffer holding kMaxFramesInFlight copies of the table. The descriptor is
+// pointed at the current frame's region each frame, so an edit applied between
+// frames never mutates memory a frame in flight is still reading. At 8 KB per
+// region that costs 16 KB total and a 8 KB memcpy on frames where the table
+// actually changed -- which is only when someone moves a slider.
+bool RendererBackend::createImportedMaterialResources() {
+    if (m_importedMaterialBufferHandle != kInvalidBufferHandle) {
+        return true;
+    }
+    // Slot 0 is the reserved sentinel and is never read; the rest default to a
+    // fully rough dielectric with a white tint, i.e. the legacy response.
+    m_importedMaterialTable.fill(importer::GpuImportedMaterial{});
+    m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
+
+    BufferCreateDesc desc{};
+    desc.size = static_cast<VkDeviceSize>(sizeof(importer::GpuImportedMaterial)) *
+                importer::kImportedSceneMaterialTableCapacity * kMaxFramesInFlight;
+    desc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    desc.memoryProperties =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    m_importedMaterialBufferHandle = m_bufferAllocator.createBuffer(desc);
+    if (m_importedMaterialBufferHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "failed to create imported material table buffer";
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_BUFFER,
+        vkHandleToUint64(m_bufferAllocator.getBuffer(m_importedMaterialBufferHandle)),
+        "importedMaterial.tableBuffer"
+    );
+    return true;
+}
+
+namespace {
+
+// One CPU-side library entry -> the packed GPU record. Emissive strength is
+// premultiplied here so the shader adds a radiance directly and never has to
+// know the authoring split between colour and intensity.
+importer::GpuImportedMaterial toGpuMaterial(const importer::ImportedSceneMaterial& material) {
+    importer::GpuImportedMaterial out{};
+    out.baseColorMetallic[0] = material.baseColorTint[0];
+    out.baseColorMetallic[1] = material.baseColorTint[1];
+    out.baseColorMetallic[2] = material.baseColorTint[2];
+    out.baseColorMetallic[3] = std::clamp(material.metallic, 0.0f, 1.0f);
+    out.emissiveRoughness[0] = material.emissive[0] * material.emissiveStrength;
+    out.emissiveRoughness[1] = material.emissive[1] * material.emissiveStrength;
+    out.emissiveRoughness[2] = material.emissive[2] * material.emissiveStrength;
+    out.emissiveRoughness[3] = std::clamp(material.roughness, 0.0f, 1.0f);
+    return out;
+}
+
+}  // namespace
+
+void RendererBackend::setImportedMaterial(std::uint32_t index,
+                                          const importer::ImportedSceneMaterial& material) {
+    // Slot 0 is the reserved sentinel; writing it would be silently ignored by
+    // the shader anyway, so reject it here where it is visible.
+    if (index == 0u || index >= importer::kImportedSceneMaterialTableCapacity) {
+        return;
+    }
+    m_importedMaterialTable[index] = toGpuMaterial(material);
+    // Every frame-in-flight region needs the new value before the edit is fully
+    // applied; see the countdown in updateFrameDescriptorSets().
+    m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
+}
+
+void RendererBackend::setImportedMaterialTable(
+    const std::vector<importer::ImportedSceneMaterial>& materials) {
+    m_importedMaterialTable.fill(importer::GpuImportedMaterial{});
+    const std::size_t count =
+        std::min<std::size_t>(materials.size(), importer::kImportedSceneMaterialTableCapacity);
+    if (materials.size() > importer::kImportedSceneMaterialTableCapacity) {
+        VOX_LOGW("render") << "material table truncated to "
+                           << importer::kImportedSceneMaterialTableCapacity << " of "
+                           << materials.size() << " entries";
+    }
+    // Starts at 1: slot 0 stays the identity sentinel no matter what the caller
+    // put in materials[0], so the flag index and the table index never diverge.
+    for (std::size_t i = 1; i < count; ++i) {
+        m_importedMaterialTable[i] = toGpuMaterial(materials[i]);
+    }
+    m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
+}
+
 bool RendererBackend::createAutoExposureResources() {
     const float initialExposure = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
     if (m_autoExposureStateBufferHandle == kInvalidBufferHandle) {

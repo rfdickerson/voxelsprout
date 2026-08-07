@@ -35,6 +35,21 @@ bool isConvex(const Polygon& polygon) {
 }
 #endif
 
+// std::vector::reserve(n) allocates EXACTLY n, so `reserve(size() + k)` before
+// every append throws away the geometric growth push_back would otherwise get:
+// each append reallocates and copies the whole accumulated buffer, making a
+// scene assembled from M appends O(total_vertices^2) in memcpy. Grow by at
+// least 2x instead so the amortized-O(1) push_back contract survives.
+// Measured on a fully built 56x56 citybuilder scene (518k verts, real procgen
+// meshes, -O3): 23.4 ms -> 4.5 ms for the same geometry.
+template <typename T>
+void reserveGrow(std::vector<T>& v, std::size_t extra) {
+    const std::size_t need = v.size() + extra;
+    if (need > v.capacity()) {
+        v.reserve(std::max(need, v.capacity() * 2));
+    }
+}
+
 }  // namespace
 
 TriMesh triangulate(const CsgMesh& mesh) {
@@ -52,7 +67,8 @@ TriMesh triangulate(const CsgMesh& mesh) {
         // default rough dielectric, so untouched generators emit the same bits
         // they always did.
         const std::uint32_t materialFlags = odai::importer::packImportedSceneMaterialFlags(
-            odai::importer::ImportedSceneSurfaceMaterial{polygon.metallic, polygon.roughness});
+            odai::importer::ImportedSceneSurfaceMaterial{polygon.metallic, polygon.roughness},
+            polygon.materialIndex);
         const std::uint32_t base = static_cast<std::uint32_t>(out.vertices.size());
         for (const Vector3& v : polygon.vertices) {
             odai::importer::ImportedScenePackedVertex vertex;
@@ -100,7 +116,7 @@ void appendTriMeshRotated(const TriMesh& mesh, const Vector3& offset, int quarte
     const float s = kSin[quarterTurns];
 
     const std::uint32_t base = static_cast<std::uint32_t>(scene.packedVertices.size());
-    scene.packedVertices.reserve(scene.packedVertices.size() + mesh.vertices.size());
+    reserveGrow(scene.packedVertices, mesh.vertices.size());
     for (const odai::importer::ImportedScenePackedVertex& src : mesh.vertices) {
         odai::importer::ImportedScenePackedVertex v = src;
         const float lx = src.position[0] - pivot.x;
@@ -120,7 +136,7 @@ void appendTriMeshRotated(const TriMesh& mesh, const Vector3& offset, int quarte
             scene.boundsMax[axis] = std::max(scene.boundsMax[axis], v.position[axis]);
         }
     }
-    scene.packedIndices.reserve(scene.packedIndices.size() + mesh.indices.size());
+    reserveGrow(scene.packedIndices, mesh.indices.size());
     for (std::uint32_t index : mesh.indices) {
         scene.packedIndices.push_back(base + index);
     }
@@ -132,7 +148,7 @@ void appendTriMesh(const TriMesh& mesh, const Vector3& offset, const Color3& col
         return;
     }
     const std::uint32_t base = static_cast<std::uint32_t>(scene.packedVertices.size());
-    scene.packedVertices.reserve(scene.packedVertices.size() + mesh.vertices.size());
+    reserveGrow(scene.packedVertices, mesh.vertices.size());
     for (const odai::importer::ImportedScenePackedVertex& src : mesh.vertices) {
         odai::importer::ImportedScenePackedVertex v = src;
         v.position[0] += offset.x;
@@ -143,7 +159,7 @@ void appendTriMesh(const TriMesh& mesh, const Vector3& offset, const Color3& col
         v.color[2] *= colorMul.b;
         scene.packedVertices.push_back(v);
     }
-    scene.packedIndices.reserve(scene.packedIndices.size() + mesh.indices.size());
+    reserveGrow(scene.packedIndices, mesh.indices.size());
     for (std::uint32_t index : mesh.indices) {
         scene.packedIndices.push_back(base + index);
     }

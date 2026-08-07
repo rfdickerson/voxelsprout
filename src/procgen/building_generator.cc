@@ -93,10 +93,12 @@ const Color3 kFactoryGlass = fromRgbHex(0x4E6070);   // industrial multipane
 // building stays the default rough dielectric and shades exactly as before —
 // glazing and metal trim are where a specular lobe actually reads at this
 // scale, and where its absence was most obviously wrong.
-constexpr float kGlassMetallic = 0.0f;    // glass is a dielectric, not a metal
-constexpr float kGlassRoughness = 0.09f;  // near-mirror: tight sun glint, sky reflection
-constexpr float kMullionMetallic = 0.90f;  // 1960s curtain walls: anodized aluminum
-constexpr float kMullionRoughness = 0.34f;
+// Defined in the public header so a caller seeding a material library can use
+// the same numbers and get shading identical to the no-library path.
+constexpr float kGlassMetallic = kBuildingGlassMetallic;      // dielectric, not a metal
+constexpr float kGlassRoughness = kBuildingGlassRoughness;    // near-mirror sun glint
+constexpr float kMullionMetallic = kBuildingMullionMetallic;  // anodized aluminum
+constexpr float kMullionRoughness = kBuildingMullionRoughness;
 
 enum class WindowStyle {
     kSash,     // 1890s: punched grid with a light sill under each window
@@ -106,13 +108,15 @@ enum class WindowStyle {
 };
 
 void addFacadeQuad(CsgMesh& mesh, int face, float u0, float u1, float y0, float y1, float wall,
-                   const Color3& color, float metallic = 0.0f, float roughness = 1.0f) {
+                   const Color3& color, float metallic = 0.0f, float roughness = 1.0f,
+                   std::uint32_t materialIndex = 0u) {
     // face 0 = -Z, 1 = +Z, 2 = -X, 3 = +X; u runs along the face, wall is the
     // fixed coordinate already offset off the surface.
     Polygon p;
     p.color = color;
     p.metallic = metallic;
     p.roughness = roughness;
+    p.materialIndex = materialIndex;
     const auto at = [&](float u, float y) -> Vector3 {
         return face < 2 ? Vector3{u, y, wall} : Vector3{wall, y, u};
     };
@@ -839,6 +843,41 @@ TriMesh generateBuilding(const BuildingDesc& desc) {
                         : build1960Tower(w, d, level, tier,
                                          desc.kind == BuildingKind::Commercial, rng, detail);
             break;
+    }
+
+    // Map the generator's two built-in facade coefficient pairs onto library
+    // slots, when the caller supplied any. Done as a post-pass keyed on the
+    // coefficients rather than threaded through the seven era builders: those
+    // coefficients already ARE the material identity here, there are exactly
+    // two of them, and neither value is produced by anything else on a
+    // building. Threading two parameters through every builder to say the same
+    // thing would be a lot of churn for no additional precision.
+    //
+    // Slot 0 (the default) leaves every polygon untouched, so a caller that has
+    // not uploaded a material table gets byte-identical geometry to before.
+    if (desc.glassMaterial != 0u || desc.mullionMaterial != 0u || desc.wallMaterial != 0u ||
+        desc.roofMaterial != 0u) {
+        const auto matches = [](const Polygon& p, float metallic, float roughness) {
+            return p.metallic == metallic && p.roughness == roughness;
+        };
+        // Upward-facing enough to read as a roof/cap rather than a wall. 0.7 is
+        // ~45 degrees, so a steep pitched roof still counts and a battered wall
+        // does not.
+        constexpr float kRoofNormalY = 0.7f;
+        for (Polygon& p : solid.polygons) {
+            if (desc.glassMaterial != 0u && matches(p, kGlassMetallic, kGlassRoughness)) {
+                p.materialIndex = desc.glassMaterial;
+            } else if (desc.mullionMaterial != 0u &&
+                       matches(p, kMullionMetallic, kMullionRoughness)) {
+                p.materialIndex = desc.mullionMaterial;
+            } else if (p.plane.normal.y >= kRoofNormalY) {
+                // Roof first: an upward face that is not glazing is a roof,
+                // cornice or parapet cap regardless of what the wall slot says.
+                if (desc.roofMaterial != 0u) p.materialIndex = desc.roofMaterial;
+            } else if (desc.wallMaterial != 0u) {
+                p.materialIndex = desc.wallMaterial;
+            }
+        }
     }
     return triangulate(solid);
 }

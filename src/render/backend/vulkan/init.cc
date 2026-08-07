@@ -207,6 +207,9 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    if (!runStep("createImportedMaterialResources", [&] { return createImportedMaterialResources(); })) {
+        return false;
+    }
     if (!runStep("createAutoExposureResources", [&] { return createAutoExposureResources(); })) {
         VOX_LOGE("render") << "init failed at createAutoExposureResources\n";
         shutdown();

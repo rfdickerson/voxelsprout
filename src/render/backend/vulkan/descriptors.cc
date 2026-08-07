@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 #include <vector>
 
@@ -51,6 +52,11 @@ void logVkFailure(const char* context, VkResult result) {
                        << vkResultName(result) << " (" << static_cast<int>(result) << ")";
 }
 
+// Fixed singleton slots at the head of the bindless table. MIRRORED in
+// render/renderer_shared.h (which chunk_upload.cc uses to assign imported
+// texture slots) and in shaders/imported_static.frag.slang — see the longer
+// note in renderer_shared.h. Nothing enforces agreement at compile time; this
+// TU does not include that header, so a mismatch is silent.
 constexpr uint32_t kBindlessTextureIndexDiffuse = 0u;
 constexpr uint32_t kBindlessTextureIndexHdrResolved = 1u;
 constexpr uint32_t kBindlessTextureIndexShadowAtlas = 2u;
@@ -70,7 +76,7 @@ constexpr uint32_t kAutoExposureHistogramBins = 64u;
 bool RendererBackend::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(13);
+        bindings.reserve(14);
 
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
@@ -168,6 +174,24 @@ bool RendererBackend::createDescriptorResources() {
             shadowSceneBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
             bindings.push_back(shadowSceneBinding);
         }
+
+        // Named material library, indexed by vertex flag bits 24-31 (see
+        // import/imported_material.h). A storage buffer rather than the camera
+        // UBO or a push constant: inFlags is `nointerpolation`, so material
+        // identity varies per triangle *within* a draw, which rules push
+        // constants out entirely; and this data changes only when someone edits
+        // a coefficient, so it has no business being re-uploaded every frame
+        // alongside the camera.
+        //
+        // Pushed unconditionally, after the conditional binding 12 above. The
+        // hole when ray tracing is off is fine — descriptorBufferBindingOffset()
+        // resolves offsets per binding rather than by position.
+        VkDescriptorSetLayoutBinding materialTableBinding{};
+        materialTableBinding.binding = 13;
+        materialTableBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        materialTableBinding.descriptorCount = 1;
+        materialTableBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(materialTableBinding);
 
         if (!createDescriptorSetLayout(
                 bindings,
@@ -371,6 +395,37 @@ void RendererBackend::updateFrameDescriptorSets(
         const VkDeviceAddress exposureAddress = (autoExposureStateBufferInfo.buffer != VK_NULL_HANDLE)
             ? vkGetBufferDeviceAddress(m_device, &exposureAddrInfo) : 0;
         writeDescriptorBufferStorage(m_mainBufferSet, region, mainOffset(2), exposureAddress, autoExposureStateBufferInfo.range);
+
+        // Material table (binding 13). Each frame in flight gets its own region
+        // of the buffer, so an edit landing between frames cannot mutate memory
+        // the GPU is still reading. The CPU mirror is copied in only when it
+        // actually changed -- a slider drag dirties it, an idle frame does not.
+        const VkBuffer materialBuffer = m_bufferAllocator.getBuffer(m_importedMaterialBufferHandle);
+        if (materialBuffer != VK_NULL_HANDLE) {
+            constexpr VkDeviceSize kMaterialRegionSize =
+                static_cast<VkDeviceSize>(sizeof(importer::GpuImportedMaterial)) *
+                importer::kImportedSceneMaterialTableCapacity;
+            const VkDeviceSize materialRegionOffset = kMaterialRegionSize * region;
+            // Dirty is a countdown, not a flag: each frame in flight owns a
+            // separate region, so one edit has to be copied into every one of
+            // them before it is fully applied.
+            if (m_importedMaterialTableDirtyFrames > 0u) {
+                if (void* mapped = m_bufferAllocator.mapBuffer(
+                        m_importedMaterialBufferHandle, materialRegionOffset, kMaterialRegionSize)) {
+                    std::memcpy(mapped, m_importedMaterialTable.data(),
+                                static_cast<std::size_t>(kMaterialRegionSize));
+                    m_bufferAllocator.unmapBuffer(m_importedMaterialBufferHandle);
+                    --m_importedMaterialTableDirtyFrames;
+                }
+            }
+            VkBufferDeviceAddressInfo materialAddrInfo{};
+            materialAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            materialAddrInfo.buffer = materialBuffer;
+            const VkDeviceAddress materialAddress =
+                vkGetBufferDeviceAddress(m_device, &materialAddrInfo) + materialRegionOffset;
+            writeDescriptorBufferStorage(m_mainBufferSet, region, mainOffset(13), materialAddress,
+                                         kMaterialRegionSize);
+        }
         // Combined image samplers (bindings 1, 3-11).
         sampler(1, diffuseTextureImageInfo);
         sampler(3, hdrSceneImageInfo);

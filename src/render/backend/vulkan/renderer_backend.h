@@ -87,10 +87,9 @@ struct ChunkResidentKey {
 
 class RendererBackend {
 public:
-    // Ambient-occlusion estimator. Each maps to its own compute pipeline built from
-    // ssao.comp.slang with a different ODAI_AO_MODE (see CMakeLists.txt), so the
-    // sample loop carries no uniform branch.
-    enum class AoMode : int { Off = 0, Ssao = 1, Hbao = 2, Gtao = 3 };
+    // AoMode (render/renderer_types.h) selects the estimator; each maps to its own
+    // compute pipeline built from ssao.comp.slang with a different ODAI_AO_MODE
+    // (see CMakeLists.txt), so the sample loop carries no uniform branch.
 
     struct ShadowDebugSettings {
         float casterConstantBiasBase = 1.1f;
@@ -114,12 +113,42 @@ public:
         bool enableOccluderCulling = true;
 
         float ssaoRadius = 24.0f;
-        float ssaoBias = 1.25f;
         float ssaoIntensity = 0.85f;
+        // AO bias, one per estimator, because the three do not share units and a
+        // single value cannot be correct for more than one of them:
+        //
+        //   SSAO  a view-space depth offset in WORLD UNITS (ssao.comp.slang, the
+        //         `sceneViewPos.z > sampleViewPos.z + bias` test). This is the only
+        //         one that tracks scene scale, so it is what setAmbientOcclusionTuning
+        //         and setStrategyMapMode set.
+        //   HBAO  a sine subtracted from dot(delta/|delta|, N), which lives in
+        //         [-1, 1]. Dimensionless; past ~0.5 it removes every horizon.
+        //   GTAO  a horizon clamp in RADIANS. At pi/2 the clamps saturate
+        //         unconditionally, every one of the 48 depth samples is discarded,
+        //         and the pass returns a pure function of the view/normal angle.
+        //
+        // The horizon estimators' biases are shape parameters, not world-scale ones,
+        // so their defaults hold for any app and nothing needs to override them.
+        // Feeding an estimator a value authored in another's units is exactly the bug
+        // this split exists to prevent -- the shader clamps per variant as a backstop.
+        float ssaoBias = 1.25f;   // world units
+        float hbaoBias = 0.05f;   // sine
+        float gtaoBias = 0.06f;   // radians (~3.4 deg)
         // Which estimator the AO pass dispatches. Off skips both the AO and blur
         // dispatches and clears the enable flag the world shaders read, so the term
         // costs nothing rather than being computed and multiplied by one.
         AoMode aoMode = AoMode::Gtao;
+
+        // The bias the active estimator actually wants, in its own units.
+        [[nodiscard]] float activeAoBias() const {
+            switch (aoMode) {
+                case AoMode::Hbao: return hbaoBias;
+                case AoMode::Gtao: return gtaoBias;
+                case AoMode::Ssao:
+                case AoMode::Off:  break;
+            }
+            return ssaoBias;
+        }
     };
 
     struct SkyDebugSettings {
@@ -207,7 +236,9 @@ public:
             // disk the flat top's own depth varies by ~radius*sin(tilt); if that exceeds
             // the bias (clamped to 8) the whole top occludes itself and goes black. So
             // keep the radius SMALL and the bias high — the only real occluder we want is
-            // the tall coastline cliff, which still reads at this radius.
+            // the tall coastline cliff, which still reads at this radius. That reasoning
+            // is specific to the point sampler; the horizon estimators evaluate a flat
+            // surface as unoccluded by construction, so they keep their own biases.
             m_shadowDebugSettings.ssaoRadius = 7.0f;
             m_shadowDebugSettings.ssaoBias = 6.0f;
             m_shadowDebugSettings.ssaoIntensity = 0.5f;
@@ -308,16 +339,27 @@ public:
     [[nodiscard]] bool isVertexAoEnabled() const;
     void setSsaoEnabled(bool enabled);
     [[nodiscard]] bool isSsaoEnabled() const;
-    // Overrides the SSAO radius/bias/intensity after setStrategyMapMode(true)
+    // Overrides the AO radius/bias/intensity after setStrategyMapMode(true)
     // has applied its hex-map-scale tuning (see setStrategyMapMode above) --
     // for a GameApp whose world scale is nothing like the hex strategy map's
     // (e.g. CityBuilder's 1-world-unit tiles vs. the hex map's much larger
-    // plateau), that tuning actively breaks SSAO rather than helping it.
+    // plateau), that tuning actively breaks AO rather than helping it.
+    //
+    // `bias` is the SSAO depth offset, in world units -- the only one of the three
+    // biases that depends on scene scale (see ShadowDebugSettings). HBAO and GTAO
+    // carry their own scale-free defaults and are deliberately not settable here:
+    // passing a world-unit distance to a radian-valued clamp is the failure mode
+    // this signature used to invite.
     void setAmbientOcclusionTuning(float radius, float bias, float intensity) {
         m_shadowDebugSettings.ssaoRadius = radius;
         m_shadowDebugSettings.ssaoBias = bias;
         m_shadowDebugSettings.ssaoIntensity = intensity;
     }
+    // Which estimator the AO pass dispatches. Orthogonal to setSsaoEnabled():
+    // that gates the pass and the world shaders' ambient factor, this picks the
+    // pipeline it runs. Both must be on for AO to appear.
+    void setAmbientOcclusionMode(AoMode mode) { m_shadowDebugSettings.aoMode = mode; }
+    [[nodiscard]] AoMode ambientOcclusionMode() const { return m_shadowDebugSettings.aoMode; }
     void setShadowSettings(const ShadowSettings& settings);
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
@@ -428,6 +470,15 @@ private:
     void savePipelineCache();
     void destroyPipelineCache();
     bool createAutoExposureResources();
+    bool createImportedMaterialResources();
+
+public:
+    void setImportedMaterial(std::uint32_t index,
+                             const importer::ImportedSceneMaterial& material);
+    void setImportedMaterialTable(
+        const std::vector<importer::ImportedSceneMaterial>& materials);
+
+private:
     bool createSunShaftResources();
     bool createSsaoComputeResources();
     bool createSkinningComputeResources();
@@ -1095,6 +1146,17 @@ private:
     std::vector<std::size_t> m_voxelGiDirtyChunkIndices;
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
+
+    // Named material library (set 0, binding 13). The CPU mirror is the source
+    // of truth and is uploaded into a per-frame region of one buffer, so a
+    // coefficient edit landing between frames can never race a frame still
+    // reading the previous values. Sized for the full table always, so the
+    // binding is valid from init onward even with no scene loaded.
+    BufferHandle m_importedMaterialBufferHandle = kInvalidBufferHandle;
+    std::array<importer::GpuImportedMaterial, importer::kImportedSceneMaterialTableCapacity>
+        m_importedMaterialTable{};
+    // Countdown, not a flag: one edit must reach every frame-in-flight region.
+    std::uint32_t m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
     bool m_strategyMapMode = false;
     bool m_minimalRenderMode = false;
     bool m_autoExposureComputeAvailable = false;
