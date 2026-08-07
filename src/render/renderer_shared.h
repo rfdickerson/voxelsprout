@@ -39,7 +39,20 @@ constexpr uint32_t kBindlessTextureIndexPlantDiffuse = 6;
 constexpr uint32_t kBindlessTextureIndexSkyDaylight = 7;
 constexpr uint32_t kBindlessTextureIndexWaterNormal = 8;
 constexpr uint32_t kBindlessTextureIndexTerrainDetail = 9;
-constexpr uint32_t kBindlessTextureStaticCount = 10;
+constexpr uint32_t kBindlessTextureIndexFogMap = 10;
+// Number of fixed singleton slots at the head of the bindless table; imported
+// scene textures are assigned from here upward (chunk_upload.cc).
+//
+// MIRRORED, and not enforced by the compiler — this header is included inside
+// `namespace odai::render` by some TUs and not at all by others, so each copy is
+// a distinct entity and a mismatch is silent. Keep these three in sync:
+//   * this block,
+//   * the private copy in backend/vulkan/descriptors.cc (which writes the
+//     descriptors these indices name),
+//   * kBindlessIndexFogMap in shaders/imported_static.frag.slang.
+// They were out of step until now: this header lacked FogMap and stopped at 10
+// while descriptors.cc wrote at 11+i, so imported texture 0 sampled the fog map.
+constexpr uint32_t kBindlessTextureStaticCount = 11;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
 constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
