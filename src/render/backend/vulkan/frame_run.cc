@@ -611,14 +611,38 @@ void RendererBackend::renderFrame(
         ? odai::math::Vector3{0.0f, 0.0f, 0.0f}
         : computeSunColor(effectiveSkySettings, sunDirection);
 
+    // Shadows stop well before the camera's far plane.
+    //
+    // farPlane is 50000 for an imported scene, and blending the logarithmic and
+    // uniform splits with nearPlane = 0.1 makes the log term vanish (0.1 *
+    // (500000)^0.25 is under 2 units against a uniform 12500), so the splits came
+    // out effectively uniform: 3752 / 7550 / 12566 / 50000. The last cascade then
+    // covered 50000 units in a 1024 map -- about 117 units per texel, or 1.7
+    // metres, which resolves nothing while re-rendering the whole region. The
+    // shadow pass measured 10.5 ms of an 18.5 ms frame.
+    //
+    // Two changes: cap the shadow distance, and compute the distribution from a
+    // practical near distance instead of the camera's 0.1. Geometry closer than
+    // kShadowSplitNear is inside cascade 0 regardless, so using it as the
+    // distribution's near end costs nothing and restores the logarithmic term
+    // that makes cascade 0 tight.
+    float shadowDistanceLimit = renderingImportedScene ? 6000.0f : farPlane;
+    if (const char* shadowDistanceEnv = std::getenv("ODAI_SHADOW_DISTANCE")) {
+        const float requested = static_cast<float>(std::atof(shadowDistanceEnv));
+        if (requested > 1.0f) {
+            shadowDistanceLimit = requested;
+        }
+    }
+    const float shadowFarPlane = std::min(farPlane, shadowDistanceLimit);
+    const float shadowSplitNear = std::min(std::max(nearPlane, shadowFarPlane * 0.008f), shadowFarPlane);
     constexpr float kCascadeLambda = 0.70f;
     constexpr float kCascadeSplitQuantization = 0.5f;
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(kShadowCascadeCount);
-        const float logarithmicSplit = nearPlane * std::pow(farPlane / nearPlane, p);
-        const float uniformSplit = nearPlane + ((farPlane - nearPlane) * p);
+        const float logarithmicSplit = shadowSplitNear * std::pow(shadowFarPlane / shadowSplitNear, p);
+        const float uniformSplit = shadowSplitNear + ((shadowFarPlane - shadowSplitNear) * p);
         const float desiredSplit =
             (kCascadeLambda * logarithmicSplit) + ((1.0f - kCascadeLambda) * uniformSplit);
         const float quantizedSplit =
@@ -631,9 +655,24 @@ void RendererBackend::renderFrame(
 
         const float previousSplit = (cascadeIndex == 0) ? nearPlane : m_shadowCascadeSplits[cascadeIndex - 1];
         split = std::max(split, previousSplit + kCascadeSplitQuantization);
-        split = std::min(split, farPlane);
+        split = std::min(split, shadowFarPlane);
         m_shadowCascadeSplits[cascadeIndex] = split;
         cascadeDistances[cascadeIndex] = split;
+    }
+
+    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && !m_shadowCascadeSplitsLogged) {
+        m_shadowCascadeSplitsLogged = true;
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            const float cascadeFar = cascadeDistances[cascadeIndex];
+            const float halfHeight = cascadeFar * tanHalfFov;
+            const float halfWidth = halfHeight * aspectRatio;
+            const float radius = std::sqrt((cascadeFar * cascadeFar) + (halfWidth * halfWidth) +
+                                           (halfHeight * halfHeight));
+            VOX_LOGI("render") << "shadow cascade " << cascadeIndex << ": far=" << cascadeFar
+                               << " radius=" << radius
+                               << " texels=" << kShadowCascadeResolution[cascadeIndex]
+                               << " texelSize=" << ((2.0f * radius) / static_cast<float>(kShadowCascadeResolution[cascadeIndex]));
+        }
     }
 
     std::array<odai::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};

@@ -1544,6 +1544,7 @@ private:
     bool m_debugCameraFovInitialized = false;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
+    bool m_shadowCascadeSplitsLogged = false;
     bool m_debugShowImportedTerrain = true;
     bool m_debugShowImportedStatics = true;
     bool m_debugShowImportedTextures = true;
