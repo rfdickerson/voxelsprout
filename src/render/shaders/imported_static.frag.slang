@@ -150,6 +150,28 @@ float sampleSsaoAmbientFactor(float4 screenPosition)
 //
 // Exterior only: an interior has no kilometres of air between the surface and
 // the eye, and applying it there washes rooms out at their far wall.
+// Value noise for breaking up terrain blend boundaries. Hash-based rather than a
+// texture: this is sampled once per fragment and a dependent texture read would
+// cost more than the arithmetic.
+float terrainBlendHash(float2 p)
+{
+    float2 wrapped = frac(p * float2(123.34, 345.45));
+    wrapped += dot(wrapped, wrapped + 34.345);
+    return frac(wrapped.x * wrapped.y);
+}
+
+float terrainBlendNoise(float2 p)
+{
+    const float2 cell = floor(p);
+    float2 f = frac(p);
+    f = f * f * (3.0 - (2.0 * f));
+    const float a = terrainBlendHash(cell);
+    const float b = terrainBlendHash(cell + float2(1.0, 0.0));
+    const float c = terrainBlendHash(cell + float2(0.0, 1.0));
+    const float d = terrainBlendHash(cell + float2(1.0, 1.0));
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
 float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDirection)
 {
     // Distance at which roughly 1/e of the surface's own colour survives. ~15000
@@ -208,11 +230,45 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // that they are each half strength.
     if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u)
     {
+        // VTXT authors one opacity per landscape post -- a value every 128 units
+        // -- and interpolating that linearly across the triangles makes every
+        // blend boundary a straight, grid-aligned edge. That is the blockiness,
+        // and it is in the interpolation, not the data: the same weights can
+        // produce an organic boundary.
+        //
+        // Two corrections, one noise sample shared by all four layers because
+        // the noise perturbs WHERE the boundary falls, not which layer it
+        // belongs to.
+        //
+        //   - Perturb the weight by value noise, so the boundary wanders across
+        //     the lattice instead of following it. Two octaves: the coarse one
+        //     breaks up long straight runs, the fine one gives the edge grain.
+        //   - Sharpen with smoothstep. A linear ramp spreads every transition
+        //     across a full 128-unit cell, which reads as a soft rectangle;
+        //     tightening it puts the transition where the noise put it.
+        //
+        // Both are no-ops where a layer is fully present or fully absent, so
+        // large single-texture areas are untouched.
+        const float2 blendNoiseUv = input.inWorldPosition.xz;
+        const float blendNoise =
+            (terrainBlendNoise(blendNoiseUv * (1.0 / 220.0)) * 0.65) +
+            (terrainBlendNoise(blendNoiseUv * (1.0 / 70.0)) * 0.35);
+        const float blendNoiseSigned = blendNoise - 0.5;
+
         for (uint layer = 0u; layer < 4u; ++layer)
         {
             const uint layerTexture = input.inLayerTextures[layer];
-            const float layerWeight = saturate(input.inLayerWeights[layer]);
-            if (layerTexture == kInvalidImportedTextureIndex || layerWeight <= 0.0)
+            const float rawWeight = saturate(input.inLayerWeights[layer]);
+            if (layerTexture == kInvalidImportedTextureIndex || rawWeight <= 0.0)
+            {
+                continue;
+            }
+            // Scaled by how mid-transition the weight is, so the noise cannot
+            // punch holes in a fully opaque layer or speckle a fully absent one.
+            const float transitionAmount = 1.0 - abs((rawWeight * 2.0) - 1.0);
+            const float perturbed = saturate(rawWeight + (blendNoiseSigned * 0.55 * transitionAmount));
+            const float layerWeight = smoothstep(0.22, 0.78, perturbed);
+            if (layerWeight <= 0.0)
             {
                 continue;
             }
