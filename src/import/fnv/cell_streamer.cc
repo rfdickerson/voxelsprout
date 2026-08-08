@@ -37,7 +37,12 @@ std::string cellAxisToken(std::int32_t value) {
 // running at all.
 //
 // 2 = alpha-blend material flag + effect-only meshes skipped
-constexpr int kCellBuildVersion = 2;
+// 3 = the alpha-cutout heuristic no longer forces alpha test onto blended
+//     surfaces (v2 cells have the test bit baked into their packed vertices,
+//     and the load-time pass only ever adds flags, so they cannot be repaired)
+// 4 = NiStencilProperty DRAW_BOTH read into kImportedSceneMaterialFlagTwoSided
+// 5 = ...with the draw-mode bits actually right; v4 never set the flag
+constexpr int kCellBuildVersion = 5;
 
 // Counts blended packed draws by inspecting the first vertex of each, matching
 // how the renderer decides which pipeline a draw goes through. Runs on the

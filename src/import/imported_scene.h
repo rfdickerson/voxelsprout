@@ -56,6 +56,8 @@ struct ImportedSceneMeshPart {
     // discards fragments in the opaque pass, alphaBlend moves the whole draw
     // into the blended pass. See kImportedSceneMaterialFlagAlphaBlend.
     bool alphaBlend = false;
+    // NiStencilProperty DRAW_BOTH. See kImportedSceneMaterialFlagTwoSided.
+    bool twoSided = false;
 };
 
 struct ImportedSceneMesh {
@@ -189,6 +191,13 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainLayers = 1u << 4
 // through a blend-enabled pipeline with depth writes off. Without it they show
 // up as solid pale slabs standing in the landscape.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaBlend = 1u << 5;
+
+// Surface is authored two-sided (Fallout's NiStencilProperty DRAW_BOTH). The
+// renderer draws these with back-face culling off. Thin alpha geometry --
+// window glass, foliage cards, awnings -- is the overwhelming majority of it,
+// which is why it rides alongside the blend flag rather than in a general
+// material system.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagTwoSided = 1u << 6;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;

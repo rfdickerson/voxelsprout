@@ -747,6 +747,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         }
                         part.alphaTest = shape.alphaTest;
                         part.alphaBlend = shape.alphaBlend;
+                        part.twoSided = shape.twoSided;
                         // A shape with no diffuse texture is not an error the
                         // resolver reports -- it silently shades from the
                         // per-model hashed colour, which reads as flat grey-brown

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -748,6 +749,21 @@ bool RendererBackend::createPipePipeline() {
         importedStaticPipelineBlended = VK_NULL_HANDLE;
     }
 
+    // Two-sided variant, for draws whose NiStencilProperty said DRAW_BOTH.
+    VkPipelineRasterizationStateCreateInfo importedBlendedTwoSidedRasterizer = importedRasterizer;
+    importedBlendedTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo importedBlendedTwoSidedCreateInfo = importedBlendedPipelineCreateInfo;
+    importedBlendedTwoSidedCreateInfo.pRasterizationState = &importedBlendedTwoSidedRasterizer;
+    VkPipeline importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    const VkResult importedBlendedTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &importedBlendedTwoSidedCreateInfo, nullptr,
+        &importedStaticPipelineBlendedTwoSided);
+    if (importedBlendedTwoSidedResult != VK_SUCCESS) {
+        logVkFailure(
+            "vkCreateGraphicsPipelines(importedStaticBlendedTwoSided)", importedBlendedTwoSidedResult);
+        importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    }
+
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     if (hasRtImportedVariant) {
         VkGraphicsPipelineCreateInfo importedRtPipelineCreateInfo = importedPipelineCreateInfo;
@@ -1022,6 +1038,7 @@ bool RendererBackend::createPipePipeline() {
         if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
         if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
         if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr); }
+        if (m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlendedTwoSided, nullptr); }
         if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
         if (m_skyCloudPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr); }
         if (m_importedWaterPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr); }
@@ -1029,6 +1046,7 @@ bool RendererBackend::createPipePipeline() {
         m_pipePipeline = pipePipeline;
         m_importedStaticPipeline = importedStaticPipeline;
         m_importedStaticPipelineBlended = importedStaticPipelineBlended;
+        m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
         m_importedStaticPipelineRt = importedStaticPipelineRt;
         m_skyCloudPipeline = skyCloudPipeline;
         m_importedWaterPipeline = importedWaterPipeline;
@@ -1057,6 +1075,12 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr);
     }
+    if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr);
+    }
+    if (m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticPipelineBlendedTwoSided, nullptr);
+    }
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr);
     }
@@ -1072,6 +1096,7 @@ bool RendererBackend::createPipePipeline() {
     m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
     m_importedStaticPipelineBlended = importedStaticPipelineBlended;
+    m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;

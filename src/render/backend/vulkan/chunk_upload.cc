@@ -1880,6 +1880,8 @@ bool RendererBackend::uploadImportedSceneInternal(
                                 std::uint32_t indexCount,
                                 bool terrainDraw,
                                 bool blendedDraw,
+                                bool twoSidedDraw,
+                                const float (&drawCenter)[3],
                                 std::uint32_t pageRangeIndex
                             ) {
         if (indexCount == 0) {
@@ -1892,8 +1894,21 @@ bool RendererBackend::uploadImportedSceneInternal(
             // folded into one vkCmdDrawIndexed even when their index ranges abut.
             if (lastMergedDrawWasTerrain == terrainDraw &&
                 previous.blended == blendedDraw &&
+                previous.twoSided == twoSidedDraw &&
                 lastMergedPageRangeIndex == pageRangeIndex &&
                 previous.firstIndex + previous.indexCount == firstIndex) {
+                // Weight the merged centre by index count so a large shape does
+                // not get dragged around by a small one folded in beside it.
+                if (blendedDraw) {
+                    const float previousWeight = static_cast<float>(previous.indexCount);
+                    const float addedWeight = static_cast<float>(indexCount);
+                    const float totalWeight = previousWeight + addedWeight;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        previous.center[axis] =
+                            ((previous.center[axis] * previousWeight) +
+                             (drawCenter[axis] * addedWeight)) / totalWeight;
+                    }
+                }
                 previous.indexCount += indexCount;
                 return;
             }
@@ -1902,6 +1917,10 @@ bool RendererBackend::uploadImportedSceneInternal(
         draw.firstIndex = firstIndex;
         draw.indexCount = indexCount;
         draw.blended = blendedDraw;
+        draw.twoSided = twoSidedDraw;
+        draw.center[0] = drawCenter[0];
+        draw.center[1] = drawCenter[1];
+        draw.center[2] = drawCenter[2];
         const std::uint32_t rendererDrawIndex = static_cast<std::uint32_t>(draws.size());
         draws.push_back(draw);
         if (terrainDraw) {
@@ -1934,16 +1953,74 @@ bool RendererBackend::uploadImportedSceneInternal(
         return (uploadScene.packedVertices[vertexIndex].flags &
                 odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
     };
+    auto packedDrawIsTwoSided = [&](const odai::importer::ImportedScenePackedDraw& srcDraw) {
+        if (srcDraw.firstIndex >= uploadScene.packedIndices.size()) {
+            return false;
+        }
+        const std::uint32_t vertexIndex = uploadScene.packedIndices[srcDraw.firstIndex];
+        if (vertexIndex >= uploadScene.packedVertices.size()) {
+            return false;
+        }
+        return (uploadScene.packedVertices[vertexIndex].flags &
+                odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
+    };
+    // AABB centre over the draw's own vertices. Only computed for blended draws
+    // -- it exists purely to sort them, and walking every opaque draw's indices
+    // to fill in a field nothing reads would be a full extra pass over the
+    // scene's geometry for nothing.
+    auto packedDrawCenter = [&](const odai::importer::ImportedScenePackedDraw& srcDraw,
+                                float (&outCenter)[3]) {
+        outCenter[0] = 0.0f;
+        outCenter[1] = 0.0f;
+        outCenter[2] = 0.0f;
+        float boundsMin[3] = {
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max()};
+        float boundsMax[3] = {
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest(),
+            std::numeric_limits<float>::lowest()};
+        const std::size_t lastIndex = std::min<std::size_t>(
+            static_cast<std::size_t>(srcDraw.firstIndex) + srcDraw.indexCount,
+            uploadScene.packedIndices.size());
+        bool sawVertex = false;
+        for (std::size_t i = srcDraw.firstIndex; i < lastIndex; ++i) {
+            const std::uint32_t vertexIndex = uploadScene.packedIndices[i];
+            if (vertexIndex >= uploadScene.packedVertices.size()) {
+                continue;
+            }
+            const auto& position = uploadScene.packedVertices[vertexIndex].position;
+            for (int axis = 0; axis < 3; ++axis) {
+                boundsMin[axis] = std::min(boundsMin[axis], position[axis]);
+                boundsMax[axis] = std::max(boundsMax[axis], position[axis]);
+            }
+            sawVertex = true;
+        }
+        if (!sawVertex) {
+            return;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            outCenter[axis] = (boundsMin[axis] + boundsMax[axis]) * 0.5f;
+        }
+    };
     for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
         const odai::importer::ImportedScenePackedDraw& srcDraw = uploadScene.packedDraws[drawIndex];
         if (srcDraw.indexCount == 0) {
             continue;
         }
+        const bool blendedDraw = packedDrawIsBlended(srcDraw);
+        float drawCenter[3] = {0.0f, 0.0f, 0.0f};
+        if (blendedDraw) {
+            packedDrawCenter(srcDraw, drawCenter);
+        }
         appendMergedDraw(
             srcDraw.firstIndex,
             srcDraw.indexCount,
             drawIndex < sourceTerrainDrawCount,
-            packedDrawIsBlended(srcDraw),
+            blendedDraw,
+            packedDrawIsTwoSided(srcDraw),
+            drawCenter,
             sourceDrawPageRangeIndices[drawIndex]);
     }
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {

@@ -1019,6 +1019,15 @@ private:
         // vertex. Blended draws are skipped by the depth prepass and the shadow
         // pass, and replayed after the opaque draws in the main pass.
         bool blended = false;
+        // World-space AABB centre, used only to sort the blended replay
+        // back-to-front. Computed at upload for blended draws and left at the
+        // origin for opaque ones, which never consult it.
+        float center[3] = {0.0f, 0.0f, 0.0f};
+        // kImportedSceneMaterialFlagTwoSided: drawn with back-face culling off.
+        // Currently honoured only on the blended replay, which is where the
+        // authored two-sidedness actually shows -- Fallout's window glass and
+        // foliage cards lose a face without it.
+        bool twoSided = false;
     };
 
     struct ImportedScenePageDrawRange {
@@ -1208,6 +1217,11 @@ private:
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
         std::uint32_t importedTerrainDrawCount = 0;
+        // Indices into importedMeshDraws naming every blended draw, farthest
+        // from the camera first. Rebuilt on the main thread each frame because
+        // the correct order depends on where the camera is; empty when the
+        // scene has no blended geometry.
+        std::span<const std::uint32_t> importedBlendedDrawOrder;
         VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorVertexOffset = 0;
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
@@ -1533,6 +1547,8 @@ private:
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
     VkPipeline& m_importedStaticPipelineBlended = m_pipelineManager.importedStaticPipelineBlended;
+    VkPipeline& m_importedStaticPipelineBlendedTwoSided =
+        m_pipelineManager.importedStaticPipelineBlendedTwoSided;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
@@ -1704,6 +1720,9 @@ private:
     uint32_t m_hexInstanceCount = 0;
     bool m_hexTerrainEnabled = true;
     uint32_t m_importedTerrainDrawCount = 0;
+    // Reused every frame so the back-to-front sort of blended imported draws
+    // does not allocate in the render loop.
+    std::vector<std::uint32_t> m_importedBlendedDrawOrder;
     uint32_t m_importedStaticDrawCount = 0;
     uint32_t m_importedWaterIndexCount = 0;
     uint32_t m_skyCloudIndexCount = 0;

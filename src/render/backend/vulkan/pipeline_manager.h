@@ -21,6 +21,9 @@ public:
     // Same shaders as importedStaticPipeline, with alpha blending on and depth
     // writes off — used for the blended tail of each imported chunk's draws.
     VkPipeline importedStaticPipelineBlended = VK_NULL_HANDLE;
+    // ...and the same again with back-face culling off, for draws whose source
+    // marked them two-sided.
+    VkPipeline importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
@@ -138,6 +141,10 @@ public:
         if (importedStaticPipelineBlended != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlended, nullptr);
             importedStaticPipelineBlended = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipelineBlendedTwoSided, nullptr);
+            importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineRt, nullptr);

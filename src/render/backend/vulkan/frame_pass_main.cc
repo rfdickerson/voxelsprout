@@ -33,6 +33,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
+    const std::span<const std::uint32_t> importedBlendedDrawOrder = inputs.importedBlendedDrawOrder;
     const VkBuffer importedActorVertexBuffer = inputs.importedActorVertexBuffer;
     const VkDeviceSize importedActorVertexOffset = inputs.importedActorVertexOffset;
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
@@ -276,7 +277,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             sizeof(ChunkPushConstants),
             &importedPushConstants
         );
-        std::size_t blendedDrawCount = 0;
         for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
             if ((drawIndex < terrainDrawCount && !drawTerrain) ||
                 (drawIndex >= staticDrawStart && !drawStatics)) {
@@ -284,8 +284,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             }
             const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
             if (importedDraw.blended) {
-                ++blendedDrawCount;
-                continue;
+                continue;  // replayed below, in back-to-front order
             }
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(
@@ -293,40 +292,34 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 importedDraw.vertexOffset, 0);
         }
 
-        // Blended tail. Same vertex/index buffers and push constants, so only
-        // the pipeline has to change. These are NOT depth-sorted: sorting would
-        // mean reordering draws per frame against the camera, and the content
-        // this covers (glass, dust sheets, light shafts) is sparse enough that
-        // the ordering artifacts are far less visible than the solid slabs that
-        // drawing them opaquely produced. Sort here if that stops being true.
-        if (blendedDrawCount != 0 && m_importedStaticPipelineBlended != VK_NULL_HANDLE) {
-            vkCmdBindPipeline(
-                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticPipelineBlended);
-            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+        // Blended tail, farthest first. Same vertex/index buffers and push
+        // constants as the opaque draws, so only the pipeline changes; if that
+        // pipeline failed to create, the draws still go out through the opaque
+        // one rather than vanishing.
+        if (!importedBlendedDrawOrder.empty()) {
+            // Two-sidedness is a per-draw property (NiStencilProperty DRAW_BOTH
+            // on the source shape), so the pipeline is resolved per draw and
+            // rebound only when it actually changes. The sorted order is what
+            // decides the sequence -- correctness of the compositing outranks
+            // the handful of extra binds a mixed run costs.
+            VkPipeline boundBlendedPipeline = VK_NULL_HANDLE;
+            for (const std::uint32_t drawIndex : importedBlendedDrawOrder) {
+                if (drawIndex >= importedMeshDraws.size()) {
+                    continue;
+                }
                 if ((drawIndex < terrainDrawCount && !drawTerrain) ||
                     (drawIndex >= staticDrawStart && !drawStatics)) {
                     continue;
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
-                if (!importedDraw.blended) {
-                    continue;
-                }
-                countDrawCalls(m_debugDrawCallsMain, 1);
-                vkCmdDrawIndexed(
-                    commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
-                    importedDraw.vertexOffset, 0);
-            }
-        } else if (blendedDrawCount != 0) {
-            // Pipeline creation failed; fall back to the pre-blending behaviour
-            // rather than dropping the geometry entirely.
-            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                if ((drawIndex < terrainDrawCount && !drawTerrain) ||
-                    (drawIndex >= staticDrawStart && !drawStatics)) {
-                    continue;
-                }
-                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
-                if (!importedDraw.blended) {
-                    continue;
+                VkPipeline wantedPipeline =
+                    (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineBlendedTwoSided
+                        : m_importedStaticPipelineBlended;
+                if (wantedPipeline != VK_NULL_HANDLE && wantedPipeline != boundBlendedPipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundBlendedPipeline = wantedPipeline;
                 }
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(

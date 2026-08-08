@@ -288,16 +288,38 @@ bool textureIndexUsesAlphaCutout(const std::vector<bool>& mask, std::uint32_t te
     return textureIndex < mask.size() && mask[textureIndex];
 }
 
+// Infers alpha test from texture CONTENT, for importers that do not tell us.
+// It is a guess, and a deliberately eager one: any texture holding both a
+// transparent and a visible texel counts.
+//
+// It must not fire on a surface whose source format stated its own blend mode.
+// A blended surface's alpha is a coverage ramp, not a cutout mask, and running
+// it through a 0.5 discard throws away exactly the part that was supposed to
+// blend -- glass at a flat alpha of 0.3 discards entirely and disappears, and a
+// dust sheet keeps only its opaque half with a hard edge where the gradient
+// was. On Fallout's Goodsprings this hit 554 of 557 blended draws, so the
+// blended pass had almost nothing left to draw by the time it ran.
+//
+// So alphaBlend vetoes the guess. It does NOT veto alphaTest set by the
+// importer itself: NiAlphaProperty can legitimately set both bits, and that
+// surface still wants its own threshold applied.
 void applyTextureAlphaCutoutFlags(ImportedScene& scene) {
     const std::vector<bool> textureAlphaCutoutMask = buildTextureAlphaCutoutMask(scene.textures);
     for (ImportedSceneMesh& mesh : scene.meshes) {
         for (ImportedSceneMeshPart& part : mesh.parts) {
-            if (textureIndexUsesAlphaCutout(textureAlphaCutoutMask, part.textureIndex)) {
+            if (!part.alphaBlend &&
+                textureIndexUsesAlphaCutout(textureAlphaCutoutMask, part.textureIndex)) {
                 part.alphaTest = true;
             }
         }
     }
+    // Runs on load as well as on build, so a cell coming back from the disk
+    // cache has to be filtered the same way -- the flag is already packed into
+    // the vertex there, which is what makes the veto checkable at all.
     for (ImportedScenePackedVertex& vertex : scene.packedVertices) {
+        if ((vertex.flags & kImportedSceneMaterialFlagAlphaBlend) != 0u) {
+            continue;
+        }
         if (textureIndexUsesAlphaCutout(textureAlphaCutoutMask, vertex.textureIndex)) {
             vertex.flags |= kImportedSceneMaterialFlagAlphaTest;
         }
@@ -683,7 +705,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     mesh.indices.size());
                 const std::uint32_t partFlags =
                     (part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u) |
-                    (part.alphaBlend ? kImportedSceneMaterialFlagAlphaBlend : 0u);
+                    (part.alphaBlend ? kImportedSceneMaterialFlagAlphaBlend : 0u) |
+                    (part.twoSided ? kImportedSceneMaterialFlagTwoSided : 0u);
                 for (std::size_t indexOffset = firstPartIndex; indexOffset < lastPartIndex; ++indexOffset) {
                     const std::uint32_t index = mesh.indices[indexOffset];
                     if (index >= mesh.vertices.size()) {

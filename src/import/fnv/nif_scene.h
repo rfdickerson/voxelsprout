@@ -46,6 +46,10 @@ struct NifShape {
     std::string diffuseTexturePath;
     // NiAlphaProperty declared alpha testing (flag 0x200) for this shape.
     bool alphaTest = false;
+    // NiStencilProperty draw mode DRAW_BOTH. Fallout marks window glass,
+    // foliage cards and awnings this way; drawn single-sided they lose
+    // whichever face points away from the camera.
+    bool twoSided = false;
     // NiAlphaProperty's blend bit. The imported static path draws opaque only,
     // so a blended shape (glass, an additive effect billboard) rendered through
     // it appears as a solid slab -- Goodsprings' window panes and dust effects

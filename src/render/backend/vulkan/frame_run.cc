@@ -1951,6 +1951,7 @@ void RendererBackend::renderFrame(
                                    << " splits=[" << m_shadowCascadeSplits[0] << ","
                                    << m_shadowCascadeSplits[1] << "," << m_shadowCascadeSplits[2]
                                    << "," << m_shadowCascadeSplits[3] << "]"
+                                   << " blendedDraws=" << m_importedBlendedDrawOrder.size()
                                    << " shadowDraws=[" << m_visibleImportedShadowMeshDraws[0].size()
                                    << "," << m_visibleImportedShadowMeshDraws[1].size()
                                    << "," << m_visibleImportedShadowMeshDraws[2].size()
@@ -1968,6 +1969,43 @@ void RendererBackend::renderFrame(
                 m_visibleImportedShadowMeshDraws[cascadeIndex]);
         }
     }
+    // Back-to-front order for the blended replay in the main pass.
+    //
+    // The blended pipeline does not write depth, so overlapping blended
+    // surfaces composite in submission order, and submission order is upload
+    // order -- which is whatever order the cells happened to stream in. Sorting
+    // by distance from the camera is what makes two panes of glass in front of
+    // each other look right from both sides. This is per-frame because the
+    // answer changes as the camera moves; it stays cheap because it only ever
+    // touches the blended subset, not the whole draw list.
+    //
+    // Draw granularity, not triangle granularity: a single merged draw whose
+    // own triangles overlap still composites in index order. That is the
+    // standard limitation of a sorted-draw transparency pass and is not worth
+    // an OIT scheme for the amount of glass Fallout places.
+    m_importedBlendedDrawOrder.clear();
+    for (std::size_t drawIndex = 0; drawIndex < importedMeshDrawsForFrame.size(); ++drawIndex) {
+        if (importedMeshDrawsForFrame[drawIndex].blended) {
+            m_importedBlendedDrawOrder.push_back(static_cast<std::uint32_t>(drawIndex));
+        }
+    }
+    if (m_importedBlendedDrawOrder.size() > 1u) {
+        const odai::math::Vector3 blendSortEye = eye;
+        std::sort(
+            m_importedBlendedDrawOrder.begin(),
+            m_importedBlendedDrawOrder.end(),
+            [&](std::uint32_t lhs, std::uint32_t rhs) {
+                auto distanceSquared = [&](std::uint32_t index) {
+                    const float* center = importedMeshDrawsForFrame[index].center;
+                    const float dx = center[0] - blendSortEye.x;
+                    const float dy = center[1] - blendSortEye.y;
+                    const float dz = center[2] - blendSortEye.z;
+                    return (dx * dx) + (dy * dy) + (dz * dz);
+                };
+                return distanceSquared(lhs) > distanceSquared(rhs);
+            });
+    }
+
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -2397,6 +2435,8 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedIndexBuffer = importedIndexBuffer;
     mainPassInputs.importedMeshDraws = importedMeshDrawsForFrame;
     mainPassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
+    mainPassInputs.importedBlendedDrawOrder = std::span<const std::uint32_t>(
+        m_importedBlendedDrawOrder.data(), m_importedBlendedDrawOrder.size());
     mainPassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
     mainPassInputs.importedActorVertexOffset =
         importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;

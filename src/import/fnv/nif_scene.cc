@@ -318,6 +318,14 @@ struct AlphaPropertyBlock {
     bool valid = false;
 };
 
+// NiStencilProperty. Only the draw mode is wanted: Fallout marks its thin alpha
+// geometry -- window glass, foliage cards, awnings -- DRAW_BOTH, and rendering
+// those single-sided loses whichever face happens to point away.
+struct StencilPropertyBlock {
+    bool valid = false;
+    bool twoSided = false;
+};
+
 // BSShaderPPLightingProperty's texture-set ref, read by its real layout rather
 // than searched for.
 //
@@ -510,6 +518,52 @@ bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPr
     constexpr std::uint16_t kAlphaTestBit = 0x0200u;
     out.alphaBlend = (flags & kAlphaBlendBit) != 0u;
     out.alphaTest = (flags & kAlphaTestBit) != 0u;
+    out.valid = true;
+    return true;
+}
+
+bool readNiStencilProperty(ByteCursor& cursor, StencilPropertyBlock& out) {
+    // Same NiObjectNET prefix as NiAlphaProperty above: name, extra data,
+    // controller, then the property's own 16-bit flags.
+    std::uint32_t nameRef = 0;
+    if (!cursor.read(nameRef)) {
+        return false;
+    }
+    std::uint32_t numExtraData = 0;
+    if (!cursor.read(numExtraData) || numExtraData > 1024u) {
+        return false;
+    }
+    for (std::uint32_t i = 0; i < numExtraData; ++i) {
+        std::int32_t ref = 0;
+        if (!cursor.read(ref)) {
+            return false;
+        }
+    }
+    std::int32_t controllerRef = 0;
+    if (!cursor.read(controllerRef)) {
+        return false;
+    }
+    std::uint16_t flags = 0;
+    if (!cursor.read(flags)) {
+        return false;
+    }
+    // nif.xml's StencilFlags bitfield, for ver >= 20.1.0.3 (which Fallout's
+    // 20.2.0.7 is): stencil enabled at bit 0 (width 1), fail action at 1 (3),
+    // z-fail action at 4 (3), pass action at 7 (3), DRAW MODE AT 10 (width 2),
+    // stencil function at 12 (3).
+    //
+    // Every NiStencilProperty in the retail Goodsprings set reads 0x4d80, which
+    // decodes as enabled=0, fail=KEEP, zfail=KEEP, pass=INCREMENT, drawMode=3,
+    // function=4. Draw mode 3 is DRAW_BOTH -- these blocks exist precisely to
+    // say "two-sided", which is the whole reason to read them.
+    //
+    // Reading the draw mode at bit 13 instead yields 2 for that same word, i.e.
+    // two-sided-never, silently and for every file. Do not adjust these
+    // positions without re-dumping the flags against real data.
+    constexpr std::uint16_t kDrawModeShift = 10u;
+    constexpr std::uint16_t kDrawModeMask = 0x3u;
+    constexpr std::uint16_t kDrawBoth = 3u;
+    out.twoSided = ((flags >> kDrawModeShift) & kDrawModeMask) == kDrawBoth;
     out.valid = true;
     return true;
 }
@@ -946,6 +1000,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<std::string> sourceTexturePaths(numBlocks);
     std::vector<std::string> texturingPropertyPaths(numBlocks);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
+    std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
     std::unordered_set<std::int32_t> referencedAsChild;
 
     for (std::size_t i = 0; i < numBlocks; ++i) {
@@ -999,6 +1054,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             AlphaPropertyBlock alpha;
             if (readNiAlphaProperty(blockCursor, header.userVersion2, alpha)) {
                 alphaProperties[i] = alpha;
+            }
+        } else if (typeName == "NiStencilProperty") {
+            StencilPropertyBlock stencil;
+            if (readNiStencilProperty(blockCursor, stencil)) {
+                stencilProperties[i] = stencil;
             }
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
             GeometryBlock block;
@@ -1095,6 +1155,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 if (alphaProperties[propertyIndex].valid) {
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
+                    continue;
+                }
+                if (stencilProperties[propertyIndex].valid) {
+                    shape.twoSided = shape.twoSided || stencilProperties[propertyIndex].twoSided;
                     continue;
                 }
                 if (!shape.diffuseTexturePath.empty()) {
