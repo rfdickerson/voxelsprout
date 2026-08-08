@@ -511,13 +511,42 @@ bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPr
         return false;
     }
     // NiAlphaProperty flags: bit 0 enables alpha BLENDING, bit 9 enables alpha
-    // TESTING. Only the test bit was read, so a blended shape was
+    // TESTING. Only the test bit used to be read, so a blended shape was
     // indistinguishable from an opaque one -- and the imported static path
-    // cannot blend, so glass panes and effect billboards drew as solid slabs.
+    // could not blend, so glass panes and effect billboards drew as solid slabs.
     constexpr std::uint16_t kAlphaBlendBit = 0x0001u;
     constexpr std::uint16_t kAlphaTestBit = 0x0200u;
-    out.alphaBlend = (flags & kAlphaBlendBit) != 0u;
+    const bool blendBit = (flags & kAlphaBlendBit) != 0u;
     out.alphaTest = (flags & kAlphaTestBit) != 0u;
+
+    // A surface that alpha-TESTS is a cutout, even when the blend bit is also
+    // set -- and blend+test together is the single most common combination
+    // Fallout ships. Retail Goodsprings:
+    //
+    //   0x12ec  blend=0 test=1   394 shapes   cutout
+    //   0x12ed  blend=1 test=1   351 shapes   cutout, with blending also on
+    //   0x10ed  blend=1 test=0    36 shapes   genuine transparency
+    //   0x1242  blend=0 test=1    17 shapes   cutout
+    //   0x1043  blend=1 test=0     1 shape    genuine transparency
+    //
+    // The test is what defines a cutout's silhouette; on those surfaces the
+    // diffuse alpha channel is not an opacity ramp at all -- Bethesda's shaders
+    // read it as a specular mask, so a building wall's alpha sits around 0.5
+    // across the whole texture. Honouring the blend bit there drew 351 shapes
+    // at half opacity and you could see straight through Goodsprings' walls.
+    //
+    // So: blended means blend WITHOUT test. That leaves 37 truly transparent
+    // shapes in the region, which is about how much glass is actually there.
+    out.alphaBlend = blendBit && !out.alphaTest;
+
+    // Not read yet: a u8 threshold follows, and it is what the test should
+    // compare against instead of the shader's hardcoded 0.5. Retail values run
+    // 0, 16, 32, 50, 60, 63, 64, 70, 80, 90, 92, 100, 120, 124, 127, 128, 160,
+    // 200 -- with 100 the most common by a wide margin, so the hardcoded 128 is
+    // wrong more often than right and erodes thin cutouts. Carrying it needs a
+    // per-surface byte the packed vertex has no room for: bits 0-6 of the flag
+    // word are material flags and 8-31 are PBR/material-index, so this wants a
+    // real field and a format version, not a stolen bit.
     out.valid = true;
     return true;
 }
