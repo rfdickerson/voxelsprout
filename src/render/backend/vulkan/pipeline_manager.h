@@ -18,6 +18,9 @@ public:
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
+    // Same shaders as importedStaticPipeline, with alpha blending on and depth
+    // writes off — used for the blended tail of each imported chunk's draws.
+    VkPipeline importedStaticPipelineBlended = VK_NULL_HANDLE;
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
@@ -131,6 +134,10 @@ public:
         if (importedStaticPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipeline, nullptr);
             importedStaticPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipelineBlended != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipelineBlended, nullptr);
+            importedStaticPipelineBlended = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineRt, nullptr);

@@ -30,6 +30,35 @@ std::string cellAxisToken(std::int32_t value) {
 // Identifies the plugin a cache was built from. Folded into a directory name
 // rather than checked and deleted: a different or updated plugin simply misses,
 // so no cache invalidation ever removes a file.
+// Bump whenever CellSceneBuilder's output changes shape or content. It joins
+// the cache key, so an old cache directory is simply never consulted again
+// rather than silently serving cells built by the previous rules. Cheap to
+// bump; forgetting to bump it produces a bug that looks like the new code not
+// running at all.
+//
+// 2 = alpha-blend material flag + effect-only meshes skipped
+constexpr int kCellBuildVersion = 2;
+
+// Counts blended packed draws by inspecting the first vertex of each, matching
+// how the renderer decides which pipeline a draw goes through. Runs on the
+// cache-hit path too, so the number is the same whether a cell was rebuilt or
+// loaded.
+std::uint64_t countBlendedDraws(const ImportedScene& scene) {
+    std::uint64_t blended = 0;
+    for (const ImportedScenePackedDraw& draw : scene.packedDraws) {
+        if (draw.indexCount == 0u || draw.firstIndex >= scene.packedIndices.size()) {
+            continue;
+        }
+        const std::uint32_t vertexIndex = scene.packedIndices[draw.firstIndex];
+        if (vertexIndex < scene.packedVertices.size() &&
+            (scene.packedVertices[vertexIndex].flags &
+             kImportedSceneMaterialFlagAlphaBlend) != 0u) {
+            ++blended;
+        }
+    }
+    return blended;
+}
+
 std::string pluginFingerprint(const std::filesystem::path& esmPath) {
     std::error_code sizeError;
     const auto size = std::filesystem::file_size(esmPath, sizeError);
@@ -37,7 +66,8 @@ std::string pluginFingerprint(const std::filesystem::path& esmPath) {
     const auto writeTime = std::filesystem::last_write_time(esmPath, timeError);
     const auto ticks = writeTime.time_since_epoch().count();
     return std::to_string(sizeError ? 0ull : static_cast<std::uint64_t>(size)) + "_" +
-           std::to_string(timeError ? 0ll : static_cast<long long>(ticks));
+           std::to_string(timeError ? 0ll : static_cast<long long>(ticks)) + "_v" +
+           std::to_string(kCellBuildVersion);
 }
 
 }  // namespace
@@ -55,6 +85,8 @@ struct CellStreamer::Pending {
         std::string error;
         float buildMs = 0.0f;
         float cacheLoadMs = 0.0f;
+        std::uint64_t effectMeshesSkipped = 0;
+        std::uint64_t blendedParts = 0;
     };
 
     std::mutex mutex;
@@ -210,6 +242,7 @@ void CellStreamer::update(
                         result.fromCache = true;
                         result.cacheLoadMs = cacheTimer.elapsedMs();
                         result.buildMs = buildTimer.elapsedMs();
+                        result.blendedParts = countBlendedDraws(result.scene);
                         std::lock_guard<std::mutex> lock(pending->mutex);
                         pending->completed.push_back(std::move(result));
                         if (pending->inFlight > 0u) {
@@ -246,6 +279,8 @@ void CellStreamer::update(
                     builder.addCellStatics(record);
                     builder.finish(result.scene);
                     result.succeeded = true;
+                    result.effectMeshesSkipped = builder.stats().effectMeshesSkipped;
+                    result.blendedParts = countBlendedDraws(result.scene);
 
                     if (!cachePath.empty()) {
                         // Write to a temporary and rename, so a crash or a second
@@ -355,6 +390,8 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         }
         m_residentChunks.emplace(result.cell, chunkIndex);
         ++m_stats.scenesLoaded;
+        m_stats.effectMeshesSkipped += result.effectMeshesSkipped;
+        m_stats.blendedPartsLoaded += result.blendedParts;
         if (m_onCellResident) {
             // Before result.scene is destroyed at the end of this loop.
             m_onCellResident(result.cell, result.scene);

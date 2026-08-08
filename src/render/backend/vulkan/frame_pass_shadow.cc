@@ -237,6 +237,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         continue;
                     }
                     const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
+                    if (importedDraw.blended) {
+                        continue;  // a blended surface casts no opaque shadow
+                    }
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,

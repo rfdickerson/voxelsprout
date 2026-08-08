@@ -1015,6 +1015,10 @@ private:
         // ImportedMeshVertex, so a byte offset would have to differ between the
         // two passes for the same draw; a vertex index is valid for both.
         std::int32_t vertexOffset = 0;
+        // Set from kImportedSceneMaterialFlagAlphaBlend on the draw's first
+        // vertex. Blended draws are skipped by the depth prepass and the shadow
+        // pass, and replayed after the opaque draws in the main pass.
+        bool blended = false;
     };
 
     struct ImportedScenePageDrawRange {
@@ -1528,6 +1532,7 @@ private:
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
+    VkPipeline& m_importedStaticPipelineBlended = m_pipelineManager.importedStaticPipelineBlended;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;

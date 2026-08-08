@@ -1,6 +1,7 @@
 #include "import/fnv/fallout_records.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -57,6 +58,14 @@ std::string subrecordString(const EsmSubrecordView& sub) {
 // transformed sub-statics with its own layout, not an EDID+MODL record, and
 // treating it like one would place its origin marker rather than its contents.
 bool isModelBearingBaseType(std::string_view type) {
+    // Diagnostic: narrow placement back to STAT alone, which is what this
+    // importer did before the other base types were added. Bisects "is this
+    // artifact coming from a type we only recently started placing?".
+    // Read once -- this runs per record.
+    static const bool statOnly = std::getenv("ODAI_FNV_STAT_ONLY") != nullptr;
+    if (statOnly) {
+        return type == "STAT";
+    }
     return type == "STAT" || type == "MSTT" || type == "ACTI" || type == "DOOR" ||
            type == "CONT" || type == "FURN" || type == "TREE" || type == "MISC" ||
            type == "TERM" || type == "LIGH" || type == "BOOK" || type == "KEYM" ||
@@ -71,6 +80,7 @@ bool isModelBearingBaseType(std::string_view type) {
 void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     FalloutStaticRecord entry{};
     entry.formId = record.formId;
+    entry.recordType = record.type;
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);

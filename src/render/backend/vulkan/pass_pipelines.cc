@@ -711,6 +711,43 @@ bool RendererBackend::createPipePipeline() {
         logVkFailure("vkCreateGraphicsPipelines(importedStatic)", importedPipelineResult);
         return false;
     }
+    // Alpha-blended variant of the same shaders.
+    //
+    // Fallout places glass, dust, light beams and vulture billboards as ordinary
+    // statics, and drawing them through the opaque pipeline turns each one into
+    // a solid pale slab standing in the landscape. Blending needs depth TEST but
+    // not depth WRITE: a blended surface must not occlude what is behind it, and
+    // must not occlude other blended surfaces either.
+    VkPipelineColorBlendAttachmentState importedBlendAttachment{};
+    importedBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    importedBlendAttachment.blendEnable = VK_TRUE;
+    importedBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    importedBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    importedBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    importedBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    importedBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    importedBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipelineColorBlendStateCreateInfo importedBlendState = colorBlending;
+    importedBlendState.attachmentCount = 1;
+    importedBlendState.pAttachments = &importedBlendAttachment;
+    VkPipelineDepthStencilStateCreateInfo importedBlendDepth = depthStencil;
+    importedBlendDepth.depthWriteEnable = VK_FALSE;
+
+    VkGraphicsPipelineCreateInfo importedBlendedPipelineCreateInfo = importedPipelineCreateInfo;
+    importedBlendedPipelineCreateInfo.pColorBlendState = &importedBlendState;
+    importedBlendedPipelineCreateInfo.pDepthStencilState = &importedBlendDepth;
+    VkPipeline importedStaticPipelineBlended = VK_NULL_HANDLE;
+    const VkResult importedBlendedResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &importedBlendedPipelineCreateInfo, nullptr,
+        &importedStaticPipelineBlended);
+    if (importedBlendedResult != VK_SUCCESS) {
+        // Not fatal: without it the blended draws simply keep going through the
+        // opaque pipeline, which is the behaviour that existed before.
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticBlended)", importedBlendedResult);
+        importedStaticPipelineBlended = VK_NULL_HANDLE;
+    }
+
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     if (hasRtImportedVariant) {
         VkGraphicsPipelineCreateInfo importedRtPipelineCreateInfo = importedPipelineCreateInfo;
@@ -984,12 +1021,14 @@ bool RendererBackend::createPipePipeline() {
         // skips voxel/terrain-tess/magica/grass pipelines it never uses.
         if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
         if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
+        if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr); }
         if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
         if (m_skyCloudPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr); }
         if (m_importedWaterPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr); }
         if (m_importedWaterPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr); }
         m_pipePipeline = pipePipeline;
         m_importedStaticPipeline = importedStaticPipeline;
+        m_importedStaticPipelineBlended = importedStaticPipelineBlended;
         m_importedStaticPipelineRt = importedStaticPipelineRt;
         m_skyCloudPipeline = skyCloudPipeline;
         m_importedWaterPipeline = importedWaterPipeline;
@@ -1032,6 +1071,7 @@ bool RendererBackend::createPipePipeline() {
     }
     m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
+    m_importedStaticPipelineBlended = importedStaticPipelineBlended;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;

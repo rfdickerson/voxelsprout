@@ -1879,6 +1879,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                                 std::uint32_t firstIndex,
                                 std::uint32_t indexCount,
                                 bool terrainDraw,
+                                bool blendedDraw,
                                 std::uint32_t pageRangeIndex
                             ) {
         if (indexCount == 0) {
@@ -1886,7 +1887,11 @@ bool RendererBackend::uploadImportedSceneInternal(
         }
         if (!draws.empty()) {
             ImportedMeshDraw& previous = draws.back();
+            // Blendedness joins the merge key: an opaque run and a blended run
+            // are recorded through different pipelines, so they can never be
+            // folded into one vkCmdDrawIndexed even when their index ranges abut.
             if (lastMergedDrawWasTerrain == terrainDraw &&
+                previous.blended == blendedDraw &&
                 lastMergedPageRangeIndex == pageRangeIndex &&
                 previous.firstIndex + previous.indexCount == firstIndex) {
                 previous.indexCount += indexCount;
@@ -1896,6 +1901,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         ImportedMeshDraw draw{};
         draw.firstIndex = firstIndex;
         draw.indexCount = indexCount;
+        draw.blended = blendedDraw;
         const std::uint32_t rendererDrawIndex = static_cast<std::uint32_t>(draws.size());
         draws.push_back(draw);
         if (terrainDraw) {
@@ -1915,6 +1921,19 @@ bool RendererBackend::uploadImportedSceneInternal(
         lastMergedPageRangeIndex = pageRangeIndex;
     };
 
+    // Blendedness is a per-vertex flag, but it is uniform across a packed draw
+    // (a draw is one NIF shape's triangles), so the first vertex decides.
+    auto packedDrawIsBlended = [&](const odai::importer::ImportedScenePackedDraw& srcDraw) {
+        if (srcDraw.firstIndex >= uploadScene.packedIndices.size()) {
+            return false;
+        }
+        const std::uint32_t vertexIndex = uploadScene.packedIndices[srcDraw.firstIndex];
+        if (vertexIndex >= uploadScene.packedVertices.size()) {
+            return false;
+        }
+        return (uploadScene.packedVertices[vertexIndex].flags &
+                odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
+    };
     for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
         const odai::importer::ImportedScenePackedDraw& srcDraw = uploadScene.packedDraws[drawIndex];
         if (srcDraw.indexCount == 0) {
@@ -1924,6 +1943,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             srcDraw.firstIndex,
             srcDraw.indexCount,
             drawIndex < sourceTerrainDrawCount,
+            packedDrawIsBlended(srcDraw),
             sourceDrawPageRangeIndices[drawIndex]);
     }
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {

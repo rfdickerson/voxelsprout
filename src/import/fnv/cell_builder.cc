@@ -401,6 +401,25 @@ void appendTerrainCell(
 
 }  // namespace
 
+bool isEffectOnlyModelPath(std::string_view modelPath) {
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        if (c == '/') {
+            c = '\\';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    if (lowered.find("\\effects\\") != std::string::npos || lowered.rfind("effects\\", 0) == 0) {
+        return true;
+    }
+    // fx-prefixed basenames living outside effects\ (fxvultures, fxglow...).
+    const std::size_t lastSlash = lowered.find_last_of('\\');
+    const std::string baseName =
+        (lastSlash == std::string::npos) ? lowered : lowered.substr(lastSlash + 1u);
+    return baseName.rfind("fx", 0) == 0;
+}
+
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError) {
     outTables = FalloutWorldTables{};
@@ -424,6 +443,9 @@ bool buildFalloutWorldTables(
         }
         if (!entry.editorId.empty()) {
             outTables.staticEditorIds.emplace(entry.formId, entry.editorId);
+        }
+        if (!entry.recordType.empty()) {
+            outTables.staticRecordTypes.emplace(entry.formId, entry.recordType);
         }
     }
     for (const FalloutLandTextureRecord& entry : data.landTextures) {
@@ -588,6 +610,11 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 const std::string& staticModelPath = statIt->second;
                 std::vector<std::uint8_t> nifBytes;
+                if (isEffectOnlyModelPath(staticModelPath)) {
+                    ++m_stats.effectMeshesSkipped;
+                    m_failedStatics.insert(ref.baseFormId);
+                    continue;
+                }
                 std::string meshError;
                 if (!m_assets.resolveMesh(staticModelPath, nifBytes, meshError)) {
                     std::cerr << "warning: could not resolve mesh " << staticModelPath << "\n";
@@ -719,6 +746,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             ++m_stats.untexturedShapesGivenModelTexture;
                         }
                         part.alphaTest = shape.alphaTest;
+                        part.alphaBlend = shape.alphaBlend;
                         // A shape with no diffuse texture is not an error the
                         // resolver reports -- it silently shades from the
                         // per-model hashed colour, which reads as flat grey-brown

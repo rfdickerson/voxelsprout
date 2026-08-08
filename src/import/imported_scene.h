@@ -52,6 +52,10 @@ struct ImportedSceneMeshPart {
     std::uint32_t indexCount = 0;
     std::uint32_t textureIndex = 0;
     bool alphaTest = false;
+    // NiAlphaProperty's blend bit, distinct from the test bit above: alphaTest
+    // discards fragments in the opaque pass, alphaBlend moves the whole draw
+    // into the blended pass. See kImportedSceneMaterialFlagAlphaBlend.
+    bool alphaBlend = false;
 };
 
 struct ImportedSceneMesh {
@@ -178,6 +182,13 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagVertexColorTint = 1u <<
 // layers existed would have the shader reading layer slots that were never
 // written. Set only where the cooker actually filled them.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainLayers = 1u << 4;
+
+// Surface is alpha-BLENDED, not merely alpha-tested. Fallout marks glass, dust
+// sheets, god rays and vulture billboards this way (NiAlphaProperty bit 0); the
+// renderer pulls these draws out of the opaque pass and replays them afterwards
+// through a blend-enabled pipeline with depth writes off. Without it they show
+// up as solid pale slabs standing in the landscape.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaBlend = 1u << 5;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;

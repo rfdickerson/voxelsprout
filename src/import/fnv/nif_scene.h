@@ -46,6 +46,11 @@ struct NifShape {
     std::string diffuseTexturePath;
     // NiAlphaProperty declared alpha testing (flag 0x200) for this shape.
     bool alphaTest = false;
+    // NiAlphaProperty's blend bit. The imported static path draws opaque only,
+    // so a blended shape (glass, an additive effect billboard) rendered through
+    // it appears as a solid slab -- Goodsprings' window panes and dust effects
+    // were floating white rectangles until this was read.
+    bool alphaBlend = false;
 };
 
 struct NifModel {

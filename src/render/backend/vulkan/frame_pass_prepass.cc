@@ -171,6 +171,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     continue;
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                if (importedDraw.blended) {
+                    continue;  // no depth/normal contribution from blended surfaces
+                }
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,

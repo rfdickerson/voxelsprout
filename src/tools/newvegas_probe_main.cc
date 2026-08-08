@@ -32,6 +32,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -328,6 +329,7 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
                       << ", alphaTest=" << (shape.alphaTest ? "yes" : "no")
+                      << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
             if (!shape.uvs.empty()) {
                 // Two ranges, and the difference between them is the point: a
@@ -914,6 +916,37 @@ int probeFloaters(
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         return a.minClearance > b.minClearance;
     });
+
+    // Which base record types actually placed geometry here.
+    std::map<std::string, std::size_t> countByType;
+    for (const FalloutPlacedReference& ref : cell.references) {
+        const auto typeIt = tables.staticRecordTypes.find(ref.baseFormId);
+        if (typeIt != tables.staticRecordTypes.end()) {
+            ++countByType[typeIt->second];
+        }
+    }
+    std::cout << "  placements by base record type:";
+    for (const auto& [type, count] : countByType) {
+        std::cout << " " << type << "=" << count;
+    }
+    std::cout << "\n";
+    // Name what the non-STAT types actually place: a type count alone cannot
+    // say whether those records carry real geometry or invisible markers.
+    std::map<std::string, std::set<std::string>> modelsByType;
+    for (const FalloutPlacedReference& ref : cell.references) {
+        const auto typeIt = tables.staticRecordTypes.find(ref.baseFormId);
+        const auto modelIt = tables.staticModelPaths.find(ref.baseFormId);
+        if (typeIt == tables.staticRecordTypes.end() || typeIt->second == "STAT" ||
+            modelIt == tables.staticModelPaths.end()) {
+            continue;
+        }
+        modelsByType[typeIt->second].insert(modelIt->second);
+    }
+    for (const auto& [type, models] : modelsByType) {
+        for (const std::string& model : models) {
+            std::cout << "    " << type << "  " << model << "\n";
+        }
+    }
 
     std::cout << "cell (" << cellX << "," << cellZ << "): " << entries.size()
               << " placed statics, " << unknownBaseCount

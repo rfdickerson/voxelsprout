@@ -76,6 +76,12 @@ struct CellStreamerStats {
     float worstApplyMs = 0.0f;
     float lastApplyMs = 0.0f;
     std::size_t residentChunks = 0;
+    // Effect-only meshes (\effects\, fx*) dropped at build time. These are the
+    // dust sheets and glow cards Fallout scatters as ordinary statics.
+    std::uint64_t effectMeshesSkipped = 0;
+    // Draws carrying kImportedSceneMaterialFlagAlphaBlend, i.e. those replayed
+    // through the blended pipeline instead of the opaque one.
+    std::uint64_t blendedPartsLoaded = 0;
 };
 
 class CellStreamer {

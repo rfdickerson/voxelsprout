@@ -314,6 +314,7 @@ bool readBsShaderTextureSet(ByteCursor& cursor, TextureSetBlock& out) {
 // path, which is a discard in the fragment shader rather than sorted blending.
 struct AlphaPropertyBlock {
     bool alphaTest = false;
+    bool alphaBlend = false;
     bool valid = false;
 };
 
@@ -501,7 +502,13 @@ bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPr
     if (!cursor.read(flags)) {
         return false;
     }
+    // NiAlphaProperty flags: bit 0 enables alpha BLENDING, bit 9 enables alpha
+    // TESTING. Only the test bit was read, so a blended shape was
+    // indistinguishable from an opaque one -- and the imported static path
+    // cannot blend, so glass panes and effect billboards drew as solid slabs.
+    constexpr std::uint16_t kAlphaBlendBit = 0x0001u;
     constexpr std::uint16_t kAlphaTestBit = 0x0200u;
+    out.alphaBlend = (flags & kAlphaBlendBit) != 0u;
     out.alphaTest = (flags & kAlphaTestBit) != 0u;
     out.valid = true;
     return true;
@@ -1087,6 +1094,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
                 if (alphaProperties[propertyIndex].valid) {
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
+                    shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
                     continue;
                 }
                 if (!shape.diffuseTexturePath.empty()) {

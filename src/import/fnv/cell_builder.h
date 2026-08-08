@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -37,6 +38,9 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, std::string> staticModelPaths;
     // STAT formID -> editor ID, used only to name meshes readably.
     std::unordered_map<std::uint32_t, std::string> staticEditorIds;
+    // Base formID -> its record type (STAT, MSTT, ACTI, ...), for attributing
+    // geometry back to the kind of record that placed it.
+    std::unordered_map<std::uint32_t, std::string> staticRecordTypes;
     // LTEX formID -> diffuse texture path, already resolved through TXST.
     std::unordered_map<std::uint32_t, std::string> landTexturePaths;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
@@ -48,6 +52,16 @@ struct FalloutWorldTables {
 // decompressed. This is what makes it affordable at startup.
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError);
+
+// True for meshes that only make sense alpha-blended or additive: dust, glow
+// billboards, light beams, sand. The imported static path draws opaque, so
+// these render as solid pale sheets standing in the landscape.
+//
+// A path heuristic rather than a flag test because the flag is not reliable
+// here: NiAlphaProperty's blend bit catches FXDustWhirlWind01 but not
+// SandDust02, which signals its transparency some other way. Skipping is a
+// stopgap for whatever the blended pass does not pick up.
+bool isEffectOnlyModelPath(std::string_view modelPath);
 
 struct CellBuildStats {
     std::size_t placedInstances = 0;
@@ -67,6 +81,7 @@ struct CellBuildStats {
     std::size_t texturesDecoded = 0;
     std::size_t nifsParsed = 0;
     std::size_t extremeUvShapes = 0;
+    std::size_t effectMeshesSkipped = 0;
     bool textureBudgetExceeded = false;
 
     // Diagnostic name sets the cooker reports. Kept here rather than dropped in

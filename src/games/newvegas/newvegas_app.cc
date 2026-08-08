@@ -582,7 +582,12 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     double cursorX = 0.0;
     double cursorY = 0.0;
     glfwGetCursorPos(m_window, &cursorX, &cursorY);
-    if (m_mouseCaptured) {
+    // A screenshot run must not mouselook. The cursor sits wherever the desktop
+    // left it, so 700 warm-up frames of deltas rotate the camera by an
+    // arbitrary amount -- which silently defeats ODAI_FNV_YAW/PITCH and makes
+    // two captures of "the same view" incomparable. That cost a bogus A/B.
+    const bool suppressMouseLook = !m_screenshotPath.empty();
+    if (m_mouseCaptured && !suppressMouseLook) {
         if (m_hasCursorSample) {
             m_yawDegrees += static_cast<float>(cursorX - m_lastCursorX) * kMouseSensitivity;
             m_pitchDegrees -= static_cast<float>(cursorY - m_lastCursorY) * kMouseSensitivity;
@@ -950,7 +955,9 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
                              << " buildMs(last/worst)=" << stats.lastBuildMs
                              << "/" << stats.worstBuildMs
                              << " cache(hit/miss)=" << stats.cacheHits << "/" << stats.cacheMisses
-                             << " cacheLoadMs=" << stats.lastCacheLoadMs;
+                             << " cacheLoadMs=" << stats.lastCacheLoadMs
+                             << " fxSkipped=" << stats.effectMeshesSkipped
+                             << " blendedDraws=" << stats.blendedPartsLoaded;
     }
 }
 

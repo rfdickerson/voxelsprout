@@ -682,7 +682,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     firstPartIndex + static_cast<std::size_t>(part.indexCount),
                     mesh.indices.size());
                 const std::uint32_t partFlags =
-                    part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u;
+                    (part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u) |
+                    (part.alphaBlend ? kImportedSceneMaterialFlagAlphaBlend : 0u);
                 for (std::size_t indexOffset = firstPartIndex; indexOffset < lastPartIndex; ++indexOffset) {
                     const std::uint32_t index = mesh.indices[indexOffset];
                     if (index >= mesh.vertices.size()) {

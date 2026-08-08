@@ -95,6 +95,10 @@ constexpr int kLandQuadrantVertexCount = kLandQuadrantGridSize * kLandQuadrantGr
 
 struct FalloutStaticRecord {
     std::uint32_t formId = 0;
+    // The record type this came from: STAT, MSTT, ACTI, DOOR, ... Kept so a
+    // caller can tell which kinds of base record a cell's geometry came from,
+    // which is the only way to attribute a rendering artifact back to a type.
+    std::string recordType;
     std::string editorId;
     std::string modelPath;  // relative to Data\Meshes, backslashes as stored in the plugin
 };
