@@ -45,6 +45,47 @@ constexpr float kLandHeightScale = 8.0f;
 constexpr float kLandTextureTilesPerCell = 8.0f;
 constexpr float kExteriorCellSize = kLandPostSpacing * static_cast<float>(kLandGridSize - 1);  // 4096
 
+// Distant-landscape LOD layout, MEASURED from retail archives with
+// `odai_newvegas_probe --find`, not taken from documentation.
+//
+// It IS a four-tier pyramid, and the tiers do not all live in the same place:
+//
+//   level4   meshes\landscape\lod\<ws>\blocks\<ws>.level4.x<X>.y<Y>.nif
+//   level8   meshes\landscape\lod\<ws>\<ws>.level8.x<X>.y<Y>.nif
+//   level16  meshes\landscape\lod\<ws>\<ws>.level16.x<X>.y<Y>.nif
+//   level32  meshes\landscape\lod\<ws>\<ws>.level32.x<X>.y<Y>.nif
+//
+// Only level4 sits under a "blocks\" subdirectory; the coarser tiers sit
+// directly under the worldspace directory. Searching for them under "blocks\"
+// finds nothing and looks exactly like "the tier does not exist" -- which is
+// the mistake this comment exists to stop anyone repeating.
+//
+// The number in the name is the tile's width in CELLS, and the coordinate is
+// the grid coordinate of the tile's corner cell, stepping by that same number.
+// WastelandNV counts: level4 301 tiles, level8 256, level16 64, level32 16 --
+// coarser tiers cover 4x the area each, so their counts fall ~4x per step.
+// The grid is sparse: tiles exist only where there is something to draw.
+//
+// Each tile NIF is a BSMultiBoundNode wrapping a single BSSegmentedTriShape
+// (see nif_scene.cc -- that block type had to be added before any of these
+// parsed) whose UVs address a sub-rect of a shared per-worldspace atlas. Its
+// vertices are already in WORLD units, unlike static models.
+//
+// Texture paths inside these NIFs are rooted at the Data directory
+// ("Data\Textures\Landscape\LOD\..."), which normalizeTexturePath has to strip.
+constexpr int kLandLodTierCellCounts[4] = {4, 8, 16, 32};
+constexpr int kLandLodBlockCells = 4;  // the finest tier, the one under blocks\
+constexpr float kLandLodBlockSize = kExteriorCellSize * static_cast<float>(kLandLodBlockCells);
+
+// The block containing a cell, in the coordinates the LOD file names use.
+// Floors toward negative infinity: cell -1 belongs to block -4, not block 0.
+constexpr std::int32_t landLodBlockOrigin(std::int32_t cellCoord) {
+    const std::int32_t block = (cellCoord >= 0)
+        ? (cellCoord / kLandLodBlockCells)
+        : ((cellCoord - (kLandLodBlockCells - 1)) / kLandLodBlockCells);
+    return block * kLandLodBlockCells;
+}
+
 // One quadrant's alpha map is a 17x17 grid of posts: a cell's 33x33 posts split
 // into 2x2 quadrants that share their middle row and column, so 16 gaps + 1.
 // VTXT addresses these directly, and because the cooked terrain mesh keeps one
@@ -230,6 +271,63 @@ struct FalloutExtractFilter {
     // means "want every worldspace".
     std::function<bool(std::uint32_t worldspaceFormId)> wantWorldspace;
 };
+
+// Where one cell's records live in the plugin, so it can be materialized later
+// without re-reading the file.
+//
+// This is the streaming index. A full extractFalloutScene pass over
+// FalloutNV.esm materializes every cell's contents and costs ~750 MB of heap;
+// the Mojave has 16,397 exterior cells and no machine holds them all. At 48
+// bytes each this index is under 800 KB for the entire worldspace, and because
+// EsmReader memory-maps the plugin, going from an entry to that cell's actual
+// LAND/REFR/NAVM records is a pointer walk plus that one cell's decompression.
+struct FalloutCellIndexEntry {
+    std::uint32_t cellFormId = 0;
+    // EDID, when the cell has one. Interiors are named ("GSDocMitchellHouse");
+    // most exterior cells are not. This is what lets a caller ask for a place by
+    // name instead of by grid coordinate.
+    std::string editorId;
+    std::uint32_t worldspaceFormId = 0;  // 0 for interior cells
+    std::int32_t gridX = 0;
+    std::int32_t gridZ = 0;
+    bool hasGridCoords = false;
+    bool isInterior = false;
+    // Byte offset of the CELL record's own header.
+    std::uint64_t cellRecordOffset = 0;
+    // The cell-children GRUP that holds this cell's REFR/LAND/NAVM records.
+    // Zero size means the cell has no children group at all (no contents).
+    std::uint64_t childrenGroupOffset = 0;
+    std::uint32_t childrenGroupSize = 0;
+};
+
+struct FalloutCellIndex {
+    std::vector<FalloutCellIndexEntry> cells;
+    std::vector<FalloutWorldspaceRecord> worldspaces;
+    // Every placed reference's owning cell, by the reference's own formID --
+    // built from record headers alone, exactly as extractFalloutScene does.
+    // Doors need this to resolve an XTEL target to the cell it stands in.
+    std::unordered_map<std::uint32_t, std::size_t> cellIndexByReferenceFormId;
+};
+
+// One pass that records where every cell's records are without materializing
+// any of them. Reads record headers and group headers only: no LAND
+// decompression, no subrecord walking except for the CELL records themselves
+// (needed for EDID and the XCLC grid coordinates the streamer ranks by).
+bool buildFalloutCellIndex(
+    const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError);
+
+// Materializes exactly one cell from an already-open reader, using an entry
+// from buildFalloutCellIndex. The reader must be open on the same plugin the
+// index was built from -- offsets are file positions, and there is no check
+// that they belong to this file.
+//
+// outCell is fully replaced. Returns false only on a malformed walk; a cell
+// with no contents succeeds and yields an empty cell.
+bool extractFalloutCellAt(
+    EsmReader& reader,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError);
 
 // Runs a single forward pass over the plugin, extracting TES4/STAT/WRLD/CELL/
 // LAND/REFR records. Cell attribution for LAND/REFR records uses simple

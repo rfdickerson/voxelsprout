@@ -956,7 +956,18 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
         } else if (looksLikeUnhandledNodeType(typeName)) {
             ++outModel.unhandledNodeTypeCount;
-        } else if (typeName == "NiTriShape" || typeName == "NiTriStrips") {
+        } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
+                   typeName == "BSSegmentedTriShape") {
+            // BSSegmentedTriShape is NiTriShape with a segment array appended
+            // after the fields this reader consumes, so the same decode works
+            // and the trailing segments are simply not read.
+            //
+            // It is what every distant-LOD landscape block is built from:
+            // meshes\landscape\lod\<worldspace>\blocks\*.level4.x<X>.y<Y>.nif
+            // holds a BSMultiBoundNode wrapping one BSSegmentedTriShape and a
+            // plain NiTriShapeData. Without this branch those files parsed
+            // "successfully" and yielded zero shapes -- the silent-drop failure
+            // mode, not an error.
             AvObjectFields fields;
             if (readNiTriBasedGeom(blockCursor, header.userVersion2, fields)) {
                 nodeFields[i] = std::move(fields);

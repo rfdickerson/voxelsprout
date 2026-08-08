@@ -847,9 +847,23 @@ float4 main(FragmentInput input) : SV_Target0
             specular) *
         (interiorMode ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
+
+    // wrappedNdotL is ndotl*0.65 + 0.35: a true-cosine core plus a constant
+    // fill that keeps faces turned away from the sun from going black. That
+    // fill is a stand-in for indirect bounce, NOT direct sunlight -- so it is
+    // the part ambient occlusion should darken.
+    //
+    // Leaving it unoccluded is why AO read as too subtle outdoors: the Mojave
+    // at midday is dominated by the sun term, AO only ever multiplied `ambient`,
+    // and every crevice still received the full 0.35 fill. Occluding the fill
+    // (and not the cosine core) darkens contact regions without muddying
+    // surfaces that genuinely face the sun.
+    const float directCore = ndotl * 0.65;
+    const float directFill = max(wrappedNdotL - directCore, 0.0);
+    const float occludedWrap = directCore + (directFill * ambientOcclusion);
     const float3 direct =
         camera.sunColorShadow.xyz *
-        (sunIntensity * wrappedNdotL * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+        (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.62));
     const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
 
     if (usePbr)

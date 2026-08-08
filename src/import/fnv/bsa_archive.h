@@ -81,8 +81,27 @@ public:
     const BsaFileEntry* find(std::string_view virtualPath) const;
 
     // Reads and (if needed) inflates a file's bytes.
-    bool extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& outBytes) const;
+    //
+    // THREAD SAFE against other extract() calls on the same archive: it opens
+    // its own ifstream per call and touches no member state, which is what lets
+    // several worker threads pull assets out of one archive at once. The error
+    // goes through outError rather than lastError() precisely so this stays
+    // true -- a shared mutable error string would be a data race, and one that
+    // corrupts a std::string rather than failing visibly.
+    //
+    // open() is NOT thread safe and must complete before any extract() begins.
+    bool extract(
+        const BsaFileEntry& entry,
+        std::vector<std::uint8_t>& outBytes,
+        std::string& outError) const;
 
+    // Convenience overload for single-threaded callers; records the error in
+    // lastError(). Do not use from worker threads.
+    bool extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& outBytes) const {
+        return extract(entry, outBytes, m_lastError);
+    }
+
+    // Only meaningful for open() and the single-threaded extract() overload.
     const std::string& lastError() const { return m_lastError; }
 
 private:

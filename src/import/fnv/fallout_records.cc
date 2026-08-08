@@ -44,6 +44,30 @@ std::string subrecordString(const EsmSubrecordView& sub) {
     return std::string(reinterpret_cast<const char*>(sub.data), length);
 }
 
+// Base record types that place a model in the world and carry EDID + MODL in
+// the same shape as STAT.
+//
+// Handling only STAT dropped 20-37% of the references in a typical Goodsprings
+// cell -- measured with `odai_newvegas_probe --floaters`. The visible symptom is
+// not a missing object so much as a floating one: road segments rest on
+// embankment and fill pieces that are MSTT/ACTI, and with those gone the road
+// hangs in the air over the terrain.
+//
+// SCOL (static collection) is deliberately NOT here: it is a container of
+// transformed sub-statics with its own layout, not an EDID+MODL record, and
+// treating it like one would place its origin marker rather than its contents.
+bool isModelBearingBaseType(std::string_view type) {
+    return type == "STAT" || type == "MSTT" || type == "ACTI" || type == "DOOR" ||
+           type == "CONT" || type == "FURN" || type == "TREE" || type == "MISC" ||
+           type == "TERM" || type == "LIGH" || type == "BOOK" || type == "KEYM" ||
+           type == "ALCH" || type == "AMMO" || type == "WEAP" || type == "ARMO" ||
+           type == "NOTE" || type == "IMOD" || type == "CCRD" || type == "CHIP" ||
+           type == "CMNY";
+    // PWAT (placeable water) is deliberately excluded: it belongs to the water
+    // render path, and going through the opaque static path draws it as a solid
+    // pale slab lying across the scene.
+}
+
 void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     FalloutStaticRecord entry{};
     entry.formId = record.formId;
@@ -392,6 +416,161 @@ void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell
 
 }  // namespace
 
+bool buildFalloutCellIndex(
+    const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError) {
+    outIndex = FalloutCellIndex{};
+    EsmReader reader;
+    if (!reader.open(esmPath)) {
+        outError = reader.lastError();
+        return false;
+    }
+
+    // Group type 6 is a cell-children group; its label is the owning CELL's
+    // formID. That group is the unit this index addresses -- everything a cell
+    // owns (persistent, temporary and visible-distant children) is inside it.
+    constexpr std::int32_t kTopLevelGroup = 0;
+    constexpr std::int32_t kWorldChildrenGroup = 1;
+    constexpr std::int32_t kCellChildrenGroup = 6;
+
+    std::vector<std::uint32_t> worldspaceStack;
+    std::size_t currentCellIndex = 0;
+    bool hasCurrentCell = false;
+    // Cell index by formID, so a children group can be attributed to its cell
+    // without assuming the group immediately follows the record.
+    std::unordered_map<std::uint32_t, std::size_t> cellIndexByFormId;
+    // Scratch scene used only to reuse parseCellRecord/parseWorldspaceRecord;
+    // its cells are converted into index entries and then discarded.
+    FalloutSceneData scratch;
+
+    EsmReader::Visitor visitor{};
+    // onRecordHeader fires before onRecord for the same record, so this carries
+    // the CELL's file offset across to where the entry is built.
+    std::uint64_t pendingCellRecordOffset = 0;
+    visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+        if (header.type == "REFR" && hasCurrentCell) {
+            outIndex.cellIndexByReferenceFormId.emplace(header.formId, currentCellIndex);
+        }
+        if (header.type == "CELL") {
+            pendingCellRecordOffset = header.fileOffset;
+        }
+        // The whole point of the index: never materialize cell contents. Only
+        // CELL and WRLD records are parsed; LAND in particular stays compressed.
+        return header.type == "CELL" || header.type == "WRLD";
+    };
+    visitor.onGroupEnter = [&](const EsmGroupView& group) {
+        if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
+            if (group.rawLabel != "WRLD" && group.rawLabel != "CELL") {
+                return false;
+            }
+        }
+        if (group.groupType == kWorldChildrenGroup && group.rawLabel.size() == 4u) {
+            std::uint32_t formId = 0;
+            std::memcpy(&formId, group.rawLabel.data(), 4u);
+            worldspaceStack.push_back(formId);
+        }
+        if (group.groupType == kCellChildrenGroup && group.rawLabel.size() == 4u) {
+            std::uint32_t cellFormId = 0;
+            std::memcpy(&cellFormId, group.rawLabel.data(), 4u);
+            const auto found = cellIndexByFormId.find(cellFormId);
+            if (found != cellIndexByFormId.end()) {
+                FalloutCellIndexEntry& entry = outIndex.cells[found->second];
+                entry.childrenGroupOffset = group.fileOffset;
+                entry.childrenGroupSize = group.groupSize;
+            }
+            // Descend anyway: the REFR headers inside are what build
+            // cellIndexByReferenceFormId, and headers are cheap.
+            currentCellIndex = (found != cellIndexByFormId.end()) ? found->second : currentCellIndex;
+            hasCurrentCell = found != cellIndexByFormId.end();
+        }
+        return true;
+    };
+    visitor.onGroupExit = [&](const EsmGroupView& group) {
+        if (group.groupType != kWorldChildrenGroup || worldspaceStack.empty() ||
+            group.rawLabel.size() != 4u) {
+            return;
+        }
+        std::uint32_t formId = 0;
+        std::memcpy(&formId, group.rawLabel.data(), 4u);
+        if (worldspaceStack.back() == formId) {
+            worldspaceStack.pop_back();
+        }
+    };
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        const std::uint32_t currentWorldspace = worldspaceStack.empty() ? 0u : worldspaceStack.back();
+        if (record.type == "WRLD") {
+            parseWorldspaceRecord(record, scratch);
+            outIndex.worldspaces = scratch.worldspaces;
+            return;
+        }
+        if (record.type != "CELL") {
+            return;
+        }
+        scratch.cells.clear();
+        parseCellRecord(record, currentWorldspace, scratch);
+        if (scratch.cells.empty()) {
+            return;
+        }
+        const FalloutCellRecord& parsed = scratch.cells.back();
+        FalloutCellIndexEntry entry{};
+        entry.cellFormId = parsed.formId;
+        entry.editorId = parsed.editorId;
+        entry.worldspaceFormId = parsed.worldspaceFormId;
+        entry.gridX = parsed.gridX;
+        entry.gridZ = parsed.gridZ;
+        entry.hasGridCoords = parsed.hasGridCoords;
+        entry.isInterior = parsed.isInterior;
+        entry.cellRecordOffset = pendingCellRecordOffset;
+        outIndex.cells.push_back(entry);
+        cellIndexByFormId[parsed.formId] = outIndex.cells.size() - 1u;
+        currentCellIndex = outIndex.cells.size() - 1u;
+        hasCurrentCell = true;
+    };
+
+    if (!reader.walk(visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    return true;
+}
+
+bool extractFalloutCellAt(
+    EsmReader& reader,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError) {
+    outCell = FalloutCellRecord{};
+    outCell.formId = entry.cellFormId;
+    outCell.isInterior = entry.isInterior;
+    outCell.hasGridCoords = entry.hasGridCoords;
+    outCell.gridX = entry.gridX;
+    outCell.gridZ = entry.gridZ;
+    outCell.worldspaceFormId = entry.worldspaceFormId;
+
+    if (entry.childrenGroupSize == 0u) {
+        return true;  // a cell with no children group simply has no contents
+    }
+
+    EsmReader::Visitor visitor{};
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        if (record.type == "REFR") {
+            parseReferenceRecord(record, &outCell);
+        } else if (record.type == "LAND") {
+            parseLandRecord(record, &outCell);
+        } else if (record.type == "NAVM") {
+            parseNavMeshRecord(record, &outCell);
+        }
+    };
+
+    if (!reader.walkRange(
+            entry.childrenGroupOffset,
+            entry.childrenGroupOffset + entry.childrenGroupSize,
+            visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    return true;
+}
+
 bool extractFalloutScene(const std::filesystem::path& esmPath, FalloutSceneData& outScene, std::string& outError) {
     return extractFalloutScene(esmPath, FalloutExtractFilter{}, outScene, outError);
 }
@@ -456,8 +635,9 @@ bool extractFalloutScene(
         // Unconditional rather than caller-controlled: parsing them would
         // produce nothing either way.
         if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
-            if (group.rawLabel != "STAT" && group.rawLabel != "WRLD" && group.rawLabel != "CELL" &&
-                group.rawLabel != "LTEX" && group.rawLabel != "TXST") {
+            if (!isModelBearingBaseType(group.rawLabel) && group.rawLabel != "WRLD" &&
+                group.rawLabel != "CELL" && group.rawLabel != "LTEX" &&
+                group.rawLabel != "TXST") {
                 return false;
             }
         }
@@ -489,7 +669,7 @@ bool extractFalloutScene(
     };
     visitor.onRecord = [&](const EsmRecordView& record) {
         const std::uint32_t currentWorldspace = worldspaceStack.empty() ? 0u : worldspaceStack.back();
-        if (record.type == "STAT") {
+        if (isModelBearingBaseType(record.type)) {
             parseStatRecord(record, outScene);
         } else if (record.type == "LTEX") {
             parseLandTextureRecord(record, outScene);

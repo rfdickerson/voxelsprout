@@ -6,6 +6,8 @@
 #include "import/imported_scene.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
+#include "render/bindless_slot_table.h"
+#include "render/gpu_arena_allocator.h"
 #include "render/frame_graph.h"
 #include "render/backend/vulkan/pipeline_manager.h"
 #include "render/backend/vulkan/ui_renderer.h"
@@ -114,6 +116,21 @@ public:
 
         float ssaoRadius = 24.0f;
         float ssaoIntensity = 0.85f;
+        // Multi-scale AO: the fine pass marches at ssaoRadius * this fraction,
+        // and the two are combined with min() so whichever scale sees more
+        // occlusion wins.
+        //
+        // One radius is always a compromise -- large enough for occlusion under
+        // an overhang is far too large for the contact darkening where an object
+        // meets the ground, and the march has a fixed step count either way, so
+        // widening it just samples the same steps further apart. Two scales get
+        // both. Zero (or >= 1) disables the second march entirely, which is a
+        // real cost saving, not just a no-op.
+        //
+        // Defaults to OFF so every other game keeps the look and the cost it
+        // had; multi-scale is opted into per app via
+        // Renderer::setAmbientOcclusionFineScale.
+        float ssaoFineRadiusScale = 0.0f;
         // AO bias, one per estimator, because the three do not share units and a
         // single value cannot be correct for more than one of them:
         //
@@ -315,6 +332,19 @@ public:
     bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
+
+    // Streaming API: add `scene` as one more resident chunk without disturbing
+    // the chunks already loaded, and evict a chunk by the index add returned.
+    // Neither waits for the device to go idle.
+    //
+    // Returns kInvalidImportedChunkIndex on failure.
+    static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
+    std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
+    void removeImportedSceneChunkAt(std::size_t chunkIndex);
+    // Number of chunk slots, live or evicted. Indices remain valid across
+    // evictions, so this only grows within a scene.
+    [[nodiscard]] std::size_t importedSceneChunkCount() const { return m_importedSceneChunks.size(); }
+    [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
     // GPU skeletal animation (Dragon Age: Origins touchstone, see
     // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once per
     // instance slot, device-local; posed per-frame via setSkinnedActorPose
@@ -388,6 +418,9 @@ public:
     // carry their own scale-free defaults and are deliberately not settable here:
     // passing a world-unit distance to a radian-valued clamp is the failure mode
     // this signature used to invite.
+    void setAmbientOcclusionFineScale(float fineRadiusScale) {
+        m_shadowDebugSettings.ssaoFineRadiusScale = std::clamp(fineRadiusScale, 0.0f, 1.0f);
+    }
     void setAmbientOcclusionTuning(float radius, float bias, float intensity) {
         m_shadowDebugSettings.ssaoRadius = radius;
         m_shadowDebugSettings.ssaoBias = bias;
@@ -552,10 +585,78 @@ private:
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
+    // appendChunk=false replaces everything (the original whole-scene load);
+    // true keeps every resident chunk and adds one more, which is the path
+    // streaming uses.
     bool uploadImportedSceneInternal(
         const odai::importer::ImportedScene& scene,
-        const odai::importer::GpuSceneAsset* gpuScene
+        const odai::importer::GpuSceneAsset* gpuScene,
+        bool appendChunk = false
     );
+
+    // Lazily creates the shared sampler every imported texture is sampled
+    // through. Safe to call repeatedly; false only on creation failure.
+    bool ensureImportedTextureSampler();
+
+    // Grows the geometry arenas to hold at least `vertexCount` more vertices and
+    // `indexCount` more indices, preserving everything already in them.
+    //
+    // Growth recreates the buffers at the larger size and copies the old
+    // contents across at the same offsets, so every live chunk's firstVertex /
+    // firstIndex stays valid. Returns false if allocation or the copy fails, in
+    // which case the existing arenas are left untouched.
+    bool ensureImportedArenaCapacity(std::uint64_t vertexCount, std::uint64_t indexCount);
+
+    // Copies `byteSize` bytes into `destination` at `destinationByteOffset` via
+    // a staging buffer, submitted on the graphics queue. Used for both the
+    // initial arena fill and per-chunk streamed uploads.
+    bool uploadIntoBufferRange(
+        BufferHandle destination,
+        VkDeviceSize destinationByteOffset,
+        const void* sourceData,
+        VkDeviceSize byteSize,
+        const char* debugLabel);
+
+    // Device-to-device copy of the first `byteSize` bytes, used when an arena
+    // grows and its contents must move to the larger buffer.
+    bool copyBufferRange(
+        BufferHandle source, BufferHandle destination, VkDeviceSize byteSize, const char* debugLabel);
+
+    // Rebuilds m_importedMeshDraws / m_importedPageDrawRanges from the live
+    // chunks, renumbering each page range's firstDraw to its position in the
+    // rebuilt flat vector. Terrain draws are kept ahead of static draws within
+    // each chunk, which is the ordering the visibility pass and the
+    // terrain/static draw split both rely on.
+    void rebuildImportedDrawTables();
+
+    // Evicts one resident chunk: returns its arena ranges, drops one reference
+    // on each texture it acquired, and rebuilds the flat draw tables. Nothing
+    // waits on the device -- the geometry is simply no longer referenced by any
+    // draw, and images retire on the render timeline.
+    //
+    // The chunk's slot in m_importedSceneChunks is left in place but marked
+    // dead, so surviving chunks keep their indices.
+    void removeImportedSceneChunk(std::size_t chunkIndex);
+
+    // Returns the bindless slot for `texture`, uploading it only if `key` is not
+    // already resident. Bumps the reference count either way, so every acquire
+    // must be paired with a releaseImportedTexture(slot).
+    //
+    // Copy commands are recorded into `commandBuffer` and the staging buffer is
+    // appended to `stagingBuffers` -- the caller owns submitting that command
+    // buffer and destroying the staging buffers once it retires. Returns
+    // kInvalidImportedTextureSlot if the texture is unusable or capacity is
+    // exhausted. An empty `key` disables deduplication for that texture.
+    std::uint32_t acquireImportedTexture(
+        const std::string& key,
+        const odai::importer::ImportedSceneTexture& texture,
+        VkCommandBuffer commandBuffer,
+        std::vector<BufferHandle>& stagingBuffers);
+
+    // Drops one reference. On the last one the image is scheduled for deferred
+    // destruction and the slot returns to the free list. Ignores
+    // kInvalidImportedTextureSlot so callers can release unconditionally.
+    void releaseImportedTexture(std::uint32_t slot);
     void destroyImGuiResources();
     void buildFrameStatsUi();
     void buildDofDebugUi();
@@ -705,6 +806,12 @@ private:
     void insertDebugLabel(VkCommandBuffer commandBuffer, const char* name, float r, float g, float b, float a = 1.0f) const;
     bool readGpuTimestampResults(uint32_t frameIndex);
     void scheduleBufferRelease(BufferHandle handle, uint64_t timelineValue);
+    // Takes raw handles rather than an ImportedTextureResource& because that
+    // struct is declared further down the class body, and a parameter type in a
+    // member declaration must already be complete.
+    void scheduleImageRelease(
+        VkImage image, VmaAllocation allocation, VkImageView imageView, uint64_t timelineValue);
+    void destroyImageResourceNow(VkImage image, VmaAllocation allocation, VkImageView imageView);
     void collectCompletedBufferReleases();
     void refreshShadowStats();
     bool validateReleaseRuntimeAssets();
@@ -735,8 +842,32 @@ private:
     void loadDescriptorBufferFunctions();
     [[nodiscard]] bool rayTracingRuntimeReady() const;
     [[nodiscard]] const char* rayTracingReleaseStatusName() const;
+    // Pushed to the AO compute pass. Defined once here because it was defined
+    // twice -- one copy sizing the pipeline layout's push range, another
+    // pushing the data -- and a field added to one but not the other is a
+    // silent mismatch between what the layout declares and what is written.
+    struct SsaoComputePushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float fineRadiusScale = 0.0f;
+        float pad = 0.0f;
+    };
+
     struct DeferredBufferRelease {
         BufferHandle handle = kInvalidBufferHandle;
+        uint64_t timelineValue = 0;
+    };
+
+    // Images freed while frames may still be sampling them. Streaming evicts
+    // textures mid-session, so the old clearGpuScene() approach of one big
+    // vkDeviceWaitIdle() before destroying every image is not an option: it
+    // would stall the whole pipeline every time a cell unloads. Same contract
+    // as DeferredBufferRelease -- destroyed once the render timeline passes
+    // the value recorded at release time.
+    struct DeferredImageRelease {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkImageView imageView = VK_NULL_HANDLE;
         uint64_t timelineValue = 0;
     };
 
@@ -859,6 +990,16 @@ private:
         BufferHandle indexBufferHandle = kInvalidBufferHandle;
         std::uint32_t firstIndex = 0;
         std::uint32_t indexCount = 0;
+        // Added to every index before the vertex buffer is read, so a chunk's
+        // indices can stay chunk-local while its vertices live at an arbitrary
+        // offset in the shared geometry arena.
+        //
+        // Counted in VERTICES, not bytes -- which is exactly why the arena
+        // suballocates in vertex units. The shadow pass streams 28-byte
+        // ImportedShadowVertex where the main pass streams 72-byte
+        // ImportedMeshVertex, so a byte offset would have to differ between the
+        // two passes for the same draw; a vertex index is valid for both.
+        std::int32_t vertexOffset = 0;
     };
 
     struct ImportedScenePageDrawRange {
@@ -867,6 +1008,33 @@ private:
         std::uint32_t terrainDrawCount = 0;
         float boundsMin[3] = {};
         float boundsMax[3] = {};
+    };
+
+    // One independently added and removed unit of imported geometry -- a
+    // streamed exterior cell, or (for the non-streaming callers) an entire
+    // scene added as a single chunk.
+    //
+    // The chunk owns its arena ranges and its own draws/page ranges. The flat
+    // m_importedMeshDraws / m_importedPageDrawRanges the visibility pass reads
+    // are a cache derived from every live chunk, rebuilt by
+    // rebuildImportedDrawTables() whenever a chunk is added or removed --
+    // rebuilding a few thousand 24-byte draws is microseconds and happens only
+    // on mutation, whereas erasing in place would renumber every page range
+    // after the hole and silently repoint draws at the wrong geometry.
+    struct ImportedSceneChunk {
+        // Arena ranges, in vertices and indices rather than bytes. See
+        // ImportedMeshDraw::vertexOffset for why vertex units.
+        std::uint64_t firstVertex = 0;
+        std::uint64_t vertexCount = 0;
+        std::uint64_t firstIndex = 0;
+        std::uint64_t indexCount = 0;
+        std::vector<ImportedMeshDraw> draws;
+        std::vector<ImportedScenePageDrawRange> pageRanges;
+        // Bindless slots this chunk acquired, to be released when it unloads.
+        // Slots shared with a still-resident chunk survive on their refcount.
+        std::vector<std::uint32_t> textureSlots;
+        std::uint32_t terrainDrawCount = 0;
+        bool alive = false;
     };
 
     struct ImportedGiTriangle {
@@ -883,6 +1051,10 @@ private:
         float intensity = 1.0f;
     };
 
+    // The GPU-side half of a bindless texture slot. Reference counts and key
+    // lookup live in m_importedTextureSlotTable (BindlessSlotTable), which is
+    // Vulkan-free and unit tested; this struct is only the handles that table's
+    // decisions apply to. Entry i here corresponds to slot index i there.
     struct ImportedTextureResource {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
@@ -1465,12 +1637,18 @@ private:
     BufferHandle m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
+    std::vector<DeferredImageRelease> m_deferredImageReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<ChunkResidentKey> m_chunkResidentKeys;
     std::vector<odai::world::ChunkLodMeshes> m_chunkLodMeshCache;
     std::vector<MagicaMeshDraw> m_magicaMeshDraws;
+    // Derived caches, rebuilt from m_importedSceneChunks on every add/remove.
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
+    std::vector<ImportedSceneChunk> m_importedSceneChunks;
+    // Suballocators over the shared geometry buffers, in vertex and index units.
+    GpuArenaAllocator m_importedVertexArena;
+    GpuArenaAllocator m_importedIndexArena;
     std::vector<ImportedMeshDraw> m_visibleImportedMeshDraws;
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
     std::vector<std::uint32_t> m_importedTextureSlots;
@@ -1508,7 +1686,13 @@ private:
     uint32_t m_importedStaticDrawCount = 0;
     uint32_t m_importedWaterIndexCount = 0;
     uint32_t m_skyCloudIndexCount = 0;
+    // Slot-indexed and never compacted: entry i is bindless descriptor
+    // kBindlessTextureStaticCount + i for the whole session. Evicted entries are
+    // zeroed rather than erased, because erasing would renumber every slot after
+    // it and silently repoint live draws at the wrong texture. The descriptor
+    // writer already skips entries with a null image view, so holes cost nothing.
     std::vector<ImportedTextureResource> m_importedTextureResources;
+    BindlessSlotTable m_importedTextureSlotTable;
     VkSampler m_importedTextureSampler = VK_NULL_HANDLE;
     ImportedTextureResource m_fogMapTextureResource{};
     VkSampler m_fogMapSampler = VK_NULL_HANDLE;

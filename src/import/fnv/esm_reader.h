@@ -58,6 +58,13 @@ struct EsmRecordView {
 struct EsmGroupView {
     std::string rawLabel;
     std::int32_t groupType = 0;
+    // Byte offset of this GRUP's own 24-byte header, and its declared size
+    // (which includes that header). Together they bound the group exactly, which
+    // is what lets a caller record a cell's children group during one full pass
+    // and later re-walk just that range with walkRange() -- the basis of
+    // streaming a single cell without re-reading the plugin.
+    std::uint64_t fileOffset = 0;
+    std::uint32_t groupSize = 0;
 };
 
 // The cheap half of a record: everything readable from its 24-byte header,
@@ -68,6 +75,8 @@ struct EsmRecordHeaderView {
     std::string_view type;
     std::uint32_t formId = 0;
     std::uint32_t flags = 0;
+    // Byte offset of this record's own 24-byte header.
+    std::uint64_t fileOffset = 0;
 };
 
 // Move-only: an open reader owns a memory mapping of the plugin file.
@@ -109,6 +118,13 @@ public:
 
     // Depth-first walk of the whole file.
     bool walk(const Visitor& visitor);
+
+    // Depth-first walk of one byte range, which must begin exactly on a GRUP or
+    // record header and end on a boundary. Used to revisit a single cell's
+    // children group recorded by an earlier full pass; because the plugin is
+    // memory-mapped this costs a pointer walk plus whatever decompression that
+    // cell's own records need, not a re-read of the file.
+    bool walkRange(std::uint64_t beginOffset, std::uint64_t endOffset, const Visitor& visitor);
 
     // Compressed records whose deflate stream produced every declared byte but
     // whose trailing checksum did not verify. These are accepted rather than

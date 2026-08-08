@@ -11,6 +11,9 @@
 
 #include <zlib.h>
 
+#include "core/job_system.h"
+#include "import/fnv/asset_source.h"
+#include "import/fnv/async_asset_loader.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/fallout_records.h"
@@ -142,7 +145,10 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     header.fileCount = 2u;
     header.totalFolderNameLength = static_cast<std::uint32_t>(folderA.size() + folderB.size() + 2u);
     header.totalFileNameLength = totalFileNameLength;
-    header.fileFlags = 0u;
+    // Declare meshes + textures, as every retail archive does. Callers use
+    // these to skip indexing archives they do not care about.
+    header.fileFlags =
+        odai::importer::fnv::kBsaContentMeshes | odai::importer::fnv::kBsaContentTextures;
 
     // Layout: header, 2 folder records, folderA block (name + 1 file record),
     // folderB block (name + 1 file record), file name block, file data.
@@ -482,6 +488,8 @@ std::vector<std::uint8_t> buildVclrPayload() {
     }
     return out;
 }
+
+void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmPath);
 
 void testFalloutRecordExtraction() {
     namespace fs = std::filesystem;
@@ -881,6 +889,9 @@ void testFalloutRecordExtraction() {
                    "VNML normal decode produces a normalized up-facing normal for straight-up input");
     }
 
+    // Same fixture, checked through the streaming index rather than a full pass.
+    testFalloutCellIndexMatchesFullExtraction(esmPath);
+
     fs::remove(esmPath);
 }
 
@@ -892,6 +903,103 @@ void appendSizedString8(std::vector<std::uint8_t>& buffer, const std::string& te
 void appendSizedString32(std::vector<std::uint8_t>& buffer, const std::string& text) {
     appendPod(buffer, static_cast<std::uint32_t>(text.size()));
     buffer.insert(buffer.end(), text.begin(), text.end());
+}
+
+// The streaming index must agree with the full extractor exactly. It is checked
+// here against the same synthetic plugin testFalloutRecordExtraction builds, so
+// a divergence shows up as a test failure rather than as geometry quietly
+// appearing in the wrong cell at runtime.
+void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmPath) {
+    using namespace odai::importer::fnv;
+
+    std::string error;
+    FalloutCellIndex index;
+    expectTrue(
+        buildFalloutCellIndex(esmPath, index, error),
+        ("cell index builds: " + error).c_str());
+
+    FalloutSceneData full;
+    expectTrue(
+        extractFalloutScene(esmPath, full, error),
+        ("reference extraction succeeds: " + error).c_str());
+
+    expectTrue(
+        index.cells.size() == full.cells.size(),
+        "cell index finds the same number of cells as a full pass");
+    expectTrue(
+        index.worldspaces.size() == full.worldspaces.size(),
+        "cell index finds the same worldspaces as a full pass");
+    // The reference map is what door teleports resolve through, so it has to be
+    // built identically by the header-only pass.
+    expectTrue(
+        index.cellIndexByReferenceFormId.size() == full.cellIndexByReferenceFormId.size(),
+        "cell index maps the same references as a full pass");
+
+    EsmReader reader;
+    expectTrue(reader.open(esmPath), "reader opens the fixture for per-cell extraction");
+
+    std::size_t cellsWithContents = 0;
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        const FalloutCellRecord* expected = nullptr;
+        for (const FalloutCellRecord& cell : full.cells) {
+            if (cell.formId == entry.cellFormId) {
+                expected = &cell;
+                break;
+            }
+        }
+        expectTrue(expected != nullptr, "every indexed cell exists in the full extraction");
+        if (expected == nullptr) {
+            continue;
+        }
+        expectTrue(
+            entry.isInterior == expected->isInterior &&
+                entry.hasGridCoords == expected->hasGridCoords &&
+                entry.gridX == expected->gridX && entry.gridZ == expected->gridZ &&
+                entry.worldspaceFormId == expected->worldspaceFormId,
+            "indexed cell metadata matches the full extraction");
+
+        FalloutCellRecord streamed;
+        expectTrue(
+            extractFalloutCellAt(reader, entry, streamed, error),
+            ("extractFalloutCellAt succeeds: " + error).c_str());
+
+        expectTrue(
+            streamed.references.size() == expected->references.size(),
+            "streamed cell has the same reference count as the full extraction");
+        expectTrue(
+            streamed.navMeshes.size() == expected->navMeshes.size(),
+            "streamed cell has the same navmesh count as the full extraction");
+        expectTrue(
+            (streamed.land != nullptr) == (expected->land != nullptr),
+            "streamed cell agrees on whether the cell has LAND");
+
+        if (streamed.land != nullptr && expected->land != nullptr) {
+            expectTrue(
+                std::memcmp(
+                    streamed.land->heights, expected->land->heights,
+                    sizeof(streamed.land->heights)) == 0,
+                "streamed LAND heights are byte-identical to the full extraction");
+            expectTrue(
+                streamed.land->textureLayers.size() == expected->land->textureLayers.size(),
+                "streamed LAND carries the same ATXT/VTXT layers");
+        }
+        for (std::size_t i = 0;
+             i < std::min(streamed.references.size(), expected->references.size()); ++i) {
+            expectTrue(
+                streamed.references[i].formId == expected->references[i].formId &&
+                    streamed.references[i].baseFormId == expected->references[i].baseFormId &&
+                    std::memcmp(
+                        streamed.references[i].position, expected->references[i].position,
+                        sizeof(streamed.references[i].position)) == 0,
+                "streamed reference matches the full extraction");
+        }
+        if (entry.childrenGroupSize > 0u) {
+            ++cellsWithContents;
+        }
+    }
+    // Guard against the whole comparison passing vacuously because no cell had
+    // a children group to walk.
+    expectTrue(cellsWithContents >= 2u, "the fixture exercises at least two cells with contents");
 }
 
 // Builds a synthetic NiNode/NiTriShape/NiTriShapeData block's AvObject prefix
@@ -1198,6 +1306,192 @@ void testBsaArchiveReadsFoldersAndFiles(bool embedFileNames) {
     fs::remove(archivePath);
 }
 
+// The background asset pipeline. Two claims are made in comments elsewhere and
+// both are load-bearing for streaming, so both are proved here rather than
+// asserted: that BsaArchive::extract() is safe to call concurrently on one
+// archive, and that the loader never starts two loads for the same asset.
+void testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const std::string uncompressedContent = "NIF-DATA-PLACEHOLDER";
+    const std::string compressedContent(4096, 'T');
+    const std::vector<std::uint8_t> archiveBytes =
+        buildSyntheticBsa(uncompressedContent, compressedContent, /*embedFileNames=*/false);
+
+    const fs::path dataDir = fs::temp_directory_path() / "odai_fnv_asset_source_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDir, cleanupError);
+    fs::create_directories(dataDir, cleanupError);
+    {
+        std::ofstream out(dataDir / "Test.bsa", std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(archiveBytes.data()),
+            static_cast<std::streamsize>(archiveBytes.size()));
+    }
+
+    FalloutAssetSource source;
+    expectTrue(source.open(dataDir), "asset source opens the data directory");
+    expectTrue(source.archiveCount() == 1u, "asset source indexes the synthetic archive");
+
+    std::string error;
+    std::vector<std::uint8_t> meshBytes;
+    expectTrue(
+        source.resolveMesh("x\\ex_wall_01.nif", meshBytes, error),
+        ("asset source resolves a mesh from the archive: " + error).c_str());
+    expectTrue(
+        std::string(meshBytes.begin(), meshBytes.end()) == uncompressedContent,
+        "resolved mesh bytes match the archive content");
+
+    std::vector<std::uint8_t> textureBytes;
+    expectTrue(
+        source.resolveTexture("x\\tx_wall_01.dds", textureBytes, error),
+        ("asset source resolves and inflates a texture: " + error).c_str());
+    expectTrue(
+        std::string(textureBytes.begin(), textureBytes.end()) == compressedContent,
+        "resolved texture bytes match the original content");
+
+    // A path that is not in the archive must fail cleanly with an error, not
+    // return stale bytes from the previous call.
+    std::vector<std::uint8_t> missingBytes{1, 2, 3};
+    expectTrue(
+        !source.resolveMesh("x\\does_not_exist.nif", missingBytes, error),
+        "resolving a missing mesh fails");
+    expectTrue(!error.empty(), "a failed resolve reports why");
+
+    // Concurrency: hammer one archive from every worker at once. If extract()
+    // were not thread safe this is where it would corrupt bytes or crash --
+    // the compressed entry in particular runs a zlib inflate per call.
+    {
+        odai::core::JobSystem jobs(8);
+        std::atomic<int> mismatches{0};
+        std::atomic<int> completed{0};
+        for (int i = 0; i < 200; ++i) {
+            const bool wantTexture = (i % 2) == 0;
+            jobs.enqueue([&source, &mismatches, &completed, wantTexture,
+                          &uncompressedContent, &compressedContent]() {
+                std::vector<std::uint8_t> bytes;
+                std::string localError;
+                const bool ok = wantTexture
+                    ? source.resolveTexture("x\\tx_wall_01.dds", bytes, localError)
+                    : source.resolveMesh("x\\ex_wall_01.nif", bytes, localError);
+                const std::string& expected = wantTexture ? compressedContent : uncompressedContent;
+                if (!ok || std::string(bytes.begin(), bytes.end()) != expected) {
+                    ++mismatches;
+                }
+                ++completed;
+            });
+        }
+        jobs.waitIdle();
+        expectTrue(completed.load() == 200, "every concurrent resolve ran");
+        expectTrue(
+            mismatches.load() == 0,
+            "200 concurrent resolves from one archive all produced correct bytes");
+    }
+
+    // Deduplication: many requests for one asset must start exactly one load.
+    {
+        odai::core::JobSystem jobs(4);
+        AsyncAssetLoader loader(source, jobs);
+
+        int startedByReturn = 0;
+        for (int i = 0; i < 50; ++i) {
+            if (loader.request(AssetKind::Mesh, "x\\ex_wall_01.nif", static_cast<std::uint64_t>(i))) {
+                ++startedByReturn;
+            }
+        }
+        loader.waitIdle();
+
+        const AsyncAssetLoaderStats stats = loader.stats();
+        expectTrue(
+            stats.startedLoads == 1u,
+            "50 requests for one mesh start exactly one background load");
+        expectTrue(
+            stats.deduplicatedRequests == 49u,
+            "the other 49 requests are folded into the in-flight load");
+        expectTrue(startedByReturn == 1, "request() reports which call actually started the load");
+
+        std::vector<LoadedAsset> drained;
+        loader.drainCompleted(drained);
+        expectTrue(drained.size() == 1u, "exactly one result is delivered for the deduplicated load");
+        expectTrue(
+            drained.size() == 1u && drained[0].succeeded &&
+                std::string(drained[0].bytes.begin(), drained[0].bytes.end()) == uncompressedContent,
+            "the deduplicated load delivers the right bytes");
+        // Case and separator differences must not defeat dedup: the ESM, the
+        // NIFs and the BSA index all disagree about them for the same file.
+        expectTrue(
+            drained.size() == 1u && drained[0].key == "x\\ex_wall_01.nif",
+            "the delivered key is the normalized path");
+    }
+
+    // Mixed-case and forward-slash spellings of one path are the same asset.
+    {
+        odai::core::JobSystem jobs(4);
+        AsyncAssetLoader loader(source, jobs);
+        loader.request(AssetKind::Mesh, "X\\EX_WALL_01.NIF");
+        loader.request(AssetKind::Mesh, "x/ex_wall_01.nif");
+        loader.request(AssetKind::Mesh, "x\\ex_wall_01.nif");
+        loader.waitIdle();
+        expectTrue(
+            loader.stats().startedLoads == 1u,
+            "case and separator variants of one path deduplicate to a single load");
+    }
+
+    // Generation: results requested before the world moved on are discarded.
+    {
+        odai::core::JobSystem jobs(4);
+        AsyncAssetLoader loader(source, jobs);
+        loader.request(AssetKind::Texture, "x\\tx_wall_01.dds");
+        loader.waitIdle();
+        loader.bumpGeneration();
+
+        std::vector<LoadedAsset> drained;
+        loader.drainCompleted(drained);
+        expectTrue(drained.empty(), "results from an abandoned generation are not delivered");
+        expectTrue(
+            loader.stats().discardedResults == 1u,
+            "discarded results are counted as wasted work rather than hidden");
+    }
+
+    // A failed load still completes and reports, rather than vanishing.
+    {
+        odai::core::JobSystem jobs(2);
+        AsyncAssetLoader loader(source, jobs);
+        loader.request(AssetKind::Mesh, "x\\nope.nif");
+        loader.waitIdle();
+
+        std::vector<LoadedAsset> drained;
+        loader.drainCompleted(drained);
+        expectTrue(drained.size() == 1u, "a failed load is still delivered");
+        expectTrue(
+            drained.size() == 1u && !drained[0].succeeded && !drained[0].error.empty(),
+            "a failed load reports failure and why");
+        expectTrue(loader.stats().failedLoads == 1u, "failed loads are counted");
+    }
+
+    fs::remove_all(dataDir, cleanupError);
+}
+
+// The LOD block origin must floor toward negative infinity, not truncate:
+// truncation makes the blocks straddling zero twice as wide as every other and
+// silently maps cells to the wrong distant tile.
+void testLandLodBlockOrigin() {
+    using odai::importer::fnv::landLodBlockOrigin;
+
+    expectTrue(landLodBlockOrigin(0) == 0, "cell 0 is in block 0");
+    expectTrue(landLodBlockOrigin(3) == 0, "cell 3 is in block 0");
+    expectTrue(landLodBlockOrigin(4) == 4, "cell 4 starts block 4");
+    expectTrue(landLodBlockOrigin(7) == 4, "cell 7 is in block 4");
+    expectTrue(landLodBlockOrigin(-1) == -4, "cell -1 is in block -4, not block 0");
+    expectTrue(landLodBlockOrigin(-4) == -4, "cell -4 starts block -4");
+    expectTrue(landLodBlockOrigin(-5) == -8, "cell -5 is in block -8");
+    expectTrue(landLodBlockOrigin(-8) == -8, "cell -8 starts block -8");
+    // Against a real measured extent: WastelandNV blocks span x -32..40 step 4.
+    expectTrue(landLodBlockOrigin(-32) == -32, "the lowest measured WastelandNV block maps to itself");
+    expectTrue(landLodBlockOrigin(43) == 40, "cell 43 falls in the highest measured block");
+}
+
 }  // namespace
 
 int main() {
@@ -1208,6 +1502,8 @@ int main() {
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
     testNifParserExtractsTransformedGeometry();
+    testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
+    testLandLodBlockOrigin();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

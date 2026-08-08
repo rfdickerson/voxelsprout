@@ -1902,6 +1902,26 @@ void RendererBackend::renderFrame(
         constexpr float kImportedShadowClipMargin = 0.08f;
         m_visibleImportedTerrainDrawCount =
             buildVisibleImportedDraws(mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
+        if (std::getenv("ODAI_DEBUG_IMPORTED_VIS") != nullptr) {
+            static int s_visFrame = 0;
+            ++s_visFrame;
+            if (s_visFrame % 240 == 0) {
+                VOX_LOGI("render") << "imported visibility: totalDraws=" << m_importedMeshDraws.size()
+                                   << " pages=" << m_importedPageDrawRanges.size()
+                                   << " visibleDraws=" << m_visibleImportedMeshDraws.size()
+                                   << " terrainDrawCount=" << m_importedTerrainDrawCount
+                                   << " indexCount=" << m_importedIndexCount
+                                   << " chunkSlots=" << m_importedSceneChunks.size()
+                                   << " liveChunks=" << liveImportedSceneChunkCount()
+                                   << " splits=[" << m_shadowCascadeSplits[0] << ","
+                                   << m_shadowCascadeSplits[1] << "," << m_shadowCascadeSplits[2]
+                                   << "," << m_shadowCascadeSplits[3] << "]"
+                                   << " shadowDraws=[" << m_visibleImportedShadowMeshDraws[0].size()
+                                   << "," << m_visibleImportedShadowMeshDraws[1].size()
+                                   << "," << m_visibleImportedShadowMeshDraws[2].size()
+                                   << "," << m_visibleImportedShadowMeshDraws[3].size() << "]";
+            }
+        }
         importedMeshDrawsForFrame = std::span<const ImportedMeshDraw>(
             m_visibleImportedMeshDraws.data(),
             m_visibleImportedMeshDraws.size());

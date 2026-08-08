@@ -24,6 +24,7 @@
 
 #include "core/frame_profiler.h"
 #include "import/dds.h"
+#include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
@@ -235,140 +236,37 @@ std::filesystem::path joinBackslashPath(std::filesystem::path base, const std::s
     return base;
 }
 
-// Resolves a model-relative path (as stored in a STAT's MODL, relative to
-// Data\Meshes) to raw NIF bytes: loose files under Data Files\Meshes win
-// over BSA archives, matching Bethesda's own load-order precedence.
+// Resolves model/texture paths to bytes. The precedence and load-order rules
+// live in import/fnv/asset_source.h so the runtime streamer uses the same ones
+// -- they were arrived at by measurement and two copies would drift.
 class AssetResolver {
 public:
-    explicit AssetResolver(std::filesystem::path dataFilesPath) : m_dataFilesPath(std::move(dataFilesPath)) {
-        std::error_code listError;
-        std::vector<std::filesystem::path> archivePaths;
-        for (const auto& entry : std::filesystem::directory_iterator(m_dataFilesPath, listError)) {
-            if (entry.is_regular_file() && toLowerAsciiCopy(entry.path().extension().string()) == ".bsa") {
-                archivePaths.push_back(entry.path());
-            }
+    explicit AssetResolver(std::filesystem::path dataFilesPath) {
+        // Exclude audio-only archives: "Fallout - Sound.bsa" and
+        // "Fallout - Voices1.bsa" hold 111982 files between them and cannot
+        // contain a mesh or texture, and indexing them was ~85% of runtime.
+        constexpr std::uint32_t kWanted = ~(
+            odai::importer::fnv::kBsaContentSounds | odai::importer::fnv::kBsaContentVoices);
+        if (!m_source.open(dataFilesPath, kWanted)) {
+            std::cerr << "warning: could not read Data Files directory " << dataFilesPath << "\n";
         }
-        // Sort into Fallout's own load order, and search LAST match wins.
-        //
-        // directory_iterator yields readdir order, which is filesystem state,
-        // not load order — so which archive won a name varied by machine, and
-        // Update.bsa (the shipped patch archive) generally lost. It overrides
-        // 36 meshes and 2 textures that also exist in the base archives: the
-        // Novac motel and bungalows, the McCarran wall set, the NCR guard
-        // towers, the Hoover Dam observation deck. All of those were resolving
-        // to their stale pre-patch versions.
-        //
-        // Rank: base archives (0) < Update.bsa (1) < DLC archives (2), and
-        // alphabetical within a rank so the result is reproducible.
-        auto loadOrderRank = [](const std::filesystem::path& path) {
-            const std::string name = toLowerAsciiCopy(path.filename().string());
-            if (name.rfind("fallout - ", 0) == 0) {
-                return 0;
-            }
-            if (name == "update.bsa") {
-                return 1;
-            }
-            return 2;  // DeadMoney, HonestHearts, OldWorldBlues, LonesomeRoad, packs
-        };
-        std::sort(
-            archivePaths.begin(), archivePaths.end(),
-            [&](const std::filesystem::path& a, const std::filesystem::path& b) {
-                const int rankA = loadOrderRank(a);
-                const int rankB = loadOrderRank(b);
-                if (rankA != rankB) {
-                    return rankA < rankB;
-                }
-                return toLowerAsciiCopy(a.filename().string()) < toLowerAsciiCopy(b.filename().string());
-            });
-
-        for (const auto& archivePath : archivePaths) {
-            const std::filesystem::directory_entry entry(archivePath);
-
-            // Opening an archive costs a std::string and a hash-map entry per
-            // file. "Fallout - Sound.bsa" and "Fallout - Voices1.bsa" hold
-            // 111982 files between them and cannot contain a mesh or texture,
-            // so indexing them was ~85% of this cooker's runtime. Check the
-            // header's content flags first and skip archives that declare
-            // nothing but audio — a conservative test, so an archive with any
-            // non-audio content is still opened.
-            constexpr std::uint32_t kAudioOnly =
-                odai::importer::fnv::kBsaContentSounds | odai::importer::fnv::kBsaContentVoices;
-            std::uint32_t contentFlags = 0;
-            if (odai::importer::fnv::peekBsaContentFlags(entry.path(), contentFlags) && contentFlags != 0u &&
-                (contentFlags & ~kAudioOnly) == 0u) {
-                continue;
-            }
-
-            odai::importer::fnv::BsaArchive archive;
-            if (archive.open(entry.path())) {
-                m_archives.push_back(std::move(archive));
-            } else {
-                std::cerr << "warning: failed to open BSA archive " << entry.path() << "\n";
-            }
+        for (const std::string& warning : m_source.warnings()) {
+            std::cerr << "warning: " << warning << "\n";
         }
     }
 
-    // Resolves a texture path as stored in a BSShaderTextureSet. Those paths
-    // usually already start with "textures\", but not always, so the prefix is
-    // added only when missing.
     bool resolveTexture(const std::string& texturePath, std::vector<std::uint8_t>& outBytes) {
-        const std::string normalized = normalizeTexturePath(texturePath);
-        const std::filesystem::path loosePath = joinBackslashPath(m_dataFilesPath, normalized);
-        std::error_code existsError;
-        if (std::filesystem::exists(loosePath, existsError)) {
-            std::ifstream input(loosePath, std::ios::binary | std::ios::ate);
-            if (input) {
-                const auto size = static_cast<std::size_t>(input.tellg());
-                input.seekg(0);
-                outBytes.resize(size);
-                if (size == 0 ||
-                    input.read(reinterpret_cast<char*>(outBytes.data()), static_cast<std::streamsize>(size))) {
-                    return true;
-                }
-            }
-        }
-        // Reverse: the archive list is in load order, so the last archive
-        // holding a name is the one the game would use.
-        for (auto it = m_archives.rbegin(); it != m_archives.rend(); ++it) {
-            if (const auto* entry = it->find(normalized)) {
-                if (it->extract(*entry, outBytes)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        std::string error;
+        return m_source.resolveTexture(texturePath, outBytes, error);
     }
 
     bool resolveMesh(const std::string& modelPath, std::vector<std::uint8_t>& outBytes) {
-        const std::string normalized = normalizeModelPath(modelPath);
-        const std::filesystem::path loosePath = joinBackslashPath(m_dataFilesPath / "meshes", normalized);
-        if (std::filesystem::exists(loosePath)) {
-            std::ifstream file(loosePath, std::ios::binary | std::ios::ate);
-            if (file) {
-                const auto size = static_cast<std::size_t>(file.tellg());
-                file.seekg(0);
-                outBytes.resize(size);
-                if (size == 0 || file.read(reinterpret_cast<char*>(outBytes.data()), static_cast<std::streamsize>(size))) {
-                    return true;
-                }
-            }
-        }
-        const std::string virtualPath = "meshes\\" + normalized;
-        // Reverse: m_archives is in load order, so the last archive holding a
-        // name is the one the game would use. Update.bsa overrides 36 base-game
-        // meshes and must win.
-        for (auto it = m_archives.rbegin(); it != m_archives.rend(); ++it) {
-            const auto* entry = it->find(virtualPath);
-            if (entry != nullptr && it->extract(*entry, outBytes)) {
-                return true;
-            }
-        }
-        return false;
+        std::string error;
+        return m_source.resolveMesh(modelPath, outBytes, error);
     }
 
 private:
-    std::filesystem::path m_dataFilesPath;
-    std::vector<odai::importer::fnv::BsaArchive> m_archives;
+    odai::importer::fnv::FalloutAssetSource m_source;
 };
 
 std::string formIdHex(std::uint32_t formId) {
@@ -1427,6 +1325,170 @@ int cookOne(
 
 }  // namespace
 
+
+// Cooks the distant-landscape LOD tier for a worldspace into one scene.
+//
+// Layout and coordinate space are MEASURED, not assumed (see
+// fnv::kLandLodBlockCells): each block is
+// meshes\landscape\lod\<ws>\blocks\<ws>.level4.x<X>.y<Y>.nif, blocks are
+// 4x4 cells, and only the "level4" tier exists -- there is no mip pyramid.
+//
+// The blocks' vertices are already in WORLD units, unlike static models which
+// are in model space and placed by an instance transform. So each block gets an
+// identity placement carrying only the Bethesda Z-up -> engine Y-up change,
+// which is folded into the instance rotation exactly as makeEngineInstanceRotation
+// does for statics.
+int cookLodTier(
+    const std::filesystem::path& dataFilesPath,
+    const std::filesystem::path& outputPath,
+    const std::string& worldspaceEditorId,
+    std::int32_t tierCells,
+    std::int32_t blockX0, std::int32_t blockZ0, std::int32_t blockX1, std::int32_t blockZ1
+) {
+    const auto totalStart = std::chrono::steady_clock::now();
+    AssetResolver assets(dataFilesPath);
+
+    ImportedScene scene;
+    scene.sourceTag = "fnv_lod";
+
+    std::unordered_map<std::string, std::uint32_t> textureIndexByPath;
+    const auto resolveLodTexture = [&](const std::string& texturePath) -> std::uint32_t {
+        if (texturePath.empty()) {
+            return kNoTextureIndex;
+        }
+        const std::string key = toLowerAsciiCopy(texturePath);
+        const auto existing = textureIndexByPath.find(key);
+        if (existing != textureIndexByPath.end()) {
+            return existing->second;
+        }
+        std::vector<std::uint8_t> ddsBytes;
+        if (!assets.resolveTexture(texturePath, ddsBytes)) {
+            textureIndexByPath.emplace(key, kNoTextureIndex);
+            return kNoTextureIndex;
+        }
+        odai::importer::ImportedSceneTexture texture;
+        if (!odai::importer::loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
+            textureIndexByPath.emplace(key, kNoTextureIndex);
+            return kNoTextureIndex;
+        }
+        texture.sourcePath = texturePath;
+        const auto index = static_cast<std::uint32_t>(scene.textures.size());
+        scene.textures.push_back(std::move(texture));
+        textureIndexByPath.emplace(key, index);
+        return index;
+    };
+
+    const std::string loweredWorldspace = toLowerAsciiCopy(worldspaceEditorId);
+    std::size_t blocksFound = 0;
+    std::size_t blocksParsed = 0;
+    std::size_t blocksMissing = 0;
+    std::size_t totalTriangles = 0;
+
+    // Only level4 lives under "blocks\"; the coarser tiers sit directly under
+    // the worldspace directory. See fnv::kLandLodTierCellCounts.
+    const std::int32_t step = tierCells;
+    const std::string tierDirectory =
+        (tierCells == odai::importer::fnv::kLandLodBlockCells) ? "\\blocks\\" : "\\";
+    for (std::int32_t bz = blockZ0; bz <= blockZ1; bz += step) {
+        for (std::int32_t bx = blockX0; bx <= blockX1; bx += step) {
+            std::ostringstream namePath;
+            namePath << "landscape\\lod\\" << loweredWorldspace << tierDirectory
+                     << loweredWorldspace << ".level" << tierCells << ".x" << bx << ".y" << bz
+                     << ".nif";
+            std::vector<std::uint8_t> nifBytes;
+            if (!assets.resolveMesh(namePath.str(), nifBytes)) {
+                ++blocksMissing;
+                continue;  // the LOD grid is sparse; absent blocks are normal
+            }
+            ++blocksFound;
+
+            odai::importer::fnv::NifModel nifModel;
+            std::string nifError;
+            if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) ||
+                nifModel.shapes.empty()) {
+                std::cerr << "warning: LOD block " << bx << "," << bz << " failed to parse: "
+                          << nifError << "\n";
+                continue;
+            }
+
+            ImportedSceneMesh mesh;
+            mesh.name = "lod" + std::to_string(tierCells) + "_" + std::to_string(bx) + "_" +
+                        std::to_string(bz);
+            for (const auto& shape : nifModel.shapes) {
+                const auto baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
+                const auto partFirstIndex = static_cast<std::uint32_t>(mesh.indices.size());
+                for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
+                    ImportedSceneVertex vertex{};
+                    vertex.position[0] = shape.positions[v * 3u];
+                    vertex.position[1] = shape.positions[(v * 3u) + 1];
+                    vertex.position[2] = shape.positions[(v * 3u) + 2];
+                    if (!shape.normals.empty()) {
+                        vertex.normal[0] = shape.normals[v * 3u];
+                        vertex.normal[1] = shape.normals[(v * 3u) + 1];
+                        vertex.normal[2] = shape.normals[(v * 3u) + 2];
+                    }
+                    if ((v * 2u) + 1u < shape.uvs.size()) {
+                        vertex.uv[0] = shape.uvs[v * 2u];
+                        vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
+                    }
+                    mesh.vertices.push_back(vertex);
+                }
+                for (const std::uint32_t index : shape.triangleIndices) {
+                    mesh.indices.push_back(baseVertex + index);
+                }
+                const auto partIndexCount =
+                    static_cast<std::uint32_t>(mesh.indices.size()) - partFirstIndex;
+                if (partIndexCount == 0u) {
+                    continue;
+                }
+                ImportedSceneMeshPart part{};
+                part.firstIndex = partFirstIndex;
+                part.indexCount = partIndexCount;
+                part.textureIndex = resolveLodTexture(shape.diffuseTexturePath);
+                part.alphaTest = shape.alphaTest;
+                mesh.parts.push_back(part);
+                totalTriangles += partIndexCount / 3u;
+            }
+            if (mesh.indices.empty()) {
+                continue;
+            }
+
+            const auto meshIndex = static_cast<std::uint32_t>(scene.meshes.size());
+            scene.meshes.push_back(std::move(mesh));
+
+            // Identity placement: the vertices are already world-space, so the
+            // only thing the transform carries is the Z-up -> Y-up basis change.
+            ImportedSceneInstance instance{};
+            instance.meshIndex = meshIndex;
+            writeTransform(instance, Vec3{0.0f, 0.0f, 0.0f}, makeEngineInstanceRotation(Mat3{}), 1.0f);
+            scene.instances.push_back(instance);
+            ++blocksParsed;
+        }
+    }
+
+    if (scene.meshes.empty()) {
+        std::cerr << "error: no LOD blocks found for worldspace \"" << worldspaceEditorId
+                  << "\" in the requested block range\n";
+        return 1;
+    }
+
+    odai::importer::buildImportedScenePackedRenderData(scene);
+    odai::importer::buildImportedScenePageRanges(scene);
+    if (!odai::importer::saveImportedScene(scene, outputPath)) {
+        std::cerr << "error: failed to write " << outputPath << ": "
+                  << odai::importer::getImportedSceneLastError() << "\n";
+        return 1;
+    }
+
+    const double totalMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - totalStart).count();
+    std::cout << "LOD level" << tierCells << ": " << blocksParsed << " tiles (" << blocksMissing
+              << " absent from the sparse grid), " << totalTriangles << " triangles, "
+              << scene.textures.size() << " textures\n";
+    std::cout << "Wrote " << outputPath << " in " << totalMs << " ms\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 5) {
         printUsage();
@@ -1452,6 +1514,38 @@ int main(int argc, char** argv) {
         gridZ1 = std::atoi(argv[9]);
         if (gridX0 > gridX1) std::swap(gridX0, gridX1);
         if (gridZ0 > gridZ1) std::swap(gridZ0, gridZ1);
+    } else if (mode == "--lod" && argc >= 10) {
+        // Block coordinates, which step by kLandLodBlockCells (4). A range given
+        // in cell coordinates still works: the loop only visits multiples of the
+        // step from the low corner.
+        const std::string lodWorldspace = argv[5];
+        std::int32_t bx0 = std::atoi(argv[6]);
+        std::int32_t bz0 = std::atoi(argv[7]);
+        std::int32_t bx1 = std::atoi(argv[8]);
+        std::int32_t bz1 = std::atoi(argv[9]);
+        if (bx0 > bx1) std::swap(bx0, bx1);
+        if (bz0 > bz1) std::swap(bz0, bz1);
+        // Optional tier (cells per tile): 4, 8, 16 or 32. Defaults to the
+        // finest.
+        std::int32_t tierCells = odai::importer::fnv::kLandLodBlockCells;
+        if (argc >= 11) {
+            tierCells = std::atoi(argv[10]);
+        }
+        bool tierValid = false;
+        for (const int candidate : odai::importer::fnv::kLandLodTierCellCounts) {
+            tierValid = tierValid || (tierCells == candidate);
+        }
+        if (!tierValid) {
+            std::cerr << "error: LOD tier must be one of 4, 8, 16, 32 (got " << tierCells << ")\n";
+            return 1;
+        }
+        const auto tierOrigin = [tierCells](std::int32_t cell) {
+            return (cell >= 0) ? ((cell / tierCells) * tierCells)
+                               : (((cell - (tierCells - 1)) / tierCells) * tierCells);
+        };
+        return cookLodTier(
+            dataFilesPath, outputPath, lodWorldspace, tierCells,
+            tierOrigin(bx0), tierOrigin(bz0), tierOrigin(bx1), tierOrigin(bz1));
     } else {
         printUsage();
         return 1;

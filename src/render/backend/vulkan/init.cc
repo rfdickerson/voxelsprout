@@ -2265,6 +2265,14 @@ void RendererBackend::destroyChunkBuffers() {
     }
     m_deferredBufferReleases.clear();
 
+    // Images evicted by streaming that never reached their retirement timeline
+    // value before shutdown. The caller has already waited for the device to go
+    // idle, so destroying them unconditionally is safe here.
+    for (const DeferredImageRelease& release : m_deferredImageReleases) {
+        destroyImageResourceNow(release.image, release.allocation, release.imageView);
+    }
+    m_deferredImageReleases.clear();
+
     m_chunkDrawRanges.clear();
     m_chunkLodMeshCache.clear();
     m_chunkLodMeshCacheValid = false;

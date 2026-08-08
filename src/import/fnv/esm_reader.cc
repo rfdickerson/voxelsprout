@@ -264,10 +264,25 @@ bool EsmReader::open(const std::filesystem::path& path) {
 }
 
 bool EsmReader::walk(const Visitor& visitor) {
+    if (m_data == nullptr || m_size == 0) {
+        m_lastError.clear();
+        m_toleratedChecksumFailures = 0;
+        m_lastError = "ESM/ESP reader has no file open";
+        return false;
+    }
+    return walkRange(0, m_size, visitor);
+}
+
+bool EsmReader::walkRange(
+    std::uint64_t beginOffset, std::uint64_t endOffset, const Visitor& visitor) {
     m_lastError.clear();
     m_toleratedChecksumFailures = 0;
     if (m_data == nullptr || m_size == 0) {
         m_lastError = "ESM/ESP reader has no file open";
+        return false;
+    }
+    if (beginOffset > endOffset || endOffset > m_size) {
+        m_lastError = "Walk range outside the plugin";
         return false;
     }
 
@@ -283,7 +298,8 @@ bool EsmReader::walk(const Visitor& visitor) {
         EsmGroupView group;
     };
     std::vector<Frame> stack;
-    stack.push_back(Frame{0, m_size, false, {}});
+    stack.push_back(Frame{static_cast<std::size_t>(beginOffset),
+                          static_cast<std::size_t>(endOffset), false, {}});
 
     // Decompression scratch buffer reused per compressed record so we don't
     // reallocate for every one in a large plugin.
@@ -320,6 +336,8 @@ bool EsmReader::walk(const Visitor& visitor) {
             EsmGroupView group{};
             group.rawLabel = std::string(reinterpret_cast<const char*>(header + 8), 4);
             group.groupType = static_cast<std::int32_t>(readU32(header + 12));
+            group.fileOffset = static_cast<std::uint64_t>(frame.pos);
+            group.groupSize = groupSize;
 
             const std::size_t contentStart = frame.pos + kGroupHeaderSize;
             const std::size_t contentEnd = frame.pos + groupSize;
@@ -358,6 +376,7 @@ bool EsmReader::walk(const Visitor& visitor) {
             headerView.type = std::string_view(reinterpret_cast<const char*>(header), 4u);
             headerView.formId = formId;
             headerView.flags = flags;
+            headerView.fileOffset = static_cast<std::uint64_t>(frame.pos);
             if (!visitor.onRecordHeader(headerView)) {
                 frame.pos = dataEnd;
                 continue;

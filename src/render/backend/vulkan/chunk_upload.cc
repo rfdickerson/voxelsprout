@@ -105,6 +105,24 @@ std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) 
     }
 }
 
+// Dedup key for an imported texture: its source path, lowercased with separators
+// unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
+// on both casing and slash direction for the same file, so a raw-string key
+// would upload "Textures\Landscape\Rock01.dds" and "textures/landscape/rock01.dds"
+// as two different images. An empty path stays empty, which disables dedup for
+// that texture rather than collapsing every unnamed texture onto one slot.
+std::string normalizedImportedTextureKey(std::string_view sourcePath) {
+    std::string key(sourcePath);
+    for (char& c : key) {
+        if (c == '\\') {
+            c = '/';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return key;
+}
+
 VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
     switch (format) {
         // Color albedo (BC1/BC3/BC7) holds sRGB-encoded bytes, so use the _SRGB views:
@@ -422,23 +440,17 @@ void RendererBackend::clearMagicaVoxelMeshes() {
 void RendererBackend::clearGpuScene() {
     if ((!m_importedTextureResources.empty() ||
          m_fogMapTextureResource.image != VK_NULL_HANDLE) && m_device != VK_NULL_HANDLE) {
+        // This is the wholesale teardown path (scene swap / shutdown), so the
+        // one big wait is still the right trade here -- it is not on the
+        // streaming path, which evicts individual slots through
+        // releaseImportedTexture() and never waits.
         vkDeviceWaitIdle(m_device);
         for (ImportedTextureResource& texture : m_importedTextureResources) {
-            if (texture.imageView != VK_NULL_HANDLE) {
-                vkDestroyImageView(m_device, texture.imageView, nullptr);
-                texture.imageView = VK_NULL_HANDLE;
-            }
-            if (texture.image != VK_NULL_HANDLE) {
-                if (m_vmaAllocator != VK_NULL_HANDLE && texture.allocation != VK_NULL_HANDLE) {
-                    vmaDestroyImage(m_vmaAllocator, texture.image, texture.allocation);
-                } else {
-                    vkDestroyImage(m_device, texture.image, nullptr);
-                }
-                texture.image = VK_NULL_HANDLE;
-                texture.allocation = VK_NULL_HANDLE;
-            }
+            destroyImageResourceNow(texture.image, texture.allocation, texture.imageView);
+            texture = ImportedTextureResource{};
         }
         m_importedTextureResources.clear();
+        m_importedTextureSlotTable.clear();
         if (m_fogMapTextureResource.imageView != VK_NULL_HANDLE) {
             vkDestroyImageView(m_device, m_fogMapTextureResource.imageView, nullptr);
             m_fogMapTextureResource.imageView = VK_NULL_HANDLE;
@@ -492,6 +504,11 @@ void RendererBackend::clearGpuScene() {
     }
     m_importedMeshDraws.clear();
     m_importedPageDrawRanges.clear();
+    // Chunks and arenas go together: the buffers backing them were just
+    // released above, so every recorded offset is now meaningless.
+    m_importedSceneChunks.clear();
+    m_importedVertexArena.reset(0);
+    m_importedIndexArena.reset(0);
     m_visibleImportedMeshDraws.clear();
     m_importedTextureSlots.clear();
     for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {
@@ -647,19 +664,652 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
 }
 
 bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& scene) {
-    return uploadImportedSceneInternal(scene, nullptr);
+    return uploadImportedSceneInternal(scene, nullptr, /*appendChunk=*/false);
+}
+
+std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
+    const std::size_t chunkCountBefore = m_importedSceneChunks.size();
+    if (!uploadImportedSceneInternal(scene, nullptr, /*appendChunk=*/true)) {
+        return kInvalidImportedChunkIndex;
+    }
+    if (m_importedSceneChunks.size() <= chunkCountBefore) {
+        // Upload reported success but produced no chunk -- an empty scene.
+        return kInvalidImportedChunkIndex;
+    }
+    return m_importedSceneChunks.size() - 1u;
+}
+
+void RendererBackend::removeImportedSceneChunkAt(std::size_t chunkIndex) {
+    removeImportedSceneChunk(chunkIndex);
+}
+
+std::size_t RendererBackend::liveImportedSceneChunkCount() const {
+    std::size_t liveCount = 0;
+    for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+        if (chunk.alive) {
+            ++liveCount;
+        }
+    }
+    return liveCount;
+}
+
+bool RendererBackend::uploadIntoBufferRange(
+    BufferHandle destination,
+    VkDeviceSize destinationByteOffset,
+    const void* sourceData,
+    VkDeviceSize byteSize,
+    const char* debugLabel) {
+    if (destination == kInvalidBufferHandle || sourceData == nullptr || byteSize == 0u) {
+        return byteSize == 0u;  // nothing to copy is success, not failure
+    }
+
+    BufferCreateDesc stagingCreateDesc{};
+    stagingCreateDesc.size = byteSize;
+    stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCreateDesc.memoryProperties =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    stagingCreateDesc.initialData = sourceData;
+    const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
+    if (stagingHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << debugLabel << " staging buffer allocation failed";
+        return false;
+    }
+
+    bool uploadFailed = false;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    VkResult result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(importedArenaUpload)", result);
+        uploadFailed = true;
+    }
+    if (!uploadFailed) {
+        VkCommandBufferAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocateInfo.commandPool = commandPool;
+        allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocateInfo.commandBufferCount = 1;
+        result = vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateCommandBuffers(importedArenaUpload)", result);
+            uploadFailed = true;
+        }
+    }
+    if (!uploadFailed) {
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkBeginCommandBuffer(importedArenaUpload)", result);
+            uploadFailed = true;
+        }
+    }
+    if (!uploadFailed) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = 0;
+        copyRegion.dstOffset = destinationByteOffset;
+        copyRegion.size = byteSize;
+        vkCmdCopyBuffer(
+            commandBuffer,
+            m_bufferAllocator.getBuffer(stagingHandle),
+            m_bufferAllocator.getBuffer(destination),
+            1,
+            &copyRegion);
+        result = vkEndCommandBuffer(commandBuffer);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkEndCommandBuffer(importedArenaUpload)", result);
+            uploadFailed = true;
+        }
+    }
+    if (!uploadFailed) {
+        result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit2(importedArenaUpload)", result);
+            uploadFailed = true;
+        }
+    }
+    if (!uploadFailed) {
+        result = vkQueueWaitIdle(m_graphicsQueue);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkQueueWaitIdle(importedArenaUpload)", result);
+            uploadFailed = true;
+        }
+    }
+
+    if (commandPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+    }
+    m_bufferAllocator.destroyBuffer(stagingHandle);
+    return !uploadFailed;
+}
+
+bool RendererBackend::copyBufferRange(
+    BufferHandle source, BufferHandle destination, VkDeviceSize byteSize, const char* debugLabel) {
+    if (source == kInvalidBufferHandle || destination == kInvalidBufferHandle || byteSize == 0u) {
+        return byteSize == 0u;
+    }
+
+    bool copyFailed = false;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    VkResult result = vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateCommandPool(importedArenaGrow)", result);
+        copyFailed = true;
+    }
+    if (!copyFailed) {
+        VkCommandBufferAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocateInfo.commandPool = commandPool;
+        allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocateInfo.commandBufferCount = 1;
+        result = vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkAllocateCommandBuffers(importedArenaGrow)", result);
+            copyFailed = true;
+        }
+    }
+    if (!copyFailed) {
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkBeginCommandBuffer(importedArenaGrow)", result);
+            copyFailed = true;
+        }
+    }
+    if (!copyFailed) {
+        VkBufferCopy copyRegion{};
+        copyRegion.size = byteSize;
+        vkCmdCopyBuffer(
+            commandBuffer,
+            m_bufferAllocator.getBuffer(source),
+            m_bufferAllocator.getBuffer(destination),
+            1,
+            &copyRegion);
+        result = vkEndCommandBuffer(commandBuffer);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkEndCommandBuffer(importedArenaGrow)", result);
+            copyFailed = true;
+        }
+    }
+    if (!copyFailed) {
+        result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit2(importedArenaGrow)", result);
+            copyFailed = true;
+        }
+    }
+    if (!copyFailed) {
+        result = vkQueueWaitIdle(m_graphicsQueue);
+        if (result != VK_SUCCESS) {
+            logVkFailure("vkQueueWaitIdle(importedArenaGrow)", result);
+            copyFailed = true;
+        }
+    }
+    if (commandPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(m_device, commandPool, nullptr);
+    }
+    if (copyFailed) {
+        VOX_LOGE("render") << debugLabel << " arena copy failed";
+    }
+    return !copyFailed;
+}
+
+bool RendererBackend::ensureImportedArenaCapacity(
+    std::uint64_t vertexCount, std::uint64_t indexCount) {
+    // Vertex and index arenas grow independently; either may already be big
+    // enough. "Big enough" here is capacity, not free space -- the caller
+    // retries allocate() after this and grows again if fragmentation defeated
+    // the first attempt.
+    const std::uint64_t neededVertices = m_importedVertexArena.used() + vertexCount;
+    const std::uint64_t neededIndices = m_importedIndexArena.used() + indexCount;
+    const bool growVertices = neededVertices > m_importedVertexArena.capacity();
+    const bool growIndices = neededIndices > m_importedIndexArena.capacity();
+    if (!growVertices && !growIndices) {
+        return true;
+    }
+
+    // First fill is sized exactly; only *growth* doubles. Doubling from empty
+    // would round a 3.29M-vertex scene up to 4.19M and cost ~110 MB across the
+    // three arenas that a one-shot uploadImportedScene() never needs.
+    const auto nextCapacity = [](std::uint64_t current, std::uint64_t needed) {
+        if (current == 0) {
+            return needed;
+        }
+        std::uint64_t capacity = current;
+        while (capacity < needed) {
+            capacity *= 2u;
+        }
+        return capacity;
+    };
+
+    const std::uint64_t newVertexCapacity = growVertices
+        ? nextCapacity(m_importedVertexArena.capacity(), neededVertices)
+        : m_importedVertexArena.capacity();
+    const std::uint64_t newIndexCapacity = growIndices
+        ? nextCapacity(m_importedIndexArena.capacity(), neededIndices)
+        : m_importedIndexArena.capacity();
+
+    // Recreate each buffer at the new size and copy the old contents across at
+    // the same offsets, so every live chunk's firstVertex/firstIndex stays
+    // valid and nothing has to be re-uploaded from the CPU.
+    struct ArenaBuffer {
+        BufferHandle* handle;
+        std::uint64_t oldCapacity;
+        std::uint64_t newCapacity;
+        std::uint64_t stride;
+        VkBufferUsageFlags usage;
+        const char* label;
+    };
+    const std::uint64_t oldVertexCapacity = m_importedVertexArena.capacity();
+    const std::uint64_t oldIndexCapacity = m_importedIndexArena.capacity();
+    const ArenaBuffer arenaBuffers[] = {
+        {&m_importedVertexBufferHandle, oldVertexCapacity, newVertexCapacity,
+         sizeof(ImportedMeshVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, "imported vertex arena"},
+        {&m_importedShadowVertexBufferHandle, oldVertexCapacity, newVertexCapacity,
+         sizeof(ImportedShadowVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+         "imported shadow vertex arena"},
+        {&m_importedIndexBufferHandle, oldIndexCapacity, newIndexCapacity,
+         sizeof(std::uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, "imported index arena"},
+    };
+
+    std::vector<BufferHandle> createdHandles;
+    createdHandles.reserve(std::size(arenaBuffers));
+    bool failed = false;
+    for (const ArenaBuffer& arena : arenaBuffers) {
+        if (arena.newCapacity == arena.oldCapacity && *arena.handle != kInvalidBufferHandle) {
+            createdHandles.push_back(kInvalidBufferHandle);  // unchanged
+            continue;
+        }
+        BufferCreateDesc desc{};
+        desc.size = static_cast<VkDeviceSize>(arena.newCapacity * arena.stride);
+        desc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | arena.usage;
+        desc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        const BufferHandle created = m_bufferAllocator.createBuffer(desc);
+        if (created == kInvalidBufferHandle) {
+            VOX_LOGE("render") << arena.label << " growth to " << arena.newCapacity
+                               << " elements failed";
+            failed = true;
+            break;
+        }
+        createdHandles.push_back(created);
+    }
+    if (failed) {
+        for (const BufferHandle handle : createdHandles) {
+            if (handle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(handle);
+            }
+        }
+        return false;
+    }
+
+    // Copy old -> new before swapping, so a failure leaves the arenas intact.
+    for (std::size_t i = 0; i < std::size(arenaBuffers) && !failed; ++i) {
+        const ArenaBuffer& arena = arenaBuffers[i];
+        if (createdHandles[i] == kInvalidBufferHandle) {
+            continue;
+        }
+        const VkDeviceSize copyBytes =
+            static_cast<VkDeviceSize>(arena.oldCapacity * arena.stride);
+        if (copyBytes == 0u || *arena.handle == kInvalidBufferHandle) {
+            continue;
+        }
+        if (!copyBufferRange(*arena.handle, createdHandles[i], copyBytes, arena.label)) {
+            failed = true;
+        }
+    }
+    if (failed) {
+        for (const BufferHandle handle : createdHandles) {
+            if (handle != kInvalidBufferHandle) {
+                m_bufferAllocator.destroyBuffer(handle);
+            }
+        }
+        return false;
+    }
+
+    for (std::size_t i = 0; i < std::size(arenaBuffers); ++i) {
+        if (createdHandles[i] == kInvalidBufferHandle) {
+            continue;
+        }
+        // Deferred: in-flight frames may still be reading the old arena.
+        scheduleBufferRelease(*arenaBuffers[i].handle, m_lastGraphicsTimelineValue);
+        *arenaBuffers[i].handle = createdHandles[i];
+    }
+    m_importedVertexArena.grow(newVertexCapacity);
+    m_importedIndexArena.grow(newIndexCapacity);
+    VOX_LOGI("render") << "imported geometry arena grown: vertices=" << newVertexCapacity
+                       << ", indices=" << newIndexCapacity;
+    return true;
+}
+
+void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
+    if (chunkIndex >= m_importedSceneChunks.size()) {
+        return;
+    }
+    ImportedSceneChunk& chunk = m_importedSceneChunks[chunkIndex];
+    if (!chunk.alive) {
+        return;
+    }
+
+    m_importedVertexArena.free(chunk.firstVertex, chunk.vertexCount);
+    m_importedIndexArena.free(chunk.firstIndex, chunk.indexCount);
+    // Only the last chunk referencing a texture actually frees it; the slot
+    // table owns that decision.
+    for (const std::uint32_t slot : chunk.textureSlots) {
+        releaseImportedTexture(slot);
+    }
+
+    chunk.alive = false;
+    chunk.draws.clear();
+    chunk.draws.shrink_to_fit();
+    chunk.pageRanges.clear();
+    chunk.pageRanges.shrink_to_fit();
+    chunk.textureSlots.clear();
+    chunk.textureSlots.shrink_to_fit();
+    chunk.vertexCount = 0;
+    chunk.indexCount = 0;
+    chunk.terrainDrawCount = 0;
+
+    rebuildImportedDrawTables();
+}
+
+void RendererBackend::rebuildImportedDrawTables() {
+    m_importedMeshDraws.clear();
+    m_importedPageDrawRanges.clear();
+    std::uint32_t terrainDrawTotal = 0;
+    std::uint32_t staticDrawTotal = 0;
+    for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+        if (!chunk.alive) {
+            continue;
+        }
+        // Each page range's firstDraw is chunk-relative on the chunk; rebase it
+        // onto where this chunk's draws land in the flat table.
+        const std::uint32_t chunkDrawBase = static_cast<std::uint32_t>(m_importedMeshDraws.size());
+        m_importedMeshDraws.insert(
+            m_importedMeshDraws.end(), chunk.draws.begin(), chunk.draws.end());
+        for (const ImportedScenePageDrawRange& pageRange : chunk.pageRanges) {
+            ImportedScenePageDrawRange rebased = pageRange;
+            rebased.firstDraw += chunkDrawBase;
+            m_importedPageDrawRanges.push_back(rebased);
+        }
+        terrainDrawTotal += chunk.terrainDrawCount;
+        staticDrawTotal +=
+            static_cast<std::uint32_t>(chunk.draws.size()) - chunk.terrainDrawCount;
+    }
+    m_importedTerrainDrawCount = terrainDrawTotal;
+    m_importedStaticDrawCount = staticDrawTotal;
+    // Total live indices across every chunk. Several callers use a non-zero
+    // value purely as "is there imported geometry at all", so it has to fall to
+    // zero when the last chunk is evicted.
+    std::uint64_t liveIndexCount = 0;
+    for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+        if (chunk.alive) {
+            liveIndexCount += chunk.indexCount;
+        }
+    }
+    m_importedIndexCount = static_cast<std::uint32_t>(liveIndexCount);
+}
+
+bool RendererBackend::ensureImportedTextureSampler() {
+    if (m_importedTextureSampler != VK_NULL_HANDLE) {
+        return true;
+    }
+    VkSamplerCreateInfo samplerCreateInfo{};
+    samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
+    samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerCreateInfo.mipLodBias = 0.0f;
+    samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+    samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
+        ? std::min(m_maxSamplerAnisotropy, 8.0f)
+        : 1.0f;
+    samplerCreateInfo.compareEnable = VK_FALSE;
+    samplerCreateInfo.minLod = 0.0f;
+    samplerCreateInfo.maxLod = 16.0f;
+    samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
+    if (vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_importedTextureSampler) != VK_SUCCESS) {
+        VOX_LOGE("render") << "imported texture sampler creation failed";
+        m_importedTextureSampler = VK_NULL_HANDLE;
+        return false;
+    }
+    setObjectName(
+        VK_OBJECT_TYPE_SAMPLER,
+        vkHandleToUint64(m_importedTextureSampler),
+        "imported.texture.sampler");
+    return true;
+}
+
+std::uint32_t RendererBackend::acquireImportedTexture(
+    const std::string& key,
+    const odai::importer::ImportedSceneTexture& srcTexture,
+    VkCommandBuffer commandBuffer,
+    std::vector<BufferHandle>& stagingBuffers) {
+    if (!m_supportsBindlessDescriptors ||
+        !m_bindlessBufferSet.valid() ||
+        m_bindlessTextureCapacity <= kBindlessTextureStaticCount ||
+        commandBuffer == VK_NULL_HANDLE) {
+        return kInvalidImportedTextureSlot;
+    }
+
+    if (srcTexture.width == 0u || srcTexture.height == 0u || srcTexture.rgba8.empty()) {
+        return kInvalidImportedTextureSlot;
+    }
+
+    const std::uint32_t inferredMipLevelCount =
+        inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size());
+    std::uint32_t mipLevelCount = 0;
+    if (srcTexture.format != odai::importer::TextureFormat::RGBA8) {
+        // Block-compressed: trust the mip count stored by the DDS loader.
+        if (srcTexture.mipLevelCount == 0u) {
+            VOX_LOGW("render") << "block-compressed texture missing mip data: "
+                               << srcTexture.sourcePath << "; skipping";
+            return kInvalidImportedTextureSlot;
+        }
+        mipLevelCount = srcTexture.mipLevelCount;
+    } else {
+        if (inferredMipLevelCount == 0u) {
+            VOX_LOGW("render") << "imported texture mip chain size invalid for "
+                               << srcTexture.sourcePath << "; skipping texture";
+            return kInvalidImportedTextureSlot;
+        }
+        mipLevelCount = inferredMipLevelCount;
+        if (srcTexture.mipLevelCount != 0u && srcTexture.mipLevelCount != inferredMipLevelCount) {
+            VOX_LOGW("render") << "imported texture mip metadata mismatch for "
+                               << srcTexture.sourcePath << "; stored=" << srcTexture.mipLevelCount
+                               << ", inferred=" << inferredMipLevelCount
+                               << " (using inferred chain)";
+        }
+    }
+
+    if (!ensureImportedTextureSampler()) {
+        return kInvalidImportedTextureSlot;
+    }
+
+    // Slot choice, reference counting and key lookup all belong to the table.
+    // If it says the key is already resident there is nothing to upload -- this
+    // is the whole point of keying by path, since streaming asks for the same
+    // ground/rock diffuse from every cell that uses it.
+    m_importedTextureSlotTable.setCapacity(m_bindlessTextureCapacity - kBindlessTextureStaticCount);
+    const BindlessSlotTable::Acquisition acquisition = m_importedTextureSlotTable.acquire(key);
+    if (acquisition.slotIndex == kInvalidSlotIndex) {
+        return kInvalidImportedTextureSlot;
+    }
+    const std::uint32_t slotIndex = acquisition.slotIndex;
+    if (!acquisition.needsUpload) {
+        return static_cast<std::uint32_t>(kBindlessTextureStaticCount + slotIndex);
+    }
+    // Every failure from here on must abandon the slot, or a key that failed to
+    // upload would stay addressable and resolve to a null image forever.
+    if (m_importedTextureResources.size() <= slotIndex) {
+        m_importedTextureResources.resize(slotIndex + 1u);
+    }
+
+    BufferCreateDesc stagingCreateDesc{};
+    stagingCreateDesc.size = static_cast<VkDeviceSize>(srcTexture.rgba8.size());
+    stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingCreateDesc.memoryProperties =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    stagingCreateDesc.initialData = srcTexture.rgba8.data();
+    const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
+    if (stagingHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "imported texture staging buffer allocation failed for "
+                           << srcTexture.sourcePath;
+        m_importedTextureSlotTable.abandon(slotIndex);
+        return kInvalidImportedTextureSlot;
+    }
+    stagingBuffers.push_back(stagingHandle);
+
+    const VkFormat textureFormat = vkFormatForImportedTexture(srcTexture.format);
+
+    VkImageCreateInfo imageCreateInfo{};
+    imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageCreateInfo.format = textureFormat;
+    imageCreateInfo.extent = {srcTexture.width, srcTexture.height, 1};
+    imageCreateInfo.mipLevels = mipLevelCount;
+    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    ImportedTextureResource resource{};
+    VmaAllocationCreateInfo allocationCreateInfo{};
+    allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const VkResult imageCreateResult = vmaCreateImage(
+        m_vmaAllocator, &imageCreateInfo, &allocationCreateInfo,
+        &resource.image, &resource.allocation, nullptr);
+    if (imageCreateResult != VK_SUCCESS) {
+        logVkFailure("vmaCreateImage(importedTexture)", imageCreateResult);
+        m_importedTextureSlotTable.abandon(slotIndex);
+        return kInvalidImportedTextureSlot;
+    }
+
+    VkImageViewCreateInfo viewCreateInfo{};
+    viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCreateInfo.image = resource.image;
+    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.format = textureFormat;
+    viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCreateInfo.subresourceRange.baseMipLevel = 0;
+    viewCreateInfo.subresourceRange.levelCount = mipLevelCount;
+    viewCreateInfo.subresourceRange.baseArrayLayer = 0;
+    viewCreateInfo.subresourceRange.layerCount = 1;
+    const VkResult imageViewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &resource.imageView);
+    if (imageViewResult != VK_SUCCESS) {
+        logVkFailure("vkCreateImageView(importedTexture)", imageViewResult);
+        vmaDestroyImage(m_vmaAllocator, resource.image, resource.allocation);
+        m_importedTextureSlotTable.abandon(slotIndex);
+        return kInvalidImportedTextureSlot;
+    }
+
+    setObjectName(
+        VK_OBJECT_TYPE_IMAGE,
+        vkHandleToUint64(resource.image),
+        ("imported.texture.image." + std::to_string(slotIndex)).c_str());
+    setObjectName(
+        VK_OBJECT_TYPE_IMAGE_VIEW,
+        vkHandleToUint64(resource.imageView),
+        ("imported.texture.view." + std::to_string(slotIndex)).c_str());
+
+    transitionImageLayout(
+        commandBuffer, resource.image,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, mipLevelCount);
+
+    std::vector<VkBufferImageCopy> copyRegions;
+    copyRegions.reserve(mipLevelCount);
+    for (std::uint32_t mipLevel = 0; mipLevel < mipLevelCount; ++mipLevel) {
+        VkBufferImageCopy copyRegion{};
+        copyRegion.bufferOffset = importedTextureMipOffsetFmt(
+            srcTexture.width, srcTexture.height, mipLevel, srcTexture.format);
+        copyRegion.bufferRowLength = 0;
+        copyRegion.bufferImageHeight = 0;
+        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copyRegion.imageSubresource.mipLevel = mipLevel;
+        copyRegion.imageSubresource.baseArrayLayer = 0;
+        copyRegion.imageSubresource.layerCount = 1;
+        copyRegion.imageOffset = {0, 0, 0};
+        copyRegion.imageExtent = {
+            std::max(1u, srcTexture.width >> mipLevel),
+            std::max(1u, srcTexture.height >> mipLevel),
+            1
+        };
+        copyRegions.push_back(copyRegion);
+    }
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        m_bufferAllocator.getBuffer(stagingHandle),
+        resource.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<std::uint32_t>(copyRegions.size()),
+        copyRegions.data());
+
+    transitionImageLayout(
+        commandBuffer, resource.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, mipLevelCount);
+
+    m_importedTextureResources[slotIndex] = resource;
+    return static_cast<std::uint32_t>(kBindlessTextureStaticCount + slotIndex);
+}
+
+void RendererBackend::releaseImportedTexture(std::uint32_t slot) {
+    if (slot == kInvalidImportedTextureSlot || slot < kBindlessTextureStaticCount) {
+        return;
+    }
+    const std::uint32_t slotIndex = slot - kBindlessTextureStaticCount;
+    if (slotIndex >= m_importedTextureResources.size()) {
+        return;
+    }
+    if (!m_importedTextureSlotTable.release(slotIndex)) {
+        return;  // still referenced by another resident cell
+    }
+    ImportedTextureResource& resource = m_importedTextureResources[slotIndex];
+    // Deferred: an in-flight frame may still be sampling this image.
+    scheduleImageRelease(
+        resource.image, resource.allocation, resource.imageView, m_lastGraphicsTimelineValue);
+    resource = ImportedTextureResource{};
 }
 
 bool RendererBackend::uploadImportedSceneInternal(
     const odai::importer::ImportedScene& scene,
-    const odai::importer::GpuSceneAsset* gpuScene
+    const odai::importer::GpuSceneAsset* gpuScene,
+    bool appendChunk
 ) {
     if (m_device == VK_NULL_HANDLE) {
         return false;
     }
 
-    clearImportedSceneMeshes();
-    destroyRayTracingScene();
+    // Append mode keeps every resident chunk and adds one more -- this is the
+    // path streaming uses. Replace mode is the original whole-scene load and
+    // still tears everything down first.
+    if (!appendChunk) {
+        clearImportedSceneMeshes();
+        destroyRayTracingScene();
+    }
 
     odai::importer::ImportedScene uploadScene = scene;
     const bool havePackedScene =
@@ -683,40 +1333,15 @@ bool RendererBackend::uploadImportedSceneInternal(
         m_bindlessBufferSet.valid() &&
         m_bindlessTextureCapacity > kBindlessTextureStaticCount &&
         !uploadScene.textures.empty()) {
-        if (m_importedTextureSampler == VK_NULL_HANDLE) {
-            VkSamplerCreateInfo samplerCreateInfo{};
-            samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-            samplerCreateInfo.magFilter = VK_FILTER_LINEAR;
-            samplerCreateInfo.minFilter = VK_FILTER_LINEAR;
-            samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-            samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerCreateInfo.mipLodBias = 0.0f;
-            samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
-            samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
-                ? std::min(m_maxSamplerAnisotropy, 8.0f)
-                : 1.0f;
-            samplerCreateInfo.compareEnable = VK_FALSE;
-            samplerCreateInfo.minLod = 0.0f;
-            samplerCreateInfo.maxLod = 16.0f;
-            samplerCreateInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-            samplerCreateInfo.unnormalizedCoordinates = VK_FALSE;
-            if (vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_importedTextureSampler) != VK_SUCCESS) {
-                VOX_LOGE("render") << "imported texture sampler creation failed";
-                m_importedTextureSampler = VK_NULL_HANDLE;
-                return false;
-            }
-            setObjectName(
-                VK_OBJECT_TYPE_SAMPLER,
-                vkHandleToUint64(m_importedTextureSampler),
-                "imported.texture.sampler");
+        if (!ensureImportedTextureSampler()) {
+            return false;
         }
 
         std::vector<BufferHandle> stagingBufferHandles;
         stagingBufferHandles.reserve(uploadScene.textures.size());
         bool textureUploadFailed = false;
-        std::size_t uploadedTextureCount = 0u;
+        std::size_t uploadedTextureCount = 0u;   // textures this call actually created
+        std::size_t acquiredTextureCount = 0u;   // slots resolved, shared or new
         VkCommandPool commandPool = VK_NULL_HANDLE;
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         if (!uploadScene.textures.empty()) {
@@ -750,179 +1375,30 @@ bool RendererBackend::uploadImportedSceneInternal(
             }
         }
 
-        const std::uint32_t maxImportedTextures =
-            m_bindlessTextureCapacity - kBindlessTextureStaticCount;
-        const std::size_t importedTextureLimit =
-            std::min<std::size_t>(uploadScene.textures.size(), maxImportedTextures);
-        for (std::size_t textureIndex = 0; textureIndex < importedTextureLimit && !textureUploadFailed; ++textureIndex) {
+        // Slot assignment, refcounting and the image upload itself now live in
+        // acquireImportedTexture. Keying by source path means a scene naming the
+        // same .dds from several materials uploads it once, and it is the same
+        // path streaming uses to share a texture across cells.
+        // Distinguish acquires from actual uploads. A streamed chunk normally
+        // shares most of its textures with chunks already resident, so counting
+        // acquires here would report a full upload every time and make working
+        // deduplication look broken.
+        const std::size_t residentBeforeUploads = m_importedTextureSlotTable.residentCount();
+        for (std::size_t textureIndex = 0; textureIndex < uploadScene.textures.size(); ++textureIndex) {
             const odai::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
-            if (srcTexture.width == 0u || srcTexture.height == 0u || srcTexture.rgba8.empty()) {
+            const std::uint32_t slot = acquireImportedTexture(
+                normalizedImportedTextureKey(srcTexture.sourcePath),
+                srcTexture,
+                commandBuffer,
+                stagingBufferHandles);
+            if (slot == kInvalidImportedTextureSlot) {
                 continue;
             }
-            const std::uint32_t inferredMipLevelCount =
-                inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size());
-
-            std::uint32_t mipLevelCount;
-            if (srcTexture.format != odai::importer::TextureFormat::RGBA8) {
-                // Block-compressed: trust the mip count stored by the DDS loader.
-                if (srcTexture.mipLevelCount == 0u || srcTexture.rgba8.empty()) {
-                    VOX_LOGW("render") << "block-compressed texture missing mip data: "
-                                       << srcTexture.sourcePath << "; skipping";
-                    continue;
-                }
-                mipLevelCount = srcTexture.mipLevelCount;
-            } else {
-                if (inferredMipLevelCount == 0u) {
-                    VOX_LOGW("render") << "imported texture mip chain size invalid for "
-                                       << srcTexture.sourcePath << "; skipping texture";
-                    continue;
-                }
-                mipLevelCount = inferredMipLevelCount;
-                if (srcTexture.mipLevelCount != 0u && srcTexture.mipLevelCount != inferredMipLevelCount) {
-                    VOX_LOGW("render") << "imported texture mip metadata mismatch for "
-                                       << srcTexture.sourcePath << "; stored=" << srcTexture.mipLevelCount
-                                       << ", inferred=" << inferredMipLevelCount
-                                       << " (using inferred chain)";
-                }
-            }
-
-            BufferCreateDesc stagingCreateDesc{};
-            stagingCreateDesc.size = static_cast<VkDeviceSize>(srcTexture.rgba8.size());
-            stagingCreateDesc.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-            stagingCreateDesc.memoryProperties =
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-            stagingCreateDesc.initialData = srcTexture.rgba8.data();
-            const BufferHandle stagingHandle = m_bufferAllocator.createBuffer(stagingCreateDesc);
-            if (stagingHandle == kInvalidBufferHandle) {
-                VOX_LOGE("render") << "imported texture staging buffer allocation failed for "
-                                   << srcTexture.sourcePath;
-                textureUploadFailed = true;
-                break;
-            }
-            stagingBufferHandles.push_back(stagingHandle);
-
-            VkImageCreateInfo imageCreateInfo{};
-            imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
-            imageCreateInfo.format = vkFormatForImportedTexture(srcTexture.format);
-            imageCreateInfo.extent = {srcTexture.width, srcTexture.height, 1};
-            imageCreateInfo.mipLevels = mipLevelCount;
-            imageCreateInfo.arrayLayers = 1;
-            imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-            imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-            imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-            imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-            ImportedTextureResource resource{};
-            VmaAllocationCreateInfo allocationCreateInfo{};
-            allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-            allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-            const VkResult imageCreateResult = vmaCreateImage(
-                m_vmaAllocator,
-                &imageCreateInfo,
-                &allocationCreateInfo,
-                &resource.image,
-                &resource.allocation,
-                nullptr);
-            if (imageCreateResult != VK_SUCCESS) {
-                logVkFailure("vmaCreateImage(importedTexture)", imageCreateResult);
-                textureUploadFailed = true;
-                break;
-            }
-
-            VkImageViewCreateInfo viewCreateInfo{};
-            viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            viewCreateInfo.image = resource.image;
-            viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewCreateInfo.format = vkFormatForImportedTexture(srcTexture.format);
-            viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            viewCreateInfo.subresourceRange.baseMipLevel = 0;
-            viewCreateInfo.subresourceRange.levelCount = mipLevelCount;
-            viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-            viewCreateInfo.subresourceRange.layerCount = 1;
-            const VkResult imageViewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &resource.imageView);
-            if (imageViewResult != VK_SUCCESS) {
-                logVkFailure("vkCreateImageView(importedTexture)", imageViewResult);
-                if (resource.image != VK_NULL_HANDLE) {
-                    vmaDestroyImage(m_vmaAllocator, resource.image, resource.allocation);
-                }
-                textureUploadFailed = true;
-                break;
-            }
-
-            setObjectName(
-                VK_OBJECT_TYPE_IMAGE,
-                vkHandleToUint64(resource.image),
-                ("imported.texture.image." + std::to_string(textureIndex)).c_str());
-            setObjectName(
-                VK_OBJECT_TYPE_IMAGE_VIEW,
-                vkHandleToUint64(resource.imageView),
-                ("imported.texture.view." + std::to_string(textureIndex)).c_str());
-
-            transitionImageLayout(
-                commandBuffer,
-                resource.image,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_PIPELINE_STAGE_2_NONE,
-                VK_ACCESS_2_NONE,
-                VK_PIPELINE_STAGE_2_COPY_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT,
-                0,
-                1,
-                0,
-                mipLevelCount);
-
-            std::vector<VkBufferImageCopy> copyRegions;
-            copyRegions.reserve(mipLevelCount);
-            for (std::uint32_t mipLevel = 0; mipLevel < mipLevelCount; ++mipLevel) {
-                VkBufferImageCopy copyRegion{};
-                copyRegion.bufferOffset = importedTextureMipOffsetFmt(
-                    srcTexture.width, srcTexture.height, mipLevel, srcTexture.format);
-                copyRegion.bufferRowLength = 0;
-                copyRegion.bufferImageHeight = 0;
-                copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                copyRegion.imageSubresource.mipLevel = mipLevel;
-                copyRegion.imageSubresource.baseArrayLayer = 0;
-                copyRegion.imageSubresource.layerCount = 1;
-                copyRegion.imageOffset = {0, 0, 0};
-                copyRegion.imageExtent = {
-                    std::max(1u, srcTexture.width >> mipLevel),
-                    std::max(1u, srcTexture.height >> mipLevel),
-                    1
-                };
-                copyRegions.push_back(copyRegion);
-            }
-            vkCmdCopyBufferToImage(
-                commandBuffer,
-                m_bufferAllocator.getBuffer(stagingHandle),
-                resource.image,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                static_cast<std::uint32_t>(copyRegions.size()),
-                copyRegions.data());
-
-            transitionImageLayout(
-                commandBuffer,
-                resource.image,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_2_COPY_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT,
-                0,
-                1,
-                0,
-                mipLevelCount);
-
-            importedTextureSlots[textureIndex] =
-                static_cast<std::uint32_t>(kBindlessTextureStaticCount + m_importedTextureResources.size());
-            m_importedTextureResources.push_back(resource);
-            ++uploadedTextureCount;
+            importedTextureSlots[textureIndex] = slot;
+            ++acquiredTextureCount;
         }
+        uploadedTextureCount =
+            m_importedTextureSlotTable.residentCount() - residentBeforeUploads;
 
         if (!textureUploadFailed && commandBuffer != VK_NULL_HANDLE) {
             if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -949,11 +1425,19 @@ bool RendererBackend::uploadImportedSceneInternal(
             clearImportedSceneMeshes();
             return false;
         }
-        if (uploadScene.textures.size() > importedTextureLimit) {
+        // uploadedTextureCount counts distinct slots, so a scene that reuses one
+        // .dds across materials now legitimately reports fewer uploads than it
+        // has texture entries. Only warn when slots actually ran out.
+        const std::size_t uniqueTextureCount = m_importedTextureSlotTable.residentCount();
+        if (m_importedTextureSlotTable.slotCount() >= m_importedTextureSlotTable.capacity() &&
+            uploadedTextureCount < uploadScene.textures.size()) {
             VOX_LOGW("render") << "imported texture set truncated by bindless capacity: uploaded "
                                << uploadedTextureCount << " of " << uploadScene.textures.size();
-        } else if (uploadedTextureCount > 0u) {
-            VOX_LOGI("render") << "uploaded imported textures: " << uploadedTextureCount;
+        } else if (acquiredTextureCount > 0u) {
+            VOX_LOGI("render") << "imported textures: uploaded " << uploadedTextureCount
+                               << ", shared " << (acquiredTextureCount - uploadedTextureCount)
+                               << " (resident=" << uniqueTextureCount
+                               << ", entries=" << uploadScene.textures.size() << ")";
         }
     } else if (!uploadScene.textures.empty()) {
         VOX_LOGW("render") << "imported textures unavailable because bindless texture sampling is not ready";
@@ -1135,8 +1619,10 @@ bool RendererBackend::uploadImportedSceneInternal(
     draws.reserve(uploadScene.packedDraws.size());
     waterVertices.reserve(uploadScene.waterPatches.size() * 4u);
     waterIndices.reserve(uploadScene.waterPatches.size() * 6u);
-    m_importedLocalLights.clear();
-    m_importedLocalLights.reserve(uploadScene.lights.size());
+    if (!appendChunk) {
+        m_importedLocalLights.clear();
+    }
+    m_importedLocalLights.reserve(m_importedLocalLights.size() + uploadScene.lights.size());
     for (const odai::importer::ImportedSceneLight& sceneLight : uploadScene.lights) {
         if (sceneLight.radius <= 0.0f || sceneLight.intensity <= 0.0f) {
             continue;
@@ -1479,17 +1965,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         return true;
     };
 
-    BufferHandle newVertexHandle = kInvalidBufferHandle;
-    if (!uploadDeviceLocalBuffer(
-            vertices.data(),
-            static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex)),
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            "imported scene vertex",
-            newVertexHandle)) {
-        return false;
-    }
-
     // Compact shadow stream: the same vertices with only what the cascades read.
+    // Allocated from the same vertex range as the main stream, so one
+    // ImportedMeshDraw::vertexOffset addresses both despite the differing stride.
     std::vector<ImportedShadowVertex> shadowVertices;
     shadowVertices.reserve(vertices.size());
     for (const ImportedMeshVertex& vertex : vertices) {
@@ -1503,60 +1981,105 @@ bool RendererBackend::uploadImportedSceneInternal(
         shadowVertex.flags = vertex.flags;
         shadowVertices.push_back(shadowVertex);
     }
-    BufferHandle newShadowVertexHandle = kInvalidBufferHandle;
-    if (!shadowVertices.empty() &&
-        !uploadDeviceLocalBuffer(
+
+    // Carve this scene's geometry out of the shared arenas. Growing first and
+    // retrying once covers the case where capacity was fine but fragmentation
+    // left no single range big enough.
+    const std::uint64_t chunkVertexCount = vertices.size();
+    const std::uint64_t chunkIndexCount = indices.size();
+    if (!ensureImportedArenaCapacity(chunkVertexCount, chunkIndexCount)) {
+        return false;
+    }
+    std::uint64_t firstVertex = m_importedVertexArena.allocate(chunkVertexCount, 1);
+    if (firstVertex == GpuArenaAllocator::kInvalidOffset && chunkVertexCount > 0) {
+        m_importedVertexArena.grow(m_importedVertexArena.capacity() + chunkVertexCount);
+        if (!ensureImportedArenaCapacity(chunkVertexCount, 0)) {
+            return false;
+        }
+        firstVertex = m_importedVertexArena.allocate(chunkVertexCount, 1);
+    }
+    std::uint64_t firstIndexSlot = m_importedIndexArena.allocate(chunkIndexCount, 1);
+    if (firstIndexSlot == GpuArenaAllocator::kInvalidOffset && chunkIndexCount > 0) {
+        m_importedIndexArena.grow(m_importedIndexArena.capacity() + chunkIndexCount);
+        if (!ensureImportedArenaCapacity(0, chunkIndexCount)) {
+            return false;
+        }
+        firstIndexSlot = m_importedIndexArena.allocate(chunkIndexCount, 1);
+    }
+    if ((chunkVertexCount > 0 && firstVertex == GpuArenaAllocator::kInvalidOffset) ||
+        (chunkIndexCount > 0 && firstIndexSlot == GpuArenaAllocator::kInvalidOffset)) {
+        VOX_LOGE("render") << "imported geometry arena could not satisfy scene of "
+                           << chunkVertexCount << " vertices / " << chunkIndexCount << " indices";
+        return false;
+    }
+    if (chunkVertexCount == 0) {
+        firstVertex = 0;
+    }
+    if (chunkIndexCount == 0) {
+        firstIndexSlot = 0;
+    }
+
+    const bool geometryUploaded =
+        uploadIntoBufferRange(
+            m_importedVertexBufferHandle,
+            static_cast<VkDeviceSize>(firstVertex * sizeof(ImportedMeshVertex)),
+            vertices.data(),
+            static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex)),
+            "imported scene vertex") &&
+        uploadIntoBufferRange(
+            m_importedShadowVertexBufferHandle,
+            static_cast<VkDeviceSize>(firstVertex * sizeof(ImportedShadowVertex)),
             shadowVertices.data(),
             static_cast<VkDeviceSize>(shadowVertices.size() * sizeof(ImportedShadowVertex)),
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            "imported scene shadow vertex",
-            newShadowVertexHandle)) {
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    BufferHandle newIndexHandle = kInvalidBufferHandle;
-    if (!uploadDeviceLocalBuffer(
+            "imported scene shadow vertex") &&
+        uploadIntoBufferRange(
+            m_importedIndexBufferHandle,
+            static_cast<VkDeviceSize>(firstIndexSlot * sizeof(std::uint32_t)),
             indices.data(),
             static_cast<VkDeviceSize>(indices.size() * sizeof(std::uint32_t)),
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            "imported scene index",
-            newIndexHandle)) {
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        if (newShadowVertexHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(newShadowVertexHandle);
-        }
+            "imported scene index");
+    if (!geometryUploaded) {
+        m_importedVertexArena.free(firstVertex, chunkVertexCount);
+        m_importedIndexArena.free(firstIndexSlot, chunkIndexCount);
         return false;
     }
 
-    m_importedVertexBufferHandle = newVertexHandle;
-    m_importedShadowVertexBufferHandle = newShadowVertexHandle;
-    m_importedIndexBufferHandle = newIndexHandle;
-    m_importedIndexCount = static_cast<std::uint32_t>(indices.size());
-    m_importedTerrainDrawCount = std::min<std::uint32_t>(mergedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
-    m_importedStaticDrawCount = static_cast<std::uint32_t>(draws.size()) - std::min(m_importedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
-    for (ImportedMeshDraw& draw : draws) {
-        draw.vertexBufferHandle = newVertexHandle;
-        draw.indexBufferHandle = newIndexHandle;
-        m_importedMeshDraws.push_back(draw);
-    }
-    m_importedPageDrawRanges = std::move(pageDrawRanges);
+    // m_importedIndexCount / terrain / static counts are derived from the live
+    // chunk set by rebuildImportedDrawTables() below, not set here.
+    const std::uint32_t chunkTerrainDrawCount =
+        std::min<std::uint32_t>(mergedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
 
-    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(newVertexHandle);
-    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(newIndexHandle);
+    ImportedSceneChunk chunk{};
+    chunk.alive = true;
+    chunk.firstVertex = firstVertex;
+    chunk.vertexCount = chunkVertexCount;
+    chunk.firstIndex = firstIndexSlot;
+    chunk.indexCount = chunkIndexCount;
+    chunk.terrainDrawCount = chunkTerrainDrawCount;
+    chunk.textureSlots = importedTextureSlots;
+    chunk.draws.reserve(draws.size());
+    for (ImportedMeshDraw& draw : draws) {
+        draw.vertexBufferHandle = m_importedVertexBufferHandle;
+        draw.indexBufferHandle = m_importedIndexBufferHandle;
+        // Rebase onto this chunk's arena ranges: indices are stored chunk-local,
+        // so the arena offset is added here rather than baked into the data.
+        draw.firstIndex += static_cast<std::uint32_t>(firstIndexSlot);
+        draw.vertexOffset = static_cast<std::int32_t>(firstVertex);
+        chunk.draws.push_back(draw);
+    }
+    chunk.pageRanges = std::move(pageDrawRanges);
+    m_importedSceneChunks.push_back(std::move(chunk));
+    rebuildImportedDrawTables();
+
+    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
+    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
     if (vertexBuffer == VK_NULL_HANDLE || indexBuffer == VK_NULL_HANDLE) {
         VOX_LOGE("render") << "imported scene upload produced null Vulkan buffers"
-                           << " (vertexHandle=" << newVertexHandle
-                           << ", indexHandle=" << newIndexHandle << ")";
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
-        m_importedVertexBufferHandle = kInvalidBufferHandle;
-        m_importedIndexBufferHandle = kInvalidBufferHandle;
-        m_importedMeshDraws.clear();
-        m_importedPageDrawRanges.clear();
-        m_importedIndexCount = 0;
-        m_importedTerrainDrawCount = 0;
-        m_importedStaticDrawCount = 0;
+                           << " (vertexHandle=" << m_importedVertexBufferHandle
+                           << ", indexHandle=" << m_importedIndexBufferHandle << ")";
+        // The arenas are shared state now, so tear them down as a unit rather
+        // than destroying handles this call happens to be holding.
+        clearImportedSceneMeshes();
         return false;
     }
     if (vertexBuffer != VK_NULL_HANDLE) {
@@ -1565,7 +2088,16 @@ bool RendererBackend::uploadImportedSceneInternal(
     if (indexBuffer != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.importedScene.index");
     }
-    if (!waterVertices.empty() && !waterIndices.empty()) {
+    // Known limitation: water still lives in one exact-fit buffer pair rather
+    // than an arena, so an appended chunk cannot contribute water without
+    // discarding whatever is already resident. Exteriors cooked so far carry no
+    // water patches, so this is inert today -- but it must become arena-backed
+    // like the geometry before any water-bearing cell is streamed.
+    if (appendChunk && !waterVertices.empty() &&
+        m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
+        VOX_LOGW("render") << "appended imported chunk carries " << waterVertices.size()
+                           << " water vertices but water is not arena-backed yet; skipping them";
+    } else if (!waterVertices.empty() && !waterIndices.empty()) {
         BufferHandle waterVertexHandle = kInvalidBufferHandle;
         if (!uploadDeviceLocalBuffer(
                 waterVertices.data(),
@@ -1614,7 +2146,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, terrainDraws);
     const ImportedDrawBounds staticBounds =
         computeImportedDrawBounds(uploadScene.packedVertices, uploadScene.packedIndices, staticDraws);
-    m_importedGiTriangles.clear();
+    if (!appendChunk) {
+        m_importedGiTriangles.clear();
+    }
     if (importedSceneIsInterior) {
         constexpr std::size_t kImportedGiTriangleLimit = 300000u;
         m_importedGiTriangles.reserve(
@@ -1702,16 +2236,51 @@ bool RendererBackend::uploadImportedSceneInternal(
                 sceneBounds = staticBounds;
             }
         }
-        m_importedSceneBoundsValid = sceneBounds.valid;
         if (sceneBounds.valid) {
+            float chunkCenter[3] = {};
             float radiusSq = 0.0f;
             for (int axis = 0; axis < 3; ++axis) {
-                m_importedSceneBoundsCenter[axis] =
-                    (sceneBounds.min[axis] + sceneBounds.max[axis]) * 0.5f;
+                chunkCenter[axis] = (sceneBounds.min[axis] + sceneBounds.max[axis]) * 0.5f;
                 const float halfExtent = (sceneBounds.max[axis] - sceneBounds.min[axis]) * 0.5f;
                 radiusSq += halfExtent * halfExtent;
             }
-            m_importedSceneBoundsRadius = std::sqrt(radiusSq);
+            const float chunkRadius = std::sqrt(radiusSq);
+
+            if (!appendChunk || !m_importedSceneBoundsValid) {
+                std::copy(std::begin(chunkCenter), std::end(chunkCenter), m_importedSceneBoundsCenter);
+                m_importedSceneBoundsRadius = chunkRadius;
+            } else {
+                // Merge the new chunk's bounding sphere into the resident one.
+                // Streaming grows the world a cell at a time, so replacing the
+                // bounds would shrink them to whichever chunk loaded last and
+                // mis-fit everything derived from them.
+                float delta[3] = {
+                    chunkCenter[0] - m_importedSceneBoundsCenter[0],
+                    chunkCenter[1] - m_importedSceneBoundsCenter[1],
+                    chunkCenter[2] - m_importedSceneBoundsCenter[2]};
+                const float distance = std::sqrt(
+                    delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+                if (distance + chunkRadius <= m_importedSceneBoundsRadius) {
+                    // New sphere already enclosed; nothing to do.
+                } else if (distance + m_importedSceneBoundsRadius <= chunkRadius) {
+                    std::copy(std::begin(chunkCenter), std::end(chunkCenter), m_importedSceneBoundsCenter);
+                    m_importedSceneBoundsRadius = chunkRadius;
+                } else {
+                    const float mergedRadius =
+                        (distance + m_importedSceneBoundsRadius + chunkRadius) * 0.5f;
+                    if (distance > 1e-5f) {
+                        const float t =
+                            (mergedRadius - m_importedSceneBoundsRadius) / distance;
+                        for (int axis = 0; axis < 3; ++axis) {
+                            m_importedSceneBoundsCenter[axis] += delta[axis] * t;
+                        }
+                    }
+                    m_importedSceneBoundsRadius = mergedRadius;
+                }
+            }
+            m_importedSceneBoundsValid = true;
+        } else if (!appendChunk) {
+            m_importedSceneBoundsValid = false;
         }
     }
     m_voxelGiWorldDirty = false;

@@ -238,7 +238,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     }
                     const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
                     countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                    vkCmdDrawIndexed(
+                        commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                        importedDraw.vertexOffset, 0);
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }
@@ -270,7 +272,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 );
                 for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                     countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                    vkCmdDrawIndexed(
+                        commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                        importedDraw.vertexOffset, 0);
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }

@@ -43,6 +43,22 @@ public:
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
 
+    // Streaming: add one more resident chunk without disturbing those already
+    // loaded, and evict one by the index add returned. Unlike
+    // uploadImportedScene(), neither replaces the scene or waits for the device
+    // to go idle, so both are safe to call between frames while the player moves.
+    //
+    // Geometry is suballocated from shared arenas and textures are reference
+    // counted by source path, so a texture used by several chunks uploads once
+    // and survives until the last chunk referencing it is evicted.
+    //
+    // addImportedSceneChunk returns kInvalidImportedChunkIndex on failure.
+    // Indices stay valid across evictions.
+    static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
+    std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
+    void removeImportedSceneChunk(std::size_t chunkIndex);
+    [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
+
     // Named material library, indexed by vertex flag bits 24-31 (see
     // import/imported_material.h). Index 0 is a reserved sentinel and is
     // ignored; out-of-range indices are ignored.
@@ -165,6 +181,12 @@ public:
     void setSsaoEnabled(bool enabled);
     [[nodiscard]] bool isSsaoEnabled() const;
     void setAmbientOcclusionTuning(float radius, float bias, float intensity);
+
+    // Multi-scale AO. The fine march runs at radius * fineRadiusScale and is
+    // combined with the coarse one by min(), so contact darkening and wide
+    // occlusion both survive instead of one radius having to serve both.
+    // Zero (or >= 1) runs a single march and costs nothing extra.
+    void setAmbientOcclusionFineScale(float fineRadiusScale);
     // Picks the AO estimator (see AoMode in renderer_types.h). Orthogonal to
     // setSsaoEnabled(), which gates the pass entirely — both must be on for AO
     // to appear. Radius is in world units, so re-tune it with the mode if the

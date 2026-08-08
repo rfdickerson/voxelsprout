@@ -44,6 +44,24 @@ bool Renderer::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
     return m_backend->uploadGpuScene(scene);
 }
 
+std::size_t Renderer::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
+    const std::size_t chunkIndex = m_backend->addImportedSceneChunk(scene);
+    return chunkIndex == RendererBackend::kInvalidImportedChunkIndex
+        ? kInvalidImportedChunkIndex
+        : chunkIndex;
+}
+
+void Renderer::removeImportedSceneChunk(std::size_t chunkIndex) {
+    if (chunkIndex == kInvalidImportedChunkIndex) {
+        return;
+    }
+    m_backend->removeImportedSceneChunkAt(chunkIndex);
+}
+
+std::size_t Renderer::liveImportedSceneChunkCount() const {
+    return m_backend->liveImportedSceneChunkCount();
+}
+
 bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }
@@ -256,6 +274,10 @@ bool Renderer::isSsaoEnabled() const {
 
 void Renderer::setAmbientOcclusionTuning(float radius, float bias, float intensity) {
     m_backend->setAmbientOcclusionTuning(radius, bias, intensity);
+}
+
+void Renderer::setAmbientOcclusionFineScale(float fineRadiusScale) {
+    m_backend->setAmbientOcclusionFineScale(fineRadiusScale);
 }
 
 void Renderer::setAmbientOcclusionMode(AoMode mode) {

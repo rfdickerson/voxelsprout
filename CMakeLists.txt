@@ -963,6 +963,21 @@ if(ODAI_BUILD_APP)
         add_executable(odai_game_newvegas
             src/games/newvegas/newvegas_main.cc
             src/games/newvegas/newvegas_app.cc
+            src/games/newvegas/newvegas_collision.cc
+            src/core/job_system.cc
+            src/import/cell_residency_planner.cc
+            # The runtime reads the game's own files now: BSA archives, the ESM
+            # record walker, typed record extraction, the NIF geometry parser
+            # and the shared per-cell scene builder.
+            src/import/fnv/asset_source.cc
+            src/import/fnv/bsa_archive.cc
+            src/import/fnv/cell_builder.cc
+            src/import/fnv/decoded_texture_cache.cc
+        src/import/fnv/decoded_texture_cache.cc
+            src/import/fnv/cell_streamer.cc
+            src/import/fnv/esm_reader.cc
+            src/import/fnv/fallout_records.cc
+            src/import/fnv/nif_scene.cc
             src/engine/game_app.cc
             src/engine/plugin.cc
             src/import/dds.cc
@@ -988,6 +1003,9 @@ if(ODAI_BUILD_APP)
         target_link_libraries(odai_game_newvegas PRIVATE
             odai_ui odai_ui_vulkan odai_audio
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+            # zlib: the runtime now inflates compressed ESM records and BSA
+            # entries itself, streaming from the game's own files.
+            ZLIB::ZLIB
         )
         if(TARGET glfw)
             target_link_libraries(odai_game_newvegas PRIVATE glfw)
@@ -1524,7 +1542,10 @@ if(ODAI_BUILD_TOOLS)
     add_executable(odai_newvegas_cooker
         src/tools/newvegas_cooker_main.cc
         src/import/dds.cc
+        src/import/fnv/asset_source.cc
         src/import/fnv/bsa_archive.cc
+        src/import/fnv/cell_builder.cc
+        src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
@@ -1551,6 +1572,9 @@ if(ODAI_BUILD_TOOLS)
         src/import/dds.cc
         src/import/imported_scene.cc
         src/import/imported_scene_query.cc
+        src/import/fnv/asset_source.cc
+        src/import/fnv/cell_builder.cc
+        src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/fallout_records.cc
@@ -1611,6 +1635,9 @@ if(BUILD_TESTING)
     # New Vegas Data Files are available to test against in CI.
     add_executable(odai_fnv_import_tests
         tests/fnv_import_tests.cc
+        src/core/job_system.cc
+        src/import/fnv/asset_source.cc
+        src/import/fnv/async_asset_loader.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/fallout_records.cc
@@ -1775,6 +1802,50 @@ if(BUILD_TESTING)
         target_compile_options(odai_core_types_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_core_types_tests COMMAND odai_core_types_tests)
+
+    # Refcounted bindless slot bookkeeping (render/bindless_slot_table.h) that
+    # imported-texture streaming rests on. Deliberately Vulkan-free so it can be
+    # tested here at all -- no test executable in this project links Vulkan.
+    add_executable(odai_bindless_slot_table_tests
+        tests/bindless_slot_table_tests.cc
+    )
+    target_include_directories(odai_bindless_slot_table_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_bindless_slot_table_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_bindless_slot_table_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_bindless_slot_table_tests COMMAND odai_bindless_slot_table_tests)
+
+    # Geometry arena suballocator (render/gpu_arena_allocator.h) behind imported
+    # scene streaming. Also Vulkan-free; the coalescing tests are the guard
+    # against an arena that fragments slowly over a long session.
+    add_executable(odai_gpu_arena_allocator_tests
+        tests/gpu_arena_allocator_tests.cc
+    )
+    target_include_directories(odai_gpu_arena_allocator_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_gpu_arena_allocator_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_gpu_arena_allocator_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_gpu_arena_allocator_tests COMMAND odai_gpu_arena_allocator_tests)
+
+    # Exterior-cell streaming residency policy (import/cell_residency_planner.h):
+    # prediction, load/unload hysteresis, in-flight budget, wasted-work counting.
+    # Pure decision logic -- no Vulkan, no IO, no threads -- so the behaviours
+    # that would otherwise only show up as runtime stutter are testable.
+    add_executable(odai_cell_residency_planner_tests
+        tests/cell_residency_planner_tests.cc
+        src/import/cell_residency_planner.cc
+    )
+    target_include_directories(odai_cell_residency_planner_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_cell_residency_planner_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_cell_residency_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_cell_residency_planner_tests COMMAND odai_cell_residency_planner_tests)
 
     # GameApp CPU timing zones (engine/game_frame_stats.h). Header-only and
     # Vulkan-free, so the zone bookkeeping is testable without a window.

@@ -10,6 +10,20 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
             app.setScenePath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--stream") == 0 && i + 1 < argc) {
+            // Stream straight from the game's own Data directory -- no cooking.
+            app.setStreamDataPath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--plugin") == 0 && i + 1 < argc) {
+            app.setStreamPlugin(argv[++i]);
+        } else if (std::strcmp(argv[i], "--worldspace") == 0 && i + 1 < argc) {
+            app.setStreamWorldspace(argv[++i]);
+        } else if (std::strcmp(argv[i], "--cache") == 0 && i + 1 < argc) {
+            app.setStreamCacheDirectory(argv[++i]);
+        } else if (std::strcmp(argv[i], "--no-cache") == 0) {
+            app.setStreamCacheEnabled(false);
+        } else if (std::strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
+            // Interior cell whose doorstep to start on, e.g. GSDocMitchellHouse.
+            app.setStreamSpawnInterior(argv[++i]);
         } else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             const std::string path = argv[++i];
             // Optional frame count after the path, for scenes that need longer

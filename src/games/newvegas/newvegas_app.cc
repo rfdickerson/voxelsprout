@@ -95,6 +95,14 @@ void NewVegasApp::buildGroundHeightField(const importer::ImportedScene& scene) {
 }
 
 bool NewVegasApp::groundHeightAt(float x, float z, float& outHeight) const {
+    // Streaming owns its own terrain: the whole-scene height field below is
+    // built once from a loaded .bin and has nothing in it when cells arrive and
+    // leave continuously.
+    if (m_streamer) {
+        // referenceY is the player's foot height, so ceilings and upper
+        // storeys above them are not mistaken for the ground.
+        return m_collision.groundHeight(x, z, m_cameraY - kEyeHeightUnits, outHeight);
+    }
     if (m_groundHeights.empty()) {
         return false;
     }
@@ -150,10 +158,47 @@ bool NewVegasApp::loadScene(
                          << " vertices, " << scene.textures.size() << " textures, "
                          << scene.doors.size() << " doors)";
 
-    if (!m_renderer.uploadImportedScene(scene)) {
+    // Diagnostic A/B: ODAI_FNV_AS_CHUNK routes the same scene through the
+    // streaming chunk path instead of the whole-scene upload, with everything
+    // else identical. Isolates "the geometry is wrong" from "the chunk path is
+    // wrong" -- they look the same on screen.
+    if (std::getenv("ODAI_FNV_AS_CHUNK") != nullptr) {
+        if (m_renderer.addImportedSceneChunk(scene) ==
+            render::Renderer::kInvalidImportedChunkIndex) {
+            VOX_LOGE("newvegas") << "failed to add scene as a chunk";
+            return false;
+        }
+        VOX_LOGI("newvegas") << "ODAI_FNV_AS_CHUNK: uploaded via addImportedSceneChunk";
+    } else if (!m_renderer.uploadImportedScene(scene)) {
         VOX_LOGE("newvegas") << "failed to upload scene to the renderer";
         return false;
     }
+    // ODAI_FNV_CHUNK_TEST exercises the streaming add/remove path before a real
+    // cell streamer exists to drive it. It re-adds the scene just loaded as a
+    // second resident chunk and then evicts it, which is the only way today to
+    // check the three invariants that matter and all fail silently:
+    //   * every texture is shared, so the second add must upload zero of them
+    //     (the refcount table returns the resident slot instead);
+    //   * the geometry arena must grow and copy, leaving chunk 0 renderable;
+    //   * eviction must return the arena ranges and drop the texture refcounts
+    //     back, restoring exactly the pre-test state.
+    // Loading the same scene twice means the two chunks occupy the same space,
+    // so the screen should look unchanged throughout -- which is the point.
+    if (std::getenv("ODAI_FNV_CHUNK_TEST") != nullptr) {
+        VOX_LOGI("newvegas") << "chunk test: live chunks before add = "
+                             << m_renderer.liveImportedSceneChunkCount();
+        const std::size_t testChunk = m_renderer.addImportedSceneChunk(scene);
+        if (testChunk == render::Renderer::kInvalidImportedChunkIndex) {
+            VOX_LOGE("newvegas") << "chunk test: addImportedSceneChunk failed";
+        } else {
+            VOX_LOGI("newvegas") << "chunk test: added chunk " << testChunk
+                                 << ", live chunks = " << m_renderer.liveImportedSceneChunkCount();
+            m_renderer.removeImportedSceneChunk(testChunk);
+            VOX_LOGI("newvegas") << "chunk test: removed chunk " << testChunk
+                                 << ", live chunks = " << m_renderer.liveImportedSceneChunkCount();
+        }
+    }
+
     const bool interior = importer::importedSceneSourceTagIsInterior(scene.sourceTag);
     m_renderer.setImportedSceneInteriorMode(interior);
     m_doors = scene.doors;
@@ -292,6 +337,40 @@ void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
     }
 }
 
+namespace {
+
+// Common install locations for Fallout: New Vegas, in the order they are tried.
+// A directory only counts when it actually holds the master plugin -- an empty
+// or partial directory would otherwise be "found" and then fail later with a
+// much less obvious message.
+std::string findFalloutDataDirectory() {
+    std::vector<std::filesystem::path> candidates;
+
+    const char* home = std::getenv("HOME");
+    if (home != nullptr) {
+        const std::filesystem::path homePath(home);
+        candidates.push_back(homePath / ".steam/steam/steamapps/common/Fallout New Vegas/Data");
+        candidates.push_back(homePath / ".local/share/Steam/steamapps/common/Fallout New Vegas/Data");
+        candidates.push_back(homePath / "GOG Games/Fallout New Vegas/Data");
+    }
+    // WSL and dual-boot mounts of a Windows install.
+    candidates.emplace_back("/mnt/c/Program Files (x86)/Steam/steamapps/common/Fallout New Vegas/Data");
+    candidates.emplace_back("/mnt/c/GOG Games/Fallout New Vegas/Data");
+    // Native Windows.
+    candidates.emplace_back("C:/Program Files (x86)/Steam/steamapps/common/Fallout New Vegas/Data");
+    candidates.emplace_back("C:/GOG Games/Fallout New Vegas/Data");
+
+    for (const std::filesystem::path& candidate : candidates) {
+        std::error_code existsError;
+        if (std::filesystem::exists(candidate / "FalloutNV.esm", existsError) && !existsError) {
+            return candidate.string();
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
 bool NewVegasApp::onInit() {
     // Without this the font atlas is empty, so every addText() emits zero
     // quads and GameApp::drawPerfOverlay bails outright — the HUD and F3 both
@@ -305,13 +384,39 @@ bool NewVegasApp::onInit() {
         return false;
     }
 
-    if (m_scenePath.empty()) {
+    if (m_streamDirectory.empty()) {
+        if (const char* fromEnv = std::getenv("ODAI_FNV_STREAM_DIR")) {
+            m_streamDirectory = fromEnv;
+        }
+    }
+    if (m_streamDirectory.empty() && m_scenePath.empty() &&
+        std::getenv("ODAI_FNV_SCENE") == nullptr) {
+        // Nothing specified at all: look for an installed copy of the game and
+        // stream from it. Streaming needs no cooked assets, so a bare launch now
+        // has a sensible thing to do -- which it did not when a cooked scene was
+        // the only possible source.
+        m_streamDirectory = findFalloutDataDirectory();
+        if (!m_streamDirectory.empty()) {
+            VOX_LOGI("newvegas") << "found Fallout: New Vegas data at " << m_streamDirectory;
+        }
+    }
+    // NOTE: streaming init happens further down, AFTER the renderer pass-stack
+    // configuration. Returning here instead left streaming running with ray
+    // tracing, voxel GI and sun shafts all still enabled -- which showed up as a
+    // BLAS/TLAS rebuild on every single streamed cell.
+    const bool streamingMode = !m_streamDirectory.empty();
+
+    if (!streamingMode && m_scenePath.empty()) {
         if (const char* fromEnv = std::getenv("ODAI_FNV_SCENE")) {
             m_scenePath = fromEnv;
         }
     }
-    if (m_scenePath.empty()) {
-        VOX_LOGE("newvegas") << "no scene given; pass --scene <path.bin> or set ODAI_FNV_SCENE";
+    if (!streamingMode && m_scenePath.empty()) {
+        VOX_LOGE("newvegas")
+            << "no Fallout: New Vegas install found, and no scene given.\n"
+               "  Stream from the game (no cooking): --stream \"<.../Fallout New Vegas/Data>\"\n"
+               "  Load a cooked scene:               --scene <path.bin>\n"
+               "  Or set ODAI_FNV_STREAM_DIR / ODAI_FNV_SCENE.";
         return false;
     }
     // Local, not a member: uploadImportedScene deep-copies the whole scene, so
@@ -326,10 +431,12 @@ bool NewVegasApp::onInit() {
     // mode) and the town centroid finds nothing (spawn falls back to the middle
     // of the map). This costs the mesh + instance arrays for the duration of
     // onInit, which is the price of knowing where the ground and the town are.
-    m_sceneDirectory = std::filesystem::path(m_scenePath).parent_path();
-    m_exteriorStem = std::filesystem::path(m_scenePath).stem().string();
-    if (!loadScene(std::filesystem::path(m_scenePath), nullptr, nullptr)) {
-        return false;
+    if (!streamingMode) {
+        m_sceneDirectory = std::filesystem::path(m_scenePath).parent_path();
+        m_exteriorStem = std::filesystem::path(m_scenePath).stem().string();
+        if (!loadScene(std::filesystem::path(m_scenePath), nullptr, nullptr)) {
+            return false;
+        }
     }
     // Sun plus cascaded shadow maps, and nothing the original game didn't have.
     // Fallout: New Vegas lit its world with a directional sun, shadow maps and
@@ -352,20 +459,62 @@ bool NewVegasApp::onInit() {
     m_renderer.setRayTracingEnabled(false);
     m_renderer.setSunShaftsEnabled(false);
 
-    // AoMode::Off skips both AO dispatches, so setSsaoEnabled is moot — but set it
-    // anyway so the two agree and neither reads as a leftover.
+    // Ambient occlusion, tuned for Bethesda scale.
     //
-    // If AO is ever restored here it needs re-tuning for Bethesda scale, and the
-    // reasoning is worth keeping: GameApp::init calls setStrategyMapMode, which
-    // pins the AO radius to 7 world units — sensible for a strategy map, but 10 cm
-    // at ~70 units/metre. The GTAO march takes six steps across a screen-space
-    // radius of roughly `radius * 9297 / depth` pixels, so a 7-unit radius
-    // collapses to sub-pixel steps beyond ~1500 units and the estimator early-outs
-    // to "unoccluded" for the whole frame. The working value was
-    // setAmbientOcclusionTuning(128.0f, 40.0f, 0.85f): 128 is not a taste call, it
-    // is the shader's own clamp ceiling in ssao.comp.slang and happens to be ~1.8 m.
-    m_renderer.setSsaoEnabled(false);
-    m_renderer.setAmbientOcclusionMode(render::AoMode::Off);
+    // The radius is NOT a taste call. GameApp::init calls setStrategyMapMode,
+    // which pins the AO radius to 7 world units -- sensible for a strategy map,
+    // but 10 cm at Fallout's ~70 units/metre. The GTAO march takes six steps
+    // across a screen-space radius of roughly `radius * 9297 / depth` pixels, so
+    // a 7-unit radius collapses to sub-pixel steps beyond ~1500 units and the
+    // estimator early-outs to "unoccluded" for the entire frame -- AO that costs
+    // its full dispatch and produces nothing. 128 is the shader's own clamp
+    // ceiling in ssao.comp.slang and lands at ~1.8 m, which is the scale of the
+    // contact darkening this world wants.
+    //
+    // ODAI_FNV_AO overrides the mode (off/ssao/hbao/gtao) for A/B comparison.
+    render::AoMode aoMode = render::AoMode::Gtao;
+    if (const char* aoEnv = std::getenv("ODAI_FNV_AO")) {
+        const std::string requested = aoEnv;
+        if (requested == "off") {
+            aoMode = render::AoMode::Off;
+        } else if (requested == "ssao") {
+            aoMode = render::AoMode::Ssao;
+        } else if (requested == "hbao") {
+            aoMode = render::AoMode::Hbao;
+        }
+    }
+    m_renderer.setSsaoEnabled(aoMode != render::AoMode::Off);
+    m_renderer.setAmbientOcclusionMode(aoMode);
+    // Sweepable, because "too subtle" is a measurable claim: the A/B against
+    // AO-off below is what says whether a value actually changed the image.
+    //
+    // NOTE the intensity is an EXPONENT: sampleSsaoAmbientFactor computes
+    // pow(ssaoRaw, intensity) on a value in [0,1]. Anything below 1 pushes the
+    // result toward 1, i.e. actively weakens the occlusion -- which is what the
+    // inherited 0.85 was doing.
+    float aoRadius = 300.0f;
+    float aoBias = 40.0f;
+    float aoIntensity = 1.7f;
+    if (const char* env = std::getenv("ODAI_FNV_AO_RADIUS")) {
+        aoRadius = static_cast<float>(std::atof(env));
+    }
+    if (const char* env = std::getenv("ODAI_FNV_AO_BIAS")) {
+        aoBias = static_cast<float>(std::atof(env));
+    }
+    if (const char* env = std::getenv("ODAI_FNV_AO_INTENSITY")) {
+        aoIntensity = static_cast<float>(std::atof(env));
+    }
+    m_renderer.setAmbientOcclusionTuning(aoRadius, aoBias, aoIntensity);
+
+    // Multi-scale: the coarse march reaches well past contact range, the fine
+    // one at ~22% of it catches where objects meet the ground. One radius
+    // cannot do both -- the march has a fixed step count, so widening it just
+    // spreads the same samples further apart.
+    float aoFineScale = 0.22f;
+    if (const char* env = std::getenv("ODAI_FNV_AO_FINE")) {
+        aoFineScale = static_cast<float>(std::atof(env));
+    }
+    m_renderer.setAmbientOcclusionFineScale(aoFineScale);
 
     // Eye adaptation. Without it the renderer holds a fixed exposure, and the
     // Mojave at noon came out around 46/255 -- textured, detailed, and far too
@@ -397,6 +546,12 @@ bool NewVegasApp::onInit() {
         }
     }
     applyTimeOfDay();
+
+    // Last, so the streamer inherits the pass-stack configuration above rather
+    // than paying for ray tracing and voxel GI on every streamed cell.
+    if (streamingMode && !initStreaming()) {
+        return false;
+    }
 
     setMouseCaptured(true);
     return true;
@@ -477,6 +632,13 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     m_cameraX += moveX * speed * deltaSeconds;
     m_cameraZ += moveZ * speed * deltaSeconds;
 
+    // Push back out of anything solid the move ended inside. Walk mode only:
+    // fly mode is the diagnostic camera and deliberately passes through
+    // everything, which is what makes it useful for looking at geometry.
+    if (m_walkMode && m_streamer) {
+        m_collision.resolveHorizontal(m_cameraX, m_cameraY, m_cameraZ);
+    }
+
     // Walk mode pins the eye to the terrain; fly mode (F) keeps the old free
     // movement, which is still the only way to inspect the scene from above or
     // to get back if you walk off the edge of the cooked grid.
@@ -510,6 +672,283 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     }
 }
 
+bool NewVegasApp::initStreaming() {
+    // One worker per core minus the main thread and a little headroom, floored
+    // at 2. Streaming is latency-sensitive rather than throughput-bound, so
+    // oversubscribing here would just contend with the render thread.
+    const unsigned hardwareThreads = std::max(4u, std::thread::hardware_concurrency());
+    m_streamJobs = std::make_unique<core::JobSystem>(std::max(2u, hardwareThreads - 2u));
+    m_streamer = std::make_unique<importer::fnv::CellStreamer>();
+
+    if (m_streamCacheEnabled) {
+        if (m_streamCacheDirectory.empty()) {
+            if (const char* fromEnv = std::getenv("ODAI_FNV_CACHE_DIR")) {
+                m_streamCacheDirectory = fromEnv;
+            }
+        }
+        if (m_streamCacheDirectory.empty()) {
+            // XDG cache location, falling back to the home directory. Built
+            // cells are derived data: safe to lose, expensive to recompute.
+            if (const char* xdgCache = std::getenv("XDG_CACHE_HOME")) {
+                m_streamCacheDirectory = (std::filesystem::path(xdgCache) / "odai" / "fnv").string();
+            } else if (const char* home = std::getenv("HOME")) {
+                m_streamCacheDirectory =
+                    (std::filesystem::path(home) / ".cache" / "odai" / "fnv").string();
+            }
+        }
+        if (!m_streamCacheDirectory.empty()) {
+            m_streamer->setCacheDirectory(std::filesystem::path(m_streamCacheDirectory));
+        }
+    }
+
+    std::string error;
+    if (!m_streamer->open(
+            std::filesystem::path(m_streamDirectory), std::filesystem::path(m_streamPlugin),
+            m_streamWorldspace, *m_streamJobs, error)) {
+        VOX_LOGE("newvegas") << "streaming init failed: " << error;
+        return false;
+    }
+    if (m_streamer->availableCellCount() == 0u) {
+        VOX_LOGE("newvegas") << "worldspace " << m_streamWorldspace << " has no streamable cells in "
+                             << m_streamDirectory;
+        return false;
+    }
+
+    // Mirror the resident set into collision. Registered before the first
+    // update() so no cell can become resident without collision knowing.
+    m_collision.clear();
+    m_streamer->setCellCallbacks(
+        [this](const importer::CellCoord& cell, const importer::ImportedScene& scene) {
+            m_collision.addCell(cell, scene);
+        },
+        [this](const importer::CellCoord& cell) { m_collision.removeCell(cell); });
+
+    importer::CellResidencyConfig config;
+    // Fallout exterior cells are 4096 world units square (33 height posts at
+    // 128-unit spacing); see fnv::kExteriorCellSize.
+    config.cellSize = 4096.0f;
+    if (const char* radiusEnv = std::getenv("ODAI_FNV_LOAD_RADIUS")) {
+        config.loadRadius = std::max(0, std::atoi(radiusEnv));
+        config.unloadRadius = config.loadRadius + 2;
+    }
+    m_streamer->setConfig(config);
+
+    // Spawn at the centre of the available cells so the first ring has content
+    // on every side; the world origin is often outside a cooked region entirely.
+    // ENGINE space (Y-up), not Fallout space (Z-up). Assigning a Fallout grid
+    // coordinate to m_cameraY put the camera tens of thousands of units below
+    // the terrain -- the streamed world rendered correctly and the player was
+    // simply underneath it.
+    float spawn[3] = {0.0f, 0.0f, 0.0f};
+    // Doc Mitchell's doorstep first -- that is where New Vegas actually begins.
+    // Fall back to the middle of the worldspace if the cell is missing, so a
+    // different plugin or a trimmed install still starts somewhere sensible.
+    const bool spawnedAtDoorstep =
+        !m_streamSpawnInterior.empty() &&
+        m_streamer->spawnAtInteriorDoorEngineSpace(m_streamSpawnInterior, spawn);
+    const bool haveSpawn =
+        spawnedAtDoorstep || m_streamer->suggestedSpawnEngineSpace(spawn);
+    if (haveSpawn) {
+        m_cameraX = spawn[0];
+        m_cameraY = spawn[1];  // height
+        m_cameraZ = spawn[2];
+        // A doorstep spawn is at eye height on the ground, so look at the
+        // horizon; the worldspace-centre fallback is well above the terrain and
+        // wants to look down at it.
+        m_pitchDegrees = spawnedAtDoorstep ? 0.0f : -20.0f;
+        // Same diagnostic override the cooked-scene path has: being able to
+        // look straight down separates "above the ground" from "inside it".
+        if (const char* pitchEnv = std::getenv("ODAI_FNV_PITCH")) {
+            m_pitchDegrees = static_cast<float>(std::atof(pitchEnv));
+        }
+        // Pinning yaw as well is what makes two captures comparable: the mouse
+        // position at startup otherwise rotates the camera differently per run,
+        // so an A/B of a rendering change compares two different views.
+        if (const char* yawEnv = std::getenv("ODAI_FNV_YAW")) {
+            m_yawDegrees = static_cast<float>(std::atof(yawEnv));
+        }
+        if (const char* heightEnv = std::getenv("ODAI_FNV_SPAWN_HEIGHT")) {
+            m_cameraY += static_cast<float>(std::atof(heightEnv));
+        }
+        // Full engine-space spawn override, for pinning the camera somewhere
+        // known-good while diagnosing.
+        if (const char* posEnv = std::getenv("ODAI_FNV_SPAWN_POS")) {
+            float px = 0.0f;
+            float py = 0.0f;
+            float pz = 0.0f;
+            if (std::sscanf(posEnv, "%f,%f,%f", &px, &py, &pz) == 3) {
+                m_cameraX = px;
+                m_cameraY = py;
+                m_cameraZ = pz;
+            }
+        }
+        VOX_LOGI("newvegas") << "spawn (engine space): x=" << m_cameraX
+                             << " y=" << m_cameraY << " (height) z=" << m_cameraZ;
+        // Walk on arrival at a doorstep: collision now supplies terrain height
+        // from the streamed cells, so there is ground to stand on. The
+        // worldspace-centre fallback still starts in fly mode, because it aims
+        // the camera from well above the terrain.
+        m_walkMode = spawnedAtDoorstep;
+    }
+    VOX_LOGI("newvegas") << "streaming " << m_streamer->availableCellCount()
+                         << " cells from " << m_streamDirectory
+                         << " (load radius " << config.loadRadius
+                         << ", unload " << config.unloadRadius << ")";
+    return true;
+}
+
+// Headless check that collision is actually doing its job, because walking
+// around by hand is not a repeatable test and "it felt solid" is not a result.
+//
+// Two properties, both of which fail silently: terrain has to be sampleable
+// everywhere the player can stand (otherwise they fall through), and a point
+// placed inside an obstacle has to come back out (otherwise buildings are
+// scenery).
+void NewVegasApp::runCollisionSelfTest() {
+    const float step = 256.0f;
+    int sampled = 0;
+    int grounded = 0;
+    float minClearance = 1e30f;
+    float maxClearance = -1e30f;
+    for (int dz = -6; dz <= 6; ++dz) {
+        for (int dx = -6; dx <= 6; ++dx) {
+            const float x = m_cameraX + (static_cast<float>(dx) * step);
+            const float z = m_cameraZ + (static_cast<float>(dz) * step);
+            float height = 0.0f;
+            ++sampled;
+            // Terrain only here: this samples coverage, and mixing in geometry
+            // would report a rooftop as "the ground".
+            if (!m_collision.terrainHeight(x, z, height)) {
+                continue;
+            }
+            ++grounded;
+            minClearance = std::min(minClearance, height);
+            maxClearance = std::max(maxClearance, height);
+        }
+    }
+
+    // Walk a straight line and confirm the player actually travels. The failure
+    // this catches is collision pinning them in place a few steps in, which is
+    // exactly what a single box per mesh did and what "it looked solid" cannot
+    // distinguish from working.
+    const float walkStep = 40.0f;
+    float px = m_cameraX;
+    float pz = m_cameraZ;
+    float py = m_cameraY;
+    float travelled = 0.0f;
+    int blockedSteps = 0;
+    for (int step = 0; step < 200; ++step) {
+        const float beforeX = px;
+        const float beforeZ = pz;
+        pz -= walkStep;  // due north in engine space
+        m_collision.resolveHorizontal(px, py, pz);
+        float ground = 0.0f;
+        if (m_collision.groundHeight(px, pz, py - m_collision.tuning().eyeHeight, ground)) {
+            py = ground + m_collision.tuning().eyeHeight;
+        }
+        const float moved =
+            std::sqrt(((px - beforeX) * (px - beforeX)) + ((pz - beforeZ) * (pz - beforeZ)));
+        travelled += moved;
+        if (moved < walkStep * 0.25f) {
+            ++blockedSteps;
+        }
+    }
+
+    // The opposite failure: collision so permissive that nothing blocks. Probe
+    // each wall triangle's centroid and require the player to be pushed out of
+    // it. Walking freely is only good news if walls still stop you.
+    int wallProbes = 0;
+    int wallBlocks = 0;
+    m_collision.forEachNearbyTriangle(
+        m_cameraX, m_cameraZ, [&](const CollisionWorld::Triangle& triangle) {
+            if (triangle.normalY >= m_collision.tuning().minWalkableNormalY) {
+                return;
+            }
+            const float minY = std::min({triangle.v[1], triangle.v[4], triangle.v[7]});
+            const float maxY = std::max({triangle.v[1], triangle.v[4], triangle.v[7]});
+            if ((maxY - minY) < m_collision.tuning().eyeHeight) {
+                return;  // too short to be a wall the player walks into
+            }
+            const float cx = (triangle.v[0] + triangle.v[3] + triangle.v[6]) / 3.0f;
+            const float cy = (triangle.v[1] + triangle.v[4] + triangle.v[7]) / 3.0f;
+            const float cz = (triangle.v[2] + triangle.v[5] + triangle.v[8]) / 3.0f;
+            float wx = cx;
+            float wz = cz;
+            ++wallProbes;
+            m_collision.resolveHorizontal(wx, cy + m_collision.tuning().eyeHeight * 0.5f, wz);
+            if (std::sqrt(((wx - cx) * (wx - cx)) + ((wz - cz) * (wz - cz))) > 1.0f) {
+                ++wallBlocks;
+            }
+        });
+
+    VOX_LOGI("newvegas") << "collision self-test: walls " << wallBlocks << "/" << wallProbes
+                         << " pushed a probe off their surface";
+    VOX_LOGI("newvegas") << "collision self-test: terrain " << grounded << "/" << sampled
+                         << " sample points grounded (heights " << minClearance << ".."
+                         << maxClearance << "); walked " << travelled << " of "
+                         << (walkStep * 200.0f) << " units due north, " << blockedSteps
+                         << "/200 steps blocked; " << m_collision.triangleCount()
+                         << " collision triangles across " << m_collision.residentCellCount()
+                         << " cells";
+}
+
+void NewVegasApp::updateStreaming(float deltaSeconds) {
+    if (!m_streamer) {
+        return;
+    }
+
+    // Velocity by differencing the camera rather than reading the movement
+    // code's own: that one is zeroed by collision and jumping, which would make
+    // the planner think a walking player had stopped.
+    float velocity[3] = {0.0f, 0.0f, 0.0f};
+    if (m_hasPreviousCameraPosition && deltaSeconds > 0.0f) {
+        velocity[0] = (m_cameraX - m_previousCameraX) / deltaSeconds;
+        velocity[1] = (m_cameraY - m_previousCameraY) / deltaSeconds;
+        velocity[2] = (m_cameraZ - m_previousCameraZ) / deltaSeconds;
+    }
+    m_previousCameraX = m_cameraX;
+    m_previousCameraY = m_cameraY;
+    m_previousCameraZ = m_cameraZ;
+    m_hasPreviousCameraPosition = true;
+
+    // The planner ranks cells in FALLOUT space; the camera moves in engine
+    // space. Converting is not optional -- feeding engine coordinates straight
+    // in makes the grid's second axis the player's altitude, so streaming
+    // follows how high they are rather than where they are.
+    const float enginePosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    float falloutPosition[3] = {0.0f, 0.0f, 0.0f};
+    float falloutVelocity[3] = {0.0f, 0.0f, 0.0f};
+    importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
+    importer::fnv::CellStreamer::engineToFallout(velocity, falloutVelocity);
+    m_streamer->update(m_renderer, falloutPosition, falloutVelocity);
+
+    // Once, after the first ring has settled.
+    if (!m_collisionSelfTestDone && std::getenv("ODAI_FNV_COLLISION_TEST") != nullptr &&
+        m_streamer->stats().residency.loadingCount == 0u &&
+        m_streamer->stats().residentChunks > 0u) {
+        m_collisionSelfTestDone = true;
+        runCollisionSelfTest();
+    }
+
+    m_streamStatsLogTimer += deltaSeconds;
+    if (m_streamStatsLogTimer >= 2.0f) {
+        m_streamStatsLogTimer = 0.0f;
+        const importer::fnv::CellStreamerStats stats = m_streamer->stats();
+        VOX_LOGI("streamer") << "resident=" << stats.residentChunks
+                             << " loading=" << stats.residency.loadingCount
+                             << " loaded=" << stats.scenesLoaded
+                             << " evicted=" << stats.residency.evictions
+                             << " wasted=" << stats.residency.wastedLoads
+                             << " missing=" << stats.residency.unavailableCells
+                             << " applyMs(last/worst)=" << stats.lastApplyMs
+                             << "/" << stats.worstApplyMs
+                             << " buildMs(last/worst)=" << stats.lastBuildMs
+                             << "/" << stats.worstBuildMs
+                             << " cache(hit/miss)=" << stats.cacheHits << "/" << stats.cacheMisses
+                             << " cacheLoadMs=" << stats.lastCacheLoadMs;
+    }
+}
+
 void NewVegasApp::onTick(float deltaSeconds) {
     if (keyDown(m_window, GLFW_KEY_ESCAPE)) {
         glfwSetWindowShouldClose(m_window, GLFW_TRUE);
@@ -517,6 +956,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
     }
 
     updateCamera(deltaSeconds);
+    updateStreaming(deltaSeconds);
 
     // Time-of-day controls. Edge-latched so a held key steps once.
     const bool bracketLeft = keyDown(m_window, GLFW_KEY_LEFT_BRACKET);

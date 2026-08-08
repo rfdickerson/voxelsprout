@@ -120,6 +120,20 @@ cmake-build-release\odai.exe
 cmake-build-release\odai_game_citybuilder.exe   # also _snake, _minesweeper, _stellaris, _swtor, _voxelcraft
 ```
 
+**Fallout: New Vegas viewer** — streams the worldspace straight out of the game's own
+`FalloutNV.esm` and `.bsa` archives. No cooking step and no cooked assets on disk:
+
+```bash
+cmake-build-linux/odai_game_newvegas          # finds an installed copy on its own
+cmake-build-linux/odai_game_newvegas --stream "<.../Fallout New Vegas/Data>"   # or point at it
+```
+
+`--worldspace <EditorID>` (default `WastelandNV`) and `--plugin <Plugin.esm>` (default
+`FalloutNV.esm`) select what to stream; `ODAI_FNV_LOAD_RADIUS` sets the cell load radius.
+`--scene <path.bin>` still loads a single cooked scene instead, which is what
+`odai_newvegas_cooker` produces — that path is for baking a fixed region or a distant-LOD
+tier (`--lod`), not for normal play.
+
 Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
 
 **Shaders** compile automatically when `slangc` is on PATH; if it isn't, shader targets are skipped rather than failing the configure. Outputs are `.slang.spv` next to the source. Manual compile:
@@ -265,7 +279,7 @@ Nine subagents, each carrying a distinct lens grounded in this codebase rather t
 |---|---|
 | Morrowind Data Files (Windows) | `C:\GOG Games\Morrowind\Data Files` |
 | Morrowind Data Files (WSL) | `/mnt/c/GOG Games/Morrowind/Data Files` |
-| Fallout: New Vegas Data Files | not yet recorded — add the real path here once known; the cooker takes it as its first argument regardless |
+| Fallout: New Vegas Data Files (Linux/Steam) | `~/.steam/steam/steamapps/common/Fallout New Vegas/Data` — `odai_game_newvegas` finds this (and the usual GOG/WSL/Windows locations) on its own; the cooker and probe take it as their first argument |
 | OpenMW source (Windows) | `C:\Users\rfdic\OneDrive\Documents\GitHub\openmw` |
 | Build dir (Windows) | `cmake-build-release` |
 | Build dir (Linux) | `cmake-build-linux` |

@@ -283,7 +283,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             }
             const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
             countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            vkCmdDrawIndexed(
+                commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                importedDraw.vertexOffset, 0);
         }
     }
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
@@ -317,7 +319,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
             countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            vkCmdDrawIndexed(
+                commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                importedDraw.vertexOffset, 0);
         }
     }
     // GPU-skinned actors (Dragon Age touchstone) -- same pipeline as the

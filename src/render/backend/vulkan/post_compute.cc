@@ -166,11 +166,6 @@ struct alignas(16) SunShaftPushConstants {
 // BestPractices-PushConstants flags it on every dispatch. The structs above
 // reach a 16-byte multiple through explicit _pad fields instead, which is why
 // they can carry alignas without the size drifting from what is pushed.
-struct SsaoComputePushConstants {
-    uint32_t width = 1u;
-    uint32_t height = 1u;
-};
-
 } // namespace
 
 // Material library table (set 0, binding 13). Created unconditionally at init,

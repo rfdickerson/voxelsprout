@@ -22,10 +22,14 @@
 //   Tab               release the mouse
 //   F3                CPU timing overlay (GameApp reserves this)
 
+#include "core/job_system.h"
 #include "engine/game_app.h"
+#include "games/newvegas/newvegas_collision.h"
+#include "import/fnv/cell_streamer.h"
 #include "import/imported_scene.h"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -43,6 +47,20 @@ public:
         m_screenshotWarmupFrames = warmupFrames;
     }
 
+    // Stream directly from the game's own data directory (the one holding
+    // FalloutNV.esm and the .bsa archives) instead of loading a cooked scene.
+    // Mutually exclusive with setScenePath(): the streamer owns renderer
+    // residency and a full-scene upload would clear its chunks.
+    void setStreamDataPath(std::string path) { m_streamDirectory = std::move(path); }
+    void setStreamPlugin(std::string plugin) { m_streamPlugin = std::move(plugin); }
+    void setStreamWorldspace(std::string worldspace) { m_streamWorldspace = std::move(worldspace); }
+    // Spawn on the doorstep of this interior cell. Empty means "centre of the
+    // worldspace" instead.
+    void setStreamSpawnInterior(std::string editorId) { m_streamSpawnInterior = std::move(editorId); }
+    // On-disk cache for built cells. Empty string disables it.
+    void setStreamCacheDirectory(std::string path) { m_streamCacheDirectory = std::move(path); }
+    void setStreamCacheEnabled(bool enabled) { m_streamCacheEnabled = enabled; }
+
 protected:
     // Fallout's world is ~70 units per metre; the strategy-map preset's AO
     // radius and forced ray-tracing-off are both wrong at that scale. See the
@@ -50,6 +68,9 @@ protected:
     bool wantsStrategyMapTuning() const override { return false; }
 
     bool onInit() override;
+    bool initStreaming();
+    void updateStreaming(float deltaSeconds);
+    void runCollisionSelfTest();
     void onTick(float deltaSeconds) override;
     void onRender(float deltaSeconds) override;
 
@@ -125,6 +146,32 @@ private:
     // is what Fallout does too.
     bool m_airborne = false;
     float m_verticalVelocity = 0.0f;
+
+    // Cell streaming. Null unless --stream was given. The job system is owned
+    // here rather than by the streamer so its thread count is visible at the
+    // call site and so it outlives every in-flight load.
+    std::string m_streamDirectory;
+    std::string m_streamPlugin = "FalloutNV.esm";
+    std::string m_streamWorldspace = "WastelandNV";
+    // Where the game itself starts you: the doorstep of Doc Mitchell's house in
+    // Goodsprings.
+    std::string m_streamSpawnInterior = "GSDocMitchellHouse";
+    std::string m_streamCacheDirectory;
+    bool m_streamCacheEnabled = true;
+    std::unique_ptr<core::JobSystem> m_streamJobs;
+    std::unique_ptr<importer::fnv::CellStreamer> m_streamer;
+    // Collision for the streamed world. The single-scene (--scene) path keeps
+    // using the older height field built from the whole scene.
+    CollisionWorld m_collision;
+    // Previous frame's camera position, differenced to get the velocity the
+    // planner predicts with. Cheaper and more honest than plumbing the movement
+    // code's own velocity, which is reset by collision and jumping.
+    float m_previousCameraX = 0.0f;
+    float m_previousCameraY = 0.0f;
+    float m_previousCameraZ = 0.0f;
+    bool m_hasPreviousCameraPosition = false;
+    float m_streamStatsLogTimer = 0.0f;
+    bool m_collisionSelfTestDone = false;
 };
 
 }  // namespace odai::games::newvegas

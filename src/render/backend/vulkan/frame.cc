@@ -481,6 +481,36 @@ void RendererBackend::scheduleBufferRelease(BufferHandle handle, uint64_t timeli
     m_deferredBufferReleases.push_back({handle, timelineValue});
 }
 
+void RendererBackend::destroyImageResourceNow(
+    VkImage image, VmaAllocation allocation, VkImageView imageView) {
+    if (imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, imageView, nullptr);
+    }
+    if (image == VK_NULL_HANDLE) {
+        return;
+    }
+    if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+        vmaDestroyImage(m_vmaAllocator, image, allocation);
+    } else {
+        vkDestroyImage(m_device, image, nullptr);
+    }
+}
+
+void RendererBackend::scheduleImageRelease(
+    VkImage image, VmaAllocation allocation, VkImageView imageView, uint64_t timelineValue) {
+    if (image == VK_NULL_HANDLE && imageView == VK_NULL_HANDLE) {
+        return;
+    }
+    // Nothing has been submitted yet (or there is no timeline to wait on), so
+    // no frame can be sampling this image: destroy it immediately rather than
+    // parking it on a queue that would never drain.
+    if (timelineValue == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        destroyImageResourceNow(image, allocation, imageView);
+        return;
+    }
+    m_deferredImageReleases.push_back({image, allocation, imageView, timelineValue});
+}
+
 void RendererBackend::collectCompletedBufferReleases() {
     if (m_renderTimelineSemaphore == VK_NULL_HANDLE) {
         return;
@@ -496,6 +526,18 @@ void RendererBackend::collectCompletedBufferReleases() {
     std::erase_if(
         m_deferredBufferReleases,
         [completedValue](const DeferredBufferRelease& release) {
+            return release.timelineValue <= completedValue;
+        }
+    );
+
+    for (const DeferredImageRelease& release : m_deferredImageReleases) {
+        if (release.timelineValue <= completedValue) {
+            destroyImageResourceNow(release.image, release.allocation, release.imageView);
+        }
+    }
+    std::erase_if(
+        m_deferredImageReleases,
+        [completedValue](const DeferredImageRelease& release) {
             return release.timelineValue <= completedValue;
         }
     );

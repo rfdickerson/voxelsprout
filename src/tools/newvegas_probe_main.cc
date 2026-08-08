@@ -14,13 +14,17 @@
 //   odai_newvegas_probe <DataFilesPath> --nif <virtualPath>
 //   odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm>
 
+#include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
+#include "import/fnv/cell_builder.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -53,6 +57,56 @@ std::vector<std::filesystem::path> listArchives(const std::filesystem::path& dat
     }
     std::sort(out.begin(), out.end());
     return out;
+}
+
+// Lists archive entries whose virtual path contains `needle`. Exists because
+// every format in this importer that was reasoned from documentation instead of
+// measured has been wrong at least once, and the distant-LOD asset layout is the
+// next thing about to be built against. Measure it, then write the code.
+int findArchiveEntries(
+    const std::filesystem::path& dataPath, const std::string& needle, std::size_t limit) {
+    const std::string loweredNeedle = toLowerAscii(needle);
+    std::size_t matches = 0;
+    std::size_t shown = 0;
+    std::map<std::string, std::size_t> matchesByArchive;
+    std::map<std::string, std::size_t> matchesByExtension;
+
+    for (const auto& archivePath : listArchives(dataPath)) {
+        BsaArchive archive;
+        if (!archive.open(archivePath)) {
+            continue;
+        }
+        for (const BsaFileEntry& entry : archive.files()) {
+            if (toLowerAscii(entry.virtualPath).find(loweredNeedle) == std::string::npos) {
+                continue;
+            }
+            ++matches;
+            ++matchesByArchive[archivePath.filename().string()];
+            const std::size_t dot = entry.virtualPath.rfind('.');
+            matchesByExtension[dot == std::string::npos
+                                   ? "(none)"
+                                   : toLowerAscii(entry.virtualPath.substr(dot))]++;
+            if (shown < limit) {
+                std::cout << "  " << entry.virtualPath << "  (" << entry.sizeOnDisk << " bytes"
+                          << (entry.compressed ? ", compressed" : "") << ")\n";
+                ++shown;
+            }
+        }
+    }
+    std::cout << matches << " entries matching \"" << needle << "\"";
+    if (matches > shown) {
+        std::cout << " (showing first " << shown << ")";
+    }
+    std::cout << "\n";
+    for (const auto& [archive, count] : matchesByArchive) {
+        std::cout << "  " << archive << ": " << count << "\n";
+    }
+    std::cout << "  by extension:";
+    for (const auto& [extension, count] : matchesByExtension) {
+        std::cout << " " << extension << "=" << count;
+    }
+    std::cout << "\n";
+    return matches == 0 ? 1 : 0;
 }
 
 int probeArchives(const std::filesystem::path& dataPath) {
@@ -350,6 +404,540 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
 // FNVEdit or the GECK, even though the extractor already parses every one of
 // them. An optional substring filters the list, since a retail plugin has
 // hundreds.
+// Verifies the streaming index against the full extractor: build the offset
+// index, then materialize a sample of cells through extractFalloutCellAt and
+// require every field to match what a whole-file pass produces for the same
+// cell. This is the gate on Phase 1 -- an index that is subtly wrong (an offset
+// off by a group header, a cell attributed to the wrong worldspace) produces
+// plausible-looking geometry in the wrong place rather than an error.
+int probeCellIndex(
+    const std::filesystem::path& esmPath, const std::string& worldspaceFilter, std::size_t sampleCount) {
+    using namespace odai::importer::fnv;
+
+    std::string error;
+    const auto indexStart = std::chrono::steady_clock::now();
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(esmPath, index, error)) {
+        std::cout << "Index build FAILED: " << error << "\n";
+        return 1;
+    }
+    const double indexMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - indexStart).count();
+
+    std::size_t exteriorCount = 0;
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        if (!entry.isInterior && entry.hasGridCoords) {
+            ++exteriorCount;
+        }
+    }
+    const std::size_t indexBytes = index.cells.size() * sizeof(FalloutCellIndexEntry);
+    std::cout << "cell index: " << index.cells.size() << " cells (" << exteriorCount
+              << " exterior with grid coords), " << index.worldspaces.size() << " worldspaces, "
+              << index.cellIndexByReferenceFormId.size() << " references mapped\n";
+    std::cout << "  built in " << indexMs << " ms, entries occupy "
+              << (indexBytes / 1024u) << " KB\n";
+
+    // Per-worldspace cell counts: this is what sets the streaming budget, and
+    // it is worth measuring rather than quoting -- the resident set has to be
+    // sized against the worldspace actually being walked.
+    std::map<std::uint32_t, std::size_t> cellsByWorldspace;
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        if (!entry.isInterior && entry.hasGridCoords) {
+            ++cellsByWorldspace[entry.worldspaceFormId];
+        }
+    }
+    for (const FalloutWorldspaceRecord& world : index.worldspaces) {
+        const auto found = cellsByWorldspace.find(world.formId);
+        if (found != cellsByWorldspace.end() && found->second > 0) {
+            std::cout << "    " << world.editorId << ": " << found->second << " exterior cells\n";
+        }
+    }
+
+    // Resolve the worldspace to sample from, by editor ID substring.
+    std::uint32_t worldspaceFormId = 0;
+    if (!worldspaceFilter.empty()) {
+        const std::string lowered = toLowerAscii(worldspaceFilter);
+        for (const FalloutWorldspaceRecord& world : index.worldspaces) {
+            if (toLowerAscii(world.editorId).find(lowered) != std::string::npos) {
+                worldspaceFormId = world.formId;
+                std::cout << "  sampling worldspace " << world.editorId << "\n";
+                break;
+            }
+        }
+        if (worldspaceFormId == 0) {
+            std::cout << "  no worldspace matching \"" << worldspaceFilter << "\"\n";
+            return 1;
+        }
+    }
+
+    // Pick the sample cells, preferring ones that actually have contents.
+    std::vector<std::size_t> sampleIndices;
+    for (std::size_t i = 0; i < index.cells.size() && sampleIndices.size() < sampleCount; ++i) {
+        const FalloutCellIndexEntry& entry = index.cells[i];
+        if (worldspaceFormId != 0 && entry.worldspaceFormId != worldspaceFormId) {
+            continue;
+        }
+        if (entry.childrenGroupSize == 0u) {
+            continue;
+        }
+        sampleIndices.push_back(i);
+    }
+    if (sampleIndices.empty()) {
+        std::cout << "  no cells with contents to sample\n";
+        return 1;
+    }
+
+    // Full-pass reference: materialize exactly the sampled cells.
+    std::vector<std::uint32_t> wantedFormIds;
+    wantedFormIds.reserve(sampleIndices.size());
+    for (const std::size_t i : sampleIndices) {
+        wantedFormIds.push_back(index.cells[i].cellFormId);
+    }
+    FalloutExtractFilter referenceFilter{};
+    referenceFilter.wantCellContents = [&](const FalloutCellRecord& cell) {
+        return std::find(wantedFormIds.begin(), wantedFormIds.end(), cell.formId) !=
+               wantedFormIds.end();
+    };
+    FalloutSceneData reference;
+    if (!extractFalloutScene(esmPath, referenceFilter, reference, error)) {
+        std::cout << "Reference extract FAILED: " << error << "\n";
+        return 1;
+    }
+
+    EsmReader reader;
+    if (!reader.open(esmPath)) {
+        std::cout << "Reader open FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+
+    std::size_t mismatches = 0;
+    std::size_t compared = 0;
+    double extractMsTotal = 0.0;
+    for (const std::size_t i : sampleIndices) {
+        const FalloutCellIndexEntry& entry = index.cells[i];
+        const FalloutCellRecord* expected = nullptr;
+        for (const FalloutCellRecord& cell : reference.cells) {
+            if (cell.formId == entry.cellFormId) {
+                expected = &cell;
+                break;
+            }
+        }
+        if (expected == nullptr) {
+            std::cout << "  cell " << std::hex << entry.cellFormId << std::dec
+                      << ": MISSING from the reference pass\n";
+            ++mismatches;
+            continue;
+        }
+
+        const auto extractStart = std::chrono::steady_clock::now();
+        FalloutCellRecord actual;
+        if (!extractFalloutCellAt(reader, entry, actual, error)) {
+            std::cout << "  cell " << std::hex << entry.cellFormId << std::dec
+                      << ": extract FAILED: " << error << "\n";
+            ++mismatches;
+            continue;
+        }
+        extractMsTotal +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extractStart)
+                .count();
+        ++compared;
+
+        std::vector<std::string> problems;
+        if (actual.references.size() != expected->references.size()) {
+            problems.push_back(
+                "references " + std::to_string(actual.references.size()) + " vs " +
+                std::to_string(expected->references.size()));
+        }
+        if (actual.navMeshes.size() != expected->navMeshes.size()) {
+            problems.push_back(
+                "navmeshes " + std::to_string(actual.navMeshes.size()) + " vs " +
+                std::to_string(expected->navMeshes.size()));
+        }
+        const bool actualHasLand = actual.land != nullptr;
+        const bool expectedHasLand = expected->land != nullptr;
+        if (actualHasLand != expectedHasLand) {
+            problems.push_back(std::string("land presence ") + (actualHasLand ? "yes" : "no") +
+                               " vs " + (expectedHasLand ? "yes" : "no"));
+        } else if (actualHasLand) {
+            const FalloutLandRecord& a = *actual.land;
+            const FalloutLandRecord& b = *expected->land;
+            if (a.hasHeights != b.hasHeights ||
+                (a.hasHeights && std::memcmp(a.heights, b.heights, sizeof(a.heights)) != 0)) {
+                problems.push_back("VHGT heights differ");
+            }
+            if (a.hasNormals != b.hasNormals ||
+                (a.hasNormals && std::memcmp(a.normals, b.normals, sizeof(a.normals)) != 0)) {
+                problems.push_back("VNML normals differ");
+            }
+            if (a.hasColors != b.hasColors ||
+                (a.hasColors && std::memcmp(a.colors, b.colors, sizeof(a.colors)) != 0)) {
+                problems.push_back("VCLR colours differ");
+            }
+            if (std::memcmp(
+                    a.quadrantBaseTextureFormId, b.quadrantBaseTextureFormId,
+                    sizeof(a.quadrantBaseTextureFormId)) != 0) {
+                problems.push_back("BTXT base textures differ");
+            }
+            if (a.textureLayers.size() != b.textureLayers.size()) {
+                problems.push_back(
+                    "layers " + std::to_string(a.textureLayers.size()) + " vs " +
+                    std::to_string(b.textureLayers.size()));
+            } else {
+                for (std::size_t layer = 0; layer < a.textureLayers.size(); ++layer) {
+                    const FalloutLandTextureLayer& la = a.textureLayers[layer];
+                    const FalloutLandTextureLayer& lb = b.textureLayers[layer];
+                    if (la.textureFormId != lb.textureFormId || la.quadrant != lb.quadrant ||
+                        la.layerIndex != lb.layerIndex ||
+                        std::memcmp(la.opacity, lb.opacity, sizeof(la.opacity)) != 0) {
+                        problems.push_back("layer " + std::to_string(layer) + " differs");
+                        break;
+                    }
+                }
+            }
+        }
+        // References must match element-for-element, not just in count.
+        const std::size_t refCompareCount =
+            std::min(actual.references.size(), expected->references.size());
+        for (std::size_t r = 0; r < refCompareCount; ++r) {
+            const FalloutPlacedReference& ra = actual.references[r];
+            const FalloutPlacedReference& rb = expected->references[r];
+            if (ra.formId != rb.formId || ra.baseFormId != rb.baseFormId ||
+                std::memcmp(ra.position, rb.position, sizeof(ra.position)) != 0 ||
+                std::memcmp(ra.rotationRadians, rb.rotationRadians, sizeof(ra.rotationRadians)) != 0 ||
+                ra.scale != rb.scale || ra.hasTeleport != rb.hasTeleport ||
+                ra.teleportTargetRefFormId != rb.teleportTargetRefFormId) {
+                problems.push_back("reference " + std::to_string(r) + " differs");
+                break;
+            }
+        }
+
+        if (!problems.empty()) {
+            ++mismatches;
+            std::cout << "  cell " << std::hex << entry.cellFormId << std::dec << " ("
+                      << entry.gridX << "," << entry.gridZ << "): MISMATCH";
+            for (const std::string& problem : problems) {
+                std::cout << "\n      " << problem;
+            }
+            std::cout << "\n";
+        }
+    }
+
+    std::cout << "compared " << compared << " cells, " << mismatches << " mismatches\n";
+    if (compared > 0) {
+        std::cout << "  extractFalloutCellAt averaged " << (extractMsTotal / static_cast<double>(compared))
+                  << " ms per cell\n";
+    }
+    return mismatches == 0 ? 0 : 1;
+}
+
+// Builds one exterior cell through the SAME path the runtime streamer uses:
+// world tables -> cell offset index -> extractFalloutCellAt -> CellSceneBuilder.
+// Reporting the geometry counts here is what makes it possible to check the
+// extracted library against what the cooker produces for the same cell.
+int probeBuildCell(
+    const std::filesystem::path& dataPath, const std::filesystem::path& esmPath,
+    const std::string& worldspaceFilter, std::int32_t cellX, std::int32_t cellZ) {
+    using namespace odai::importer::fnv;
+
+    std::string error;
+    const auto tablesStart = std::chrono::steady_clock::now();
+    FalloutWorldTables tables;
+    if (!buildFalloutWorldTables(esmPath, tables, error)) {
+        std::cout << "world tables FAILED: " << error << "\n";
+        return 1;
+    }
+    const double tablesMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tablesStart).count();
+    std::cout << "world tables: " << tables.staticModelPaths.size() << " statics, "
+              << tables.landTexturePaths.size() << " land textures, "
+              << tables.worldspaceFormIdsByEditorId.size() << " worldspaces, built in "
+              << tablesMs << " ms\n";
+
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(esmPath, index, error)) {
+        std::cout << "cell index FAILED: " << error << "\n";
+        return 1;
+    }
+
+    std::uint32_t worldspaceFormId = 0;
+    const auto worldIt = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspaceFilter));
+    if (worldIt != tables.worldspaceFormIdsByEditorId.end()) {
+        worldspaceFormId = worldIt->second;
+    }
+
+    const FalloutCellIndexEntry* entry = nullptr;
+    for (const FalloutCellIndexEntry& candidate : index.cells) {
+        if (candidate.isInterior || !candidate.hasGridCoords) {
+            continue;
+        }
+        if (worldspaceFormId != 0 && candidate.worldspaceFormId != worldspaceFormId) {
+            continue;
+        }
+        if (candidate.gridX == cellX && candidate.gridZ == cellZ) {
+            entry = &candidate;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        std::cout << "no cell at (" << cellX << "," << cellZ << ") in that worldspace\n";
+        return 1;
+    }
+
+    EsmReader reader;
+    if (!reader.open(esmPath)) {
+        std::cout << "reader open FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+    FalloutCellRecord cell;
+    const auto extractStart = std::chrono::steady_clock::now();
+    if (!extractFalloutCellAt(reader, *entry, cell, error)) {
+        std::cout << "extractFalloutCellAt FAILED: " << error << "\n";
+        return 1;
+    }
+    const double extractMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - extractStart).count();
+
+    FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "asset source FAILED to open " << dataPath << "\n";
+        return 1;
+    }
+
+    const auto buildStart = std::chrono::steady_clock::now();
+    CellSceneBuilder builder(assets, tables);
+    const std::vector<const FalloutCellRecord*> cells{&cell};
+    builder.setFallbackLandTexture(builder.dominantLandTexture(cells));
+    builder.addCellTerrain(cell);
+    builder.addCellStatics(cell);
+    odai::importer::ImportedScene scene;
+    builder.finish(scene);
+    const double buildMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
+
+    // Optional: write it out so it can be diffed against a cooker-produced
+    // scene for the same cell.
+    if (const char* savePath = std::getenv("ODAI_PROBE_SAVE_CELL")) {
+        if (odai::importer::saveImportedScene(scene, savePath)) {
+            std::cout << "  saved to " << savePath << "\n";
+        }
+    }
+
+    const CellBuildStats& stats = builder.stats();
+    std::cout << "cell (" << cellX << "," << cellZ << "): " << cell.references.size()
+              << " references, land=" << (cell.land != nullptr ? "yes" : "no") << "\n";
+    std::cout << "  built: meshes=" << scene.meshes.size()
+              << " instances=" << scene.instances.size()
+              << " textures=" << scene.textures.size()
+              << " packedVerts=" << scene.packedVertices.size()
+              << " packedIndices=" << scene.packedIndices.size()
+              << " packedDraws=" << scene.packedDraws.size()
+              << " terrainParts=" << stats.terrainPartsEmitted << "\n";
+    std::cout << "  shapes=" << stats.totalShapes
+              << " untextured=" << stats.untexturedShapes
+              << " placed=" << stats.placedInstances
+              << " decalsSkipped=" << stats.shadowDecalShapesSkipped
+              << " markersSkipped=" << stats.editorMarkerModelsSkipped
+              << " droppedLayers=" << stats.droppedTerrainLayers << "\n";
+    std::cout << "  timing: extract " << extractMs << " ms, build " << buildMs << " ms\n";
+    std::cout << "    of which: NIF parse " << stats.nifParseMs << " ms (" << stats.nifsParsed
+              << " meshes), texture decode " << stats.textureDecodeMs << " ms ("
+              << stats.texturesDecoded << " textures)\n";
+    return 0;
+}
+
+// Lists placed references by how far their origin sits above the cell's own
+// terrain. Most statics rest on the ground, so a large positive offset is either
+// a legitimately elevated object or a placement bug -- and printing the model
+// path and rotation beside the offset is what separates the two.
+int probeFloaters(
+    const std::filesystem::path& dataPath, const std::filesystem::path& esmPath,
+    const std::string& worldspaceFilter, std::int32_t cellX, std::int32_t cellZ) {
+    using namespace odai::importer::fnv;
+
+    std::string error;
+    FalloutWorldTables tables;
+    if (!buildFalloutWorldTables(esmPath, tables, error)) {
+        std::cout << "world tables FAILED: " << error << "\n";
+        return 1;
+    }
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(esmPath, index, error)) {
+        std::cout << "cell index FAILED: " << error << "\n";
+        return 1;
+    }
+    std::uint32_t worldspaceFormId = 0;
+    const auto worldIt = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspaceFilter));
+    if (worldIt != tables.worldspaceFormIdsByEditorId.end()) {
+        worldspaceFormId = worldIt->second;
+    }
+    const FalloutCellIndexEntry* entry = nullptr;
+    for (const FalloutCellIndexEntry& candidate : index.cells) {
+        if (!candidate.isInterior && candidate.hasGridCoords &&
+            (worldspaceFormId == 0 || candidate.worldspaceFormId == worldspaceFormId) &&
+            candidate.gridX == cellX && candidate.gridZ == cellZ) {
+            entry = &candidate;
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        std::cout << "no cell at (" << cellX << "," << cellZ << ")\n";
+        return 1;
+    }
+
+    EsmReader reader;
+    if (!reader.open(esmPath)) {
+        return 1;
+    }
+    FalloutCellRecord cell;
+    if (!extractFalloutCellAt(reader, *entry, cell, error)) {
+        std::cout << "extract FAILED: " << error << "\n";
+        return 1;
+    }
+    if (cell.land == nullptr || !cell.land->hasHeights) {
+        std::cout << "cell has no LAND heights to compare against\n";
+        return 1;
+    }
+
+    // Bilinear sample of the 33x33 VHGT grid at a world position inside the cell.
+    const float cellOriginX = static_cast<float>(cellX) * kExteriorCellSize;
+    const float cellOriginY = static_cast<float>(cellZ) * kExteriorCellSize;
+    const auto terrainHeightAt = [&](float worldX, float worldY) {
+        const float gx = std::clamp(
+            (worldX - cellOriginX) / kLandPostSpacing, 0.0f, static_cast<float>(kLandGridSize - 1));
+        const float gy = std::clamp(
+            (worldY - cellOriginY) / kLandPostSpacing, 0.0f, static_cast<float>(kLandGridSize - 1));
+        const int x0 = static_cast<int>(gx);
+        const int y0 = static_cast<int>(gy);
+        const int x1 = std::min(x0 + 1, kLandGridSize - 1);
+        const int y1 = std::min(y0 + 1, kLandGridSize - 1);
+        const float fx = gx - static_cast<float>(x0);
+        const float fy = gy - static_cast<float>(y0);
+        const auto at = [&](int x, int y) { return cell.land->heights[(y * kLandGridSize) + x]; };
+        return (at(x0, y0) * (1 - fx) * (1 - fy)) + (at(x1, y0) * fx * (1 - fy)) +
+               (at(x0, y1) * (1 - fx) * fy) + (at(x1, y1) * fx * fy);
+    };
+
+    // Ground truth for "is it floating": transform the mesh's own vertices into
+    // world space and take the MINIMUM clearance over the terrain beneath them.
+    // The reference origin sitting high means nothing on its own -- a sloped
+    // road piece is authored with its origin at the raised end.
+    FalloutAssetSource assets;
+    const bool haveAssets = assets.open(dataPath);
+    std::unordered_map<std::uint32_t, std::vector<std::array<float, 3>>> meshPointsByFormId;
+    const auto meshPointsFor = [&](std::uint32_t baseFormId,
+                                   const std::string& modelPath) -> const std::vector<std::array<float, 3>>& {
+        static const std::vector<std::array<float, 3>> kEmpty;
+        const auto cached = meshPointsByFormId.find(baseFormId);
+        if (cached != meshPointsByFormId.end()) {
+            return cached->second;
+        }
+        std::vector<std::array<float, 3>> points;
+        std::vector<std::uint8_t> nifBytes;
+        std::string meshError;
+        if (haveAssets && assets.resolveMesh(modelPath, nifBytes, meshError)) {
+            NifModel model;
+            std::string nifError;
+            if (parseNifStaticMesh(nifBytes, model, nifError)) {
+                for (const auto& shape : model.shapes) {
+                    // Sample sparsely; a few hundred points bound the footprint
+                    // well enough and this runs per distinct model, not per ref.
+                    const std::size_t vertexCount = shape.positions.size() / 3u;
+                    const std::size_t stride = std::max<std::size_t>(1u, vertexCount / 200u);
+                    for (std::size_t v = 0; v < vertexCount; v += stride) {
+                        points.push_back({shape.positions[v * 3u], shape.positions[(v * 3u) + 1],
+                                          shape.positions[(v * 3u) + 2]});
+                    }
+                }
+            }
+        }
+        return meshPointsByFormId.emplace(baseFormId, std::move(points)).first->second;
+    };
+
+    struct Entry {
+        float offset;
+        float minClearance;
+        float rotationMagnitudeDegrees;
+        float scale;
+        float localX;
+        float localY;
+        bool outsideCell;
+        std::string model;
+    };
+    std::vector<Entry> entries;
+    std::size_t unknownBaseCount = 0;
+    for (const FalloutPlacedReference& ref : cell.references) {
+        const auto modelIt = tables.staticModelPaths.find(ref.baseFormId);
+        if (modelIt == tables.staticModelPaths.end()) {
+            // The base record is not a STAT this importer knows. Every such
+            // reference is silently dropped from the scene, which is how a road
+            // can end up resting on nothing.
+            ++unknownBaseCount;
+            continue;
+        }
+        const float ground = terrainHeightAt(ref.position[0], ref.position[1]);
+        const float rotationMagnitude =
+            std::sqrt((ref.rotationRadians[0] * ref.rotationRadians[0]) +
+                      (ref.rotationRadians[1] * ref.rotationRadians[1]) +
+                      (ref.rotationRadians[2] * ref.rotationRadians[2])) *
+            57.2957795f;
+        const float localX = ref.position[0] - cellOriginX;
+        const float localY = ref.position[1] - cellOriginY;
+        // A reference can be listed in one cell but positioned outside it; the
+        // height sampler clamps to the cell edge there, so the offset it reports
+        // is against the wrong ground and must not be read as a placement bug.
+        const bool outsideCell = localX < 0.0f || localX > kExteriorCellSize ||
+                                 localY < 0.0f || localY > kExteriorCellSize;
+        // Bethesda euler order, matching the cooker/cell builder.
+        const float cx = std::cos(ref.rotationRadians[0]);
+        const float sx = std::sin(ref.rotationRadians[0]);
+        const float cy = std::cos(ref.rotationRadians[1]);
+        const float sy = std::sin(ref.rotationRadians[1]);
+        const float cz = std::cos(ref.rotationRadians[2]);
+        const float sz = std::sin(ref.rotationRadians[2]);
+        const float rot[9] = {
+            cz * cy,  (cz * sy * sx) - (sz * cx),  (cz * sy * cx) + (sz * sx),
+            sz * cy,  (sz * sy * sx) + (cz * cx),  (sz * sy * cx) - (cz * sx),
+            -sy,      cy * sx,                     cy * cx};
+        float minClearance = std::numeric_limits<float>::max();
+        for (const std::array<float, 3>& local : meshPointsFor(ref.baseFormId, modelIt->second)) {
+            const float wx = ref.position[0] + ref.scale * ((rot[0] * local[0]) + (rot[1] * local[1]) + (rot[2] * local[2]));
+            const float wy = ref.position[1] + ref.scale * ((rot[3] * local[0]) + (rot[4] * local[1]) + (rot[5] * local[2]));
+            const float wz = ref.position[2] + ref.scale * ((rot[6] * local[0]) + (rot[7] * local[1]) + (rot[8] * local[2]));
+            minClearance = std::min(minClearance, wz - terrainHeightAt(wx, wy));
+        }
+        if (minClearance == std::numeric_limits<float>::max()) {
+            minClearance = 0.0f;  // no mesh points; do not report it as floating
+        }
+        entries.push_back(Entry{ref.position[2] - ground, minClearance, rotationMagnitude,
+                                ref.scale, localX, localY, outsideCell, modelIt->second});
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+        return a.minClearance > b.minClearance;
+    });
+
+    std::cout << "cell (" << cellX << "," << cellZ << "): " << entries.size()
+              << " placed statics, " << unknownBaseCount
+              << " references DROPPED (base record is not a known STAT)\n";
+    std::size_t floating = 0;
+    for (const Entry& e : entries) {
+        if (e.minClearance > 50.0f) {
+            ++floating;
+        }
+    }
+    std::cout << "  " << floating << " have their ENTIRE mesh more than 50 units clear of the "
+              << "terrain (i.e. genuinely floating)\n";
+    const std::size_t show = std::min<std::size_t>(entries.size(), 14u);
+    for (std::size_t i = 0; i < show; ++i) {
+        std::cout << "  clearance +" << static_cast<int>(entries[i].minClearance)
+                  << "  origin +" << static_cast<int>(entries[i].offset) << " units  rot "
+                  << static_cast<int>(entries[i].rotationMagnitudeDegrees) << " deg  scale "
+                  << entries[i].scale << (entries[i].outsideCell ? "  OUTSIDE-CELL" : "")
+                  << "  local(" << static_cast<int>(entries[i].localX) << ","
+                  << static_cast<int>(entries[i].localY) << ")  " << entries[i].model << "\n";
+    }
+    return 0;
+}
+
 int listCells(const std::filesystem::path& esmPath, const std::string& filter) {
     odai::importer::fnv::FalloutSceneData scene;
     std::string error;
@@ -892,6 +1480,24 @@ int main(int argc, char** argv) {
     }
     if (mode == "--cells" && argc >= 4) {
         return listCells(dataPath / argv[3], argc >= 5 ? argv[4] : "");
+    }
+    if (mode == "--find" && argc >= 4) {
+        return findArchiveEntries(
+            dataPath, argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 25u);
+    }
+    if (mode == "--floaters" && argc >= 7) {
+        return probeFloaters(
+            dataPath, dataPath / argv[3], argv[4], std::atoi(argv[5]), std::atoi(argv[6]));
+    }
+    if (mode == "--buildcell" && argc >= 7) {
+        return probeBuildCell(
+            dataPath, dataPath / argv[3], argv[4], std::atoi(argv[5]), std::atoi(argv[6]));
+    }
+    if (mode == "--cellindex" && argc >= 4) {
+        return probeCellIndex(
+            dataPath / argv[3],
+            argc >= 5 ? argv[4] : "",
+            argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 8u);
     }
     if (mode == "--scene" && argc >= 4) {
         return probeScene(argv[3]);

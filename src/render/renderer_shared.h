@@ -53,6 +53,10 @@ constexpr uint32_t kBindlessTextureIndexFogMap = 10;
 // They were out of step until now: this header lacked FogMap and stopped at 10
 // while descriptors.cc wrote at 11+i, so imported texture 0 sampled the fog map.
 constexpr uint32_t kBindlessTextureStaticCount = 11;
+// "No bindless slot" -- returned when a texture is unusable or the bindless
+// table is full. Matches kInvalidImportedTextureIndex on the shader side, which
+// falls back to the vertex-colour palette rather than sampling slot 0.
+constexpr uint32_t kInvalidImportedTextureSlot = 0xFFFFFFFFu;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
 // The three shadow-atlas constants below are one layout expressed three ways and

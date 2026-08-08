@@ -263,11 +263,14 @@ const BsaFileEntry* BsaArchive::find(std::string_view virtualPath) const {
     return it == m_pathIndex.end() ? nullptr : &m_files[it->second];
 }
 
-bool BsaArchive::extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& outBytes) const {
-    m_lastError.clear();
+bool BsaArchive::extract(
+    const BsaFileEntry& entry,
+    std::vector<std::uint8_t>& outBytes,
+    std::string& outError) const {
+    outError.clear();
     std::ifstream input(m_path, std::ios::binary);
     if (!input) {
-        m_lastError = "Failed to reopen BSA archive: " + m_path.string();
+        outError = "Failed to reopen BSA archive: " + m_path.string();
         return false;
     }
     input.seekg(static_cast<std::streamoff>(entry.dataOffset), std::ios::beg);
@@ -281,12 +284,12 @@ bool BsaArchive::extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& o
     if ((m_archiveFlags & kFlagEmbedFileNames) != 0u) {
         std::uint8_t embeddedNameLength = 0;
         if (!readValue(input, embeddedNameLength)) {
-            m_lastError = "Truncated embedded BSA file name: " + entry.virtualPath;
+            outError = "Truncated embedded BSA file name: " + entry.virtualPath;
             return false;
         }
         const std::uint32_t embeddedBytes = 1u + embeddedNameLength;
         if (remainingSize < embeddedBytes) {
-            m_lastError = "Embedded BSA file name overruns the entry size: " + entry.virtualPath;
+            outError = "Embedded BSA file name overruns the entry size: " + entry.virtualPath;
             return false;
         }
         input.seekg(static_cast<std::streamoff>(embeddedNameLength), std::ios::cur);
@@ -297,26 +300,26 @@ bool BsaArchive::extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& o
         outBytes.resize(remainingSize);
         if (remainingSize != 0 &&
             !input.read(reinterpret_cast<char*>(outBytes.data()), static_cast<std::streamsize>(remainingSize))) {
-            m_lastError = "Truncated BSA file data: " + entry.virtualPath;
+            outError = "Truncated BSA file data: " + entry.virtualPath;
             return false;
         }
         return true;
     }
 
     if (remainingSize < sizeof(std::uint32_t)) {
-        m_lastError = "Truncated compressed BSA entry header: " + entry.virtualPath;
+        outError = "Truncated compressed BSA entry header: " + entry.virtualPath;
         return false;
     }
     std::uint32_t originalSize = 0;
     if (!readValue(input, originalSize)) {
-        m_lastError = "Truncated compressed BSA entry header: " + entry.virtualPath;
+        outError = "Truncated compressed BSA entry header: " + entry.virtualPath;
         return false;
     }
     const std::uint32_t compressedSize = remainingSize - static_cast<std::uint32_t>(sizeof(originalSize));
     std::vector<std::uint8_t> compressed(compressedSize);
     if (compressedSize != 0 &&
         !input.read(reinterpret_cast<char*>(compressed.data()), static_cast<std::streamsize>(compressedSize))) {
-        m_lastError = "Truncated compressed BSA data: " + entry.virtualPath;
+        outError = "Truncated compressed BSA data: " + entry.virtualPath;
         return false;
     }
 
@@ -328,7 +331,7 @@ bool BsaArchive::extract(const BsaFileEntry& entry, std::vector<std::uint8_t>& o
         compressed.empty() ? nullptr : reinterpret_cast<const Bytef*>(compressed.data()),
         static_cast<uLong>(compressed.size()));
     if (result != Z_OK || destLen != originalSize) {
-        m_lastError = "zlib inflate failed for BSA entry: " + entry.virtualPath;
+        outError = "zlib inflate failed for BSA entry: " + entry.virtualPath;
         return false;
     }
     return true;
