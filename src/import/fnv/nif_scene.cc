@@ -315,6 +315,7 @@ bool readBsShaderTextureSet(ByteCursor& cursor, TextureSetBlock& out) {
 struct AlphaPropertyBlock {
     bool alphaTest = false;
     bool alphaBlend = false;
+    std::uint8_t alphaThreshold = 128;
     bool valid = false;
 };
 
@@ -539,14 +540,19 @@ bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPr
     // shapes in the region, which is about how much glass is actually there.
     out.alphaBlend = blendBit && !out.alphaTest;
 
-    // Not read yet: a u8 threshold follows, and it is what the test should
-    // compare against instead of the shader's hardcoded 0.5. Retail values run
-    // 0, 16, 32, 50, 60, 63, 64, 70, 80, 90, 92, 100, 120, 124, 127, 128, 160,
-    // 200 -- with 100 the most common by a wide margin, so the hardcoded 128 is
-    // wrong more often than right and erodes thin cutouts. Carrying it needs a
-    // per-surface byte the packed vertex has no room for: bits 0-6 of the flag
-    // word are material flags and 8-31 are PBR/material-index, so this wants a
-    // real field and a format version, not a stolen bit.
+    // The threshold the test compares against, one byte after the flags.
+    // Retail Goodsprings runs 0, 16, 32, 50, 60, 63, 64, 70, 80, 90, 92, 100,
+    // 120, 124, 127, 128, 160 and 200, with 100 by far the most common -- so
+    // the 0.5 every renderer hardcodes is wrong more often than right, and
+    // being too high erodes thin cutouts (foliage, chain-link, grating).
+    //
+    // A truncated read keeps the neutral 128 rather than failing the property:
+    // losing the shape's alpha mode entirely would be a much worse outcome
+    // than shading it at the default threshold.
+    std::uint8_t threshold = 128;
+    if (cursor.read(threshold)) {
+        out.alphaThreshold = threshold;
+    }
     out.valid = true;
     return true;
 }
@@ -1182,6 +1188,12 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 }
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
                 if (alphaProperties[propertyIndex].valid) {
+                    // A shape carries at most one alpha property in practice;
+                    // if it somehow carries two, the one that turns the test on
+                    // is the one whose threshold means anything.
+                    if (alphaProperties[propertyIndex].alphaTest && !shape.alphaTest) {
+                        shape.alphaThreshold = alphaProperties[propertyIndex].alphaThreshold;
+                    }
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
                     continue;

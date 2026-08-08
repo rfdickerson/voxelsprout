@@ -138,6 +138,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         // Per-chunk offsets ride the instance buffer; the push constant block stays
         // zeroed so the shader's chunkOffset/cascadeData path matches the main pass.
         ChunkPushConstants chunkPushConstants{};
+        // Neutral alpha-test threshold. Draws that carry an authored one
+        // overwrite this; leaving it zeroed would mean nothing cuts out.
+        chunkPushConstants.materialParams[0] = 0.5f;
         vkCmdPushConstants(
             commandBuffer,
             m_pipelineLayout,
@@ -165,6 +168,27 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            // The normal-depth shader alpha-tests too, so it needs the same
+            // authored threshold the main pass uses -- otherwise SSAO sees a
+            // different silhouette than the lit pass does.
+            ChunkPushConstants importedPrepassPushConstants{};
+            importedPrepassPushConstants.materialParams[0] = 0.5f;
+            int lastPushedThreshold = -1;
+            const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+                if (static_cast<int>(threshold) == lastPushedThreshold) {
+                    return;
+                }
+                lastPushedThreshold = static_cast<int>(threshold);
+                importedPrepassPushConstants.materialParams[0] =
+                    static_cast<float>(threshold) / 255.0f;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &importedPrepassPushConstants);
+            };
             for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
                 if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
                     (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
@@ -174,6 +198,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 if (importedDraw.blended) {
                     continue;  // no depth/normal contribution from blended surfaces
                 }
+                pushAlphaThreshold(importedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,

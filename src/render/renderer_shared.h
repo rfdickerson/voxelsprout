@@ -163,6 +163,11 @@ struct alignas(16) CameraUniform {
 struct alignas(16) ChunkPushConstants {
     float chunkOffset[4];
     float cascadeData[4];
+    // [0] = alpha-test threshold in 0..1 for the draw being recorded, [1..3]
+    // spare. Mirrored in src/render/shaders/chunk_push_constants.slang and in
+    // the private copy of this struct in pass_pipelines.cc -- all three must
+    // agree or the pipeline layout's push range stops covering the block.
+    float materialParams[4];
 };
 
 struct alignas(16) ChunkInstanceData {

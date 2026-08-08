@@ -48,7 +48,7 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v21 -> v22: a trailing doors section. Appended and version-gated, so v15-v21
 // files load with no doors and behave exactly as before -- unlike the vertex
 // widenings above, this one touches no existing bytes.
-constexpr std::uint32_t kImportedSceneVersion = 22u;
+constexpr std::uint32_t kImportedSceneVersion = 23u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 // The pre-v19 ImportedSceneVertex: position[3], normal[3], uv[2].
 constexpr std::size_t kImportedSceneVertexFloatsV18 = 8;
@@ -523,6 +523,33 @@ bool readMeshVertexArray(
     return true;
 }
 
+// ImportedScenePackedDraw grew from two uints to two uints plus the alpha
+// threshold and its padding at version 23. Anything older is read as the old
+// pair and keeps the neutral 128 default, which is exactly the behaviour those
+// files were produced under.
+bool readPackedDrawArray(
+    std::istream& input,
+    std::uint32_t version,
+    std::vector<ImportedScenePackedDraw>& out
+) {
+    if (out.empty()) {
+        return true;
+    }
+    if (version >= 23u) {
+        return readExact(input, out.data(), out.size() * sizeof(ImportedScenePackedDraw));
+    }
+    std::vector<std::uint32_t> legacy(out.size() * 2u);
+    if (!readExact(input, legacy.data(), legacy.size() * sizeof(std::uint32_t))) {
+        return false;
+    }
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = ImportedScenePackedDraw{};
+        out[i].firstIndex = legacy[i * 2u];
+        out[i].indexCount = legacy[(i * 2u) + 1u];
+    }
+    return true;
+}
+
 bool readPackedVertexArray(
     std::istream& input,
     std::uint32_t version,
@@ -676,6 +703,31 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             return packedVertexIndex;
         };
 
+        // One draw per PART, not per mesh.
+        //
+        // A part is one source shape, and material state that cannot live on
+        // the vertex -- the alpha-test threshold -- is per part. An importer
+        // routinely builds one mesh out of many shapes (a Fallout house is
+        // walls plus glass plus trim in a single NIF), so collapsing them into
+        // one draw would force all of them to share one threshold.
+        //
+        // This does not inflate what the GPU sees: the renderer's upload merges
+        // adjacent draws that agree on every piece of state it cares about, so
+        // parts that genuinely match are recombined there, and only parts that
+        // actually differ stay apart.
+        const auto emitDraw = [&](std::uint32_t drawFirstIndex, std::uint8_t alphaThreshold) {
+            const std::uint32_t indexCount =
+                static_cast<std::uint32_t>(scene.packedIndices.size() - drawFirstIndex);
+            if (indexCount == 0u) {
+                return;
+            }
+            ImportedScenePackedDraw draw{};
+            draw.firstIndex = drawFirstIndex;
+            draw.indexCount = indexCount;
+            draw.alphaThreshold = alphaThreshold;
+            scene.packedDraws.push_back(draw);
+        };
+
         if (mesh.parts.empty()) {
             const std::uint32_t invalidTextureIndex = std::numeric_limits<std::uint32_t>::max();
             std::vector<std::uint32_t> remappedVertexIndices(
@@ -691,11 +743,16 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                 }
                 scene.packedIndices.push_back(remappedIndex);
             }
+            // No part, so no authored alpha mode; the neutral default applies
+            // and this draw never alpha-tests anyway.
+            emitDraw(firstIndex, 128u);
         } else {
             for (const ImportedSceneMeshPart& part : mesh.parts) {
                 if (part.indexCount == 0u || part.firstIndex >= mesh.indices.size()) {
                     continue;
                 }
+                const std::uint32_t partDrawFirstIndex =
+                    static_cast<std::uint32_t>(scene.packedIndices.size());
                 std::vector<std::uint32_t> remappedVertexIndices(
                     mesh.vertices.size(),
                     std::numeric_limits<std::uint32_t>::max());
@@ -718,11 +775,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     }
                     scene.packedIndices.push_back(remappedIndex);
                 }
+                emitDraw(partDrawFirstIndex, part.alphaThreshold);
             }
-        }
-        const std::uint32_t indexCount = static_cast<std::uint32_t>(scene.packedIndices.size() - firstIndex);
-        if (indexCount != 0u) {
-            scene.packedDraws.push_back(ImportedScenePackedDraw{firstIndex, indexCount});
         }
     };
 
@@ -809,7 +863,11 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                 const std::uint32_t indexCount =
                     static_cast<std::uint32_t>(scene.packedIndices.size() - firstIndex);
                 if (indexCount != 0u) {
-                    scene.packedDraws.push_back(ImportedScenePackedDraw{firstIndex, indexCount});
+                    ImportedScenePackedDraw draw{};
+                    draw.firstIndex = firstIndex;
+                    draw.indexCount = indexCount;
+                    draw.alphaThreshold = part.alphaThreshold;
+                    scene.packedDraws.push_back(draw);
                 }
             }
         }
@@ -962,6 +1020,7 @@ void buildImportedScenePageRanges(ImportedScene& scene, float pageSize) {
         ImportedScenePackedDraw dstDraw{};
         dstDraw.firstIndex = static_cast<std::uint32_t>(newIndices.size());
         dstDraw.indexCount = static_cast<std::uint32_t>(lastIndex - firstIndex);
+        dstDraw.alphaThreshold = srcDraw.alphaThreshold;
         newIndices.insert(
             newIndices.end(),
             scene.packedIndices.begin() + static_cast<std::ptrdiff_t>(firstIndex),
@@ -1384,8 +1443,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
             !readExact(input, scene.packedIndices.data(), scene.packedIndices.size() * sizeof(std::uint32_t))) {
             return false;
         }
-        if (packedDrawCount != 0 &&
-            !readExact(input, scene.packedDraws.data(), scene.packedDraws.size() * sizeof(ImportedScenePackedDraw))) {
+        if (packedDrawCount != 0 && !readPackedDrawArray(input, version, scene.packedDraws)) {
             return false;
         }
     } else {

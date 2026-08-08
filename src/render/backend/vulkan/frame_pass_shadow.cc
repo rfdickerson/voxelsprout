@@ -164,6 +164,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 // cascadeData[0] selects the light matrix for this cascade in the shadow
                 // vertex shader; chunk offsets ride the instance buffer.
                 ChunkPushConstants chunkPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                chunkPushConstants.materialParams[0] = 0.5f;
                 chunkPushConstants.cascadeData[0] = cascadeF;
                 vkCmdPushConstants(
                     commandBuffer,
@@ -215,6 +218,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants importedPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                importedPushConstants.materialParams[0] = 0.5f;
                 importedPushConstants.chunkOffset[0] = 0.0f;
                 importedPushConstants.chunkOffset[1] = 0.0f;
                 importedPushConstants.chunkOffset[2] = 0.0f;
@@ -231,6 +237,25 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     sizeof(ChunkPushConstants),
                     &importedPushConstants
                 );
+                // Same authored threshold as the main pass. A cascade that cut
+                // out at a different alpha would cast a shadow whose silhouette
+                // did not match the thing casting it.
+                int lastPushedThreshold = -1;
+                const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastPushedThreshold) {
+                        return;
+                    }
+                    lastPushedThreshold = static_cast<int>(threshold);
+                    importedPushConstants.materialParams[0] =
+                        static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &importedPushConstants);
+                };
                 for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
                     if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
                         (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
@@ -240,6 +265,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     if (importedDraw.blended) {
                         continue;  // a blended surface casts no opaque shadow
                     }
+                    pushAlphaThreshold(importedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -264,6 +290,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants importedPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                importedPushConstants.materialParams[0] = 0.5f;
                 importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
                 vkCmdPushConstants(
                     commandBuffer,
@@ -297,6 +326,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
                 ChunkPushConstants skinnedPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                skinnedPushConstants.materialParams[0] = 0.5f;
                 skinnedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
                 vkCmdPushConstants(
                     commandBuffer,

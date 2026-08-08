@@ -58,6 +58,10 @@ struct ImportedSceneMeshPart {
     bool alphaBlend = false;
     // NiStencilProperty DRAW_BOTH. See kImportedSceneMaterialFlagTwoSided.
     bool twoSided = false;
+    // What alphaTest compares the sampled alpha against, quantized 0-255 the
+    // way the source formats store it. 128 is the neutral 0.5 that every
+    // caller which does not author a threshold gets.
+    std::uint8_t alphaThreshold = 128;
 };
 
 struct ImportedSceneMesh {
@@ -291,6 +295,13 @@ inline ImportedSceneSurfaceMaterial unpackImportedSceneMaterialFlags(std::uint32
 struct ImportedScenePackedDraw {
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;
+    // Alpha-test threshold for this draw's surface, 0-255. Lives here rather
+    // than on the vertex because it is a per-surface constant: a scene has
+    // thousands of draws and millions of vertices, so per-vertex would be four
+    // bytes of the same value repeated a thousand times over, on the shadow
+    // stream as well as the main one. The renderer forwards it per draw.
+    std::uint8_t alphaThreshold = 128;
+    std::uint8_t reserved[3] = {0, 0, 0};
 };
 
 // Optional spatial grouping of packed draws for per-chunk frustum culling.

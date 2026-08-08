@@ -214,7 +214,10 @@ float4 sampleImportedAlbedo(FragmentInput input)
         return float4(input.inColor, 1.0);
     }
     float4 sampled = bindlessTextures[input.inTextureIndex].Sample(input.inUv);
-    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u && sampled.a < 0.5)
+    // Fallout's NiAlphaProperty test mode is GREATER: a fragment survives when
+    // its alpha is strictly above the authored threshold, so discard on <=.
+    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
+        sampled.a <= chunkPc.materialParams.x)
     {
         discard;
     }

@@ -46,6 +46,10 @@ struct NifShape {
     std::string diffuseTexturePath;
     // NiAlphaProperty declared alpha testing (flag 0x200) for this shape.
     bool alphaTest = false;
+    // NiAlphaProperty's threshold byte, the value alphaTest compares against.
+    // 128 is the neutral default (the 0.5 every renderer hardcodes) and is what
+    // a shape with no alpha property keeps.
+    std::uint8_t alphaThreshold = 128;
     // NiStencilProperty draw mode DRAW_BOTH. Fallout marks window glass,
     // foliage cards and awnings this way; drawn single-sided they lose
     // whichever face points away from the camera.

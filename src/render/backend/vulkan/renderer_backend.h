@@ -1028,6 +1028,10 @@ private:
         // authored two-sidedness actually shows -- Fallout's window glass and
         // foliage cards lose a face without it.
         bool twoSided = false;
+        // Alpha-test threshold, 0-255, forwarded to the shader per draw through
+        // the push constants. Part of the merge key: two runs that discard at
+        // different thresholds are not the same draw.
+        std::uint8_t alphaThreshold = 128;
     };
 
     struct ImportedScenePageDrawRange {

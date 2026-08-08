@@ -43,7 +43,8 @@ std::string cellAxisToken(std::int32_t value) {
 // 4 = NiStencilProperty DRAW_BOTH read into kImportedSceneMaterialFlagTwoSided
 // 5 = ...with the draw-mode bits actually right; v4 never set the flag
 // 6 = alpha blend now means blend WITHOUT test; blend+test is a cutout
-constexpr int kCellBuildVersion = 6;
+// 7 = per-surface alpha-test threshold carried on the packed draw
+constexpr int kCellBuildVersion = 7;
 
 // Counts blended packed draws by inspecting the first vertex of each, matching
 // how the renderer decides which pipeline a draw goes through. Runs on the

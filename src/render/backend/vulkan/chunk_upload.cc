@@ -1881,6 +1881,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                                 bool terrainDraw,
                                 bool blendedDraw,
                                 bool twoSidedDraw,
+                                std::uint8_t alphaThreshold,
                                 const float (&drawCenter)[3],
                                 std::uint32_t pageRangeIndex
                             ) {
@@ -1895,6 +1896,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             if (lastMergedDrawWasTerrain == terrainDraw &&
                 previous.blended == blendedDraw &&
                 previous.twoSided == twoSidedDraw &&
+                previous.alphaThreshold == alphaThreshold &&
                 lastMergedPageRangeIndex == pageRangeIndex &&
                 previous.firstIndex + previous.indexCount == firstIndex) {
                 // Weight the merged centre by index count so a large shape does
@@ -1918,6 +1920,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         draw.indexCount = indexCount;
         draw.blended = blendedDraw;
         draw.twoSided = twoSidedDraw;
+        draw.alphaThreshold = alphaThreshold;
         draw.center[0] = drawCenter[0];
         draw.center[1] = drawCenter[1];
         draw.center[2] = drawCenter[2];
@@ -2020,6 +2023,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             drawIndex < sourceTerrainDrawCount,
             blendedDraw,
             packedDrawIsTwoSided(srcDraw),
+            srcDraw.alphaThreshold,
             drawCenter,
             sourceDrawPageRangeIndices[drawIndex]);
     }

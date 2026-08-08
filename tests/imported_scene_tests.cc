@@ -844,10 +844,29 @@ void testPreV19VertexLayoutCompatibility() {
         const auto* tailBytes = reinterpret_cast<const std::uint8_t*>(tail);
         downgraded.insert(downgraded.end(), tailBytes, tailBytes + sizeof(tail));
     }
+    // Packed indices copy as is, but packed draws were a bare
+    // {firstIndex, indexCount} pair through v22; v23 appended the alpha-test
+    // threshold and its padding. A v18 fixture has to carry the narrow form or
+    // the reader walks off the end of the draw block and everything after it.
+    const std::size_t packedIndicesBegin =
+        packedBlockBegin + (scene.packedVertices.size() * sizeof(ImportedScenePackedVertex));
+    const std::size_t packedDrawsBegin =
+        packedIndicesBegin + (scene.packedIndices.size() * sizeof(std::uint32_t));
+    const std::size_t packedDrawsEnd =
+        packedDrawsBegin + (scene.packedDraws.size() * sizeof(ImportedScenePackedDraw));
+    expectTrue(packedDrawsEnd <= bytes.size(), "downgrade fixture locates the packed draw block");
     downgraded.insert(
         downgraded.end(),
-        bytes.begin() + static_cast<std::ptrdiff_t>(
-            packedBlockBegin + (scene.packedVertices.size() * sizeof(ImportedScenePackedVertex))),
+        bytes.begin() + static_cast<std::ptrdiff_t>(packedIndicesBegin),
+        bytes.begin() + static_cast<std::ptrdiff_t>(packedDrawsBegin));
+    for (const ImportedScenePackedDraw& packedDraw : scene.packedDraws) {
+        const std::uint32_t legacyDraw[2] = {packedDraw.firstIndex, packedDraw.indexCount};
+        const auto* drawBytes = reinterpret_cast<const std::uint8_t*>(legacyDraw);
+        downgraded.insert(downgraded.end(), drawBytes, drawBytes + sizeof(legacyDraw));
+    }
+    downgraded.insert(
+        downgraded.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(packedDrawsEnd),
         bytes.end());
     {
         std::ofstream output(v18Path, std::ios::binary | std::ios::trunc);
@@ -1025,6 +1044,85 @@ void testTerrainLayerPacking() {
     fs::remove(path, cleanupError);
 }
 
+// The alpha-test threshold is authored per surface and rides the packed draw
+// rather than the vertex. Two things have to hold for that to be usable: the
+// value has to survive packing (which reorders draws to build page ranges) and
+// it has to survive the round trip to disk.
+void testAlphaThresholdRoundTrip() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer;
+
+    ImportedScene scene;
+    scene.sourceTag = "alpha_threshold";
+
+    // Two parts of one mesh with different thresholds, so a single shared
+    // threshold or a dropped one both show up as a failure.
+    ImportedSceneMesh mesh{};
+    mesh.name = "cutouts";
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+        ImportedSceneVertex{{2.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{3.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{2.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    mesh.indices = {0u, 1u, 2u, 3u, 4u, 5u};
+    ImportedSceneMeshPart lowPart{};
+    lowPart.firstIndex = 0u;
+    lowPart.indexCount = 3u;
+    lowPart.textureIndex = 0xffffffffu;
+    lowPart.alphaTest = true;
+    lowPart.alphaThreshold = 32u;
+    ImportedSceneMeshPart highPart{};
+    highPart.firstIndex = 3u;
+    highPart.indexCount = 3u;
+    highPart.textureIndex = 0xffffffffu;
+    highPart.alphaTest = true;
+    highPart.alphaThreshold = 200u;
+    mesh.parts = {lowPart, highPart};
+    scene.meshes.push_back(mesh);
+
+    // Packing walks instances, not meshes; a mesh nothing places produces
+    // nothing.
+    ImportedSceneInstance instance{};
+    instance.meshIndex = 0u;
+    instance.modelPath = "cutouts.nif";
+    instance.transform[0] = 1.0f;
+    instance.transform[5] = 1.0f;
+    instance.transform[10] = 1.0f;
+    instance.transform[15] = 1.0f;
+    scene.instances.push_back(instance);
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.packedDraws.size() == 2u, "one packed draw per part");
+    if (scene.packedDraws.size() != 2u) {
+        return;
+    }
+    expectTrue(scene.packedDraws[0].alphaThreshold == 32u, "low threshold packs onto its draw");
+    expectTrue(scene.packedDraws[1].alphaThreshold == 200u, "high threshold packs onto its draw");
+
+    // Page building rewrites the draw array wholesale; the threshold has to be
+    // carried across rather than reset to the default.
+    buildImportedScenePageRanges(scene, 64.0f);
+    expectTrue(scene.packedDraws.size() == 2u, "page build keeps both draws");
+    if (scene.packedDraws.size() == 2u) {
+        expectTrue(scene.packedDraws[0].alphaThreshold == 32u, "page build keeps the low threshold");
+        expectTrue(scene.packedDraws[1].alphaThreshold == 200u, "page build keeps the high threshold");
+    }
+
+    const fs::path scenePath = fs::temp_directory_path() / "odai_alpha_threshold.bin";
+    expectTrue(saveImportedScene(scene, scenePath), "threshold scene saves");
+    ImportedScene loaded{};
+    expectTrue(loadImportedScene(scenePath, loaded), "threshold scene loads");
+    expectTrue(loaded.packedDraws.size() == 2u, "threshold scene round trips both draws");
+    if (loaded.packedDraws.size() == 2u) {
+        expectTrue(loaded.packedDraws[0].alphaThreshold == 32u, "low threshold survives disk");
+        expectTrue(loaded.packedDraws[1].alphaThreshold == 200u, "high threshold survives disk");
+    }
+    fs::remove(scenePath);
+}
+
 int main() {
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
@@ -1038,6 +1136,7 @@ int main() {
     testPageRangeBuildAndRoundTrip();
     testMaterialLibraryRoundTrip();
     testImportedSceneRaycast();
+    testAlphaThresholdRoundTrip();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";
