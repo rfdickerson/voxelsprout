@@ -707,8 +707,43 @@ void RendererBackend::renderFrame(
         }
         boundingRadius = std::max(boundingRadius * 1.04f, orthoSceneFit ? 8.0f : 24.0f);
         boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
-        if (m_shadowStableCascadeRadii[cascadeIndex] <= 0.0f) {
+        // Re-latch when the fit the cascade actually wants has moved away from
+        // the cached one.
+        //
+        // The cache exists to stop the ortho box resizing every frame, which
+        // makes shadow edges crawl. It used to be invalidated only by
+        // projectionParamsChanged, i.e. aspect ratio and FOV -- but farPlane
+        // also flips 500 -> 50000 the moment the first imported chunk becomes
+        // resident, which moves every cascade split and therefore every radius.
+        // A streaming game latched its radii on frame 0 with no geometry loaded
+        // and kept them forever: cascade 0 wanted 1048 units and was pinned at
+        // 87.9, so the shader routed every fragment inside 573 units of view
+        // depth to a box only 88 units across, and the rest of that range
+        // sampled outside the map and came back fully lit. Fallout had no
+        // shadows past roughly one fence post.
+        //
+        // Relative tolerance rather than exact equality: splits are already
+        // quantized to 0.5 with a 0.5 update threshold, so in a steady state
+        // this compares equal and the cache still does its job.
+        constexpr float kCascadeRadiusRelatchTolerance = 0.01f;
+        const float cachedRadius = m_shadowStableCascadeRadii[cascadeIndex];
+        if (cachedRadius <= 0.0f ||
+            std::abs(boundingRadius - cachedRadius) > cachedRadius * kCascadeRadiusRelatchTolerance) {
             m_shadowStableCascadeRadii[cascadeIndex] = boundingRadius;
+        }
+        static const bool s_logShadowFit = std::getenv("ODAI_DEBUG_SHADOW_FIT") != nullptr;
+        if (s_logShadowFit) {
+            static int s_fitFrame = 0;
+            if (cascadeIndex == 0) {
+                ++s_fitFrame;
+            }
+            if (s_fitFrame % 240 == 0) {
+                VOX_LOGI("render") << "shadow fit cascade " << cascadeIndex
+                                   << " far=" << cascadeFar
+                                   << " wanted=" << boundingRadius
+                                   << " cached=" << m_shadowStableCascadeRadii[cascadeIndex]
+                                   << " sceneFit=" << (orthoSceneFit ? "yes" : "no");
+            }
         }
         // Scene-fitted ortho cascades bypass the stable-radius cache: the cache
         // only invalidates on projection changes, not on scene re-uploads.
