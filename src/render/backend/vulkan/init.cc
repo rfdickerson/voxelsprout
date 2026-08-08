@@ -2273,6 +2273,11 @@ void RendererBackend::destroyChunkBuffers() {
     }
     m_deferredImageReleases.clear();
 
+    for (const DeferredCommandPoolRelease& release : m_deferredCommandPoolReleases) {
+        vkDestroyCommandPool(m_device, release.pool, nullptr);
+    }
+    m_deferredCommandPoolReleases.clear();
+
     m_chunkDrawRanges.clear();
     m_chunkLodMeshCache.clear();
     m_chunkLodMeshCacheValid = false;

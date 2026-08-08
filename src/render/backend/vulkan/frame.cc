@@ -511,6 +511,17 @@ void RendererBackend::scheduleImageRelease(
     m_deferredImageReleases.push_back({image, allocation, imageView, timelineValue});
 }
 
+void RendererBackend::scheduleCommandPoolRelease(VkCommandPool pool, uint64_t timelineValue) {
+    if (pool == VK_NULL_HANDLE) {
+        return;
+    }
+    if (timelineValue == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        vkDestroyCommandPool(m_device, pool, nullptr);
+        return;
+    }
+    m_deferredCommandPoolReleases.push_back({pool, timelineValue});
+}
+
 void RendererBackend::collectCompletedBufferReleases() {
     if (m_renderTimelineSemaphore == VK_NULL_HANDLE) {
         return;
@@ -538,6 +549,18 @@ void RendererBackend::collectCompletedBufferReleases() {
     std::erase_if(
         m_deferredImageReleases,
         [completedValue](const DeferredImageRelease& release) {
+            return release.timelineValue <= completedValue;
+        }
+    );
+
+    for (const DeferredCommandPoolRelease& release : m_deferredCommandPoolReleases) {
+        if (release.timelineValue <= completedValue) {
+            vkDestroyCommandPool(m_device, release.pool, nullptr);
+        }
+    }
+    std::erase_if(
+        m_deferredCommandPoolReleases,
+        [completedValue](const DeferredCommandPoolRelease& release) {
             return release.timelineValue <= completedValue;
         }
     );

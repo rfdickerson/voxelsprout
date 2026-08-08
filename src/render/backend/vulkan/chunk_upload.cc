@@ -766,30 +766,50 @@ bool RendererBackend::uploadIntoBufferRange(
             uploadFailed = true;
         }
     }
+    // Same reasoning as the texture path: signal a timeline value the next
+    // frame's graphics submit already waits on, rather than draining the whole
+    // graphics queue here. Three of these run per streamed cell (vertices,
+    // shadow vertices, indices), so three full queue drains were being paid for
+    // every cell that arrived.
+    uint64_t uploadTimelineValue = 0;
     if (!uploadFailed) {
-        result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
+        uploadTimelineValue = m_nextTimelineValue++;
+
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderTimelineSemaphore;
+        signalInfo.value = uploadTimelineValue;
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+
+        result = vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
         if (result != VK_SUCCESS) {
             logVkFailure("vkQueueSubmit2(importedArenaUpload)", result);
             uploadFailed = true;
-        }
-    }
-    if (!uploadFailed) {
-        result = vkQueueWaitIdle(m_graphicsQueue);
-        if (result != VK_SUCCESS) {
-            logVkFailure("vkQueueWaitIdle(importedArenaUpload)", result);
-            uploadFailed = true;
+            uploadTimelineValue = 0;
+        } else {
+            m_pendingTransferTimelineValue =
+                std::max(m_pendingTransferTimelineValue, uploadTimelineValue);
         }
     }
 
-    if (commandPool != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-    }
-    m_bufferAllocator.destroyBuffer(stagingHandle);
+    scheduleCommandPoolRelease(commandPool, uploadTimelineValue);
+    scheduleBufferRelease(stagingHandle, uploadTimelineValue);
     return !uploadFailed;
 }
 
 bool RendererBackend::copyBufferRange(
-    BufferHandle source, BufferHandle destination, VkDeviceSize byteSize, const char* debugLabel) {
+    BufferHandle source, BufferHandle destination, VkDeviceSize byteSize, const char* debugLabel,
+    uint64_t& outTimelineValue) {
+    outTimelineValue = 0;
     if (source == kInvalidBufferHandle || destination == kInvalidBufferHandle || byteSize == 0u) {
         return byteSize == 0u;
     }
@@ -843,23 +863,40 @@ bool RendererBackend::copyBufferRange(
             copyFailed = true;
         }
     }
+    // The old arena is scheduled for release on m_lastGraphicsTimelineValue by
+    // the caller, and the new one is only ever drawn from after the graphics
+    // submit waits on this value, so the copy needs no CPU wait either.
+    uint64_t copyTimelineValue = 0;
     if (!copyFailed) {
-        result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
+        copyTimelineValue = m_nextTimelineValue++;
+
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderTimelineSemaphore;
+        signalInfo.value = copyTimelineValue;
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+
+        result = vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
         if (result != VK_SUCCESS) {
             logVkFailure("vkQueueSubmit2(importedArenaGrow)", result);
             copyFailed = true;
+            copyTimelineValue = 0;
+        } else {
+            m_pendingTransferTimelineValue =
+                std::max(m_pendingTransferTimelineValue, copyTimelineValue);
         }
     }
-    if (!copyFailed) {
-        result = vkQueueWaitIdle(m_graphicsQueue);
-        if (result != VK_SUCCESS) {
-            logVkFailure("vkQueueWaitIdle(importedArenaGrow)", result);
-            copyFailed = true;
-        }
-    }
-    if (commandPool != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(m_device, commandPool, nullptr);
-    }
+    scheduleCommandPoolRelease(commandPool, copyTimelineValue);
+    outTimelineValue = copyTimelineValue;
     if (copyFailed) {
         VOX_LOGE("render") << debugLabel << " arena copy failed";
     }
@@ -955,6 +992,7 @@ bool RendererBackend::ensureImportedArenaCapacity(
     }
 
     // Copy old -> new before swapping, so a failure leaves the arenas intact.
+    uint64_t arenaCopyTimelineValue = 0;
     for (std::size_t i = 0; i < std::size(arenaBuffers) && !failed; ++i) {
         const ArenaBuffer& arena = arenaBuffers[i];
         if (createdHandles[i] == kInvalidBufferHandle) {
@@ -965,9 +1003,12 @@ bool RendererBackend::ensureImportedArenaCapacity(
         if (copyBytes == 0u || *arena.handle == kInvalidBufferHandle) {
             continue;
         }
-        if (!copyBufferRange(*arena.handle, createdHandles[i], copyBytes, arena.label)) {
+        uint64_t copyTimelineValue = 0;
+        if (!copyBufferRange(
+                *arena.handle, createdHandles[i], copyBytes, arena.label, copyTimelineValue)) {
             failed = true;
         }
+        arenaCopyTimelineValue = std::max(arenaCopyTimelineValue, copyTimelineValue);
     }
     if (failed) {
         for (const BufferHandle handle : createdHandles) {
@@ -982,8 +1023,12 @@ bool RendererBackend::ensureImportedArenaCapacity(
         if (createdHandles[i] == kInvalidBufferHandle) {
             continue;
         }
-        // Deferred: in-flight frames may still be reading the old arena.
-        scheduleBufferRelease(*arenaBuffers[i].handle, m_lastGraphicsTimelineValue);
+        // Deferred past BOTH the frames that may still be reading the old arena
+        // and the copy that is reading it right now -- the copy signals a later
+        // value than any submitted frame, so the frame value alone is not enough.
+        scheduleBufferRelease(
+            *arenaBuffers[i].handle,
+            std::max(m_lastGraphicsTimelineValue, arenaCopyTimelineValue));
         *arenaBuffers[i].handle = createdHandles[i];
     }
     m_importedVertexArena.grow(newVertexCapacity);
@@ -1311,15 +1356,26 @@ bool RendererBackend::uploadImportedSceneInternal(
         destroyRayTracingScene();
     }
 
-    odai::importer::ImportedScene uploadScene = scene;
+    // Copy ONLY when the packed stream has to be rebuilt.
+    //
+    // This used to deep-copy every scene unconditionally so that
+    // buildImportedScenePackedRenderData could mutate it -- the one and only
+    // mutation in this whole function. A streamed cell always arrives with its
+    // packed stream already built (the cooker and CellSceneBuilder both finish
+    // with it), so that copy was ~10 MB of memcpy per cell, including a full
+    // duplicate of every texture, thrown away moments later.
     const bool havePackedScene =
-        !uploadScene.packedVertices.empty() &&
-        !uploadScene.packedIndices.empty() &&
-        !uploadScene.packedDraws.empty();
+        !scene.packedVertices.empty() &&
+        !scene.packedIndices.empty() &&
+        !scene.packedDraws.empty();
+    odai::importer::ImportedScene rebuiltScene;
     if (!havePackedScene) {
         VOX_LOGI("render") << "imported scene missing packed geometry cache; rebuilding render stream on load";
-        odai::importer::buildImportedScenePackedRenderData(uploadScene);
-    } else {
+        rebuiltScene = scene;
+        odai::importer::buildImportedScenePackedRenderData(rebuiltScene);
+    }
+    const odai::importer::ImportedScene& uploadScene = havePackedScene ? scene : rebuiltScene;
+    if (havePackedScene) {
         VOX_LOGI("render") << "imported scene using packed geometry cache (vertices="
                            << uploadScene.packedVertices.size()
                            << ", indices=" << uploadScene.packedIndices.size()
@@ -1406,21 +1462,66 @@ bool RendererBackend::uploadImportedSceneInternal(
                 textureUploadFailed = true;
             }
         }
+        // Submit WITHOUT blocking the CPU.
+        //
+        // This used to be submit + vkQueueWaitIdle(m_graphicsQueue), and the
+        // wait is what made a streamed cell cost hundreds of milliseconds:
+        // vkQueueWaitIdle drains the ENTIRE graphics queue, so uploading one
+        // cell's textures waited on every frame already in flight, not just on
+        // the copy that was actually issued.
+        //
+        // Instead signal a timeline value and record it in
+        // m_pendingTransferTimelineValue, which the next frame's graphics
+        // submit already waits on (frame_run.cc). The GPU still orders the copy
+        // before any sampling; the CPU simply stops standing there.
+        //
+        // Staying on the graphics queue is deliberate. The transfer ring would
+        // be the obvious home, but m_transferQueueFamilyIndex can be a DISTINCT
+        // family, and these uploads end with a barrier to SHADER_READ_ONLY at
+        // VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT -- not a legal stage on a
+        // transfer-only queue, and crossing families would additionally need
+        // ownership transfers on every image.
+        uint64_t textureUploadTimelineValue = 0;
         if (!textureUploadFailed && commandBuffer != VK_NULL_HANDLE) {
-            if (submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE) != VK_SUCCESS ||
-                vkQueueWaitIdle(m_graphicsQueue) != VK_SUCCESS) {
-                VOX_LOGE("render") << "imported texture upload submit failed";
+            textureUploadTimelineValue = m_nextTimelineValue++;
+
+            VkSemaphoreSubmitInfo signalInfo{};
+            signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            signalInfo.semaphore = m_renderTimelineSemaphore;
+            signalInfo.value = textureUploadTimelineValue;
+            signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            VkCommandBufferSubmitInfo commandBufferInfo{};
+            commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+            commandBufferInfo.commandBuffer = commandBuffer;
+            VkSubmitInfo2 submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+            submitInfo.commandBufferInfoCount = 1;
+            submitInfo.pCommandBufferInfos = &commandBufferInfo;
+            submitInfo.signalSemaphoreInfoCount = 1;
+            submitInfo.pSignalSemaphoreInfos = &signalInfo;
+
+            const VkResult submitResult =
+                vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            if (submitResult != VK_SUCCESS) {
+                logVkFailure("vkQueueSubmit2(importedTextureUpload)", submitResult);
                 textureUploadFailed = true;
+                textureUploadTimelineValue = 0;
+            } else {
+                m_pendingTransferTimelineValue =
+                    std::max(m_pendingTransferTimelineValue, textureUploadTimelineValue);
             }
         }
+
+        // The staging buffers and the pool are still being read by that submit,
+        // so they retire on its timeline value rather than here. A zero value
+        // (nothing was submitted) frees them immediately.
         for (const BufferHandle stagingHandle : stagingBufferHandles) {
             if (stagingHandle != kInvalidBufferHandle) {
-                m_bufferAllocator.destroyBuffer(stagingHandle);
+                scheduleBufferRelease(stagingHandle, textureUploadTimelineValue);
             }
         }
-        if (commandPool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(m_device, commandPool, nullptr);
-        }
+        scheduleCommandPoolRelease(commandPool, textureUploadTimelineValue);
+        commandPool = VK_NULL_HANDLE;
         if (textureUploadFailed) {
             clearImportedSceneMeshes();
             return false;

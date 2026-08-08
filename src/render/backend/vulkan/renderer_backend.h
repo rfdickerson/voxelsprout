@@ -619,8 +619,13 @@ private:
 
     // Device-to-device copy of the first `byteSize` bytes, used when an arena
     // grows and its contents must move to the larger buffer.
+    // outTimelineValue receives the value the copy signals. The SOURCE buffer
+    // must not be released before that value retires -- releasing it on
+    // m_lastGraphicsTimelineValue instead is a use-after-free, because the copy
+    // signals a strictly later value than any frame already submitted.
     bool copyBufferRange(
-        BufferHandle source, BufferHandle destination, VkDeviceSize byteSize, const char* debugLabel);
+        BufferHandle source, BufferHandle destination, VkDeviceSize byteSize,
+        const char* debugLabel, uint64_t& outTimelineValue);
 
     // Rebuilds m_importedMeshDraws / m_importedPageDrawRanges from the live
     // chunks, renumbering each page range's firstDraw to its position in the
@@ -809,6 +814,7 @@ private:
     // Takes raw handles rather than an ImportedTextureResource& because that
     // struct is declared further down the class body, and a parameter type in a
     // member declaration must already be complete.
+    void scheduleCommandPoolRelease(VkCommandPool pool, uint64_t timelineValue);
     void scheduleImageRelease(
         VkImage image, VmaAllocation allocation, VkImageView imageView, uint64_t timelineValue);
     void destroyImageResourceNow(VkImage image, VmaAllocation allocation, VkImageView imageView);
@@ -864,6 +870,15 @@ private:
     // would stall the whole pipeline every time a cell unloads. Same contract
     // as DeferredBufferRelease -- destroyed once the render timeline passes
     // the value recorded at release time.
+    // A transient command pool whose buffer may still be executing. Destroying
+    // one before its submission retires is undefined, and the reason this
+    // exists is that texture uploads no longer block on vkQueueWaitIdle -- so
+    // there is no longer a point at which the pool is trivially safe to free.
+    struct DeferredCommandPoolRelease {
+        VkCommandPool pool = VK_NULL_HANDLE;
+        uint64_t timelineValue = 0;
+    };
+
     struct DeferredImageRelease {
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
@@ -1638,6 +1653,7 @@ private:
     BufferHandle m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<DeferredImageRelease> m_deferredImageReleases;
+    std::vector<DeferredCommandPoolRelease> m_deferredCommandPoolReleases;
     std::vector<ChunkDrawRange> m_chunkDrawRanges;
     std::vector<ChunkResidentKey> m_chunkResidentKeys;
     std::vector<odai::world::ChunkLodMeshes> m_chunkLodMeshCache;
