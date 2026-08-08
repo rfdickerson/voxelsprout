@@ -2,6 +2,7 @@
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
+#include "core/frame_profiler.h"
 #include "core/log.h"
 #include "math/math.h"
 #include "sim/network_procedural.h"
@@ -1364,6 +1365,17 @@ bool RendererBackend::uploadImportedSceneInternal(
     // packed stream already built (the cooker and CellSceneBuilder both finish
     // with it), so that copy was ~10 MB of memcpy per cell, including a full
     // duplicate of every texture, thrown away moments later.
+    // Per-phase timing for the chunk apply, env-gated. Worth keeping: it is what
+    // showed that fusing the two vertex passes did NOT help, and that the cost
+    // is spread rather than concentrated in one loop.
+    const bool logChunkTiming = std::getenv("ODAI_DEBUG_CHUNK_TIMING") != nullptr;
+    const core::Stopwatch chunkPhaseTimer;
+    float textureMs = 0.0f;
+    float vertexMs = 0.0f;
+    float geometryUploadMs = 0.0f;
+    float drawBuildMs = 0.0f;
+    core::Stopwatch phaseTimer;
+
     const bool havePackedScene =
         !scene.packedVertices.empty() &&
         !scene.packedIndices.empty() &&
@@ -1382,6 +1394,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                            << ", draws=" << uploadScene.packedDraws.size() << ")";
     }
 
+    phaseTimer.restart();
     std::vector<std::uint32_t> importedTextureSlots(
         uploadScene.textures.size(),
         std::numeric_limits<std::uint32_t>::max());
@@ -1709,6 +1722,9 @@ bool RendererBackend::uploadImportedSceneInternal(
             VOX_LOGE("render") << "fog map upload failed";
         }
     }
+
+    textureMs = phaseTimer.elapsedMs();
+    phaseTimer.restart();
 
     std::vector<ImportedMeshVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -2083,6 +2099,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         shadowVertices.push_back(shadowVertex);
     }
 
+    vertexMs = phaseTimer.elapsedMs();
+    phaseTimer.restart();
+
     // Carve this scene's geometry out of the shared arenas. Growing first and
     // retrying once covers the case where capacity was fine but fragmentation
     // left no single range big enough.
@@ -2150,6 +2169,9 @@ bool RendererBackend::uploadImportedSceneInternal(
     const std::uint32_t chunkTerrainDrawCount =
         std::min<std::uint32_t>(mergedTerrainDrawCount, static_cast<std::uint32_t>(draws.size()));
 
+    geometryUploadMs = phaseTimer.elapsedMs();
+    phaseTimer.restart();
+
     ImportedSceneChunk chunk{};
     chunk.alive = true;
     chunk.firstVertex = firstVertex;
@@ -2171,6 +2193,8 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.pageRanges = std::move(pageDrawRanges);
     m_importedSceneChunks.push_back(std::move(chunk));
     rebuildImportedDrawTables();
+    drawBuildMs = phaseTimer.elapsedMs();
+    phaseTimer.restart();
 
     const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
     const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
@@ -2383,6 +2407,14 @@ bool RendererBackend::uploadImportedSceneInternal(
         } else if (!appendChunk) {
             m_importedSceneBoundsValid = false;
         }
+    }
+    if (logChunkTiming) {
+        VOX_LOGI("render") << "chunk upload phases (ms): textures=" << textureMs
+                           << " vertexStreams=" << vertexMs
+                           << " geometryUpload=" << geometryUploadMs
+                           << " drawTables=" << drawBuildMs
+                           << " tail(bounds/gi/rt)=" << phaseTimer.elapsedMs()
+                           << " total=" << chunkPhaseTimer.elapsedMs();
     }
     m_voxelGiWorldDirty = false;
     m_voxelGiOccupancyFullRebuildInProgress = false;

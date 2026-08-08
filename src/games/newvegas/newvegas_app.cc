@@ -677,7 +677,12 @@ bool NewVegasApp::initStreaming() {
     // at 2. Streaming is latency-sensitive rather than throughput-bound, so
     // oversubscribing here would just contend with the render thread.
     const unsigned hardwareThreads = std::max(4u, std::thread::hardware_concurrency());
-    m_streamJobs = std::make_unique<core::JobSystem>(std::max(2u, hardwareThreads - 2u));
+    unsigned streamThreads = std::max(2u, hardwareThreads - 2u);
+    if (const char* env = std::getenv("ODAI_FNV_STREAM_THREADS")) {
+        streamThreads = std::max(1u, static_cast<unsigned>(std::atoi(env)));
+    }
+    VOX_LOGI("newvegas") << "streaming workers: " << streamThreads;
+    m_streamJobs = std::make_unique<core::JobSystem>(streamThreads);
     m_streamer = std::make_unique<importer::fnv::CellStreamer>();
 
     if (m_streamCacheEnabled) {
