@@ -89,6 +89,17 @@ struct NifModel {
     // diagnostics (odai_newvegas_probe --nif) so those types can be identified
     // rather than guessed at.
     std::vector<std::string> unresolvedPropertyTypes;
+    // Shapes whose node transform was a reflection (negative determinant) and
+    // whose winding was therefore reversed on import. Nonzero is normal --
+    // Bethesda mirrors meshes to vary them -- and a nonzero count here is what
+    // says the fix is doing work rather than being dead code.
+    std::uint32_t mirroredShapeCount = 0;
+    // Shapes whose NiStencilProperty declared DRAW_CW (front face is the
+    // clockwise winding, the reverse of this renderer's convention).
+    std::uint32_t reversedWindingShapeCount = 0;
+    // Census of NiStencilProperty draw modes seen, indexed by the 2-bit value:
+    // 0 = DRAW_CCW_OR_BOTH, 1 = DRAW_CCW, 2 = DRAW_CW, 3 = DRAW_BOTH.
+    std::uint32_t stencilDrawModeCounts[4] = {0, 0, 0, 0};
 };
 
 // ---------------------------------------------------------------------------

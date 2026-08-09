@@ -235,6 +235,9 @@ private:
     // walking back into Nipton does not re-announce it.
     std::unordered_set<std::string> m_discoveredRegions;
     float m_regionPollSeconds = 0.0f;
+    // ODAI_FNV_BENCH_HEADING is applied once, not every frame, or the walk
+    // would never turn away from it.
+    bool m_benchHeadingApplied = false;
 
     // Cell streaming. Null unless --stream was given. The job system is owned
     // here rather than by the streamer so its thread count is visible at the

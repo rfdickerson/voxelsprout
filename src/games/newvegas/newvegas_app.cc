@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cctype>
 #include <cstdlib>
 
@@ -920,8 +921,33 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
             const char* env = std::getenv("ODAI_FNV_BENCH_SPEED");
             return env != nullptr ? static_cast<float>(std::atof(env)) : 400.0f;
         }();
+        // ODAI_FNV_BENCH_TURN is the turn rate in degrees/second at the
+        // default speed; 0 walks a straight line.
+        //
+        // The default 6 deg/s is a CIRCLE of radius speed/turn -- about 3820
+        // units at 400 u/s, which is smaller than one 4096-unit exterior cell.
+        // That is fine for measuring steady-state rendering (the point it was
+        // written for) and useless for measuring streaming: the walk never
+        // leaves the cells it started resident in, so no cell is ever loaded or
+        // evicted mid-run. Testing traversal means setting this to 0.
+        static const float s_benchTurn = []() {
+            const char* env = std::getenv("ODAI_FNV_BENCH_TURN");
+            return env != nullptr ? static_cast<float>(std::atof(env)) : 6.0f;
+        }();
+        // ODAI_FNV_BENCH_HEADING picks the initial compass direction, applied
+        // once, so a straight-line run can be aimed at a specific neighbour
+        // region instead of wherever spawn happened to face.
+        static const float s_benchHeading = []() {
+            const char* env = std::getenv("ODAI_FNV_BENCH_HEADING");
+            return env != nullptr ? static_cast<float>(std::atof(env))
+                                  : std::numeric_limits<float>::quiet_NaN();
+        }();
+        if (!std::isnan(s_benchHeading) && !m_benchHeadingApplied) {
+            m_yawDegrees = s_benchHeading;
+            m_benchHeadingApplied = true;
+        }
         const float step = s_fixedDt ? (1.0f / 60.0f) : deltaSeconds;
-        m_yawDegrees += (s_benchSpeed / 400.0f) * 6.0f * step;
+        m_yawDegrees += (s_benchSpeed / 400.0f) * s_benchTurn * step;
         const float yawRadians = m_yawDegrees * (kPi / 180.0f);
         const float kBenchSpeed = s_benchSpeed;  // default ~5.7 m/s, a fast jog
         m_cameraX += std::cos(yawRadians) * kBenchSpeed * step;
@@ -1488,6 +1514,22 @@ void NewVegasApp::updateRegionDiscovery() {
         return;
     }
     const float position[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    // ODAI_FNV_LOG_REGION=1 traces the cell and region under the camera every
+    // poll. "No banner fired" and "the walk never left the region" look the
+    // same from the outside, and a traversal test has to tell them apart.
+    static const bool s_logRegion = std::getenv("ODAI_FNV_LOG_REGION") != nullptr;
+    if (s_logRegion) {
+        float fallout[3] = {};
+        importer::fnv::CellStreamer::engineToFallout(position, fallout);
+        std::string names;
+        for (const std::string& name : m_streamer->regionNamesAtEngineSpace(position)) {
+            names += names.empty() ? name : (", " + name);
+        }
+        VOX_LOGI("newvegas") << "cell ("
+                             << static_cast<int>(std::floor(fallout[0] / 4096.0f)) << ","
+                             << static_cast<int>(std::floor(fallout[1] / 4096.0f))
+                             << ") regions: " << (names.empty() ? "<none>" : names);
+    }
     for (const std::string& name : m_streamer->regionNamesAtEngineSpace(position)) {
         // insert() reports whether it was new, so the "have I seen this?" check
         // and the record of having seen it are one operation -- there is no

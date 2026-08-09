@@ -1640,6 +1640,8 @@ private:
     VkPipeline& m_importedStaticPipelineBlended = m_pipelineManager.importedStaticPipelineBlended;
     VkPipeline& m_importedStaticPipelineBlendedTwoSided =
         m_pipelineManager.importedStaticPipelineBlendedTwoSided;
+    VkPipeline& m_importedStaticPipelineTwoSided =
+        m_pipelineManager.importedStaticPipelineTwoSided;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
@@ -2019,6 +2021,10 @@ private:
         VkDeviceSize bufferOffset = 0;  // byte offset into the frame arena slice
         std::uint32_t drawCount = 0;
         std::uint8_t alphaThreshold = 128;
+        // Two-sidedness is a PIPELINE property, so it splits batches exactly
+        // like the alpha threshold (a push constant) does -- both are state
+        // that cannot vary within one indirect call.
+        bool twoSided = false;
     };
     // Per-frame scratch, kept as members so the per-pass rebuild does not
     // allocate: this runs three times a frame (shadow x4 cascades, prepass,

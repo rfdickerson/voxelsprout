@@ -318,12 +318,35 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         const bool useIndirect = m_supportsMultiDrawIndirect &&
             buildImportedIndirectBatches(importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
         if (useIndirect) {
+            // Two-sidedness is a pipeline switch, so the batch order (grouped
+            // by it) is also the bind order -- at most one extra bind.
+            VkPipeline boundOpaquePipeline = VK_NULL_HANDLE;
             for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                VkPipeline wantedPipeline =
+                    (batch.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineTwoSided
+                        : ((useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                               ? m_importedStaticPipelineRt
+                               : m_importedStaticPipeline);
+                if (wantedPipeline != boundOpaquePipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundOpaquePipeline = wantedPipeline;
+                }
                 pushAlphaThreshold(batch.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexedIndirect(
                     commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                     batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+            }
+            if (boundOpaquePipeline != VK_NULL_HANDLE) {
+                // Leave the opaque pipeline bound for the blended replay below,
+                // which assumes it and only rebinds when it wants a different one.
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineRt
+                        : m_importedStaticPipeline);
             }
         } else {
             // Direct fallback: no multiDrawIndirect, or the frame arena could

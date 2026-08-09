@@ -699,7 +699,14 @@ bool RendererBackend::createPipePipeline() {
     importedPipelineCreateInfo.pStages = importedShaderStages.data();
     importedPipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
     VkPipelineRasterizationStateCreateInfo importedRasterizer = rasterizer;
-    importedRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    // ODAI_DEBUG_NO_CULL=1 disables back-face culling on imported opaque
+    // geometry. Diagnostic, not a setting: rendering a frame with and without
+    // it and diffing localises "this surface is see-through" to culling
+    // specifically -- pixels that change are exactly the ones a back face was
+    // being removed from.
+    importedRasterizer.cullMode = (std::getenv("ODAI_DEBUG_NO_CULL") != nullptr)
+        ? VK_CULL_MODE_NONE
+        : VK_CULL_MODE_BACK_BIT;
     importedPipelineCreateInfo.pRasterizationState = &importedRasterizer;
 
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
@@ -767,6 +774,23 @@ bool RendererBackend::createPipePipeline() {
         logVkFailure(
             "vkCreateGraphicsPipelines(importedStaticBlendedTwoSided)", importedBlendedTwoSidedResult);
         importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    }
+
+    // Opaque two-sided, for DRAW_BOTH shapes that are not blended. Same state
+    // as the opaque pipeline with culling off.
+    VkPipelineRasterizationStateCreateInfo importedTwoSidedRasterizer = importedRasterizer;
+    importedTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo importedTwoSidedCreateInfo = importedPipelineCreateInfo;
+    importedTwoSidedCreateInfo.pRasterizationState = &importedTwoSidedRasterizer;
+    VkPipeline importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult importedTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &importedTwoSidedCreateInfo, nullptr,
+        &importedStaticPipelineTwoSided);
+    if (importedTwoSidedResult != VK_SUCCESS) {
+        // Not fatal: two-sided draws fall back to the culling pipeline, which
+        // is exactly the behaviour this fixes -- degraded, not broken.
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticTwoSided)", importedTwoSidedResult);
+        importedStaticPipelineTwoSided = VK_NULL_HANDLE;
     }
 
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
@@ -1044,6 +1068,7 @@ bool RendererBackend::createPipePipeline() {
         if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
         if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr); }
         if (m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlendedTwoSided, nullptr); }
+        if (m_importedStaticPipelineTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineTwoSided, nullptr); }
         if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
         if (m_skyCloudPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr); }
         if (m_importedWaterPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr); }
@@ -1052,6 +1077,8 @@ bool RendererBackend::createPipePipeline() {
         m_importedStaticPipeline = importedStaticPipeline;
         m_importedStaticPipelineBlended = importedStaticPipelineBlended;
         m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
+    m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
+        m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
         m_importedStaticPipelineRt = importedStaticPipelineRt;
         m_skyCloudPipeline = skyCloudPipeline;
         m_importedWaterPipeline = importedWaterPipeline;
@@ -1102,6 +1129,7 @@ bool RendererBackend::createPipePipeline() {
     m_importedStaticPipeline = importedStaticPipeline;
     m_importedStaticPipelineBlended = importedStaticPipelineBlended;
     m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
+    m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;

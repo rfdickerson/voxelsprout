@@ -24,6 +24,11 @@ public:
     // ...and the same again with back-face culling off, for draws whose source
     // marked them two-sided.
     VkPipeline importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    // Opaque two-sided. A shape whose NiStencilProperty says DRAW_BOTH needs
+    // culling off whether or not it is blended; only the blended half had a
+    // variant, so opaque DRAW_BOTH geometry was back-face culled and went
+    // see-through from one side.
+    VkPipeline importedStaticPipelineTwoSided = VK_NULL_HANDLE;
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
@@ -141,6 +146,10 @@ public:
         if (importedStaticPipelineBlended != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlended, nullptr);
             importedStaticPipelineBlended = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipelineTwoSided, nullptr);
+            importedStaticPipelineTwoSided = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlendedTwoSided, nullptr);

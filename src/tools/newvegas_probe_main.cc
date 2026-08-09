@@ -192,6 +192,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
     std::size_t totalShapes = 0;
     std::size_t totalTriangles = 0;
     std::size_t totalSkippedShapes = 0;
+    std::size_t totalMirroredShapes = 0;
+    std::size_t totalReversedWinding = 0;
+    std::array<std::size_t, 4> stencilDrawModes{};
     std::map<std::string, std::size_t> parseErrors;
     // Which property types are costing us textures, aggregated across the whole
     // sample rather than one file at a time. "44 of 800 shapes have no diffuse"
@@ -217,6 +220,11 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
             continue;
         }
         totalSkippedShapes += model.skippedShapeCount;
+        totalMirroredShapes += model.mirroredShapeCount;
+        totalReversedWinding += model.reversedWindingShapeCount;
+        for (int m = 0; m < 4; ++m) {
+            stencilDrawModes[m] += model.stencilDrawModeCounts[m];
+        }
         for (const std::string& typeName : model.unresolvedPropertyTypes) {
             ++unresolvedPropertyTypes[typeName];
         }
@@ -247,6 +255,10 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
               << "  shapes            " << totalShapes << "\n"
               << "  triangles         " << totalTriangles << "\n"
               << "  skipped shapes    " << totalSkippedShapes << "\n"
+              << "  mirrored shapes   " << totalMirroredShapes << "  (negative-determinant transform)\n"
+              << "  DRAW_CW shapes    " << totalReversedWinding << "  (stencil says CW is the front face)\n"
+              << "  stencil drawModes ccwOrBoth=" << stencilDrawModes[0] << " ccw=" << stencilDrawModes[1]
+              << " cw=" << stencilDrawModes[2] << " both=" << stencilDrawModes[3] << "\n"
               << "  shapes w/ diffuse " << shapesWithDiffuse << "\n"
               << "  shapes w/ alphaTest " << shapesWithAlphaTest << "\n"
               << "  shapes w/o diffuse  " << (totalShapes - shapesWithDiffuse) << "\n";
@@ -641,16 +653,46 @@ int probeRegions(const std::filesystem::path& pluginPath, std::size_t limit) {
               << index.cells.size() << " cells, " << cellsWithAnyRegion << " in at least one region, "
               << cellsWithDiscoverableRegion << " in at least one DISCOVERABLE region\n";
 
-    std::vector<std::pair<std::string, std::size_t>> named;
-    for (const auto& [formId, count] : cellsPerRegion) {
-        const auto found = tables.regionNamesByFormId.find(formId);
-        if (found != tables.regionNamesByFormId.end()) {
-            named.emplace_back(found->second, count);
+    // Cell-grid centroid per named region, so a traversal test can be aimed at
+    // one. Without a location a region name is unusable for navigation --
+    // "walk until something happens" is not a test.
+    struct RegionExtent {
+        std::string name;
+        std::size_t cellCount = 0;
+        long long sumX = 0;
+        long long sumZ = 0;
+    };
+    std::map<std::uint32_t, RegionExtent> extents;
+    for (const FalloutCellIndexEntry& cell : index.cells) {
+        if (!cell.hasGridCoords) {
+            continue;
+        }
+        for (const std::uint32_t regionFormId : cell.regionFormIds) {
+            const auto named = tables.regionNamesByFormId.find(regionFormId);
+            if (named == tables.regionNamesByFormId.end()) {
+                continue;
+            }
+            RegionExtent& extent = extents[regionFormId];
+            extent.name = named->second;
+            ++extent.cellCount;
+            extent.sumX += cell.gridX;
+            extent.sumZ += cell.gridZ;
         }
     }
-    std::sort(named.begin(), named.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (std::size_t i = 0; i < named.size() && i < limit; ++i) {
-        std::cout << "  " << named[i].second << " cells  \"" << named[i].first << "\"\n";
+    std::vector<RegionExtent> sorted;
+    sorted.reserve(extents.size());
+    for (const auto& [formId, extent] : extents) {
+        sorted.push_back(extent);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const RegionExtent& a, const RegionExtent& b) {
+        return a.cellCount > b.cellCount;
+    });
+    for (std::size_t i = 0; i < sorted.size() && i < limit; ++i) {
+        const RegionExtent& extent = sorted[i];
+        std::cout << "  " << extent.cellCount << " cells  centroid cell ("
+                  << (extent.sumX / static_cast<long long>(extent.cellCount)) << ","
+                  << (extent.sumZ / static_cast<long long>(extent.cellCount)) << ")  \""
+                  << extent.name << "\"\n";
     }
     return 0;
 }

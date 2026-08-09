@@ -250,6 +250,15 @@ Mat4 multiply(const Mat4& a, const Mat4& b) {
     return out;
 }
 
+// Determinant of a row-major Mat4's upper-left 3x3. Negative means the
+// transform includes a reflection.
+float determinant3x3(const Mat4& mat) {
+    const float a = mat.m[0], b = mat.m[1], c = mat.m[2];
+    const float d = mat.m[4], e = mat.m[5], f = mat.m[6];
+    const float g = mat.m[8], h = mat.m[9], i = mat.m[10];
+    return (a * ((e * i) - (f * h))) - (b * ((d * i) - (f * g))) + (c * ((d * h) - (e * g)));
+}
+
 std::array<float, 3> transformPoint(const Mat4& mat, const float p[3]) {
     return {
         (mat.m[0] * p[0]) + (mat.m[1] * p[1]) + (mat.m[2] * p[2]) + mat.m[3],
@@ -325,6 +334,10 @@ struct AlphaPropertyBlock {
 struct StencilPropertyBlock {
     bool valid = false;
     bool twoSided = false;
+    // DRAW_CW: front face is the clockwise winding, the reverse of this
+    // renderer's convention.
+    bool reversedWinding = false;
+    std::uint16_t drawMode = 0;
 };
 
 // BSShaderPPLightingProperty's texture-set ref, read by its real layout rather
@@ -654,7 +667,16 @@ bool readNiStencilProperty(ByteCursor& cursor, StencilPropertyBlock& out) {
     constexpr std::uint16_t kDrawModeShift = 10u;
     constexpr std::uint16_t kDrawModeMask = 0x3u;
     constexpr std::uint16_t kDrawBoth = 3u;
-    out.twoSided = ((flags >> kDrawModeShift) & kDrawModeMask) == kDrawBoth;
+    const std::uint16_t drawMode = (flags >> kDrawModeShift) & kDrawModeMask;
+    out.twoSided = drawMode == kDrawBoth;
+    // DRAW_CW (2) means the shape's front face is the CLOCKWISE winding, i.e.
+    // the opposite of DRAW_CCW_OR_BOTH (0) / DRAW_CCW (1). Only twoSided used
+    // to be read, so a DRAW_CW shape kept the default convention, the
+    // back-face-culling pipeline culled its front faces, and the mesh looked
+    // solid from one side and see-through from the other.
+    constexpr std::uint16_t kDrawCw = 2u;
+    out.reversedWinding = drawMode == kDrawCw;
+    out.drawMode = drawMode;
     out.valid = true;
     return true;
 }
@@ -1257,6 +1279,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // change any texture that already resolved, which the before/after
             // in the header comment relies on.
             std::string noLightingFallback;
+            bool shapeReversedWinding = false;
             for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
                 if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
                     continue;
@@ -1278,6 +1301,9 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 }
                 if (stencilProperties[propertyIndex].valid) {
                     shape.twoSided = shape.twoSided || stencilProperties[propertyIndex].twoSided;
+                    shapeReversedWinding =
+                        shapeReversedWinding || stencilProperties[propertyIndex].reversedWinding;
+                    ++outModel.stencilDrawModeCounts[stencilProperties[propertyIndex].drawMode & 0x3u];
                     continue;
                 }
                 if (!shape.diffuseTexturePath.empty()) {
@@ -1339,6 +1365,38 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 }
             }
             shape.triangleIndices = src.triangleIndices;
+
+            // Mirrored shapes: reverse the winding.
+            //
+            // A node transform with a NEGATIVE determinant is a reflection, and
+            // Bethesda uses them freely -- a negative scale on one axis is how
+            // one rock or rubble mesh becomes several distinct-looking ones.
+            // Baking such a transform into world-space vertices (which this
+            // parser does; there is no per-shape instance matrix downstream)
+            // flips which side of every triangle faces out, while the index
+            // order still says the old one does. The imported-static pipeline
+            // culls back faces, so the visible result is a rock that is solid
+            // from most angles and see-through from the mirrored one -- exactly
+            // the "90% fine, a few transparent on one side" symptom.
+            //
+            // Swapping two indices per triangle restores the outward face.
+            // Normals need no flip: they are transformed by the same matrix, so
+            // they are already mirrored consistently with the positions.
+            // Either source of inversion flips the winding, and BOTH together
+            // cancel out -- so this is an XOR, not two independent reversals.
+            const bool mirroredTransform = determinant3x3(worldTransform) < 0.0f;
+            if (mirroredTransform) {
+                ++outModel.mirroredShapeCount;
+            }
+            if (shapeReversedWinding) {
+                ++outModel.reversedWindingShapeCount;
+            }
+            if (mirroredTransform != shapeReversedWinding) {
+                for (std::size_t i = 0; i + 2u < shape.triangleIndices.size(); i += 3u) {
+                    std::swap(shape.triangleIndices[i + 1u], shape.triangleIndices[i + 2u]);
+                }
+            }
+
             outModel.shapes.push_back(std::move(shape));
         }
     }

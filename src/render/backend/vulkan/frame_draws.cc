@@ -103,13 +103,21 @@ bool RendererBackend::buildImportedIndirectBatches(
     // uses two or three, so a flat array beats a map and avoids allocating.
     constexpr std::uint32_t kNoCommand = 0xffffffffu;
     std::uint32_t mergedCommands = 0;
-    std::array<std::uint32_t, 256> countPerThreshold{};
+    // 512 buckets: alpha threshold in the low 8 bits, two-sidedness in bit 8.
+    // Both are state that cannot change inside one indirect call -- the
+    // threshold is a push constant, two-sidedness is the pipeline -- so both
+    // have to be part of the grouping key.
+    constexpr std::size_t kBucketCount = 512;
+    const auto bucketOf = [](const ImportedMeshDraw& draw) -> std::size_t {
+        return static_cast<std::size_t>(draw.alphaThreshold) | (draw.twoSided ? 256u : 0u);
+    };
+    std::array<std::uint32_t, kBucketCount> countPerThreshold{};
     std::size_t totalIncluded = 0;
     for (std::size_t i = 0; i < draws.size(); ++i) {
         if (draws[i].blended || !include(i)) {
             continue;
         }
-        ++countPerThreshold[draws[i].alphaThreshold];
+        ++countPerThreshold[bucketOf(draws[i])];
         ++totalIncluded;
     }
     if (totalIncluded == 0) {
@@ -118,7 +126,7 @@ bool RendererBackend::buildImportedIndirectBatches(
 
     // Lay the groups out contiguously, then fill them by walking the draws once
     // more and writing each into its group's cursor.
-    std::array<std::uint32_t, 256> groupStart{};
+    std::array<std::uint32_t, kBucketCount> groupStart{};
     std::uint32_t cursor = 0;
     for (std::size_t threshold = 0; threshold < countPerThreshold.size(); ++threshold) {
         if (countPerThreshold[threshold] == 0u) {
@@ -127,17 +135,18 @@ bool RendererBackend::buildImportedIndirectBatches(
         groupStart[threshold] = cursor;
         ImportedIndirectBatch batch{};
         batch.drawCount = countPerThreshold[threshold];
-        batch.alphaThreshold = static_cast<std::uint8_t>(threshold);
+        batch.alphaThreshold = static_cast<std::uint8_t>(threshold & 0xffu);
+        batch.twoSided = (threshold & 256u) != 0u;
         batch.bufferOffset = static_cast<VkDeviceSize>(cursor) * sizeof(VkDrawIndexedIndirectCommand);
         m_importedIndirectBatches.push_back(batch);
         cursor += countPerThreshold[threshold];
     }
 
     m_importedIndirectScratch.resize(totalIncluded);
-    std::array<std::uint32_t, 256> writeCursor = groupStart;
+    std::array<std::uint32_t, kBucketCount> writeCursor = groupStart;
     // Per group, the command written most recently, so an incoming draw can be
     // MERGED into it instead of becoming its own command.
-    std::array<std::uint32_t, 256> lastWritten{};
+    std::array<std::uint32_t, kBucketCount> lastWritten{};
     lastWritten.fill(kNoCommand);
 
     for (std::size_t i = 0; i < draws.size(); ++i) {
@@ -145,7 +154,7 @@ bool RendererBackend::buildImportedIndirectBatches(
             continue;
         }
         const ImportedMeshDraw& draw = draws[i];
-        const std::uint8_t threshold = draw.alphaThreshold;
+        const std::size_t threshold = bucketOf(draw);
 
         // Merge adjacent index ranges into one command.
         //
@@ -186,11 +195,12 @@ bool RendererBackend::buildImportedIndirectBatches(
     // offset and count to what was actually written.
     std::uint32_t compactCursor = 0;
     for (ImportedIndirectBatch& batch : m_importedIndirectBatches) {
-        const std::uint32_t written =
-            writeCursor[batch.alphaThreshold] - groupStart[batch.alphaThreshold];
+        const std::size_t bucket =
+            static_cast<std::size_t>(batch.alphaThreshold) | (batch.twoSided ? 256u : 0u);
+        const std::uint32_t written = writeCursor[bucket] - groupStart[bucket];
         for (std::uint32_t k = 0; k < written; ++k) {
             m_importedIndirectScratch[compactCursor + k] =
-                m_importedIndirectScratch[groupStart[batch.alphaThreshold] + k];
+                m_importedIndirectScratch[groupStart[bucket] + k];
         }
         batch.bufferOffset =
             static_cast<VkDeviceSize>(compactCursor) * sizeof(VkDrawIndexedIndirectCommand);

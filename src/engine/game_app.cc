@@ -163,7 +163,12 @@ void GameApp::run() {
 
     while (m_window && glfwWindowShouldClose(m_window) == GLFW_FALSE) {
         const double now = glfwGetTime();
-        const float  dt  = static_cast<float>(std::min(now - prevTime, 0.1));
+        // The simulation dt is clamped so one long frame cannot teleport the
+        // world; the MEASURED interval must not be, or the clamp silently
+        // becomes the reported maximum. A 0.72 s streaming stall showed up as
+        // exactly 100 ms in the frame histogram until this was split.
+        const double frameIntervalSeconds = now - prevTime;
+        const float  dt  = static_cast<float>(std::min(frameIntervalSeconds, 0.1));
         prevTime = now;
 
         m_frameProfiler.beginFrame();
@@ -257,7 +262,7 @@ void GameApp::run() {
         // tail phenomenon, and a mean hides one 40 ms frame per second
         // completely while that single frame is the entire complaint.
         if (m_frameStatsSeconds > 0.0) {
-            m_frameIntervalsMs.push_back(static_cast<float>(dt) * 1000.0f);
+            m_frameIntervalsMs.push_back(static_cast<float>(frameIntervalSeconds) * 1000.0f);
             m_frameStatsElapsed += dt;
             if (m_frameStatsElapsed >= m_frameStatsSeconds) {
                 reportFrameStats();
