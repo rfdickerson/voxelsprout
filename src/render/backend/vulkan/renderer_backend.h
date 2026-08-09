@@ -345,6 +345,11 @@ public:
     // evictions, so this only grows within a scene.
     [[nodiscard]] std::size_t importedSceneChunkCount() const { return m_importedSceneChunks.size(); }
     [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
+    // Punctual lights currently reaching the GPU, summed over live chunks.
+    // Exposed so the add/remove harness can assert that eviction releases a
+    // chunk's lights -- a leak there is invisible on screen until the 64-light
+    // budget is full of lights belonging to cells the player left long ago.
+    [[nodiscard]] std::size_t importedLocalLightCount() const;
     // GPU skeletal animation (Dragon Age: Origins touchstone, see
     // docs/ROADMAP.md). Uploads a skinned mesh's rest-pose geometry once per
     // instance slot, device-local; posed per-frame via setSkinnedActorPose
@@ -1053,6 +1058,13 @@ private:
     // rebuilding a few thousand 24-byte draws is microseconds and happens only
     // on mutation, whereas erasing in place would renumber every page range
     // after the hole and silently repoint draws at the wrong geometry.
+    struct ImportedLocalLight {
+        float position[3] = {};
+        float color[3] = {1.0f, 1.0f, 1.0f};
+        float radius = 0.0f;
+        float intensity = 1.0f;
+    };
+
     struct ImportedSceneChunk {
         // Arena ranges, in vertices and indices rather than bytes. See
         // ImportedMeshDraw::vertexOffset for why vertex units.
@@ -1065,6 +1077,13 @@ private:
         // Bindless slots this chunk acquired, to be released when it unloads.
         // Slots shared with a still-resident chunk survive on their refcount.
         std::vector<std::uint32_t> textureSlots;
+        // This chunk's punctual lights, owned here rather than appended
+        // straight into m_importedLocalLights. The flat list is rebuilt from
+        // the live chunks in rebuildImportedDrawTables(); appending directly
+        // meant a streaming session accumulated the lights of every cell it had
+        // ever loaded, because removeImportedSceneChunk had no way to find them
+        // again.
+        std::vector<ImportedLocalLight> lights;
         std::uint32_t terrainDrawCount = 0;
         bool alive = false;
     };
@@ -1074,13 +1093,6 @@ private:
         float p1[3] = {};
         float p2[3] = {};
         float albedo[3] = {};
-    };
-
-    struct ImportedLocalLight {
-        float position[3] = {};
-        float color[3] = {1.0f, 1.0f, 1.0f};
-        float radius = 0.0f;
-        float intensity = 1.0f;
     };
 
     // The GPU-side half of a bindless texture slot. Reference counts and key

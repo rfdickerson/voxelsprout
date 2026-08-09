@@ -44,7 +44,11 @@ std::string cellAxisToken(std::int32_t value) {
 // 5 = ...with the draw-mode bits actually right; v4 never set the flag
 // 6 = alpha blend now means blend WITHOUT test; blend+test is a cutout
 // 7 = per-surface alpha-test threshold carried on the packed draw
-constexpr int kCellBuildVersion = 7;
+// 8 = LIGH references emitted as ImportedScene lights (cached cells built
+//     before this carry none, and ImportedScene::lights is serialized)
+// 9 = SCOL (static collection) references placed; their merged mesh is real
+//     geometry that every cached cell before this is missing
+constexpr int kCellBuildVersion = 9;
 
 // Counts blended packed draws by inspecting the first vertex of each, matching
 // how the renderer decides which pipeline a draw goes through. Runs on the
@@ -563,6 +567,33 @@ void CellStreamer::waitIdle() {
     }
     std::unique_lock<std::mutex> lock(m_pending->mutex);
     m_pending->idle.wait(lock, [this]() { return m_pending->inFlight == 0u; });
+}
+
+std::vector<std::string> CellStreamer::regionNamesAtEngineSpace(
+    const float enginePosition[3]) const {
+    std::vector<std::string> names;
+    float fallout[3] = {};
+    engineToFallout(enginePosition, fallout);
+
+    // Which cell the position is in. Floors toward negative infinity: cell -1
+    // spans [-4096, 0), so truncating would put every position in the strip
+    // between -4096 and 0 into cell 0 and report the wrong region there.
+    const auto cellOf = [](float world) {
+        return static_cast<std::int32_t>(std::floor(world / kExteriorCellSize));
+    };
+    const CellCoord coord{cellOf(fallout[0]), cellOf(fallout[1])};
+
+    const auto found = m_availableCells.find(coord);
+    if (found == m_availableCells.end() || found->second >= m_cellIndex.cells.size()) {
+        return names;
+    }
+    for (const std::uint32_t regionFormId : m_cellIndex.cells[found->second].regionFormIds) {
+        const auto named = m_worldTables.regionNamesByFormId.find(regionFormId);
+        if (named != m_worldTables.regionNamesByFormId.end()) {
+            names.push_back(named->second);
+        }
+    }
+    return names;
 }
 
 CellStreamerStats CellStreamer::stats() const {

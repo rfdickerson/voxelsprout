@@ -62,6 +62,10 @@ std::size_t Renderer::liveImportedSceneChunkCount() const {
     return m_backend->liveImportedSceneChunkCount();
 }
 
+std::size_t Renderer::importedLocalLightCount() const {
+    return m_backend->importedLocalLightCount();
+}
+
 bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }

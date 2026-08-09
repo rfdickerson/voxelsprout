@@ -54,9 +54,27 @@ std::string subrecordString(const EsmSubrecordView& sub) {
 // embankment and fill pieces that are MSTT/ACTI, and with those gone the road
 // hangs in the air over the terrain.
 //
-// SCOL (static collection) is deliberately NOT here: it is a container of
-// transformed sub-statics with its own layout, not an EDID+MODL record, and
-// treating it like one would place its origin marker rather than its contents.
+// SCOL (static collection) IS here, and the reason is worth recording because
+// the opposite was assumed for a long time. The comment that used to sit here
+// said SCOL was "a container of transformed sub-statics, not an EDID+MODL
+// record", and that placing it as a model would land its origin marker rather
+// than its contents. Both halves are wrong, checked against retail data:
+//
+//   * All 98 SCOL records in FalloutNV.esm carry exactly one MODL, and 88 of
+//     them resolve to a real mesh. The 10 that do not are SCOLtest01..10 --
+//     unshipped developer records, which fail to resolve exactly like any other
+//     missing mesh and land in m_failedStatics.
+//   * That mesh is the MERGED geometry, not a marker. meshes\scol\
+//     scolgoodpringsfenceb01.nif is 126 KB holding two textured shapes of 1486
+//     and 58 vertices, and its bounds (x -793..7) match the part positions in
+//     the record's own DATA subrecords.
+//
+// The ONAM/DATA container is authoring data: ONAM names a sub-static and DATA
+// is an array of 28-byte {pos[3], rotationRadians[3], scale} placements, which
+// is what the GECK consumes to BAKE the merged NIF. The game ships the bake, so
+// reading the container at runtime would rebuild geometry that already exists.
+// (423 DATA subrecords across the 98 records, every size a multiple of 28,
+// which is what pins the stride.)
 bool isModelBearingBaseType(std::string_view type) {
     // Diagnostic: narrow placement back to STAT alone, which is what this
     // importer did before the other base types were added. Bisects "is this
@@ -71,7 +89,7 @@ bool isModelBearingBaseType(std::string_view type) {
            type == "TERM" || type == "LIGH" || type == "BOOK" || type == "KEYM" ||
            type == "ALCH" || type == "AMMO" || type == "WEAP" || type == "ARMO" ||
            type == "NOTE" || type == "IMOD" || type == "CCRD" || type == "CHIP" ||
-           type == "CMNY";
+           type == "CMNY" || type == "SCOL";
     // PWAT (placeable water) is deliberately excluded: it belongs to the water
     // render path, and going through the opaque static path draws it as a solid
     // pale slab lying across the scene.
@@ -89,6 +107,59 @@ void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
         }
     }
     scene.statics.push_back(std::move(entry));
+}
+
+// LIGH's light parameters. Layout and the reasoning behind every field is in
+// FalloutLightRecord's comment in the header -- it was read off the file, not
+// taken from documentation.
+//
+// A LIGH is parsed TWICE on purpose: once by parseStatRecord, because 29 of the
+// 501 carry a MODL and a lamp is a visible object, and once here for the light
+// itself. The two are additive, not alternatives.
+constexpr std::size_t kLightDataSize = 32u;
+
+void parseLightRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutLightRecord entry{};
+    entry.formId = record.formId;
+    bool haveData = false;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "EDID") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "MODL") {
+            entry.modelPath = subrecordString(sub);
+        } else if (sub.type == "DATA" && sub.size >= kLightDataSize) {
+            // Every retail DATA is exactly 32 bytes; >= rather than == so a
+            // longer one from a mod is read rather than dropped.
+            entry.radius = static_cast<float>(readU32(sub.data + 4));
+            entry.color[0] = static_cast<float>(sub.data[8]) / 255.0f;
+            entry.color[1] = static_cast<float>(sub.data[9]) / 255.0f;
+            entry.color[2] = static_cast<float>(sub.data[10]) / 255.0f;
+            entry.flags = readU32(sub.data + 12);
+            entry.falloffExponent = readF32(sub.data + 16);
+            haveData = true;
+        } else if (sub.type == "FNAM" && sub.size >= sizeof(float)) {
+            entry.fadeValue = readF32(sub.data);
+        }
+    }
+    if (!haveData) {
+        return;  // no DATA means nothing to light with; not an error
+    }
+    scene.lights.push_back(std::move(entry));
+}
+
+// REGN. Only EDID and RDMP are read -- see FalloutRegionRecord for why the
+// displayed name is RDMP and why a region without one is not a fallback case.
+void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutRegionRecord entry{};
+    entry.formId = record.formId;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "EDID") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "RDMP") {
+            entry.mapName = subrecordString(sub);
+        }
+    }
+    scene.regions.push_back(std::move(entry));
 }
 
 void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene) {
@@ -115,6 +186,14 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
             entry.hasGridCoords = true;
             entry.gridX = readI32(sub.data);
             entry.gridZ = readI32(sub.data + 4);
+        } else if (sub.type == "XCLR") {
+            // A packed array of REGN formIDs. Every retail size is a multiple
+            // of 4 (measured: 4, 8, 12, 16, 20 and one 24), which is what pins
+            // the stride; the loop tolerates a trailing partial anyway rather
+            // than reading past the subrecord.
+            for (std::uint32_t offset = 0; offset + 4u <= sub.size; offset += 4u) {
+                entry.regionFormIds.push_back(readU32(sub.data + offset));
+            }
         }
     }
     scene.cells.push_back(std::move(entry));
@@ -529,6 +608,7 @@ bool buildFalloutCellIndex(
         entry.gridZ = parsed.gridZ;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.isInterior = parsed.isInterior;
+        entry.regionFormIds = parsed.regionFormIds;
         entry.cellRecordOffset = pendingCellRecordOffset;
         outIndex.cells.push_back(entry);
         cellIndexByFormId[parsed.formId] = outIndex.cells.size() - 1u;
@@ -639,15 +719,21 @@ bool extractFalloutScene(
         constexpr std::int32_t kWorldChildrenGroup = 1;
 
         // A top-level group's label is the record type it contains. This
-        // function extracts exactly five types, so every other top group —
-        // DIAL, INFO, NAVM, SCPT, PACK, SOUN and the rest, which together are
-        // most of the record count — can be seeked past without being read.
+        // function extracts a narrow set, so every other top group — DIAL,
+        // INFO, NAVM, SCPT, PACK, SOUN and the rest, which together are most of
+        // the record count — can be seeked past without being read.
         // Unconditional rather than caller-controlled: parsing them would
         // produce nothing either way.
+        //
+        // THIS LIST IS A SECOND GATE, and forgetting it is silent. A record
+        // type reaching the dispatch below still yields nothing unless its top
+        // group is admitted here — REGN was added to the dispatch first and
+        // parsed exactly zero records, because its group was seeked past before
+        // any record header was ever read. Add types in both places.
         if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
             if (!isModelBearingBaseType(group.rawLabel) && group.rawLabel != "WRLD" &&
                 group.rawLabel != "CELL" && group.rawLabel != "LTEX" &&
-                group.rawLabel != "TXST") {
+                group.rawLabel != "TXST" && group.rawLabel != "REGN") {
                 return false;
             }
         }
@@ -681,6 +767,13 @@ bool extractFalloutScene(
         const std::uint32_t currentWorldspace = worldspaceStack.empty() ? 0u : worldspaceStack.back();
         if (isModelBearingBaseType(record.type)) {
             parseStatRecord(record, outScene);
+            // Not an "else": a LIGH is both a (usually absent) model and a
+            // light source, and both halves are wanted.
+            if (record.type == "LIGH") {
+                parseLightRecord(record, outScene);
+            }
+        } else if (record.type == "REGN") {
+            parseRegionRecord(record, outScene);
         } else if (record.type == "LTEX") {
             parseLandTextureRecord(record, outScene);
         } else if (record.type == "TXST") {

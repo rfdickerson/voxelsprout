@@ -170,6 +170,21 @@ public:
     static void engineToFallout(const float enginePosition[3], float outFallout[3]);
     static void falloutToEngine(const float falloutPosition[3], float outEngine[3]);
 
+    // The discoverable regions covering an engine-space position, by display
+    // name ("Mojave Outpost").
+    //
+    // Lives here rather than in the game because the streamer already owns both
+    // halves -- the cell index (which carries each cell's XCLR region list) and
+    // the world tables (REGN formID -> map name). Answering it anywhere else
+    // would mean a second copy of one of them.
+    //
+    // Returns nothing outside the loaded worldspace, for a cell with no region,
+    // and for regions with no RDMP map name. That last case is the common one:
+    // only 55 of FalloutNV.esm's 276 regions are player-facing, and the other
+    // 221 are weather/audio zones nobody should be told they have entered.
+    [[nodiscard]] std::vector<std::string> regionNamesAtEngineSpace(
+        const float enginePosition[3]) const;
+
     [[nodiscard]] CellStreamerStats stats() const;
     [[nodiscard]] std::size_t availableCellCount() const { return m_availableCells.size(); }
     [[nodiscard]] bool isOpen() const { return m_jobs != nullptr; }

@@ -58,6 +58,7 @@ public:
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunk(std::size_t chunkIndex);
     [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
+    [[nodiscard]] std::size_t importedLocalLightCount() const;
 
     // Named material library, indexed by vertex flag bits 24-31 (see
     // import/imported_material.h). Index 0 is a reserved sentinel and is

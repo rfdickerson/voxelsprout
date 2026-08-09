@@ -425,7 +425,7 @@ bool buildFalloutWorldTables(
     outTables = FalloutWorldTables{};
 
     // Reject every worldspace group and every cell's contents: this pass wants
-    // only the top-level STAT / LTEX / TXST / WRLD records. Nothing per-cell is
+    // only the top-level STAT / LIGH / LTEX / TXST / WRLD / REGN records. Nothing per-cell is
     // materialized, so no LAND record is ever decompressed -- which is what
     // makes it cheap enough to run at game startup.
     FalloutExtractFilter filter{};
@@ -448,9 +448,17 @@ bool buildFalloutWorldTables(
             outTables.staticRecordTypes.emplace(entry.formId, entry.recordType);
         }
     }
+    for (const FalloutLightRecord& entry : data.lights) {
+        outTables.lightsByFormId.emplace(entry.formId, entry);
+    }
     for (const FalloutLandTextureRecord& entry : data.landTextures) {
         if (!entry.diffuseTexturePath.empty()) {
             outTables.landTexturePaths.emplace(entry.formId, entry.diffuseTexturePath);
+        }
+    }
+    for (const FalloutRegionRecord& entry : data.regions) {
+        if (entry.isDiscoverable()) {
+            outTables.regionNamesByFormId.emplace(entry.formId, entry.mapName);
         }
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
@@ -592,12 +600,59 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
         m_stats.droppedTerrainLayers);
 }
 
+// A LIGH reference becomes an ImportedSceneLight. The renderer's punctual-light
+// path (chunk_upload -> frame_run's 64-light budget -> evaluateImportedLocalLights)
+// has always been complete; nothing in this importer had ever written to it, so
+// every lamp in the Mojave was an unlit prop.
+//
+// Rotation is ignored on purpose: the flag census over all 501 LIGH records
+// found no spotlight bit anywhere in the base game, so every one of them is
+// omnidirectional and its REFR orientation cannot matter.
+void CellSceneBuilder::addCellLight(
+    const FalloutPlacedReference& ref, const FalloutLightRecord& light) {
+    if (light.radius <= 0.0f) {
+        // Exactly one LIGH in FalloutNV.esm has radius 0. chunk_upload would
+        // drop it anyway; counting it here is what makes that visible.
+        ++m_stats.lightsSkippedZeroRadius;
+        return;
+    }
+    ImportedSceneLight entry{};
+    entry.sourceId = light.editorId;
+    const Vec3 position = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
+    entry.position[0] = position.x;
+    entry.position[1] = position.y;
+    entry.position[2] = position.z;
+    entry.color[0] = light.color[0];
+    entry.color[1] = light.color[1];
+    entry.color[2] = light.color[2];
+    // XSCL scales the placed instance, and for a light the only thing there is
+    // to scale is its reach.
+    entry.radius = light.radius * (ref.scale > 0.0f ? ref.scale : 1.0f);
+    // FNAM, the GECK's fade value, is the only authored brightness in the
+    // record. The shader multiplies by its own global intensity on top, so this
+    // stays a plain pass-through rather than being pre-tuned here.
+    entry.intensity = light.fadeValue > 0.0f ? light.fadeValue : 1.0f;
+    entry.flags = light.flags;
+    m_scene.lights.push_back(std::move(entry));
+    ++m_stats.lightsPlaced;
+}
+
 void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
     // Diagnostic sets the cooker kept (unresolved texture paths, extreme-UV
     // model names, per-model untextured lists) are not carried here: they are
     // reporting for a batch cook, not something a streaming build can act on.
     // The counters that matter are in CellBuildStats.
     for (const auto& ref : cell.references) {
+            // Lights first, and deliberately ahead of the m_failedStatics gate:
+            // only 29 of 501 LIGH records carry a MODL, so the other 472 have no
+            // model path, land in m_failedStatics on first sight, and would be
+            // skipped before ever being looked at as a light.
+            if (const auto lightIt = m_tables.lightsByFormId.find(ref.baseFormId);
+                lightIt != m_tables.lightsByFormId.end()) {
+                addCellLight(ref, lightIt->second);
+                // No `continue`: a LIGH that does have a mesh still needs its
+                // lamp placed, so fall through into the static path below.
+            }
             if (m_failedStatics.count(ref.baseFormId) != 0u) {
                 continue;
             }

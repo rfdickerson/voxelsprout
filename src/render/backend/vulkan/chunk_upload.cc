@@ -684,6 +684,10 @@ void RendererBackend::removeImportedSceneChunkAt(std::size_t chunkIndex) {
     removeImportedSceneChunk(chunkIndex);
 }
 
+std::size_t RendererBackend::importedLocalLightCount() const {
+    return m_importedLocalLights.size();
+}
+
 std::size_t RendererBackend::liveImportedSceneChunkCount() const {
     std::size_t liveCount = 0;
     for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
@@ -1073,6 +1077,9 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
 void RendererBackend::rebuildImportedDrawTables() {
     m_importedMeshDraws.clear();
     m_importedPageDrawRanges.clear();
+    // Rebuilt, not appended to, so evicting a chunk drops its lights. This runs
+    // on both add and remove, which is what makes that true in both directions.
+    m_importedLocalLights.clear();
     std::uint32_t terrainDrawTotal = 0;
     std::uint32_t staticDrawTotal = 0;
     for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
@@ -1089,6 +1096,8 @@ void RendererBackend::rebuildImportedDrawTables() {
             rebased.firstDraw += chunkDrawBase;
             m_importedPageDrawRanges.push_back(rebased);
         }
+        m_importedLocalLights.insert(
+            m_importedLocalLights.end(), chunk.lights.begin(), chunk.lights.end());
         terrainDrawTotal += chunk.terrainDrawCount;
         staticDrawTotal +=
             static_cast<std::uint32_t>(chunk.draws.size()) - chunk.terrainDrawCount;
@@ -1736,10 +1745,12 @@ bool RendererBackend::uploadImportedSceneInternal(
     draws.reserve(uploadScene.packedDraws.size());
     waterVertices.reserve(uploadScene.waterPatches.size() * 4u);
     waterIndices.reserve(uploadScene.waterPatches.size() * 6u);
-    if (!appendChunk) {
-        m_importedLocalLights.clear();
-    }
-    m_importedLocalLights.reserve(m_importedLocalLights.size() + uploadScene.lights.size());
+    // Collected per chunk, not appended to m_importedLocalLights: the flat list
+    // is rebuilt from the live chunks below, so an evicted cell's lights go away
+    // with it. Appending here instead leaked every light a streaming session had
+    // ever loaded, since removeImportedSceneChunk could not identify them.
+    std::vector<ImportedLocalLight> chunkLights;
+    chunkLights.reserve(uploadScene.lights.size());
     for (const odai::importer::ImportedSceneLight& sceneLight : uploadScene.lights) {
         if (sceneLight.radius <= 0.0f || sceneLight.intensity <= 0.0f) {
             continue;
@@ -1751,7 +1762,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         light.color[2] = std::clamp(sceneLight.color[2], 0.0f, 8.0f);
         light.radius = sceneLight.radius;
         light.intensity = sceneLight.intensity;
-        m_importedLocalLights.push_back(light);
+        chunkLights.push_back(light);
     }
 
     for (const odai::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
@@ -2281,6 +2292,7 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.indexCount = chunkIndexCount;
     chunk.terrainDrawCount = chunkTerrainDrawCount;
     chunk.textureSlots = importedTextureSlots;
+    chunk.lights = std::move(chunkLights);
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
         draw.vertexBufferHandle = m_importedVertexBufferHandle;

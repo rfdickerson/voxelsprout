@@ -280,7 +280,13 @@ void printUsage() {
         "Usage:\n"
         "  odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --cell <EditorID>\n"
         "  odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --worldspace <EditorID> "
-        "<gridX0> <gridZ0> <gridX1> <gridZ1>\n";
+        "<gridX0> <gridZ0> <gridX1> <gridZ1>\n"
+        // Distant LOD. Two sets, not one -- see cookLodTier. The plugin name is
+        // ignored by these: LOD tiles come from the archives, not the ESM.
+        "  odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --lod <WorldspaceID> "
+        "<cellX0> <cellZ0> <cellX1> <cellZ1> [tier: 4|8|16|32, default 4]\n"
+        "  odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --lodobjects "
+        "<WorldspaceID> <cellX0> <cellZ0> <cellX1> <cellZ1>   (merged distant buildings, level4 only)\n";
 }
 
 // Appends one exterior cell's LAND heightmap as a 32x32-quad grid, all
@@ -1326,15 +1332,22 @@ int cookOne(
 }  // namespace
 
 
-// Cooks the distant-landscape LOD tier for a worldspace into one scene.
+// Cooks one distant-landscape LOD tier for a worldspace into one scene.
 //
-// Layout and coordinate space are MEASURED, not assumed (see
-// fnv::kLandLodBlockCells): each block is
-// meshes\landscape\lod\<ws>\blocks\<ws>.level4.x<X>.y<Y>.nif, blocks are
-// 4x4 cells, and only the "level4" tier exists -- there is no mip pyramid.
+// Layout and coordinate space are MEASURED, not assumed -- see the
+// kLandLodTierCellCounts comment in fallout_records.h, which is the authority.
+// The two things that matter here:
 //
-// The blocks' vertices are already in WORLD units, unlike static models which
-// are in model space and placed by an instance transform. So each block gets an
+//   * There are TWO sets, terrain and objects, and which one you get is a
+//     parameter rather than something inferred from the tier. This function
+//     used to derive the directory from `tierCells == 4`, so `--lod ... 4`
+//     cooked distant BUILDINGS while tiers 8/16/32 cooked terrain -- one flag
+//     silently meaning two different things, and no way to ask for terrain
+//     level4 (the finest terrain tier, 1024 tiles for WastelandNV) at all.
+//   * Terrain is a real four-tier pyramid; the object set is level4 only.
+//
+// The tiles' vertices are already in WORLD units, unlike static models which
+// are in model space and placed by an instance transform. So each tile gets an
 // identity placement carrying only the Bethesda Z-up -> engine Y-up change,
 // which is folded into the instance rotation exactly as makeEngineInstanceRotation
 // does for statics.
@@ -1342,6 +1355,7 @@ int cookLodTier(
     const std::filesystem::path& dataFilesPath,
     const std::filesystem::path& outputPath,
     const std::string& worldspaceEditorId,
+    odai::importer::fnv::LandLodSet lodSet,
     std::int32_t tierCells,
     std::int32_t blockX0, std::int32_t blockZ0, std::int32_t blockX1, std::int32_t blockZ1
 ) {
@@ -1384,19 +1398,13 @@ int cookLodTier(
     std::size_t blocksMissing = 0;
     std::size_t totalTriangles = 0;
 
-    // Only level4 lives under "blocks\"; the coarser tiers sit directly under
-    // the worldspace directory. See fnv::kLandLodTierCellCounts.
     const std::int32_t step = tierCells;
-    const std::string tierDirectory =
-        (tierCells == odai::importer::fnv::kLandLodBlockCells) ? "\\blocks\\" : "\\";
     for (std::int32_t bz = blockZ0; bz <= blockZ1; bz += step) {
         for (std::int32_t bx = blockX0; bx <= blockX1; bx += step) {
-            std::ostringstream namePath;
-            namePath << "landscape\\lod\\" << loweredWorldspace << tierDirectory
-                     << loweredWorldspace << ".level" << tierCells << ".x" << bx << ".y" << bz
-                     << ".nif";
+            const std::string tilePath = odai::importer::fnv::landLodTilePath(
+                loweredWorldspace, lodSet, tierCells, bx, bz);
             std::vector<std::uint8_t> nifBytes;
-            if (!assets.resolveMesh(namePath.str(), nifBytes)) {
+            if (!assets.resolveMesh(tilePath, nifBytes)) {
                 ++blocksMissing;
                 continue;  // the LOD grid is sparse; absent blocks are normal
             }
@@ -1482,9 +1490,14 @@ int cookLodTier(
 
     const double totalMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - totalStart).count();
-    std::cout << "LOD level" << tierCells << ": " << blocksParsed << " tiles (" << blocksMissing
-              << " absent from the sparse grid), " << totalTriangles << " triangles, "
-              << scene.textures.size() << " textures\n";
+    // blocksFound minus blocksParsed is the count that resolved out of the
+    // archives but failed to parse -- reported because it was being counted and
+    // then dropped, which made a parse failure look identical to a sparse-grid
+    // hole in the only summary this mode prints.
+    std::cout << "LOD " << (lodSet == odai::importer::fnv::LandLodSet::Objects ? "objects" : "terrain")
+              << " level" << tierCells << ": " << blocksParsed << " tiles parsed of " << blocksFound
+              << " resolved (" << blocksMissing << " absent from the sparse grid), " << totalTriangles
+              << " triangles, " << scene.textures.size() << " textures\n";
     std::cout << "Wrote " << outputPath << " in " << totalMs << " ms\n";
     return 0;
 }
@@ -1514,10 +1527,18 @@ int main(int argc, char** argv) {
         gridZ1 = std::atoi(argv[9]);
         if (gridX0 > gridX1) std::swap(gridX0, gridX1);
         if (gridZ0 > gridZ1) std::swap(gridZ0, gridZ1);
-    } else if (mode == "--lod" && argc >= 10) {
-        // Block coordinates, which step by kLandLodBlockCells (4). A range given
-        // in cell coordinates still works: the loop only visits multiples of the
-        // step from the low corner.
+    } else if ((mode == "--lod" || mode == "--lodobjects") && argc >= 10) {
+        // Tile coordinates, which step by the tier width. A range given in cell
+        // coordinates still works: the corners are floored onto the tile grid
+        // below and the loop only visits multiples of the step from there.
+        //
+        // --lod is TERRAIN and --lodobjects is the merged distant buildings.
+        // Separate modes rather than a set argument because they are not
+        // interchangeable: the object set exists only at level4, so the tier
+        // argument means different things for each.
+        const auto lodSet = (mode == "--lodobjects")
+            ? odai::importer::fnv::LandLodSet::Objects
+            : odai::importer::fnv::LandLodSet::Terrain;
         const std::string lodWorldspace = argv[5];
         std::int32_t bx0 = std::atoi(argv[6]);
         std::int32_t bz0 = std::atoi(argv[7]);
@@ -1525,27 +1546,24 @@ int main(int argc, char** argv) {
         std::int32_t bz1 = std::atoi(argv[9]);
         if (bx0 > bx1) std::swap(bx0, bx1);
         if (bz0 > bz1) std::swap(bz0, bz1);
-        // Optional tier (cells per tile): 4, 8, 16 or 32. Defaults to the
-        // finest.
+        // Optional tier (cells per tile): 4, 8, 16 or 32 for terrain, 4 only
+        // for objects. Defaults to the finest.
         std::int32_t tierCells = odai::importer::fnv::kLandLodBlockCells;
         if (argc >= 11) {
             tierCells = std::atoi(argv[10]);
         }
-        bool tierValid = false;
-        for (const int candidate : odai::importer::fnv::kLandLodTierCellCounts) {
-            tierValid = tierValid || (tierCells == candidate);
-        }
-        if (!tierValid) {
-            std::cerr << "error: LOD tier must be one of 4, 8, 16, 32 (got " << tierCells << ")\n";
+        if (!odai::importer::fnv::landLodTierExists(lodSet, tierCells)) {
+            std::cerr << "error: " << mode << " has no level" << tierCells << " tier"
+                      << (lodSet == odai::importer::fnv::LandLodSet::Objects
+                              ? " (object LOD ships level4 only)\n"
+                              : " (terrain tiers are 4, 8, 16, 32)\n");
             return 1;
         }
-        const auto tierOrigin = [tierCells](std::int32_t cell) {
-            return (cell >= 0) ? ((cell / tierCells) * tierCells)
-                               : (((cell - (tierCells - 1)) / tierCells) * tierCells);
-        };
+        using odai::importer::fnv::landLodTileOrigin;
         return cookLodTier(
-            dataFilesPath, outputPath, lodWorldspace, tierCells,
-            tierOrigin(bx0), tierOrigin(bz0), tierOrigin(bx1), tierOrigin(bz1));
+            dataFilesPath, outputPath, lodWorldspace, lodSet, tierCells,
+            landLodTileOrigin(bx0, tierCells), landLodTileOrigin(bz0, tierCells),
+            landLodTileOrigin(bx1, tierCells), landLodTileOrigin(bz1, tierCells));
     } else {
         printUsage();
         return 1;

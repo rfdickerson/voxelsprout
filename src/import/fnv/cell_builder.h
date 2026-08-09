@@ -43,8 +43,17 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, std::string> staticRecordTypes;
     // LTEX formID -> diffuse texture path, already resolved through TXST.
     std::unordered_map<std::uint32_t, std::string> landTexturePaths;
+    // REGN formID -> the name to show the player (RDMP). Only discoverable
+    // regions are in here: a region with no map name is deliberately absent
+    // rather than present-with-an-empty-string, so a lookup miss means "do not
+    // announce this" without the caller having to re-check.
+    std::unordered_map<std::uint32_t, std::string> regionNamesByFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
+    // LIGH formID -> its light parameters. A LIGH also appears in the maps
+    // above when it carries a MODL (29 of 501 do), because the lamp mesh and
+    // the light it casts are both wanted.
+    std::unordered_map<std::uint32_t, FalloutLightRecord> lightsByFormId;
 };
 
 // One pass over the plugin that materializes no cell contents: it rejects every
@@ -82,6 +91,10 @@ struct CellBuildStats {
     std::size_t nifsParsed = 0;
     std::size_t extremeUvShapes = 0;
     std::size_t effectMeshesSkipped = 0;
+    // LIGH references turned into ImportedScene lights, and those rejected for
+    // having a zero radius (exactly one LIGH in FalloutNV.esm does).
+    std::size_t lightsPlaced = 0;
+    std::size_t lightsSkippedZeroRadius = 0;
     bool textureBudgetExceeded = false;
 
     // Diagnostic name sets the cooker reports. Kept here rather than dropped in
@@ -108,6 +121,10 @@ public:
     // addCellTerrain for every cell first, then addCellStatics for every cell.
     void addCellTerrain(const FalloutCellRecord& cell);
     void addCellStatics(const FalloutCellRecord& cell);
+    // Emits one ImportedScene light for a REFR whose base is a LIGH. Called
+    // from addCellStatics, and additive to the lamp mesh rather than instead
+    // of it.
+    void addCellLight(const FalloutPlacedReference& ref, const FalloutLightRecord& light);
 
     // Convenience for the single-cell (streaming) case.
     void addCell(const FalloutCellRecord& cell) {
