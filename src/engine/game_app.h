@@ -183,6 +183,12 @@ private:
     world::ChunkGrid  m_emptyGrid;
     sim::Simulation   m_emptySimulation;
 
+    void reportFrameStats();
+    // ODAI_FRAME_STATS benchmark state. Zero means the benchmark is off.
+    double m_frameStatsSeconds = 0.0;
+    double m_frameStatsElapsed = 0.0;
+    std::vector<float> m_frameIntervalsMs;
+
     GameFrameProfiler m_frameProfiler;
     bool m_perfOverlayVisible = false;
     bool m_perfOverlayKeyPrev = false;

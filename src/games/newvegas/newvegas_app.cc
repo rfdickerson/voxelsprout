@@ -889,6 +889,25 @@ void NewVegasApp::applyTimeOfDay() {
 }
 
 void NewVegasApp::updateCamera(float deltaSeconds) {
+    // ODAI_FNV_BENCH=1 walks the camera forward on a slow turn instead of
+    // reading input. "It is jittery when I move" is not reproducible from a
+    // standing start, and a hand-driven walk is not comparable between runs --
+    // this makes the motion identical every time so a frame-time change is
+    // attributable to the code rather than to how the tester moved.
+    static const bool s_bench = std::getenv("ODAI_FNV_BENCH") != nullptr;
+    if (s_bench) {
+        m_yawDegrees += 6.0f * deltaSeconds;
+        const float yawRadians = m_yawDegrees * (kPi / 180.0f);
+        constexpr float kBenchSpeed = 400.0f;  // ~5.7 m/s, a fast jog
+        m_cameraX += std::cos(yawRadians) * kBenchSpeed * deltaSeconds;
+        m_cameraZ += std::sin(yawRadians) * kBenchSpeed * deltaSeconds;
+        float groundHeight = 0.0f;
+        if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
+            m_cameraY = groundHeight + kEyeHeightUnits;
+        }
+        return;
+    }
+
     // Mouselook from raw cursor deltas; GameApp has put the cursor in
     // GLFW_CURSOR_DISABLED mode so it reports unbounded relative motion.
     double cursorX = 0.0;

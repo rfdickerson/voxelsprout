@@ -151,6 +151,10 @@ bool GameApp::init(const char* title) {
 void GameApp::run() {
     double prevTime = glfwGetTime();
 
+    if (const char* statsEnv = std::getenv("ODAI_FRAME_STATS")) {
+        m_frameStatsSeconds = std::atof(statsEnv);
+        m_frameIntervalsMs.reserve(4096);
+    }
     if (const char* overlayEnv = std::getenv("ODAI_PERF_OVERLAY")) {
         m_perfOverlayVisible = (overlayEnv[0] != '\0' && overlayEnv[0] != '0');
     }
@@ -242,7 +246,85 @@ void GameApp::run() {
         }
 
         m_frameProfiler.endFrame(frameWatch.elapsedMs());
+
+        // ODAI_FRAME_STATS=<seconds>: collect wall-clock frame intervals, print
+        // a distribution, and quit.
+        //
+        // The INTERVAL between frames is what the player feels, not the CPU
+        // time inside one -- a frame that costs 4 ms of CPU and then blocks 20
+        // ms on a fence is a 24 ms frame, and only the interval shows that.
+        // Percentiles rather than an average for the same reason: judder is a
+        // tail phenomenon, and a mean hides one 40 ms frame per second
+        // completely while that single frame is the entire complaint.
+        if (m_frameStatsSeconds > 0.0) {
+            m_frameIntervalsMs.push_back(static_cast<float>(dt) * 1000.0f);
+            m_frameStatsElapsed += dt;
+            if (m_frameStatsElapsed >= m_frameStatsSeconds) {
+                reportFrameStats();
+                glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+            }
+        }
     }
+}
+
+void GameApp::reportFrameStats() {
+    // Drop the first samples: window creation, swapchain setup and the first
+    // pipeline compiles land there and are not what anyone means by frame time.
+    constexpr std::size_t kWarmupFrames = 30;
+    if (m_frameIntervalsMs.size() <= kWarmupFrames) {
+        VOX_LOGW("engine") << "frame stats: too few frames to report";
+        return;
+    }
+    std::vector<float> samples(m_frameIntervalsMs.begin() + kWarmupFrames, m_frameIntervalsMs.end());
+    std::sort(samples.begin(), samples.end());
+    const auto percentile = [&samples](float fraction) {
+        const auto index = static_cast<std::size_t>(fraction * static_cast<float>(samples.size() - 1));
+        return samples[index];
+    };
+    double total = 0.0;
+    for (const float sample : samples) {
+        total += sample;
+    }
+    const double mean = total / static_cast<double>(samples.size());
+
+    // Judder metric: how far consecutive intervals move relative to each other.
+    // A steady 33 ms is smooth; alternating 8/58 averages the same and is not.
+    double totalJump = 0.0;
+    float worstJump = 0.0f;
+    for (std::size_t i = kWarmupFrames + 1; i < m_frameIntervalsMs.size(); ++i) {
+        const float jump = std::abs(m_frameIntervalsMs[i] - m_frameIntervalsMs[i - 1]);
+        totalJump += jump;
+        worstJump = std::max(worstJump, jump);
+    }
+    const double meanJump = totalJump / static_cast<double>(samples.size());
+
+    const render::FramePacingStats pacing = m_renderer.framePacingStats();
+    VOX_LOGI("engine") << "frame stats over " << samples.size() << " frames:"
+                       << "  mean=" << mean << "ms (" << (1000.0 / std::max(mean, 1e-6)) << " fps)"
+                       << "  p50=" << percentile(0.50f)
+                       << "  p95=" << percentile(0.95f)
+                       << "  p99=" << percentile(0.99f)
+                       << "  max=" << samples.back();
+    VOX_LOGI("engine") << "  frame-to-frame jump: mean=" << meanJump << "ms worst=" << worstJump << "ms";
+    // CPU zone breakdown. Without it, "the frame is 30 ms" is a fact with no
+    // next step: it does not say whether the CPU is the limiter or is merely
+    // waiting on the GPU, and those have opposite fixes.
+    const auto zone = [this](GameZone z) { return m_frameProfiler.channel(z).ewmaMs(); };
+    VOX_LOGI("engine") << "  cpu ms (ewma): poll=" << zone(GameZone::Poll)
+                       << " uiUpdate=" << zone(GameZone::UiUpdate)
+                       << " tick=" << zone(GameZone::Tick)
+                       << " plugins=" << zone(GameZone::Plugins)
+                       << " audio=" << zone(GameZone::Audio)
+                       << " render=" << zone(GameZone::Render)
+                       << " (uiBuild=" << zone(GameZone::UiBuild)
+                       << " submit=" << zone(GameZone::Submit) << ")"
+                       << " frame=" << zone(GameZone::Frame);
+    VOX_LOGI("engine") << "  cpu waits: frameSlot=" << pacing.cpuWaitFrameSlotMs
+                       << "ms acquire=" << pacing.cpuWaitAcquireMs
+                       << "ms present=" << pacing.cpuWaitPresentMs
+                       << "ms transfer=" << pacing.cpuWaitTransferMs
+                       << "ms  queuedFrames=" << pacing.queuedFrames
+                       << " latePresents=" << pacing.latePresentCount;
 }
 
 void GameApp::shutdown() {

@@ -50,6 +50,14 @@ std::string cellAxisToken(std::int32_t value) {
 //     geometry that every cached cell before this is missing
 constexpr int kCellBuildVersion = 9;
 
+// How long applyCompletedLoads may spend uploading finished cells in one frame,
+// and how slow a single chunk add has to be before it logs itself.
+//
+// 6 ms leaves room inside a 16.7 ms frame for the rest of the CPU work while
+// still draining the queue quickly when several small cells land together.
+constexpr float kChunkApplyBudgetMs = 6.0f;
+constexpr float kSlowChunkApplyLogMs = 8.0f;
+
 // Counts blended packed draws by inspecting the first vertex of each, matching
 // how the renderer decides which pipeline a draw goes through. Runs on the
 // cache-hit path too, so the number is the same whether a cell was rebuilt or
@@ -331,6 +339,14 @@ void CellStreamer::update(
 void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
     // Take only as many as this frame's budget allows; the rest stay queued and
     // are applied over the following frames.
+    //
+    // The COUNT budget alone is not enough and measurement says so: with it
+    // already pinned at 1, a single apply was still measured at 70 ms -- a
+    // 69k-vertex, 52-texture cell uploads geometry and decodes textures
+    // synchronously here, and no count can subdivide one item. The time budget
+    // below is what stops a run of merely-expensive cells (0.7-10.8 ms each)
+    // from stacking into one frame behind a count of 1 per frame; it cannot
+    // help the single oversized cell, which needs the upload itself amortized.
     const std::size_t budget = std::max<std::size_t>(1u, m_planner.config().maxChunkAppliesPerFrame);
     std::vector<Pending::Result> drained;
     {
@@ -350,7 +366,20 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
     }
 
     const core::Stopwatch applyTimer;
+    std::size_t appliedThisFrame = 0;
     for (Pending::Result& result : drained) {
+        // Stop once the frame's apply budget is spent, and put the rest back.
+        // Always apply at least one, or a machine where every cell exceeds the
+        // budget would never make progress.
+        if (appliedThisFrame > 0 && applyTimer.elapsedMs() > kChunkApplyBudgetMs) {
+            std::lock_guard<std::mutex> lock(m_pending->mutex);
+            m_pending->completed.insert(
+                m_pending->completed.begin(),
+                std::make_move_iterator(drained.begin() + static_cast<std::ptrdiff_t>(appliedThisFrame)),
+                std::make_move_iterator(drained.end()));
+            break;
+        }
+        ++appliedThisFrame;
         if (!result.succeeded) {
             ++m_stats.loadFailures;
             VOX_LOGW("streamer") << "cell " << result.cell.x << "," << result.cell.z
@@ -388,10 +417,18 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         const float chunkMs = chunkTimer.elapsedMs();
         // Per-chunk, not just aggregated: a single slow add is what a player
         // feels, and an average hides it.
-        VOX_LOGI("streamer") << "cell " << result.cell.x << "," << result.cell.z
-                             << " chunk add took " << chunkMs << " ms ("
-                             << result.scene.packedVertices.size() << " verts, "
-                             << result.scene.textures.size() << " textures)";
+        //
+        // Gated, because this ran unconditionally on every chunk add -- one
+        // formatted log line with six fields, on the main thread, inside the
+        // frame it is trying to measure. Measuring a hitch should not be part
+        // of the hitch.
+        static const bool s_logChunkAdds = std::getenv("ODAI_FNV_LOG_CHUNK_ADDS") != nullptr;
+        if (s_logChunkAdds || chunkMs > kSlowChunkApplyLogMs) {
+            VOX_LOGI("streamer") << "cell " << result.cell.x << "," << result.cell.z
+                                 << " chunk add took " << chunkMs << " ms ("
+                                 << result.scene.packedVertices.size() << " verts, "
+                                 << result.scene.textures.size() << " textures)";
+        }
         if (chunkIndex == render::Renderer::kInvalidImportedChunkIndex) {
             VOX_LOGW("streamer") << "cell " << result.cell.x << "," << result.cell.z
                                  << " geometry upload failed";
