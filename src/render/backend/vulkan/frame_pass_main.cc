@@ -302,20 +302,46 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 sizeof(ChunkPushConstants),
                 &importedPushConstants);
         };
-        for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-            if ((drawIndex < terrainDrawCount && !drawTerrain) ||
-                (drawIndex >= staticDrawStart && !drawStatics)) {
-                continue;
+        // Opaque imported geometry, as indirect batches grouped by alpha-test
+        // threshold. This is the bulk of the frame's draw calls -- roughly 3000
+        // of them in the Mojave -- and they all share one vertex and one index
+        // buffer, so the whole set collapses into one indirect call per
+        // distinct threshold.
+        const auto includeDraw = [&](std::size_t drawIndex) {
+            if (drawIndex < terrainDrawCount) {
+                return drawTerrain;
             }
-            const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
-            if (importedDraw.blended) {
-                continue;  // replayed below, in back-to-front order
+            return drawStatics;
+        };
+        VkBuffer indirectBuffer = VK_NULL_HANDLE;
+        VkDeviceSize indirectBase = 0;
+        const bool useIndirect = m_supportsMultiDrawIndirect &&
+            buildImportedIndirectBatches(importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+        if (useIndirect) {
+            for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                pushAlphaThreshold(batch.alphaThreshold);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexedIndirect(
+                    commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
+                    batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
             }
-            pushAlphaThreshold(importedDraw.alphaThreshold);
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(
-                commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
-                importedDraw.vertexOffset, 0);
+        } else {
+            // Direct fallback: no multiDrawIndirect, or the frame arena could
+            // not serve the command buffer this frame.
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                if (!includeDraw(drawIndex)) {
+                    continue;
+                }
+                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                if (importedDraw.blended) {
+                    continue;  // replayed below, in back-to-front order
+                }
+                pushAlphaThreshold(importedDraw.alphaThreshold);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                    importedDraw.vertexOffset, 0);
+            }
         }
 
         // Blended tail, farthest first. Same vertex/index buffers and push

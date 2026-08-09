@@ -189,20 +189,42 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     sizeof(ChunkPushConstants),
                     &importedPrepassPushConstants);
             };
-            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
-                    (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
-                    continue;
+            // Same indirect batching as the main pass: one call per distinct
+            // alpha-test threshold instead of one per draw.
+            const auto includeDraw = [&](std::size_t drawIndex) {
+                if (drawIndex < terrainDrawCount) {
+                    return m_debugShowImportedTerrain;
                 }
-                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
-                if (importedDraw.blended) {
-                    continue;  // no depth/normal contribution from blended surfaces
+                return m_debugShowImportedStatics;
+            };
+            VkBuffer indirectBuffer = VK_NULL_HANDLE;
+            VkDeviceSize indirectBase = 0;
+            const bool useIndirect = m_supportsMultiDrawIndirect &&
+                buildImportedIndirectBatches(
+                    importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+            if (useIndirect) {
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    pushAlphaThreshold(batch.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
+                        batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
                 }
-                pushAlphaThreshold(importedDraw.alphaThreshold);
-                countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(
-                    commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
-                    importedDraw.vertexOffset, 0);
+            } else {
+                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                    if (!includeDraw(drawIndex)) {
+                        continue;
+                    }
+                    const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                    if (importedDraw.blended) {
+                        continue;  // no depth/normal contribution from blended surfaces
+                    }
+                    pushAlphaThreshold(importedDraw.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                        importedDraw.vertexOffset, 0);
+                }
             }
         }
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&

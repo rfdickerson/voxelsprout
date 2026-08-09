@@ -256,20 +256,44 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         sizeof(ChunkPushConstants),
                         &importedPushConstants);
                 };
-                for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
-                    if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
-                        (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
-                        continue;
+                // Indirect batching, rebuilt per cascade because each cascade
+                // culls its own caster list. This is the biggest single block
+                // of draw calls in the frame -- four cascades over the whole
+                // caster set -- so it is also where batching pays the most.
+                const auto includeDraw = [&](std::size_t drawIndex) {
+                    if (drawIndex < terrainDrawCount) {
+                        return m_debugShowImportedTerrain;
                     }
-                    const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
-                    if (importedDraw.blended) {
-                        continue;  // a blended surface casts no opaque shadow
+                    return m_debugShowImportedStatics;
+                };
+                VkBuffer indirectBuffer = VK_NULL_HANDLE;
+                VkDeviceSize indirectBase = 0;
+                const bool useIndirect = m_supportsMultiDrawIndirect &&
+                    buildImportedIndirectBatches(
+                        cascadeImportedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+                if (useIndirect) {
+                    for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        pushAlphaThreshold(batch.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexedIndirect(
+                            commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
+                            batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
                     }
-                    pushAlphaThreshold(importedDraw.alphaThreshold);
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(
-                        commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
-                        importedDraw.vertexOffset, 0);
+                } else {
+                    for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
+                        if (!includeDraw(drawIndex)) {
+                            continue;
+                        }
+                        const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
+                        if (importedDraw.blended) {
+                            continue;  // a blended surface casts no opaque shadow
+                        }
+                        pushAlphaThreshold(importedDraw.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexed(
+                            commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                            importedDraw.vertexOffset, 0);
+                    }
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }

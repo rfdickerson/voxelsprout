@@ -344,6 +344,20 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     // kept private, so "why is the frame 17 ms" could only be answered by
     // disabling passes one at a time and re-measuring. ODAI_GPU_TIMINGS prints
     // it directly.
+    // Draw-call census alongside the pass timings. "The frame is 30 ms of CPU
+    // in submit" does not say whether that is a few slow calls or a great many
+    // cheap ones, and those have completely different fixes.
+    if (std::getenv("ODAI_DRAW_COUNTS") != nullptr) {
+        static std::uint64_t s_drawLogFrame = 0;
+        if ((s_drawLogFrame++ % 60u) == 0u) {
+            VOX_LOGI("render") << "draw calls: total=" << m_debugDrawCallsTotal
+                               << " shadow=" << m_debugDrawCallsShadow
+                               << " prepass=" << m_debugDrawCallsPrepass
+                               << " main=" << m_debugDrawCallsMain
+                               << "  importedDraws=" << m_importedMeshDraws.size()
+                               << " mergedAway=" << m_debugImportedDrawsMerged;
+        }
+    }
     if (std::getenv("ODAI_GPU_TIMINGS") != nullptr) {
         static std::uint64_t s_timingLogFrame = 0;
         if ((s_timingLogFrame++ % 60u) == 0u) {

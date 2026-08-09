@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <functional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -1927,6 +1928,45 @@ private:
     odai::world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;
     std::uint32_t m_debugChunkIndirectCommandCount = 0;
+    // Indirect batching for imported-scene draws.
+    //
+    // Every imported draw shares ONE vertex buffer and ONE index buffer (see
+    // rebuildImportedDrawTables), so the only things that vary per draw are the
+    // index range and the authored alpha-test threshold. That makes them
+    // mergeable into vkCmdDrawIndexedIndirect: the index range moves into an
+    // indirect command buffer, and the threshold -- the one value that cannot
+    // vary within a single indirect call, because it is a push constant --
+    // becomes the grouping key.
+    //
+    // In practice the Mojave has two or three distinct thresholds across
+    // thousands of draws, so ~3000 vkCmdDrawIndexed calls collapse to ~3
+    // vkCmdDrawIndexedIndirect calls per pass.
+    struct ImportedIndirectBatch {
+        VkDeviceSize bufferOffset = 0;  // byte offset into the frame arena slice
+        std::uint32_t drawCount = 0;
+        std::uint8_t alphaThreshold = 128;
+    };
+    // Per-frame scratch, kept as members so the per-pass rebuild does not
+    // allocate: this runs three times a frame (shadow x4 cascades, prepass,
+    // main) and heap traffic in the recording path is exactly what this change
+    // exists to remove.
+    std::vector<VkDrawIndexedIndirectCommand> m_importedIndirectScratch;
+    std::vector<ImportedIndirectBatch> m_importedIndirectBatches;
+
+    // Builds grouped indirect commands for the given draws into the frame
+    // arena. `include` decides which draw indices participate (culling, terrain
+    // /static toggles). Returns false when the arena could not serve the
+    // allocation, in which case the caller must fall back to direct draws --
+    // dropping the geometry instead would silently empty the scene.
+    [[nodiscard]] bool buildImportedIndirectBatches(
+        std::span<const ImportedMeshDraw> draws,
+        const std::function<bool(std::size_t)>& include,
+        VkBuffer& outBuffer,
+        VkDeviceSize& outBaseOffset);
+
+    // Draws folded away by index-range merging this frame, for the census.
+    std::uint32_t m_debugImportedDrawsMerged = 0;
+
     std::uint32_t m_debugDrawCallsTotal = 0;
     std::uint32_t m_debugDrawCallsShadow = 0;
     std::uint32_t m_debugDrawCallsPrepass = 0;
