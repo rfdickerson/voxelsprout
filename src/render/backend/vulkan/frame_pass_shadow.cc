@@ -96,6 +96,12 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     // settlements/units); the prior game's voxel chunk + magica shadow draws were removed.
     if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if ((inputs.skipCascadeMask & (1u << cascadeIndex)) != 0u) {
+                // This cascade's tile is being reused -- see skipCascadeMask's
+                // declaration. Skipping the whole begin/end block is what keeps
+                // the tile intact: the clear is scoped to the block's renderArea.
+                continue;
+            }
             if (m_cmdInsertDebugUtilsLabel != nullptr) {
                 const std::string cascadeLabel = "Shadow Cascade " + std::to_string(cascadeIndex);
                 insertDebugLabel(commandBuffer, cascadeLabel.c_str(), 0.48f, 0.32f, 0.32f, 1.0f);

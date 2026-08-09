@@ -67,19 +67,26 @@ constexpr uint32_t kImportedLocalLightCapacity = 64;
 // renderer_backend.h's private kShadowAtlasSize, which is what the image
 // allocation actually uses (class scope wins inside member functions). If these
 // disagree, cascades sample the wrong atlas region instead of failing loudly.
-constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
+// Halved from 4096/2048/2048/1024 in an 8192 atlas after GPU timestamps put
+// the shadow pass at ~5 ms of a ~20 ms frame on the Intel LNL iGPU -- a
+// quarter of the whole GPU budget rasterizing shadow maps. Halving the linear
+// resolution quarters the rasterized texels. Cascade 0's texel goes from
+// ~0.5 to ~1.0 world units (~1.5 cm at Fallout scale), and TAA now averages
+// the shadow edges temporally, which is what makes the coarser maps
+// acceptable where they were not before it existed.
+constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 1024u, 1024u, 512u};
 struct ShadowAtlasRect {
     uint32_t x;
     uint32_t y;
     uint32_t size;
 };
 constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
-    ShadowAtlasRect{0u, 0u, 4096u},
-    ShadowAtlasRect{4096u, 0u, 2048u},
-    ShadowAtlasRect{6144u, 0u, 2048u},
-    ShadowAtlasRect{4096u, 2048u, 1024u}
+    ShadowAtlasRect{0u, 0u, 2048u},
+    ShadowAtlasRect{2048u, 0u, 1024u},
+    ShadowAtlasRect{3072u, 0u, 1024u},
+    ShadowAtlasRect{2048u, 1024u, 512u}
 };
-constexpr uint32_t kShadowAtlasSize = 8192u;
+constexpr uint32_t kShadowAtlasSize = 4096u;
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 8u;

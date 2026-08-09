@@ -94,6 +94,15 @@ void appendDeviceExtensionIfMissing(std::vector<const char*>& extensions, const 
 
 
 bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid) {
+    // Diagnostic: ODAI_DEBUG_NO_TEXTURES=1 shades imported geometry from vertex
+    // color instead of its textures (the same switch the imgui debug panel
+    // flips). Exists as an env so a headless A/B can separate "the image is
+    // unstable because texture sampling shimmers" from "the image is unstable
+    // because geometry/cutout edges crawl" -- the two need entirely different
+    // fixes and look identical in a screenshot.
+    if (std::getenv("ODAI_DEBUG_NO_TEXTURES") != nullptr) {
+        m_debugShowImportedTextures = false;
+    }
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
     auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {
@@ -218,6 +227,9 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     if (!runStep("createSunShaftResources", [&] { return createSunShaftResources(); })) {
         VOX_LOGE("render") << "init failed at createSunShaftResources\n";
         shutdown();
+        return false;
+    }
+    if (!runStep("createTaaComputeResources", [&] { return createTaaComputeResources(); })) {
         return false;
     }
     if (!runStep("createSsaoComputeResources", [&] { return createSsaoComputeResources(); })) {
@@ -1862,6 +1874,23 @@ bool RendererBackend::createSwapchain() {
 
     m_swapchainFormat = surfaceFormat.format;
     m_swapchainExtent = extent;
+    {
+        float renderScale = 1.0f;
+        if (const char* scaleEnv = std::getenv("ODAI_RENDER_SCALE")) {
+            renderScale = static_cast<float>(std::atof(scaleEnv));
+        }
+        renderScale = std::clamp(renderScale, 0.3f, 1.0f);
+        m_renderExtent.width = std::max(
+            1u, static_cast<uint32_t>(static_cast<float>(extent.width) * renderScale + 0.5f));
+        m_renderExtent.height = std::max(
+            1u, static_cast<uint32_t>(static_cast<float>(extent.height) * renderScale + 0.5f));
+        if (renderScale < 1.0f) {
+            VOX_LOGI("render") << "render scale " << renderScale << ": 3D at "
+                               << m_renderExtent.width << "x" << m_renderExtent.height
+                               << ", UI/present at " << m_swapchainExtent.width << "x"
+                               << m_swapchainExtent.height;
+        }
+    }
 
     m_swapchainImageViews.resize(imageCount, VK_NULL_HANDLE);
     for (uint32_t i = 0; i < imageCount; ++i) {
@@ -1889,6 +1918,9 @@ bool RendererBackend::createSwapchain() {
               << ", presentMode=" << presentModeName(presentMode) << "\n";
     m_swapchainImageInitialized.assign(imageCount, false);
     m_swapchainImageTimelineValues.assign(imageCount, 0);
+    if (!createTaaTargets()) {
+        return false;
+    }
     if (!createHdrResolveTargets()) {
         VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
@@ -2085,6 +2117,7 @@ bool RendererBackend::recreateSwapchain() {
 
 void RendererBackend::destroySwapchain() {
     resetDisplayTimingTracking();
+    destroyTaaTargets();
     destroyHdrResolveTargets();
     destroyMsaaColorTargets();
     destroyDepthTargets();
@@ -2351,6 +2384,7 @@ void RendererBackend::shutdown() {
         destroyVoxelGiResources();
         destroyAutoExposureResources();
         destroySunShaftResources();
+        destroyTaaComputeResources();
         destroySsaoComputeResources();
         destroySkinningComputeResources();
         destroyChunkBuffers();

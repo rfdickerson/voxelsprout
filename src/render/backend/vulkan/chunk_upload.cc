@@ -1075,6 +1075,9 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
 }
 
 void RendererBackend::rebuildImportedDrawTables() {
+    // The caster set is changing; every cached shadow-cascade tile may show
+    // geometry that no longer exists (or miss geometry that now does).
+    m_shadowRenderedValid = {};
     m_importedMeshDraws.clear();
     m_importedPageDrawRanges.clear();
     // Rebuilt, not appended to, so evicting a chunk drops its lights. This runs
@@ -1238,6 +1241,22 @@ std::uint32_t RendererBackend::acquireImportedTexture(
     imageCreateInfo.format = textureFormat;
     imageCreateInfo.extent = {srcTexture.width, srcTexture.height, 1};
     imageCreateInfo.mipLevels = mipLevelCount;
+    // ODAI_DEBUG_TEXTURE_MIPS=1: census of what mip chains actually reach the
+    // GPU. "The loader decodes mips" and "the sampler has maxLod=16" are
+    // necessary but not sufficient -- a texture arriving here with
+    // mipLevelCount 1 shimmers under minification no matter what the sampler
+    // is configured to do, and nothing else in the frame says so.
+    if (std::getenv("ODAI_DEBUG_TEXTURE_MIPS") != nullptr) {
+        static std::uint32_t s_single = 0;
+        static std::uint32_t s_chained = 0;
+        ((mipLevelCount <= 1u) ? s_single : s_chained)++;
+        if (((s_single + s_chained) % 64u) == 0u) {
+            VOX_LOGI("render") << "texture mip census: singleMip=" << s_single
+                               << " withChain=" << s_chained
+                               << " (last: " << srcTexture.sourcePath << " mips=" << mipLevelCount
+                               << " " << srcTexture.width << "x" << srcTexture.height << ")";
+        }
+    }
     imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;

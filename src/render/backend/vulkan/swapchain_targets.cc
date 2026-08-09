@@ -92,8 +92,8 @@ bool RendererBackend::createDepthTargets() {
         imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
         imageCreateInfo.format = m_depthFormat;
-        imageCreateInfo.extent.width = m_swapchainExtent.width;
-        imageCreateInfo.extent.height = m_swapchainExtent.height;
+        imageCreateInfo.extent.width = m_renderExtent.width;
+        imageCreateInfo.extent.height = m_renderExtent.height;
         imageCreateInfo.extent.depth = 1;
         imageCreateInfo.mipLevels = 1;
         imageCreateInfo.arrayLayers = 1;
@@ -200,8 +200,8 @@ bool RendererBackend::createAoTargets() {
 
     const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
     const uint32_t frameTargetCount = kMaxFramesInFlight;
-    m_aoExtent.width = std::max(1u, m_swapchainExtent.width / 2u);
-    m_aoExtent.height = std::max(1u, m_swapchainExtent.height / 2u);
+    m_aoExtent.width = std::max(1u, m_renderExtent.width / 2u);
+    m_aoExtent.height = std::max(1u, m_renderExtent.height / 2u);
 
     auto createColorTargets = [&](VkFormat format,
                                   std::vector<VkImage>& outImages,
@@ -546,7 +546,7 @@ bool RendererBackend::createHdrResolveTargets() {
     const bool supportsBloomMipBlit =
         (hdrFormatProperties.optimalTilingFeatures & bloomMipFeatures) == bloomMipFeatures;
 
-    const uint32_t maxDimension = std::max(m_swapchainExtent.width, m_swapchainExtent.height);
+    const uint32_t maxDimension = std::max(m_renderExtent.width, m_renderExtent.height);
     uint32_t preferredMipLevels = 1u;
     for (uint32_t mipDimension = maxDimension;
          mipDimension > 1u && preferredMipLevels < kHdrResolveBloomMipCount;
@@ -575,7 +575,7 @@ bool RendererBackend::createHdrResolveTargets() {
         hdrResolveDesc.imageType = VK_IMAGE_TYPE_2D;
         hdrResolveDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
         hdrResolveDesc.format = m_hdrColorFormat;
-        hdrResolveDesc.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        hdrResolveDesc.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
         hdrResolveDesc.usage =
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
             VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -652,7 +652,7 @@ bool RendererBackend::createHdrResolveTargets() {
         waterRefractionDesc.imageType = VK_IMAGE_TYPE_2D;
         waterRefractionDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
         waterRefractionDesc.format = m_hdrColorFormat;
-        waterRefractionDesc.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        waterRefractionDesc.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
         waterRefractionDesc.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         waterRefractionDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         waterRefractionDesc.mipLevels = 1;
@@ -735,8 +735,8 @@ bool RendererBackend::createMsaaColorTargets() {
         imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
         imageCreateInfo.format = m_hdrColorFormat;
-        imageCreateInfo.extent.width = m_swapchainExtent.width;
-        imageCreateInfo.extent.height = m_swapchainExtent.height;
+        imageCreateInfo.extent.width = m_renderExtent.width;
+        imageCreateInfo.extent.height = m_renderExtent.height;
         imageCreateInfo.extent.depth = 1;
         imageCreateInfo.mipLevels = 1;
         imageCreateInfo.arrayLayers = 1;
@@ -829,6 +829,97 @@ bool RendererBackend::createMsaaColorTargets() {
     }
 
     return true;
+}
+
+
+bool RendererBackend::createTaaTargets() {
+    // Two swapchain-sized HDR images ping-ponged as TAA history. NOT arena
+    // transients: the arena reclaims per frame, and history must survive into
+    // the next one. Dedicated allocations -- two images, once per resize.
+    for (std::uint32_t i = 0; i < 2u; ++i) {
+        VkImageCreateInfo imageCreateInfo{};
+        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageCreateInfo.format = m_hdrColorFormat;
+        imageCreateInfo.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
+        imageCreateInfo.mipLevels = 1;
+        imageCreateInfo.arrayLayers = 1;
+        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageCreateInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        const VkResult imageResult =
+            vkCreateImage(m_device, &imageCreateInfo, nullptr, &m_taaImages[i]);
+        if (imageResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImage(taa)", imageResult);
+            return false;
+        }
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(m_device, m_taaImages[i], &memoryRequirements);
+        const uint32_t memoryTypeIndex = findMemoryTypeIndex(
+            m_physicalDevice, memoryRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+            VOX_LOGI("render") << "no memory type for TAA image\n";
+            return false;
+        }
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        const VkResult allocResult =
+            vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_taaImageMemories[i]);
+        if (allocResult != VK_SUCCESS) {
+            logVkFailure("vkAllocateMemory(taa)", allocResult);
+            return false;
+        }
+        const VkResult bindResult =
+            vkBindImageMemory(m_device, m_taaImages[i], m_taaImageMemories[i], 0);
+        if (bindResult != VK_SUCCESS) {
+            logVkFailure("vkBindImageMemory(taa)", bindResult);
+            return false;
+        }
+        VkImageViewCreateInfo viewCreateInfo{};
+        viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewCreateInfo.image = m_taaImages[i];
+        viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewCreateInfo.format = m_hdrColorFormat;
+        viewCreateInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+        const VkResult viewResult =
+            vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_taaImageViews[i]);
+        if (viewResult != VK_SUCCESS) {
+            logVkFailure("vkCreateImageView(taa)", viewResult);
+            return false;
+        }
+        const std::string imageName = "taa.history.image." + std::to_string(i);
+        setObjectName(VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(m_taaImages[i]), imageName.c_str());
+    }
+    // Fresh images: whatever history existed died with the old swapchain.
+    m_taaImageInitialized = {false, false};
+    m_taaHistoryValid = false;
+    m_taaHistoryIndex = 0;
+    return true;
+}
+
+void RendererBackend::destroyTaaTargets() {
+    for (std::uint32_t i = 0; i < 2u; ++i) {
+        if (m_taaImageViews[i] != VK_NULL_HANDLE) {
+            vkDestroyImageView(m_device, m_taaImageViews[i], nullptr);
+            m_taaImageViews[i] = VK_NULL_HANDLE;
+        }
+        if (m_taaImages[i] != VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, m_taaImages[i], nullptr);
+            m_taaImages[i] = VK_NULL_HANDLE;
+        }
+        if (m_taaImageMemories[i] != VK_NULL_HANDLE) {
+            vkFreeMemory(m_device, m_taaImageMemories[i], nullptr);
+            m_taaImageMemories[i] = VK_NULL_HANDLE;
+        }
+    }
+    m_taaImageInitialized = {false, false};
+    m_taaHistoryValid = false;
 }
 
 void RendererBackend::destroyHdrResolveTargets() {

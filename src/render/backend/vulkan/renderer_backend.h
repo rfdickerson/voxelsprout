@@ -364,6 +364,11 @@ public:
     // matches the debug-toggle pattern already used elsewhere (see
     // ChunkPushConstants' disable-textures/flat-shading bits).
     void setSkinningDebugBypass(bool bypass) { m_skinningDebugBypass = bypass; }
+    // Temporal AA over the resolved HDR image (camera reprojection, static
+    // world -- see taa.comp.slang's header for scope and limits). Off by
+    // default so every existing game and test renders pixel-identical; the
+    // Fallout viewer opts in.
+    void setTaaEnabled(bool enabled) { m_taaEnabled = enabled; }
     // GPU-instanced, tessellated, height-displaced hex land surface. Available only
     // when the device supports tessellation (hexTerrainReady()); the caller keeps the
     // flat imported-static land otherwise. setHexTerrainEnabled gates the draw at
@@ -469,7 +474,7 @@ private:
     // the kShadowAtlasRects / kShadowCascadeResolution layout there. This copy is
     // the one the atlas image allocation uses; that one normalizes the sampling
     // UV rects. See the comment beside them before changing either.
-    static constexpr uint32_t kShadowAtlasSize = 8192;
+    static constexpr uint32_t kShadowAtlasSize = 4096;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
     static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
@@ -1175,6 +1180,13 @@ private:
         std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
         bool importedPageCullingEnabled = false;
         std::array<std::span<const ImportedMeshDraw>, kShadowCascadeCount> importedMeshDrawsByCascade;
+        // Bit N set = cascade N keeps last frame's atlas tile instead of
+        // re-rendering. Valid only because each cascade's dynamic-rendering
+        // begin scopes its clear to its own atlas rect -- skipping the block
+        // leaves the tile bit-for-bit intact -- and because frame_run swaps the
+        // skipped cascade's matrix for the one its tile was rendered with, so
+        // sampling and content always agree.
+        std::uint32_t skipCascadeMask = 0;
         std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
         uint32_t pipeInstanceCount = 0;
         const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
@@ -1337,6 +1349,15 @@ private:
     // which image actually holds the frame the user is looking at.
     uint32_t m_lastPresentedImageIndex = UINT32_MAX;
     VkExtent2D m_swapchainExtent{};
+    // Internal 3D rendering resolution. Every scene-resolution target (depth,
+    // MSAA color, HDR resolve, TAA history, water refraction, and the half-res
+    // AO chain derived from it) is sized from THIS, not the swapchain; the
+    // tonemap fullscreen pass samples with normalized UVs into the
+    // swapchain-sized target, so it upscales for free, and the UI still
+    // renders at native resolution on top -- text stays sharp at any scale.
+    // Set from ODAI_RENDER_SCALE (0.3..1.0, default 1.0) wherever the
+    // swapchain extent is (re)established.
+    VkExtent2D m_renderExtent{};
     VkExtent2D m_aoExtent{};
     VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
@@ -1395,11 +1416,64 @@ private:
     std::vector<bool> m_sunShaftImageInitialized;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
+
+    // ---- Temporal AA ------------------------------------------------------
+    // Two persistent history images ping-ponged by frame parity. Deliberately
+    // NOT FrameArena transients: the arena reclaims per frame, and history is
+    // the one image in this renderer that must survive into the next one.
+    bool m_taaEnabled = false;
+    VkDescriptorSetLayout m_taaDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_taaPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_taaPipeline = VK_NULL_HANDLE;
+    DescriptorBufferSet m_taaBufferSet;
+    std::array<VkImage, 2> m_taaImages{};
+    std::array<VkDeviceMemory, 2> m_taaImageMemories{};
+    std::array<VkImageView, 2> m_taaImageViews{};
+    std::array<bool, 2> m_taaImageInitialized{};
+    // Which of the two images holds LAST frame's output. Flipped after each
+    // recorded pass.
+    std::uint32_t m_taaHistoryIndex = 0;
+    bool m_taaHistoryValid = false;
+    // Set by renderFrame for updateFrameDescriptorSets/recordTaaPass: this
+    // frame's inverse view, last frame's view-projection (both already
+    // transposed for the column-major shader), and whether prev is real.
+    odai::math::Matrix4 m_taaInvViewColumnMajor{};
+    odai::math::Matrix4 m_taaPrevViewProjColumnMajor{};
+    odai::math::Matrix4 m_taaPrevViewProj{};
+    bool m_taaPrevViewProjValid = false;
+
+    struct TaaUniformData {
+        float invView[16];
+        float prevViewProj[16];
+        float params[4];
+    };
+    struct TaaPushConstants {
+        std::uint32_t width;
+        std::uint32_t height;
+        float pad0;
+        float pad1;
+    };
+
+    bool createTaaComputeResources();
+    void destroyTaaComputeResources();
+    bool createTaaTargets();
+    void destroyTaaTargets();
+    // Records sample->TAA->copy-back over hdrResolve mip0. Returns true when
+    // it ran, which tells the caller the image is now in TRANSFER_DST rather
+    // than COLOR_ATTACHMENT layout.
+    bool recordTaaPass(VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex);
     VkSampler m_sunShaftSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
     bool m_shadowDepthInitialized = false;
+    // Cascade-interleave cache: the matrix each cascade's atlas tile was
+    // actually rendered with, and whether that tile is reusable. Invalidated
+    // whenever the caster set changes (chunk add/evict -> rebuild of the draw
+    // tables) or the atlas is recreated.
+    std::array<odai::math::Matrix4, kShadowCascadeCount> m_shadowRenderedMatrices{};
+    std::array<bool, kShadowCascadeCount> m_shadowRenderedValid{};
+    std::uint32_t m_shadowInterleaveParity = 0;
     std::array<VkImage, 2> m_voxelGiImages{};
     std::array<VkImageView, 2> m_voxelGiImageViews{};
     std::array<VkDeviceMemory, 2> m_voxelGiImageMemories{};

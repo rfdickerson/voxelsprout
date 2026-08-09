@@ -495,6 +495,14 @@ bool NewVegasApp::onInit() {
     // structures on every uploadImportedScene too.
     m_renderer.setRayTracingEnabled(false);
     m_renderer.setSunShaftsEnabled(false);
+    // Temporal AA. This is what stops textured surfaces shimmering in motion
+    // -- measured at 13x the frame-to-frame instability of flat-shaded
+    // geometry before TAA existed. ODAI_TAA=0 turns it off for A/B.
+    {
+        const char* taaEnv = std::getenv("ODAI_TAA");
+        const bool taaEnabled = taaEnv == nullptr || taaEnv[0] != '0';
+        m_renderer.setTaaEnabled(taaEnabled);
+    }
 
     // Ambient occlusion, tuned for Bethesda scale.
     //

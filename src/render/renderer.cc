@@ -82,6 +82,10 @@ void Renderer::setSkinningDebugBypass(bool bypass) {
     m_backend->setSkinningDebugBypass(bypass);
 }
 
+void Renderer::setTaaEnabled(bool enabled) {
+    m_backend->setTaaEnabled(enabled);
+}
+
 void Renderer::clearHexTerrain() {
     m_backend->clearHexTerrain();
 }

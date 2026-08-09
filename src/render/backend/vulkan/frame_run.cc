@@ -478,7 +478,7 @@ void RendererBackend::renderFrame(
     m_debugDrawCallsMain = 0;
     m_debugDrawCallsPost = 0;
 
-    const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
+    const float aspectRatio = static_cast<float>(m_renderExtent.width) / static_cast<float>(m_renderExtent.height);
     const float nearPlane = 0.1f;
     const bool renderingImportedActors =
         importedActors != nullptr &&
@@ -515,6 +515,18 @@ void RendererBackend::renderFrame(
     }
     const odai::math::Matrix4 mvp = projection * view;
     const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
+    // TAA reprojection inputs. The column-major copies go to the shader (same
+    // transpose convention as the camera UBO); prevViewProj must be read
+    // BEFORE it is overwritten with this frame's matrix, or reprojection
+    // becomes an identity and TAA silently stops doing anything.
+    if (m_taaEnabled) {
+        m_taaInvViewColumnMajor = transpose(odai::math::inverse(view));
+        m_taaPrevViewProjColumnMajor = transpose(m_taaPrevViewProj);
+    }
+    const bool taaPrevWasValid = m_taaPrevViewProjValid;
+    (void)taaPrevWasValid;
+    m_taaPrevViewProj = mvp;
+    m_taaPrevViewProjValid = true;
     const odai::math::Matrix4 viewColumnMajor = transpose(view);
     const odai::math::Matrix4 projectionColumnMajor = transpose(projection);
 
@@ -814,6 +826,56 @@ void RendererBackend::renderFrame(
             lightFar
         );
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
+    }
+
+    // Cascade interleaving: skip re-rendering a cascade whose atlas tile is
+    // still exactly right, and alternate the two far cascades under motion.
+    //
+    // Two skip conditions, one exact and one approximate:
+    //   * The computed matrix is BITWISE the one the tile was rendered with.
+    //     Texel snapping and radius quantization make this the common case for
+    //     a slow or stationary camera, and the skip is then free -- the tile
+    //     would have been re-rendered identical.
+    //   * Far cascades (2, 3) alternate by frame parity while moving. Their
+    //     texels are tens of world units, so serving a tile whose snap origin
+    //     is one frame stale moves distant shadows by less than a screen pixel
+    //     -- and it halves the largest single block of repeated geometry work
+    //     in the frame.
+    //
+    // A skipped cascade samples with the matrix its tile was RENDERED with
+    // (cached), never this frame's -- content and matrix must agree or far
+    // shadows swim. Skinned actors would break the exact-skip (they move
+    // without moving the matrix), so any skinned draws disable skipping
+    // entirely; the Fallout viewer currently has none.
+    std::uint32_t shadowSkipCascadeMask = 0;
+    static const bool s_shadowInterleaveDisabled =
+        std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
+        std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
+    m_shadowInterleaveParity ^= 1u;
+    const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
+    if (!s_shadowInterleaveDisabled && !anySkinnedShadowCasters) {
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if (!m_shadowRenderedValid[cascadeIndex]) {
+                continue;
+            }
+            const bool matrixUnchanged =
+                std::memcmp(
+                    m_shadowRenderedMatrices[cascadeIndex].m,
+                    lightViewProjMatrices[cascadeIndex].m,
+                    sizeof(lightViewProjMatrices[cascadeIndex].m)) == 0;
+            const bool parityDefersFarCascade =
+                cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
+            if (matrixUnchanged || parityDefersFarCascade) {
+                shadowSkipCascadeMask |= (1u << cascadeIndex);
+                lightViewProjMatrices[cascadeIndex] = m_shadowRenderedMatrices[cascadeIndex];
+            }
+        }
+    }
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if ((shadowSkipCascadeMask & (1u << cascadeIndex)) == 0u) {
+            m_shadowRenderedMatrices[cascadeIndex] = lightViewProjMatrices[cascadeIndex];
+            m_shadowRenderedValid[cascadeIndex] = true;
+        }
     }
 
     std::array<odai::math::Vector3, 9> shIrradiance{};
@@ -2101,6 +2163,7 @@ void RendererBackend::renderFrame(
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     shadowPassInputs.importedActorMeshDraws = importedActorMeshDraws;
     shadowPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
+    shadowPassInputs.skipCascadeMask = shadowSkipCascadeMask;
     shadowPassInputs.importedPageCullingEnabled = importedPageCullingEnabled;
     if (importedPageCullingEnabled) {
         for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
@@ -2464,14 +2527,14 @@ void RendererBackend::renderFrame(
     VkViewport viewport{};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = static_cast<float>(m_swapchainExtent.width);
-    viewport.height = static_cast<float>(m_swapchainExtent.height);
+    viewport.width = static_cast<float>(m_renderExtent.width);
+    viewport.height = static_cast<float>(m_renderExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 
     VkRect2D scissor{};
     scissor.offset = {0, 0};
-    scissor.extent = m_swapchainExtent;
+    scissor.extent = m_renderExtent;
     frameExecutionContext.viewport = viewport;
     frameExecutionContext.scissor = scissor;
 
@@ -2506,14 +2569,20 @@ void RendererBackend::renderFrame(
     mainPassInputs.preview = &preview;
     recordMainScenePass(frameExecutionContext, mainPassInputs);
 
+    // TAA runs on the resolved HDR image before bloom mips are cut from it, so
+    // bloom blooms the stabilized frame rather than the shimmering one. When it
+    // ran, mip0 is left in TRANSFER_DST (the copy-back) instead of
+    // COLOR_ATTACHMENT -- the transitions below take the matching source.
+    const bool taaRan = recordTaaPass(commandBuffer, aoFrameIndex);
+
     if (m_hdrResolveMipLevels > 1u) {
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             VK_ACCESS_2_TRANSFER_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2542,10 +2611,10 @@ void RendererBackend::renderFrame(
                 1u
             );
 
-            const uint32_t srcWidth = std::max(1u, m_swapchainExtent.width >> (mipLevel - 1u));
-            const uint32_t srcHeight = std::max(1u, m_swapchainExtent.height >> (mipLevel - 1u));
-            const uint32_t dstWidth = std::max(1u, m_swapchainExtent.width >> mipLevel);
-            const uint32_t dstHeight = std::max(1u, m_swapchainExtent.height >> mipLevel);
+            const uint32_t srcWidth = std::max(1u, m_renderExtent.width >> (mipLevel - 1u));
+            const uint32_t srcHeight = std::max(1u, m_renderExtent.height >> (mipLevel - 1u));
+            const uint32_t dstWidth = std::max(1u, m_renderExtent.width >> mipLevel);
+            const uint32_t dstHeight = std::max(1u, m_renderExtent.height >> mipLevel);
 
             VkImageBlit mipBlit{};
             mipBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -2616,10 +2685,10 @@ void RendererBackend::renderFrame(
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2685,8 +2754,8 @@ void RendererBackend::renderFrame(
             kAutoExposureTargetDownsampleMip,
             availableHdrMipLevels - 1u
         );
-        const uint32_t hdrWidth = std::max(1u, m_swapchainExtent.width >> histogramSourceMip);
-        const uint32_t hdrHeight = std::max(1u, m_swapchainExtent.height >> histogramSourceMip);
+        const uint32_t hdrWidth = std::max(1u, m_renderExtent.width >> histogramSourceMip);
+        const uint32_t hdrHeight = std::max(1u, m_renderExtent.height >> histogramSourceMip);
         AutoExposureHistogramPushConstants histogramPushConstants{};
         histogramPushConstants.width = hdrWidth;
         histogramPushConstants.height = hdrHeight;
@@ -2943,8 +3012,20 @@ void RendererBackend::renderFrame(
     coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan->post, "post");
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    // The tonemap/UI pass writes the SWAPCHAIN image and must cover all of it.
+    // `viewport`/`scissor` above are the scene pair, sized to m_renderExtent --
+    // reusing them here is what squeezed the upscaled frame into the top-left
+    // corner of the window when the render scale first went below 1.0, with
+    // black filling the rest.
+    VkViewport presentViewport{};
+    presentViewport.width = static_cast<float>(m_swapchainExtent.width);
+    presentViewport.height = static_cast<float>(m_swapchainExtent.height);
+    presentViewport.minDepth = 0.0f;
+    presentViewport.maxDepth = 1.0f;
+    VkRect2D presentScissor{};
+    presentScissor.extent = m_swapchainExtent;
+    vkCmdSetViewport(commandBuffer, 0, 1, &presentViewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &presentScissor);
 
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);

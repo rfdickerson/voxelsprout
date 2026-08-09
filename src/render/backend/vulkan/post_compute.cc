@@ -16,6 +16,42 @@ namespace odai::render {
 
 namespace {
 
+// Local copy of the shared single-image barrier helper. renderer_shared.h owns
+// the canonical one, but this file cannot include it -- their anonymous-
+// namespace helpers collide -- and the shared definition does not link across
+// translation units.
+void taaTransitionImage(
+    VkCommandBuffer commandBuffer,
+    VkImage image,
+    VkImageLayout oldLayout,
+    VkImageLayout newLayout,
+    VkPipelineStageFlags2 srcStageMask,
+    VkAccessFlags2 srcAccessMask,
+    VkPipelineStageFlags2 dstStageMask,
+    VkAccessFlags2 dstAccessMask) {
+    VkImageMemoryBarrier2 imageBarrier{};
+    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    imageBarrier.srcStageMask = srcStageMask;
+    imageBarrier.srcAccessMask = srcAccessMask;
+    imageBarrier.dstStageMask = dstStageMask;
+    imageBarrier.dstAccessMask = dstAccessMask;
+    imageBarrier.oldLayout = oldLayout;
+    imageBarrier.newLayout = newLayout;
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.image = image;
+    imageBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+    VkDependencyInfo dependencyInfo{};
+    dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependencyInfo.imageMemoryBarrierCount = 1;
+    dependencyInfo.pImageMemoryBarriers = &imageBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+}
+
+}  // namespace
+
+namespace {
+
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 
 template <typename VkHandleT>
@@ -883,6 +919,247 @@ void RendererBackend::destroySsaoComputeResources() {
         vkDestroyDescriptorSetLayout(m_device, m_ssaoBlurDescriptorSetLayout, nullptr);
         m_ssaoBlurDescriptorSetLayout = VK_NULL_HANDLE;
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Temporal AA. See taa.comp.slang for what this fixes and why reprojection is
+// camera-only. The pass samples hdrResolve mip0, blends clamped history, and
+// copies the result back over mip0 so bloom and tonemap stay untouched.
+
+bool RendererBackend::createTaaComputeResources() {
+    constexpr const char* kTaaShaderPath = "../src/render/shaders/taa.comp.slang.spv";
+
+    if (m_taaDescriptorSetLayout == VK_NULL_HANDLE) {
+        VkDescriptorSetLayoutBinding cameraBinding{};
+        cameraBinding.binding = 0;
+        cameraBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        cameraBinding.descriptorCount = 1;
+        cameraBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding currentColorBinding{};
+        currentColorBinding.binding = 1;
+        currentColorBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        currentColorBinding.descriptorCount = 1;
+        currentColorBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding historyBinding{};
+        historyBinding.binding = 2;
+        historyBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        historyBinding.descriptorCount = 1;
+        historyBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding normalDepthBinding{};
+        normalDepthBinding.binding = 3;
+        normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        normalDepthBinding.descriptorCount = 1;
+        normalDepthBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding outputBinding{};
+        outputBinding.binding = 4;
+        outputBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        outputBinding.descriptorCount = 1;
+        outputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        VkDescriptorSetLayoutBinding taaUniformBinding{};
+        taaUniformBinding.binding = 5;
+        taaUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        taaUniformBinding.descriptorCount = 1;
+        taaUniformBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 6> bindings = {
+            cameraBinding, currentColorBinding, historyBinding,
+            normalDepthBinding, outputBinding, taaUniformBinding
+        };
+        if (!createDescriptorSetLayout(
+                bindings,
+                m_taaDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(taa)",
+                "renderer.descriptorSetLayout.taa",
+                nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+            )) {
+            destroyTaaComputeResources();
+            return false;
+        }
+    }
+
+    if (!m_taaBufferSet.valid()) {
+        if (!createDescriptorBufferSet(
+                m_taaDescriptorSetLayout,
+                kMaxFramesInFlight,
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                    VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.taa",
+                m_taaBufferSet
+            )) {
+            destroyTaaComputeResources();
+            return false;
+        }
+    }
+
+    if (m_taaPipeline != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    VkShaderModule taaShaderModule = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(m_device, kTaaShaderPath, "taa.comp", taaShaderModule)) {
+        destroyTaaComputeResources();
+        return false;
+    }
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(TaaPushConstants);
+    const std::array<VkPushConstantRange, 1> pushConstantRanges = {pushConstantRange};
+
+    if (!createComputePipelineLayout(
+            m_taaDescriptorSetLayout,
+            pushConstantRanges,
+            m_taaPipelineLayout,
+            "vkCreatePipelineLayout(taa)",
+            "renderer.pipelineLayout.taa"
+        )) {
+        vkDestroyShaderModule(m_device, taaShaderModule, nullptr);
+        destroyTaaComputeResources();
+        return false;
+    }
+    if (!createComputePipeline(
+            m_taaPipelineLayout,
+            taaShaderModule,
+            m_taaPipeline,
+            "vkCreateComputePipelines(taa)",
+            "pipeline.taa",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT
+        )) {
+        vkDestroyShaderModule(m_device, taaShaderModule, nullptr);
+        destroyTaaComputeResources();
+        return false;
+    }
+    vkDestroyShaderModule(m_device, taaShaderModule, nullptr);
+    return true;
+}
+
+void RendererBackend::destroyTaaComputeResources() {
+    if (m_taaPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_taaPipeline, nullptr);
+        m_taaPipeline = VK_NULL_HANDLE;
+    }
+    if (m_taaPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_taaPipelineLayout, nullptr);
+        m_taaPipelineLayout = VK_NULL_HANDLE;
+    }
+    destroyDescriptorBufferSet(m_taaBufferSet);
+    if (m_taaDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_taaDescriptorSetLayout, nullptr);
+        m_taaDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+}
+
+bool RendererBackend::recordTaaPass(VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex) {
+    if (!m_taaEnabled || m_taaPipeline == VK_NULL_HANDLE || !m_taaBufferSet.valid()) {
+        return false;
+    }
+    if (aoFrameIndex >= m_hdrResolveImages.size() ||
+        m_hdrResolveImages[aoFrameIndex] == VK_NULL_HANDLE) {
+        return false;
+    }
+    const std::uint32_t currentImage = m_taaHistoryIndex ^ 1u;
+    const std::uint32_t historyImage = m_taaHistoryIndex;
+    if (m_taaImages[currentImage] == VK_NULL_HANDLE ||
+        m_taaImages[historyImage] == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    beginDebugLabel(commandBuffer, "Pass: TAA", 0.22f, 0.34f, 0.40f, 1.0f);
+
+    // hdrResolve mip0: main-pass color output -> compute sampled input.
+    taaTransitionImage(
+        commandBuffer, m_hdrResolveImages[aoFrameIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+    // This frame's output image -> GENERAL for storage writes. Its previous
+    // contents (history from two frames ago) are dead; UNDEFINED is both legal
+    // and faster when it was never written.
+    taaTransitionImage(
+        commandBuffer, m_taaImages[currentImage],
+        m_taaImageInitialized[currentImage] ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                           : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL,
+        m_taaImageInitialized[currentImage] ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                            : VK_PIPELINE_STAGE_2_NONE,
+        m_taaImageInitialized[currentImage] ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                                            : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    // The history image the descriptor points at must be in SHADER_READ_ONLY
+    // even on the first frame, when it holds nothing and the shader's weight
+    // is zero -- validation checks descriptor layouts regardless of branches.
+    if (!m_taaImageInitialized[historyImage]) {
+        taaTransitionImage(
+            commandBuffer, m_taaImages[historyImage],
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        m_taaImageInitialized[historyImage] = true;
+    }
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_taaPipeline);
+    bindDescriptorBuffer(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_taaPipelineLayout,
+        0, m_taaBufferSet, m_currentFrame);
+
+    TaaPushConstants pushConstants{};
+    pushConstants.width = m_renderExtent.width;
+    pushConstants.height = m_renderExtent.height;
+    vkCmdPushConstants(
+        commandBuffer, m_taaPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+        0, sizeof(TaaPushConstants), &pushConstants);
+    vkCmdDispatch(
+        commandBuffer,
+        (m_renderExtent.width + 7u) / 8u,
+        (m_renderExtent.height + 7u) / 8u,
+        1u);
+
+    // Copy the result back over hdrResolve mip0 so the bloom/tonemap chain
+    // reads TAA output without knowing TAA exists.
+    taaTransitionImage(
+        commandBuffer, m_taaImages[currentImage],
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    taaTransitionImage(
+        commandBuffer, m_hdrResolveImages[aoFrameIndex],
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    VkImageCopy copyRegion{};
+    copyRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copyRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copyRegion.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
+    vkCmdCopyImage(
+        commandBuffer,
+        m_taaImages[currentImage], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        m_hdrResolveImages[aoFrameIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1u, &copyRegion);
+
+    // The output becomes next frame's history input.
+    taaTransitionImage(
+        commandBuffer, m_taaImages[currentImage],
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    m_taaImageInitialized[currentImage] = true;
+
+    endDebugLabel(commandBuffer);
+
+    m_taaHistoryIndex = currentImage;
+    m_taaHistoryValid = true;
+    return true;
 }
 
 } // namespace odai::render

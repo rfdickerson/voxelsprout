@@ -163,7 +163,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     renderingInfo.renderArea.offset = {0, 0};
-    renderingInfo.renderArea.extent = m_swapchainExtent;
+    renderingInfo.renderArea.extent = m_renderExtent;
     renderingInfo.layerCount = 1;
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachments = &colorAttachment;
@@ -532,7 +532,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         opaqueCopyRegion.dstSubresource.mipLevel = 0;
         opaqueCopyRegion.dstSubresource.baseArrayLayer = 0;
         opaqueCopyRegion.dstSubresource.layerCount = 1;
-        opaqueCopyRegion.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        opaqueCopyRegion.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
         vkCmdCopyImage(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],

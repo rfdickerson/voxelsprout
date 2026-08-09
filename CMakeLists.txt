@@ -231,6 +231,7 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_normaldepth.frag.slang" fragment)
     # Ambient occlusion: one source, three estimators. ODAI_AO_MODE picks which
     # estimateVisibility() compiles in, so each pipeline's sample loop is branch-free.
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang"

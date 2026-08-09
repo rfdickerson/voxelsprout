@@ -81,6 +81,8 @@ public:
     bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     void setSkinningDebugBypass(bool bypass);
+    // Temporal AA (camera reprojection; static world). Off by default.
+    void setTaaEnabled(bool enabled);
     // GPU-instanced, tessellated, height-displaced hex land surface (strategy map).
     // hexTerrainReady() reports whether the device created the pipeline (tessellation
     // support); the caller keeps the flat imported-static land otherwise.
