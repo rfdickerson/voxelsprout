@@ -289,6 +289,7 @@ add_library(odai_ui STATIC
     src/ui/cached_rich_text.cc
     src/ui/ui_context.cc
     src/ui/icon_atlas.cc
+    src/ui/toast_host.cc
     src/ui/tooltip.cc
     src/ui/theme/ui_theme.cc
     src/ui/signal.cc

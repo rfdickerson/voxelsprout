@@ -1,6 +1,8 @@
 #include "games/newvegas/newvegas_app.h"
 
 #include "core/log.h"
+#include "import/fnv/asset_source.h"
+#include "import/fnv/nif_scene.h"
 #include "ui/ui_types.h"
 
 #include <cstdio>
@@ -9,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 
 namespace odai::games::newvegas {
@@ -181,21 +184,28 @@ bool NewVegasApp::loadScene(
     //     (the refcount table returns the resident slot instead);
     //   * the geometry arena must grow and copy, leaving chunk 0 renderable;
     //   * eviction must return the arena ranges and drop the texture refcounts
-    //     back, restoring exactly the pre-test state.
+    //     back, restoring exactly the pre-test state;
+    //   * eviction must release the chunk's punctual lights. These used to be
+    //     appended straight into one flat list with no record of which chunk
+    //     owned them, so they were never released -- invisible until the
+    //     64-light budget filled up with lights from cells long since left.
     // Loading the same scene twice means the two chunks occupy the same space,
     // so the screen should look unchanged throughout -- which is the point.
     if (std::getenv("ODAI_FNV_CHUNK_TEST") != nullptr) {
         VOX_LOGI("newvegas") << "chunk test: live chunks before add = "
-                             << m_renderer.liveImportedSceneChunkCount();
+                             << m_renderer.liveImportedSceneChunkCount()
+                             << ", lights = " << m_renderer.importedLocalLightCount();
         const std::size_t testChunk = m_renderer.addImportedSceneChunk(scene);
         if (testChunk == render::Renderer::kInvalidImportedChunkIndex) {
             VOX_LOGE("newvegas") << "chunk test: addImportedSceneChunk failed";
         } else {
             VOX_LOGI("newvegas") << "chunk test: added chunk " << testChunk
-                                 << ", live chunks = " << m_renderer.liveImportedSceneChunkCount();
+                                 << ", live chunks = " << m_renderer.liveImportedSceneChunkCount()
+                                 << ", lights = " << m_renderer.importedLocalLightCount();
             m_renderer.removeImportedSceneChunk(testChunk);
             VOX_LOGI("newvegas") << "chunk test: removed chunk " << testChunk
-                                 << ", live chunks = " << m_renderer.liveImportedSceneChunkCount();
+                                 << ", live chunks = " << m_renderer.liveImportedSceneChunkCount()
+                                 << ", lights = " << m_renderer.importedLocalLightCount();
         }
     }
 
@@ -375,11 +385,24 @@ bool NewVegasApp::onInit() {
     // Without this the font atlas is empty, so every addText() emits zero
     // quads and GameApp::drawPerfOverlay bails outright — the HUD and F3 both
     // render nothing, silently, with no error anywhere.
+    // TV-sized type. The defaults (18 px body) are a desk-monitor scale: at a
+    // couch viewing distance that is roughly half the angular size a console UI
+    // needs, and it is why the first pass of this HUD was unreadable on a TV.
+    // 28 px body / 76 px display is the 10-foot scale, and contentScale() still
+    // multiplies on top for high-DPI panels.
+    //
+    // Inter is the Helvetica-like grotesque already vendored here, so the
+    // display face costs no new asset.
+    constexpr float kTvBodySize = 28.0f;
+    constexpr float kTvNumericSize = 26.0f;
+    constexpr float kTvCaptionSize = 22.0f;
+    constexpr float kTvDisplaySize = 76.0f;  // the discovery banner
     if (!loadFonts(
             resolveAssetPath("assets/fonts/Inter-Regular.ttf"),
             resolveAssetPath("assets/fonts/Inter-Bold.ttf"),
             resolveAssetPath("assets/fonts/Inter-Italic.ttf"),
-            resolveAssetPath("assets/fonts/Inter-Regular.ttf"))) {
+            resolveAssetPath("assets/fonts/Inter-Regular.ttf"),
+            kTvBodySize, kTvNumericSize, kTvCaptionSize, kTvDisplaySize)) {
         VOX_LOGE("newvegas") << "failed to load UI fonts";
         return false;
     }
@@ -404,14 +427,28 @@ bool NewVegasApp::onInit() {
     // configuration. Returning here instead left streaming running with ray
     // tracing, voxel GI and sun shafts all still enabled -- which showed up as a
     // BLAS/TLAS rebuild on every single streamed cell.
+    // Character mode STREAMS THE WORLD TOO, and that turned out to be
+    // load-bearing rather than cosmetic. With streaming off nothing calls
+    // uploadImportedScene, and a frame with no imported geometry renders no
+    // sky, no ground and no skinned actor -- a flat clear-colour screen that
+    // looks exactly like a failed character upload. Standing the character in
+    // Goodsprings costs a few seconds of streaming and makes the view both
+    // correct and legible: a body at Fallout's own scale, next to Fallout's own
+    // buildings, is the only way to see that the scale is right.
     const bool streamingMode = !m_streamDirectory.empty();
 
-    if (!streamingMode && m_scenePath.empty()) {
+    if (!streamingMode && !m_characterMode && m_scenePath.empty()) {
         if (const char* fromEnv = std::getenv("ODAI_FNV_SCENE")) {
             m_scenePath = fromEnv;
         }
     }
-    if (!streamingMode && m_scenePath.empty()) {
+    if (m_characterMode && m_streamDirectory.empty()) {
+        VOX_LOGE("newvegas")
+            << "--character needs the game's Data directory (for the skeleton and "
+               "body meshes); none was found. Pass --stream \"<.../Fallout New Vegas/Data>\".";
+        return false;
+    }
+    if (!streamingMode && !m_characterMode && m_scenePath.empty()) {
         VOX_LOGE("newvegas")
             << "no Fallout: New Vegas install found, and no scene given.\n"
                "  Stream from the game (no cooking): --stream \"<.../Fallout New Vegas/Data>\"\n"
@@ -431,7 +468,7 @@ bool NewVegasApp::onInit() {
     // mode) and the town centroid finds nothing (spawn falls back to the middle
     // of the map). This costs the mesh + instance arrays for the duration of
     // onInit, which is the price of knowing where the ground and the town are.
-    if (!streamingMode) {
+    if (!streamingMode && !m_characterMode) {
         m_sceneDirectory = std::filesystem::path(m_scenePath).parent_path();
         m_exteriorStem = std::filesystem::path(m_scenePath).stem().string();
         if (!loadScene(std::filesystem::path(m_scenePath), nullptr, nullptr)) {
@@ -552,9 +589,284 @@ bool NewVegasApp::onInit() {
     if (streamingMode && !initStreaming()) {
         return false;
     }
+    if (m_characterMode && !initCharacter(m_streamDirectory)) {
+        return false;
+    }
+
+    // Pip-Boy palette for notifications, matching the HUD chrome.
+    ui::ToastStyle toastStyle{};
+    toastStyle.widthPx = 300.0f;
+    m_toasts.setStyle(toastStyle);
+    ui::ToastTiming toastTiming{};
+    toastTiming.holdSeconds = 4.5f;
+    m_toasts.setTiming(toastTiming);
+    m_toasts.setMaxVisible(3);
+
+    // Discovery banner: centred, chrome-free, slow fade.
+    m_banner.setStyle(ui::makeBannerStyle());
+    m_banner.setTiming(ui::makeBannerTiming());
+    m_banner.setMaxVisible(1);
+
+    // ODAI_FNV_UI_DEMO=1 opens the menu and stacks sample toasts at startup.
+    // The screenshot path cannot press buttons, so without this the menu and a
+    // multi-toast stack are the two things that can only be checked by a human
+    // with a controller in hand -- which is to say, not checked.
+    if (std::getenv("ODAI_FNV_UI_DEMO") != nullptr) {
+        // ODAI_FNV_UI_DEMO=menu opens the pause menu; anything else shows the
+        // discovery banner. They are mutually exclusive at runtime (the banner
+        // holds while the menu is up), so the demo cannot show both either.
+        const std::string demoMode = std::getenv("ODAI_FNV_UI_DEMO");
+        m_navDriving = true;  // show the focus highlight and the controller labels
+        m_menuOpen = (demoMode == "menu");
+        if (!m_menuOpen) {
+            m_banner.push("Goodsprings", "Location discovered", "region:Goodsprings");
+        }
+        m_toasts.push("Stimpak", "Added to inventory");
+        m_toasts.push("Quest updated", "Back in the Saddle");
+    }
 
     setMouseCaptured(true);
     return true;
+}
+
+bool NewVegasApp::initCharacter(const std::filesystem::path& dataFilesPath) {
+    importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataFilesPath)) {
+        VOX_LOGE("newvegas") << "could not index archives under " << dataFilesPath;
+        return false;
+    }
+
+    std::string error;
+    std::vector<std::uint8_t> bytes;
+    if (!assets.resolveMesh(m_characterSkeletonPath, bytes, error)) {
+        VOX_LOGE("newvegas") << "skeleton not found: " << m_characterSkeletonPath << " (" << error << ")";
+        return false;
+    }
+    importer::fnv::NifSkeleton nifSkeleton;
+    if (!importer::fnv::parseNifSkeleton(bytes, nifSkeleton, error)) {
+        VOX_LOGE("newvegas") << "skeleton parse failed: " << error;
+        return false;
+    }
+    if (!importer::fnv::buildFalloutSkeleton(nifSkeleton, m_character.skeleton)) {
+        VOX_LOGE("newvegas") << "skeleton conversion failed";
+        return false;
+    }
+
+    for (const std::string& partPath : m_characterPartPaths) {
+        if (!assets.resolveMesh(partPath, bytes, error)) {
+            VOX_LOGW("newvegas") << "body part not found: " << partPath << " (" << error << ")";
+            continue;
+        }
+        importer::fnv::NifSkinnedModel model;
+        if (!importer::fnv::parseNifSkinnedMesh(bytes, model, error)) {
+            VOX_LOGW("newvegas") << "body part parse failed: " << partPath << " (" << error << ")";
+            continue;
+        }
+        if (!importer::fnv::appendFalloutCharacterMesh(model, m_character, error)) {
+            VOX_LOGW("newvegas") << "body part bind failed: " << partPath << " (" << error << ")";
+        }
+    }
+    if (m_character.vertices.empty()) {
+        VOX_LOGE("newvegas") << "no skinned geometry loaded";
+        return false;
+    }
+
+    // One draw per part -- minus the gore caps. The draws index the merged
+    // buffer, which is why appendFalloutCharacterMesh records
+    // firstIndex/indexCount rather than leaving each part with its own arrays.
+    //
+    // A body NIF ships dismemberment geometry alongside the body: on
+    // characters\_male\upperbody.nif, 3 of the 6 shapes ("limbcaps",
+    // "meatneck01", "meathead01") are meat caps the game reveals only when a
+    // limb comes off. They are skinned and they bind correctly -- their
+    // measured bind-pose bounds are simply not on the standing body
+    // ("limbcaps" sits at y -102..-18, well below the feet at 0.78) because
+    // nothing positions them until a limb is severed.
+    //
+    // Drawing them makes an otherwise correct character look broken, and it was
+    // the reason the first framed capture of this view looked like it had
+    // failed. Excluded by texture because the proper discriminator --
+    // BSDismemberSkinInstance's per-partition body-part IDs -- is the one part
+    // of that block this importer deliberately does not read. All three use
+    // textures\gore\MeatCapGore01.dds and no non-gore part does.
+    // ODAI_FNV_CHAR_ALL=1 keeps the caps, for diagnosing which parts reach the
+    // screen at all.
+    const bool keepAllParts = std::getenv("ODAI_FNV_CHAR_ALL") != nullptr;
+    const auto isGoreCap = [keepAllParts](const std::string& texturePath) {
+        if (keepAllParts) {
+            return false;
+        }
+        std::string lowered = texturePath;
+        for (char& ch : lowered) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return lowered.find("\\gore\\") != std::string::npos;
+    };
+    m_characterDraws.clear();
+    m_characterDraws.reserve(m_character.parts.size());
+    std::vector<const importer::fnv::FalloutCharacterPart*> drawnParts;
+    for (const auto& part : m_character.parts) {
+        if (isGoreCap(part.diffuseTexturePath)) {
+            VOX_LOGI("newvegas") << "  skipping gore cap \"" << part.name << "\"";
+            continue;
+        }
+        importer::ImportedScenePackedDraw draw{};
+        draw.firstIndex = part.firstIndex;
+        draw.indexCount = part.indexCount;
+        draw.alphaThreshold = part.alphaThreshold;
+        m_characterDraws.push_back(draw);
+        drawnParts.push_back(&part);
+    }
+    // ODAI_FNV_CHAR_NODRAW=1 uploads the template (so the skinning dispatch
+    // still runs) but issues no draws. Paired with ODAI_FNV_SKIN_BYPASS, which
+    // does the opposite, it separates "the compute pass corrupts the frame"
+    // from "the geometry it produces does".
+    if (std::getenv("ODAI_FNV_CHAR_NODRAW") != nullptr) {
+        VOX_LOGW("newvegas") << "character draws SUPPRESSED: dispatch only";
+        m_characterDraws.clear();
+    } else if (m_characterDraws.empty()) {
+        VOX_LOGE("newvegas") << "every part was filtered out; nothing to draw";
+        return false;
+    }
+
+    importer::fnv::computeFalloutBindPose(m_character, m_characterBindPose);
+
+    render::ImportedSkinnedMeshTemplate meshTemplate{};
+    meshTemplate.vertices = m_character.vertices;
+    meshTemplate.indices = m_character.indices;
+    meshTemplate.draws = m_characterDraws;
+    meshTemplate.boneCount = static_cast<std::uint32_t>(m_character.skeleton.bones.size());
+    // ODAI_FNV_SKIN_BYPASS=1 skips the skinning dispatch, leaving the output
+    // buffer at the rest pose the upload seeded it with. It is the one
+    // diagnostic that separates "the vertex data I handed over is wrong" from
+    // "the compute pass is not doing what I think": a clean figure under bypass
+    // and an exploded one without it puts the fault squarely in the dispatch.
+    if (std::getenv("ODAI_FNV_SKIN_BYPASS") != nullptr) {
+        VOX_LOGW("newvegas") << "skinning dispatch BYPASSED: showing the rest pose";
+        m_renderer.setSkinningDebugBypass(true);
+    }
+    // ODAI_FNV_CHAR_NOUPLOAD=1 does everything except hand the mesh to the GPU.
+    // It answers the one question the other toggles cannot: whether the frame
+    // breaks because of the skinned instance at all, or because of something
+    // else this mode does.
+    if (std::getenv("ODAI_FNV_CHAR_NOUPLOAD") != nullptr) {
+        VOX_LOGW("newvegas") << "character GPU upload SKIPPED";
+        m_characterBindPose.clear();
+        return true;
+    }
+    if (!m_renderer.uploadSkinnedMeshTemplate(0u, meshTemplate)) {
+        VOX_LOGE("newvegas") << "uploadSkinnedMeshTemplate failed";
+        return false;
+    }
+
+    VOX_LOGI("newvegas") << "character: " << m_character.skeleton.bones.size() << " bones, "
+                         << m_character.vertices.size() << " vertices, "
+                         << (m_character.indices.size() / 3u) << " triangles, "
+                         << m_character.parts.size() << " parts, "
+                         << m_character.unresolvedBoneCount << " unresolved bones";
+
+    // Frame the camera on the skinned bind-pose bounds rather than on a guessed
+    // height. The character's extent is the only thing in the scene, and
+    // guessing it wrong means an empty screen that looks exactly like a failed
+    // upload -- which is the outcome this whole mode exists to rule out.
+    float boundsMin[3] = {1e30f, 1e30f, 1e30f};
+    float boundsMax[3] = {-1e30f, -1e30f, -1e30f};
+    // Over the DRAWN parts only. Including the filtered gore caps here would
+    // frame the camera on a body twice its real height and push the character
+    // itself into the top half of the screen.
+    for (const importer::fnv::FalloutCharacterPart* part : drawnParts) {
+    for (std::uint32_t idx = part->firstIndex; idx < part->firstIndex + part->indexCount; ++idx) {
+        const auto& vertex = m_character.vertices[m_character.indices[idx]];
+        odai::math::Vector3 skinned{0.0f, 0.0f, 0.0f};
+        const odai::math::Vector3 rest{vertex.position[0], vertex.position[1], vertex.position[2]};
+        for (int k = 0; k < importer::fnv::kNifMaxBoneInfluences; ++k) {
+            const float weight = vertex.boneWeights[k];
+            if (weight <= 0.0f) {
+                continue;
+            }
+            const std::size_t bone = vertex.boneIndices[k];
+            if (bone >= m_characterBindPose.size()) {
+                continue;
+            }
+            const odai::math::Vector3 contribution =
+                odai::math::transformPoint(m_characterBindPose[bone], rest);
+            skinned.x += contribution.x * weight;
+            skinned.y += contribution.y * weight;
+            skinned.z += contribution.z * weight;
+        }
+        const float values[3] = {skinned.x, skinned.y, skinned.z};
+        for (int a = 0; a < 3; ++a) {
+            boundsMin[a] = std::min(boundsMin[a], values[a]);
+            boundsMax[a] = std::max(boundsMax[a], values[a]);
+        }
+    }
+    }
+    const float centreX = (boundsMin[0] + boundsMax[0]) * 0.5f;
+    const float centreZ = (boundsMin[2] + boundsMax[2]) * 0.5f;
+    const float height = std::max(1.0f, boundsMax[1] - boundsMin[1]);
+    VOX_LOGI("newvegas") << "character bind-pose bounds"
+                         << " x " << boundsMin[0] << ".." << boundsMax[0]
+                         << " y " << boundsMin[1] << ".." << boundsMax[1]
+                         << " z " << boundsMin[2] << ".." << boundsMax[2]
+                         << " (" << height << " units tall)";
+
+    // Stand the character in front of wherever streaming spawned the camera,
+    // rather than moving the camera to the character. The spawn is on the
+    // ground in Goodsprings and the camera is at eye height there; dragging it
+    // to a bare bounding box would give up the one thing this view is for,
+    // which is seeing the body at the same scale as the world around it.
+    //
+    // The offsets fold into the bone matrices in updateCharacterPose: a skinned
+    // actor has no separate instance transform.
+    const float yawRadians = m_yawDegrees * (kPi / 180.0f);
+    const float forwardX = std::cos(yawRadians);
+    const float forwardZ = std::sin(yawRadians);
+    // Far enough that the whole figure fits a 75-degree vertical FOV with
+    // margin (tan(37.5 deg) ~= 0.767), and no closer -- near clip aside, a body
+    // filling the frame hides exactly the scale comparison being made.
+    const float standoff = height * 1.1f / 0.767f;
+    m_characterWorldX = m_cameraX + (forwardX * standoff) - centreX;
+    m_characterWorldZ = m_cameraZ + (forwardZ * standoff) - centreZ;
+    // The bind pose already stands on y = 0 (measured: feet at 0.78), so the
+    // ground height goes in unmodified.
+    float groundY = m_cameraY;
+    if (groundHeightAt(m_characterWorldX, m_characterWorldZ, groundY)) {
+        m_characterWorldY = groundY;
+    } else {
+        // No collision data yet (the cell may still be streaming): drop the
+        // character to the camera's own foot height, which the spawn put on the
+        // ground.
+        m_characterWorldY = m_cameraY - kEyeHeightUnits;
+    }
+    VOX_LOGI("newvegas") << "character placed at " << m_characterWorldX << ", " << m_characterWorldY
+                         << ", " << m_characterWorldZ << " (camera at " << m_cameraX << ", "
+                         << m_cameraY << ", " << m_cameraZ << ")";
+    return true;
+}
+
+void NewVegasApp::updateCharacterPose() {
+    if (m_characterBindPose.empty()) {
+        return;
+    }
+    // ODAI_FNV_CHAR_NOPOSE=1 never submits a pose. With the output buffer now
+    // seeded at upload time, the actor should still draw -- in rest pose, at
+    // the origin -- which isolates the per-frame pose upload from everything
+    // else the skinned path does.
+    if (std::getenv("ODAI_FNV_CHAR_NOPOSE") != nullptr) {
+        return;
+    }
+    // World placement rides on the bone matrices, pre-multiplied: the skinning
+    // pass consumes bone matrices and nothing else, so there is no separate
+    // instance transform to put it in.
+    const odai::math::Matrix4 actorWorld = odai::math::Matrix4::translation(
+        odai::math::Vector3{m_characterWorldX, m_characterWorldY, m_characterWorldZ});
+    m_characterPoseScratch.resize(m_characterBindPose.size());
+    for (std::size_t i = 0; i < m_characterBindPose.size(); ++i) {
+        m_characterPoseScratch[i] = actorWorld * m_characterBindPose[i];
+    }
+    render::ImportedSkinnedActorFrameData pose{};
+    pose.boneMatrices = m_characterPoseScratch;
+    m_renderer.setSkinnedActorPose(0u, pose);
 }
 
 void NewVegasApp::applyTimeOfDay() {
@@ -962,6 +1274,27 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
 }
 
 void NewVegasApp::onTick(float deltaSeconds) {
+    // Before anything reads input: the menu toggle decided here gates whether
+    // camera movement runs at all this frame.
+    pollNavInput(deltaSeconds);
+    m_toasts.update(deltaSeconds);
+    // The banner is a WORLD event, so it pauses with the world. Letting it run
+    // under an open menu means a discovery fades in and out behind a modal
+    // panel and the player never sees the one thing it existed to tell them --
+    // and while it lasted, two pieces of large centred type sat on top of each
+    // other. Held here, it plays the moment the menu closes.
+    if (!m_menuOpen) {
+        m_banner.update(deltaSeconds);
+    }
+    // Region lookup walks the cell index, so it is polled a few times a second
+    // rather than every frame. A player cannot cross a 4096-unit cell in less
+    // than that even sprinting, so nothing is missed.
+    m_regionPollSeconds += deltaSeconds;
+    if (m_regionPollSeconds >= 0.25f) {
+        m_regionPollSeconds = 0.0f;
+        updateRegionDiscovery();
+    }
+
     if (keyDown(m_window, GLFW_KEY_ESCAPE)) {
         glfwSetWindowShouldClose(m_window, GLFW_TRUE);
         return;
@@ -1019,37 +1352,322 @@ void NewVegasApp::onTick(float deltaSeconds) {
     applyTimeOfDay();
 }
 
-void NewVegasApp::drawHud() {
+
+// ---------------------------------------------------------------------------
+// Console-friendly UI: nav input, region-discovery toasts, Pip-Boy HUD.
+
+namespace {
+
+// Pip-Boy phosphor. One palette, used by every piece of chrome below, so the
+// HUD reads as one instrument rather than a pile of independently styled boxes.
+constexpr ui::UiColor kPipGreen{0.42f, 1.00f, 0.52f, 1.00f};
+constexpr ui::UiColor kPipGreenDim{0.26f, 0.66f, 0.32f, 1.00f};
+constexpr ui::UiColor kPipPanel{0.02f, 0.07f, 0.03f, 0.82f};
+constexpr ui::UiColor kPipPanelSolid{0.02f, 0.07f, 0.03f, 0.95f};
+
+float deadzone(float value, float threshold) {
+    if (value > -threshold && value < threshold) {
+        return 0.0f;
+    }
+    return value;
+}
+
+}  // namespace
+
+void NewVegasApp::pollNavInput(float deltaSeconds) {
+    m_nav.beginFrame();
+
+    const bool keyUp = keyDown(m_window, GLFW_KEY_UP);
+    const bool keyDownArrow = keyDown(m_window, GLFW_KEY_DOWN);
+    const bool keyLeft = keyDown(m_window, GLFW_KEY_LEFT);
+    const bool keyRight = keyDown(m_window, GLFW_KEY_RIGHT);
+    bool accept = keyDown(m_window, GLFW_KEY_ENTER);
+    bool cancel = keyDown(m_window, GLFW_KEY_ESCAPE);
+    bool menu = cancel;
+
+    // Gamepad, when one is present. GLFW's gamepad mapping gives the same
+    // button indices for every recognized pad, so this needs no per-controller
+    // handling -- an unmapped joystick simply reports false here rather than
+    // producing garbage input.
+    float stickX = 0.0f;
+    float stickY = 0.0f;
+    GLFWgamepadstate pad{};
+    const bool hasPad = glfwJoystickIsGamepad(GLFW_JOYSTICK_1) == GLFW_TRUE &&
+        glfwGetGamepadState(GLFW_JOYSTICK_1, &pad) == GLFW_TRUE;
+    if (hasPad) {
+        constexpr float kStickDeadzone = 0.25f;
+        stickX = deadzone(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_X], kStickDeadzone);
+        stickY = deadzone(pad.axes[GLFW_GAMEPAD_AXIS_LEFT_Y], kStickDeadzone);
+        accept = accept || pad.buttons[GLFW_GAMEPAD_BUTTON_A] == GLFW_PRESS;
+        cancel = cancel || pad.buttons[GLFW_GAMEPAD_BUTTON_B] == GLFW_PRESS;
+        menu = menu || pad.buttons[GLFW_GAMEPAD_BUTTON_START] == GLFW_PRESS;
+        m_nav.setAction(ui::UiNavAction::PrevTab,
+                        pad.buttons[GLFW_GAMEPAD_BUTTON_LEFT_BUMPER] == GLFW_PRESS);
+        m_nav.setAction(ui::UiNavAction::NextTab,
+                        pad.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS);
+    }
+
+    // Stick first, then OR in the d-pad and arrow keys. The stick mapper owns
+    // the four directions' latched state, so digital sources are folded in
+    // after it rather than fighting it for the same flags.
+    m_navStick.apply(m_nav, stickX, stickY);
+    const bool padUp = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_UP] == GLFW_PRESS;
+    const bool padDown = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_DOWN] == GLFW_PRESS;
+    const bool padLeft = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_LEFT] == GLFW_PRESS;
+    const bool padRight = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_RIGHT] == GLFW_PRESS;
+    if (keyUp || padUp) { m_nav.setAction(ui::UiNavAction::Up, true); }
+    if (keyDownArrow || padDown) { m_nav.setAction(ui::UiNavAction::Down, true); }
+    if (keyLeft || padLeft) { m_nav.setAction(ui::UiNavAction::Left, true); }
+    if (keyRight || padRight) { m_nav.setAction(ui::UiNavAction::Right, true); }
+    m_nav.setAction(ui::UiNavAction::Accept, accept);
+    m_nav.setAction(ui::UiNavAction::Cancel, cancel);
+    m_nav.setAction(ui::UiNavAction::Menu, menu);
+
+    m_navRepeat.update(m_nav, deltaSeconds);
+
+    // Any directional or accept input means a controller is driving. The mouse
+    // takes it back in updateCamera, which is where mouse motion is already
+    // being read.
+    m_navDriving = m_navDriving || m_nav.active;
+    m_nav.active = false;
+
+    if (m_nav.pressed(ui::UiNavAction::Menu)) {
+        m_menuOpen = !m_menuOpen;
+        // Releasing the mouse with the menu up is what makes it usable on PC;
+        // on a controller it costs nothing.
+        setMouseCaptured(!m_menuOpen);
+    }
+}
+
+void NewVegasApp::updateRegionDiscovery() {
+    if (!m_streamer) {
+        return;
+    }
+    const float position[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    for (const std::string& name : m_streamer->regionNamesAtEngineSpace(position)) {
+        // insert() reports whether it was new, so the "have I seen this?" check
+        // and the record of having seen it are one operation -- there is no
+        // window where a second call in the same frame announces it twice.
+        if (!m_discoveredRegions.insert(name).second) {
+            continue;
+        }
+        VOX_LOGI("newvegas") << "discovered region: " << name;
+        // Keyed on the region so a player standing on a cell boundary, where
+        // the streamer flips between two cells, refreshes one announcement
+        // instead of queueing a run of identical ones.
+        m_banner.push(name, "Location discovered", "region:" + name);
+    }
+}
+
+void NewVegasApp::drawPipBoyHud() {
+    const float scale = contentScale();
+    int screenWidth = 0;
+    int screenHeight = 0;
+    framebufferSize(screenWidth, screenHeight);
+    const float margin = 16.0f * scale;
+
+    // Status strip, bottom-left: the readouts that belong on screen all the
+    // time. Kept to one line so it never competes with the world.
     const int hours = static_cast<int>(m_timeOfDayHours);
     const int minutes = static_cast<int>((m_timeOfDayHours - static_cast<float>(hours)) * 60.0f);
-    char text[192];
+    char status[192];
+    const std::size_t regionCount = m_discoveredRegions.size();
     std::snprintf(
-        text, sizeof(text),
-        "New Vegas  |  %02d:%02d %s  |  pos %.0f %.0f %.0f  |  [ ] time   P cycle   Tab cursor",
-        hours, minutes, m_dayCyclePaused ? "(paused)" : "(running)", m_cameraX, m_cameraY, m_cameraZ);
-    // Door prompt, centred low on screen where an interaction prompt belongs
-    // rather than buried in the status line.
+        status, sizeof(status), "%02d:%02d%s   %s   %zu region%s",
+        hours, minutes, m_dayCyclePaused ? " (paused)" : "",
+        m_walkMode ? "ON FOOT" : "FLY", regionCount, regionCount == 1u ? "" : "s");
+
+    const float statusWidth = m_uiFont.measureText(status) + (margin * 1.5f);
+    const float statusHeight = m_uiFont.lineHeightPx() + (10.0f * scale);
+    ui::UiRect statusRect{};
+    statusRect.minX = margin;
+    statusRect.maxX = margin + statusWidth;
+    statusRect.maxY = static_cast<float>(screenHeight) - margin;
+    statusRect.minY = statusRect.maxY - statusHeight;
+    m_uiDrawList.addRoundRectFilled(statusRect, kPipPanel, 3.0f * scale);
+    m_uiDrawList.addRoundRect(statusRect, kPipGreenDim, 3.0f * scale, 1.0f * scale);
+    m_uiDrawList.addText(
+        m_uiFont, status,
+        ui::UiVec2{statusRect.minX + (margin * 0.75f), statusRect.minY + (5.0f * scale)},
+        kPipGreen);
+
+    // Interaction prompt, centred low -- where an action prompt belongs, and
+    // labelled for whichever device is driving.
     const int usableDoor = findUsableDoor();
-    if (usableDoor >= 0) {
+    if (usableDoor >= 0 && !m_menuOpen) {
         const importer::ImportedSceneDoor& door = m_doors[static_cast<std::size_t>(usableDoor)];
         char prompt[192];
-        std::snprintf(prompt, sizeof(prompt), "[E]  %s",
+        std::snprintf(prompt, sizeof(prompt), "%s  %s", m_navDriving ? "(A)" : "[E]",
                       door.targetCellEditorId.empty() ? "Exit" : door.targetCellEditorId.c_str());
-        const float promptScale = contentScale();
         const float promptWidth = m_uiFont.measureText(prompt);
-        int screenWidth = 0;
-        int screenHeight = 0;
-        framebufferSize(screenWidth, screenHeight);
         ui::UiVec2 promptPosition{};
         promptPosition.x = (static_cast<float>(screenWidth) - promptWidth) * 0.5f;
-        promptPosition.y = static_cast<float>(screenHeight) - (96.0f * promptScale);
-        m_uiDrawList.addText(m_uiFont, prompt, promptPosition, ui::UiColor{1.0f, 0.94f, 0.72f, 1.0f});
+        promptPosition.y = static_cast<float>(screenHeight) - (96.0f * scale);
+        m_uiDrawList.addText(m_uiFont, prompt, promptPosition, kPipGreen);
     }
-    const float margin = 16.0f * contentScale();
-    m_uiDrawList.addText(m_uiFont, text, ui::UiVec2{margin, margin}, ui::UiColor{0.91f, 0.85f, 0.69f, 1.0f});
+
+    // Hint line, top-left. Names the buttons of whichever device is in use --
+    // showing "Tab" to someone holding a controller is worse than showing
+    // nothing.
+    const char* hint = m_navDriving
+        ? "(Start) menu   (LS) move   (A) use"
+        : "Esc menu   [ ] time   P cycle   Tab cursor";
+    m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
+}
+
+void NewVegasApp::drawPauseMenu() {
+    if (!m_menuOpen) {
+        // Keep the ring empty so a stale focus index cannot survive a close and
+        // reopen and act on the wrong entry.
+        m_menuFocus.beginFrame();
+        return;
+    }
+    const float scale = contentScale();
+    int screenWidth = 0;
+    int screenHeight = 0;
+    framebufferSize(screenWidth, screenHeight);
+
+    // Dim the world so the menu is unambiguously modal.
+    ui::UiRect full{0.0f, 0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
+    m_uiDrawList.addRectFilled(full, ui::UiColor{0.0f, 0.02f, 0.0f, 0.55f});
+
+    struct Entry {
+        const char* label;
+        const char* value;
+    };
+    char timeValue[32];
+    std::snprintf(timeValue, sizeof(timeValue), "%s", m_dayCyclePaused ? "Paused" : "Running");
+    char regionValue[32];
+    std::snprintf(regionValue, sizeof(regionValue), "%zu", m_discoveredRegions.size());
+    const Entry entries[] = {
+        {m_walkMode ? "Movement: On Foot" : "Movement: Fly", ""},
+        {"Day cycle", timeValue},
+        {"Regions discovered", regionValue},
+        {"Resume", ""},
+    };
+    constexpr std::size_t kEntryCount = sizeof(entries) / sizeof(entries[0]);
+
+    // Panel metrics as three explicit bands -- header, rows, footer -- rather
+    // than one fudged total. The first version folded the footer into a single
+    // padding constant and the footer text landed on top of the last row: the
+    // arithmetic has to close, and it only closes if each band is named.
+    // Every band is derived from the font's line height rather than being a
+    // fixed pixel count. The type scale moved once already (to a TV size) and
+    // the fixed values silently stopped fitting -- the header ran into the
+    // first row. Derived bands cannot drift out of step with the type.
+    const float lineHeight = m_uiFont.lineHeightPx();
+    const float rowHeight = lineHeight + (16.0f * scale);
+    const float headerBand = lineHeight + (28.0f * scale);
+    const float footerBand = lineHeight + (22.0f * scale);
+    // Wide enough for the widest row, so a longer label cannot overrun the
+    // panel it is drawn inside.
+    float contentWidth = m_uiFont.measureText("PIP-BOY 3000");
+    for (const Entry& entry : entries) {
+        const float rowWidth = m_uiFont.measureText(entry.label) +
+            (entry.value[0] != '\0' ? m_uiFont.measureText(entry.value) + (48.0f * scale) : 0.0f);
+        contentWidth = std::max(contentWidth, rowWidth);
+    }
+    const float panelWidth = std::max(460.0f * scale, contentWidth + (64.0f * scale));
+    const float panelHeight =
+        headerBand + (rowHeight * static_cast<float>(kEntryCount)) + footerBand;
+    ui::UiRect panel{};
+    panel.minX = (static_cast<float>(screenWidth) - panelWidth) * 0.5f;
+    panel.maxX = panel.minX + panelWidth;
+    panel.minY = (static_cast<float>(screenHeight) - panelHeight) * 0.5f;
+    panel.maxY = panel.minY + panelHeight;
+    m_uiDrawList.addRoundRectFilled(panel, kPipPanelSolid, 4.0f * scale);
+    m_uiDrawList.addRoundRect(panel, kPipGreen, 4.0f * scale, 1.5f * scale);
+    m_uiDrawList.addText(
+        m_uiFont, "PIP-BOY 3000",
+        ui::UiVec2{panel.minX + (24.0f * scale), panel.minY + (14.0f * scale)}, kPipGreen);
+
+    // Register every row with the focus ring, THEN navigate. Navigating with a
+    // partial list would let the first row absorb every move.
+    m_menuFocus.beginFrame();
+    ui::UiRect rows[kEntryCount];
+    for (std::size_t i = 0; i < kEntryCount; ++i) {
+        ui::UiRect row{};
+        row.minX = panel.minX + (16.0f * scale);
+        row.maxX = panel.maxX - (16.0f * scale);
+        row.minY = panel.minY + headerBand + (static_cast<float>(i) * rowHeight);
+        row.maxY = row.minY + rowHeight - (4.0f * scale);
+        rows[i] = row;
+        m_menuFocus.addItem(row);
+    }
+    if (!m_navDriving) {
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        glfwGetCursorPos(m_window, &cursorX, &cursorY);
+        m_menuFocus.focusHovered(
+            ui::UiVec2{static_cast<float>(cursorX), static_cast<float>(cursorY)});
+    }
+    m_menuFocus.applyNavigation(m_nav);
+
+    for (std::size_t i = 0; i < kEntryCount; ++i) {
+        const bool focused = m_menuFocus.isFocused(static_cast<int>(i));
+        if (focused) {
+            m_uiDrawList.addRoundRectFilled(
+                rows[i], ui::UiColor{0.16f, 0.42f, 0.20f, 0.85f}, 3.0f * scale);
+        }
+        m_uiDrawList.addText(
+            m_uiFont, entries[i].label,
+            ui::UiVec2{rows[i].minX + (16.0f * scale), rows[i].minY + (8.0f * scale)},
+            focused ? kPipGreen : kPipGreenDim);
+        if (entries[i].value[0] != '\0') {
+            const float valueWidth = m_uiFont.measureText(entries[i].value);
+            m_uiDrawList.addText(
+                m_uiFont, entries[i].value,
+                ui::UiVec2{rows[i].maxX - valueWidth - (16.0f * scale), rows[i].minY + (8.0f * scale)},
+                focused ? kPipGreen : kPipGreenDim);
+        }
+    }
+
+    if (m_nav.pressed(ui::UiNavAction::Accept)) {
+        switch (m_menuFocus.focused()) {
+            case 0: m_walkMode = !m_walkMode; break;
+            case 1: m_dayCyclePaused = !m_dayCyclePaused; break;
+            case 2: break;  // a readout, not an action
+            case 3: m_menuOpen = false; setMouseCaptured(true); break;
+            default: break;
+        }
+    }
+
+    const char* footer = m_navDriving ? "(A) select    (B) back" : "Enter select    Esc back";
+    m_uiDrawList.addText(
+        m_uiFont, footer,
+        ui::UiVec2{panel.minX + (24.0f * scale), panel.maxY - footerBand + (12.0f * scale)},
+        kPipGreenDim);
+}
+
+void NewVegasApp::drawHud() {
+    drawPipBoyHud();
+    drawPauseMenu();
+
+    // Toasts last so they sit above the menu: a discovery that fires while the
+    // menu is open must not be hidden behind it.
+    int screenWidth = 0;
+    int screenHeight = 0;
+    framebufferSize(screenWidth, screenHeight);
+    const ui::UiRect screen{
+        0.0f, 0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
+    m_toasts.draw(m_uiDrawList, m_uiFont, screen, contentScale());
+    // The banner draws its title in the display face and its subtitle in the
+    // body face -- the size jump between them is what makes the location name
+    // read as the headline rather than as another line of HUD text. Falls back
+    // to the body face if loadFonts was not given a display size.
+    if (!m_menuOpen) {
+        const ui::Font& bannerFont = m_uiFontDisplay.valid() ? m_uiFontDisplay : m_uiFont;
+        m_banner.draw(m_uiDrawList, bannerFont, m_uiFont, screen, contentScale());
+    }
 }
 
 void NewVegasApp::onRender(float /*deltaSeconds*/) {
+    // Before beginFrameDraw: the backend consumes the pending pose while
+    // recording this frame, so setting it afterwards would always be a frame
+    // late -- invisible on a still bind pose, and a lag on an animated one.
+    if (m_characterMode) {
+        updateCharacterPose();
+    }
     beginFrameDraw();
     drawHud();
 

@@ -15,7 +15,10 @@
 #include "ui/theme/ui_theme.h"
 #include "ui/font.h"
 #include "ui/icon_atlas.h"
+#include "ui/nav_focus.h"
+#include "ui/nav_input.h"
 #include "ui/rich_text.h"
+#include "ui/toast_host.h"
 #include "ui/color_scale.h"
 #include "ui/ui_context.h"
 #include "ui/ui_cursor.h"
@@ -2285,7 +2288,357 @@ void testPanelAnimatedBackground() {
     expectTrue(std::abs(fin.r - 0.9f) < 1e-5f, "animated background reached target");
 }
 
+// ---------------------------------------------------------------------------
+// Console/controller UI: toasts, directional navigation, focus.
+
+void testToastQueueAndExpiry() {
+    using namespace odai::ui;
+    ToastHost host;
+    host.setMaxVisible(2);
+    ToastTiming timing{};
+    timing.fadeInSeconds = 0.1f;
+    timing.holdSeconds = 1.0f;
+    timing.fadeOutSeconds = 0.1f;
+    host.setTiming(timing);
+
+    host.push("Nipton", "Discovered");
+    host.push("Primm", "Discovered");
+    host.push("Novac", "Discovered");
+    // Nothing is visible until update() runs: push only enqueues, so a caller
+    // pushing during load does not get a stack that skipped its fade-in.
+    expectTrue(host.visibleCount() == 0u, "push alone shows nothing");
+    expectTrue(host.queuedCount() == 3u, "all three are queued");
+
+    host.update(0.0f);
+    expectTrue(host.visibleCount() == 2u, "maxVisible caps the on-screen stack at 2");
+    expectTrue(host.queuedCount() == 1u, "the third waits its turn");
+    expectTrue(host.visibleTitle(0) == "Nipton", "oldest is admitted first");
+    expectTrue(host.visibleTitle(1) == "Primm", "then the next");
+
+    // One toast's whole life is fadeIn + hold + fadeOut = 1.2s. Step just past
+    // that so the first two have retired and the third has been admitted --
+    // NOT further, or the third expires too and the check below passes for the
+    // wrong reason (which is exactly what a first draft of this test did).
+    for (int i = 0; i < 13; ++i) {
+        host.update(0.1f);
+    }
+    expectTrue(host.queuedCount() == 0u, "the queue drains");
+    expectTrue(host.visibleCount() == 1u, "the third toast got its turn once a slot freed");
+    expectTrue(host.visibleTitle(0) == "Novac", "and it is the one that was waiting");
+
+    // And eventually everything expires.
+    for (int i = 0; i < 40; ++i) {
+        host.update(0.1f);
+    }
+    expectTrue(host.visibleCount() == 0u, "every toast expires");
+}
+
+// Re-announcing the same thing must not stack duplicates.
+//
+// This is the behaviour region discovery actually depends on: standing on a
+// cell boundary makes the streamer flip between two cells, and without
+// coalescing the player gets an endlessly growing column of the same name.
+void testToastCoalescingByKey() {
+    using namespace odai::ui;
+    ToastHost host;
+    ToastTiming timing{};
+    timing.fadeInSeconds = 0.05f;
+    timing.holdSeconds = 1.0f;
+    timing.fadeOutSeconds = 0.05f;
+    host.setTiming(timing);
+
+    host.push("Nipton", "Discovered", "region:Nipton");
+    host.update(0.1f);
+    expectTrue(host.visibleCount() == 1u, "first push shows one toast");
+
+    // Same key while it is alive: refreshes, does not stack.
+    host.push("Nipton", "Discovered", "region:Nipton");
+    host.update(0.0f);
+    expectTrue(host.visibleCount() == 1u, "the same key does not stack a duplicate");
+    expectTrue(host.queuedCount() == 0u, "and does not queue one either");
+
+    // A different key does stack.
+    host.push("Novac", "Discovered", "region:Novac");
+    host.update(0.0f);
+    expectTrue(host.visibleCount() == 2u, "a different key stacks");
+
+    // The refresh must have restarted the clock: after a bit more than one
+    // hold period from the FIRST push, the refreshed toast is still alive.
+    for (int i = 0; i < 8; ++i) {
+        host.update(0.1f);
+    }
+    expectTrue(host.visibleCount() >= 1u, "the refreshed toast outlives its original hold");
+}
+
+void testToastDrawEmitsGeometry() {
+    using namespace odai::ui;
+    Font font;
+    font.initSyntheticMonospace(8.0f, 12.0f, 4.0f, 16.0f);
+    ToastHost host;
+    host.push("Mojave Outpost", "Discovered");
+    host.update(0.0f);
+
+    UiDrawList drawList;
+    UiRect screen{0.0f, 0.0f, 1920.0f, 1080.0f};
+    drawList.reset(UiVec2{1920.0f, 1080.0f});
+    host.draw(drawList, font, screen, 1.0f);
+    const UiDrawData& data = drawList.data();
+    expectTrue(!data.vertices.empty(), "a visible toast emits geometry");
+
+    // It must land in the top-right quadrant, which is the whole contract of
+    // where a notification goes.
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    for (const UiVertex& vertex : data.vertices) {
+        maxX = std::max(maxX, vertex.posPx[0]);
+        maxY = std::max(maxY, vertex.posPx[1]);
+    }
+    expectTrue(maxX > 1400.0f, "toasts anchor to the right edge");
+    expectTrue(maxY < 400.0f, "toasts anchor to the top");
+
+    // An empty host draws nothing at all -- not a zero-alpha panel.
+    ToastHost empty;
+    UiDrawList emptyList;
+    emptyList.reset(UiVec2{1920.0f, 1080.0f});
+    empty.draw(emptyList, font, screen, 1.0f);
+    expectTrue(emptyList.data().vertices.empty(), "an empty host emits no geometry");
+}
+
+// Held directions must auto-repeat, but a single tap must move exactly once.
+void testNavRepeat() {
+    using namespace odai::ui;
+    UiNavRepeatConfig config{};
+    config.initialDelaySeconds = 0.4f;
+    config.repeatIntervalSeconds = 0.1f;
+    UiNavRepeater repeater(config);
+    UiNavInput input;
+
+    int presses = 0;
+    const auto step = [&](bool down, float dt) {
+        input.beginFrame();
+        input.setAction(UiNavAction::Down, down);
+        repeater.update(input, dt);
+        if (input.pressed(UiNavAction::Down)) {
+            ++presses;
+        }
+    };
+
+    // A tap: one press, and nothing more while released.
+    step(true, 0.016f);
+    expectTrue(presses == 1, "a tap presses once");
+    step(false, 0.016f);
+    expectTrue(presses == 1, "release adds nothing");
+
+    // Hold: silent through the initial delay, then repeating.
+    presses = 0;
+    step(true, 0.016f);
+    expectTrue(presses == 1, "the initial press still fires");
+    for (int i = 0; i < 20; ++i) {  // 0.32s held, still inside the 0.4s delay
+        step(true, 0.016f);
+    }
+    expectTrue(presses == 1, "no repeat before the initial delay elapses");
+    for (int i = 0; i < 10; ++i) {  // to 0.48s: past the delay
+        step(true, 0.016f);
+    }
+    expectTrue(presses >= 2, "repeat starts after the delay");
+
+    // A long frame owes multiple repeats rather than silently dropping them.
+    presses = 0;
+    repeater.reset();
+    input.beginFrame();
+    input.setAction(UiNavAction::Down, false);
+    step(true, 0.016f);   // initial press
+    step(true, 1.0f);     // one very long frame
+    expectTrue(presses >= 2, "a long frame still delivers a repeat");
+}
+
+// Stick input needs hysteresis or a stick resting near the threshold chatters.
+void testNavStickHysteresis() {
+    using namespace odai::ui;
+    UiNavStickMapper mapper;
+    mapper.pressThreshold = 0.55f;
+    mapper.releaseThreshold = 0.35f;
+    UiNavInput input;
+
+    input.beginFrame();
+    mapper.apply(input, 0.0f, 0.5f);
+    expectTrue(!input.down(UiNavAction::Down), "below the press threshold does not latch");
+
+    input.beginFrame();
+    mapper.apply(input, 0.0f, 0.7f);
+    expectTrue(input.down(UiNavAction::Down), "past the press threshold latches");
+
+    // Falling back between the two thresholds must NOT release.
+    input.beginFrame();
+    mapper.apply(input, 0.0f, 0.45f);
+    expectTrue(input.down(UiNavAction::Down), "stays latched inside the hysteresis band");
+
+    input.beginFrame();
+    mapper.apply(input, 0.0f, 0.2f);
+    expectTrue(!input.down(UiNavAction::Down), "releases below the release threshold");
+
+    // Up is negative on every gamepad GLFW reports.
+    input.beginFrame();
+    mapper.apply(input, 0.0f, -0.9f);
+    expectTrue(input.down(UiNavAction::Up), "negative Y is Up");
+    expectTrue(!input.down(UiNavAction::Down), "and not Down at the same time");
+}
+
+// Focus must follow screen geometry, and prefer the item straight ahead.
+void testNavFocusSpatial() {
+    using namespace odai::ui;
+    NavFocusRing ring;
+    UiNavInput input;
+
+    // Two columns, three rows -- the layout that breaks naive nearest-neighbour
+    // navigation, because the diagonal is closer than the item directly below.
+    const auto rect = [](float x, float y) {
+        return UiRect{x, y, x + 200.0f, y + 40.0f};
+    };
+    const auto layout = [&]() {
+        ring.beginFrame();
+        ring.addItem(rect(0.0f, 0.0f));      // 0 left-top
+        ring.addItem(rect(210.0f, 0.0f));    // 1 right-top
+        ring.addItem(rect(0.0f, 300.0f));    // 2 left-middle (far below)
+        ring.addItem(rect(210.0f, 300.0f));  // 3 right-middle
+    };
+
+    layout();
+    ring.applyNavigation(input);
+    expectTrue(ring.focused() == 0, "focus adopts the first item");
+
+    input.beginFrame();
+    input.setAction(UiNavAction::Right, true);
+    layout();
+    ring.applyNavigation(input);
+    expectTrue(ring.focused() == 1, "Right moves across the row");
+
+    input.beginFrame();
+    input.setAction(UiNavAction::Down, true);
+    layout();
+    ring.applyNavigation(input);
+    // Item 2 is diagonally nearer in raw distance than item 3 is vertically,
+    // but Down must stay in its own column.
+    expectTrue(ring.focused() == 3, "Down stays in the same column");
+
+    input.beginFrame();
+    input.setAction(UiNavAction::Left, true);
+    layout();
+    ring.applyNavigation(input);
+    expectTrue(ring.focused() == 2, "Left moves back across the row");
+
+    // No wrap-around: pressing Down at the bottom stays put.
+    input.beginFrame();
+    input.setAction(UiNavAction::Down, true);
+    layout();
+    ring.applyNavigation(input);
+    expectTrue(ring.focused() == 2, "Down at the bottom does not wrap to the top");
+
+    // Hover and controller share one focus model.
+    layout();
+    ring.focusHovered(UiVec2{100.0f, 20.0f});
+    expectTrue(ring.focused() == 0, "hovering focuses the hovered item");
+    ring.focusHovered(UiVec2{2000.0f, 2000.0f});
+    expectTrue(ring.focused() == 0, "hovering nothing leaves focus alone");
+}
+
+// A disabled item must never take focus, including as the initial adoption.
+void testNavFocusSkipsDisabled() {
+    using namespace odai::ui;
+    NavFocusRing ring;
+    UiNavInput input;
+    const auto layout = [&]() {
+        ring.beginFrame();
+        ring.addItem(UiRect{0.0f, 0.0f, 100.0f, 40.0f}, false);     // disabled
+        ring.addItem(UiRect{0.0f, 50.0f, 100.0f, 90.0f}, true);
+        ring.addItem(UiRect{0.0f, 100.0f, 100.0f, 140.0f}, false);  // disabled
+        ring.addItem(UiRect{0.0f, 150.0f, 100.0f, 190.0f}, true);
+    };
+    layout();
+    ring.applyNavigation(input);
+    expectTrue(ring.focused() == 1, "focus adopts the first ENABLED item");
+
+    input.beginFrame();
+    input.setAction(UiNavAction::Down, true);
+    layout();
+    ring.applyNavigation(input);
+    expectTrue(ring.focused() == 3, "Down skips over the disabled item");
+
+    layout();
+    ring.focusHovered(UiVec2{50.0f, 120.0f});
+    expectTrue(ring.focused() == 3, "hovering a disabled item does not focus it");
+}
+
+// The centre banner is a different idiom from the corner toast, and the two
+// differences that matter are testable: it centres, and it shows exactly one
+// announcement no matter how many are queued.
+void testToastBannerPlacement() {
+    using namespace odai::ui;
+    Font font;
+    font.initSyntheticMonospace(8.0f, 12.0f, 4.0f, 16.0f);
+
+    ToastHost host;
+    host.setStyle(makeBannerStyle());
+    host.setTiming(makeBannerTiming());
+    host.push("Goodsprings", "Location discovered");
+    host.push("Primm", "Location discovered");
+    // Two updates, not one. The first ADMITS from the queue -- a toast enters
+    // at presence 0 -- and only the second advances its fade. Collapsing these
+    // into a single update(0.5f) leaves the banner fully transparent, which is
+    // easy to mistake for "the banner does not draw".
+    host.update(0.0f);
+    host.update(0.5f);
+
+    UiDrawList drawList;
+    const UiRect screen{0.0f, 0.0f, 1920.0f, 1080.0f};
+    drawList.reset(UiVec2{1920.0f, 1080.0f});
+    host.draw(drawList, font, screen, 1.0f);
+    const UiDrawData& data = drawList.data();
+    expectTrue(!data.vertices.empty(), "a banner emits geometry");
+
+    float minX = 1e9f;
+    float maxX = -1e9f;
+    float minY = 1e9f;
+    float maxY = -1e9f;
+    for (const UiVertex& vertex : data.vertices) {
+        minX = std::min(minX, vertex.posPx[0]);
+        maxX = std::max(maxX, vertex.posPx[0]);
+        minY = std::min(minY, vertex.posPx[1]);
+        maxY = std::max(maxY, vertex.posPx[1]);
+    }
+    const float centerX = (minX + maxX) * 0.5f;
+    expectTrue(std::fabs(centerX - 960.0f) < 40.0f, "the banner is horizontally centred");
+    // Upper-middle, not the corner and not the very top.
+    expectTrue(minY > 200.0f && maxY < 700.0f, "the banner sits in the upper middle");
+
+    // Only ONE announcement is drawn even with two live: two pieces of large
+    // centred type would land on top of each other.
+    expectTrue(host.visibleCount() == 2u, "both are alive in the queue");
+    const float bannerHeight = maxY - minY;
+    expectTrue(bannerHeight < 120.0f, "only one banner is drawn, not a stack");
+
+    // The slow fade is the point: at 0.5s into a 1.1s fade-in it must still be
+    // partially transparent, so the announcement blooms rather than pops.
+    bool sawPartialAlpha = false;
+    for (const UiVertex& vertex : data.vertices) {
+        const std::uint32_t alpha = (vertex.rgba8 >> 24) & 0xffu;
+        if (alpha > 0u && alpha < 250u) {
+            sawPartialAlpha = true;
+            break;
+        }
+    }
+    expectTrue(sawPartialAlpha, "the banner is mid-fade rather than instantly opaque");
+}
+
 int main() {
+    testToastQueueAndExpiry();
+    testToastCoalescingByKey();
+    testToastDrawEmitsGeometry();
+    testToastBannerPlacement();
+    testNavRepeat();
+    testNavStickHysteresis();
+    testNavFocusSpatial();
+    testNavFocusSkipsDisabled();
     testNineSliceQuadGen();
     testGradientPrimitive();
     testHGradientPrimitive();

@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <iostream>
 
 int main(int argc, char** argv) {
@@ -24,6 +25,20 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
             // Interior cell whose doorstep to start on, e.g. GSDocMitchellHouse.
             app.setStreamSpawnInterior(argv[++i]);
+        } else if (std::strcmp(argv[i], "--character") == 0) {
+            // Optional: a skeleton path, then any number of body-part paths,
+            // all relative to Data\Meshes. No arguments means the default male
+            // body, which is the case worth having be zero-effort.
+            std::string skeletonPath;
+            std::vector<std::string> partPaths;
+            while (i + 1 < argc && argv[i + 1][0] != '-') {
+                if (skeletonPath.empty()) {
+                    skeletonPath = argv[++i];
+                } else {
+                    partPaths.emplace_back(argv[++i]);
+                }
+            }
+            app.setCharacterMode(std::move(skeletonPath), std::move(partPaths));
         } else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             const std::string path = argv[++i];
             // Optional frame count after the path, for scenes that need longer
@@ -41,7 +56,10 @@ int main(int argc, char** argv) {
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
                       << "odai_game_newvegas --screenshot <out.ppm> [frames]\n"
                       << "  Render `frames` frames (default 8), write a PPM, and quit.\n"
-                      << "  Cook a scene first with odai_newvegas_cooker.\n";
+                      << "  Cook a scene first with odai_newvegas_cooker.\n"
+                      << "odai_game_newvegas --character [<skeleton.nif> <part.nif>...]\n"
+                      << "  Stand one GPU-skinned character in bind pose, no world.\n"
+                      << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n";
             return 0;
         }
     }

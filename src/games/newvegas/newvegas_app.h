@@ -22,15 +22,21 @@
 //   Tab               release the mouse
 //   F3                CPU timing overlay (GameApp reserves this)
 
+#include "anim/skeleton.h"
 #include "core/job_system.h"
 #include "engine/game_app.h"
+#include "import/fnv/character_builder.h"
 #include "games/newvegas/newvegas_collision.h"
 #include "import/fnv/cell_streamer.h"
+#include "ui/nav_focus.h"
+#include "ui/nav_input.h"
+#include "ui/toast_host.h"
 #include "import/imported_scene.h"
 
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace odai::games::newvegas {
@@ -57,6 +63,26 @@ public:
     // Spawn on the doorstep of this interior cell. Empty means "centre of the
     // worldspace" instead.
     void setStreamSpawnInterior(std::string editorId) { m_streamSpawnInterior = std::move(editorId); }
+    // Stand one GPU-skinned character in bind pose against the sky, instead of
+    // loading a world at all.
+    //
+    // This is a rig check, not a game mode: it isolates "does the skeleton bind
+    // and skin correctly" from every other thing that can make a character look
+    // wrong (placement, animation, streaming, lighting). Assets still come from
+    // the installed game's archives, so it needs a Data directory found the
+    // same way streaming finds one -- it just does not stream anything from it.
+    //
+    // Empty partPaths means the default male body.
+    void setCharacterMode(std::string skeletonPath, std::vector<std::string> partPaths) {
+        m_characterMode = true;
+        if (!skeletonPath.empty()) {
+            m_characterSkeletonPath = std::move(skeletonPath);
+        }
+        if (!partPaths.empty()) {
+            m_characterPartPaths = std::move(partPaths);
+        }
+    }
+
     // On-disk cache for built cells. Empty string disables it.
     void setStreamCacheDirectory(std::string path) { m_streamCacheDirectory = std::move(path); }
     void setStreamCacheEnabled(bool enabled) { m_streamCacheEnabled = enabled; }
@@ -69,6 +95,14 @@ protected:
 
     bool onInit() override;
     bool initStreaming();
+    // Loads the skeleton and body parts, binds them, and uploads the result to
+    // skinned instance slot 0. Also frames the camera on the bind-pose bounds,
+    // because the character's own extent is the only sensible thing to point at
+    // when there is no world.
+    bool initCharacter(const std::filesystem::path& dataFilesPath);
+    // Re-submits the bind pose. Called every frame, not once: the backend
+    // consumes the pose during the frame it was set for and does not retain it.
+    void updateCharacterPose();
     void updateStreaming(float deltaSeconds);
     void runCollisionSelfTest();
     void onTick(float deltaSeconds) override;
@@ -76,6 +110,17 @@ protected:
 
 private:
     void applyTimeOfDay();
+    // Reads keyboard AND gamepad into one device-agnostic nav snapshot. Both
+    // always run: a player can have a controller plugged in and still reach for
+    // Escape, and making them exclusive means whichever the game guessed wrong
+    // about simply stops working.
+    void pollNavInput(float deltaSeconds);
+    // Checks the regions covering the camera and toasts any not seen before.
+    void updateRegionDiscovery();
+    void drawPipBoyHud();
+    // The pause menu. Controller-navigable; returns nothing because every entry
+    // acts on app state directly.
+    void drawPauseMenu();
     void updateCamera(float deltaSeconds);
     void drawHud();
     // Flattens the cooked terrain mesh into a regular height lattice so the
@@ -146,6 +191,50 @@ private:
     // is what Fallout does too.
     bool m_airborne = false;
     float m_verticalVelocity = 0.0f;
+
+    // Bind-pose character view (--character). See setCharacterMode.
+    bool m_characterMode = false;
+    std::string m_characterSkeletonPath = "characters\\_male\\skeleton.nif";
+    std::vector<std::string> m_characterPartPaths = {"characters\\_male\\upperbody.nif"};
+    importer::fnv::FalloutCharacter m_character;
+    // The draw list handed to the renderer, one entry per body part. Held as a
+    // member because ImportedSkinnedMeshTemplate takes spans -- a local would
+    // dangle the moment initCharacter returned.
+    std::vector<importer::ImportedScenePackedDraw> m_characterDraws;
+    std::vector<odai::math::Matrix4> m_characterBindPose;
+    // Bind pose with the actor's world placement folded in, which is how the
+    // skinning pass wants it: there is no separate instance transform for a
+    // skinned actor, so world placement rides on the bone matrices.
+    std::vector<odai::math::Matrix4> m_characterPoseScratch;
+    // Where the character stands, in world units. Folded into every bone matrix
+    // each frame rather than being an instance transform, because a skinned
+    // actor has no instance transform.
+    float m_characterWorldX = 0.0f;
+    float m_characterWorldY = 0.0f;
+    float m_characterWorldZ = 0.0f;
+
+    // ---- UI ----------------------------------------------------------
+    // Two notification hosts, because they are two different idioms (see
+    // ToastPlacement): m_banner is the big centred "Goodsprings" announcement,
+    // m_toasts is the corner stack for everything else. One host cannot be both
+    // at once -- placement is a property of the host's style, and a discovery
+    // arriving while a corner toast is up must not restyle it mid-fade.
+    ui::ToastHost m_banner;
+    ui::ToastHost m_toasts;
+    ui::UiNavInput m_nav;
+    ui::UiNavRepeater m_navRepeat;
+    ui::UiNavStickMapper m_navStick;
+    ui::NavFocusRing m_menuFocus;
+    bool m_menuOpen = false;
+    // True once a controller (or the d-pad keys) last drove the UI, false once
+    // the mouse moves. Drives whether the focus highlight is drawn at all --
+    // an always-on highlight looks broken with a mouse, and a never-on one
+    // makes the menu unusable from a couch.
+    bool m_navDriving = false;
+    // Region names already announced. Discovery is once per session per region;
+    // walking back into Nipton does not re-announce it.
+    std::unordered_set<std::string> m_discoveredRegions;
+    float m_regionPollSeconds = 0.0f;
 
     // Cell streaming. Null unless --stream was given. The job system is owned
     // here rather than by the streamer so its thread count is visible at the
