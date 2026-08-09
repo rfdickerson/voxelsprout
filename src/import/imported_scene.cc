@@ -167,7 +167,48 @@ bool bc1BlockHasTransparentTexel(const std::uint8_t* block) {
 
 // Decodes the 8-byte BC3/BC5-style alpha block palette and folds each texel's
 // alpha into the transparent/visible presence flags.
-void bc3AlphaBlockPresence(const std::uint8_t* block, bool& sawTransparent, bool& sawVisible) {
+// Verdict for the bimodality test below: a cutout mask is mostly fully
+// transparent or fully opaque, with few texels in between. A specular mask --
+// which is what Bethesda puts in the diffuse alpha of ordinary building
+// surfaces -- sits in the middle and is nearly all "in between".
+struct AlphaBandCounts {
+    std::size_t low = 0;   // < 32, effectively transparent
+    std::size_t mid = 0;   // the rest
+    std::size_t high = 0;  // > 224, effectively opaque
+
+    void add(std::uint8_t alpha) {
+        if (alpha < 32u) {
+            ++low;
+        } else if (alpha > 224u) {
+            ++high;
+        } else {
+            ++mid;
+        }
+    }
+
+    // A cutout needs BOTH a real transparent region and a mid band small
+    // enough to be just the antialiased rim between the two.
+    //
+    // The old test was "any texel below 250 and any above 8", which a flat
+    // 0.5 alpha satisfies trivially -- and that is exactly the value a
+    // specular mask holds. Every ordinary wall and roof therefore had alpha
+    // test forced on at the default 0.5 threshold, and tore into ragged holes
+    // wherever the mask crossed it. That is the "missing parts of the
+    // building" symptom, and it is this heuristic, not the shader.
+    [[nodiscard]] bool looksLikeCutout() const {
+        const std::size_t total = low + mid + high;
+        if (total == 0u) {
+            return false;
+        }
+        constexpr double kMinTransparentFraction = 0.01;  // at least 1% cut away
+        constexpr double kMaxMidFraction = 0.20;          // rim, not a gradient
+        const double lowFraction = static_cast<double>(low) / static_cast<double>(total);
+        const double midFraction = static_cast<double>(mid) / static_cast<double>(total);
+        return lowFraction >= kMinTransparentFraction && midFraction <= kMaxMidFraction;
+    }
+};
+
+void bc3AlphaBlockBands(const std::uint8_t* block, AlphaBandCounts& bands) {
     const std::uint8_t alpha0 = block[0];
     const std::uint8_t alpha1 = block[1];
     std::uint8_t palette[8] = {alpha0, alpha1};
@@ -187,9 +228,7 @@ void bc3AlphaBlockPresence(const std::uint8_t* block, bool& sawTransparent, bool
         indexBits |= static_cast<std::uint64_t>(block[2 + byteIndex]) << (8 * byteIndex);
     }
     for (int texel = 0; texel < 16; ++texel) {
-        const std::uint8_t alpha = palette[(indexBits >> (3 * texel)) & 0x7u];
-        sawTransparent = sawTransparent || alpha < 250u;
-        sawVisible = sawVisible || alpha > 8u;
+        bands.add(palette[(indexBits >> (3 * texel)) & 0x7u]);
     }
 }
 
@@ -207,17 +246,11 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             if (texture.rgba8.size() < baseByteCount) {
                 return false;
             }
-            bool sawTransparent = false;
-            bool sawVisible = false;
+            AlphaBandCounts bands;
             for (std::size_t pixelIndex = 0; pixelIndex < basePixelCount; ++pixelIndex) {
-                const std::uint8_t alpha = texture.rgba8[(pixelIndex * 4u) + 3u];
-                sawTransparent = sawTransparent || alpha < 250u;
-                sawVisible = sawVisible || alpha > 8u;
-                if (sawTransparent && sawVisible) {
-                    return true;
-                }
+                bands.add(texture.rgba8[(pixelIndex * 4u) + 3u]);
             }
-            return false;
+            return bands.looksLikeCutout();
         }
         case TextureFormat::BC1: {
             if (texture.rgba8.size() < baseBlockCount * 8u) {
@@ -236,38 +269,30 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             if (texture.rgba8.size() < baseBlockCount * 16u) {
                 return false;
             }
-            bool sawTransparent = false;
-            bool sawVisible = false;
+            AlphaBandCounts bands;
             for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
                 const std::uint8_t* alphaBytes = texture.rgba8.data() + (blockIndex * 16u);
                 for (std::size_t byteIndex = 0; byteIndex < 8u; ++byteIndex) {
                     const std::uint8_t packed = alphaBytes[byteIndex];
                     for (const std::uint8_t nibble : {static_cast<std::uint8_t>(packed & 0x0Fu),
                                                       static_cast<std::uint8_t>(packed >> 4u)}) {
-                        sawTransparent = sawTransparent || nibble < 15u;
-                        sawVisible = sawVisible || nibble > 0u;
+                        // 4-bit alpha widened to 8 so one band test serves
+                        // every format.
+                        bands.add(static_cast<std::uint8_t>(nibble * 17u));
                     }
                 }
-                if (sawTransparent && sawVisible) {
-                    return true;
-                }
             }
-            return false;
+            return bands.looksLikeCutout();
         }
         case TextureFormat::BC3: {
             if (texture.rgba8.size() < baseBlockCount * 16u) {
                 return false;
             }
-            bool sawTransparent = false;
-            bool sawVisible = false;
+            AlphaBandCounts bands;
             for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
-                bc3AlphaBlockPresence(
-                    texture.rgba8.data() + (blockIndex * 16u), sawTransparent, sawVisible);
-                if (sawTransparent && sawVisible) {
-                    return true;
-                }
+                bc3AlphaBlockBands(texture.rgba8.data() + (blockIndex * 16u), bands);
             }
-            return false;
+            return bands.looksLikeCutout();
         }
         // BC4/BC5 carry no color alpha; BC7 alpha needs a full per-mode decode,
         // so a BC7 cook that wants cutout must set the part flag explicitly.

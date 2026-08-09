@@ -14,6 +14,7 @@
 //   odai_newvegas_probe <DataFilesPath> --nif <virtualPath>
 //   odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm>
 
+#include "import/dds.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/cell_builder.h"
@@ -697,6 +698,63 @@ int probeRegions(const std::filesystem::path& pluginPath, std::size_t limit) {
     return 0;
 }
 
+// Decoded alpha histogram for one texture.
+//
+// "The shape has alphaTest and vanishes" has two very different causes -- an
+// authored cutout working as intended, or an alpha channel that decoded to
+// nothing -- and only the decoded bytes tell them apart.
+int probeTexture(const std::filesystem::path& dataPath, const std::string& texturePath) {
+    using namespace odai::importer;
+    fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "could not index archives under " << dataPath << "\n";
+        return 1;
+    }
+    std::vector<std::uint8_t> ddsBytes;
+    std::string error;
+    if (!assets.resolveTexture(texturePath, ddsBytes, error)) {
+        std::cout << "resolve failed: " << error << "\n";
+        return 1;
+    }
+    ImportedSceneTexture texture;
+    if (!loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
+        std::cout << "DDS decode failed\n";
+        return 1;
+    }
+    const char* formatName = "?";
+    switch (texture.format) {
+        case TextureFormat::RGBA8: formatName = "RGBA8"; break;
+        case TextureFormat::BC1: formatName = "BC1"; break;
+        case TextureFormat::BC3: formatName = "BC3"; break;
+        case TextureFormat::BC5: formatName = "BC5"; break;
+        case TextureFormat::BC7: formatName = "BC7"; break;
+        default: break;
+    }
+    std::cout << texturePath << ": " << texture.width << "x" << texture.height
+              << " format=" << formatName << " mips=" << texture.mipLevelCount
+              << " bytes=" << ddsBytes.size() << "\n";
+    // The GPU samples the compressed data directly, so decode base mip 0 to
+    // RGBA only when the loader already did; otherwise report what is known.
+    if (texture.format != TextureFormat::RGBA8 || texture.rgba8.empty()) {
+        std::cout << "  (compressed on the GPU; alpha lives in the block data)\n";
+        return 0;
+    }
+    std::array<std::size_t, 5> buckets{};
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(texture.width) * static_cast<std::size_t>(texture.height);
+    for (std::size_t i = 0; i < pixelCount && (i * 4u) + 3u < texture.rgba8.size(); ++i) {
+        const std::uint8_t alpha = texture.rgba8[(i * 4u) + 3u];
+        if (alpha == 0u) { ++buckets[0]; }
+        else if (alpha < 64u) { ++buckets[1]; }
+        else if (alpha < 128u) { ++buckets[2]; }
+        else if (alpha < 255u) { ++buckets[3]; }
+        else { ++buckets[4]; }
+    }
+    std::cout << "  alpha: zero=" << buckets[0] << " <64=" << buckets[1] << " <128=" << buckets[2]
+              << " <255=" << buckets[3] << " opaque=" << buckets[4] << " of " << pixelCount << "\n";
+    return 0;
+}
+
 int probeSingleNif(const std::filesystem::path& dataPath, const std::string& virtualPath) {
     MeshIndex index = buildMeshIndex(dataPath);
     for (std::size_t a = 0; a < index.archives.size(); ++a) {
@@ -719,6 +777,10 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
                       << ", alphaTest=" << (shape.alphaTest ? "yes" : "no")
+                      << (shape.alphaTest
+                              ? (" thr=" + std::to_string(static_cast<int>(shape.alphaThreshold)))
+                              : std::string())
+                      << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
             if (!shape.uvs.empty()) {
@@ -2074,6 +2136,7 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --regions <Plugin.esm> [topN]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --texture <texturePath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --skeleton <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --skinned <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --character <skeleton.nif> <part.nif>...\n"
@@ -2121,6 +2184,9 @@ int main(int argc, char** argv) {
     }
     if (mode == "--regions" && argc >= 4) {
         return probeRegions(dataPath / argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 15u);
+    }
+    if (mode == "--texture" && argc >= 4) {
+        return probeTexture(dataPath, argv[3]);
     }
     if (mode == "--skeleton" && argc >= 4) {
         return probeSkeleton(dataPath, argv[3]);

@@ -286,6 +286,13 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         // The alpha-test threshold is authored per surface, so it rides the push
         // constants and is re-pushed only when consecutive draws disagree.
         // Sentinel starts outside 0-255 so the first draw always pushes.
+        // ODAI_DEBUG_NO_ALPHATEST=1 pushes a threshold below every possible
+        // sampled alpha, so the shader's `discard` can never fire. Diagnostic
+        // twin of ODAI_DEBUG_NO_CULL: rendering with and without it and
+        // diffing separates "this surface is missing because alpha test threw
+        // it away" from "because it was culled" from "because it was never
+        // submitted", which look identical on screen.
+        static const bool s_disableAlphaTest = std::getenv("ODAI_DEBUG_NO_ALPHATEST") != nullptr;
         int lastPushedThreshold = -1;
         const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
             if (static_cast<int>(threshold) == lastPushedThreshold) {
@@ -293,7 +300,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             }
             lastPushedThreshold = static_cast<int>(threshold);
             importedPushConstants.materialParams[0] =
-                static_cast<float>(threshold) / 255.0f;
+                s_disableAlphaTest ? -1.0f : (static_cast<float>(threshold) / 255.0f);
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,
