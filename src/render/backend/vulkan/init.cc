@@ -465,7 +465,33 @@ bool RendererBackend::createInstance() {
         createInfo.ppEnabledLayerNames = kValidationLayers.data();
     }
 
-    const VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
+    VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
+
+    // Enumeration saying a layer exists is NOT proof it will load, so a
+    // successful isLayerAvailable() above does not make this branch dead code.
+    //
+    // A layer manifest names its library with a bare filename
+    // ("libVkLayer_khronos_validation.so"), which the loader resolves through
+    // the dynamic linker. So a manifest reachable via VK_LAYER_PATH /
+    // VK_ADD_LAYER_PATH whose .so is NOT on LD_LIBRARY_PATH enumerates fine and
+    // then fails here -- exactly what the LunarG SDK's own setup-env.sh
+    // produces, since it puts the manifest directory on the layer path but only
+    // adds the library directory when passed --set-dep-ld.
+    //
+    // Validation is a debug convenience. Losing it must not stop the game from
+    // starting, which is what the old unconditional failure did: on any machine
+    // without the layer properly installed, the app exited at init with
+    // VK_ERROR_LAYER_NOT_PRESENT and no way past it.
+    if (result == VK_ERROR_LAYER_NOT_PRESENT && enableValidationLayers) {
+        VOX_LOGW("render")
+            << "validation layer enumerated but failed to load; continuing WITHOUT validation. "
+               "Its manifest is on the layer path but libVkLayer_khronos_validation.so is not on "
+               "LD_LIBRARY_PATH -- for the LunarG SDK, source setup-env.sh --set-dep-ld\n";
+        createInfo.enabledLayerCount = 0;
+        createInfo.ppEnabledLayerNames = nullptr;
+        result = vkCreateInstance(&createInfo, nullptr, &m_instance);
+    }
+
     if (result != VK_SUCCESS) {
         logVkFailure("vkCreateInstance", result);
         return false;
