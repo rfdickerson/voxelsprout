@@ -100,6 +100,22 @@ void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
         vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
     }
 
+    if (dispatchedAny) {
+        // Put the GRAPHICS descriptor-buffer binding back.
+        //
+        // bindDescriptorBuffer above calls vkCmdBindDescriptorBuffers with a
+        // single binding, and that call REPLACES the whole bound array rather
+        // than adding to it -- so after this pass the command buffer has one
+        // descriptor buffer bound where the graphics passes expect two (main at
+        // index 0, bindless at index 1).
+        //
+        // Every other compute pass in this renderer (SSAO, post) gets away with
+        // the same pattern because it runs AFTER the graphics passes it shares a
+        // command buffer with. Skinning is the only one that runs before them,
+        // which is why it is the only one that has to restore the binding.
+        bindGraphicsDescriptorBuffers(commandBuffer);
+    }
+
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQuerySkinningEnd);
 }

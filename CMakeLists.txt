@@ -978,6 +978,7 @@ if(ODAI_BUILD_APP)
             src/import/fnv/esm_reader.cc
             src/import/fnv/fallout_records.cc
             src/import/fnv/nif_scene.cc
+            src/import/fnv/character_builder.cc
             src/engine/game_app.cc
             src/engine/plugin.cc
             src/import/dds.cc
@@ -1579,6 +1580,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/esm_reader.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
+        src/import/fnv/character_builder.cc
     )
     target_include_directories(odai_newvegas_probe PRIVATE src)
     target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB)
@@ -1642,6 +1644,7 @@ if(BUILD_TESTING)
         src/import/fnv/esm_reader.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
+        src/import/fnv/character_builder.cc
     )
     target_include_directories(odai_fnv_import_tests PRIVATE src)
     target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB)

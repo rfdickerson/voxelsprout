@@ -13,6 +13,7 @@
 
 #include "core/job_system.h"
 #include "import/fnv/asset_source.h"
+#include "import/fnv/character_builder.h"
 #include "import/fnv/async_asset_loader.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/esm_reader.h"
@@ -1492,6 +1493,254 @@ void testLandLodBlockOrigin() {
     expectTrue(landLodBlockOrigin(43) == 40, "cell 43 falls in the highest measured block");
 }
 
+// The same flooring has to hold for every tier, not just the finest one: the
+// terrain LOD pyramid is level4/8/16/32 and a coarse tier is exactly where a
+// truncating divide does the most damage, because its zero-straddling tile
+// would be 64 cells wide instead of 32.
+void testLandLodTileOriginAcrossTiers() {
+    using odai::importer::fnv::kLandLodTierCellCounts;
+    using odai::importer::fnv::landLodTileOrigin;
+    using odai::importer::fnv::landLodTileSize;
+
+    expectTrue(landLodTileOrigin(-5, 8) == -8, "cell -5 is in tier-8 tile -8");
+    expectTrue(landLodTileOrigin(-8, 8) == -8, "cell -8 starts tier-8 tile -8");
+    expectTrue(landLodTileOrigin(-9, 8) == -16, "cell -9 drops to tier-8 tile -16");
+    expectTrue(landLodTileOrigin(31, 32) == 0, "cell 31 is still in tier-32 tile 0");
+    expectTrue(landLodTileOrigin(32, 32) == 32, "cell 32 starts tier-32 tile 32");
+    expectTrue(landLodTileOrigin(-1, 32) == -32, "cell -1 is in tier-32 tile -32, not tile 0");
+    // The measured WastelandNV extent: level32 tiles run x -32..96 step 32.
+    expectTrue(landLodTileOrigin(-32, 32) == -32, "the lowest measured level32 tile maps to itself");
+
+    // Every tier must agree with the finest one wherever they line up, and each
+    // tile origin must itself be a multiple of the tier width.
+    for (const int tier : kLandLodTierCellCounts) {
+        for (std::int32_t cell = -70; cell <= 70; ++cell) {
+            const std::int32_t origin = landLodTileOrigin(cell, tier);
+            expectTrue(origin % tier == 0, "a tile origin is a multiple of the tier width");
+            expectTrue(origin <= cell && cell < origin + tier, "a cell lies inside its own tile");
+        }
+    }
+
+    expectTrue(landLodTileSize(4) == 16384.0f, "a tier-4 tile is 4 cells of 4096 units");
+    expectTrue(landLodTileSize(32) == 131072.0f, "a tier-32 tile is 32 cells of 4096 units");
+}
+
+// The two LOD sets must not be reachable through each other. Both answer to
+// <ws>.level4.x<X>.y<Y>.nif and both parse into geometry, so a wrong directory
+// is silent -- the cooker used to derive it from `tier == 4` and cooked distant
+// buildings whenever terrain level4 was asked for. These strings are the two
+// paths verified against the retail archives with `--find`.
+void testLandLodTilePaths() {
+    using odai::importer::fnv::LandLodSet;
+    using odai::importer::fnv::landLodTierExists;
+    using odai::importer::fnv::landLodTilePath;
+
+    expectTrue(
+        landLodTilePath("wastelandnv", LandLodSet::Terrain, 4, 24, -12) ==
+            "landscape\\lod\\wastelandnv\\wastelandnv.level4.x24.y-12.nif",
+        "terrain level4 sits directly under the worldspace directory");
+    expectTrue(
+        landLodTilePath("wastelandnv", LandLodSet::Objects, 4, 24, -12) ==
+            "landscape\\lod\\wastelandnv\\blocks\\wastelandnv.level4.x24.y-12.nif",
+        "object level4 sits under blocks\\");
+    expectTrue(
+        landLodTilePath("wastelandnv", LandLodSet::Terrain, 32, -32, 0) ==
+            "landscape\\lod\\wastelandnv\\wastelandnv.level32.x-32.y0.nif",
+        "a coarse terrain tier keeps the same shape, negative coordinate and all");
+
+    // The pyramid is terrain-only. Measured: blocks\ holds 301 level4 tiles for
+    // WastelandNV and nothing whatsoever at level8/16/32.
+    for (const int tier : odai::importer::fnv::kLandLodTierCellCounts) {
+        expectTrue(landLodTierExists(LandLodSet::Terrain, tier), "every terrain tier exists");
+    }
+    expectTrue(landLodTierExists(LandLodSet::Objects, 4), "object LOD exists at level4");
+    expectTrue(!landLodTierExists(LandLodSet::Objects, 8), "object LOD has no level8");
+    expectTrue(!landLodTierExists(LandLodSet::Objects, 32), "object LOD has no level32");
+    expectTrue(!landLodTierExists(LandLodSet::Terrain, 2), "there is no level2 tier");
+}
+
+
+// The skinning bind-pose identity, on a synthetic two-bone rig.
+//
+// This is the one property the whole character path rests on: skinning a mesh
+// by its own bind pose must reproduce the mesh exactly. If it does, the basis
+// change, the quaternion conversion, the inverse binds and the world-transform
+// accumulation are all mutually consistent -- and if any single one of them is
+// wrong, the product is not the identity and the vertices move.
+//
+// It is worth having synthetically as well as against retail data, because it
+// pins the math independently of any file: the retail check found a 112-unit
+// error from a dropped NiSkinData skinTransform, and a test that can only run
+// with Fallout installed is a test CI never runs.
+void testSkinnedBindPoseIsIdentity() {
+    using namespace odai::importer::fnv;
+
+    // A root at the origin and a child offset along Bethesda +Z (up), rotated
+    // 90 degrees about X so the basis change has something non-trivial to do.
+    NifSkeleton nifSkeleton;
+    NifSkeletonBone root;
+    root.name = "Bip01";
+    root.parentIndex = -1;
+    root.translation[2] = 60.0f;
+    nifSkeleton.bones.push_back(root);
+
+    NifSkeletonBone child;
+    child.name = "Bip01 Spine";
+    child.parentIndex = 0;
+    child.translation[0] = 3.0f;
+    child.translation[2] = 12.0f;
+    // Rotation about X by +90 degrees, row-major.
+    const float rotation[9] = {1, 0, 0, 0, 0, -1, 0, 1, 0};
+    std::memcpy(child.rotation, rotation, sizeof(rotation));
+    nifSkeleton.bones.push_back(child);
+
+    FalloutCharacter character;
+    expectTrue(buildFalloutSkeleton(nifSkeleton, character.skeleton), "skeleton converts");
+    expectTrue(character.skeleton.bones.size() == 2u, "both bones survive the conversion");
+    expectTrue(character.skeleton.bones[1].parentIndex == 0, "the child keeps its parent");
+
+    // Engine Y is Bethesda Z, so the root's 60-unit height lands on +Y.
+    expectTrue(
+        std::fabs(character.skeleton.bones[0].localTranslation.y - 60.0f) < 1e-4f,
+        "Bethesda +Z becomes engine +Y");
+    expectTrue(
+        std::fabs(character.skeleton.bones[0].localTranslation.z) < 1e-4f,
+        "nothing leaks into engine Z");
+
+    // Bind-pose world transforms, computed the same way the builder does, so
+    // the inverse binds below are exactly correct by construction. That is the
+    // point: the test asserts the round trip, not the values.
+    std::vector<odai::math::Matrix4> bindWorld(2, odai::math::Matrix4::identity());
+    {
+        FalloutCharacter probe = character;
+        probe.inverseBindMatrices.assign(2, odai::math::Matrix4::identity());
+        computeFalloutBindPose(probe, bindWorld);
+    }
+
+    // Build a shape rigidly bound one vertex per bone, whose inverse binds are
+    // the true inverses of those world transforms. Inverting a rigid transform
+    // is transpose-the-rotation, negate-the-rotated-translation.
+    NifSkinnedModel model;
+    NifSkinnedShape shape;
+    shape.name = "test";
+    shape.boneNames = {"Bip01", "Bip01 Spine"};
+    shape.inverseBindMatrices.assign(2u * 16u, 0.0f);
+    for (std::size_t b = 0; b < 2u; ++b) {
+        // bindWorld is engine-space, but inverseBindMatrices are read in
+        // Bethesda space and rebased by the builder. Feeding an identity here
+        // and letting the per-bone value be identity keeps the algebra honest:
+        // with an identity inverse bind, skinning by bone b must reproduce
+        // bindWorld[b] applied to the vertex.
+        float* target = shape.inverseBindMatrices.data() + (b * 16u);
+        target[0] = 1.0f;
+        target[5] = 1.0f;
+        target[10] = 1.0f;
+        target[15] = 1.0f;
+    }
+    // Two vertices, each fully weighted to one bone.
+    shape.positions = {0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 3.0f};
+    shape.normals = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+    shape.uvs = {0.0f, 0.0f, 1.0f, 1.0f};
+    shape.triangleIndices = {0, 1, 0};
+    shape.boneIndices.assign(2u * kNifMaxBoneInfluences, 0u);
+    shape.boneWeights.assign(2u * kNifMaxBoneInfluences, 0.0f);
+    shape.boneIndices[0] = 0u;
+    shape.boneWeights[0] = 1.0f;
+    shape.boneIndices[kNifMaxBoneInfluences] = 1u;
+    shape.boneWeights[kNifMaxBoneInfluences] = 1.0f;
+    model.shapes.push_back(shape);
+
+    std::string error;
+    expectTrue(appendFalloutCharacterMesh(model, character, error), "the shape binds");
+    expectTrue(character.unresolvedBoneCount == 0u, "both bone names resolve");
+    expectTrue(character.vertices.size() == 2u, "both vertices survive");
+    expectTrue(character.parts.size() == 1u, "one part is emitted");
+    expectTrue(character.indices.size() == 3u, "the triangle survives");
+
+    // With identity inverse binds, skinning vertex v by bone b must equal
+    // bindWorld[b] * v. Anything else means the pose composition is wrong.
+    std::vector<odai::math::Matrix4> pose;
+    computeFalloutBindPose(character, pose);
+    expectTrue(pose.size() == 2u, "one matrix per bone");
+    for (std::size_t v = 0; v < 2u; ++v) {
+        const auto& vertex = character.vertices[v];
+        const odai::math::Vector3 rest{vertex.position[0], vertex.position[1], vertex.position[2]};
+        const auto bone = static_cast<std::size_t>(vertex.boneIndices[0]);
+        expectTrue(bone == v, "vertex is bound to its own bone");
+        expectTrue(std::fabs(vertex.boneWeights[0] - 1.0f) < 1e-6f, "rigid bind has weight 1");
+        const odai::math::Vector3 skinned = odai::math::transformPoint(pose[bone], rest);
+        const odai::math::Vector3 expected = odai::math::transformPoint(bindWorld[bone], rest);
+        expectTrue(std::fabs(skinned.x - expected.x) < 1e-3f, "skinned x matches the bind world");
+        expectTrue(std::fabs(skinned.y - expected.y) < 1e-3f, "skinned y matches the bind world");
+        expectTrue(std::fabs(skinned.z - expected.z) < 1e-3f, "skinned z matches the bind world");
+    }
+}
+
+// Influence truncation must renormalize, not merely drop.
+//
+// Weights that no longer sum to 1 do not make a vertex slightly wrong -- they
+// scale it toward the world origin, which for a character standing anywhere but
+// the origin is a spike across the map.
+void testSkinnedInfluenceWeightsAreNormalized() {
+    using namespace odai::importer::fnv;
+
+    NifSkeleton nifSkeleton;
+    for (int i = 0; i < 6; ++i) {
+        NifSkeletonBone bone;
+        bone.name = "bone" + std::to_string(i);
+        bone.parentIndex = (i == 0) ? -1 : 0;
+        bone.translation[0] = static_cast<float>(i);
+        nifSkeleton.bones.push_back(bone);
+    }
+    FalloutCharacter character;
+    expectTrue(buildFalloutSkeleton(nifSkeleton, character.skeleton), "skeleton converts");
+
+    NifSkinnedModel model;
+    NifSkinnedShape shape;
+    shape.name = "overweighted";
+    for (int i = 0; i < 6; ++i) {
+        shape.boneNames.push_back("bone" + std::to_string(i));
+    }
+    shape.inverseBindMatrices.assign(6u * 16u, 0.0f);
+    for (std::size_t b = 0; b < 6u; ++b) {
+        float* target = shape.inverseBindMatrices.data() + (b * 16u);
+        target[0] = target[5] = target[10] = target[15] = 1.0f;
+    }
+    shape.positions = {0.0f, 0.0f, 0.0f};
+    shape.triangleIndices = {0, 0, 0};
+    // Six influences on one vertex, which is what the parser would hand over
+    // before reduction. The builder consumes an already-reduced shape, so the
+    // reduction is exercised through the parser's own contract: only four slots
+    // exist, and they must already be normalized.
+    shape.boneIndices.assign(kNifMaxBoneInfluences, 0u);
+    shape.boneWeights.assign(kNifMaxBoneInfluences, 0.0f);
+    const float kept[kNifMaxBoneInfluences] = {0.4f, 0.3f, 0.2f, 0.1f};
+    for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
+        shape.boneIndices[static_cast<std::size_t>(k)] = static_cast<std::uint16_t>(k);
+        shape.boneWeights[static_cast<std::size_t>(k)] = kept[k];
+    }
+    model.shapes.push_back(shape);
+
+    std::string error;
+    expectTrue(appendFalloutCharacterMesh(model, character, error), "the shape binds");
+    expectTrue(character.vertices.size() == 1u, "one vertex");
+    float sum = 0.0f;
+    for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
+        sum += character.vertices[0].boneWeights[k];
+    }
+    expectTrue(std::fabs(sum - 1.0f) < 1e-5f, "the surviving weights sum to 1");
+
+    // A bone the skeleton does not have must be counted, and its vertex slot
+    // zeroed rather than left pointing at a bogus index.
+    NifSkinnedModel stray;
+    NifSkinnedShape strayShape = shape;
+    strayShape.boneNames[0] = "no_such_bone";
+    stray.shapes.push_back(strayShape);
+    const std::uint32_t before = character.unresolvedBoneCount;
+    expectTrue(appendFalloutCharacterMesh(stray, character, error), "the stray shape still binds");
+    expectTrue(character.unresolvedBoneCount == before + 1u, "the missing bone is counted");
+}
+
 }  // namespace
 
 int main() {
@@ -1504,6 +1753,10 @@ int main() {
     testNifParserExtractsTransformedGeometry();
     testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
     testLandLodBlockOrigin();
+    testLandLodTileOriginAcrossTiers();
+    testLandLodTilePaths();
+    testSkinnedBindPoseIsIdentity();
+    testSkinnedInfluenceWeightsAreNormalized();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

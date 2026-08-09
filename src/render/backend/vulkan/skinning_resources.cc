@@ -353,7 +353,14 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
     if (!uploadDeviceLocalBuffer(
             gpuVertices.data(),
             static_cast<VkDeviceSize>(gpuVertices.size() * sizeof(GpuSkinnedVertexIn)),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            // SHADER_DEVICE_ADDRESS is required, not optional: this buffer is
+            // reached through a descriptor BUFFER, and writeDescriptorBufferStorage
+            // below takes its device address. Without the usage bit
+            // vkGetBufferDeviceAddress is invalid -- validation reports
+            // VUID-VkBufferDeviceAddressInfo-buffer-02601 and the address that
+            // comes back does not point at the buffer, so the compute pass reads
+            // garbage and the whole frame renders black.
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
             "skinned mesh rest-pose vertex",
             newRestPoseHandle)) {
         return false;
@@ -370,16 +377,49 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         return false;
     }
 
-    // Persistent skinned output: rewritten every frame by recordSkinningPass,
-    // read every frame as a plain ImportedMeshVertex vertex buffer -- created
-    // directly device-local (no staging upload; nothing to initialize it
-    // with yet).
-    BufferCreateDesc outputCreateDesc{};
-    outputCreateDesc.size = static_cast<VkDeviceSize>(gpuVertices.size() * sizeof(ImportedMeshVertex));
-    outputCreateDesc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    outputCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    const BufferHandle newOutputHandle = m_bufferAllocator.createBuffer(outputCreateDesc);
-    if (newOutputHandle == kInvalidBufferHandle) {
+    // Persistent skinned output: rewritten every frame by recordSkinningPass and
+    // read every frame as a plain ImportedMeshVertex vertex buffer.
+    //
+    // SEEDED with the rest pose rather than left uninitialized. The comment here
+    // used to say there was "nothing to initialize it with yet", which is not
+    // true -- the rest pose is right there, and it is exactly what this buffer
+    // should contain before the first dispatch. Left uninitialized, any frame
+    // that draws before a dispatch lands (the debug bypass, a slot whose pose
+    // has not been set, the frame a template is uploaded on) feeds the vertex
+    // stage whatever the allocator handed back. Garbage floats become NaN
+    // positions, NaN reaches the auto-exposure histogram, and the tonemapper
+    // takes the ENTIRE frame with it -- the world included. That failure looks
+    // nothing like "the character is missing"; it looks like the renderer
+    // broke.
+    std::vector<ImportedMeshVertex> restOutputVertices(gpuVertices.size());
+    for (std::size_t i = 0; i < gpuVertices.size(); ++i) {
+        const ImportedSkinnedMeshVertex& src = meshTemplate.vertices[i];
+        ImportedMeshVertex& dst = restOutputVertices[i];
+        dst.position[0] = src.position[0];
+        dst.position[1] = src.position[1];
+        dst.position[2] = src.position[2];
+        dst.normal[0] = src.normal[0];
+        dst.normal[1] = src.normal[1];
+        dst.normal[2] = src.normal[2];
+        dst.color[0] = src.color[0];
+        dst.color[1] = src.color[1];
+        dst.color[2] = src.color[2];
+        dst.uv[0] = src.uv[0];
+        dst.uv[1] = src.uv[1];
+        dst.textureIndex = src.textureIndex;
+        dst.flags = src.flags;
+    }
+    BufferHandle newOutputHandle = kInvalidBufferHandle;
+    if (!uploadDeviceLocalBuffer(
+            restOutputVertices.data(),
+            static_cast<VkDeviceSize>(restOutputVertices.size() * sizeof(ImportedMeshVertex)),
+            // Storage (written by the compute pass through a descriptor buffer,
+            // hence SHADER_DEVICE_ADDRESS -- see the rest-pose buffer above)
+            // plus vertex (read by the main pass as plain geometry).
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            "skinned mesh output",
+            newOutputHandle)) {
         VOX_LOGE("render") << "skinned mesh output buffer allocation failed";
         m_bufferAllocator.destroyBuffer(newRestPoseHandle);
         m_bufferAllocator.destroyBuffer(newIndexHandle);
@@ -396,7 +436,7 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         writeDescriptorBufferStorage(
             slot.bufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 2),
             m_bufferAllocator.getDeviceAddress(newOutputHandle),
-            outputCreateDesc.size);
+            static_cast<VkDeviceSize>(restOutputVertices.size() * sizeof(ImportedMeshVertex)));
     }
 
     m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
@@ -472,8 +512,24 @@ void RendererBackend::uploadSkinnedActorPoseForFrame() {
 
         const VkDeviceSize boneBufferSize =
             static_cast<VkDeviceSize>(slot.pendingBoneMatrices.size() * sizeof(odai::math::Matrix4));
-        const std::optional<FrameArenaSlice> boneSlice =
-            m_frameArena.allocateUpload(boneBufferSize, alignof(float), FrameArenaUploadKind::Unknown);
+        // 256-byte alignment, NOT alignof(float).
+        //
+        // This slice is handed to the shader as a StructuredBuffer<float4x4>
+        // via its device address, so the base has to satisfy that type's
+        // alignment (16 under std430), and separately any device's
+        // minStorageBufferOffsetAlignment. alignof(float) is 4 and satisfies
+        // neither. 256 covers every device's limit with a few bytes of padding
+        // once per frame.
+        //
+        // The failure this caused is worth recording because it looks like
+        // anything but an alignment bug: misaligned matrices read as garbage,
+        // garbage matrices put NaN in the skinned positions, and NaN reaching
+        // the auto-exposure histogram takes the tonemapper -- and therefore the
+        // WHOLE FRAME, world and sky included -- to a single flat colour. The
+        // symptom was "adding a character makes the renderer stop working".
+        constexpr VkDeviceSize kBoneMatrixAlignment = 256u;
+        const std::optional<FrameArenaSlice> boneSlice = m_frameArena.allocateUpload(
+            boneBufferSize, kBoneMatrixAlignment, FrameArenaUploadKind::Unknown);
         if (!boneSlice.has_value() || boneSlice->mapped == nullptr) {
             VOX_LOGW("render") << "skinning: bone matrix upload failed for instance " << i
                                 << ", skipping this frame's pose";

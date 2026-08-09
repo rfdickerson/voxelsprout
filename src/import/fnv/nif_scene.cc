@@ -346,7 +346,11 @@ struct StencilPropertyBlock {
 //                           envMapScale f32
 //   BSShaderLightingProperty : textureClampMode u32
 //   BSShaderPPLightingProperty : textureSet ref  <-- what we want
-bool readBsShaderTextureSetRef(ByteCursor& cursor, std::int32_t& outTextureSetRef) {
+//
+// Leaves the cursor positioned immediately after textureClampMode, i.e. at the
+// first field the concrete subclass adds. BSShaderPPLightingProperty puts a
+// texture-set ref there; BSShaderNoLightingProperty puts a sized string.
+bool readBsShaderLightingPrefix(ByteCursor& cursor) {
     std::int32_t nameRef = 0;
     if (!cursor.read(nameRef)) {
         return false;
@@ -368,38 +372,71 @@ bool readBsShaderTextureSetRef(ByteCursor& cursor, std::int32_t& outTextureSetRe
     std::uint32_t shaderFlags2 = 0;
     float envMapScale = 0.0f;
     std::uint32_t textureClampMode = 0;
-    if (!cursor.read(controllerRef) || !cursor.read(flags) || !cursor.read(shaderType) ||
-        !cursor.read(shaderFlags) || !cursor.read(shaderFlags2) || !cursor.read(envMapScale) ||
-        !cursor.read(textureClampMode)) {
-        return false;
-    }
-    return cursor.read(outTextureSetRef);
+    return cursor.read(controllerRef) && cursor.read(flags) && cursor.read(shaderType) &&
+        cursor.read(shaderFlags) && cursor.read(shaderFlags2) && cursor.read(envMapScale) &&
+        cursor.read(textureClampMode);
+}
+
+bool readBsShaderTextureSetRef(ByteCursor& cursor, std::int32_t& outTextureSetRef) {
+    return readBsShaderLightingPrefix(cursor) && cursor.read(outTextureSetRef);
 }
 
 // BSShaderNoLightingProperty names its texture DIRECTLY, as a length-prefixed
-// string, instead of pointing at a BSShaderTextureSet. That is the whole reason
-// it needs its own reader: the texture-set path above finds nothing for these
-// blocks, so every shape using one came out with no diffuse texture and shaded
-// from the per-model hashed colour -- grey patches on an otherwise textured
-// model, on 44 of 800 shapes in a 169-cell Mojave cook.
+// string, instead of pointing at a BSShaderTextureSet.
 //
-// Shares BSShaderProperty's prefix with the reader above, so the field walk is
-// identical up to where the texture-set ref would be. Then the string.
-// NiTexturingProperty reaches its texture through NiSourceTexture blocks, not a
-// BSShaderTextureSet. It is the older Gamebryo path and retail FNV still uses it
-// on plenty of geometry -- cliffs and rock formations especially -- so shapes
-// carrying one came out with no diffuse texture at all and shaded from the
-// per-model hashed colour.
+// READ THIS BEFORE ASSUMING IT MATTERS: it recovers ZERO textures on retail
+// data. Measured over all 20746 NIFs in the retail archives, before and after
+// this reader existed, `--nifs 30000` reports the same 63404 shapes with a
+// diffuse and the same 4569 without. Every shape carrying one of these already
+// gets its diffuse from another property on the same shape -- almost always a
+// NiTexturingProperty resolved through NiSourceTexture, which is why adding
+// that reader is what actually fixed the untextured effect meshes.
 //
-// Both readers below SCAN the block for a value that validates, rather than
-// walking to a computed offset. That is the same technique the texture-set
-// resolution documents above, and for the same reason: the field layout of
-// these types shifts with userVersion2, and two attempts at deriving an offset
-// for BSShaderNoLightingProperty both landed wrong. A scan cannot be wrong by
-// construction here -- a candidate is only accepted if it resolves to something
-// that is actually a texture path.
+// The comment that used to sit here claimed 44 of 800 shapes in a Mojave cook
+// lost their texture to this type. That was measured before the
+// NiTexturingProperty path existed and has not been true since. Checked
+// directly on meshes\effects\nv\sanddust\sanddust02.nif: both sStorm shapes
+// resolve textures\effects\nv\dustStorm.dds with this reader deleted.
 //
-// Scanning is cheap: these are 4-byte integer reads with no allocation.
+// What it does buy is a truthful diagnostic. unresolvedPropertyTypes is the
+// list used to decide what to implement next, and this type was 3539 of its
+// entries -- the largest by far, and every one of them a false lead. With the
+// reader in, that drops to 2508, and those remaining are blocks whose fileName
+// is legitimately the empty string (editor markers and similar), not holes.
+// The types actually still costing textures are visible underneath it now:
+// TallGrassShaderProperty (18), WaterShaderProperty (8), SkyShaderProperty (6),
+// TileShaderProperty (5).
+//
+// Because it changes no geometry and no texture, it does NOT need a
+// kCellBuildVersion bump -- invalidating every cached cell for a diagnostic
+// would cost a full re-cook and buy nothing.
+//
+// It derives from BSShaderLightingProperty, so it shares the prefix walked by
+// readBsShaderLightingPrefix above and puts a sized string exactly where
+// BSShaderPPLightingProperty puts its texture-set ref -- fileName length at
+// block-relative offset 34, characters at 38, then four falloff floats.
+//
+// This IS a computed offset, and two earlier attempts at one landed wrong, so
+// it was verified against three retail blocks in
+// meshes\effects\nv\sanddust\sanddust02.nif before being written. The block
+// sizes close exactly on the layout, which a wrong offset cannot do:
+//
+//   block [50]  87 bytes = 38 + 33 (fileName) + 16 (4 falloff floats)
+//   block [63]  54 bytes = 38 +  0 (empty)    + 16
+//   block [70]  86 bytes = 38 + 32            + 16
+//
+// and envMapScale reads exactly 1.0f at offset 26 in all three. A scan was the
+// alternative and is the weaker option here: these blocks begin with a nameRef
+// into the header string table, so a scan accepting "the first word that
+// resolves to a .dds path" returns the block's NAME on any file whose strings
+// happen to include texture paths. The offset closes on arithmetic; the scan
+// cannot be checked at all.
+//
+// NiTexturingProperty is a different problem and keeps the scan below. It
+// reaches its texture through NiSourceTexture blocks rather than a texture set
+// -- the older Gamebryo path, still used by retail FNV on cliffs and rock
+// formations -- and those blocks put a ushort and a byte ahead of their refs,
+// so the fields are genuinely misaligned rather than at a stable offset.
 
 bool looksLikeDdsPath(const std::string& value) {
     if (value.size() < 5u || value.size() > 256u) {
@@ -415,6 +452,25 @@ bool looksLikeDdsPath(const std::string& value) {
         return static_cast<char>(std::tolower(c));
     });
     return lowered.compare(lowered.size() - 4u, 4u, ".dds") == 0;
+}
+
+// BSShaderNoLightingProperty's own field: a sized string holding the texture
+// path, immediately after the shared BSShaderLightingProperty prefix. Empty
+// strings are real (block [63] above) and are reported as "no texture" rather
+// than as a parse failure.
+bool readBsShaderNoLightingTexture(ByteCursor& cursor, std::string& outFileName) {
+    if (!readBsShaderLightingPrefix(cursor)) {
+        return false;
+    }
+    std::string fileName;
+    if (!cursor.readSizedString<std::uint32_t>(fileName)) {
+        return false;
+    }
+    if (!looksLikeDdsPath(fileName)) {
+        return false;
+    }
+    outFileName = std::move(fileName);
+    return true;
 }
 
 // A NiSourceTexture names its file either through the header string table or
@@ -1034,6 +1090,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     // NiSourceTexture chain instead of BSShaderTextureSet.
     std::vector<std::string> sourceTexturePaths(numBlocks);
     std::vector<std::string> texturingPropertyPaths(numBlocks);
+    std::vector<std::string> noLightingTexturePaths(numBlocks);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
     std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
     std::unordered_set<std::int32_t> referencedAsChild;
@@ -1074,6 +1131,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             std::int32_t textureSetRef = -1;
             if (readBsShaderTextureSetRef(blockCursor, textureSetRef)) {
                 shaderTextureSetRefs[i] = textureSetRef;
+            }
+        } else if (typeName == "BSShaderNoLightingProperty") {
+            std::string fileName;
+            if (readBsShaderNoLightingTexture(blockCursor, fileName)) {
+                noLightingTexturePaths[i] = std::move(fileName);
             }
         } else if (typeName == "NiSourceTexture") {
             std::string fileName;
@@ -1182,11 +1244,27 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // words for the first one that indexes a block actually parsed as
             // a BSShaderTextureSet. Wrong-by-construction is impossible: a
             // candidate is only accepted if it resolves to the right type.
+            // BSShaderNoLightingProperty's directly-named texture is held back
+            // until every property has been walked, rather than assigned in
+            // place. The loop below is first-property-wins -- it bails on any
+            // property once shape.diffuseTexturePath is non-empty -- so
+            // assigning inline would let a NoLighting property that happens to
+            // come first suppress a BSShaderTextureSet later in the same list.
+            // A texture set is the richer source -- it also names the normal map,
+            // which the normal-mapping path reads out of slot 1 -- so it wins,
+            // and this is the fallback for shapes that have nothing else.
+            // Holding it back is what makes this reader provably unable to
+            // change any texture that already resolved, which the before/after
+            // in the header comment relies on.
+            std::string noLightingFallback;
             for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
                 if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
                     continue;
                 }
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
+                if (noLightingFallback.empty() && !noLightingTexturePaths[propertyIndex].empty()) {
+                    noLightingFallback = noLightingTexturePaths[propertyIndex];
+                }
                 if (alphaProperties[propertyIndex].valid) {
                     // A shape carries at most one alpha property in practice;
                     // if it somehow carries two, the one that turns the test on
@@ -1209,29 +1287,36 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     shape.diffuseTexturePath = texturingPropertyPaths[propertyIndex];
                     continue;
                 }
+                // A texture set, when the property has one. Type-validate the
+                // resolved ref: the layout above is read, not guessed, so this
+                // is an assertion rather than a search.
                 const std::int32_t textureSetRef = shaderTextureSetRefs[propertyIndex];
-                if (textureSetRef < 0 || static_cast<std::size_t>(textureSetRef) >= numBlocks) {
-                    // Record what this actually was. A property that is neither
-                    // an alpha property nor something we got a texture set out
-                    // of is exactly the case that leaves a shape untextured.
-                    if (propertyIndex < header.blockTypeIndex.size()) {
-                        const std::string& typeName =
-                            header.blockTypeNames[header.blockTypeIndex[propertyIndex]];
-                        if (std::find(
-                                outModel.unresolvedPropertyTypes.begin(),
-                                outModel.unresolvedPropertyTypes.end(),
-                                typeName) == outModel.unresolvedPropertyTypes.end()) {
-                            outModel.unresolvedPropertyTypes.push_back(typeName);
-                        }
+                if (textureSetRef >= 0 && static_cast<std::size_t>(textureSetRef) < numBlocks) {
+                    const TextureSetBlock& set = textureSets[static_cast<std::size_t>(textureSetRef)];
+                    if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
+                        shape.diffuseTexturePath = set.textures.front();
                     }
                     continue;
                 }
-                // Type-validate the resolved ref. The layout above is read, not
-                // guessed, so this is an assertion rather than a search.
-                const TextureSetBlock& set = textureSets[static_cast<std::size_t>(textureSetRef)];
-                if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
-                    shape.diffuseTexturePath = set.textures.front();
+                if (!noLightingTexturePaths[propertyIndex].empty()) {
+                    continue;  // held back; applied after the loop if nothing better won
                 }
+                // Record what this actually was. A property that is neither an
+                // alpha property nor something we got a texture out of is
+                // exactly the case that leaves a shape untextured.
+                if (propertyIndex < header.blockTypeIndex.size()) {
+                    const std::string& typeName =
+                        header.blockTypeNames[header.blockTypeIndex[propertyIndex]];
+                    if (std::find(
+                            outModel.unresolvedPropertyTypes.begin(),
+                            outModel.unresolvedPropertyTypes.end(),
+                            typeName) == outModel.unresolvedPropertyTypes.end()) {
+                        outModel.unresolvedPropertyTypes.push_back(typeName);
+                    }
+                }
+            }
+            if (shape.diffuseTexturePath.empty() && !noLightingFallback.empty()) {
+                shape.diffuseTexturePath = std::move(noLightingFallback);
             }
 
             shape.uvs = src.uvs;
@@ -1258,6 +1343,544 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         }
     }
 
+    return true;
+}
+
+// Parses a skeleton NIF's NiNode hierarchy into a flat, topologically ordered
+// bone array.
+//
+// This reuses readNiNode rather than adding a second node decoder, which
+// matters: readAvObjectPrefix carries the userVersion2 flags-width fix that
+// cost a real bug to find (see its comment), and a parallel implementation
+// would not have it.
+//
+// What is deliberately NOT read: a skeleton file is roughly half physics.
+// meshes\characters\_male\skeleton.nif is 388 blocks, of which 65 are NiNodes
+// and the rest are bhkRigidBody / bhkCapsuleShape / bhkRagdollConstraint
+// (ragdoll), NiTransformController / NiTransformInterpolator (the idle the
+// skeleton ships with), and one NiTriShape. Only the NiNodes are bones. The
+// controllers are skipped because animation comes from .kf files against these
+// bone names, not from whatever this file happens to embed.
+bool parseNifSkeleton(
+    const std::vector<std::uint8_t>& bytes, NifSkeleton& outSkeleton, std::string& outError) {
+    outSkeleton = NifSkeleton{};
+    ByteCursor cursor(bytes.data(), bytes.size());
+    NifHeader header;
+    if (!parseHeader(cursor, header, outError)) {
+        return false;
+    }
+
+    const std::size_t numBlocks = header.blockSize.size();
+    std::vector<std::size_t> blockStart(numBlocks);
+    std::size_t cursorPos = cursor.pos();
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        blockStart[i] = cursorPos;
+        if (cursorPos + header.blockSize[i] > bytes.size()) {
+            outError = "NIF block size table overruns the file";
+            return false;
+        }
+        cursorPos += header.blockSize[i];
+    }
+
+    std::vector<AvObjectFields> nodeFields(numBlocks);
+    std::vector<bool> isNiNode(numBlocks, false);
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
+        if (!isNodeTypeName(typeName)) {
+            continue;
+        }
+        ByteCursor blockCursor(bytes.data() + blockStart[i], header.blockSize[i]);
+        AvObjectFields fields;
+        if (readNiNode(blockCursor, header.userVersion2, fields)) {
+            nodeFields[i] = std::move(fields);
+            isNiNode[i] = true;
+        }
+    }
+
+    // Parent links, derived from the children lists. A node claimed by two
+    // parents keeps the first -- the format does not permit it, and preferring
+    // the first at least keeps the hierarchy a tree rather than a cycle.
+    std::vector<std::int32_t> parentBlock(numBlocks, -1);
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        if (!isNiNode[i]) {
+            continue;
+        }
+        for (const std::int32_t child : nodeFields[i].children) {
+            if (child < 0 || static_cast<std::size_t>(child) >= numBlocks) {
+                continue;
+            }
+            const auto childIndex = static_cast<std::size_t>(child);
+            if (isNiNode[childIndex] && parentBlock[childIndex] < 0) {
+                parentBlock[childIndex] = static_cast<std::int32_t>(i);
+            }
+        }
+    }
+
+    // Emit depth-first from every root so parents always precede children,
+    // which is the ordering NifSkeleton promises and what lets a consumer
+    // accumulate world transforms in one forward pass.
+    std::vector<int> boneIndexByBlock(numBlocks, -1);
+    std::vector<std::size_t> stack;
+    for (std::size_t i = numBlocks; i-- > 0;) {
+        if (isNiNode[i] && parentBlock[i] < 0) {
+            stack.push_back(i);
+        }
+    }
+    while (!stack.empty()) {
+        const std::size_t blockIndex = stack.back();
+        stack.pop_back();
+
+        NifSkeletonBone bone;
+        const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
+        if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+            bone.name = header.strings[static_cast<std::size_t>(nameRef)];
+        }
+        const AvObjectFields& fields = nodeFields[blockIndex];
+        std::memcpy(bone.translation, fields.translation, sizeof(bone.translation));
+        std::memcpy(bone.rotation, fields.rotation, sizeof(bone.rotation));
+        bone.scale = fields.scale;
+        const std::int32_t parent = parentBlock[blockIndex];
+        bone.parentIndex =
+            (parent >= 0) ? boneIndexByBlock[static_cast<std::size_t>(parent)] : -1;
+        boneIndexByBlock[blockIndex] = static_cast<int>(outSkeleton.bones.size());
+        outSkeleton.bones.push_back(std::move(bone));
+
+        // Reversed so the traversal visits children in file order, which keeps
+        // the emitted bone order stable and readable against a block dump.
+        const auto& children = nodeFields[blockIndex].children;
+        for (std::size_t c = children.size(); c-- > 0;) {
+            const std::int32_t child = children[c];
+            if (child < 0 || static_cast<std::size_t>(child) >= numBlocks) {
+                continue;
+            }
+            const auto childIndex = static_cast<std::size_t>(child);
+            if (isNiNode[childIndex] && boneIndexByBlock[childIndex] < 0) {
+                stack.push_back(childIndex);
+            }
+        }
+    }
+
+    // Anything still unemitted was a NiNode reachable from no root -- a cycle,
+    // or a child of a node type this parser does not walk. Counted, not
+    // dropped silently: a missing bone means every vertex weighted to it
+    // collapses somewhere it should not be.
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        if (isNiNode[i] && boneIndexByBlock[i] < 0) {
+            ++outSkeleton.orphanedBoneCount;
+        }
+    }
+
+    if (outSkeleton.bones.empty()) {
+        outError = "NIF contains no NiNode hierarchy to read as a skeleton";
+        return false;
+    }
+    return true;
+}
+
+namespace {
+
+// NiSkinInstance, and its FNV subclass BSDismemberSkinInstance.
+//
+// NiSkinInstance layout (20.2.0.7):
+//   data          ref  -> NiSkinData
+//   skinPartition ref  -> NiSkinPartition
+//   skeletonRoot  ptr  -> NiNode (a POINTER, same 4 bytes on disk as a ref)
+//   numBones      u32
+//   bones[]       ptr  -> NiNode, one per bone
+//
+// BSDismemberSkinInstance appends numPartitions + a partition array AFTER all
+// of that, so the prefix above decodes identically and the dismemberment data
+// -- which body part each triangle belongs to, for gore and armour swapping --
+// is simply not read. That is why one reader serves both.
+struct SkinInstanceBlock {
+    std::int32_t dataRef = -1;
+    std::int32_t partitionRef = -1;
+    std::vector<std::int32_t> boneNodeRefs;
+    bool valid = false;
+};
+
+bool readSkinInstance(ByteCursor& cursor, SkinInstanceBlock& out) {
+    std::int32_t skeletonRoot = 0;
+    std::uint32_t numBones = 0;
+    if (!cursor.read(out.dataRef) || !cursor.read(out.partitionRef) ||
+        !cursor.read(skeletonRoot) || !cursor.read(numBones)) {
+        return false;
+    }
+    // A body mesh binds a few dozen bones. Anything past this is a misparse,
+    // and rejecting it here keeps a bad offset from allocating wildly.
+    if (numBones > 512u) {
+        return false;
+    }
+    out.boneNodeRefs.resize(numBones);
+    for (std::int32_t& ref : out.boneNodeRefs) {
+        if (!cursor.read(ref)) {
+            return false;
+        }
+    }
+    out.valid = true;
+    return true;
+}
+
+// One bone's entry inside NiSkinData.
+struct SkinDataBone {
+    float inverseBind[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};  // row-major
+    std::vector<std::pair<std::uint16_t, float>> weights;  // (vertex index, weight)
+};
+
+struct SkinDataBlock {
+    // The overall geometry-space -> skeleton-root-space transform. See
+    // NifSkinnedShape::skinTransform for why it cannot be skipped.
+    float skinTransform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::vector<SkinDataBone> bones;
+    bool valid = false;
+};
+
+// Builds a row-major 4x4 from NIF's (rotation 3x3, translation, scale) triple,
+// which is how every transform in this format is stored.
+void composeInverseBind(
+    const float rotation[9], const float translation[3], float scale, float outMatrix[16]) {
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            outMatrix[(row * 4) + col] = rotation[(row * 3) + col] * scale;
+        }
+        outMatrix[(row * 4) + 3] = translation[row];
+    }
+    outMatrix[12] = 0.0f;
+    outMatrix[13] = 0.0f;
+    outMatrix[14] = 0.0f;
+    outMatrix[15] = 1.0f;
+}
+
+// NiSkinData layout (20.2.0.7, userVersion2 = 34):
+//   skinTransform      rotation 3x3, translation 3, scale 1   (36 + 12 + 4)
+//   numBones           u32
+//   skinPartition      ref     -- present only when version <= 10.1.0.0, so
+//                                 NOT present here. Reading it anyway shifts
+//                                 every bone by four bytes.
+//   hasVertexWeights   u8
+//   boneList[numBones]:
+//       skinTransform  rotation 3x3, translation 3, scale 1
+//       boundingSphere centre 3, radius 1
+//       numVertices    u16
+//       vertexWeights[numVertices]: index u16, weight f32
+//
+// The per-bone skinTransform IS the inverse bind pose -- it maps a vertex from
+// skin space into that bone's local space, which is exactly what a skinning
+// matrix needs on its right-hand side. It is not a bind pose to be inverted.
+//
+// The layout is confirmed by arithmetic rather than assumed: the block closes
+// exactly when the last bone's weight array ends, and readSkinData rejects the
+// parse otherwise. On upperbody.nif the NiSkinData blocks are 10477 / 8517 /
+// ... bytes and every one of them closes.
+bool readSkinData(ByteCursor& cursor, SkinDataBlock& out) {
+    float rootRotation[9] = {};
+    float rootTranslation[3] = {};
+    float rootScale = 1.0f;
+    std::uint32_t numBones = 0;
+    std::uint8_t hasVertexWeights = 0;
+    if (!cursor.read(rootRotation) || !cursor.read(rootTranslation) || !cursor.read(rootScale) ||
+        !cursor.read(numBones) || !cursor.read(hasVertexWeights)) {
+        return false;
+    }
+    composeInverseBind(rootRotation, rootTranslation, rootScale, out.skinTransform);
+    if (numBones > 512u) {
+        return false;
+    }
+    out.bones.resize(numBones);
+    for (SkinDataBone& bone : out.bones) {
+        float rotation[9] = {};
+        float translation[3] = {};
+        float scale = 1.0f;
+        float boundingSphere[4] = {};
+        std::uint16_t numVertices = 0;
+        if (!cursor.read(rotation) || !cursor.read(translation) || !cursor.read(scale) ||
+            !cursor.read(boundingSphere) || !cursor.read(numVertices)) {
+            return false;
+        }
+        composeInverseBind(rotation, translation, scale, bone.inverseBind);
+        if (hasVertexWeights == 0u) {
+            // Legal per the format: the weights then live in the
+            // NiSkinPartition instead. Not seen in retail FNV bodies, and the
+            // caller reports a shape with no weights rather than emitting one
+            // that would collapse to the origin.
+            continue;
+        }
+        bone.weights.resize(numVertices);
+        for (auto& weight : bone.weights) {
+            if (!cursor.read(weight.first) || !cursor.read(weight.second)) {
+                return false;
+            }
+        }
+    }
+    out.valid = true;
+    return true;
+}
+
+// Reduces one vertex's influence list to kNifMaxBoneInfluences, keeping the
+// largest weights, and renormalizes so they sum to 1.
+//
+// Renormalizing rather than just dropping is what keeps a truncated vertex on
+// the model: skinning is a weighted average of bone transforms, so weights
+// summing to 0.85 shrink the vertex 15% of the way toward the world origin --
+// which on a character at the far end of the Mojave is a spike across the map,
+// not a subtle error.
+void reduceInfluences(
+    std::vector<std::pair<std::uint16_t, float>>& influences, bool& outTruncated) {
+    outTruncated = false;
+    if (influences.size() > static_cast<std::size_t>(kNifMaxBoneInfluences)) {
+        std::partial_sort(
+            influences.begin(), influences.begin() + kNifMaxBoneInfluences, influences.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+        influences.resize(static_cast<std::size_t>(kNifMaxBoneInfluences));
+        outTruncated = true;
+    }
+    float total = 0.0f;
+    for (const auto& influence : influences) {
+        total += influence.second;
+    }
+    if (total <= 0.0f) {
+        return;
+    }
+    for (auto& influence : influences) {
+        influence.second /= total;
+    }
+}
+
+}  // namespace
+
+bool parseNifSkinnedMesh(
+    const std::vector<std::uint8_t>& bytes, NifSkinnedModel& outModel, std::string& outError) {
+    outModel = NifSkinnedModel{};
+    ByteCursor cursor(bytes.data(), bytes.size());
+    NifHeader header;
+    if (!parseHeader(cursor, header, outError)) {
+        return false;
+    }
+
+    const std::size_t numBlocks = header.blockSize.size();
+    std::vector<std::size_t> blockStart(numBlocks);
+    std::size_t cursorPos = cursor.pos();
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        blockStart[i] = cursorPos;
+        if (cursorPos + header.blockSize[i] > bytes.size()) {
+            outError = "NIF block size table overruns the file";
+            return false;
+        }
+        cursorPos += header.blockSize[i];
+    }
+
+    // A skinned shape's vertices are in SKIN space already -- the whole point
+    // of the inverse-bind transform is that they are not in any node's local
+    // space. So unlike parseNifStaticMesh, no node world transform is
+    // accumulated or applied here. Baking the NiTriShape's own transform in
+    // would double-apply it, since NiSkinData's per-bone transform is relative
+    // to the same skin space.
+    std::vector<AvObjectFields> nodeFields(numBlocks);
+    std::vector<bool> isTriShape(numBlocks, false);
+    std::vector<GeometryBlock> geometry(numBlocks);
+    std::vector<TextureSetBlock> textureSets(numBlocks);
+    std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
+    std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
+    std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
+    std::vector<SkinInstanceBlock> skinInstances(numBlocks);
+    std::vector<SkinDataBlock> skinData(numBlocks);
+    std::vector<std::string> nodeNames(numBlocks);
+    // Which skin instance each shape names. Read here rather than in
+    // readNiTriBasedGeom because the static path has no use for it and the
+    // field sits immediately after the data ref that path already reads.
+    std::vector<std::int32_t> shapeSkinRefs(numBlocks, -1);
+
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
+        ByteCursor blockCursor(bytes.data() + blockStart[i], header.blockSize[i]);
+
+        if (isNodeTypeName(typeName)) {
+            AvObjectFields fields;
+            if (readNiNode(blockCursor, header.userVersion2, fields)) {
+                const std::int32_t nameRef = fields.nameRef;
+                if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+                    nodeNames[i] = header.strings[static_cast<std::size_t>(nameRef)];
+                }
+                nodeFields[i] = std::move(fields);
+            }
+        } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
+                   typeName == "BSSegmentedTriShape") {
+            AvObjectFields fields;
+            if (readNiTriBasedGeom(blockCursor, header.userVersion2, fields)) {
+                // The skin instance ref is the very next field after the data
+                // ref readNiTriBasedGeom stops at.
+                std::int32_t skinRef = -1;
+                if (blockCursor.read(skinRef)) {
+                    shapeSkinRefs[i] = skinRef;
+                }
+                nodeFields[i] = std::move(fields);
+                isTriShape[i] = true;
+            }
+        } else if (typeName == "NiSkinInstance" || typeName == "BSDismemberSkinInstance") {
+            SkinInstanceBlock instance;
+            if (readSkinInstance(blockCursor, instance)) {
+                skinInstances[i] = std::move(instance);
+            }
+        } else if (typeName == "NiSkinData") {
+            SkinDataBlock data;
+            if (readSkinData(blockCursor, data)) {
+                skinData[i] = std::move(data);
+            }
+        } else if (typeName == "BSShaderPPLightingProperty") {
+            std::int32_t textureSetRef = -1;
+            if (readBsShaderTextureSetRef(blockCursor, textureSetRef)) {
+                shaderTextureSetRefs[i] = textureSetRef;
+            }
+        } else if (typeName == "BSShaderTextureSet") {
+            TextureSetBlock set;
+            if (readBsShaderTextureSet(blockCursor, set)) {
+                textureSets[i] = std::move(set);
+            }
+        } else if (typeName == "NiAlphaProperty") {
+            AlphaPropertyBlock alpha;
+            if (readNiAlphaProperty(blockCursor, header.userVersion2, alpha)) {
+                alphaProperties[i] = alpha;
+            }
+        } else if (typeName == "NiStencilProperty") {
+            StencilPropertyBlock stencil;
+            if (readNiStencilProperty(blockCursor, stencil)) {
+                stencilProperties[i] = stencil;
+            }
+        } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
+            GeometryBlock block;
+            const bool isStrips = (typeName == "NiTriStripsData");
+            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, block) && block.valid) {
+                geometry[i] = std::move(block);
+            }
+        }
+    }
+
+    for (std::size_t blockIndex = 0; blockIndex < numBlocks; ++blockIndex) {
+        if (!isTriShape[blockIndex]) {
+            continue;
+        }
+        const std::int32_t dataRef = nodeFields[blockIndex].dataRef;
+        if (dataRef < 0 || static_cast<std::size_t>(dataRef) >= numBlocks ||
+            !geometry[static_cast<std::size_t>(dataRef)].valid) {
+            continue;
+        }
+        const GeometryBlock& src = geometry[static_cast<std::size_t>(dataRef)];
+        const std::size_t vertexCount = src.positions.size() / 3u;
+
+        // The skin instance, and through it the skin data. A shape missing
+        // either is real geometry that simply is not skinned.
+        const std::int32_t skinRef = shapeSkinRefs[blockIndex];
+        if (skinRef < 0 || static_cast<std::size_t>(skinRef) >= numBlocks ||
+            !skinInstances[static_cast<std::size_t>(skinRef)].valid) {
+            ++outModel.unskinnedShapeCount;
+            continue;
+        }
+        const SkinInstanceBlock& instance = skinInstances[static_cast<std::size_t>(skinRef)];
+        const std::int32_t dataBlockRef = instance.dataRef;
+        if (dataBlockRef < 0 || static_cast<std::size_t>(dataBlockRef) >= numBlocks ||
+            !skinData[static_cast<std::size_t>(dataBlockRef)].valid) {
+            ++outModel.unskinnedShapeCount;
+            continue;
+        }
+        const SkinDataBlock& data = skinData[static_cast<std::size_t>(dataBlockRef)];
+        // The two bone lists must agree: NiSkinInstance names the nodes,
+        // NiSkinData holds their transforms and weights, and they are parallel
+        // arrays with no cross-reference. A mismatch means one of the two
+        // parsed wrong, and pairing them anyway would bind every vertex to the
+        // wrong bone -- a failure that looks like a mangled character rather
+        // than like a parse error.
+        if (data.bones.size() != instance.boneNodeRefs.size()) {
+            ++outModel.unskinnedShapeCount;
+            continue;
+        }
+
+        NifSkinnedShape shape;
+        const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
+        if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+            shape.name = header.strings[static_cast<std::size_t>(nameRef)];
+        }
+        shape.positions = src.positions;
+        shape.normals = src.normals;
+        shape.uvs = src.uvs;
+        shape.triangleIndices = src.triangleIndices;
+
+        for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
+            if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
+                continue;
+            }
+            const auto propertyIndex = static_cast<std::size_t>(propertyRef);
+            if (alphaProperties[propertyIndex].valid) {
+                shape.alphaTest = alphaProperties[propertyIndex].alphaTest;
+                shape.alphaBlend = alphaProperties[propertyIndex].alphaBlend;
+                shape.alphaThreshold = alphaProperties[propertyIndex].alphaThreshold;
+                continue;
+            }
+            if (stencilProperties[propertyIndex].valid) {
+                shape.twoSided = stencilProperties[propertyIndex].twoSided;
+                continue;
+            }
+            if (!shape.diffuseTexturePath.empty()) {
+                continue;
+            }
+            const std::int32_t textureSetRef = shaderTextureSetRefs[propertyIndex];
+            if (textureSetRef >= 0 && static_cast<std::size_t>(textureSetRef) < numBlocks) {
+                const TextureSetBlock& set = textureSets[static_cast<std::size_t>(textureSetRef)];
+                if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
+                    shape.diffuseTexturePath = set.textures.front();
+                }
+            }
+        }
+
+        // Bone names, resolved through the instance's node pointers. A name
+        // that does not resolve stays empty rather than shifting every later
+        // bone down by one -- the arrays are positional, so dropping an entry
+        // would silently rebind the whole shape.
+        std::memcpy(shape.skinTransform, data.skinTransform, sizeof(shape.skinTransform));
+        shape.boneNames.resize(instance.boneNodeRefs.size());
+        shape.inverseBindMatrices.resize(instance.boneNodeRefs.size() * 16u);
+        for (std::size_t b = 0; b < instance.boneNodeRefs.size(); ++b) {
+            const std::int32_t nodeRef = instance.boneNodeRefs[b];
+            if (nodeRef >= 0 && static_cast<std::size_t>(nodeRef) < numBlocks) {
+                shape.boneNames[b] = nodeNames[static_cast<std::size_t>(nodeRef)];
+            }
+            std::memcpy(
+                shape.inverseBindMatrices.data() + (b * 16u), data.bones[b].inverseBind,
+                sizeof(float) * 16u);
+        }
+
+        // Transpose the weight lists: NiSkinData stores them per bone, the GPU
+        // wants them per vertex.
+        std::vector<std::vector<std::pair<std::uint16_t, float>>> perVertex(vertexCount);
+        for (std::size_t b = 0; b < data.bones.size(); ++b) {
+            for (const auto& [vertexIndex, weight] : data.bones[b].weights) {
+                if (vertexIndex >= vertexCount || weight <= 0.0f) {
+                    continue;
+                }
+                perVertex[vertexIndex].emplace_back(static_cast<std::uint16_t>(b), weight);
+            }
+        }
+
+        shape.boneIndices.assign(vertexCount * kNifMaxBoneInfluences, 0u);
+        shape.boneWeights.assign(vertexCount * kNifMaxBoneInfluences, 0.0f);
+        for (std::size_t v = 0; v < vertexCount; ++v) {
+            bool truncated = false;
+            reduceInfluences(perVertex[v], truncated);
+            if (truncated) {
+                ++outModel.truncatedInfluenceVertexCount;
+            }
+            for (std::size_t k = 0; k < perVertex[v].size(); ++k) {
+                shape.boneIndices[(v * kNifMaxBoneInfluences) + k] = perVertex[v][k].first;
+                shape.boneWeights[(v * kNifMaxBoneInfluences) + k] = perVertex[v][k].second;
+            }
+        }
+
+        outModel.shapes.push_back(std::move(shape));
+    }
+
+    if (outModel.shapes.empty() && outModel.unskinnedShapeCount == 0u) {
+        outError = "NIF contains no geometry";
+        return false;
+    }
     return true;
 }
 

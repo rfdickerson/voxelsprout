@@ -17,6 +17,7 @@
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/cell_builder.h"
+#include "import/fnv/character_builder.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <set>
@@ -191,6 +193,11 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
     std::size_t totalTriangles = 0;
     std::size_t totalSkippedShapes = 0;
     std::map<std::string, std::size_t> parseErrors;
+    // Which property types are costing us textures, aggregated across the whole
+    // sample rather than one file at a time. "44 of 800 shapes have no diffuse"
+    // is not actionable; "N of them carry a BSShaderNoLightingProperty" is, and
+    // it turns a fix into a before/after number instead of a claim.
+    std::map<std::string, std::size_t> unresolvedPropertyTypes;
 
     std::vector<std::uint8_t> bytes;
     for (const auto& [archiveIndex, entry] : index.nifs) {
@@ -210,6 +217,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
             continue;
         }
         totalSkippedShapes += model.skippedShapeCount;
+        for (const std::string& typeName : model.unresolvedPropertyTypes) {
+            ++unresolvedPropertyTypes[typeName];
+        }
         if (model.shapes.empty()) {
             ++emptyModels;
             continue;
@@ -238,9 +248,16 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
               << "  triangles         " << totalTriangles << "\n"
               << "  skipped shapes    " << totalSkippedShapes << "\n"
               << "  shapes w/ diffuse " << shapesWithDiffuse << "\n"
-              << "  shapes w/ alphaTest " << shapesWithAlphaTest << "\n";
+              << "  shapes w/ alphaTest " << shapesWithAlphaTest << "\n"
+              << "  shapes w/o diffuse  " << (totalShapes - shapesWithDiffuse) << "\n";
     for (const auto& [message, count] : parseErrors) {
         std::cout << "  [" << count << "x] " << message << "\n";
+    }
+    if (!unresolvedPropertyTypes.empty()) {
+        std::cout << "unresolved property types (each one is a shape that lost its texture):\n";
+        for (const auto& [typeName, count] : unresolvedPropertyTypes) {
+            std::cout << "  " << count << "x " << typeName << "\n";
+        }
     }
     return 0;
 }
@@ -305,6 +322,337 @@ int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virt
     }
     std::cout << "Not found in any mesh archive: " << virtualPath << "\n";
     return 1;
+}
+
+// Dumps a skeleton NIF's bone hierarchy as an indented tree.
+//
+// The tree shape is the check that matters and it is one a human has to make:
+// a bone array can be complete, correctly named and still wrong, if the parent
+// links put the forearm under the pelvis. Indentation makes that obvious at a
+// glance in a way a bone count never does.
+int probeSkeleton(const std::filesystem::path& dataPath, const std::string& virtualPath) {
+    MeshIndex index = buildMeshIndex(dataPath);
+    for (std::size_t a = 0; a < index.archives.size(); ++a) {
+        const BsaFileEntry* entry = index.archives[a].find(virtualPath);
+        if (entry == nullptr) {
+            continue;
+        }
+        std::vector<std::uint8_t> bytes;
+        if (!index.archives[a].extract(*entry, bytes)) {
+            std::cout << "extract failed: " << index.archives[a].lastError() << "\n";
+            return 1;
+        }
+        odai::importer::fnv::NifSkeleton skeleton;
+        std::string error;
+        if (!odai::importer::fnv::parseNifSkeleton(bytes, skeleton, error)) {
+            std::cout << "skeleton parse FAILED: " << error << "\n";
+            return 1;
+        }
+        std::cout << skeleton.bones.size() << " bones, " << skeleton.orphanedBoneCount
+                  << " orphaned\n";
+        std::vector<int> depth(skeleton.bones.size(), 0);
+        for (std::size_t b = 0; b < skeleton.bones.size(); ++b) {
+            const auto& bone = skeleton.bones[b];
+            // Safe as a plain lookup rather than a walk precisely because the
+            // array is topologically ordered -- the parent's depth is always
+            // already computed.
+            depth[b] = (bone.parentIndex >= 0) ? depth[static_cast<std::size_t>(bone.parentIndex)] + 1 : 0;
+            std::cout << "  " << std::string(static_cast<std::size_t>(depth[b]) * 2u, ' ')
+                      << (bone.name.empty() ? "<unnamed>" : bone.name) << "  t("
+                      << bone.translation[0] << ", " << bone.translation[1] << ", "
+                      << bone.translation[2] << ")";
+            if (bone.scale != 1.0f) {
+                std::cout << " scale=" << bone.scale;
+            }
+            std::cout << "\n";
+        }
+        return 0;
+    }
+    std::cout << "Not found in any mesh archive: " << virtualPath << "\n";
+    return 1;
+}
+
+// Dumps a skinned mesh's shapes: their bone bindings and weight distribution.
+//
+// The influence histogram is the part worth printing. Skinning quality lives
+// or dies on whether truncating to four influences is throwing away real
+// weight, and that is invisible in any per-shape summary -- a mesh where 3% of
+// vertices lose a 0.01 influence is fine, and one where 30% lose a 0.2 is not.
+int probeSkinnedNif(const std::filesystem::path& dataPath, const std::string& virtualPath) {
+    MeshIndex index = buildMeshIndex(dataPath);
+    for (std::size_t a = 0; a < index.archives.size(); ++a) {
+        const BsaFileEntry* entry = index.archives[a].find(virtualPath);
+        if (entry == nullptr) {
+            continue;
+        }
+        std::vector<std::uint8_t> bytes;
+        if (!index.archives[a].extract(*entry, bytes)) {
+            std::cout << "extract failed: " << index.archives[a].lastError() << "\n";
+            return 1;
+        }
+        odai::importer::fnv::NifSkinnedModel model;
+        std::string error;
+        if (!odai::importer::fnv::parseNifSkinnedMesh(bytes, model, error)) {
+            std::cout << "skinned parse FAILED: " << error << "\n";
+            return 1;
+        }
+        std::cout << model.shapes.size() << " skinned shape(s), " << model.unskinnedShapeCount
+                  << " unskinned, " << model.truncatedInfluenceVertexCount
+                  << " vertices truncated to 4 influences\n";
+        for (const auto& shape : model.shapes) {
+            const std::size_t vertexCount = shape.positions.size() / 3u;
+            std::cout << "  \"" << shape.name << "\" verts " << vertexCount << ", tris "
+                      << (shape.triangleIndices.size() / 3u) << ", bones " << shape.boneNames.size()
+                      << ", diffuse \"" << shape.diffuseTexturePath << "\"\n";
+            // How many bones each vertex actually uses, after truncation. A
+            // column at 1 on a body mesh means the weights did not parse.
+            std::size_t byCount[odai::importer::fnv::kNifMaxBoneInfluences + 1] = {};
+            double weightSumMin = 2.0;
+            double weightSumMax = 0.0;
+            for (std::size_t v = 0; v < vertexCount; ++v) {
+                int used = 0;
+                double sum = 0.0;
+                for (int k = 0; k < odai::importer::fnv::kNifMaxBoneInfluences; ++k) {
+                    const float w = shape.boneWeights[(v * odai::importer::fnv::kNifMaxBoneInfluences) + static_cast<std::size_t>(k)];
+                    if (w > 0.0f) {
+                        ++used;
+                        sum += w;
+                    }
+                }
+                ++byCount[used];
+                weightSumMin = std::min(weightSumMin, sum);
+                weightSumMax = std::max(weightSumMax, sum);
+            }
+            std::cout << "      influences/vertex:";
+            for (int k = 0; k <= odai::importer::fnv::kNifMaxBoneInfluences; ++k) {
+                std::cout << " " << k << "=" << byCount[k];
+            }
+            std::cout << "   weight sum [" << weightSumMin << ", " << weightSumMax << "]\n";
+            std::cout << "      bones:";
+            for (std::size_t b = 0; b < shape.boneNames.size() && b < 8u; ++b) {
+                std::cout << " " << shape.boneNames[b];
+            }
+            if (shape.boneNames.size() > 8u) {
+                std::cout << " ...(+" << (shape.boneNames.size() - 8u) << ")";
+            }
+            std::cout << "\n";
+        }
+        return 0;
+    }
+    std::cout << "Not found in any mesh archive: " << virtualPath << "\n";
+    return 1;
+}
+
+// The whole character path end to end: skeleton NIF + body-part NIFs -> one
+// bound, engine-space, GPU-skinnable mesh.
+//
+// Every number printed here is a thing that can be wrong silently. The two that
+// matter most: unresolvedBones > 0 means vertices are bound to bones the
+// skeleton does not have (they collapse to the root), and a bind-pose bounding
+// box that is not roughly human-sized and standing on y=0 means the basis
+// change or the inverse binds are wrong -- which looks like an exploded mesh on
+// screen and like nothing at all in a vertex count.
+int probeCharacter(
+    const std::filesystem::path& dataPath, const std::string& skeletonPath,
+    const std::vector<std::string>& partPaths) {
+    // Paths here are relative to meshes\, matching FalloutAssetSource and the
+    // cooker -- NOT the full "meshes\..." virtual path --nif and --nifblocks
+    // take. Those two go straight at the archive index; this goes through the
+    // same resolver the game does, loose files and all.
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "could not index archives under " << dataPath << "\n";
+        return 1;
+    }
+
+    std::string resolveError;
+    std::vector<std::uint8_t> skeletonBytes;
+    if (!assets.resolveMesh(skeletonPath, skeletonBytes, resolveError)) {
+        std::cout << "could not resolve skeleton: " << skeletonPath << " (" << resolveError << ")\n";
+        return 1;
+    }
+    odai::importer::fnv::NifSkeleton nifSkeleton;
+    std::string error;
+    if (!odai::importer::fnv::parseNifSkeleton(skeletonBytes, nifSkeleton, error)) {
+        std::cout << "skeleton parse FAILED: " << error << "\n";
+        return 1;
+    }
+    odai::importer::fnv::FalloutCharacter character;
+    if (!odai::importer::fnv::buildFalloutSkeleton(nifSkeleton, character.skeleton)) {
+        std::cout << "skeleton conversion FAILED\n";
+        return 1;
+    }
+    std::cout << "skeleton: " << character.skeleton.bones.size() << " bones ("
+              << nifSkeleton.orphanedBoneCount << " orphaned)\n";
+
+    for (const std::string& partPath : partPaths) {
+        std::vector<std::uint8_t> partBytes;
+        if (!assets.resolveMesh(partPath, partBytes, resolveError)) {
+            std::cout << "  could not resolve part: " << partPath << " (" << resolveError << ")\n";
+            continue;
+        }
+        odai::importer::fnv::NifSkinnedModel model;
+        if (!odai::importer::fnv::parseNifSkinnedMesh(partBytes, model, error)) {
+            std::cout << "  part parse FAILED (" << partPath << "): " << error << "\n";
+            continue;
+        }
+        const std::size_t partsBefore = character.parts.size();
+        if (!odai::importer::fnv::appendFalloutCharacterMesh(model, character, error)) {
+            std::cout << "  bind FAILED (" << partPath << "): " << error << "\n";
+            continue;
+        }
+        std::cout << "  " << partPath << " -> " << (character.parts.size() - partsBefore)
+                  << " part(s), " << model.truncatedInfluenceVertexCount << " truncated\n";
+    }
+
+    std::cout << "bound: " << character.vertices.size() << " vertices, "
+              << (character.indices.size() / 3u) << " triangles, " << character.parts.size()
+              << " parts\n"
+              << "  unresolvedBones=" << character.unresolvedBoneCount
+              << " conflictingInverseBinds=" << character.conflictingInverseBindCount << "\n";
+
+    // Skin the bind pose on the CPU and measure the result. If the inverse
+    // binds and the basis change agree, this reproduces the rest pose exactly,
+    // so the skinned bounds must match the raw vertex bounds. They are printed
+    // together because the comparison is the test.
+    std::vector<odai::math::Matrix4> boneMatrices;
+    odai::importer::fnv::computeFalloutBindPose(character, boneMatrices);
+
+    float rawMin[3] = {1e30f, 1e30f, 1e30f};
+    float rawMax[3] = {-1e30f, -1e30f, -1e30f};
+    float skinnedMin[3] = {1e30f, 1e30f, 1e30f};
+    float skinnedMax[3] = {-1e30f, -1e30f, -1e30f};
+    double maxDrift = 0.0;
+    for (const auto& vertex : character.vertices) {
+        for (int a = 0; a < 3; ++a) {
+            rawMin[a] = std::min(rawMin[a], vertex.position[a]);
+            rawMax[a] = std::max(rawMax[a], vertex.position[a]);
+        }
+        // Exactly what the skinning compute shader does: a weighted sum of the
+        // bone matrices applied to the rest position.
+        odai::math::Vector3 skinned{0.0f, 0.0f, 0.0f};
+        const odai::math::Vector3 rest{vertex.position[0], vertex.position[1], vertex.position[2]};
+        for (int k = 0; k < odai::importer::fnv::kNifMaxBoneInfluences; ++k) {
+            const float weight = vertex.boneWeights[k];
+            if (weight <= 0.0f) {
+                continue;
+            }
+            const std::size_t bone = vertex.boneIndices[k];
+            if (bone >= boneMatrices.size()) {
+                continue;
+            }
+            const odai::math::Vector3 contribution =
+                odai::math::transformPoint(boneMatrices[bone], rest);
+            skinned.x += contribution.x * weight;
+            skinned.y += contribution.y * weight;
+            skinned.z += contribution.z * weight;
+        }
+        const float skinnedArray[3] = {skinned.x, skinned.y, skinned.z};
+        for (int a = 0; a < 3; ++a) {
+            skinnedMin[a] = std::min(skinnedMin[a], skinnedArray[a]);
+            skinnedMax[a] = std::max(skinnedMax[a], skinnedArray[a]);
+            maxDrift = std::max(maxDrift, static_cast<double>(std::fabs(skinnedArray[a] - vertex.position[a])));
+        }
+    }
+    // Per part, because a single merged bounding box hides the one part that is
+    // in the wrong place -- and "one part misplaced" and "the whole rig is
+    // wrong" need completely different fixes.
+    std::cout << "  per-part skinned bounds:\n";
+    for (const auto& part : character.parts) {
+        float partMin[3] = {1e30f, 1e30f, 1e30f};
+        float partMax[3] = {-1e30f, -1e30f, -1e30f};
+        for (std::uint32_t idx = part.firstIndex; idx < part.firstIndex + part.indexCount; ++idx) {
+            const std::uint32_t vertexIndex = character.indices[idx];
+            const auto& vertex = character.vertices[vertexIndex];
+            odai::math::Vector3 skinned{0.0f, 0.0f, 0.0f};
+            const odai::math::Vector3 rest{vertex.position[0], vertex.position[1], vertex.position[2]};
+            for (int k = 0; k < odai::importer::fnv::kNifMaxBoneInfluences; ++k) {
+                const float weight = vertex.boneWeights[k];
+                if (weight <= 0.0f) {
+                    continue;
+                }
+                const std::size_t bone = vertex.boneIndices[k];
+                if (bone >= boneMatrices.size()) {
+                    continue;
+                }
+                const odai::math::Vector3 c = odai::math::transformPoint(boneMatrices[bone], rest);
+                skinned.x += c.x * weight;
+                skinned.y += c.y * weight;
+                skinned.z += c.z * weight;
+            }
+            const float values[3] = {skinned.x, skinned.y, skinned.z};
+            for (int a = 0; a < 3; ++a) {
+                partMin[a] = std::min(partMin[a], values[a]);
+                partMax[a] = std::max(partMax[a], values[a]);
+            }
+        }
+        std::cout << "    \"" << part.name << "\"  y " << partMin[1] << ".." << partMax[1]
+                  << "  x " << partMin[0] << ".." << partMax[0]
+                  << "  z " << partMin[2] << ".." << partMax[2] << "\n";
+    }
+    std::cout << "  rest bounds     min(" << rawMin[0] << ", " << rawMin[1] << ", " << rawMin[2]
+              << ") max(" << rawMax[0] << ", " << rawMax[1] << ", " << rawMax[2] << ")\n"
+              << "  bind-pose skin  min(" << skinnedMin[0] << ", " << skinnedMin[1] << ", "
+              << skinnedMin[2] << ") max(" << skinnedMax[0] << ", " << skinnedMax[1] << ", "
+              << skinnedMax[2] << ")\n"
+              << "  max per-vertex drift " << maxDrift
+              << "   (near zero means the bind pose round-trips: inverse binds and"
+                 " basis change agree)\n";
+    return 0;
+}
+
+// Regions, and which cells belong to them.
+//
+// Prints the discoverable set (RDMP-bearing) against the total, because the gap
+// between the two is the whole point: announcing every REGN would fire on
+// weather and audio zones the player is not meant to see named.
+int probeRegions(const std::filesystem::path& pluginPath, std::size_t limit) {
+    using namespace odai::importer::fnv;
+    std::string error;
+    FalloutWorldTables tables;
+    if (!buildFalloutWorldTables(pluginPath, tables, error)) {
+        std::cout << "world tables FAILED: " << error << "\n";
+        return 1;
+    }
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(pluginPath, index, error)) {
+        std::cout << "cell index FAILED: " << error << "\n";
+        return 1;
+    }
+
+    std::map<std::uint32_t, std::size_t> cellsPerRegion;
+    std::size_t cellsWithAnyRegion = 0;
+    std::size_t cellsWithDiscoverableRegion = 0;
+    for (const FalloutCellIndexEntry& cell : index.cells) {
+        if (cell.regionFormIds.empty()) {
+            continue;
+        }
+        ++cellsWithAnyRegion;
+        bool discoverable = false;
+        for (const std::uint32_t regionFormId : cell.regionFormIds) {
+            ++cellsPerRegion[regionFormId];
+            discoverable = discoverable || tables.regionNamesByFormId.count(regionFormId) != 0u;
+        }
+        if (discoverable) {
+            ++cellsWithDiscoverableRegion;
+        }
+    }
+    std::cout << tables.regionNamesByFormId.size() << " discoverable region(s) (RDMP-bearing)\n"
+              << index.cells.size() << " cells, " << cellsWithAnyRegion << " in at least one region, "
+              << cellsWithDiscoverableRegion << " in at least one DISCOVERABLE region\n";
+
+    std::vector<std::pair<std::string, std::size_t>> named;
+    for (const auto& [formId, count] : cellsPerRegion) {
+        const auto found = tables.regionNamesByFormId.find(formId);
+        if (found != tables.regionNamesByFormId.end()) {
+            named.emplace_back(found->second, count);
+        }
+    }
+    std::sort(named.begin(), named.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (std::size_t i = 0; i < named.size() && i < limit; ++i) {
+        std::cout << "  " << named[i].second << " cells  \"" << named[i].first << "\"\n";
+    }
+    return 0;
 }
 
 int probeSingleNif(const std::filesystem::path& dataPath, const std::string& virtualPath) {
@@ -740,6 +1088,10 @@ int probeBuildCell(
               << " decalsSkipped=" << stats.shadowDecalShapesSkipped
               << " markersSkipped=" << stats.editorMarkerModelsSkipped
               << " droppedLayers=" << stats.droppedTerrainLayers << "\n";
+    std::cout << "  lights=" << scene.lights.size()
+              << " placed=" << stats.lightsPlaced
+              << " zeroRadiusSkipped=" << stats.lightsSkippedZeroRadius
+              << " (LIGH base records known: " << tables.lightsByFormId.size() << ")\n";
     std::cout << "  timing: extract " << extractMs << " ms, build " << buildMs << " ms\n";
     std::cout << "    of which: NIF parse " << stats.nifParseMs << " ms (" << stats.nifsParsed
               << " meshes), texture decode " << stats.textureDecodeMs << " ms ("
@@ -1051,7 +1403,208 @@ int probeNavmesh(const std::filesystem::path& pluginPath, std::size_t limit) {
     return 0;
 }
 
-int probePlugin(const std::filesystem::path& pluginPath) {
+// Generic "what is actually in this record type" dump.
+//
+// Every typed reader in fallout_records.cc that got its field layout from
+// documentation rather than from the file has been wrong at least once, and
+// wrong silently -- a bad offset returns a plausible number, not an error. This
+// mode exists so the first step of adding any record type is reading it, and it
+// prints every interpretation at once (hex, u32, i32, f32, ASCII) so the right
+// one is picked by recognising it rather than by assuming it.
+//
+// The subrecord census at the end is the other half: it shows which subrecords
+// are always present, which are optional, and -- for container records like
+// SCOL -- which repeat.
+int probeRecordType(const std::filesystem::path& pluginPath, const std::string& wantedType, std::size_t limit) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    std::size_t seen = 0;
+    std::size_t total = 0;
+    std::map<std::string, std::size_t> subrecordCounts;
+    std::map<std::string, std::map<std::uint32_t, std::size_t>> subrecordSizes;
+
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        if (record.type != wantedType) {
+            return;
+        }
+        ++total;
+        for (const auto& sub : record.subrecords) {
+            ++subrecordCounts[sub.type];
+            ++subrecordSizes[sub.type][sub.size];
+        }
+        if (seen >= limit) {
+            return;
+        }
+        ++seen;
+
+        // The editor ID up front: without it every dump looks alike and there is
+        // no way to cross-check a value against what the record obviously is.
+        std::string editorId;
+        for (const auto& sub : record.subrecords) {
+            if (sub.type == "EDID" && sub.size > 0u) {
+                editorId.assign(reinterpret_cast<const char*>(sub.data), sub.size);
+                while (!editorId.empty() && editorId.back() == '\0') {
+                    editorId.pop_back();
+                }
+                break;
+            }
+        }
+        std::cout << "\n" << wantedType << " formId=0x" << std::hex << record.formId << std::dec
+                  << (editorId.empty() ? "" : "  \"" + editorId + "\"") << "\n";
+
+        for (const auto& sub : record.subrecords) {
+            std::cout << "  " << sub.type << "  size=" << sub.size << "\n";
+            if (sub.type == "EDID" || sub.type == "MODL" || sub.type == "FULL") {
+                std::string text(reinterpret_cast<const char*>(sub.data), sub.size);
+                while (!text.empty() && text.back() == '\0') {
+                    text.pop_back();
+                }
+                std::cout << "      \"" << text << "\"\n";
+                continue;
+            }
+            // Cap the dump: a DATA holding an instance array can be thousands of
+            // bytes, and the first few structs settle the stride.
+            const std::size_t words = std::min<std::size_t>(sub.size / 4u, 24u);
+            for (std::size_t w = 0; w < words; ++w) {
+                std::uint32_t u = 0;
+                std::int32_t i = 0;
+                float f = 0.0f;
+                std::memcpy(&u, sub.data + (w * 4u), 4u);
+                std::memcpy(&i, sub.data + (w * 4u), 4u);
+                std::memcpy(&f, sub.data + (w * 4u), 4u);
+                std::cout << "      @" << std::setw(3) << (w * 4u) << "  0x" << std::hex << std::setw(8)
+                          << std::setfill('0') << u << std::setfill(' ') << std::dec
+                          << "  u=" << std::setw(11) << u << "  i=" << std::setw(11) << i
+                          << "  f=" << f << "  |";
+                for (std::size_t b = 0; b < 4u; ++b) {
+                    const auto ch = static_cast<unsigned char>(sub.data[(w * 4u) + b]);
+                    std::cout << ((ch >= 0x20u && ch <= 0x7eu) ? static_cast<char>(ch) : '.');
+                }
+                std::cout << "|\n";
+            }
+            if (sub.size / 4u > words) {
+                std::cout << "      ... " << ((sub.size / 4u) - words) << " more word(s)\n";
+            }
+            if (sub.size % 4u != 0u) {
+                std::cout << "      (+" << (sub.size % 4u) << " trailing byte(s) -- size is NOT a multiple of 4)\n";
+            }
+        }
+    };
+    if (!reader.walk(visitor)) {
+        std::cout << "walk failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+
+    std::cout << "\n" << total << " " << wantedType << " record(s). Subrecord census:\n";
+    for (const auto& [type, count] : subrecordCounts) {
+        std::cout << "  " << count << "x " << type;
+        // A single size means a fixed struct; several means either a variable
+        // payload or an array whose element count differs per record. Both are
+        // things a reader has to know before it walks anything.
+        const auto& sizes = subrecordSizes[type];
+        std::cout << "   size(s):";
+        std::size_t shown = 0;
+        for (const auto& [size, howMany] : sizes) {
+            if (shown++ >= 6u) {
+                std::cout << " ...(" << (sizes.size() - 6u) << " more)";
+                break;
+            }
+            std::cout << " " << size << "(x" << howMany << ")";
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+// Which cells actually place lights, and how many.
+//
+// "The importer emits no lights" and "this cell has no lights to emit" look
+// identical from a single cell build, and the first Goodsprings cells tried
+// happened to be the second case. This resolves the ambiguity and, as a side
+// effect, says where to point a camera to see the feature working.
+int probeRefsByBaseType(
+    const std::filesystem::path& dataPath, const std::filesystem::path& pluginPath,
+    const std::string& baseType, std::size_t limit) {
+    using namespace odai::importer::fnv;
+    (void)dataPath;
+
+    std::string error;
+    FalloutWorldTables tables;
+    if (!buildFalloutWorldTables(pluginPath, tables, error)) {
+        std::cout << "world tables FAILED: " << error << "\n";
+        return 1;
+    }
+    // Which base formIDs count as this type. LIGH is answered from its own
+    // table because a light is not required to have a model; everything else
+    // comes from the record-type map the static tables already carry.
+    std::unordered_set<std::uint32_t> wanted;
+    if (baseType == "LIGH") {
+        for (const auto& [formId, unused] : tables.lightsByFormId) {
+            (void)unused;
+            wanted.insert(formId);
+        }
+    } else {
+        for (const auto& [formId, type] : tables.staticRecordTypes) {
+            if (type == baseType) {
+                wanted.insert(formId);
+            }
+        }
+    }
+    std::cout << baseType << " base records known: " << wanted.size() << "\n";
+
+    FalloutSceneData data;
+    FalloutExtractFilter filter{};  // everything: this is the expensive full pass, on purpose
+    if (!extractFalloutScene(pluginPath, filter, data, error)) {
+        std::cout << "extract FAILED: " << error << "\n";
+        return 1;
+    }
+
+    struct CellLights {
+        const FalloutCellRecord* cell = nullptr;
+        std::size_t lightRefs = 0;
+    };
+    std::vector<CellLights> hits;
+    std::size_t totalLightRefs = 0;
+    std::size_t exteriorLightRefs = 0;
+    for (const FalloutCellRecord& cell : data.cells) {
+        std::size_t count = 0;
+        for (const auto& ref : cell.references) {
+            if (wanted.count(ref.baseFormId) != 0u) {
+                ++count;
+            }
+        }
+        if (count == 0u) {
+            continue;
+        }
+        totalLightRefs += count;
+        if (!cell.isInterior) {
+            exteriorLightRefs += count;
+        }
+        hits.push_back({&cell, count});
+    }
+    std::sort(hits.begin(), hits.end(), [](const CellLights& a, const CellLights& b) {
+        return a.lightRefs > b.lightRefs;
+    });
+
+    std::cout << totalLightRefs << " " << baseType << " reference(s) across " << hits.size() << " cell(s); "
+              << exteriorLightRefs << " of them in exterior cells.\n";
+    for (std::size_t i = 0; i < hits.size() && i < limit; ++i) {
+        const FalloutCellRecord& cell = *hits[i].cell;
+        std::cout << "  " << hits[i].lightRefs << "  " << (cell.isInterior ? "interior" : "exterior")
+                  << "  \"" << cell.editorId << "\"";
+        if (!cell.isInterior) {
+            std::cout << "  grid (" << cell.gridX << "," << cell.gridZ << ")";
+        }
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+int probePlugin(const std::filesystem::path& pluginPath, std::size_t typeLimit) {
     odai::importer::fnv::EsmReader reader;
     if (!reader.open(pluginPath)) {
         std::cout << "open failed: " << reader.lastError() << "\n";
@@ -1071,8 +1624,16 @@ int probePlugin(const std::filesystem::path& pluginPath) {
     std::cout << "Walked " << total << " records of " << recordCounts.size() << " types.\n";
     std::vector<std::pair<std::string, std::size_t>> sorted(recordCounts.begin(), recordCounts.end());
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (std::size_t i = 0; i < sorted.size() && i < 20u; ++i) {
+    // The tail matters as much as the head here: the records worth importing
+    // next (WATR, LIGH, REGN, WTHR) sit well below the top 20, buried under
+    // REFR/CELL/LAND. Default to the same 20 as before, but let a caller ask
+    // for the whole census.
+    const std::size_t shown = std::min(sorted.size(), typeLimit);
+    for (std::size_t i = 0; i < shown; ++i) {
         std::cout << "  " << sorted[i].second << "  " << sorted[i].first << "\n";
+    }
+    if (shown < sorted.size()) {
+        std::cout << "  ... " << (sorted.size() - shown) << " more type(s); pass a count to list them\n";
     }
     std::cout << "Tolerated checksum failures: " << reader.toleratedChecksumFailures() << "\n";
     return 0;
@@ -1470,7 +2031,18 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --regions <Plugin.esm> [topN]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --skeleton <virtualPath>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --skinned <virtualPath>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --character <skeleton.nif> <part.nif>...\n"
+              // Modes that existed but were never listed here.
+              << "  odai_newvegas_probe <DataFilesPath> --find <substring> [limit]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --cellindex <Plugin.esm> [worldspace] [limit]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --buildcell <Plugin.esm> <Worldspace> <x> <z>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --floaters <Plugin.esm> <Worldspace> <x> <z>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm> [typeCount]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --record <Plugin.esm> <TYPE> [dumpCount]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --refs <Plugin.esm> <BASETYPE> [topN]\n"
               << "  odai_newvegas_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
               << "  odai_newvegas_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
               << "  odai_newvegas_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
@@ -1505,8 +2077,32 @@ int main(int argc, char** argv) {
     if (mode == "--nifblocks" && argc >= 4) {
         return dumpNifBlocks(dataPath, argv[3]);
     }
+    if (mode == "--regions" && argc >= 4) {
+        return probeRegions(dataPath / argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 15u);
+    }
+    if (mode == "--skeleton" && argc >= 4) {
+        return probeSkeleton(dataPath, argv[3]);
+    }
+    if (mode == "--skinned" && argc >= 4) {
+        return probeSkinnedNif(dataPath, argv[3]);
+    }
+    if (mode == "--character" && argc >= 5) {
+        return probeCharacter(
+            dataPath, argv[3], std::vector<std::string>(argv + 4, argv + argc));
+    }
     if (mode == "--plugin" && argc >= 4) {
-        return probePlugin(dataPath / argv[3]);
+        return probePlugin(
+            dataPath / argv[3],
+            argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 20u);
+    }
+    if (mode == "--refs" && argc >= 5) {
+        return probeRefsByBaseType(
+            dataPath, dataPath / argv[3], argv[4],
+            argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 15u);
+    }
+    if (mode == "--record" && argc >= 5) {
+        return probeRecordType(
+            dataPath / argv[3], argv[4], argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 3u);
     }
     if (mode == "--navm" && argc >= 4) {
         return probeNavmesh(dataPath / argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 2u);
