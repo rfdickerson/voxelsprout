@@ -896,11 +896,28 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     // attributable to the code rather than to how the tester moved.
     static const bool s_bench = std::getenv("ODAI_FNV_BENCH") != nullptr;
     if (s_bench) {
-        m_yawDegrees += 6.0f * deltaSeconds;
+        // ODAI_FNV_BENCH_FIXED_DT=1 advances by a FIXED step instead of real
+        // elapsed time, which makes frame N land at exactly the same camera
+        // position on every run. That is what lets two captures taken one frame
+        // apart be compared: without it the walk depends on how fast the
+        // machine happened to render, and any diff is dominated by the camera
+        // having moved a different distance.
+        static const bool s_fixedDt = std::getenv("ODAI_FNV_BENCH_FIXED_DT") != nullptr;
+        // ODAI_FNV_BENCH_SPEED overrides the walk speed. A very low value is
+        // what isolates temporal shimmer: with the camera barely moving between
+        // two frames, anything that still differs is the renderer being
+        // unstable rather than the world going past. Turn rate scales with it
+        // so a slow walk is also a slow turn.
+        static const float s_benchSpeed = []() {
+            const char* env = std::getenv("ODAI_FNV_BENCH_SPEED");
+            return env != nullptr ? static_cast<float>(std::atof(env)) : 400.0f;
+        }();
+        const float step = s_fixedDt ? (1.0f / 60.0f) : deltaSeconds;
+        m_yawDegrees += (s_benchSpeed / 400.0f) * 6.0f * step;
         const float yawRadians = m_yawDegrees * (kPi / 180.0f);
-        constexpr float kBenchSpeed = 400.0f;  // ~5.7 m/s, a fast jog
-        m_cameraX += std::cos(yawRadians) * kBenchSpeed * deltaSeconds;
-        m_cameraZ += std::sin(yawRadians) * kBenchSpeed * deltaSeconds;
+        const float kBenchSpeed = s_benchSpeed;  // default ~5.7 m/s, a fast jog
+        m_cameraX += std::cos(yawRadians) * kBenchSpeed * step;
+        m_cameraZ += std::sin(yawRadians) * kBenchSpeed * step;
         float groundHeight = 0.0f;
         if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
             m_cameraY = groundHeight + kEyeHeightUnits;

@@ -780,8 +780,30 @@ void RendererBackend::renderFrame(
         const float bottom = -cascadeRadius;
         const float top = cascadeRadius;
         // Keep a stable but tighter depth range per cascade to improve depth precision.
+        // The FAR side is padded around the cascade sphere; the NEAR side is
+        // opened all the way to the light. They are not symmetric on purpose.
+        //
+        // A caster between the light and the cascade box is not "outside the
+        // cascade" -- it is precisely the thing casting into it. Clipping it at
+        // a near plane just above the sphere loses its shadow, and because the
+        // SAME matrix is what buildVisibleImportedDraws culls pages against, it
+        // loses the draw as well. Both happen together, and the geometry that
+        // hits it is the tall stuff: with the old padding, cascade 0 had about
+        // 390 units (5.6 m) of headroom above a sphere centred on the camera,
+        // so Goodsprings' radio mast and water tower dropped in and out of the
+        // shadow set as the camera moved. That is the flicker.
+        //
+        // Opening the near plane costs range, not precision here: an
+        // orthographic depth range is linear and the shadow format is
+        // D32_SFLOAT, so going from ~2.9r to ~3.3r of span is free in practice.
         const float casterPadding = std::max(24.0f, cascadeRadius * 0.35f);
-        const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
+        constexpr float kLightNearPlane = 1.0f;
+        // ODAI_SHADOW_LEGACY_NEAR=1 restores the symmetric near plane, for
+        // A/B-ing the flicker this change fixes.
+        static const bool s_legacyNear = std::getenv("ODAI_SHADOW_LEGACY_NEAR") != nullptr;
+        const float lightNear = s_legacyNear
+            ? std::max(0.1f, lightDistance - cascadeRadius - casterPadding)
+            : kLightNearPlane;
         const float lightFar = lightDistance + cascadeRadius + casterPadding;
         const odai::math::Matrix4 lightProjection = orthographicVulkan(
             left,
@@ -1934,7 +1956,12 @@ void RendererBackend::renderFrame(
     };
     if (importedPageCullingEnabled) {
         constexpr float kImportedMainClipMargin = 0.04f;
-        constexpr float kImportedShadowClipMargin = 0.08f;
+        // Margin on the page-vs-cascade test, in NDC. Generous because the
+        // cost of being wrong is asymmetric: an extra page costs one merged
+        // indirect draw of geometry that is already resident, while a missing
+        // one costs a shadow that visibly pops as the camera moves.
+        static const bool s_legacyShadowMargin = std::getenv("ODAI_SHADOW_LEGACY_NEAR") != nullptr;
+        const float kImportedShadowClipMargin = s_legacyShadowMargin ? 0.08f : 0.25f;
         m_visibleImportedTerrainDrawCount =
             buildVisibleImportedDraws(mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
         if (std::getenv("ODAI_DEBUG_IMPORTED_VIS") != nullptr) {
@@ -1956,6 +1983,31 @@ void RendererBackend::renderFrame(
                                    << "," << m_visibleImportedShadowMeshDraws[1].size()
                                    << "," << m_visibleImportedShadowMeshDraws[2].size()
                                    << "," << m_visibleImportedShadowMeshDraws[3].size() << "]";
+            }
+        }
+        // ODAI_SHADOW_STABILITY=1 reports how often a cascade's caster set
+        // CHANGES SIZE between frames. That is the number that matters for
+        // flicker: a caster entering or leaving the set is a shadow appearing
+        // or vanishing, and no amount of texel snapping hides it.
+        if (std::getenv("ODAI_SHADOW_STABILITY") != nullptr) {
+            static std::array<std::size_t, kShadowCascadeCount> s_previousCounts{};
+            static std::array<std::uint64_t, kShadowCascadeCount> s_changeCount{};
+            static std::uint64_t s_frames = 0;
+            ++s_frames;
+            for (std::uint32_t i = 0; i < kShadowCascadeCount; ++i) {
+                const std::size_t count = m_visibleImportedShadowMeshDraws[i].size();
+                if (s_frames > 1 && count != s_previousCounts[i]) {
+                    ++s_changeCount[i];
+                }
+                s_previousCounts[i] = count;
+            }
+            if ((s_frames % 300u) == 0u) {
+                VOX_LOGI("render") << "shadow caster-set changes per cascade over " << s_frames
+                                   << " frames: " << s_changeCount[0] << ", " << s_changeCount[1]
+                                   << ", " << s_changeCount[2] << ", " << s_changeCount[3]
+                                   << "  (counts now " << s_previousCounts[0] << ", "
+                                   << s_previousCounts[1] << ", " << s_previousCounts[2] << ", "
+                                   << s_previousCounts[3] << ")";
             }
         }
         importedMeshDrawsForFrame = std::span<const ImportedMeshDraw>(
