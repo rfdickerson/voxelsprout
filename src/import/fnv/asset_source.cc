@@ -196,6 +196,18 @@ bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory)
         if (toLowerAsciiCopy(entry.path().extension().string()) == ".bsa" &&
             entry.path().parent_path() == directory) {
             archivePaths.push_back(entry.path());
+            // Counted toward the fingerprint even though it is not served by
+            // path. A mod that ships ONE archive and no loose files -- Nevada
+            // Skies is 330 MB of exactly that -- otherwise fingerprints as
+            // "<name>_0_0" whatever the archive holds, so updating the pack
+            // leaves the cell-cache key identical and every cached cell keeps
+            // serving the old art. That is the failure the fingerprint exists
+            // to prevent.
+            std::error_code archiveSizeError;
+            const auto archiveSize = std::filesystem::file_size(entry.path(), archiveSizeError);
+            if (!archiveSizeError) {
+                mod.totalBytes += static_cast<std::uint64_t>(archiveSize);
+            }
             continue;
         }
         std::error_code relativeError;

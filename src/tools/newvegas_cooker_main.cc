@@ -1179,6 +1179,14 @@ int cookOne(
     }
     const float meshMs = phaseTimer.lapMs();
 
+    // Same statement the streaming path makes in CellSceneBuilder::finish():
+    // every part's alpha mode came off its NiAlphaProperty, so the texture-
+    // content cutout guess must not run on load. Without it a cooked scene is
+    // written at v24 with the flag clear, applyTextureAlphaCutoutFlags() runs
+    // over it exactly as before, and `--scene` shows the ragged holes the
+    // streamed path no longer has -- the two paths disagreeing about the same
+    // geometry.
+    outScene.alphaFlagsAuthored = true;
     odai::importer::buildImportedScenePackedRenderData(outScene);
     odai::importer::buildImportedScenePageRanges(outScene);
     const float packMs = phaseTimer.lapMs();
@@ -1480,6 +1488,14 @@ int cookLodTier(
         return 1;
     }
 
+    // Same statement the streaming path makes in CellSceneBuilder::finish():
+    // every part's alpha mode came off its NiAlphaProperty, so the texture-
+    // content cutout guess must not run on load. Without it a cooked scene is
+    // written at v24 with the flag clear, applyTextureAlphaCutoutFlags() runs
+    // over it exactly as before, and `--scene` shows the ragged holes the
+    // streamed path no longer has -- the two paths disagreeing about the same
+    // geometry.
+    scene.alphaFlagsAuthored = true;
     odai::importer::buildImportedScenePackedRenderData(scene);
     odai::importer::buildImportedScenePageRanges(scene);
     if (!odai::importer::saveImportedScene(scene, outputPath)) {

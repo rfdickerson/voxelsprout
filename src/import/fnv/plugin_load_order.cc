@@ -107,6 +107,17 @@ bool readFalloutPluginHeader(
     const std::uint32_t flags = readU32(header + 8);
     outHeader.isMaster = (flags & kTes4MasterFlag) != 0u;
 
+    // Bound the declared size against the file BEFORE sizing anything from it.
+    // --plugin-add takes an arbitrary user-named path, so a truncated download
+    // or any garbage file whose first four bytes read "TES4" can declare up to
+    // 0xFFFFFFFF here; sizing the vector from that asks for ~4 GB and dies on
+    // bad_alloc instead of reporting "not a Fallout plugin".
+    std::error_code fileSizeError;
+    const auto fileSize = std::filesystem::file_size(path, fileSizeError);
+    if (!fileSizeError && static_cast<std::uintmax_t>(dataSize) > fileSize) {
+        outError = "TES4 record claims more bytes than the file holds: " + path.string();
+        return false;
+    }
     // The TES4 record is never compressed and is a few hundred bytes; reading
     // it is the whole cost of placing a plugin in a load order.
     std::vector<std::uint8_t> body(dataSize);

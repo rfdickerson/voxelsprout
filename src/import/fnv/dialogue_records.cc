@@ -133,10 +133,31 @@ bool buildSpeakerDialogueTree(
                 if (sub.type != "CTDA" || sub.size < 28u) {
                     continue;
                 }
-                // CTDA (FO3/FNV, 28 bytes): type u8, 3 unused, comparison f32,
-                // function index u32 @8, param1 u32 @12, param2, runOn, ref.
-                if (readU32(sub.data + 8) == kCtdaFunctionGetIsId &&
-                    readU32(sub.data + 12) == speakerFormId) {
+                // CTDA (FO3/FNV, 28 bytes): type u8 @0, 3 unused, comparison
+                // f32 @4, function index u32 @8, param1 u32 @12, param2, runOn,
+                // reference.
+                //
+                // The operator in the type byte's top 3 bits has to be read,
+                // not just the function and its parameter. Fallout writes
+                // "everyone EXCEPT this actor" as GetIsID <actor> == 0, which
+                // is the same function and the same parameter as the line that
+                // belongs to him -- only the comparison differs. Ignoring it
+                // attributed other characters' lines to the speaker.
+                if (readU32(sub.data + 8) != kCtdaFunctionGetIsId ||
+                    readU32(sub.data + 12) != speakerFormId) {
+                    continue;
+                }
+                float comparisonValue = 0.0f;
+                std::memcpy(&comparisonValue, sub.data + 4, sizeof(comparisonValue));
+                const std::uint8_t comparisonOperator =
+                    static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
+                // 0 = EQUAL, 2 = GREATER, 3 = GREATER-OR-EQUAL: all read as
+                // "is this actor" when tested against 1.
+                const bool positive =
+                    (comparisonOperator == 0u && comparisonValue == 1.0f) ||
+                    (comparisonOperator == 2u && comparisonValue == 0.0f) ||
+                    (comparisonOperator == 3u && comparisonValue == 1.0f);
+                if (positive) {
                     isSpeaker = true;
                 }
             }

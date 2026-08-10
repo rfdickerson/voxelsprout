@@ -225,7 +225,14 @@ bool isEmptyCloudLayer(const std::string& texturePath) {
             c = '\\';
         }
     }
-    return normalized == "sky\\alpha.dds" || normalized.rfind("alpha.dds") == normalized.size() - 9u;
+    // The length guard is load-bearing: size() - 9u is unsigned, so an
+    // 8-character path such as "sky1.dds" wraps to SIZE_MAX, which compares
+    // equal to the npos a failed rfind returns -- silently reporting a real
+    // cloud layer as the empty placeholder and dropping it from the sky.
+    constexpr std::size_t kAlphaSuffixLength = 9u;  // "alpha.dds"
+    return normalized == "sky\\alpha.dds" ||
+        (normalized.size() >= kAlphaSuffixLength &&
+         normalized.rfind("alpha.dds") == normalized.size() - kAlphaSuffixLength);
 }
 
 namespace {
