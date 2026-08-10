@@ -197,6 +197,7 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
     // Node-recognition health. A nonzero failure count means a subtree was
     // dropped; before the else-branch existed it meant one was silently
     // relocated to the model origin instead.
+    std::array<std::size_t, 8> alphaTestFunctions{};
     std::size_t modelsUsingFooterRoots = 0;
     std::size_t totalNodeParseFailures = 0;
     std::size_t modelsWithNodeParseFailure = 0;
@@ -230,6 +231,7 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
         }
         totalSkippedShapes += model.skippedShapeCount;
         if (model.usedFooterRoots) { ++modelsUsingFooterRoots; }
+        for (int f = 0; f < 8; ++f) { alphaTestFunctions[f] += model.alphaTestFunctionCounts[f]; }
         totalNodeParseFailures += model.nodeParseFailedCount;
         totalUnhandledNodeTypes += model.unhandledNodeTypeCount;
         if (model.nodeParseFailedCount != 0u) { ++modelsWithNodeParseFailure; }
@@ -269,6 +271,10 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
               << "  triangles         " << totalTriangles << "\n"
               << "  skipped shapes    " << totalSkippedShapes << "\n"
               << "  footer-rooted     " << modelsUsingFooterRoots << " model(s)\n"
+              << "  alphaTest funcs   ALWAYS=" << alphaTestFunctions[0] << " LESS=" << alphaTestFunctions[1]
+              << " EQUAL=" << alphaTestFunctions[2] << " LEQUAL=" << alphaTestFunctions[3]
+              << " GREATER=" << alphaTestFunctions[4] << " NOTEQUAL=" << alphaTestFunctions[5]
+              << " GEQUAL=" << alphaTestFunctions[6] << " NEVER=" << alphaTestFunctions[7] << "\n"
               << "  node parse fails  " << totalNodeParseFailures << " across "
               << modelsWithNodeParseFailure << " model(s); unhandled *Node types "
               << totalUnhandledNodeTypes << "\n"

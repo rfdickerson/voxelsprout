@@ -114,6 +114,11 @@ struct NifModel {
     // Census of NiStencilProperty draw modes seen, indexed by the 2-bit value:
     // 0 = DRAW_CCW_OR_BOTH, 1 = DRAW_CCW, 2 = DRAW_CW, 3 = DRAW_BOTH.
     std::uint32_t stencilDrawModeCounts[4] = {0, 0, 0, 0};
+    // Census of NiAlphaProperty's Test Func (nif.xml AlphaFlags bits 10-12):
+    // 0 ALWAYS, 1 LESS, 2 EQUAL, 3 LEQUAL, 4 GREATER, 5 NOTEQUAL, 6 GEQUAL,
+    // 7 NEVER. The importer treats every alpha-tested shape as GREATER, which
+    // is the format default; this counts whether retail ever disagrees.
+    std::uint32_t alphaTestFunctionCounts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 };
 
 // ---------------------------------------------------------------------------

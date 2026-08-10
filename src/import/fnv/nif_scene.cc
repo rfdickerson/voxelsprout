@@ -397,6 +397,9 @@ struct AlphaPropertyBlock {
     bool alphaTest = false;
     bool alphaBlend = false;
     std::uint8_t alphaThreshold = 128;
+    // AlphaFlags bits 10-12. Read for census only: the renderer's discard is
+    // hardcoded to GREATER, so a shape declaring anything else is shaded wrong.
+    std::uint8_t alphaTestFunction = 4;  // TEST_GREATER
     bool valid = false;
 };
 
@@ -660,6 +663,8 @@ bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPr
     constexpr std::uint16_t kAlphaTestBit = 0x0200u;
     const bool blendBit = (flags & kAlphaBlendBit) != 0u;
     out.alphaTest = (flags & kAlphaTestBit) != 0u;
+    // nif.xml AlphaFlags: Test Func is bits 10-12, default TEST_GREATER.
+    out.alphaTestFunction = static_cast<std::uint8_t>((flags >> 10) & 0x7u);
 
     // A surface that alpha-TESTS is a cutout, even when the blend bit is also
     // set -- and blend+test together is the single most common combination
@@ -1227,13 +1232,31 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
         ByteCursor blockCursor(bytes.data() + blockStart[i], header.blockSize[i]);
 
-        if (isNodeTypeName(typeName)) {
+        // Any type whose name ends in "Node" is ATTEMPTED as a node even when
+        // it is not in the list above. That collapses the old "unhandled node
+        // type" case into the parse-failure case, which matters because the two
+        // were handled differently and only one of them was guarded: an
+        // unhandled type never reached readNiNode, so nodeParseFailedCount
+        // stayed 0, the root-scan fallback below ran anyway, and the type's
+        // children were promoted to roots and walked from identity -- the
+        // reparent-to-origin bug this file exists to prevent, still reachable
+        // through any NiNode-derived type the list happens not to name.
+        //
+        // Safe because recognition is proved structurally, not by name:
+        // readNiNode rejects anything whose child count does not fit the block
+        // or that lacks the effects-count trailer. A "*Node" type that is not
+        // NiNode-derived fails that and is counted, rather than misparsed.
+        if (isNodeTypeName(typeName) || looksLikeUnhandledNodeType(typeName)) {
             AvObjectFields fields;
             if (readNiNode(blockCursor, header.userVersion2, fields)) {
                 nodeFields[i] = std::move(fields);
                 isNiNode[i] = true;
                 for (const std::int32_t child : nodeFields[i].children) {
                     referencedAsChild.insert(child);
+                }
+                if (!isNodeTypeName(typeName)) {
+                    // Parsed fine, but the type is not one we knew about.
+                    ++outModel.unhandledNodeTypeCount;
                 }
             } else {
                 // Counted rather than ignored. Salvaging the child refs here
@@ -1242,8 +1265,6 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 // subtree is left unreachable and simply not drawn.
                 ++outModel.nodeParseFailedCount;
             }
-        } else if (looksLikeUnhandledNodeType(typeName)) {
-            ++outModel.unhandledNodeTypeCount;
         } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
                    typeName == "BSSegmentedTriShape") {
             // BSSegmentedTriShape is NiTriShape with a segment array appended
@@ -1433,6 +1454,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     // is the one whose threshold means anything.
                     if (alphaProperties[propertyIndex].alphaTest && !shape.alphaTest) {
                         shape.alphaThreshold = alphaProperties[propertyIndex].alphaThreshold;
+                        if (alphaProperties[propertyIndex].alphaTest) {
+                            ++outModel.alphaTestFunctionCounts
+                                 [alphaProperties[propertyIndex].alphaTestFunction & 0x7u];
+                        }
                     }
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
