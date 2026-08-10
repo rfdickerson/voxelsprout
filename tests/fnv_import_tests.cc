@@ -1306,6 +1306,31 @@ void testNifParserDoesNotReparentSubtreesToTheOrigin() {
                    "An unreachable subtree emits NOTHING (it must not appear at the origin)");
     }
 
+    // 3. A middle node of a type NOT in the known list but whose name ends in
+    //    "Node" -- a mod-authored or newer niftools type. It must still be
+    //    walked, because the alternative is the reparent-to-origin bug: an
+    //    unrecognized parent never claims its children, and the root scan then
+    //    promotes each of them and drops the ancestor translation. This is the
+    //    case a name-based allowlist could never cover and the one that made
+    //    the first footer fix incomplete.
+    {
+        const std::vector<std::uint8_t> bytes = buildChainedNif("BSFooBarNode", 5000.0f, 0);
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("Unknown *Node middle type parses: " + error).c_str());
+        expectTrue(model.shapes.size() == 1u,
+                   "Geometry under an unknown *Node type is still reachable");
+        if (model.shapes.size() == 1u && model.shapes.front().positions.size() >= 3u) {
+            expectNear(model.shapes.front().positions[2], 5000.0f, 1e-3f,
+                       "Unknown *Node keeps its translation instead of collapsing to the origin");
+        }
+        expectTrue(model.unhandledNodeTypeCount == 1u,
+                   "The unknown type is still reported, having been walked rather than skipped");
+        expectTrue(model.nodeParseFailedCount == 0u,
+                   "A well-formed unknown *Node parses rather than counting as a failure");
+    }
+
     // 3. A footer root pointing at a non-node (nif.xml: a first-person camera is
     //    listed among the roots "even if it is not a root object") must not be
     //    walked as a node, and must not take the whole model down with it.
@@ -1318,6 +1343,32 @@ void testNifParserDoesNotReparentSubtreesToTheOrigin() {
         expectTrue(model.shapes.empty() || model.shapes.size() == 1u,
                    "A non-node footer root is skipped rather than misparsed");
     }
+}
+
+
+// A TES4 header whose declared size exceeds the file must be rejected before it
+// is used to size anything. --plugin-add takes an arbitrary user-named path, so
+// this is reachable from a truncated download or any file whose first four
+// bytes happen to read "TES4".
+void testPluginHeaderRejectsOversizedRecord() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "odai_bogus_plugin.esp";
+    {
+        std::ofstream out(path, std::ios::binary);
+        const char magic[4] = {'T', 'E', 'S', '4'};
+        out.write(magic, 4);
+        const std::uint32_t dataSize = 0xFFFFFFFFu;  // ~4 GB, on a 24-byte file
+        out.write(reinterpret_cast<const char*>(&dataSize), 4);
+        const std::uint32_t rest[4] = {0, 0, 0, 0};
+        out.write(reinterpret_cast<const char*>(rest), sizeof(rest));
+    }
+    odai::importer::fnv::FalloutPluginHeader header;
+    std::string error;
+    const bool ok = odai::importer::fnv::readFalloutPluginHeader(path, header, error);
+    expectTrue(!ok, "A TES4 record larger than its file is rejected, not allocated");
+    expectTrue(!error.empty(), "Rejecting an oversized TES4 record explains why");
+    std::error_code removeError;
+    std::filesystem::remove(path, removeError);
 }
 
 // A child count that cannot fit in the block must be rejected before it is
@@ -2310,6 +2361,7 @@ int main() {
     testNifParserExtractsTransformedGeometry();
     testNifParserDoesNotReparentSubtreesToTheOrigin();
     testNifParserRejectsImplausibleChildCount();
+    testPluginHeaderRejectsOversizedRecord();
     testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
     testModDirectoryOverridesArchives();
     testPluginLoadOrderRemapsFormIds();
