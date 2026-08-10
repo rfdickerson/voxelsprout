@@ -199,6 +199,12 @@ private:
     double m_lastCursorY = 0.0;
     bool m_hasCursorSample = false;
     VictorState m_victor;
+    // Held until the first frame has rendered: adding the chunk during onInit
+    // is the one thing no other caller of addImportedSceneChunk does, and is
+    // the prime suspect for his geometry uploading as zeros. The streamer's
+    // cells are all added from the frame loop.
+    odai::importer::ImportedScene m_victorPendingScene;
+    bool m_victorChunkPending = false;
     // Engine space; y == 0 means "use his authored ACRE position".
     float m_victorSpawnPosition[3] = {};
     bool m_victorPromptVisible = false;

@@ -2070,6 +2070,24 @@ void RendererBackend::renderFrame(
             static int s_visFrame = 0;
             ++s_visFrame;
             if (s_visFrame % 240 == 0) {
+                std::size_t chunk0Visible = 0;
+                std::size_t chunk0Total = 0;
+                if (!m_importedSceneChunks.empty()) {
+                    const std::int32_t chunk0VertexOffset =
+                        static_cast<std::int32_t>(m_importedSceneChunks.front().firstVertex);
+                    for (const ImportedMeshDraw& visibleDraw : m_visibleImportedMeshDraws) {
+                        if (visibleDraw.vertexOffset == chunk0VertexOffset) {
+                            ++chunk0Visible;
+                        }
+                    }
+                    for (const ImportedMeshDraw& tableDraw : m_importedMeshDraws) {
+                        if (tableDraw.vertexOffset == chunk0VertexOffset) {
+                            ++chunk0Total;
+                        }
+                    }
+                }
+                VOX_LOGI("render") << "imported visibility: chunk0 draws " << chunk0Visible
+                                   << "/" << chunk0Total << " visible";
                 VOX_LOGI("render") << "imported visibility: totalDraws=" << m_importedMeshDraws.size()
                                    << " pages=" << m_importedPageDrawRanges.size()
                                    << " visibleDraws=" << m_visibleImportedMeshDraws.size()

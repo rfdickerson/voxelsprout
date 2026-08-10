@@ -1780,12 +1780,14 @@ bool NewVegasApp::initStreaming() {
             const std::filesystem::path dataPath(m_streamDirectory);
             if (loadVictor(dataPath, dataPath / m_streamPlugin, m_victor, victorScene,
                            m_victorSpawnPosition[1] != 0.0f ? m_victorSpawnPosition : nullptr)) {
-                m_victor.chunkIndex = m_renderer.addImportedSceneChunk(victorScene);
+                m_victorPendingScene = victorScene;
+                m_victorChunkPending = true;
                 VOX_LOGI("newvegas")
                     << "Victor geometry: verts=" << victorScene.packedVertices.size()
                     << " indices=" << victorScene.packedIndices.size()
                     << " draws=" << victorScene.packedDraws.size()
                     << " instances=" << victorScene.instances.size()
+                    << " pages=" << victorScene.pageRanges.size()
                     << " bounds=(" << victorScene.boundsMin[0] << "," << victorScene.boundsMin[1]
                     << "," << victorScene.boundsMin[2] << ")..(" << victorScene.boundsMax[0] << ","
                     << victorScene.boundsMax[1] << "," << victorScene.boundsMax[2] << ")"
@@ -1794,6 +1796,19 @@ bool NewVegasApp::initStreaming() {
                                          : std::to_string(m_victor.chunkIndex));
             }
             VOX_LOGI("newvegas") << "Victor: " << m_victor.status;
+            // ODAI_FNV_VICTOR_DUMP=<path.bin>: save his scene so it can be
+            // opened with --scene, i.e. through the cooked-scene upload path.
+            // That path demonstrably renders untextured vertex-colour geometry
+            // (the strategy map), so it splits "his geometry is bad" from "the
+            // chunk path mishandles it" in one run with no new render code.
+            if (const char* dump = std::getenv("ODAI_FNV_VICTOR_DUMP")) {
+                if (importer::saveImportedScene(victorScene, dump)) {
+                    VOX_LOGI("newvegas") << "Victor scene dumped to " << dump;
+                } else {
+                    VOX_LOGW("newvegas") << "Victor scene dump FAILED: "
+                                         << importer::getImportedSceneLastError();
+                }
+            }
         }
 
         // AFTER the doorstep decision, which would otherwise overwrite it ten
@@ -1995,6 +2010,17 @@ void NewVegasApp::onTick(float deltaSeconds) {
     if (m_regionPollSeconds >= 0.25f) {
         m_regionPollSeconds = 0.0f;
         updateRegionDiscovery();
+    }
+
+    // Deferred from onInit: see m_victorChunkPending's comment.
+    if (m_victorChunkPending) {
+        m_victorChunkPending = false;
+        m_victor.chunkIndex = m_renderer.addImportedSceneChunk(m_victorPendingScene);
+        m_victorPendingScene = importer::ImportedScene{};
+        VOX_LOGI("newvegas") << "Victor chunk added from frame loop: "
+                             << (m_victor.chunkIndex == render::Renderer::kInvalidImportedChunkIndex
+                                     ? std::string("FAILED")
+                                     : std::to_string(m_victor.chunkIndex));
     }
 
     // Talking to Victor. Held keys are edge-detected by keyDown(), so a choice

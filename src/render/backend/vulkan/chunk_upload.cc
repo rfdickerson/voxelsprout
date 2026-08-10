@@ -677,6 +677,14 @@ std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::Importe
         // Upload reported success but produced no chunk -- an empty scene.
         return kInvalidImportedChunkIndex;
     }
+    // When ANY resident chunk carries page ranges, per-frame draw selection is
+    // built from pages ONLY (see frame_run's importedPageCullingEnabled), so a
+    // chunk whose pages were dropped -- e.g. by the coverage check above --
+    // has every draw silently excluded. Worth a line at add time; that failure
+    // renders as "uploaded fine, never drawn".
+    VOX_LOGI("render") << "chunk " << (m_importedSceneChunks.size() - 1u) << " added: draws="
+                       << m_importedSceneChunks.back().draws.size() << " pages="
+                       << m_importedSceneChunks.back().pageRanges.size();
     return m_importedSceneChunks.size() - 1u;
 }
 

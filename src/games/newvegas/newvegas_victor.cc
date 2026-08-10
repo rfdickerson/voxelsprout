@@ -5,6 +5,7 @@
 #include "import/fnv/nif_scene.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cmath>
 #include <limits>
@@ -88,8 +89,22 @@ bool loadVictor(
         }
         const auto baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
         const auto firstIndex = static_cast<std::uint32_t>(mesh.indices.size());
+        // Flat two-tone: brushed steel for the body (Securitron.dds), near-black
+        // for the screen bezel (BlackTron.dds). Untextured vertex colour, like
+        // the rest of this scene's fallback path -- sampling the real diffuse
+        // would need the texture table this one-mesh scene does not carry.
+        std::string loweredDiffuse = shape.diffuseTexturePath;
+        std::transform(loweredDiffuse.begin(), loweredDiffuse.end(), loweredDiffuse.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool trim = loweredDiffuse.find("blacktron") != std::string::npos;
+        const float bodyColor[3] = {0.62f, 0.65f, 0.68f};
+        const float trimColor[3] = {0.13f, 0.14f, 0.16f};
+        const float* shapeColor = trim ? trimColor : bodyColor;
         for (std::size_t i = 0; i < vertexCount; ++i) {
             odai::importer::ImportedSceneVertex vertex{};
+            vertex.color[0] = shapeColor[0];
+            vertex.color[1] = shapeColor[1];
+            vertex.color[2] = shapeColor[2];
             for (int axis = 0; axis < 3; ++axis) {
                 vertex.position[axis] = shape.positions[(i * 3u) + static_cast<std::size_t>(axis)];
             }
