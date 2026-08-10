@@ -507,6 +507,11 @@ private:
     // the kShadowAtlasRects / kShadowCascadeResolution layout there. This copy is
     // the one the atlas image allocation uses; that one normalizes the sampling
     // UV rects. See the comment beside them before changing either.
+    //
+    // 4096, not the 8192 main carried: the merge kept this branch's
+    // kShadowCascadeResolution of {2048, 1024, 1024, 512}, which packs into a
+    // 4096 atlas. main raised both together; taking only its atlas size here
+    // would have left the image twice the size the rects address.
     static constexpr uint32_t kShadowAtlasSize = 4096;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
