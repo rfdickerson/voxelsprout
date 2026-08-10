@@ -478,7 +478,7 @@ void RendererBackend::renderFrame(
     m_debugDrawCallsMain = 0;
     m_debugDrawCallsPost = 0;
 
-    const float aspectRatio = static_cast<float>(m_swapchainExtent.width) / static_cast<float>(m_swapchainExtent.height);
+    const float aspectRatio = static_cast<float>(m_renderExtent.width) / static_cast<float>(m_renderExtent.height);
     const float nearPlane = 0.1f;
     const bool renderingImportedActors =
         importedActors != nullptr &&
@@ -515,6 +515,18 @@ void RendererBackend::renderFrame(
     }
     const odai::math::Matrix4 mvp = projection * view;
     const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
+    // TAA reprojection inputs. The column-major copies go to the shader (same
+    // transpose convention as the camera UBO); prevViewProj must be read
+    // BEFORE it is overwritten with this frame's matrix, or reprojection
+    // becomes an identity and TAA silently stops doing anything.
+    if (m_taaEnabled) {
+        m_taaInvViewColumnMajor = transpose(odai::math::inverse(view));
+        m_taaPrevViewProjColumnMajor = transpose(m_taaPrevViewProj);
+    }
+    const bool taaPrevWasValid = m_taaPrevViewProjValid;
+    (void)taaPrevWasValid;
+    m_taaPrevViewProj = mvp;
+    m_taaPrevViewProjValid = true;
     const odai::math::Matrix4 viewColumnMajor = transpose(view);
     const odai::math::Matrix4 projectionColumnMajor = transpose(projection);
 
@@ -611,14 +623,38 @@ void RendererBackend::renderFrame(
         ? odai::math::Vector3{0.0f, 0.0f, 0.0f}
         : computeSunColor(effectiveSkySettings, sunDirection);
 
+    // Shadows stop well before the camera's far plane.
+    //
+    // farPlane is 50000 for an imported scene, and blending the logarithmic and
+    // uniform splits with nearPlane = 0.1 makes the log term vanish (0.1 *
+    // (500000)^0.25 is under 2 units against a uniform 12500), so the splits came
+    // out effectively uniform: 3752 / 7550 / 12566 / 50000. The last cascade then
+    // covered 50000 units in a 1024 map -- about 117 units per texel, or 1.7
+    // metres, which resolves nothing while re-rendering the whole region. The
+    // shadow pass measured 10.5 ms of an 18.5 ms frame.
+    //
+    // Two changes: cap the shadow distance, and compute the distribution from a
+    // practical near distance instead of the camera's 0.1. Geometry closer than
+    // kShadowSplitNear is inside cascade 0 regardless, so using it as the
+    // distribution's near end costs nothing and restores the logarithmic term
+    // that makes cascade 0 tight.
+    float shadowDistanceLimit = renderingImportedScene ? 6000.0f : farPlane;
+    if (const char* shadowDistanceEnv = std::getenv("ODAI_SHADOW_DISTANCE")) {
+        const float requested = static_cast<float>(std::atof(shadowDistanceEnv));
+        if (requested > 1.0f) {
+            shadowDistanceLimit = requested;
+        }
+    }
+    const float shadowFarPlane = std::min(farPlane, shadowDistanceLimit);
+    const float shadowSplitNear = std::min(std::max(nearPlane, shadowFarPlane * 0.008f), shadowFarPlane);
     constexpr float kCascadeLambda = 0.70f;
     constexpr float kCascadeSplitQuantization = 0.5f;
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(kShadowCascadeCount);
-        const float logarithmicSplit = nearPlane * std::pow(farPlane / nearPlane, p);
-        const float uniformSplit = nearPlane + ((farPlane - nearPlane) * p);
+        const float logarithmicSplit = shadowSplitNear * std::pow(shadowFarPlane / shadowSplitNear, p);
+        const float uniformSplit = shadowSplitNear + ((shadowFarPlane - shadowSplitNear) * p);
         const float desiredSplit =
             (kCascadeLambda * logarithmicSplit) + ((1.0f - kCascadeLambda) * uniformSplit);
         const float quantizedSplit =
@@ -631,9 +667,24 @@ void RendererBackend::renderFrame(
 
         const float previousSplit = (cascadeIndex == 0) ? nearPlane : m_shadowCascadeSplits[cascadeIndex - 1];
         split = std::max(split, previousSplit + kCascadeSplitQuantization);
-        split = std::min(split, farPlane);
+        split = std::min(split, shadowFarPlane);
         m_shadowCascadeSplits[cascadeIndex] = split;
         cascadeDistances[cascadeIndex] = split;
+    }
+
+    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && !m_shadowCascadeSplitsLogged) {
+        m_shadowCascadeSplitsLogged = true;
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            const float cascadeFar = cascadeDistances[cascadeIndex];
+            const float halfHeight = cascadeFar * tanHalfFov;
+            const float halfWidth = halfHeight * aspectRatio;
+            const float radius = std::sqrt((cascadeFar * cascadeFar) + (halfWidth * halfWidth) +
+                                           (halfHeight * halfHeight));
+            VOX_LOGI("render") << "shadow cascade " << cascadeIndex << ": far=" << cascadeFar
+                               << " radius=" << radius
+                               << " texels=" << kShadowCascadeResolution[cascadeIndex]
+                               << " texelSize=" << ((2.0f * radius) / static_cast<float>(kShadowCascadeResolution[cascadeIndex]));
+        }
     }
 
     std::array<odai::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
@@ -668,8 +719,43 @@ void RendererBackend::renderFrame(
         }
         boundingRadius = std::max(boundingRadius * 1.04f, orthoSceneFit ? 8.0f : 24.0f);
         boundingRadius = std::ceil(boundingRadius * 16.0f) / 16.0f;
-        if (m_shadowStableCascadeRadii[cascadeIndex] <= 0.0f) {
+        // Re-latch when the fit the cascade actually wants has moved away from
+        // the cached one.
+        //
+        // The cache exists to stop the ortho box resizing every frame, which
+        // makes shadow edges crawl. It used to be invalidated only by
+        // projectionParamsChanged, i.e. aspect ratio and FOV -- but farPlane
+        // also flips 500 -> 50000 the moment the first imported chunk becomes
+        // resident, which moves every cascade split and therefore every radius.
+        // A streaming game latched its radii on frame 0 with no geometry loaded
+        // and kept them forever: cascade 0 wanted 1048 units and was pinned at
+        // 87.9, so the shader routed every fragment inside 573 units of view
+        // depth to a box only 88 units across, and the rest of that range
+        // sampled outside the map and came back fully lit. Fallout had no
+        // shadows past roughly one fence post.
+        //
+        // Relative tolerance rather than exact equality: splits are already
+        // quantized to 0.5 with a 0.5 update threshold, so in a steady state
+        // this compares equal and the cache still does its job.
+        constexpr float kCascadeRadiusRelatchTolerance = 0.01f;
+        const float cachedRadius = m_shadowStableCascadeRadii[cascadeIndex];
+        if (cachedRadius <= 0.0f ||
+            std::abs(boundingRadius - cachedRadius) > cachedRadius * kCascadeRadiusRelatchTolerance) {
             m_shadowStableCascadeRadii[cascadeIndex] = boundingRadius;
+        }
+        static const bool s_logShadowFit = std::getenv("ODAI_DEBUG_SHADOW_FIT") != nullptr;
+        if (s_logShadowFit) {
+            static int s_fitFrame = 0;
+            if (cascadeIndex == 0) {
+                ++s_fitFrame;
+            }
+            if (s_fitFrame % 240 == 0) {
+                VOX_LOGI("render") << "shadow fit cascade " << cascadeIndex
+                                   << " far=" << cascadeFar
+                                   << " wanted=" << boundingRadius
+                                   << " cached=" << m_shadowStableCascadeRadii[cascadeIndex]
+                                   << " sceneFit=" << (orthoSceneFit ? "yes" : "no");
+            }
         }
         // Scene-fitted ortho cascades bypass the stable-radius cache: the cache
         // only invalidates on projection changes, not on scene re-uploads.
@@ -706,8 +792,30 @@ void RendererBackend::renderFrame(
         const float bottom = -cascadeRadius;
         const float top = cascadeRadius;
         // Keep a stable but tighter depth range per cascade to improve depth precision.
+        // The FAR side is padded around the cascade sphere; the NEAR side is
+        // opened all the way to the light. They are not symmetric on purpose.
+        //
+        // A caster between the light and the cascade box is not "outside the
+        // cascade" -- it is precisely the thing casting into it. Clipping it at
+        // a near plane just above the sphere loses its shadow, and because the
+        // SAME matrix is what buildVisibleImportedDraws culls pages against, it
+        // loses the draw as well. Both happen together, and the geometry that
+        // hits it is the tall stuff: with the old padding, cascade 0 had about
+        // 390 units (5.6 m) of headroom above a sphere centred on the camera,
+        // so Goodsprings' radio mast and water tower dropped in and out of the
+        // shadow set as the camera moved. That is the flicker.
+        //
+        // Opening the near plane costs range, not precision here: an
+        // orthographic depth range is linear and the shadow format is
+        // D32_SFLOAT, so going from ~2.9r to ~3.3r of span is free in practice.
         const float casterPadding = std::max(24.0f, cascadeRadius * 0.35f);
-        const float lightNear = std::max(0.1f, lightDistance - cascadeRadius - casterPadding);
+        constexpr float kLightNearPlane = 1.0f;
+        // ODAI_SHADOW_LEGACY_NEAR=1 restores the symmetric near plane, for
+        // A/B-ing the flicker this change fixes.
+        static const bool s_legacyNear = std::getenv("ODAI_SHADOW_LEGACY_NEAR") != nullptr;
+        const float lightNear = s_legacyNear
+            ? std::max(0.1f, lightDistance - cascadeRadius - casterPadding)
+            : kLightNearPlane;
         const float lightFar = lightDistance + cascadeRadius + casterPadding;
         const odai::math::Matrix4 lightProjection = orthographicVulkan(
             left,
@@ -718,6 +826,56 @@ void RendererBackend::renderFrame(
             lightFar
         );
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
+    }
+
+    // Cascade interleaving: skip re-rendering a cascade whose atlas tile is
+    // still exactly right, and alternate the two far cascades under motion.
+    //
+    // Two skip conditions, one exact and one approximate:
+    //   * The computed matrix is BITWISE the one the tile was rendered with.
+    //     Texel snapping and radius quantization make this the common case for
+    //     a slow or stationary camera, and the skip is then free -- the tile
+    //     would have been re-rendered identical.
+    //   * Far cascades (2, 3) alternate by frame parity while moving. Their
+    //     texels are tens of world units, so serving a tile whose snap origin
+    //     is one frame stale moves distant shadows by less than a screen pixel
+    //     -- and it halves the largest single block of repeated geometry work
+    //     in the frame.
+    //
+    // A skipped cascade samples with the matrix its tile was RENDERED with
+    // (cached), never this frame's -- content and matrix must agree or far
+    // shadows swim. Skinned actors would break the exact-skip (they move
+    // without moving the matrix), so any skinned draws disable skipping
+    // entirely; the Fallout viewer currently has none.
+    std::uint32_t shadowSkipCascadeMask = 0;
+    static const bool s_shadowInterleaveDisabled =
+        std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
+        std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
+    m_shadowInterleaveParity ^= 1u;
+    const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
+    if (!s_shadowInterleaveDisabled && !anySkinnedShadowCasters) {
+        for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if (!m_shadowRenderedValid[cascadeIndex]) {
+                continue;
+            }
+            const bool matrixUnchanged =
+                std::memcmp(
+                    m_shadowRenderedMatrices[cascadeIndex].m,
+                    lightViewProjMatrices[cascadeIndex].m,
+                    sizeof(lightViewProjMatrices[cascadeIndex].m)) == 0;
+            const bool parityDefersFarCascade =
+                cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
+            if (matrixUnchanged || parityDefersFarCascade) {
+                shadowSkipCascadeMask |= (1u << cascadeIndex);
+                lightViewProjMatrices[cascadeIndex] = m_shadowRenderedMatrices[cascadeIndex];
+            }
+        }
+    }
+    for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if ((shadowSkipCascadeMask & (1u << cascadeIndex)) == 0u) {
+            m_shadowRenderedMatrices[cascadeIndex] = lightViewProjMatrices[cascadeIndex];
+            m_shadowRenderedValid[cascadeIndex] = true;
+        }
     }
 
     std::array<odai::math::Vector3, 9> shIrradiance{};
@@ -882,6 +1040,46 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig5[1] = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
     mvpUniform.skyConfig5[2] = (m_morrowindSkyTextureImageView != VK_NULL_HANDLE) ? 1.0f : 0.0f;
     mvpUniform.skyConfig5[3] = std::clamp(m_skyDebugSettings.waterRefractionDecay, 0.25f, 3.0f);
+
+    // Authored sky, if a WTHR record pushed one in. Weight 0 makes every term
+    // below inert, which is the state every game other than New Vegas is in.
+    mvpUniform.weatherSkyUpper[3] = std::clamp(m_weatherSky.weight, 0.0f, 1.0f);
+    for (int channel = 0; channel < 3; ++channel) {
+        mvpUniform.weatherSkyUpper[channel] = m_weatherSky.skyUpper[channel];
+        mvpUniform.weatherSkyLower[channel] = m_weatherSky.skyLower[channel];
+        mvpUniform.weatherHorizon[channel] = m_weatherSky.horizon[channel];
+        mvpUniform.weatherFog[channel] = m_weatherSky.fogColor[channel];
+    }
+    mvpUniform.weatherSkyLower[3] = 0.0f;
+    mvpUniform.weatherHorizon[3] = 0.0f;
+    mvpUniform.weatherFog[3] = m_weatherSky.fogFarDistance;
+
+    for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
+        const bool hasSlot = m_weatherCloudSlots[layer] != kInvalidImportedTextureSlot;
+        for (int channel = 0; channel < 3; ++channel) {
+            mvpUniform.weatherCloudTint[layer][channel] = m_weatherSky.cloudTint[layer][channel];
+        }
+        // Opacity is what gates the layer in the shader, so a layer whose
+        // texture failed to upload is switched off here rather than sampling
+        // whatever happens to live in slot 0.
+        mvpUniform.weatherCloudTint[layer][3] =
+            hasSlot ? std::clamp(m_weatherSky.cloudOpacity[layer], 0.0f, 1.0f) : 0.0f;
+        mvpUniform.weatherCloudParams[layer][0] =
+            hasSlot ? static_cast<float>(m_weatherCloudSlots[layer]) : -1.0f;
+        mvpUniform.weatherCloudParams[layer][1] = m_weatherCloudScroll[layer];
+        mvpUniform.weatherCloudParams[layer][2] = m_weatherCloudDomeScale[layer];
+        mvpUniform.weatherCloudParams[layer][3] = 0.0f;
+    }
+
+    mvpUniform.tonemapConfig[0] =
+        (m_tonemapSettings.mode == TonemapMode::Enb) ? 1.0f : 0.0f;
+    mvpUniform.tonemapConfig[1] = m_tonemapSettings.contrast;
+    mvpUniform.tonemapConfig[2] = m_tonemapSettings.saturation;
+    mvpUniform.tonemapConfig[3] = m_tonemapSettings.curve;
+    mvpUniform.tonemapConfig2[0] = m_tonemapSettings.overbrightDampening;
+    mvpUniform.tonemapConfig2[1] = 0.0f;
+    mvpUniform.tonemapConfig2[2] = 0.0f;
+    mvpUniform.tonemapConfig2[3] = 0.0f;
     mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceR, 0.0f, 4.0f);
     mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceG, 0.0f, 4.0f);
     mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceB, 0.0f, 4.0f);
@@ -1342,6 +1540,7 @@ void RendererBackend::renderFrame(
     };
 
     if (voxelGiNeedsOccupancyUpload &&
+        m_voxelGiRequested &&
         m_voxelGiComputeAvailable &&
         m_voxelGiOccupancyImage != VK_NULL_HANDLE &&
         m_voxelGiOccupancyImageView != VK_NULL_HANDLE) {
@@ -1859,9 +2058,60 @@ void RendererBackend::renderFrame(
     };
     if (importedPageCullingEnabled) {
         constexpr float kImportedMainClipMargin = 0.04f;
-        constexpr float kImportedShadowClipMargin = 0.08f;
+        // Margin on the page-vs-cascade test, in NDC. Generous because the
+        // cost of being wrong is asymmetric: an extra page costs one merged
+        // indirect draw of geometry that is already resident, while a missing
+        // one costs a shadow that visibly pops as the camera moves.
+        static const bool s_legacyShadowMargin = std::getenv("ODAI_SHADOW_LEGACY_NEAR") != nullptr;
+        const float kImportedShadowClipMargin = s_legacyShadowMargin ? 0.08f : 0.25f;
         m_visibleImportedTerrainDrawCount =
             buildVisibleImportedDraws(mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
+        if (std::getenv("ODAI_DEBUG_IMPORTED_VIS") != nullptr) {
+            static int s_visFrame = 0;
+            ++s_visFrame;
+            if (s_visFrame % 240 == 0) {
+                VOX_LOGI("render") << "imported visibility: totalDraws=" << m_importedMeshDraws.size()
+                                   << " pages=" << m_importedPageDrawRanges.size()
+                                   << " visibleDraws=" << m_visibleImportedMeshDraws.size()
+                                   << " terrainDrawCount=" << m_importedTerrainDrawCount
+                                   << " indexCount=" << m_importedIndexCount
+                                   << " chunkSlots=" << m_importedSceneChunks.size()
+                                   << " liveChunks=" << liveImportedSceneChunkCount()
+                                   << " splits=[" << m_shadowCascadeSplits[0] << ","
+                                   << m_shadowCascadeSplits[1] << "," << m_shadowCascadeSplits[2]
+                                   << "," << m_shadowCascadeSplits[3] << "]"
+                                   << " blendedDraws=" << m_importedBlendedDrawOrder.size()
+                                   << " shadowDraws=[" << m_visibleImportedShadowMeshDraws[0].size()
+                                   << "," << m_visibleImportedShadowMeshDraws[1].size()
+                                   << "," << m_visibleImportedShadowMeshDraws[2].size()
+                                   << "," << m_visibleImportedShadowMeshDraws[3].size() << "]";
+            }
+        }
+        // ODAI_SHADOW_STABILITY=1 reports how often a cascade's caster set
+        // CHANGES SIZE between frames. That is the number that matters for
+        // flicker: a caster entering or leaving the set is a shadow appearing
+        // or vanishing, and no amount of texel snapping hides it.
+        if (std::getenv("ODAI_SHADOW_STABILITY") != nullptr) {
+            static std::array<std::size_t, kShadowCascadeCount> s_previousCounts{};
+            static std::array<std::uint64_t, kShadowCascadeCount> s_changeCount{};
+            static std::uint64_t s_frames = 0;
+            ++s_frames;
+            for (std::uint32_t i = 0; i < kShadowCascadeCount; ++i) {
+                const std::size_t count = m_visibleImportedShadowMeshDraws[i].size();
+                if (s_frames > 1 && count != s_previousCounts[i]) {
+                    ++s_changeCount[i];
+                }
+                s_previousCounts[i] = count;
+            }
+            if ((s_frames % 300u) == 0u) {
+                VOX_LOGI("render") << "shadow caster-set changes per cascade over " << s_frames
+                                   << " frames: " << s_changeCount[0] << ", " << s_changeCount[1]
+                                   << ", " << s_changeCount[2] << ", " << s_changeCount[3]
+                                   << "  (counts now " << s_previousCounts[0] << ", "
+                                   << s_previousCounts[1] << ", " << s_previousCounts[2] << ", "
+                                   << s_previousCounts[3] << ")";
+            }
+        }
         importedMeshDrawsForFrame = std::span<const ImportedMeshDraw>(
             m_visibleImportedMeshDraws.data(),
             m_visibleImportedMeshDraws.size());
@@ -1873,6 +2123,43 @@ void RendererBackend::renderFrame(
                 m_visibleImportedShadowMeshDraws[cascadeIndex]);
         }
     }
+    // Back-to-front order for the blended replay in the main pass.
+    //
+    // The blended pipeline does not write depth, so overlapping blended
+    // surfaces composite in submission order, and submission order is upload
+    // order -- which is whatever order the cells happened to stream in. Sorting
+    // by distance from the camera is what makes two panes of glass in front of
+    // each other look right from both sides. This is per-frame because the
+    // answer changes as the camera moves; it stays cheap because it only ever
+    // touches the blended subset, not the whole draw list.
+    //
+    // Draw granularity, not triangle granularity: a single merged draw whose
+    // own triangles overlap still composites in index order. That is the
+    // standard limitation of a sorted-draw transparency pass and is not worth
+    // an OIT scheme for the amount of glass Fallout places.
+    m_importedBlendedDrawOrder.clear();
+    for (std::size_t drawIndex = 0; drawIndex < importedMeshDrawsForFrame.size(); ++drawIndex) {
+        if (importedMeshDrawsForFrame[drawIndex].blended) {
+            m_importedBlendedDrawOrder.push_back(static_cast<std::uint32_t>(drawIndex));
+        }
+    }
+    if (m_importedBlendedDrawOrder.size() > 1u) {
+        const odai::math::Vector3 blendSortEye = eye;
+        std::sort(
+            m_importedBlendedDrawOrder.begin(),
+            m_importedBlendedDrawOrder.end(),
+            [&](std::uint32_t lhs, std::uint32_t rhs) {
+                auto distanceSquared = [&](std::uint32_t index) {
+                    const float* center = importedMeshDrawsForFrame[index].center;
+                    const float dx = center[0] - blendSortEye.x;
+                    const float dy = center[1] - blendSortEye.y;
+                    const float dz = center[2] - blendSortEye.z;
+                    return (dx * dx) + (dy * dy) + (dz * dz);
+                };
+                return distanceSquared(lhs) > distanceSquared(rhs);
+            });
+    }
+
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
@@ -1901,6 +2188,10 @@ void RendererBackend::renderFrame(
     shadowPassInputs.canDrawMagica = canDrawMagica;
     shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
     shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
+    shadowPassInputs.importedShadowVertexBuffer =
+        m_importedShadowVertexBufferHandle != kInvalidBufferHandle
+            ? m_bufferAllocator.getBuffer(m_importedShadowVertexBufferHandle)
+            : VK_NULL_HANDLE;
     shadowPassInputs.importedIndexBuffer = importedIndexBuffer;
     shadowPassInputs.importedMeshDraws = m_importedMeshDraws;
     shadowPassInputs.importedTerrainDrawCount = m_importedTerrainDrawCount;
@@ -1912,6 +2203,7 @@ void RendererBackend::renderFrame(
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     shadowPassInputs.importedActorMeshDraws = importedActorMeshDraws;
     shadowPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
+    shadowPassInputs.skipCascadeMask = shadowSkipCascadeMask;
     shadowPassInputs.importedPageCullingEnabled = importedPageCullingEnabled;
     if (importedPageCullingEnabled) {
         for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
@@ -1944,7 +2236,8 @@ void RendererBackend::renderFrame(
         !voxelGiNeedsOccupancyUpload ||
         voxelGiOccupancyDispatchZ > 0u ||
         voxelGiOccupancyClearThisFrame;
-    if (m_voxelGiComputeAvailable &&
+    if (m_voxelGiRequested &&
+        m_voxelGiComputeAvailable &&
         m_voxelGiOccupancyPipeline != VK_NULL_HANDLE &&
         m_voxelGiSkyExposurePipeline != VK_NULL_HANDLE &&
         m_voxelGiSurfacePipeline != VK_NULL_HANDLE &&
@@ -2118,16 +2411,20 @@ void RendererBackend::renderFrame(
         writeGpuTimestampTop(kGpuTimestampQueryGiPropagateStart);
         writeGpuTimestampBottom(kGpuTimestampQueryGiPropagateEnd);
     }
+    // The app-level opt-out (setVoxelGiEnabled) folds in here as well as at the
+    // dispatch gates above, so the state reported below is what actually ran
+    // rather than what the hardware could have run.
+    const bool voxelGiComputeActive = m_voxelGiRequested && m_voxelGiComputeAvailable;
     const bool voxelGiRtSurfaceRequested = m_voxelGiDebugSettings.surfaceMode != VoxelGiSurfaceMode::Legacy;
     const bool voxelGiRtSurfaceCanRun =
-        m_voxelGiComputeAvailable &&
+        voxelGiComputeActive &&
         voxelGiRtSurfaceRequested &&
         m_rayTracingRuntimeEnabled &&
         m_voxelGiSurfacePipelineRt != VK_NULL_HANDLE &&
         m_rtTlas.handle != VK_NULL_HANDLE;
     const bool voxelGiRestirRequested = m_voxelGiDebugSettings.surfaceMode == VoxelGiSurfaceMode::RestirSurface;
     const bool voxelGiRestirCanRun =
-        m_voxelGiComputeAvailable &&
+        voxelGiComputeActive &&
         voxelGiRestirRequested &&
         m_rayTracingRuntimeEnabled &&
         m_voxelGiRestirReady &&
@@ -2141,7 +2438,7 @@ void RendererBackend::renderFrame(
     }
     const char* voxelGiSurfaceFallbackReason = voxelGiSurfaceFallbackReasonName(
         m_voxelGiDebugSettings.surfaceMode,
-        m_voxelGiComputeAvailable,
+        voxelGiComputeActive,
         voxelGiRtSurfaceCanRun,
         voxelGiRestirCanRun,
         m_rtTlas.handle != VK_NULL_HANDLE
@@ -2156,7 +2453,7 @@ void RendererBackend::renderFrame(
                            << ", active=" << voxelGiSurfaceModeName(activeVoxelGiSurfaceMode)
                            << ", fallback=" << (activeVoxelGiSurfaceMode != m_voxelGiDebugSettings.surfaceMode ? "yes" : "no")
                            << ", reason=" << voxelGiSurfaceFallbackReason
-                           << ", compute=" << (m_voxelGiComputeAvailable ? "yes" : "no")
+                           << ", compute=" << (voxelGiComputeActive ? "yes" : "no")
                            << ", rtReady=" << (voxelGiRtSurfaceCanRun ? "yes" : "no")
                            << ", restirReady=" << (voxelGiRestirCanRun ? "yes" : "no")
                            << ", tlas=" << (m_rtTlas.handle != VK_NULL_HANDLE ? "yes" : "no")
@@ -2250,6 +2547,14 @@ void RendererBackend::renderFrame(
     prepassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
     prepassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
     prepassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
+    // Exactly the three consumers of the normal-depth buffer. Sun shafts and
+    // water are checked against what will actually run, not what is merely
+    // compiled in, so a scene with AO off, shafts off and no water skips a full
+    // re-render of its geometry every frame.
+    prepassInputs.normalDepthNeeded =
+        m_debugEnableSsao ||
+        (m_sunShaftsRequested && m_sunShaftComputeAvailable) ||
+        m_importedWaterIndexCount > 0u;
     recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
     if (m_debugEnableSsao) {
@@ -2262,14 +2567,14 @@ void RendererBackend::renderFrame(
     VkViewport viewport{};
     viewport.x = 0.0f;
     viewport.y = 0.0f;
-    viewport.width = static_cast<float>(m_swapchainExtent.width);
-    viewport.height = static_cast<float>(m_swapchainExtent.height);
+    viewport.width = static_cast<float>(m_renderExtent.width);
+    viewport.height = static_cast<float>(m_renderExtent.height);
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
 
     VkRect2D scissor{};
     scissor.offset = {0, 0};
-    scissor.extent = m_swapchainExtent;
+    scissor.extent = m_renderExtent;
     frameExecutionContext.viewport = viewport;
     frameExecutionContext.scissor = scissor;
 
@@ -2285,6 +2590,8 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedIndexBuffer = importedIndexBuffer;
     mainPassInputs.importedMeshDraws = importedMeshDrawsForFrame;
     mainPassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
+    mainPassInputs.importedBlendedDrawOrder = std::span<const std::uint32_t>(
+        m_importedBlendedDrawOrder.data(), m_importedBlendedDrawOrder.size());
     mainPassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
     mainPassInputs.importedActorVertexOffset =
         importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
@@ -2302,14 +2609,20 @@ void RendererBackend::renderFrame(
     mainPassInputs.preview = &preview;
     recordMainScenePass(frameExecutionContext, mainPassInputs);
 
+    // TAA runs on the resolved HDR image before bloom mips are cut from it, so
+    // bloom blooms the stabilized frame rather than the shimmering one. When it
+    // ran, mip0 is left in TRANSFER_DST (the copy-back) instead of
+    // COLOR_ATTACHMENT -- the transitions below take the matching source.
+    const bool taaRan = recordTaaPass(commandBuffer, aoFrameIndex);
+
     if (m_hdrResolveMipLevels > 1u) {
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             VK_ACCESS_2_TRANSFER_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2338,10 +2651,10 @@ void RendererBackend::renderFrame(
                 1u
             );
 
-            const uint32_t srcWidth = std::max(1u, m_swapchainExtent.width >> (mipLevel - 1u));
-            const uint32_t srcHeight = std::max(1u, m_swapchainExtent.height >> (mipLevel - 1u));
-            const uint32_t dstWidth = std::max(1u, m_swapchainExtent.width >> mipLevel);
-            const uint32_t dstHeight = std::max(1u, m_swapchainExtent.height >> mipLevel);
+            const uint32_t srcWidth = std::max(1u, m_renderExtent.width >> (mipLevel - 1u));
+            const uint32_t srcHeight = std::max(1u, m_renderExtent.height >> (mipLevel - 1u));
+            const uint32_t dstWidth = std::max(1u, m_renderExtent.width >> mipLevel);
+            const uint32_t dstHeight = std::max(1u, m_renderExtent.height >> mipLevel);
 
             VkImageBlit mipBlit{};
             mipBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -2412,10 +2725,10 @@ void RendererBackend::renderFrame(
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2481,8 +2794,8 @@ void RendererBackend::renderFrame(
             kAutoExposureTargetDownsampleMip,
             availableHdrMipLevels - 1u
         );
-        const uint32_t hdrWidth = std::max(1u, m_swapchainExtent.width >> histogramSourceMip);
-        const uint32_t hdrHeight = std::max(1u, m_swapchainExtent.height >> histogramSourceMip);
+        const uint32_t hdrWidth = std::max(1u, m_renderExtent.width >> histogramSourceMip);
+        const uint32_t hdrHeight = std::max(1u, m_renderExtent.height >> histogramSourceMip);
         AutoExposureHistogramPushConstants histogramPushConstants{};
         histogramPushConstants.width = hdrWidth;
         histogramPushConstants.height = hdrHeight;
@@ -2590,7 +2903,8 @@ void RendererBackend::renderFrame(
         wroteSunShaftTimestamps = true;
         writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
         const bool sunShaftInitialized = m_sunShaftImageInitialized[aoFrameIndex];
-        if (m_sunShaftComputeAvailable &&
+        if (m_sunShaftsRequested &&
+            m_sunShaftComputeAvailable &&
             m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
             m_sunShaftPipeline != VK_NULL_HANDLE &&
             m_sunShaftBufferSet.valid()) {
@@ -2738,8 +3052,20 @@ void RendererBackend::renderFrame(
     coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan->post, "post");
     beginDebugLabel(commandBuffer, "Pass: Tonemap + UI", 0.24f, 0.24f, 0.24f, 1.0f);
     vkCmdBeginRendering(commandBuffer, &toneMapRenderingInfo);
-    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+    // The tonemap/UI pass writes the SWAPCHAIN image and must cover all of it.
+    // `viewport`/`scissor` above are the scene pair, sized to m_renderExtent --
+    // reusing them here is what squeezed the upscaled frame into the top-left
+    // corner of the window when the render scale first went below 1.0, with
+    // black filling the rest.
+    VkViewport presentViewport{};
+    presentViewport.width = static_cast<float>(m_swapchainExtent.width);
+    presentViewport.height = static_cast<float>(m_swapchainExtent.height);
+    presentViewport.minDepth = 0.0f;
+    presentViewport.maxDepth = 1.0f;
+    VkRect2D presentScissor{};
+    presentScissor.extent = m_swapchainExtent;
+    vkCmdSetViewport(commandBuffer, 0, 1, &presentViewport);
+    vkCmdSetScissor(commandBuffer, 0, 1, &presentScissor);
 
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
@@ -2894,6 +3220,9 @@ void RendererBackend::renderFrame(
 
     const auto presentStartTime = std::chrono::steady_clock::now();
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
+    if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        m_lastPresentedImageIndex = imageIndex;
+    }
     const float presentWaitMs = static_cast<float>(
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - presentStartTime).count()
     );

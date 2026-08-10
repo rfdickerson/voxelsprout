@@ -31,6 +31,8 @@ RaytracingAccelerationStructure shadowScene;
 // the PBR bit stays clear and shading falls back to the legacy diffuse chain.
 static const uint kImportedMaterialFlagAlphaTest = 1u;
 static const uint kImportedMaterialFlagPbr = 4u;
+static const uint kImportedMaterialFlagVertexColorTint = 8u;
+static const uint kImportedMaterialFlagTerrainLayers = 16u;
 static const uint kImportedMaterialRoughnessShift = 8u;
 static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
@@ -116,6 +118,8 @@ struct FragmentInput
     float2 inUv : TEXCOORD3;
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
+    nointerpolation uint4 inLayerTextures : TEXCOORD6;
+    float4 inLayerWeights : TEXCOORD7;
 };
 
 // Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
@@ -134,6 +138,74 @@ float sampleSsaoAmbientFactor(float4 screenPosition)
     return lerp(1.0, pow(max(ssaoRaw, 0.001), ssaoIntensity), ssaoEnable);
 }
 
+// Aerial perspective: distance haze, so a landscape reads as deep instead of
+// flat.
+//
+// Not a fog constant. Extinction is wavelength-dependent (blue survives least,
+// so distant terrain shifts toward the sky) and the inscattered light warms
+// toward the sun, which is what makes a hill lit from behind glow at its edge.
+// Both fall straight out of the same sun colour and sky strengths the skybox
+// shades with, so the horizon and the terrain in front of it agree instead of
+// meeting at a visible seam.
+//
+// Exterior only: an interior has no kilometres of air between the surface and
+// the eye, and applying it there washes rooms out at their far wall.
+// Value noise for breaking up terrain blend boundaries. Hash-based rather than a
+// texture: this is sampled once per fragment and a dependent texture read would
+// cost more than the arithmetic.
+float terrainBlendHash(float2 p)
+{
+    float2 wrapped = frac(p * float2(123.34, 345.45));
+    wrapped += dot(wrapped, wrapped + 34.345);
+    return frac(wrapped.x * wrapped.y);
+}
+
+float terrainBlendNoise(float2 p)
+{
+    const float2 cell = floor(p);
+    float2 f = frac(p);
+    f = f * f * (3.0 - (2.0 * f));
+    const float a = terrainBlendHash(cell);
+    const float b = terrainBlendHash(cell + float2(1.0, 0.0));
+    const float c = terrainBlendHash(cell + float2(0.0, 1.0));
+    const float d = terrainBlendHash(cell + float2(1.0, 1.0));
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDirection)
+{
+    // Distance at which roughly 1/e of the surface's own colour survives. ~15000
+    // Bethesda units is a little over 200 m: far enough that near geometry is
+    // untouched, close enough that the far ridges of a cooked region sit back.
+    const float kAerialEFoldDistance = 15000.0;
+    const float3 cameraPosition = camera.shadowVoxelGridSize.xyz;
+    const float viewDistance = length(worldPosition - cameraPosition);
+    const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
+
+    // Blue extinguishes least, so it dominates what comes back from the air.
+    const float3 extinctionPerUnit =
+        float3(1.35, 1.12, 0.85) / kAerialEFoldDistance;
+    const float3 transmittance = exp(-viewDistance * extinctionPerUnit);
+
+    // Forward scattering: looking toward the sun through air brightens and warms
+    // it. pow(,6) keeps the effect close to the sun rather than tinting the
+    // whole sky.
+    const float sunAlignment = saturate(dot(viewDirection, toSun));
+    const float3 skyInscatter = float3(0.40, 0.56, 0.82);
+    const float3 sunInscatter = float3(1.00, 0.86, 0.66);
+    const float3 inscatterColor =
+        lerp(skyInscatter, sunInscatter, pow(sunAlignment, 6.0) * 0.85);
+
+    // Scaled by the sun's own colour and the sky's rayleigh strength so dusk
+    // haze goes warm and night haze goes dark, instead of staying daylight blue.
+    const float skyStrength = max(camera.skyConfig0.x, 0.01);
+    const float sunLuminance = dot(camera.sunColorShadow.xyz, float3(0.30, 0.59, 0.11));
+    const float3 inscatter =
+        inscatterColor * (skyStrength * 0.42) * max(sunLuminance, 0.03);
+
+    return (shaded * transmittance) + (inscatter * (float3(1.0, 1.0, 1.0) - transmittance));
+}
+
 float4 sampleImportedAlbedo(FragmentInput input)
 {
     const bool disableTextures = chunkPc.cascadeData.z > 0.5;
@@ -142,19 +214,104 @@ float4 sampleImportedAlbedo(FragmentInput input)
         return float4(input.inColor, 1.0);
     }
     float4 sampled = bindlessTextures[input.inTextureIndex].Sample(input.inUv);
-    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u && sampled.a < 0.5)
+    // Fallout's NiAlphaProperty test mode is GREATER: a fragment survives when
+    // its alpha is strictly above the authored threshold, so discard on <=.
+    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
+        sampled.a <= chunkPc.materialParams.x)
     {
+        // ODAI_DEBUG_ALPHATEST_HIGHLIGHT paints what would be cut away instead
+        // of cutting it. ODAI_DEBUG_NO_ALPHATEST answers "is alpha test doing
+        // this"; this answers "WHICH surface", which is the harder half when a
+        // scene draws 490 alpha-tested shapes and only one of them is wrong.
+        if (chunkPc.materialParams.y > 0.5)
+        {
+            return float4(1.0, 0.0, 1.0, 1.0);
+        }
         discard;
+    }
+    // Fallout's landscape is a base texture per quadrant with additional layers
+    // alpha-blended over it (ATXT/VTXT) -- roads, gravel, and the transitions
+    // between ground types. Without this the terrain is one flat texture per
+    // 2048-unit quadrant with a hard seam at every quadrant boundary.
+    //
+    // Layers composite in order, each a straight lerp by its own weight, which
+    // is what the game's own layer stack does. The weights are independent
+    // opacities, NOT a partition of unity, so they must not be normalized: a
+    // post where two layers are both fully opaque means the later one wins, not
+    // that they are each half strength.
+    if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u)
+    {
+        // VTXT authors one opacity per landscape post -- a value every 128 units
+        // -- and interpolating that linearly across the triangles makes every
+        // blend boundary a straight, grid-aligned edge. That is the blockiness,
+        // and it is in the interpolation, not the data: the same weights can
+        // produce an organic boundary.
+        //
+        // Two corrections, one noise sample shared by all four layers because
+        // the noise perturbs WHERE the boundary falls, not which layer it
+        // belongs to.
+        //
+        //   - Perturb the weight by value noise, so the boundary wanders across
+        //     the lattice instead of following it. Two octaves: the coarse one
+        //     breaks up long straight runs, the fine one gives the edge grain.
+        //   - Sharpen with smoothstep. A linear ramp spreads every transition
+        //     across a full 128-unit cell, which reads as a soft rectangle;
+        //     tightening it puts the transition where the noise put it.
+        //
+        // Both are no-ops where a layer is fully present or fully absent, so
+        // large single-texture areas are untouched.
+        const float2 blendNoiseUv = input.inWorldPosition.xz;
+        const float blendNoise =
+            (terrainBlendNoise(blendNoiseUv * (1.0 / 220.0)) * 0.65) +
+            (terrainBlendNoise(blendNoiseUv * (1.0 / 70.0)) * 0.35);
+        const float blendNoiseSigned = blendNoise - 0.5;
+
+        for (uint layer = 0u; layer < 4u; ++layer)
+        {
+            const uint layerTexture = input.inLayerTextures[layer];
+            const float rawWeight = saturate(input.inLayerWeights[layer]);
+            if (layerTexture == kInvalidImportedTextureIndex || rawWeight <= 0.0)
+            {
+                continue;
+            }
+            // Scaled by how mid-transition the weight is, so the noise cannot
+            // punch holes in a fully opaque layer or speckle a fully absent one.
+            const float transitionAmount = 1.0 - abs((rawWeight * 2.0) - 1.0);
+            const float perturbed = saturate(rawWeight + (blendNoiseSigned * 0.55 * transitionAmount));
+            const float layerWeight = smoothstep(0.22, 0.78, perturbed);
+            if (layerWeight <= 0.0)
+            {
+                continue;
+            }
+            const float4 layerSample = bindlessTextures[layerTexture].Sample(input.inUv);
+            sampled = float4(lerp(sampled.rgb, layerSample.rgb, layerWeight), sampled.a);
+        }
     }
     if (disableTextures)
     {
         return float4(input.inColor, 1.0);
     }
-    // Tint the texture toward the vertex color (terrain palette for terrain tiles,
-    // material color for imported meshes). Matches the blend the hex terrain shader
-    // used so terrain types remain identifiable under the texture detail.
-    const float3 tinted = lerp(sampled.rgb, sampled.rgb * input.inColor * 1.6, 0.25);
-    return float4(tinted, sampled.a);
+    // Vertex color modulates a textured surface only where the cooker says the
+    // color is authored data (kImportedSceneMaterialFlagVertexColorTint). For
+    // Fallout terrain that is LAND's VCLR: the baked ambient and regional
+    // palette the game itself shades landscape with.
+    //
+    // The bit is what makes this safe to do unconditionally. This used to blend
+    // 25% toward `sampled.rgb * inColor * 1.6` for *everything* textured, back
+    // when the only colors reaching here were
+    // buildImportedScenePackedRenderData's fallbacks — a hash of the model path
+    // for instanced statics, a height ramp for terrain. Both are noise, both
+    // biased dark with blue lowest, which is what made cooked scenes read dark,
+    // warm and over-saturated with a per-model hue cast. Those fallbacks still
+    // exist and still must not tint anything; they just no longer set the bit.
+    //
+    // Untextured geometry is unaffected either way: it returns inColor as its
+    // albedo at the early-out above.
+    if ((input.inFlags & kImportedMaterialFlagVertexColorTint) != 0u)
+    {
+        return float4(sampled.rgb * input.inColor, sampled.a);
+    }
+    return sampled;
 }
 
 float3 sampleImportedVoxelGi(float3 worldPosition, float3 normal)
@@ -497,17 +654,47 @@ float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIn
 
     float visibility = 0.0;
     float weightSum = 0.0;
-    for (int y = -3; y <= 3; ++y)
+    // Two paths, and the split is measured rather than stylistic.
+    //
+    // This used to iterate -3..3 (49 steps) and `continue` past everything
+    // outside kernelRadius, which is 1 by default -- 40 of 49 iterations per
+    // fragment branching and doing nothing, and the cascade blend region runs
+    // the whole thing twice. Constant bounds let the compiler unroll to exactly
+    // nine taps: 7.42 -> 6.49 ms of main pass at identical output. Making the
+    // bounds follow kernelRadius dynamically instead only reached 7.11, because
+    // a runtime trip count blocks the unroll -- so the default radius gets a
+    // fixed 3x3 and the wider kernels, which only the debug UI selects, take the
+    // general path.
+    if (kernelRadius <= 1)
     {
-        for (int x = -3; x <= 3; ++x)
+        [unroll]
+        for (int y = -1; y <= 1; ++y)
         {
-            if (abs(x) > kernelRadius || abs(y) > kernelRadius) continue;
-            const float2 uv = shadowUv + float2(float(x), float(y)) * texelSize;
-            const float wx = float(kernelRadius + 1 - abs(x));
-            const float wy = float(kernelRadius + 1 - abs(y));
-            const float weight = wx * wy;
-            visibility += shadowMap.SampleCmpLevelZero(uv, shadowDepthRef + bias) * weight;
-            weightSum += weight;
+            [unroll]
+            for (int x = -1; x <= 1; ++x)
+            {
+                const float2 uv = shadowUv + float2(float(x), float(y)) * texelSize;
+                const float weight = float(2 - abs(x)) * float(2 - abs(y));
+                visibility += shadowMap.SampleCmpLevelZero(uv, shadowDepthRef + bias) * weight;
+                weightSum += weight;
+            }
+        }
+    }
+    else
+    {
+        [loop]
+        for (int y = -kernelRadius; y <= kernelRadius; ++y)
+        {
+            [loop]
+            for (int x = -kernelRadius; x <= kernelRadius; ++x)
+            {
+                const float2 uv = shadowUv + float2(float(x), float(y)) * texelSize;
+                const float wx = float(kernelRadius + 1 - abs(x));
+                const float wy = float(kernelRadius + 1 - abs(y));
+                const float weight = wx * wy;
+                visibility += shadowMap.SampleCmpLevelZero(uv, shadowDepthRef + bias) * weight;
+                weightSum += weight;
+            }
         }
     }
     return visibility / max(weightSum, 0.0001);
@@ -552,8 +739,27 @@ float4 main(FragmentInput input) : SV_Target0
     const bool usePbr = importedMaterialHasPbr(input.inFlags);
 
     float3 albedo = albedoFull.rgb * materialTint;
-    albedo = lerp(albedo, float3(0.40, 0.39, 0.36), smoothstep(0.35, 0.66, slope) * 0.6);
-    albedo = lerp(albedo, float3(0.52, 0.51, 0.47), smoothstep(0.66, 0.92, slope) * 0.5);
+    // Stylized slope tint (docs/stylized_low_poly.md): steep faces blend toward
+    // flat rock greys so untextured low-poly terrain reads as cliff rather than
+    // as a coloured ramp.
+    //
+    // Applied ONLY to untextured surfaces. It used to run unconditionally, which
+    // meant it overwrote real albedo on anything sloped: on a cooked Fallout
+    // scene a rock face measured (97,91,90) and a Joshua tree trunk (164,169,166)
+    // -- near-perfectly neutral grey -- while the flat ground beside them kept
+    // its warm (74,72,50). That is the whole "grey materials instead of textures"
+    // symptom, and it is this lerp, not the texture pipeline.
+    //
+    // Gating on textured-ness rather than on
+    // kImportedSceneMaterialFlagTerrainSlopeBlend keeps every existing scene
+    // pixel-identical: the geometry this was authored for (the hex strategy map,
+    // procedural low-poly) is untextured and still gets it. The reserved flag is
+    // the right control if a TEXTURED surface ever wants the effect too.
+    if (input.inTextureIndex == kInvalidImportedTextureIndex)
+    {
+        albedo = lerp(albedo, float3(0.40, 0.39, 0.36), smoothstep(0.35, 0.66, slope) * 0.6);
+        albedo = lerp(albedo, float3(0.52, 0.51, 0.47), smoothstep(0.66, 0.92, slope) * 0.5);
+    }
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
     const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
     const float3 shNormalIrradiance = evaluateShIrradiance(normal);
@@ -652,9 +858,23 @@ float4 main(FragmentInput input) : SV_Target0
             specular) *
         (interiorMode ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
+
+    // wrappedNdotL is ndotl*0.65 + 0.35: a true-cosine core plus a constant
+    // fill that keeps faces turned away from the sun from going black. That
+    // fill is a stand-in for indirect bounce, NOT direct sunlight -- so it is
+    // the part ambient occlusion should darken.
+    //
+    // Leaving it unoccluded is why AO read as too subtle outdoors: the Mojave
+    // at midday is dominated by the sun term, AO only ever multiplied `ambient`,
+    // and every crevice still received the full 0.35 fill. Occluding the fill
+    // (and not the cosine core) darkens contact regions without muddying
+    // surfaces that genuinely face the sun.
+    const float directCore = ndotl * 0.65;
+    const float directFill = max(wrappedNdotL - directCore, 0.0);
+    const float occludedWrap = directCore + (directFill * ambientOcclusion);
     const float3 direct =
         camera.sunColorShadow.xyz *
-        (sunIntensity * wrappedNdotL * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+        (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.62));
     const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
 
     if (usePbr)
@@ -696,6 +916,11 @@ float4 main(FragmentInput input) : SV_Target0
     float3 shaded =
         ((diffuseLight * albedo * pbrDiffuseScale(surface.metallic)) + specular +
          (float3(1.0, 0.98, 0.94) * (rim * rimWeight)) + materialEmissive);
+
+    if (!interiorMode)
+    {
+        shaded = applyAerialPerspective(shaded, input.inWorldPosition, -viewDir);
+    }
 
     // Fog-of-war visibility blend. Only applied when the fog map is active
     // (strategy map mode). The fog texture is a blurred per-tile R8 map where

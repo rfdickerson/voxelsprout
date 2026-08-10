@@ -2,6 +2,8 @@
 
 #include "core/log.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -269,7 +271,20 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         return false;
     }
 
-    std::array<std::uint64_t, kGpuTimestampQueryCount> timestamps{};
+    // Per-query availability, NOT a plain bulk read.
+    //
+    // Without WITH_AVAILABILITY, vkGetQueryPoolResults reports VK_NOT_READY for
+    // the WHOLE range if any single query in it is unwritten -- and most of
+    // these are conditional. A frame with voxel GI, SSAO and sun shafts turned
+    // off never writes their queries, so the entire readback failed every frame
+    // and every pass timing read zero. Availability makes a skipped pass mean
+    // "this pass did not run", which is the truth, instead of poisoning the
+    // other 30 measurements.
+    struct TimestampResult {
+        std::uint64_t ticks = 0;
+        std::uint64_t available = 0;
+    };
+    std::array<TimestampResult, kGpuTimestampQueryCount> timestamps{};
     const VkResult result = vkGetQueryPoolResults(
         m_device,
         queryPool,
@@ -277,14 +292,17 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         kGpuTimestampQueryCount,
         sizeof(timestamps),
         timestamps.data(),
-        sizeof(std::uint64_t),
-        VK_QUERY_RESULT_64_BIT
+        sizeof(TimestampResult),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT
     );
-    if (result == VK_NOT_READY) {
+    if (result != VK_SUCCESS && result != VK_NOT_READY) {
+        logVkFailure("vkGetQueryPoolResults(gpuTimestamps)", result);
         return false;
     }
-    if (result != VK_SUCCESS) {
-        logVkFailure("vkGetQueryPoolResults(gpuTimestamps)", result);
+    // The frame's own start/end bracket every pass, so if those two are not
+    // ready the submission is genuinely still in flight and nothing is usable.
+    if (timestamps[kGpuTimestampQueryFrameStart].available == 0u ||
+        timestamps[kGpuTimestampQueryFrameEnd].available == 0u) {
         return false;
     }
 
@@ -292,8 +310,11 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         if (startIndex >= kGpuTimestampQueryCount || endIndex >= kGpuTimestampQueryCount) {
             return 0.0f;
         }
-        const std::uint64_t startTicks = timestamps[startIndex];
-        const std::uint64_t endTicks = timestamps[endIndex];
+        if (timestamps[startIndex].available == 0u || timestamps[endIndex].available == 0u) {
+            return 0.0f;  // pass did not run this frame
+        }
+        const std::uint64_t startTicks = timestamps[startIndex].ticks;
+        const std::uint64_t endTicks = timestamps[endIndex].ticks;
         if (endTicks <= startTicks) {
             return 0.0f;
         }
@@ -319,6 +340,41 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
+    // Per-pass GPU breakdown. Everything above was already measured and then
+    // kept private, so "why is the frame 17 ms" could only be answered by
+    // disabling passes one at a time and re-measuring. ODAI_GPU_TIMINGS prints
+    // it directly.
+    // Draw-call census alongside the pass timings. "The frame is 30 ms of CPU
+    // in submit" does not say whether that is a few slow calls or a great many
+    // cheap ones, and those have completely different fixes.
+    if (std::getenv("ODAI_DRAW_COUNTS") != nullptr) {
+        static std::uint64_t s_drawLogFrame = 0;
+        if ((s_drawLogFrame++ % 60u) == 0u) {
+            VOX_LOGI("render") << "draw calls: total=" << m_debugDrawCallsTotal
+                               << " shadow=" << m_debugDrawCallsShadow
+                               << " prepass=" << m_debugDrawCallsPrepass
+                               << " main=" << m_debugDrawCallsMain
+                               << "  importedDraws=" << m_importedMeshDraws.size()
+                               << " mergedAway=" << m_debugImportedDrawsMerged;
+        }
+    }
+    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr) {
+        static std::uint64_t s_timingLogFrame = 0;
+        if ((s_timingLogFrame++ % 60u) == 0u) {
+            VOX_LOGI("render")
+                << "GPU ms: frame=" << m_debugGpuFrameTimeMs
+                << " shadow=" << m_debugGpuShadowTimeMs
+                << " prepass=" << m_debugGpuPrepassTimeMs
+                << " ssao=" << m_debugGpuSsaoTimeMs
+                << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs
+                << " main=" << m_debugGpuMainTimeMs
+                << " post=" << m_debugGpuPostTimeMs
+                << " ui=" << m_debugGpuUiTimeMs
+                << " autoExposure=" << m_debugGpuAutoExposureTimeMs
+                << " sunShaft=" << m_debugGpuSunShaftTimeMs
+                << " giOccupancy=" << m_debugGpuGiOccupancyTimeMs;
+        }
+    }
     m_debugGpuFrameTimingMsHistory.push(m_debugGpuFrameTimeMs);
     updateFrameTimingPercentiles();
     m_gpuTimestampQuerySubmitted[frameIndex] = false;
@@ -439,6 +495,47 @@ void RendererBackend::scheduleBufferRelease(BufferHandle handle, uint64_t timeli
     m_deferredBufferReleases.push_back({handle, timelineValue});
 }
 
+void RendererBackend::destroyImageResourceNow(
+    VkImage image, VmaAllocation allocation, VkImageView imageView) {
+    if (imageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device, imageView, nullptr);
+    }
+    if (image == VK_NULL_HANDLE) {
+        return;
+    }
+    if (m_vmaAllocator != VK_NULL_HANDLE && allocation != VK_NULL_HANDLE) {
+        vmaDestroyImage(m_vmaAllocator, image, allocation);
+    } else {
+        vkDestroyImage(m_device, image, nullptr);
+    }
+}
+
+void RendererBackend::scheduleImageRelease(
+    VkImage image, VmaAllocation allocation, VkImageView imageView, uint64_t timelineValue) {
+    if (image == VK_NULL_HANDLE && imageView == VK_NULL_HANDLE) {
+        return;
+    }
+    // Nothing has been submitted yet (or there is no timeline to wait on), so
+    // no frame can be sampling this image: destroy it immediately rather than
+    // parking it on a queue that would never drain.
+    if (timelineValue == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        destroyImageResourceNow(image, allocation, imageView);
+        return;
+    }
+    m_deferredImageReleases.push_back({image, allocation, imageView, timelineValue});
+}
+
+void RendererBackend::scheduleCommandPoolRelease(VkCommandPool pool, uint64_t timelineValue) {
+    if (pool == VK_NULL_HANDLE) {
+        return;
+    }
+    if (timelineValue == 0 || m_renderTimelineSemaphore == VK_NULL_HANDLE) {
+        vkDestroyCommandPool(m_device, pool, nullptr);
+        return;
+    }
+    m_deferredCommandPoolReleases.push_back({pool, timelineValue});
+}
+
 void RendererBackend::collectCompletedBufferReleases() {
     if (m_renderTimelineSemaphore == VK_NULL_HANDLE) {
         return;
@@ -454,6 +551,30 @@ void RendererBackend::collectCompletedBufferReleases() {
     std::erase_if(
         m_deferredBufferReleases,
         [completedValue](const DeferredBufferRelease& release) {
+            return release.timelineValue <= completedValue;
+        }
+    );
+
+    for (const DeferredImageRelease& release : m_deferredImageReleases) {
+        if (release.timelineValue <= completedValue) {
+            destroyImageResourceNow(release.image, release.allocation, release.imageView);
+        }
+    }
+    std::erase_if(
+        m_deferredImageReleases,
+        [completedValue](const DeferredImageRelease& release) {
+            return release.timelineValue <= completedValue;
+        }
+    );
+
+    for (const DeferredCommandPoolRelease& release : m_deferredCommandPoolReleases) {
+        if (release.timelineValue <= completedValue) {
+            vkDestroyCommandPool(m_device, release.pool, nullptr);
+        }
+    }
+    std::erase_if(
+        m_deferredCommandPoolReleases,
+        [completedValue](const DeferredCommandPoolRelease& release) {
             return release.timelineValue <= completedValue;
         }
     );

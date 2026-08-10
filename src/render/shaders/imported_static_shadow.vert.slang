@@ -3,9 +3,11 @@ import chunk_push_constants;
 
 struct VertexInput
 {
+    // Normal and colour are deliberately absent: this pass writes depth and
+    // alpha-tests, nothing more. Declaring them forced every pipeline using this
+    // shader to describe attributes it never read, and blocked binding the
+    // compact 28-byte shadow stream.
     [[vk::location(0)]] float3 inPosition : TEXCOORD0;
-    [[vk::location(1)]] float3 inNormal : TEXCOORD1;
-    [[vk::location(2)]] float3 inColor : TEXCOORD2;
     [[vk::location(3)]] float2 inUv : TEXCOORD3;
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
     [[vk::location(5)]] uint inFlags : TEXCOORD5;

@@ -107,6 +107,15 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     vkCmdSetViewport(commandBuffer, 0, 1, &aoViewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &aoScissor);
 
+    // Begin/clear/end even when nothing needs the result: the attachments must
+    // still end the frame in the layout the descriptor set was written for, and
+    // clearing is a fraction of the cost of re-rendering the scene.
+    if (!inputs.normalDepthNeeded) {
+        vkCmdEndRendering(commandBuffer);
+        writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
+        return;
+    }
+
     // Voxel chunks (VoxelCraft). This is what gives ambient occlusion something to
     // occlude against in a voxel world — without it the AO input buffer holds only
     // imported statics and skinned actors, and every AO mode reads flat where the
@@ -129,6 +138,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         // Per-chunk offsets ride the instance buffer; the push constant block stays
         // zeroed so the shader's chunkOffset/cascadeData path matches the main pass.
         ChunkPushConstants chunkPushConstants{};
+        // Neutral alpha-test threshold. Draws that carry an authored one
+        // overwrite this; leaving it zeroed would mean nothing cuts out.
+        chunkPushConstants.materialParams[0] = 0.5f;
         vkCmdPushConstants(
             commandBuffer,
             m_pipelineLayout,
@@ -156,14 +168,63 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
-                    (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
-                    continue;
+            // The normal-depth shader alpha-tests too, so it needs the same
+            // authored threshold the main pass uses -- otherwise SSAO sees a
+            // different silhouette than the lit pass does.
+            ChunkPushConstants importedPrepassPushConstants{};
+            importedPrepassPushConstants.materialParams[0] = 0.5f;
+            int lastPushedThreshold = -1;
+            const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+                if (static_cast<int>(threshold) == lastPushedThreshold) {
+                    return;
                 }
-                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
-                countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                lastPushedThreshold = static_cast<int>(threshold);
+                importedPrepassPushConstants.materialParams[0] =
+                    static_cast<float>(threshold) / 255.0f;
+                vkCmdPushConstants(
+                    commandBuffer,
+                    m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(ChunkPushConstants),
+                    &importedPrepassPushConstants);
+            };
+            // Same indirect batching as the main pass: one call per distinct
+            // alpha-test threshold instead of one per draw.
+            const auto includeDraw = [&](std::size_t drawIndex) {
+                if (drawIndex < terrainDrawCount) {
+                    return m_debugShowImportedTerrain;
+                }
+                return m_debugShowImportedStatics;
+            };
+            VkBuffer indirectBuffer = VK_NULL_HANDLE;
+            VkDeviceSize indirectBase = 0;
+            const bool useIndirect = m_supportsMultiDrawIndirect &&
+                buildImportedIndirectBatches(
+                    importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+            if (useIndirect) {
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    pushAlphaThreshold(batch.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
+                        batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                }
+            } else {
+                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                    if (!includeDraw(drawIndex)) {
+                        continue;
+                    }
+                    const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                    if (importedDraw.blended) {
+                        continue;  // no depth/normal contribution from blended surfaces
+                    }
+                    pushAlphaThreshold(importedDraw.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                        importedDraw.vertexOffset, 0);
+                }
             }
         }
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
@@ -179,7 +240,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
             for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
-                vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                vkCmdDrawIndexed(
+                    commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                    importedDraw.vertexOffset, 0);
             }
         }
         // GPU-skinned actors (Dragon Age touchstone) -- same pipeline as the

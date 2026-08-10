@@ -34,6 +34,10 @@ struct PushConstants
 {
     uint width;
     uint height;
+    // Multi-scale AO: the fine march uses radius * fineRadiusScale. Zero or >= 1
+    // disables the second march. See RendererBackend::SsaoComputePushConstants.
+    float fineRadiusScale;
+    float pad;
 };
 
 [[vk::push_constant]]
@@ -334,7 +338,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 centerViewPos = reconstructViewPosition(uv, centerDepth);
     const float randomAngle = interleavedGradientNoise(float2(dispatchThreadId.xy)) * 6.2831853;
 
-    const float radius = clamp(camera.shadowConfig2.x, 0.25, 128.0);
+    // Ceiling raised from 128 for multi-scale: the COARSE radius wants to reach
+    // well past contact range (128 units is ~1.8 m at Fallout's ~70 units/metre),
+    // and the fine march below now covers the close detail a single wide radius
+    // used to smear. Apps asking for less are unaffected.
+    const float radius = clamp(camera.shadowConfig2.x, 0.25, 512.0);
 
     // Bias is in this estimator's own units (the CPU picks which of the three it
     // sends -- see ShadowDebugSettings::activeAoBias). Clamp per variant, because
@@ -355,7 +363,24 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float bias = clamp(camera.shadowConfig2.y, 0.0, 0.4);
 #endif
 
-    const float visibility =
+    float visibility =
         estimateVisibility(uv, screenSize, centerViewPos, centerNormal, randomAngle, radius, bias);
+
+    // Second, tighter march. min() rather than a blend or a product: each scale
+    // answers "how much of the hemisphere is blocked at THIS distance", and the
+    // honest combined answer is whichever saw more occlusion. Multiplying would
+    // double-count the geometry both scales can see, which reads as a dark halo
+    // around every object.
+    const float fineScale = pushConstants.fineRadiusScale;
+    if (fineScale > 0.0 && fineScale < 1.0)
+    {
+        // Rotating the fine march's dither breaks up the banding that shows up
+        // when both scales sample the same directions from the same pixel.
+        const float fineAngle = randomAngle + 1.7;
+        const float fineVisibility = estimateVisibility(
+            uv, screenSize, centerViewPos, centerNormal, fineAngle, radius * fineScale, bias);
+        visibility = min(visibility, fineVisibility);
+    }
+
     ssaoRawTexture[dispatchThreadId.xy] = pow(saturate(visibility), kSsaoPower);
 }

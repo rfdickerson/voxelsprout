@@ -94,6 +94,15 @@ void appendDeviceExtensionIfMissing(std::vector<const char*>& extensions, const 
 
 
 bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid) {
+    // Diagnostic: ODAI_DEBUG_NO_TEXTURES=1 shades imported geometry from vertex
+    // color instead of its textures (the same switch the imgui debug panel
+    // flips). Exists as an env so a headless A/B can separate "the image is
+    // unstable because texture sampling shimmers" from "the image is unstable
+    // because geometry/cutout edges crawl" -- the two need entirely different
+    // fixes and look identical in a screenshot.
+    if (std::getenv("ODAI_DEBUG_NO_TEXTURES") != nullptr) {
+        m_debugShowImportedTextures = false;
+    }
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
     auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {
@@ -218,6 +227,9 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     if (!runStep("createSunShaftResources", [&] { return createSunShaftResources(); })) {
         VOX_LOGE("render") << "init failed at createSunShaftResources\n";
         shutdown();
+        return false;
+    }
+    if (!runStep("createTaaComputeResources", [&] { return createTaaComputeResources(); })) {
         return false;
     }
     if (!runStep("createSsaoComputeResources", [&] { return createSsaoComputeResources(); })) {
@@ -465,7 +477,33 @@ bool RendererBackend::createInstance() {
         createInfo.ppEnabledLayerNames = kValidationLayers.data();
     }
 
-    const VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
+    VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
+
+    // Enumeration saying a layer exists is NOT proof it will load, so a
+    // successful isLayerAvailable() above does not make this branch dead code.
+    //
+    // A layer manifest names its library with a bare filename
+    // ("libVkLayer_khronos_validation.so"), which the loader resolves through
+    // the dynamic linker. So a manifest reachable via VK_LAYER_PATH /
+    // VK_ADD_LAYER_PATH whose .so is NOT on LD_LIBRARY_PATH enumerates fine and
+    // then fails here -- exactly what the LunarG SDK's own setup-env.sh
+    // produces, since it puts the manifest directory on the layer path but only
+    // adds the library directory when passed --set-dep-ld.
+    //
+    // Validation is a debug convenience. Losing it must not stop the game from
+    // starting, which is what the old unconditional failure did: on any machine
+    // without the layer properly installed, the app exited at init with
+    // VK_ERROR_LAYER_NOT_PRESENT and no way past it.
+    if (result == VK_ERROR_LAYER_NOT_PRESENT && enableValidationLayers) {
+        VOX_LOGW("render")
+            << "validation layer enumerated but failed to load; continuing WITHOUT validation. "
+               "Its manifest is on the layer path but libVkLayer_khronos_validation.so is not on "
+               "LD_LIBRARY_PATH -- for the LunarG SDK, source setup-env.sh --set-dep-ld\n";
+        createInfo.enabledLayerCount = 0;
+        createInfo.ppEnabledLayerNames = nullptr;
+        result = vkCreateInstance(&createInfo, nullptr, &m_instance);
+    }
+
     if (result != VK_SUCCESS) {
         logVkFailure("vkCreateInstance", result);
         return false;
@@ -846,7 +884,22 @@ bool RendererBackend::pickPhysicalDevice() {
         m_ssaoFormat = selected.ssaoFormat;
         m_desktopCapabilityProbe = selected.capabilityProbe;
         m_rayTracingCapabilityProbe = selected.rayTracingProbe;
-        m_colorSampleCount = VK_SAMPLE_COUNT_4_BIT;
+        // Requested count, clamped to the device's colour+depth intersection.
+        // Never silently upgrades: an app asking for 1x gets 1x.
+        {
+            const VkSampleCountFlags supported =
+                selected.properties.limits.framebufferColorSampleCounts &
+                selected.properties.limits.framebufferDepthSampleCounts;
+            const uint32_t requested = m_requestedMsaaSamples;
+            VkSampleCountFlagBits chosen = VK_SAMPLE_COUNT_1_BIT;
+            for (const auto candidate : {VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_4_BIT, VK_SAMPLE_COUNT_2_BIT}) {
+                if (static_cast<uint32_t>(candidate) <= requested && (supported & candidate) != 0u) {
+                    chosen = candidate;
+                    break;
+                }
+            }
+            m_colorSampleCount = chosen;
+        }
 
         VOX_LOGI("render") << "selected GPU: " << selected.properties.deviceName
                            << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
@@ -1821,6 +1874,23 @@ bool RendererBackend::createSwapchain() {
 
     m_swapchainFormat = surfaceFormat.format;
     m_swapchainExtent = extent;
+    {
+        float renderScale = 1.0f;
+        if (const char* scaleEnv = std::getenv("ODAI_RENDER_SCALE")) {
+            renderScale = static_cast<float>(std::atof(scaleEnv));
+        }
+        renderScale = std::clamp(renderScale, 0.3f, 1.0f);
+        m_renderExtent.width = std::max(
+            1u, static_cast<uint32_t>(static_cast<float>(extent.width) * renderScale + 0.5f));
+        m_renderExtent.height = std::max(
+            1u, static_cast<uint32_t>(static_cast<float>(extent.height) * renderScale + 0.5f));
+        if (renderScale < 1.0f) {
+            VOX_LOGI("render") << "render scale " << renderScale << ": 3D at "
+                               << m_renderExtent.width << "x" << m_renderExtent.height
+                               << ", UI/present at " << m_swapchainExtent.width << "x"
+                               << m_swapchainExtent.height;
+        }
+    }
 
     m_swapchainImageViews.resize(imageCount, VK_NULL_HANDLE);
     for (uint32_t i = 0; i < imageCount; ++i) {
@@ -1848,6 +1918,9 @@ bool RendererBackend::createSwapchain() {
               << ", presentMode=" << presentModeName(presentMode) << "\n";
     m_swapchainImageInitialized.assign(imageCount, false);
     m_swapchainImageTimelineValues.assign(imageCount, 0);
+    if (!createTaaTargets()) {
+        return false;
+    }
     if (!createHdrResolveTargets()) {
         VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
@@ -2044,6 +2117,7 @@ bool RendererBackend::recreateSwapchain() {
 
 void RendererBackend::destroySwapchain() {
     resetDisplayTimingTracking();
+    destroyTaaTargets();
     destroyHdrResolveTargets();
     destroyMsaaColorTargets();
     destroyDepthTargets();
@@ -2250,6 +2324,19 @@ void RendererBackend::destroyChunkBuffers() {
     }
     m_deferredBufferReleases.clear();
 
+    // Images evicted by streaming that never reached their retirement timeline
+    // value before shutdown. The caller has already waited for the device to go
+    // idle, so destroying them unconditionally is safe here.
+    for (const DeferredImageRelease& release : m_deferredImageReleases) {
+        destroyImageResourceNow(release.image, release.allocation, release.imageView);
+    }
+    m_deferredImageReleases.clear();
+
+    for (const DeferredCommandPoolRelease& release : m_deferredCommandPoolReleases) {
+        vkDestroyCommandPool(m_device, release.pool, nullptr);
+    }
+    m_deferredCommandPoolReleases.clear();
+
     m_chunkDrawRanges.clear();
     m_chunkLodMeshCache.clear();
     m_chunkLodMeshCacheValid = false;
@@ -2297,6 +2384,7 @@ void RendererBackend::shutdown() {
         destroyVoxelGiResources();
         destroyAutoExposureResources();
         destroySunShaftResources();
+        destroyTaaComputeResources();
         destroySsaoComputeResources();
         destroySkinningComputeResources();
         destroyChunkBuffers();

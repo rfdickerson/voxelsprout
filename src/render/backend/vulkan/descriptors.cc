@@ -558,6 +558,68 @@ void RendererBackend::updateFrameDescriptorSets(
             m_sunShaftImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
     }
 
+    if (m_taaEnabled && m_taaBufferSet.valid() &&
+        aoFrameIndex < m_hdrResolveImageViews.size() &&
+        m_hdrResolveImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_taaImageViews[0] != VK_NULL_HANDLE && m_taaImageViews[1] != VK_NULL_HANDLE) {
+        // TAA's small uniform lives in a fresh FrameArena slice each frame:
+        // it changes every frame (prev matrices), and the arena is exactly the
+        // per-frame upload path everything else uses for that.
+        //
+        // 256-byte alignment for the same reason the bone matrices use it --
+        // this address feeds a shader binding directly, so it must satisfy
+        // any device's minUniformBufferOffsetAlignment, not the struct's.
+        TaaUniformData uniformData{};
+        std::memcpy(uniformData.invView, m_taaInvViewColumnMajor.m, sizeof(uniformData.invView));
+        std::memcpy(
+            uniformData.prevViewProj, m_taaPrevViewProjColumnMajor.m,
+            sizeof(uniformData.prevViewProj));
+        // History weight 0.88: high enough to converge shimmer in ~8 frames,
+        // low enough that the clamp can pull a stale region back quickly.
+        uniformData.params[0] = 0.88f;
+        uniformData.params[1] = (m_taaHistoryValid && m_taaPrevViewProjValid) ? 1.0f : 0.0f;
+        const std::optional<FrameArenaSlice> uniformSlice = m_frameArena.allocateUpload(
+            sizeof(TaaUniformData), 256u, FrameArenaUploadKind::Unknown);
+        if (uniformSlice.has_value() && uniformSlice->mapped != nullptr) {
+            std::memcpy(uniformSlice->mapped, &uniformData, sizeof(uniformData));
+            const VkDeviceAddress uniformAddress =
+                m_bufferAllocator.getDeviceAddress(uniformSlice->buffer) + uniformSlice->offset;
+            const uint32_t region = m_currentFrame;
+            // The pass writes into (historyIndex ^ 1) and reads historyIndex;
+            // recordTaaPass flips the index after recording, so these must
+            // agree with the pre-flip value.
+            const std::uint32_t currentImage = m_taaHistoryIndex ^ 1u;
+            const std::uint32_t historyImage = m_taaHistoryIndex;
+            writeDescriptorBufferUniform(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 0),
+                cameraDeviceAddress, cameraBufferInfo.range);
+            writeDescriptorBufferCombinedImageSampler(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 1), 0,
+                m_hdrResolveImageViews[aoFrameIndex], m_ssaoSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            writeDescriptorBufferCombinedImageSampler(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 2), 0,
+                m_taaImageViews[historyImage], m_ssaoSampler,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            writeDescriptorBufferCombinedImageSampler(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 3), 0,
+                normalDepthImageInfo.imageView, normalDepthImageInfo.sampler,
+                normalDepthImageInfo.imageLayout);
+            writeDescriptorBufferStorageImage(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 4),
+                m_taaImageViews[currentImage], VK_IMAGE_LAYOUT_GENERAL);
+            writeDescriptorBufferUniform(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 5),
+                uniformAddress, sizeof(TaaUniformData));
+        }
+    }
+
     if (m_ssaoBufferSet.valid() &&
         aoFrameIndex < m_ssaoRawImageViews.size() &&
         m_ssaoRawImageViews[aoFrameIndex] != VK_NULL_HANDLE) {

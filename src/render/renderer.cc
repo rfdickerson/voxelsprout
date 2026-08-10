@@ -44,6 +44,28 @@ bool Renderer::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
     return m_backend->uploadGpuScene(scene);
 }
 
+std::size_t Renderer::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
+    const std::size_t chunkIndex = m_backend->addImportedSceneChunk(scene);
+    return chunkIndex == RendererBackend::kInvalidImportedChunkIndex
+        ? kInvalidImportedChunkIndex
+        : chunkIndex;
+}
+
+void Renderer::removeImportedSceneChunk(std::size_t chunkIndex) {
+    if (chunkIndex == kInvalidImportedChunkIndex) {
+        return;
+    }
+    m_backend->removeImportedSceneChunkAt(chunkIndex);
+}
+
+std::size_t Renderer::liveImportedSceneChunkCount() const {
+    return m_backend->liveImportedSceneChunkCount();
+}
+
+std::size_t Renderer::importedLocalLightCount() const {
+    return m_backend->importedLocalLightCount();
+}
+
 bool Renderer::uploadImportedScene(const odai::importer::ImportedScene& scene) {
     return m_backend->uploadImportedScene(scene);
 }
@@ -58,6 +80,10 @@ void Renderer::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSk
 
 void Renderer::setSkinningDebugBypass(bool bypass) {
     m_backend->setSkinningDebugBypass(bypass);
+}
+
+void Renderer::setTaaEnabled(bool enabled) {
+    m_backend->setTaaEnabled(enabled);
 }
 
 void Renderer::clearHexTerrain() {
@@ -118,6 +144,42 @@ void Renderer::setStrategyMapMode(bool enabled) {
 
 void Renderer::setRayTracingEnabled(bool enabled) {
     m_backend->setRayTracingEnabled(enabled);
+}
+
+bool Renderer::captureFrameToFile(const std::string& outputPath) {
+    return m_backend->captureLastFrameToFile(outputPath);
+}
+
+void Renderer::setNeutralColorGrading() {
+    m_backend->setNeutralColorGrading();
+}
+
+void Renderer::setAutoExposureEnabled(bool enabled) {
+    m_backend->setAutoExposureEnabled(enabled);
+}
+
+bool Renderer::isAutoExposureEnabled() const {
+    return m_backend->isAutoExposureEnabled();
+}
+
+void Renderer::setVoxelGiEnabled(bool enabled) {
+    m_backend->setVoxelGiEnabled(enabled);
+}
+
+bool Renderer::isVoxelGiEnabled() const {
+    return m_backend->isVoxelGiEnabled();
+}
+
+void Renderer::setSunShaftsEnabled(bool enabled) {
+    m_backend->setSunShaftsEnabled(enabled);
+}
+
+bool Renderer::isSunShaftsEnabled() const {
+    return m_backend->isSunShaftsEnabled();
+}
+
+void Renderer::setMsaaSamples(std::uint32_t samples) {
+    m_backend->setRequestedMsaaSamples(samples);
 }
 
 void Renderer::setMinimalRenderMode(bool enabled) {
@@ -226,6 +288,10 @@ void Renderer::setAmbientOcclusionTuning(float radius, float bias, float intensi
     m_backend->setAmbientOcclusionTuning(radius, bias, intensity);
 }
 
+void Renderer::setAmbientOcclusionFineScale(float fineRadiusScale) {
+    m_backend->setAmbientOcclusionFineScale(fineRadiusScale);
+}
+
 void Renderer::setAmbientOcclusionMode(AoMode mode) {
     m_backend->setAmbientOcclusionMode(mode);
 }
@@ -248,6 +314,18 @@ ShadowStats Renderer::shadowStats() const {
 
 void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
+}
+
+void Renderer::setWeatherSky(const WeatherSkyParams& params) {
+    m_backend->setWeatherSky(params);
+}
+
+void Renderer::setWeatherClouds(const WeatherCloudTextures& clouds) {
+    m_backend->setWeatherClouds(clouds);
+}
+
+void Renderer::setTonemapSettings(const TonemapSettings& settings) {
+    m_backend->setTonemapSettings(settings);
 }
 
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,

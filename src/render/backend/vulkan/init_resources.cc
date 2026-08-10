@@ -2524,6 +2524,7 @@ bool RendererBackend::createShadowResources() {
     );
 
     m_shadowDepthInitialized = false;
+    m_shadowRenderedValid = {};
     VOX_LOGI("render") << "shadow resources ready (atlas " << kShadowAtlasSize << "x" << kShadowAtlasSize
               << ", cascades=" << kShadowCascadeCount << ")\n";
     return true;
@@ -3716,6 +3717,7 @@ void RendererBackend::destroyShadowResources() {
         m_shadowDepthMemory = VK_NULL_HANDLE;
     }
     m_shadowDepthInitialized = false;
+    m_shadowRenderedValid = {};
 }
 
 

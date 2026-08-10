@@ -33,6 +33,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
     const std::uint32_t importedTerrainDrawCount = inputs.importedTerrainDrawCount;
+    const std::span<const std::uint32_t> importedBlendedDrawOrder = inputs.importedBlendedDrawOrder;
     const VkBuffer importedActorVertexBuffer = inputs.importedActorVertexBuffer;
     const VkDeviceSize importedActorVertexOffset = inputs.importedActorVertexOffset;
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
@@ -162,7 +163,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     renderingInfo.renderArea.offset = {0, 0};
-    renderingInfo.renderArea.extent = m_swapchainExtent;
+    renderingInfo.renderArea.extent = m_renderExtent;
     renderingInfo.layerCount = 1;
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachments = &colorAttachment;
@@ -233,6 +234,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         // Per-chunk offsets ride the instance buffer; the push constant block stays zeroed
         // so the shader's chunkOffset/cascadeData path matches the shadow pass.
         ChunkPushConstants chunkPushConstants{};
+        // Neutral alpha-test threshold. Draws that carry an authored one
+        // overwrite this; leaving it zeroed would mean nothing cuts out.
+        chunkPushConstants.materialParams[0] = 0.5f;
         vkCmdPushConstants(
             commandBuffer,
             m_pipelineLayout,
@@ -265,6 +269,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
+        // Neutral alpha-test threshold. Draws that carry an authored one
+        // overwrite this; leaving it zeroed would mean nothing cuts out.
+        importedPushConstants.materialParams[0] = 0.5f;
         importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
@@ -276,14 +283,135 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             sizeof(ChunkPushConstants),
             &importedPushConstants
         );
-        for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-            if ((drawIndex < terrainDrawCount && !drawTerrain) ||
-                (drawIndex >= staticDrawStart && !drawStatics)) {
-                continue;
+        // The alpha-test threshold is authored per surface, so it rides the push
+        // constants and is re-pushed only when consecutive draws disagree.
+        // Sentinel starts outside 0-255 so the first draw always pushes.
+        // ODAI_DEBUG_NO_ALPHATEST=1 pushes a threshold below every possible
+        // sampled alpha, so the shader's `discard` can never fire. Diagnostic
+        // twin of ODAI_DEBUG_NO_CULL: rendering with and without it and
+        // diffing separates "this surface is missing because alpha test threw
+        // it away" from "because it was culled" from "because it was never
+        // submitted", which look identical on screen.
+        static const bool s_disableAlphaTest = std::getenv("ODAI_DEBUG_NO_ALPHATEST") != nullptr;
+        int lastPushedThreshold = -1;
+        const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+            if (static_cast<int>(threshold) == lastPushedThreshold) {
+                return;
             }
-            const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            lastPushedThreshold = static_cast<int>(threshold);
+            importedPushConstants.materialParams[0] =
+                s_disableAlphaTest ? -1.0f : (static_cast<float>(threshold) / 255.0f);
+            static const bool s_highlightAlphaTest =
+                std::getenv("ODAI_DEBUG_ALPHATEST_HIGHLIGHT") != nullptr;
+            importedPushConstants.materialParams[1] = s_highlightAlphaTest ? 1.0f : 0.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &importedPushConstants);
+        };
+        // Opaque imported geometry, as indirect batches grouped by alpha-test
+        // threshold. This is the bulk of the frame's draw calls -- roughly 3000
+        // of them in the Mojave -- and they all share one vertex and one index
+        // buffer, so the whole set collapses into one indirect call per
+        // distinct threshold.
+        const auto includeDraw = [&](std::size_t drawIndex) {
+            if (drawIndex < terrainDrawCount) {
+                return drawTerrain;
+            }
+            return drawStatics;
+        };
+        VkBuffer indirectBuffer = VK_NULL_HANDLE;
+        VkDeviceSize indirectBase = 0;
+        const bool useIndirect = m_supportsMultiDrawIndirect &&
+            buildImportedIndirectBatches(importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+        if (useIndirect) {
+            // Two-sidedness is a pipeline switch, so the batch order (grouped
+            // by it) is also the bind order -- at most one extra bind.
+            VkPipeline boundOpaquePipeline = VK_NULL_HANDLE;
+            for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                VkPipeline wantedPipeline =
+                    (batch.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineTwoSided
+                        : ((useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                               ? m_importedStaticPipelineRt
+                               : m_importedStaticPipeline);
+                if (wantedPipeline != boundOpaquePipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundOpaquePipeline = wantedPipeline;
+                }
+                pushAlphaThreshold(batch.alphaThreshold);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexedIndirect(
+                    commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
+                    batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+            }
+            if (boundOpaquePipeline != VK_NULL_HANDLE) {
+                // Leave the opaque pipeline bound for the blended replay below,
+                // which assumes it and only rebinds when it wants a different one.
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineRt
+                        : m_importedStaticPipeline);
+            }
+        } else {
+            // Direct fallback: no multiDrawIndirect, or the frame arena could
+            // not serve the command buffer this frame.
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                if (!includeDraw(drawIndex)) {
+                    continue;
+                }
+                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                if (importedDraw.blended) {
+                    continue;  // replayed below, in back-to-front order
+                }
+                pushAlphaThreshold(importedDraw.alphaThreshold);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                    importedDraw.vertexOffset, 0);
+            }
+        }
+
+        // Blended tail, farthest first. Same vertex/index buffers and push
+        // constants as the opaque draws, so only the pipeline changes; if that
+        // pipeline failed to create, the draws still go out through the opaque
+        // one rather than vanishing.
+        if (!importedBlendedDrawOrder.empty()) {
+            // Two-sidedness is a per-draw property (NiStencilProperty DRAW_BOTH
+            // on the source shape), so the pipeline is resolved per draw and
+            // rebound only when it actually changes. The sorted order is what
+            // decides the sequence -- correctness of the compositing outranks
+            // the handful of extra binds a mixed run costs.
+            VkPipeline boundBlendedPipeline = VK_NULL_HANDLE;
+            for (const std::uint32_t drawIndex : importedBlendedDrawOrder) {
+                if (drawIndex >= importedMeshDraws.size()) {
+                    continue;
+                }
+                if ((drawIndex < terrainDrawCount && !drawTerrain) ||
+                    (drawIndex >= staticDrawStart && !drawStatics)) {
+                    continue;
+                }
+                const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
+                pushAlphaThreshold(importedDraw.alphaThreshold);
+                VkPipeline wantedPipeline =
+                    (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineBlendedTwoSided
+                        : m_importedStaticPipelineBlended;
+                if (wantedPipeline != VK_NULL_HANDLE && wantedPipeline != boundBlendedPipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundBlendedPipeline = wantedPipeline;
+                }
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                    importedDraw.vertexOffset, 0);
+            }
         }
     }
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
@@ -304,6 +432,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
+        // Neutral alpha-test threshold. Draws that carry an authored one
+        // overwrite this; leaving it zeroed would mean nothing cuts out.
+        importedPushConstants.materialParams[0] = 0.5f;
         importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
@@ -317,7 +448,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
             countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+            vkCmdDrawIndexed(
+                commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                importedDraw.vertexOffset, 0);
         }
     }
     // GPU-skinned actors (Dragon Age touchstone) -- same pipeline as the
@@ -337,6 +470,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         bindGraphicsDescriptorBuffers(commandBuffer);
         ChunkPushConstants skinnedPushConstants{};
+        // Neutral alpha-test threshold. Draws that carry an authored one
+        // overwrite this; leaving it zeroed would mean nothing cuts out.
+        skinnedPushConstants.materialParams[0] = 0.5f;
         skinnedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         skinnedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         skinnedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
@@ -429,7 +565,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         opaqueCopyRegion.dstSubresource.mipLevel = 0;
         opaqueCopyRegion.dstSubresource.baseArrayLayer = 0;
         opaqueCopyRegion.dstSubresource.layerCount = 1;
-        opaqueCopyRegion.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1u};
+        opaqueCopyRegion.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
         vkCmdCopyImage(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
@@ -522,6 +658,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             );
             bindGraphicsDescriptorBuffers(commandBuffer);
             ChunkPushConstants waterPushConstants{};
+            // Neutral alpha-test threshold. Draws that carry an authored one
+            // overwrite this; leaving it zeroed would mean nothing cuts out.
+            waterPushConstants.materialParams[0] = 0.5f;
             waterPushConstants.cascadeData[2] = m_debugImportedWaterSolid ? 1.0f : 0.0f;
             vkCmdPushConstants(
                 commandBuffer,

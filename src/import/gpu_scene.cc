@@ -314,7 +314,13 @@ bool buildGpuSceneAssetFromImportedScene(const ImportedScene& scene, GpuSceneAss
     outAsset.waterPatches = scene.waterPatches;
     outAsset.lights = scene.lights;
     outAsset.sceneBounds = makeEmptyBounds();
-    const std::vector<bool> textureAlphaCutoutMask = buildTextureAlphaCutoutMask(scene.textures);
+    // Same veto as applyTextureAlphaCutoutFlags in imported_scene.cc: a scene
+    // whose importer authored per-shape alpha modes never gets the content
+    // guess. An empty mask makes textureIndexUsesAlphaCutout() false for every
+    // index, leaving part.alphaTest as the only source.
+    const std::vector<bool> textureAlphaCutoutMask = scene.alphaFlagsAuthored
+        ? std::vector<bool>{}
+        : buildTextureAlphaCutoutMask(scene.textures);
 
     std::uint32_t globalFirstVertex = 0u;
     std::uint32_t globalFirstIndex = 0u;

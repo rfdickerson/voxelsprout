@@ -88,13 +88,10 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
             VK_IMAGE_ASPECT_COLOR_BIT
         );
 
-        struct SsaoComputePushConstants {
-            uint32_t width;
-            uint32_t height;
-        };
         SsaoComputePushConstants ssaoPushConstants{};
         ssaoPushConstants.width = std::max(1u, aoExtent.width);
         ssaoPushConstants.height = std::max(1u, aoExtent.height);
+        ssaoPushConstants.fineRadiusScale = m_shadowDebugSettings.ssaoFineRadiusScale;
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipeline);
         bindDescriptorBuffer(

@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace odai::importer::fnv {
@@ -57,10 +58,41 @@ struct EsmRecordView {
 struct EsmGroupView {
     std::string rawLabel;
     std::int32_t groupType = 0;
+    // Byte offset of this GRUP's own 24-byte header, and its declared size
+    // (which includes that header). Together they bound the group exactly, which
+    // is what lets a caller record a cell's children group during one full pass
+    // and later re-walk just that range with walkRange() -- the basis of
+    // streaming a single cell without re-reading the plugin.
+    std::uint64_t fileOffset = 0;
+    std::uint32_t groupSize = 0;
 };
 
+// The cheap half of a record: everything readable from its 24-byte header,
+// with no decompression and no subrecord parsing. `type` points into the
+// reader's own file buffer and is valid only for the duration of the
+// onRecordHeader callback.
+struct EsmRecordHeaderView {
+    std::string_view type;
+    std::uint32_t formId = 0;
+    std::uint32_t flags = 0;
+    // Byte offset of this record's own 24-byte header.
+    std::uint64_t fileOffset = 0;
+};
+
+// Move-only: an open reader owns a memory mapping of the plugin file.
 class EsmReader {
 public:
+    EsmReader() = default;
+    ~EsmReader();
+    EsmReader(const EsmReader&) = delete;
+    EsmReader& operator=(const EsmReader&) = delete;
+    EsmReader(EsmReader&& other) noexcept;
+    EsmReader& operator=(EsmReader&& other) noexcept;
+
+    // Memory-maps the plugin rather than reading it. FalloutNV.esm is 234 MB
+    // and a filtered walk touches only a fraction of it, so mapping saves both
+    // the read itself (~80 ms warm) and the resident pages for everything the
+    // walk skips. Falls back to a plain read if the mapping fails.
     bool open(const std::filesystem::path& path);
     const std::string& lastError() const { return m_lastError; }
 
@@ -69,6 +101,16 @@ public:
         // contents entirely (onGroupExit is still called).
         std::function<bool(const EsmGroupView&)> onGroupEnter;
         std::function<void(const EsmGroupView&)> onGroupExit;
+        // Called with a record's header BEFORE its body is decompressed or
+        // split into subrecords. Return false to skip the record entirely, at
+        // the cost of only a header read.
+        //
+        // This is the difference between reading a plugin and parsing one.
+        // FalloutNV.esm holds 29363 compressed LAND records; materializing
+        // them costs ~129 MB of inflate and ~489 MB of heap, and a caller
+        // cooking an interior cell wants none of it. Leave this null to
+        // materialize every record.
+        std::function<bool(const EsmRecordHeaderView&)> onRecordHeader;
         // See the EsmRecordView comment: extract what you need from `record`
         // synchronously — its subrecord data pointers do not outlive this call.
         std::function<void(const EsmRecordView&)> onRecord;
@@ -77,9 +119,37 @@ public:
     // Depth-first walk of the whole file.
     bool walk(const Visitor& visitor);
 
+    // Depth-first walk of one byte range, which must begin exactly on a GRUP or
+    // record header and end on a boundary. Used to revisit a single cell's
+    // children group recorded by an earlier full pass; because the plugin is
+    // memory-mapped this costs a pointer walk plus whatever decompression that
+    // cell's own records need, not a re-read of the file.
+    bool walkRange(std::uint64_t beginOffset, std::uint64_t endOffset, const Visitor& visitor);
+
+    // Compressed records whose deflate stream produced every declared byte but
+    // whose trailing checksum did not verify. These are accepted rather than
+    // treated as fatal — retail FalloutNV.esm ships exactly one (a LAND,
+    // formID 0x150FC0). A nonzero count here is worth reporting, not ignoring;
+    // a large one means something is actually wrong with the file.
+    std::uint32_t toleratedChecksumFailures() const { return m_toleratedChecksumFailures; }
+
 private:
-    std::vector<std::uint8_t> m_bytes;
+    // Releases the mapping (if any) and drops back to an empty reader.
+    void close();
+
+    // The plugin bytes, however they got here. When the file is mapped,
+    // m_data points into the mapping and m_ownedBytes is empty; on the
+    // fallback path m_data points at m_ownedBytes. Either way the buffer is
+    // stable for the reader's lifetime, which the subrecord views rely on.
+    const std::uint8_t* m_data = nullptr;
+    std::size_t m_size = 0;
+    std::vector<std::uint8_t> m_ownedBytes;
+    // Platform mapping handles, owned and interpreted only by esm_reader.cc.
+    void* m_mappingAddress = nullptr;
+    std::uint64_t m_mappingHandles[2] = {0, 0};
+
     std::string m_lastError;
+    std::uint32_t m_toleratedChecksumFailures = 0;
 };
 
 }  // namespace odai::importer::fnv

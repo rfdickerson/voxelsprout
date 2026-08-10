@@ -220,8 +220,12 @@ void testMaterialIndexPacking() {
     // reinterprets the entire table.
     check(sizeof(GpuImportedMaterial) == 32u, "GpuImportedMaterial is 32 bytes");
     check(alignof(GpuImportedMaterial) == 16u, "GpuImportedMaterial is 16-byte aligned");
-    check(sizeof(ImportedScenePackedVertex) == 52u,
-          "packed vertex is 52 bytes -- it is raw-blitted to disk with no version gate");
+    // 52 through v19, 68 through v20; v21 widened the terrain layer texture
+    // indices and a packed weight word. readPackedVertexArray version-gates the
+    // read now, but the size still deserves an assert: it is what makes anyone
+    // widening the struct go and add the matching legacy branch.
+    check(sizeof(ImportedScenePackedVertex) == 72u,
+          "packed vertex is 72 bytes -- widening it needs a new legacy branch in readPackedVertexArray");
 
     // Index 0 means "no library material" and must reduce exactly to the old
     // overload, default included. This is what keeps legacy scenes bit-identical.

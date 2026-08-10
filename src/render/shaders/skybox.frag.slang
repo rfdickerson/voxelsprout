@@ -1,13 +1,103 @@
 import camera_uniform;
+
+// Same bindless table the imported-geometry shaders use; the sky pipeline binds
+// set 1 already, so cloud layers cost no new descriptor.
+[[vk::binding(0, 1)]]
+Sampler2D<float4> bindlessTextures[];
+
 float saturate01(float value)
 {
     return clamp(value, 0.0, 1.0);
 }
 
+
 float smoothStep(float edge0, float edge1, float x)
 {
     const float t = saturate01((x - edge0) / max(edge1 - edge0, 1e-6));
     return t * t * (3.0 - (2.0 * t));
+}
+
+// Fallout's cloud layers are SKY DOME MAPS, not tiling planes: each texture is
+// a fisheye of the whole sky, zenith at the centre of the image and horizon at
+// the rim of an inscribed circle. Nevada Skies' WesternSky1.dds is unmistakable
+// about it -- a bright cloud disc with sun rays radiating into the dark corners.
+//
+// This was first written as a plane projection, dir.xz/(dir.y+k), with wrap
+// addressing. That maps the visible sky into roughly [-0.76, 0.76] of UV space,
+// so it crosses zero and the sampler wraps -- which tiles the entire circular
+// image and puts a hard seam where it crosses. The symptom is a vertical seam
+// with the sky visibly repeating from it, and no amount of tuning the scale
+// fixes it, because tiling a fisheye is meaningless.
+//
+// The right mapping sends the hemisphere onto the unit disc exactly once:
+// angle from the zenith becomes radius, compass direction becomes angle. Every
+// UV then lands inside one copy of the texture, so there is nothing to wrap and
+// no seam to find.
+float3 applyWeatherClouds(float3 sky, float3 dir, float time)
+{
+    if (dir.y <= 0.0)
+    {
+        return sky;  // below the horizon; the ground blend owns this
+    }
+
+    // Angle from the zenith, normalised so 0 is straight up and 1 is the
+    // horizon. acos rather than a cheaper approximation because the horizon is
+    // where the gradient is steepest and where any error shows.
+    const float radius = acos(clamp(dir.y, 0.0, 1.0)) * (2.0 / 3.14159265);
+    const float2 compass = dir.xz;
+    const float compassLength = max(length(compass), 1e-5);
+    const float2 compassDir = compass / compassLength;
+
+    // Fade the last of it out at the horizon: the dome map's own rim is a hard
+    // edge, and the projection compresses hardest right there.
+    const float horizonFade = 1.0 - smoothStep(0.86, 1.0, radius);
+
+    float3 result = sky;
+    for (int layer = 0; layer < 4; ++layer)
+    {
+        const float4 tint = camera.weatherCloudTint[layer];
+        const float opacity = tint.w;
+        if (opacity <= 0.001)
+        {
+            continue;
+        }
+        const float4 params = camera.weatherCloudParams[layer];
+        const int slot = int(params.x + 0.5);
+        if (slot < 0)
+        {
+            continue;
+        }
+
+        // A dome map cannot scroll by translating UV -- that would slide the
+        // fisheye off its own centre. It ROTATES about the zenith, which is
+        // what a cloud layer drifting overhead actually looks like.
+        const float angle = time * params.y;
+        const float sinA = sin(angle);
+        const float cosA = cos(angle);
+        const float2 rotated = float2(
+            (compassDir.x * cosA) - (compassDir.y * sinA),
+            (compassDir.x * sinA) + (compassDir.y * cosA));
+
+        // params.z scales the dome: 1.0 puts the horizon exactly on the
+        // inscribed circle. Staying at or under 1 keeps every sample inside the
+        // texture, so wrap addressing never comes into play.
+        const float2 uv = float2(0.5, 0.5) + (0.5 * radius * params.z) * rotated;
+        const float4 sampled = bindlessTextures[slot].Sample(uv);
+
+        // FNV cloud textures carry the cloud SHAPE in alpha; rgb is shading
+        // detail, not the final colour. PNAM's per-layer tint is the colour.
+        //
+        // Multiplying rgb by the tint squares the darkness and is how a heavy
+        // overcast rendered as pure black: the tint is already sRGB 19,23,23
+        // (linear 0.0075) and the texture rgb is dark too, so the product
+        // landed below what 8-bit output can represent. Use the tint as the
+        // base and let the texture only modulate around it.
+        const float detail = dot(sampled.rgb, float3(0.2126, 0.7152, 0.0722));
+        const float3 cloudColor = tint.xyz * lerp(0.70, 1.30, saturate01(detail));
+        const float coverage = saturate01(sampled.a * opacity * horizonFade);
+        result = lerp(result, cloudColor, coverage);
+    }
+    return result;
 }
 
 float3 proceduralSky(float3 direction, float3 sunDirection)
@@ -38,13 +128,36 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     const float3 zenithRayleigh = lerp(float3(0.06, 0.24, 0.54), float3(0.16, 0.12, 0.30), zenithWarm);
     const float3 zenithMie = lerp(float3(0.22, 0.20, 0.15), float3(0.30, 0.18, 0.24), zenithWarm);
 
-    const float3 horizonColor =
+    float3 horizonColor =
         (horizonRayleigh * rayleighStrength) +
         (horizonMie * (mieStrength * 0.58));
-    const float3 zenithColor =
+    float3 zenithColor =
         (zenithRayleigh * rayleighStrength) +
         (zenithMie * (mieStrength * 0.25));
-    float3 sky = lerp(horizonColor, zenithColor, skyT);
+
+    // Authored sky from a WTHR record, blended over the procedural one. Fallout
+    // stores three vertical stops rather than a two-end gradient -- Horizon at
+    // the skyline, SkyLower just above it, SkyUpper at the zenith -- and the
+    // narrow Horizon->SkyLower band near the ground is what gives these skies
+    // their look. Collapsing it into a single lerp loses exactly the part worth
+    // having.
+    const float weatherWeight = saturate01(camera.weatherSkyUpper.w);
+    const float upAmount = saturate01(dir.y);
+    const float3 authoredLowBand =
+        lerp(camera.weatherHorizon.xyz, camera.weatherSkyLower.xyz,
+             smoothStep(0.0, 0.22, upAmount));
+    const float3 authoredSky =
+        lerp(authoredLowBand, camera.weatherSkyUpper.xyz, smoothStep(0.12, 0.75, upAmount));
+
+    // The horizon and zenith stops move too, because everything downstream --
+    // the ground blend below, and any caller reading these -- would otherwise
+    // mix an authored sky against a procedural horizon and band at the skyline.
+    horizonColor = lerp(horizonColor, camera.weatherHorizon.xyz, weatherWeight);
+    zenithColor = lerp(zenithColor, camera.weatherSkyUpper.xyz, weatherWeight);
+
+    // Falls through to the sun disk and phase terms below rather than returning:
+    // an authored sky still needs a sun in it.
+    float3 sky = lerp(lerp(horizonColor, zenithColor, skyT), authoredSky, weatherWeight);
 
     const float sunDotRaw = clamp(dot(dir, toSun), -1.0, 1.0);
     const float sunDot = max(sunDotRaw, 0.0);
@@ -103,6 +216,10 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     const float hazeBloom = hazeCore * hazeMask * (1.6 * haloIntensity * lowSunHaze);
 
     sky += sunColor * (disk + halo + hazeBloom) * (1.0 + phaseBoost);
+
+    // After the sun, so a cloud layer covers the disk instead of the disk
+    // burning through it.
+    sky = applyWeatherClouds(sky, dir, camera.skyConfig1.z);
 
     const float3 groundColor = float3(0.05, 0.06, 0.07);
     const float belowHorizon = saturate01(-dir.y);

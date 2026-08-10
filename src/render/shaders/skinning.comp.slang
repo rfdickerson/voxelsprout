@@ -8,32 +8,66 @@
 // imported_static.vert/frag.slang and all of their pipeline variants consume
 // the result as a plain vertex buffer with zero shader changes.
 //
-// VERIFY BEFORE SHIPPING: boneMatrices must be uploaded in the same
-// row-major/column-major convention the camera MVP matrix already uses for
-// this -matrix-layout-column-major compile flag (odai::math::Matrix4 is
-// row-major on the CPU side per math/math.h) -- transpose on upload if the
-// camera-matrix upload path does, mirror it exactly if it doesn't.
+// boneMatrices are uploaded transposed (skinning_resources.cc), matching the
+// camera-MVP path's convention for this -matrix-layout-column-major compile.
+//
+// STRUCT LAYOUT -- read this before touching either struct below.
+//
+// Both are declared with SCALAR members rather than float3/float2/uint4, and
+// that is load-bearing, not a style choice. A StructuredBuffer here lays out
+// under std430, where a float3 is 16-byte ALIGNED. Written the natural way:
+//
+//   struct { float3 position; float3 normal; float3 color; float2 uv;
+//            uint textureIndex; uint flags; uint4 boneIndices;
+//            float4 boneWeights; };
+//
+// SPIR-V puts normal at offset 16 (not 12), color at 32 (not 24), and gives the
+// struct a stride of 96 -- while the CPU side writes a tightly packed 84 bytes.
+// Every field past position is then read from the wrong offset, and every
+// vertex after the first from the wrong base. The result on screen is not a
+// subtly wrong character, it is a cloud of shards.
+//
+// Scalars are 4-byte aligned in std430, so a scalar-by-scalar declaration packs
+// exactly like the C struct. Confirmed by disassembly, which is the only way to
+// confirm it -- run:
+//
+//   spirv-dis src/render/shaders/skinning.comp.slang.spv | grep OpMemberDecorate
+//
+// and check the offsets against GpuSkinnedVertexIn / ImportedMeshVertex in
+// skinning_resources.cc and renderer_backend.h. Input stride must be 84,
+// output stride 72.
+//
+// The output struct additionally carries the terrain-layer fields. It is bound
+// as a plain vertex buffer for the main pass, which reads it as
+// ImportedMeshVertex -- so it has to match that struct to its last byte, not
+// just up to the fields skinning happens to care about.
 
 struct SkinnedVertexIn
 {
-    float3 position;
-    float3 normal;
-    float3 color;
-    float2 uv;
+    float positionX, positionY, positionZ;
+    float normalX, normalY, normalZ;
+    float colorR, colorG, colorB;
+    float u, v;
     uint textureIndex;
     uint flags;
-    uint4 boneIndices;
-    float4 boneWeights;
+    uint boneIndex0, boneIndex1, boneIndex2, boneIndex3;
+    float boneWeight0, boneWeight1, boneWeight2, boneWeight3;
 };
 
 struct SkinnedVertexOut
 {
-    float3 position;
-    float3 normal;
-    float3 color;
-    float2 uv;
+    float positionX, positionY, positionZ;
+    float normalX, normalY, normalZ;
+    float colorR, colorG, colorB;
+    float u, v;
     uint textureIndex;
     uint flags;
+    // ImportedMeshVertex's terrain-layer tail. Skinned geometry never uses
+    // terrain layers, but the fields must exist and be initialized: the main
+    // pass reads them off this same buffer, and leaving them out shortens the
+    // stride so every vertex after the first is fetched from the wrong offset.
+    uint layerTextureIndex0, layerTextureIndex1, layerTextureIndex2, layerTextureIndex3;
+    uint layerWeights;
 };
 
 struct SkinningPushConstants
@@ -68,28 +102,58 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const SkinnedVertexIn v = restPoseVertices[vertexIndex];
     const uint maxBoneIndex = max(skinningPc.boneCount, 1u) - 1u;
 
+    // Reassembled into vectors here rather than declared as vectors above --
+    // see the struct-layout note at the top of this file for why the storage
+    // has to stay scalar.
+    const float3 restPosition = float3(v.positionX, v.positionY, v.positionZ);
+    const float3 restNormal = float3(v.normalX, v.normalY, v.normalZ);
+    const uint4 boneIndices = uint4(v.boneIndex0, v.boneIndex1, v.boneIndex2, v.boneIndex3);
+    const float4 boneWeights = float4(v.boneWeight0, v.boneWeight1, v.boneWeight2, v.boneWeight3);
+
     float4 skinnedPosition = float4(0.0, 0.0, 0.0, 0.0);
     float4 skinnedNormal = float4(0.0, 0.0, 0.0, 0.0);
     [unroll]
     for (uint i = 0; i < 4u; ++i)
     {
-        const float weight = v.boneWeights[i];
+        const float weight = boneWeights[i];
         if (weight <= 0.0)
         {
             continue;
         }
-        const uint boneIndex = min(v.boneIndices[i], maxBoneIndex);
+        const uint boneIndex = min(boneIndices[i], maxBoneIndex);
         const float4x4 boneMatrix = boneMatrices[boneIndex];
-        skinnedPosition += weight * mul(boneMatrix, float4(v.position, 1.0));
-        skinnedNormal += weight * mul(boneMatrix, float4(v.normal, 0.0));
+        skinnedPosition += weight * mul(boneMatrix, float4(restPosition, 1.0));
+        skinnedNormal += weight * mul(boneMatrix, float4(restNormal, 0.0));
     }
 
+    // A vertex with no influences at all would otherwise collapse to the
+    // origin. Falling back to the rest pose keeps it where the artist put it,
+    // which is both more useful and much easier to recognize than a spike.
+    const float weightTotal = boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w;
+    const float3 finalPosition = (weightTotal > 0.0) ? skinnedPosition.xyz : restPosition;
+    const float3 finalNormal =
+        (weightTotal > 0.0 && dot(skinnedNormal.xyz, skinnedNormal.xyz) > 1e-12)
+            ? normalize(skinnedNormal.xyz)
+            : restNormal;
+
     SkinnedVertexOut result;
-    result.position = skinnedPosition.xyz;
-    result.normal = normalize(skinnedNormal.xyz);
-    result.color = v.color;
-    result.uv = v.uv;
+    result.positionX = finalPosition.x;
+    result.positionY = finalPosition.y;
+    result.positionZ = finalPosition.z;
+    result.normalX = finalNormal.x;
+    result.normalY = finalNormal.y;
+    result.normalZ = finalNormal.z;
+    result.colorR = v.colorR;
+    result.colorG = v.colorG;
+    result.colorB = v.colorB;
+    result.u = v.u;
+    result.v = v.v;
     result.textureIndex = v.textureIndex;
     result.flags = v.flags;
+    result.layerTextureIndex0 = 0xffffffffu;
+    result.layerTextureIndex1 = 0xffffffffu;
+    result.layerTextureIndex2 = 0xffffffffu;
+    result.layerTextureIndex3 = 0xffffffffu;
+    result.layerWeights = 0u;
     skinnedVertices[vertexIndex] = result;
 }

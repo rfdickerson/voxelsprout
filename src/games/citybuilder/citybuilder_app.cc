@@ -810,6 +810,13 @@ bool CityBuilderApp::onInit() {
             m_season = seasonForMonth(m_month);
         }
     }
+    if (const std::string shot = readEnv("ODAI_CITY_SCREENSHOT"); !shot.empty()) {
+        m_screenshotPath = shot;
+        if (const std::string frames = readEnv("ODAI_CITY_SCREENSHOT_FRAMES"); !frames.empty()) {
+            m_screenshotWarmupFrames = std::max(1, std::atoi(frames.c_str()));
+        }
+    }
+
     recomputeStats();   // snap initial city stats to their targets
     pushHistory();      // first sample so the report charts open with data
     return true;
@@ -2635,6 +2642,20 @@ void CityBuilderApp::onRender(float /*dt*/) {
     // re-upload.
     const render::ImportedActorFrameData actorData = buildActorFrameData();
     submitFrame(m_camera, 0.0f, actorData.vertices.empty() ? nullptr : &actorData);
+
+    // After submitFrame: the capture reads the last presented image, so running
+    // it earlier gets nothing. The warm-up matters here too -- the ambient
+    // agents need time to walk clear of their spawn tiles, and auto-exposure
+    // takes several frames to settle.
+    if (!m_screenshotPath.empty()) {
+        ++m_framesRendered;
+        if (m_framesRendered >= m_screenshotWarmupFrames) {
+            if (!m_renderer.captureFrameToFile(m_screenshotPath)) {
+                VOX_LOGE("city") << "screenshot capture failed";
+            }
+            glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+        }
+    }
 }
 
 ImportedScene CityBuilderApp::buildCityScene() const {

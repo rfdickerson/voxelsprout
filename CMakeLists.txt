@@ -231,6 +231,7 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_normaldepth.frag.slang" fragment)
     # Ambient occlusion: one source, three estimators. ODAI_AO_MODE picks which
     # estimateVisibility() compiles in, so each pipeline's sample loop is branch-free.
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang"
@@ -289,6 +290,7 @@ add_library(odai_ui STATIC
     src/ui/cached_rich_text.cc
     src/ui/ui_context.cc
     src/ui/icon_atlas.cc
+    src/ui/toast_host.cc
     src/ui/tooltip.cc
     src/ui/theme/ui_theme.cc
     src/ui/signal.cc
@@ -641,6 +643,7 @@ if(ODAI_BUILD_APP)
         list(APPEND RENDER_BACKEND_SOURCES
             src/render/backend/vulkan/device.cc
             src/render/backend/vulkan/frame.cc
+            src/render/backend/vulkan/frame_capture.cc
             src/render/backend/vulkan/frame_run.cc
             src/render/backend/vulkan/frame_graph_core.cc
             src/render/backend/vulkan/frame_graph_runtime.cc
@@ -911,6 +914,10 @@ if(ODAI_BUILD_APP)
     # skirmish (Dragon Age: Origins touchstone, Vulkan). First game exercising
     # the multi-instance GPU skinning pipeline end to end.
     # ---------------------------------------------------------------------------
+        # Free-roam viewer for cooked Fallout: New Vegas scenes. Needs a full
+        # GameApp (not odai_material_editor, which is minimal-rendering) to show
+        # sun, sky, shadows and ambient occlusion.
+        #   odai_game_newvegas --scene <cooked.bin>
         add_executable(odai_game_legion
             src/games/legion/legion_main.cc
             src/games/legion/legion_app.cc
@@ -954,6 +961,72 @@ if(ODAI_BUILD_APP)
         else()
             target_compile_options(odai_game_legion PRIVATE -Wall -Wextra -Wpedantic)
         endif()
+
+        add_executable(odai_game_newvegas
+            src/games/newvegas/newvegas_main.cc
+            src/games/newvegas/newvegas_app.cc
+            src/games/newvegas/newvegas_collision.cc
+            src/games/newvegas/newvegas_ogg.cc
+            src/core/job_system.cc
+            src/import/cell_residency_planner.cc
+            # The runtime reads the game's own files now: BSA archives, the ESM
+            # record walker, typed record extraction, the NIF geometry parser
+            # and the shared per-cell scene builder.
+            src/import/fnv/asset_source.cc
+            src/import/fnv/bsa_archive.cc
+            src/import/fnv/cell_builder.cc
+            src/import/fnv/decoded_texture_cache.cc
+        src/import/fnv/decoded_texture_cache.cc
+            src/import/fnv/cell_streamer.cc
+            src/import/fnv/esm_reader.cc
+            src/import/fnv/plugin_load_order.cc
+            src/import/fnv/weather_records.cc
+            src/import/fnv/fallout_records.cc
+            src/import/fnv/nif_scene.cc
+            src/import/fnv/character_builder.cc
+            src/engine/game_app.cc
+            src/engine/plugin.cc
+            src/import/dds.cc
+            src/import/gpu_scene.cc
+            src/import/imported_scene.cc
+            src/import/imported_scene_query.cc
+            src/render/frame_graph.cc
+            src/render/renderer.cc
+            src/world/world.cc
+            src/world/chunk_grid_worldgen.cc
+            src/world/chunk_mesher.cc
+            src/world/clipmap_index.cc
+            src/world/magica_voxel.cc
+            ${RENDER_BACKEND_SOURCES}
+        )
+        target_include_directories(odai_game_newvegas PRIVATE src ${ODAI_STB_INCLUDE_DIRS})
+        target_compile_definitions(odai_game_newvegas PRIVATE
+            ODAI_RENDER_BACKEND_VULKAN=1
+            ODAI_HAS_VULKAN=1
+            ODAI_HAS_GLFW=1
+            ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
+        )
+        target_link_libraries(odai_game_newvegas PRIVATE
+            odai_ui odai_ui_vulkan odai_audio
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+            # zlib: the runtime now inflates compressed ESM records and BSA
+            # entries itself, streaming from the game's own files.
+            ZLIB::ZLIB
+        )
+        if(TARGET glfw)
+            target_link_libraries(odai_game_newvegas PRIVATE glfw)
+        elseif(TARGET glfw3::glfw)
+            target_link_libraries(odai_game_newvegas PRIVATE glfw3::glfw)
+        endif()
+        if(TARGET slang_shaders)
+            add_dependencies(odai_game_newvegas slang_shaders)
+        endif()
+        if(MSVC)
+            target_compile_options(odai_game_newvegas PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_game_newvegas PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
 
     # ---------------------------------------------------------------------------
     # odai_game_snake — Snake / Nibbles (Vulkan)
@@ -1441,6 +1514,21 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_dds_bundler PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    # FNV texture-pack normalizer — mip-drops a downloaded texture mod to the
+    # ceiling the runtime will ask for and lowercases its paths, producing a
+    # directory to hand to `odai_game_newvegas --mod`.
+    #   odai_fnv_texture_pack --in <dir> --out <dir> [--max-size 1024]
+    add_executable(odai_fnv_texture_pack
+        src/import/dds.cc
+        src/tools/fnv_texture_pack_main.cc
+    )
+    target_include_directories(odai_fnv_texture_pack PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_fnv_texture_pack PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_fnv_texture_pack PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     # SVG bundler — offline .svg → .odaivec tessellated geometry cache. Run once
     # per icon directory; VectorIconRegistry prefers a fresh .odaivec sidecar.
     #   odai_svg_bundler <file.svg> [...]
@@ -1474,8 +1562,14 @@ if(ODAI_BUILD_TOOLS)
     #   odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --worldspace <EditorID> <x0> <z0> <x1> <z1>
     add_executable(odai_newvegas_cooker
         src/tools/newvegas_cooker_main.cc
+        src/import/dds.cc
+        src/import/fnv/asset_source.cc
         src/import/fnv/bsa_archive.cc
+        src/import/fnv/cell_builder.cc
+        src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/esm_reader.cc
+        src/import/fnv/plugin_load_order.cc
+        src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
         src/import/imported_scene.cc
@@ -1487,6 +1581,38 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_newvegas_cooker PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
         target_compile_options(odai_newvegas_cooker PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    # New Vegas probe — real-data harness for the BSA/ESM/NIF readers.
+    # odai_fnv_import_tests is synthetic-fixture-only by design, so it cannot
+    # catch a wrong assumption about the retail format; this is the tool that
+    # can. Deliberately NOT registered with add_test: it needs an installed
+    # copy of the game.
+    #   odai_newvegas_probe <DataFilesPath> --archives | --nifs [limit] |
+    #                                       --nif <path> | --plugin <Plugin.esm>
+    add_executable(odai_newvegas_probe
+        src/tools/newvegas_probe_main.cc
+        src/import/dds.cc
+        src/import/imported_scene.cc
+        src/import/imported_scene_query.cc
+        src/import/fnv/asset_source.cc
+        src/import/fnv/cell_builder.cc
+        src/import/fnv/decoded_texture_cache.cc
+        src/import/fnv/bsa_archive.cc
+        src/import/fnv/esm_reader.cc
+        src/import/fnv/plugin_load_order.cc
+        src/import/fnv/weather_records.cc
+        src/import/fnv/fallout_records.cc
+        src/import/fnv/dialogue_records.cc
+        src/import/fnv/nif_scene.cc
+        src/import/fnv/character_builder.cc
+    )
+    target_include_directories(odai_newvegas_probe PRIVATE src)
+    target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB)
+    if(MSVC)
+        target_compile_options(odai_newvegas_probe PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_newvegas_probe PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
@@ -1536,10 +1662,16 @@ if(BUILD_TESTING)
     # New Vegas Data Files are available to test against in CI.
     add_executable(odai_fnv_import_tests
         tests/fnv_import_tests.cc
+        src/core/job_system.cc
+        src/import/fnv/asset_source.cc
+        src/import/fnv/async_asset_loader.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/esm_reader.cc
+        src/import/fnv/plugin_load_order.cc
+        src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
+        src/import/fnv/character_builder.cc
     )
     target_include_directories(odai_fnv_import_tests PRIVATE src)
     target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB)
@@ -1700,6 +1832,50 @@ if(BUILD_TESTING)
         target_compile_options(odai_core_types_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME odai_core_types_tests COMMAND odai_core_types_tests)
+
+    # Refcounted bindless slot bookkeeping (render/bindless_slot_table.h) that
+    # imported-texture streaming rests on. Deliberately Vulkan-free so it can be
+    # tested here at all -- no test executable in this project links Vulkan.
+    add_executable(odai_bindless_slot_table_tests
+        tests/bindless_slot_table_tests.cc
+    )
+    target_include_directories(odai_bindless_slot_table_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_bindless_slot_table_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_bindless_slot_table_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_bindless_slot_table_tests COMMAND odai_bindless_slot_table_tests)
+
+    # Geometry arena suballocator (render/gpu_arena_allocator.h) behind imported
+    # scene streaming. Also Vulkan-free; the coalescing tests are the guard
+    # against an arena that fragments slowly over a long session.
+    add_executable(odai_gpu_arena_allocator_tests
+        tests/gpu_arena_allocator_tests.cc
+    )
+    target_include_directories(odai_gpu_arena_allocator_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_gpu_arena_allocator_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_gpu_arena_allocator_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_gpu_arena_allocator_tests COMMAND odai_gpu_arena_allocator_tests)
+
+    # Exterior-cell streaming residency policy (import/cell_residency_planner.h):
+    # prediction, load/unload hysteresis, in-flight budget, wasted-work counting.
+    # Pure decision logic -- no Vulkan, no IO, no threads -- so the behaviours
+    # that would otherwise only show up as runtime stutter are testable.
+    add_executable(odai_cell_residency_planner_tests
+        tests/cell_residency_planner_tests.cc
+        src/import/cell_residency_planner.cc
+    )
+    target_include_directories(odai_cell_residency_planner_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_cell_residency_planner_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_cell_residency_planner_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_cell_residency_planner_tests COMMAND odai_cell_residency_planner_tests)
 
     # GameApp CPU timing zones (engine/game_frame_stats.h). Header-only and
     # Vulkan-free, so the zone bookkeeping is testable without a window.

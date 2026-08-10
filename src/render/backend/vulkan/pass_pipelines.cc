@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -154,6 +155,11 @@ struct alignas(16) ChunkInstanceData {
 struct alignas(16) ChunkPushConstants {
     float chunkOffset[4];
     float cascadeData[4];
+    // [0] = alpha-test threshold in 0..1 for the draw being recorded, [1..3]
+    // spare. Mirrored in src/render/shaders/chunk_push_constants.slang and in
+    // the private copy of this struct in pass_pipelines.cc -- all three must
+    // agree or the pipeline layout's push range stops covering the block.
+    float materialParams[4];
 };
 
 } // namespace
@@ -641,7 +647,10 @@ bool RendererBackend::createPipePipeline() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedAttributes[6]{};
+    // Locations 6-10: terrain layer blend (Fallout ATXT/VTXT). Four bindless
+    // slots plus one packed weight word; inert unless the vertex carries
+    // kImportedSceneMaterialFlagTerrainLayers.
+    VkVertexInputAttributeDescription importedAttributes[11]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -666,12 +675,23 @@ bool RendererBackend::createPipePipeline() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    for (uint32_t layer = 0; layer < 4; ++layer) {
+        importedAttributes[6 + layer].location = 6 + layer;
+        importedAttributes[6 + layer].binding = 0;
+        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
+        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
+            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
+    }
+    importedAttributes[10].location = 10;
+    importedAttributes[10].binding = 0;
+    importedAttributes[10].format = VK_FORMAT_R32_UINT;
+    importedAttributes[10].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 11;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     VkGraphicsPipelineCreateInfo importedPipelineCreateInfo = pipelineCreateInfo;
@@ -679,7 +699,14 @@ bool RendererBackend::createPipePipeline() {
     importedPipelineCreateInfo.pStages = importedShaderStages.data();
     importedPipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
     VkPipelineRasterizationStateCreateInfo importedRasterizer = rasterizer;
-    importedRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    // ODAI_DEBUG_NO_CULL=1 disables back-face culling on imported opaque
+    // geometry. Diagnostic, not a setting: rendering a frame with and without
+    // it and diffing localises "this surface is see-through" to culling
+    // specifically -- pixels that change are exactly the ones a back face was
+    // being removed from.
+    importedRasterizer.cullMode = (std::getenv("ODAI_DEBUG_NO_CULL") != nullptr)
+        ? VK_CULL_MODE_NONE
+        : VK_CULL_MODE_BACK_BIT;
     importedPipelineCreateInfo.pRasterizationState = &importedRasterizer;
 
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
@@ -697,6 +724,75 @@ bool RendererBackend::createPipePipeline() {
         logVkFailure("vkCreateGraphicsPipelines(importedStatic)", importedPipelineResult);
         return false;
     }
+    // Alpha-blended variant of the same shaders.
+    //
+    // Fallout places glass, dust, light beams and vulture billboards as ordinary
+    // statics, and drawing them through the opaque pipeline turns each one into
+    // a solid pale slab standing in the landscape. Blending needs depth TEST but
+    // not depth WRITE: a blended surface must not occlude what is behind it, and
+    // must not occlude other blended surfaces either.
+    VkPipelineColorBlendAttachmentState importedBlendAttachment{};
+    importedBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    importedBlendAttachment.blendEnable = VK_TRUE;
+    importedBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    importedBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    importedBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    importedBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    importedBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    importedBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    VkPipelineColorBlendStateCreateInfo importedBlendState = colorBlending;
+    importedBlendState.attachmentCount = 1;
+    importedBlendState.pAttachments = &importedBlendAttachment;
+    VkPipelineDepthStencilStateCreateInfo importedBlendDepth = depthStencil;
+    importedBlendDepth.depthWriteEnable = VK_FALSE;
+
+    VkGraphicsPipelineCreateInfo importedBlendedPipelineCreateInfo = importedPipelineCreateInfo;
+    importedBlendedPipelineCreateInfo.pColorBlendState = &importedBlendState;
+    importedBlendedPipelineCreateInfo.pDepthStencilState = &importedBlendDepth;
+    VkPipeline importedStaticPipelineBlended = VK_NULL_HANDLE;
+    const VkResult importedBlendedResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &importedBlendedPipelineCreateInfo, nullptr,
+        &importedStaticPipelineBlended);
+    if (importedBlendedResult != VK_SUCCESS) {
+        // Not fatal: without it the blended draws simply keep going through the
+        // opaque pipeline, which is the behaviour that existed before.
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticBlended)", importedBlendedResult);
+        importedStaticPipelineBlended = VK_NULL_HANDLE;
+    }
+
+    // Two-sided variant, for draws whose NiStencilProperty said DRAW_BOTH.
+    VkPipelineRasterizationStateCreateInfo importedBlendedTwoSidedRasterizer = importedRasterizer;
+    importedBlendedTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo importedBlendedTwoSidedCreateInfo = importedBlendedPipelineCreateInfo;
+    importedBlendedTwoSidedCreateInfo.pRasterizationState = &importedBlendedTwoSidedRasterizer;
+    VkPipeline importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    const VkResult importedBlendedTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &importedBlendedTwoSidedCreateInfo, nullptr,
+        &importedStaticPipelineBlendedTwoSided);
+    if (importedBlendedTwoSidedResult != VK_SUCCESS) {
+        logVkFailure(
+            "vkCreateGraphicsPipelines(importedStaticBlendedTwoSided)", importedBlendedTwoSidedResult);
+        importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    }
+
+    // Opaque two-sided, for DRAW_BOTH shapes that are not blended. Same state
+    // as the opaque pipeline with culling off.
+    VkPipelineRasterizationStateCreateInfo importedTwoSidedRasterizer = importedRasterizer;
+    importedTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo importedTwoSidedCreateInfo = importedPipelineCreateInfo;
+    importedTwoSidedCreateInfo.pRasterizationState = &importedTwoSidedRasterizer;
+    VkPipeline importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult importedTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &importedTwoSidedCreateInfo, nullptr,
+        &importedStaticPipelineTwoSided);
+    if (importedTwoSidedResult != VK_SUCCESS) {
+        // Not fatal: two-sided draws fall back to the culling pipeline, which
+        // is exactly the behaviour this fixes -- degraded, not broken.
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticTwoSided)", importedTwoSidedResult);
+        importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+    }
+
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     if (hasRtImportedVariant) {
         VkGraphicsPipelineCreateInfo importedRtPipelineCreateInfo = importedPipelineCreateInfo;
@@ -970,12 +1066,19 @@ bool RendererBackend::createPipePipeline() {
         // skips voxel/terrain-tess/magica/grass pipelines it never uses.
         if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
         if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
+        if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr); }
+        if (m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlendedTwoSided, nullptr); }
+        if (m_importedStaticPipelineTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineTwoSided, nullptr); }
         if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
         if (m_skyCloudPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr); }
         if (m_importedWaterPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr); }
         if (m_importedWaterPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr); }
         m_pipePipeline = pipePipeline;
         m_importedStaticPipeline = importedStaticPipeline;
+        m_importedStaticPipelineBlended = importedStaticPipelineBlended;
+        m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
+    m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
+        m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
         m_importedStaticPipelineRt = importedStaticPipelineRt;
         m_skyCloudPipeline = skyCloudPipeline;
         m_importedWaterPipeline = importedWaterPipeline;
@@ -1004,6 +1107,12 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr);
     }
+    if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr);
+    }
+    if (m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticPipelineBlendedTwoSided, nullptr);
+    }
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr);
     }
@@ -1018,6 +1127,9 @@ bool RendererBackend::createPipePipeline() {
     }
     m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
+    m_importedStaticPipelineBlended = importedStaticPipelineBlended;
+    m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
+    m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;
@@ -1334,7 +1446,10 @@ bool RendererBackend::createAoPipelines() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedAttributes[6]{};
+    // Locations 6-10: terrain layer blend (Fallout ATXT/VTXT). Four bindless
+    // slots plus one packed weight word; inert unless the vertex carries
+    // kImportedSceneMaterialFlagTerrainLayers.
+    VkVertexInputAttributeDescription importedAttributes[11]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1359,12 +1474,23 @@ bool RendererBackend::createAoPipelines() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    for (uint32_t layer = 0; layer < 4; ++layer) {
+        importedAttributes[6 + layer].location = 6 + layer;
+        importedAttributes[6 + layer].binding = 0;
+        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
+        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
+            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
+    }
+    importedAttributes[10].location = 10;
+    importedAttributes[10].binding = 0;
+    importedAttributes[10].format = VK_FORMAT_R32_UINT;
+    importedAttributes[10].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 11;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;
@@ -2287,37 +2413,62 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowBindings[0].stride = sizeof(ImportedMeshVertex);
     importedShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedShadowAttributes[6]{};
+    // Locations 1 and 2 (normal, colour) are gone: imported_static_shadow.vert
+    // no longer declares them, because this pass writes depth and alpha-tests
+    // and reads nothing else.
+    VkVertexInputAttributeDescription importedShadowAttributes[4]{};
     importedShadowAttributes[0].location = 0;
     importedShadowAttributes[0].binding = 0;
     importedShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     importedShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
-    importedShadowAttributes[1].location = 1;
+    importedShadowAttributes[1].location = 3;
     importedShadowAttributes[1].binding = 0;
-    importedShadowAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
-    importedShadowAttributes[2].location = 2;
+    importedShadowAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    importedShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
+    importedShadowAttributes[2].location = 4;
     importedShadowAttributes[2].binding = 0;
-    importedShadowAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
-    importedShadowAttributes[3].location = 3;
+    importedShadowAttributes[2].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
+    importedShadowAttributes[3].location = 5;
     importedShadowAttributes[3].binding = 0;
-    importedShadowAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
-    importedShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, uv));
-    importedShadowAttributes[4].location = 4;
-    importedShadowAttributes[4].binding = 0;
-    importedShadowAttributes[4].format = VK_FORMAT_R32_UINT;
-    importedShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, textureIndex));
-    importedShadowAttributes[5].location = 5;
-    importedShadowAttributes[5].binding = 0;
-    importedShadowAttributes[5].format = VK_FORMAT_R32_UINT;
-    importedShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    importedShadowAttributes[3].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+
+    // Identical attributes against the 28-byte stream. Same shaders, same
+    // locations; only the stride and offsets differ.
+    VkVertexInputBindingDescription importedShadowCompactBindings[1]{};
+    importedShadowCompactBindings[0].binding = 0;
+    importedShadowCompactBindings[0].stride = sizeof(ImportedShadowVertex);
+    importedShadowCompactBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription importedShadowCompactAttributes[4]{};
+    importedShadowCompactAttributes[0].location = 0;
+    importedShadowCompactAttributes[0].binding = 0;
+    importedShadowCompactAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    importedShadowCompactAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, position));
+    importedShadowCompactAttributes[1].location = 3;
+    importedShadowCompactAttributes[1].binding = 0;
+    importedShadowCompactAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+    importedShadowCompactAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, uv));
+    importedShadowCompactAttributes[2].location = 4;
+    importedShadowCompactAttributes[2].binding = 0;
+    importedShadowCompactAttributes[2].format = VK_FORMAT_R32_UINT;
+    importedShadowCompactAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, textureIndex));
+    importedShadowCompactAttributes[3].location = 5;
+    importedShadowCompactAttributes[3].binding = 0;
+    importedShadowCompactAttributes[3].format = VK_FORMAT_R32_UINT;
+    importedShadowCompactAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, flags));
+    VkPipelineVertexInputStateCreateInfo importedShadowCompactVertexInputInfo{};
+    importedShadowCompactVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    importedShadowCompactVertexInputInfo.vertexBindingDescriptionCount = 1;
+    importedShadowCompactVertexInputInfo.pVertexBindingDescriptions = importedShadowCompactBindings;
+    importedShadowCompactVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    importedShadowCompactVertexInputInfo.pVertexAttributeDescriptions = importedShadowCompactAttributes;
 
     VkPipelineVertexInputStateCreateInfo importedShadowVertexInputInfo{};
     importedShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedShadowVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedShadowVertexInputInfo.pVertexBindingDescriptions = importedShadowBindings;
-    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
+    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 4;
     importedShadowVertexInputInfo.pVertexAttributeDescriptions = importedShadowAttributes;
 
     VkGraphicsPipelineCreateInfo importedShadowPipelineCreateInfo = shadowPipelineCreateInfo;
@@ -2334,6 +2485,27 @@ bool RendererBackend::createGraphicsPipeline() {
         nullptr,
         &importedStaticShadowPipeline
     );
+    VkGraphicsPipelineCreateInfo importedShadowCompactPipelineCreateInfo = importedShadowPipelineCreateInfo;
+    importedShadowCompactPipelineCreateInfo.pVertexInputState = &importedShadowCompactVertexInputInfo;
+    VkPipeline importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
+    const VkResult importedShadowCompactResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &importedShadowCompactPipelineCreateInfo,
+        nullptr,
+        &importedStaticShadowCompactPipeline
+    );
+    if (importedShadowCompactResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticShadowCompact)", importedShadowCompactResult);
+        if (importedStaticShadowCompactPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticShadowCompactPipeline, nullptr);
+            importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
+        }
+        // Not fatal: the shadow pass falls back to the full-stride pipeline.
+    }
+    m_importedStaticShadowCompactPipeline = importedStaticShadowCompactPipeline;
+
     destroyShaderModules(m_device, importedShadowShaderModules);
     if (importedShadowPipelineResult != VK_SUCCESS) {
         vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);

@@ -96,6 +96,12 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     // settlements/units); the prior game's voxel chunk + magica shadow draws were removed.
     if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if ((inputs.skipCascadeMask & (1u << cascadeIndex)) != 0u) {
+                // This cascade's tile is being reused -- see skipCascadeMask's
+                // declaration. Skipping the whole begin/end block is what keeps
+                // the tile intact: the clear is scoped to the block's renderArea.
+                continue;
+            }
             if (m_cmdInsertDebugUtilsLabel != nullptr) {
                 const std::string cascadeLabel = "Shadow Cascade " + std::to_string(cascadeIndex);
                 insertDebugLabel(commandBuffer, cascadeLabel.c_str(), 0.48f, 0.32f, 0.32f, 1.0f);
@@ -164,6 +170,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 // cascadeData[0] selects the light matrix for this cascade in the shadow
                 // vertex shader; chunk offsets ride the instance buffer.
                 ChunkPushConstants chunkPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                chunkPushConstants.materialParams[0] = 0.5f;
                 chunkPushConstants.cascadeData[0] = cascadeF;
                 vkCmdPushConstants(
                     commandBuffer,
@@ -195,13 +204,29 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     -(constantBias * kImportedShadowConstantBiasScale),
                     0.0f,
                     -(slopeBias * kImportedShadowSlopeBiasScale));
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
+                // Prefer the 28-byte stream. Same shaders and same draws; the
+                // cascades read position plus the alpha-test fields and nothing
+                // else, so the full 72-byte stride was wasting most of every
+                // cache line, four times per frame. Falls back to the full
+                // vertex if the compact pipeline or buffer is unavailable.
+                const bool useCompactShadowStream =
+                    m_importedStaticShadowCompactPipeline != VK_NULL_HANDLE &&
+                    inputs.importedShadowVertexBuffer != VK_NULL_HANDLE;
+                vkCmdBindPipeline(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    useCompactShadowStream ? m_importedStaticShadowCompactPipeline
+                                           : m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
-                const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
+                const VkBuffer importedVertexBuffers[1] = {
+                    useCompactShadowStream ? inputs.importedShadowVertexBuffer : importedVertexBuffer};
                 const VkDeviceSize importedVertexOffsets[1] = {0};
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants importedPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                importedPushConstants.materialParams[0] = 0.5f;
                 importedPushConstants.chunkOffset[0] = 0.0f;
                 importedPushConstants.chunkOffset[1] = 0.0f;
                 importedPushConstants.chunkOffset[2] = 0.0f;
@@ -218,14 +243,63 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     sizeof(ChunkPushConstants),
                     &importedPushConstants
                 );
-                for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
-                    if ((drawIndex < terrainDrawCount && !m_debugShowImportedTerrain) ||
-                        (drawIndex >= staticDrawStart && !m_debugShowImportedStatics)) {
-                        continue;
+                // Same authored threshold as the main pass. A cascade that cut
+                // out at a different alpha would cast a shadow whose silhouette
+                // did not match the thing casting it.
+                int lastPushedThreshold = -1;
+                const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastPushedThreshold) {
+                        return;
                     }
-                    const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
-                    countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                    lastPushedThreshold = static_cast<int>(threshold);
+                    importedPushConstants.materialParams[0] =
+                        static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &importedPushConstants);
+                };
+                // Indirect batching, rebuilt per cascade because each cascade
+                // culls its own caster list. This is the biggest single block
+                // of draw calls in the frame -- four cascades over the whole
+                // caster set -- so it is also where batching pays the most.
+                const auto includeDraw = [&](std::size_t drawIndex) {
+                    if (drawIndex < terrainDrawCount) {
+                        return m_debugShowImportedTerrain;
+                    }
+                    return m_debugShowImportedStatics;
+                };
+                VkBuffer indirectBuffer = VK_NULL_HANDLE;
+                VkDeviceSize indirectBase = 0;
+                const bool useIndirect = m_supportsMultiDrawIndirect &&
+                    buildImportedIndirectBatches(
+                        cascadeImportedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+                if (useIndirect) {
+                    for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        pushAlphaThreshold(batch.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexedIndirect(
+                            commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
+                            batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                } else {
+                    for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
+                        if (!includeDraw(drawIndex)) {
+                            continue;
+                        }
+                        const ImportedMeshDraw& importedDraw = cascadeImportedMeshDraws[drawIndex];
+                        if (importedDraw.blended) {
+                            continue;  // a blended surface casts no opaque shadow
+                        }
+                        pushAlphaThreshold(importedDraw.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexed(
+                            commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                            importedDraw.vertexOffset, 0);
+                    }
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }
@@ -246,6 +320,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants importedPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                importedPushConstants.materialParams[0] = 0.5f;
                 importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
                 vkCmdPushConstants(
                     commandBuffer,
@@ -257,7 +334,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 );
                 for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                     countDrawCalls(m_debugDrawCallsShadow, 1);
-                    vkCmdDrawIndexed(commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex, 0, 0);
+                    vkCmdDrawIndexed(
+                        commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                        importedDraw.vertexOffset, 0);
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
             }
@@ -277,6 +356,9 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
                 ChunkPushConstants skinnedPushConstants{};
+                // Neutral alpha-test threshold. Draws that carry an authored one
+                // overwrite this; leaving it zeroed would mean nothing cuts out.
+                skinnedPushConstants.materialParams[0] = 0.5f;
                 skinnedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
                 vkCmdPushConstants(
                     commandBuffer,

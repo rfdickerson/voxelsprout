@@ -53,21 +53,40 @@ constexpr uint32_t kBindlessTextureIndexFogMap = 10;
 // They were out of step until now: this header lacked FogMap and stopped at 10
 // while descriptors.cc wrote at 11+i, so imported texture 0 sampled the fog map.
 constexpr uint32_t kBindlessTextureStaticCount = 11;
+// "No bindless slot" -- returned when a texture is unusable or the bindless
+// table is full. Matches kInvalidImportedTextureIndex on the shader side, which
+// falls back to the vertex-colour palette rather than sampling slot 0.
+constexpr uint32_t kInvalidImportedTextureSlot = 0xFFFFFFFFu;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
-constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {4096u, 2048u, 2048u, 1024u};
+// The three shadow-atlas constants below are one layout expressed three ways and
+// must be edited together: kShadowCascadeResolution feeds the texel-snapping math
+// (frame_run.cc), kShadowAtlasRects places each cascade in the atlas and derives
+// the sampling UV rects, and kShadowAtlasSize is the atlas dimension the rects are
+// normalized against. A fourth mirror lives outside this header:
+// renderer_backend.h's private kShadowAtlasSize, which is what the image
+// allocation actually uses (class scope wins inside member functions). If these
+// disagree, cascades sample the wrong atlas region instead of failing loudly.
+// Halved from 4096/2048/2048/1024 in an 8192 atlas after GPU timestamps put
+// the shadow pass at ~5 ms of a ~20 ms frame on the Intel LNL iGPU -- a
+// quarter of the whole GPU budget rasterizing shadow maps. Halving the linear
+// resolution quarters the rasterized texels. Cascade 0's texel goes from
+// ~0.5 to ~1.0 world units (~1.5 cm at Fallout scale), and TAA now averages
+// the shadow edges temporally, which is what makes the coarser maps
+// acceptable where they were not before it existed.
+constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 1024u, 1024u, 512u};
 struct ShadowAtlasRect {
     uint32_t x;
     uint32_t y;
     uint32_t size;
 };
 constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
-    ShadowAtlasRect{0u, 0u, 4096u},
-    ShadowAtlasRect{4096u, 0u, 2048u},
-    ShadowAtlasRect{6144u, 0u, 2048u},
-    ShadowAtlasRect{4096u, 2048u, 1024u}
+    ShadowAtlasRect{0u, 0u, 2048u},
+    ShadowAtlasRect{2048u, 0u, 1024u},
+    ShadowAtlasRect{3072u, 0u, 1024u},
+    ShadowAtlasRect{2048u, 1024u, 512u}
 };
-constexpr uint32_t kShadowAtlasSize = 8192u;
+constexpr uint32_t kShadowAtlasSize = 4096u;
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 8u;
@@ -146,11 +165,37 @@ struct alignas(16) CameraUniform {
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
     float fogMapConfig[4]; // [0]=invExtentX, [1]=invExtentZ, [2]=unused, [3]=enabled
+    // Authored sky, from a Fallout WTHR record. The procedural Rayleigh/Mie sky
+    // stays the default and stays the only path when weight is 0 -- these blend
+    // over it rather than replacing it, so every other game renders exactly as
+    // before. Appended at the end of the block so no existing field's offset
+    // moves. Mirrored in src/render/shaders/camera_uniform.slang.
+    float weatherSkyUpper[4];  // [0..2]=linear rgb at zenith, [3]=blend weight 0..1
+    float weatherSkyLower[4];  // [0..2]=linear rgb above the horizon band, [3]=unused
+    float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=unused
+    float weatherFog[4];       // [0..2]=linear fog rgb, [3]=fog far distance in world units
+    // Four planar cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
+    float weatherCloudTint[4][4];
+    // [0]=bindless texture slot as a float, [1]=rotation rad/s, [2]=dome scale,
+    // [3]=unused. Slot is carried as a float because the whole block is floats;
+    // the shader rounds it back to an index.
+    float weatherCloudParams[4][4];
+    // Tonemap selection and parameters.
+    // [0] = mode: 0 = the ACES fit, 1 = the ENB/Enhanced Shaders curve
+    // [1] = contrast, [2] = saturation, [3] = curve knee (ENB's "ToneMapping Curve")
+    float tonemapConfig[4];
+    // [0] = overbright dampening (ENB's "Overbright Dampening"), [1..3] spare.
+    float tonemapConfig2[4];
 };
 
 struct alignas(16) ChunkPushConstants {
     float chunkOffset[4];
     float cascadeData[4];
+    // [0] = alpha-test threshold in 0..1 for the draw being recorded, [1..3]
+    // spare. Mirrored in src/render/shaders/chunk_push_constants.slang and in
+    // the private copy of this struct in pass_pipelines.cc -- all three must
+    // agree or the pipeline layout's push range stops covering the block.
+    float materialParams[4];
 };
 
 struct alignas(16) ChunkInstanceData {

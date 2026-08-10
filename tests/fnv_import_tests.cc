@@ -6,10 +6,16 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <zlib.h>
 
+#include "core/job_system.h"
+#include "import/fnv/asset_source.h"
+#include "import/fnv/plugin_load_order.h"
+#include "import/fnv/character_builder.h"
+#include "import/fnv/async_asset_loader.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/fallout_records.h"
@@ -19,7 +25,9 @@ namespace {
 
 int g_failures = 0;
 
-void expectTrue(bool condition, const char* message) {
+// string_view rather than const char* so callers can build a message with a
+// run-label suffix (the BSA test runs twice, once per archive-flag shape).
+void expectTrue(bool condition, std::string_view message) {
     if (!condition) {
         std::cerr << "[fnv import test] FAIL: " << message << '\n';
         ++g_failures;
@@ -47,6 +55,15 @@ void appendBString(std::vector<std::uint8_t>& buffer, const std::string& text) {
     const std::string withNul = text + '\0';
     buffer.push_back(static_cast<std::uint8_t>(withNul.size()));
     buffer.insert(buffer.end(), withNul.begin(), withNul.end());
+}
+
+// The embedded file name in a data block (archive flag 0x100) is length-
+// prefixed but NOT NUL-terminated, unlike the folder-name BString above.
+// Verified against retail Fallout - Textures.bsa, whose first data block
+// opens with 0x33 followed by exactly 51 path characters.
+void appendEmbeddedName(std::vector<std::uint8_t>& buffer, const std::string& text) {
+    buffer.push_back(static_cast<std::uint8_t>(text.size()));
+    buffer.insert(buffer.end(), text.begin(), text.end());
 }
 
 void appendNulTerminated(std::vector<std::uint8_t>& buffer, const std::string& text) {
@@ -83,13 +100,24 @@ struct TestFileRecord {
 // documented in bsa_archive.h so the test validates the reader's own
 // understanding of folder/file record offsets and the name block, not just
 // that encode(decode(x)) == x for an arbitrary internal representation.
+//
+// Two retail conventions this fixture deliberately reproduces, because an
+// earlier version of it did not and so could never have caught the reader
+// bugs they hid (both were found only by running against a real install):
+//   - Folder-record offsets are biased by totalFileNameLength.
+//   - When `embedFileNames` is set (archive flag 0x100, which both retail
+//     texture archives use), every data block opens with a BString holding
+//     the file's full virtual path, and those bytes count toward the file
+//     record's size.
 std::vector<std::uint8_t> buildSyntheticBsa(
     const std::string& uncompressedContent,
-    const std::string& compressedContent
+    const std::string& compressedContent,
+    bool embedFileNames = false
 ) {
     constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
     constexpr std::uint32_t kFlagHasFileNames = 0x2u;
     constexpr std::uint32_t kFlagCompressedArchive = 0x4u;
+    constexpr std::uint32_t kFlagEmbedFileNames = 0x100u;
     constexpr std::uint32_t kFileCompressionToggleBit = 0x40000000u;
 
     const std::string folderA = "meshes\\x";
@@ -113,12 +141,16 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     header.magic = 0x00415342u;
     header.version = 104u;
     header.folderRecordOffset = sizeof(TestBsaHeader);
-    header.archiveFlags = kFlagHasFolderNames | kFlagHasFileNames | kFlagCompressedArchive;
+    header.archiveFlags = kFlagHasFolderNames | kFlagHasFileNames | kFlagCompressedArchive |
+        (embedFileNames ? kFlagEmbedFileNames : 0u);
     header.folderCount = 2u;
     header.fileCount = 2u;
     header.totalFolderNameLength = static_cast<std::uint32_t>(folderA.size() + folderB.size() + 2u);
     header.totalFileNameLength = totalFileNameLength;
-    header.fileFlags = 0u;
+    // Declare meshes + textures, as every retail archive does. Callers use
+    // these to skip indexing archives they do not care about.
+    header.fileFlags =
+        odai::importer::fnv::kBsaContentMeshes | odai::importer::fnv::kBsaContentTextures;
 
     // Layout: header, 2 folder records, folderA block (name + 1 file record),
     // folderB block (name + 1 file record), file name block, file data.
@@ -130,26 +162,36 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     const std::size_t fileNameBlockOffset = folderBRecordOffset + folderBBlockSize;
     const std::size_t fileDataOffset = fileNameBlockOffset + totalFileNameLength;
 
+    // Embedded names, when present, prefix each data block and are counted in
+    // the file record's size.
+    const std::string embeddedA = folderA + "\\" + fileA;
+    const std::string embeddedB = folderB + "\\" + fileB;
+    const std::size_t embeddedABytes = embedFileNames ? 1u + embeddedA.size() : 0u;
+    const std::size_t embeddedBBytes = embedFileNames ? 1u + embeddedB.size() : 0u;
+
     // fileA: uncompressed (toggled off default-compressed archive -> stored
     // raw). fileB: compressed, stored as [uint32 originalSize][zlib bytes].
     const std::size_t fileAOffset = fileDataOffset;
-    const std::size_t fileASize = uncompressedContent.size();
+    const std::size_t fileASize = embeddedABytes + uncompressedContent.size();
     const std::size_t fileBOffset = fileAOffset + fileASize;
-    const std::size_t fileBSizeOnDisk = sizeof(std::uint32_t) + compressedBytes.size();
+    const std::size_t fileBSizeOnDisk = embeddedBBytes + sizeof(std::uint32_t) + compressedBytes.size();
 
     std::vector<std::uint8_t> out;
     appendPod(out, header);
 
+    // Retail archives bias folder-record offsets by totalFileNameLength; the
+    // reader is expected to subtract it back off. Writing the unbiased value
+    // here is what let the reader's missing subtraction go unnoticed.
     TestFolderRecord folderRecA{};
     folderRecA.nameHash = 0x1111ull;
     folderRecA.fileCount = 1u;
-    folderRecA.offset = static_cast<std::uint32_t>(folderARecordOffset);
+    folderRecA.offset = static_cast<std::uint32_t>(folderARecordOffset + totalFileNameLength);
     appendPod(out, folderRecA);
 
     TestFolderRecord folderRecB{};
     folderRecB.nameHash = 0x2222ull;
     folderRecB.fileCount = 1u;
-    folderRecB.offset = static_cast<std::uint32_t>(folderBRecordOffset);
+    folderRecB.offset = static_cast<std::uint32_t>(folderBRecordOffset + totalFileNameLength);
     appendPod(out, folderRecB);
 
     appendBString(out, folderA);
@@ -169,7 +211,14 @@ std::vector<std::uint8_t> buildSyntheticBsa(
     appendNulTerminated(out, fileA);
     appendNulTerminated(out, fileB);
 
+    if (embedFileNames) {
+        appendEmbeddedName(out, embeddedA);
+    }
     out.insert(out.end(), uncompressedContent.begin(), uncompressedContent.end());
+
+    if (embedFileNames) {
+        appendEmbeddedName(out, embeddedB);
+    }
     appendPod(out, static_cast<std::uint32_t>(compressedContent.size()));
     out.insert(out.end(), compressedBytes.begin(), compressedBytes.end());
 
@@ -249,6 +298,18 @@ std::vector<std::uint8_t> zlibCompress(const std::vector<std::uint8_t>& data) {
     compress2(out.data(), &bound, data.empty() ? nullptr : data.data(), static_cast<uLong>(data.size()), Z_BEST_COMPRESSION);
     out.resize(bound);
     return out;
+}
+
+// Corrupts the trailing adler32 of a zlib stream, leaving the deflate payload
+// intact. Reproduces the one damaged record in retail FalloutNV.esm (a LAND,
+// formID 0x150FC0): every declared byte decodes correctly but the checksum
+// does not verify. zlib's uncompress() rejects the whole call for this, which
+// used to abort the entire plugin walk over a single bad record.
+std::vector<std::uint8_t> corruptZlibChecksum(std::vector<std::uint8_t> stream) {
+    if (stream.size() >= 4u) {
+        stream[stream.size() - 1u] ^= 0xFFu;
+    }
+    return stream;
 }
 
 void testEsmReaderWalksGroupsRecordsAndSubrecords() {
@@ -417,6 +478,21 @@ std::vector<std::uint8_t> buildVnmlPayload() {
     return out;
 }
 
+// VCLR: one unsigned RGB triple per post. Uses a distinct value per channel so
+// a channel swap or an off-by-one stride shows up as a wrong colour rather than
+// passing by symmetry.
+std::vector<std::uint8_t> buildVclrPayload() {
+    std::vector<std::uint8_t> out;
+    for (int i = 0; i < odai::importer::fnv::kLandVertexCount; ++i) {
+        out.push_back(255);
+        out.push_back(128);
+        out.push_back(64);
+    }
+    return out;
+}
+
+void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmPath);
+
 void testFalloutRecordExtraction() {
     namespace fs = std::filesystem;
     using namespace odai::importer::fnv;
@@ -449,18 +525,112 @@ void testFalloutRecordExtraction() {
     btxtPayload.push_back(0u);  // pad
     appendPod(btxtPayload, static_cast<std::uint16_t>(0));  // layer
 
+    const auto vclrPayload = buildVclrPayload();
+
+    // Two ATXT/VTXT layers, deliberately emitted with the HIGHER layer index
+    // first so the parser's sort is doing real work rather than preserving
+    // subrecord order by luck.
+    constexpr std::uint32_t kLayerTextureFormIdHigh = 0x00004100u;
+    constexpr std::uint32_t kLayerTextureFormIdLow = 0x00004200u;
+    const auto buildAtxtPayload = [](std::uint32_t formId, std::uint8_t quadrant, std::uint16_t layerIndex) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, formId);
+        out.push_back(quadrant);
+        out.push_back(0u);  // pad
+        appendPod(out, layerIndex);
+        return out;
+    };
+    // Opacity 1.0 at quadrant post 0, 0.25 at post 5.
+    const auto buildVtxtPayload = []() {
+        std::vector<std::uint8_t> out;
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, 1.0f);
+        appendPod(out, static_cast<std::uint16_t>(5));
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, 0.25f);
+        return out;
+    };
+
     const auto landSubrecords = [&] {
         std::vector<std::uint8_t> out;
         const auto vhgt = buildSubrecord("VHGT", vhgtPayload);
         const auto vnml = buildSubrecord("VNML", vnmlPayload);
+        const auto vclr = buildSubrecord("VCLR", vclrPayload);
         const auto btxt = buildSubrecord("BTXT", btxtPayload);
+        const auto atxtHigh = buildSubrecord("ATXT", buildAtxtPayload(kLayerTextureFormIdHigh, 0u, 1u));
+        const auto vtxtHigh = buildSubrecord("VTXT", buildVtxtPayload());
+        const auto atxtLow = buildSubrecord("ATXT", buildAtxtPayload(kLayerTextureFormIdLow, 0u, 0u));
+        const auto vtxtLow = buildSubrecord("VTXT", buildVtxtPayload());
         out.insert(out.end(), vhgt.begin(), vhgt.end());
         out.insert(out.end(), vnml.begin(), vnml.end());
+        out.insert(out.end(), vclr.begin(), vclr.end());
         out.insert(out.end(), btxt.begin(), btxt.end());
+        out.insert(out.end(), atxtHigh.begin(), atxtHigh.end());
+        out.insert(out.end(), vtxtHigh.begin(), vtxtHigh.end());
+        out.insert(out.end(), atxtLow.begin(), atxtLow.end());
+        out.insert(out.end(), vtxtLow.begin(), vtxtLow.end());
         return out;
     }();
     constexpr std::uint32_t kLandFormId = 0x00003000u;
     const auto landRecord = buildRecord("LAND", kLandFormId, 0u, landSubrecords);
+
+    // --- NAVM: a 4-vertex, 2-triangle navmesh sharing one interior edge. ---
+    //
+    // Deliberately asymmetric: triangle 0 links its edge 1 to triangle 1, and
+    // triangle 1 links its edge 2 back. A parser that assumed a fixed edge
+    // ordering, or that read the neighbour block at the wrong offset, would
+    // still produce two triangles -- only the adjacency would be wrong, and the
+    // adjacency is the entire point of using the authored mesh.
+    constexpr std::uint32_t kNavMeshFormId = 0x00005000u;
+    constexpr std::uint32_t kNavDoorRefFormId = 0x00005100u;
+    std::vector<std::uint8_t> navDataPayload;
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0x00002000u));  // the exterior CELL below
+    appendPod(navDataPayload, static_cast<std::uint32_t>(4));   // vertex count
+    appendPod(navDataPayload, static_cast<std::uint32_t>(2));   // triangle count
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0));
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0));
+    appendPod(navDataPayload, static_cast<std::uint32_t>(0));
+
+    std::vector<std::uint8_t> navVertexPayload;
+    const float navVertices[4][3] = {
+        {0.0f, 0.0f, 10.0f}, {128.0f, 0.0f, 10.0f}, {128.0f, 128.0f, 10.0f}, {0.0f, 128.0f, 10.0f}};
+    for (const auto& vertex : navVertices) {
+        appendPod(navVertexPayload, vertex[0]);
+        appendPod(navVertexPayload, vertex[1]);
+        appendPod(navVertexPayload, vertex[2]);
+    }
+
+    const auto appendNavTriangle = [](std::vector<std::uint8_t>& out,
+                                      std::uint16_t v0, std::uint16_t v1, std::uint16_t v2,
+                                      std::uint16_t n0, std::uint16_t n1, std::uint16_t n2,
+                                      std::uint16_t flags, std::uint16_t cover) {
+        appendPod(out, v0); appendPod(out, v1); appendPod(out, v2);
+        appendPod(out, n0); appendPod(out, n1); appendPod(out, n2);
+        appendPod(out, flags); appendPod(out, cover);
+    };
+    std::vector<std::uint8_t> navTrianglePayload;
+    appendNavTriangle(navTrianglePayload, 0, 1, 2, 0xffffu, 1u, 0xffffu, 0x0800u, 0u);
+    // Neighbour 9 is out of range for a 2-triangle mesh and must be clamped to
+    // "border": a wild index is dereferenced during pathfinding.
+    appendNavTriangle(navTrianglePayload, 0, 2, 3, 0xffffu, 0xffffu, 9u, 0u, 0u);
+
+    std::vector<std::uint8_t> navPortalPayload;
+    appendPod(navPortalPayload, kNavDoorRefFormId);
+    appendPod(navPortalPayload, static_cast<std::uint16_t>(1));
+    appendPod(navPortalPayload, static_cast<std::uint16_t>(0));
+
+    const auto navSubrecords = [&] {
+        std::vector<std::uint8_t> out;
+        for (const auto& sub : {buildSubrecord("DATA", navDataPayload),
+                                buildSubrecord("NVVX", navVertexPayload),
+                                buildSubrecord("NVTR", navTrianglePayload),
+                                buildSubrecord("NVDP", navPortalPayload)}) {
+            out.insert(out.end(), sub.begin(), sub.end());
+        }
+        return out;
+    }();
+    const auto navMeshRecord = buildRecord("NAVM", kNavMeshFormId, 0u, navSubrecords);
 
     // --- REFR placing the static in the exterior cell. ---
     std::vector<std::uint8_t> refData;
@@ -508,6 +678,7 @@ void testFalloutRecordExtraction() {
 
     std::vector<std::uint8_t> tempChildrenContent;
     tempChildrenContent.insert(tempChildrenContent.end(), landRecord.begin(), landRecord.end());
+    tempChildrenContent.insert(tempChildrenContent.end(), navMeshRecord.begin(), navMeshRecord.end());
     tempChildrenContent.insert(tempChildrenContent.end(), refRecord.begin(), refRecord.end());
     char extCellLabel[4];
     std::memcpy(extCellLabel, &kExtCellFormId, 4);
@@ -624,16 +795,89 @@ void testFalloutRecordExtraction() {
                intCell->references.front().scale == 1.0f,
                "Interior REFR without XSCL defaults to scale 1.0");
 
-    expectTrue(extCell != nullptr && extCell->land.has_value(), "Exterior cell owns its LAND record");
-    if (extCell != nullptr && extCell->land.has_value()) {
+    expectTrue(extCell != nullptr && extCell->land != nullptr, "Exterior cell owns its LAND record");
+    if (extCell != nullptr && extCell->land != nullptr) {
         const FalloutLandRecord& land = *extCell->land;
         expectTrue(land.quadrantBaseTextureFormId[0] == kBaseTextureFormId,
                    "LAND BTXT base texture formID round-trips for quadrant 0");
 
+        // VCLR decodes unsigned to [0,1] — 255/128/64, not the signed mapping
+        // VNML uses. Checking all three channels on a post other than the first
+        // catches a channel swap and a wrong stride, both of which leave post 0
+        // looking correct.
+        expectTrue(land.hasColors, "LAND VCLR sets hasColors");
+        bool vclrMatches = land.hasColors;
+        for (int i = 0; i < kLandVertexCount && vclrMatches; ++i) {
+            vclrMatches =
+                std::fabs(land.colors[(i * 3) + 0] - 1.0f) < 1e-4f &&
+                std::fabs(land.colors[(i * 3) + 1] - (128.0f / 255.0f)) < 1e-4f &&
+                std::fabs(land.colors[(i * 3) + 2] - (64.0f / 255.0f)) < 1e-4f;
+        }
+        expectTrue(vclrMatches, "LAND VCLR decodes to unsigned [0,1] RGB at every post");
+
+        // --- NAVM ---
+        expectTrue(extCell->navMeshes.size() == 1, "exterior cell owns its NAVM record");
+        if (extCell->navMeshes.size() == 1) {
+            const FalloutNavMeshRecord& navMesh = extCell->navMeshes.front();
+            expectTrue(navMesh.vertices.size() == 12u, "NAVM decodes 4 vertices (3 floats each)");
+            expectTrue(navMesh.triangles.size() == 2u, "NAVM decodes 2 triangles");
+            if (navMesh.vertices.size() == 12u) {
+                expectTrue(std::fabs(navMesh.vertices[3] - 128.0f) < 1e-4f &&
+                           std::fabs(navMesh.vertices[5] - 10.0f) < 1e-4f,
+                           "NAVM vertices keep Bethesda-space xyz order");
+            }
+            if (navMesh.triangles.size() == 2u) {
+                const FalloutNavMeshTriangle& first = navMesh.triangles[0];
+                expectTrue(first.vertex[0] == 0 && first.vertex[1] == 1 && first.vertex[2] == 2,
+                           "NAVM triangle vertex indices round-trip");
+                expectTrue(first.neighbour[0] == kNavMeshNoNeighbour && first.neighbour[1] == 1 &&
+                               first.neighbour[2] == kNavMeshNoNeighbour,
+                           "NAVM adjacency is read per edge, not reordered");
+                expectTrue(first.flags == 0x0800u, "NAVM triangle flags round-trip");
+                expectTrue(navMesh.triangles[1].neighbour[2] == kNavMeshNoNeighbour,
+                           "NAVM neighbour index past the triangle count clamps to border");
+            }
+            expectTrue(navMesh.doorPortals.size() == 1 &&
+                           navMesh.doorPortals[0].doorRefFormId == kNavDoorRefFormId &&
+                           navMesh.doorPortals[0].triangleIndex == 1u,
+                       "NAVM door portal names its door reference and triangle");
+        }
+
+        // ATXT/VTXT: two layers, emitted high-index-first, so a correct parse
+        // reorders them and pairs each VTXT with the ATXT that preceded it.
+        expectTrue(land.textureLayers.size() == 2, "LAND parses both ATXT layers");
+        if (land.textureLayers.size() == 2) {
+            expectTrue(land.textureLayers[0].layerIndex == 0u &&
+                       land.textureLayers[0].textureFormId == kLayerTextureFormIdLow,
+                       "ATXT layers sort by layer index, not subrecord order");
+            expectTrue(land.textureLayers[1].layerIndex == 1u &&
+                       land.textureLayers[1].textureFormId == kLayerTextureFormIdHigh,
+                       "the higher ATXT layer index sorts last");
+            expectTrue(land.textureLayers[0].quadrant == 0u, "ATXT quadrant round-trips");
+            bool opacityMatches = true;
+            for (const auto& layer : land.textureLayers) {
+                opacityMatches = opacityMatches &&
+                    std::fabs(layer.opacity[0] - 1.0f) < 1e-4f &&
+                    std::fabs(layer.opacity[5] - 0.25f) < 1e-4f &&
+                    // Every post VTXT did not mention stays fully transparent.
+                    std::fabs(layer.opacity[1]) < 1e-4f &&
+                    std::fabs(layer.opacity[kLandQuadrantVertexCount - 1]) < 1e-4f;
+            }
+            expectTrue(opacityMatches, "VTXT opacity lands on the posts it names and nowhere else");
+        }
+
+        // Fixture is a base offset of 100 with a single +4 delta at row 10,
+        // col 20. kLandHeightScale multiplies the accumulated total including
+        // the offset, so the flat posts are 100*8 = 800 and the raised ones
+        // are (100+4)*8 = 832 — NOT 100 and 100+4*8, which is what this
+        // expected while the decoder scaled only the deltas. That error put
+        // every object in the game a median of 7566 units above its terrain.
+        constexpr float kFlatHeight = 100.0f * kLandHeightScale;
+        constexpr float kRaisedHeight = 104.0f * kLandHeightScale;
         bool heightsMatchExpected = true;
         for (int row = 0; row < kLandGridSize && heightsMatchExpected; ++row) {
             for (int col = 0; col < kLandGridSize; ++col) {
-                const float expected = (row == 10 && col >= 20) ? 132.0f : 100.0f;
+                const float expected = (row == 10 && col >= 20) ? kRaisedHeight : kFlatHeight;
                 if (std::fabs(land.heights[(row * kLandGridSize) + col] - expected) > 1e-3f) {
                     heightsMatchExpected = false;
                     break;
@@ -642,10 +886,13 @@ void testFalloutRecordExtraction() {
         }
         expectTrue(heightsMatchExpected,
                    "VHGT height decode: a single mid-row delta only raises that row from its column onward, "
-                   "leaving every other post at the base offset");
+                   "leaving every other post at the base offset, with the scale applied to the total");
         expectTrue(land.hasNormals && land.normals[2] > 0.99f,
                    "VNML normal decode produces a normalized up-facing normal for straight-up input");
     }
+
+    // Same fixture, checked through the streaming index rather than a full pass.
+    testFalloutCellIndexMatchesFullExtraction(esmPath);
 
     fs::remove(esmPath);
 }
@@ -660,6 +907,103 @@ void appendSizedString32(std::vector<std::uint8_t>& buffer, const std::string& t
     buffer.insert(buffer.end(), text.begin(), text.end());
 }
 
+// The streaming index must agree with the full extractor exactly. It is checked
+// here against the same synthetic plugin testFalloutRecordExtraction builds, so
+// a divergence shows up as a test failure rather than as geometry quietly
+// appearing in the wrong cell at runtime.
+void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmPath) {
+    using namespace odai::importer::fnv;
+
+    std::string error;
+    FalloutCellIndex index;
+    expectTrue(
+        buildFalloutCellIndex(esmPath, index, error),
+        ("cell index builds: " + error).c_str());
+
+    FalloutSceneData full;
+    expectTrue(
+        extractFalloutScene(esmPath, full, error),
+        ("reference extraction succeeds: " + error).c_str());
+
+    expectTrue(
+        index.cells.size() == full.cells.size(),
+        "cell index finds the same number of cells as a full pass");
+    expectTrue(
+        index.worldspaces.size() == full.worldspaces.size(),
+        "cell index finds the same worldspaces as a full pass");
+    // The reference map is what door teleports resolve through, so it has to be
+    // built identically by the header-only pass.
+    expectTrue(
+        index.cellIndexByReferenceFormId.size() == full.cellIndexByReferenceFormId.size(),
+        "cell index maps the same references as a full pass");
+
+    EsmReader reader;
+    expectTrue(reader.open(esmPath), "reader opens the fixture for per-cell extraction");
+
+    std::size_t cellsWithContents = 0;
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        const FalloutCellRecord* expected = nullptr;
+        for (const FalloutCellRecord& cell : full.cells) {
+            if (cell.formId == entry.cellFormId) {
+                expected = &cell;
+                break;
+            }
+        }
+        expectTrue(expected != nullptr, "every indexed cell exists in the full extraction");
+        if (expected == nullptr) {
+            continue;
+        }
+        expectTrue(
+            entry.isInterior == expected->isInterior &&
+                entry.hasGridCoords == expected->hasGridCoords &&
+                entry.gridX == expected->gridX && entry.gridZ == expected->gridZ &&
+                entry.worldspaceFormId == expected->worldspaceFormId,
+            "indexed cell metadata matches the full extraction");
+
+        FalloutCellRecord streamed;
+        expectTrue(
+            extractFalloutCellAt(reader, entry, streamed, error),
+            ("extractFalloutCellAt succeeds: " + error).c_str());
+
+        expectTrue(
+            streamed.references.size() == expected->references.size(),
+            "streamed cell has the same reference count as the full extraction");
+        expectTrue(
+            streamed.navMeshes.size() == expected->navMeshes.size(),
+            "streamed cell has the same navmesh count as the full extraction");
+        expectTrue(
+            (streamed.land != nullptr) == (expected->land != nullptr),
+            "streamed cell agrees on whether the cell has LAND");
+
+        if (streamed.land != nullptr && expected->land != nullptr) {
+            expectTrue(
+                std::memcmp(
+                    streamed.land->heights, expected->land->heights,
+                    sizeof(streamed.land->heights)) == 0,
+                "streamed LAND heights are byte-identical to the full extraction");
+            expectTrue(
+                streamed.land->textureLayers.size() == expected->land->textureLayers.size(),
+                "streamed LAND carries the same ATXT/VTXT layers");
+        }
+        for (std::size_t i = 0;
+             i < std::min(streamed.references.size(), expected->references.size()); ++i) {
+            expectTrue(
+                streamed.references[i].formId == expected->references[i].formId &&
+                    streamed.references[i].baseFormId == expected->references[i].baseFormId &&
+                    std::memcmp(
+                        streamed.references[i].position, expected->references[i].position,
+                        sizeof(streamed.references[i].position)) == 0,
+                "streamed reference matches the full extraction");
+        }
+        if (entry.childrenGroupSize > 0u) {
+            ++cellsWithContents;
+        }
+    }
+    // Guard against the whole comparison passing vacuously because no cell had
+    // a children group to walk.
+    expectTrue(cellsWithContents >= 2u, "the fixture exercises at least two cells with contents");
+}
+
 // Builds a synthetic NiNode/NiTriShape/NiTriShapeData block's AvObject prefix
 // (name ref, extra data, controller ref, flags, translation, rotation,
 // scale, properties, collision ref) matching nif_scene.cc's readAvObjectPrefix.
@@ -669,7 +1013,12 @@ void appendAvObjectPrefix(
     appendPod(out, static_cast<std::int32_t>(-1));  // nameRef
     appendPod(out, static_cast<std::uint32_t>(0));  // numExtraData
     appendPod(out, static_cast<std::int32_t>(-1));  // controllerRef
-    appendPod(out, static_cast<std::uint16_t>(0));  // flags
+    // NiAVObject::flags is a uint at userVersion2 > 26, and this fixture
+    // declares 34 (what Fallout: New Vegas writes). Emitting a ushort here —
+    // as this did — shifts the whole rest of the block by two bytes, which is
+    // exactly the mismatch that made every retail node fail to parse while
+    // this test still passed.
+    appendPod(out, static_cast<std::uint32_t>(0));  // flags
     for (float v : translation) appendPod(out, v);
     for (float v : rotation) appendPod(out, v);
     appendPod(out, scale);
@@ -686,6 +1035,14 @@ void testNifParserExtractsTransformedGeometry() {
     appendAvObjectPrefix(niNodeBlock, nodeTranslation, identityRotation, 2.0f);
     appendPod(niNodeBlock, static_cast<std::uint32_t>(1));  // numChildren
     appendPod(niNodeBlock, static_cast<std::int32_t>(1));   // children[0] = block 1
+    // Num Effects. The parser does not read the effects list, but it does
+    // require this count to be present, and that requirement is what lets it
+    // recognize a node by LAYOUT instead of by type name (see readNiNode).
+    // This fixture omitted the field, which made it a NiNode no real file
+    // would contain: a census over 20000 retail meshes finds the trailer on
+    // every single one. Written here so the fixture matches the format rather
+    // than the parser being loosened to match the fixture.
+    appendPod(niNodeBlock, static_cast<std::uint32_t>(0));  // numEffects
 
     // Block 1: NiTriShape, identity local transform, dataRef = block 2.
     std::vector<std::uint8_t> triShapeBlock;
@@ -703,7 +1060,14 @@ void testNifParserExtractsTransformedGeometry() {
     for (const auto& v : localVerts) {
         for (float f : v) appendPod(triShapeDataBlock, f);
     }
-    appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0x0001u));  // vectorFlags: hasNormals, no tangents, 0 UV sets
+    // vectorFlags is Bethesda's BSVectorFlags: bit 0 is a BOOLEAN "has UV"
+    // (one set), bit 12 means tangents follow. It is NOT a 0-5 bit count, and
+    // whether normals are present is the separate bool byte below, not bit 0.
+    // 0x0001 is the retail-dominant shape, so this fixture now exercises the
+    // UV read rather than skipping it — the earlier fixture wrote 0x0000 and
+    // left that path, the one that had the bug, entirely untested.
+    appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0x0001u));
+    appendPod(triShapeDataBlock, static_cast<std::uint8_t>(1));  // hasNormals
     for (int i = 0; i < 3; ++i) {
         appendPod(triShapeDataBlock, 0.0f);
         appendPod(triShapeDataBlock, 0.0f);
@@ -714,6 +1078,10 @@ void testNifParserExtractsTransformedGeometry() {
     appendPod(triShapeDataBlock, 0.0f);
     appendPod(triShapeDataBlock, 1.0f);                            // bounding sphere radius
     appendPod(triShapeDataBlock, static_cast<std::uint8_t>(0));    // hasVertexColors
+    // UV set 0, one (u, v) per vertex — present because vectorFlags bit 0 is set.
+    appendPod(triShapeDataBlock, 0.25f); appendPod(triShapeDataBlock, 0.5f);
+    appendPod(triShapeDataBlock, 0.75f); appendPod(triShapeDataBlock, 0.5f);
+    appendPod(triShapeDataBlock, 0.25f); appendPod(triShapeDataBlock, 1.0f);
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0));   // consistencyType
     appendPod(triShapeDataBlock, static_cast<std::int32_t>(-1));   // additionalDataRef
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(1));   // numTriangles
@@ -722,6 +1090,11 @@ void testNifParserExtractsTransformedGeometry() {
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0));
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(1));
     appendPod(triShapeDataBlock, static_cast<std::uint16_t>(2));
+    // Trailing `Num Match Groups`. Retail NiTriShapeData always carries at
+    // least this u16; a fixture that stops after the triangles is shorter than
+    // any real block, and the parser's end-of-block consistency check rightly
+    // rejects it.
+    appendPod(triShapeDataBlock, static_cast<std::uint16_t>(0));
 
     std::vector<std::uint8_t> fileBytes;
     const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
@@ -781,15 +1154,379 @@ void testNifParserExtractsTransformedGeometry() {
             shape.triangleIndices.size() == 3u && shape.triangleIndices[0] == 0u &&
             shape.triangleIndices[1] == 1u && shape.triangleIndices[2] == 2u,
             "Triangle indices round-trip");
+
+        expectTrue(shape.uvs.size() == 6u, "UV set 0 is extracted when BSVectorFlags bit 0 is set");
+        if (shape.uvs.size() == 6u) {
+            expectNear(shape.uvs[0], 0.25f, 1e-5f, "UV 0 u");
+            expectNear(shape.uvs[1], 0.5f, 1e-5f, "UV 0 v");
+            expectNear(shape.uvs[4], 0.25f, 1e-5f, "UV 2 u");
+            expectNear(shape.uvs[5], 1.0f, 1e-5f, "UV 2 v");
+        }
     }
 }
 
-void testBsaArchiveReadsFoldersAndFiles() {
+// Builds a NIF whose hierarchy is root -> middle -> NiTriShape -> data, where
+// the MIDDLE block's type name is chosen by the caller. `footerRoot` < 0 omits
+// the footer entirely (older behaviour); otherwise a one-root footer is written.
+//
+// This is the shape of the floating-geometry bug: when the middle node is not
+// recognized, nothing claims the NiTriShape as a child, and the old root scan
+// promoted it to a root walked from identity -- silently dropping the 5000-unit
+// translation the middle node carries.
+std::vector<std::uint8_t> buildChainedNif(
+    const std::string& middleTypeName, float middleTranslateZ, int footerRoot,
+    bool truncateMiddleBlock = false) {
+    const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+    // Block 0: root node, no translation, one child (block 1).
+    std::vector<std::uint8_t> rootBlock;
+    appendAvObjectPrefix(rootBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(rootBlock, static_cast<std::uint32_t>(1));   // numChildren
+    appendPod(rootBlock, static_cast<std::int32_t>(1));    // children[0] = block 1
+    appendPod(rootBlock, static_cast<std::uint32_t>(0));   // numEffects
+
+    // Block 1: the middle node, translated, one child (block 2).
+    std::vector<std::uint8_t> middleBlock;
+    appendAvObjectPrefix(middleBlock, {0.0f, 0.0f, middleTranslateZ}, identityRotation, 1.0f);
+    appendPod(middleBlock, static_cast<std::uint32_t>(1));  // numChildren
+    appendPod(middleBlock, static_cast<std::int32_t>(2));   // children[0] = block 2
+    if (!truncateMiddleBlock) {
+        appendPod(middleBlock, static_cast<std::uint32_t>(0));  // numEffects
+    }
+
+    // Block 2: NiTriShape, identity local transform, dataRef = block 3.
+    std::vector<std::uint8_t> triShapeBlock;
+    appendAvObjectPrefix(triShapeBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(triShapeBlock, static_cast<std::int32_t>(3));  // dataRef
+
+    // Block 3: NiTriShapeData, one triangle at the origin, no normals/UVs.
+    std::vector<std::uint8_t> dataBlock;
+    appendPod(dataBlock, static_cast<std::int32_t>(0));      // groupId
+    appendPod(dataBlock, static_cast<std::uint16_t>(3));     // numVertices
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));      // keepFlags
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));      // compressFlags
+    appendPod(dataBlock, static_cast<std::uint8_t>(1));      // hasVertices
+    for (int v = 0; v < 3; ++v) {
+        appendPod(dataBlock, 0.0f);
+        appendPod(dataBlock, 0.0f);
+        appendPod(dataBlock, 0.0f);
+    }
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));     // vectorFlags: no UVs, no tangents
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));      // hasNormals
+    appendPod(dataBlock, 0.0f);                              // bounding sphere center x
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);                              // bounding sphere radius
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));      // hasVertexColors
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));     // consistencyType
+    appendPod(dataBlock, static_cast<std::int32_t>(-1));     // additionalDataRef
+    appendPod(dataBlock, static_cast<std::uint16_t>(1));     // numTriangles
+    appendPod(dataBlock, static_cast<std::uint32_t>(3));     // numTrianglePoints
+    appendPod(dataBlock, static_cast<std::uint8_t>(1));      // hasTriangles
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));
+    appendPod(dataBlock, static_cast<std::uint16_t>(1));
+    appendPod(dataBlock, static_cast<std::uint16_t>(2));
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));     // numMatchGroups
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(11));
+    appendPod(fileBytes, static_cast<std::uint32_t>(4));   // numBlocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(34));  // userVersion2
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(4));   // numBlockTypes
+    appendSizedString32(fileBytes, "NiNode");
+    appendSizedString32(fileBytes, middleTypeName);
+    appendSizedString32(fileBytes, "NiTriShape");
+    appendSizedString32(fileBytes, "NiTriShapeData");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));
+    appendPod(fileBytes, static_cast<std::uint16_t>(2));
+    appendPod(fileBytes, static_cast<std::uint16_t>(3));
+    appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(middleBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(triShapeBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(dataBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // numStrings
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // maxStringLength
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // numGroups
+
+    fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+    fileBytes.insert(fileBytes.end(), middleBlock.begin(), middleBlock.end());
+    fileBytes.insert(fileBytes.end(), triShapeBlock.begin(), triShapeBlock.end());
+    fileBytes.insert(fileBytes.end(), dataBlock.begin(), dataBlock.end());
+
+    if (footerRoot >= 0) {
+        appendPod(fileBytes, static_cast<std::uint32_t>(1));  // Num Roots
+        appendPod(fileBytes, static_cast<std::int32_t>(footerRoot));
+    }
+    return fileBytes;
+}
+
+// The floating-geometry regression, stated as the two outcomes that matter.
+void testNifParserDoesNotReparentSubtreesToTheOrigin() {
+    // 1. A middle node of a type the allowlist did not previously cover
+    //    (BSMasterParticleSystem is NiNode-derived per nif.xml and roots 38
+    //    retail meshes, yet does not end in "Node" so no suffix rule sees it).
+    //    Its translation must survive.
+    {
+        const std::vector<std::uint8_t> bytes =
+            buildChainedNif("BSMasterParticleSystem", 5000.0f, 0);
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("NiNode-derived middle type parses: " + error).c_str());
+        expectTrue(model.usedFooterRoots, "Roots came from the footer, not the orphan scan");
+        expectTrue(model.shapes.size() == 1u, "Geometry under a BSMasterParticleSystem is reachable");
+        if (model.shapes.size() == 1u && model.shapes.front().positions.size() >= 3u) {
+            expectNear(model.shapes.front().positions[2], 5000.0f, 1e-3f,
+                       "Subtree keeps its ancestor translation instead of collapsing to the origin");
+        }
+    }
+
+    // 2. A middle node whose block is truncated so readNiNode rejects it. The
+    //    subtree must be DROPPED, not emitted at the origin -- "missing" is
+    //    diagnosable, "floating in the sky" is what this whole change is about.
+    {
+        const std::vector<std::uint8_t> bytes =
+            buildChainedNif("NiNode", 5000.0f, 0, /*truncateMiddleBlock=*/true);
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("Truncated middle node still parses the file: " + error).c_str());
+        expectTrue(model.nodeParseFailedCount == 1u,
+                   "A node whose field walk fails is counted rather than silently ignored");
+        expectTrue(model.shapes.empty(),
+                   "An unreachable subtree emits NOTHING (it must not appear at the origin)");
+    }
+
+    // 3. A middle node of a type NOT in the known list but whose name ends in
+    //    "Node" -- a mod-authored or newer niftools type. It must still be
+    //    walked, because the alternative is the reparent-to-origin bug: an
+    //    unrecognized parent never claims its children, and the root scan then
+    //    promotes each of them and drops the ancestor translation. This is the
+    //    case a name-based allowlist could never cover and the one that made
+    //    the first footer fix incomplete.
+    {
+        const std::vector<std::uint8_t> bytes = buildChainedNif("BSFooBarNode", 5000.0f, 0);
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("Unknown *Node middle type parses: " + error).c_str());
+        expectTrue(model.shapes.size() == 1u,
+                   "Geometry under an unknown *Node type is still reachable");
+        if (model.shapes.size() == 1u && model.shapes.front().positions.size() >= 3u) {
+            expectNear(model.shapes.front().positions[2], 5000.0f, 1e-3f,
+                       "Unknown *Node keeps its translation instead of collapsing to the origin");
+        }
+        expectTrue(model.unhandledNodeTypeCount == 1u,
+                   "The unknown type is still reported, having been walked rather than skipped");
+        expectTrue(model.nodeParseFailedCount == 0u,
+                   "A well-formed unknown *Node parses rather than counting as a failure");
+    }
+
+    // 3. A footer root pointing at a non-node (nif.xml: a first-person camera is
+    //    listed among the roots "even if it is not a root object") must not be
+    //    walked as a node, and must not take the whole model down with it.
+    {
+        std::vector<std::uint8_t> bytes = buildChainedNif("NiNode", 7.0f, 2);  // root -> NiTriShape
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("Footer root pointing at a non-node still parses: " + error).c_str());
+        expectTrue(model.shapes.empty() || model.shapes.size() == 1u,
+                   "A non-node footer root is skipped rather than misparsed");
+    }
+}
+
+
+// A TES4 header whose declared size exceeds the file must be rejected before it
+// is used to size anything. --plugin-add takes an arbitrary user-named path, so
+// this is reachable from a truncated download or any file whose first four
+// bytes happen to read "TES4".
+void testPluginHeaderRejectsOversizedRecord() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "odai_bogus_plugin.esp";
+    {
+        std::ofstream out(path, std::ios::binary);
+        const char magic[4] = {'T', 'E', 'S', '4'};
+        out.write(magic, 4);
+        const std::uint32_t dataSize = 0xFFFFFFFFu;  // ~4 GB, on a 24-byte file
+        out.write(reinterpret_cast<const char*>(&dataSize), 4);
+        const std::uint32_t rest[4] = {0, 0, 0, 0};
+        out.write(reinterpret_cast<const char*>(rest), sizeof(rest));
+    }
+    odai::importer::fnv::FalloutPluginHeader header;
+    std::string error;
+    const bool ok = odai::importer::fnv::readFalloutPluginHeader(path, header, error);
+    expectTrue(!ok, "A TES4 record larger than its file is rejected, not allocated");
+    expectTrue(!error.empty(), "Rejecting an oversized TES4 record explains why");
+    std::error_code removeError;
+    std::filesystem::remove(path, removeError);
+}
+
+// A child count that cannot fit in the block must be rejected before it is
+// used to size anything: unbounded, a desynchronized 0xFFFFFFFF here asks for a
+// ~17 GB allocation on nothing worse than a malformed mod asset.
+void testNifParserRejectsImplausibleChildCount() {
+    const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+    std::vector<std::uint8_t> rootBlock;
+    appendAvObjectPrefix(rootBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(rootBlock, static_cast<std::uint32_t>(0xFFFFFFFFu));  // numChildren
+    appendPod(rootBlock, static_cast<std::uint32_t>(0));
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(11));
+    appendPod(fileBytes, static_cast<std::uint32_t>(1));   // numBlocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(34));
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));
+    appendSizedString32(fileBytes, "NiNode");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));
+    appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));
+    fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+
+    odai::importer::fnv::NifModel model;
+    std::string error;
+    // Must return without allocating; whether it reports success with no shapes
+    // is immaterial, the point is that it does not try to size a vector from a
+    // count the block cannot possibly contain.
+    odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error);
+    expectTrue(model.nodeParseFailedCount == 1u,
+               "An impossible child count is rejected and counted, not allocated");
+    expectTrue(model.shapes.empty(), "No geometry is invented from a rejected node");
+}
+
+// onRecordHeader must be able to reject a record before its body is touched.
+// The load-bearing case is a compressed record: if the skip happened after
+// decompression it would save nothing, so this fixture makes the skipped
+// record's payload deliberately un-inflatable. A walk that succeeds proves
+// the body was never read.
+void testEsmReaderSkipsRecordsByHeader() {
     namespace fs = std::filesystem;
+    constexpr std::uint32_t kRecordFlagCompressed = 0x00040000u;
+
+    const auto keptRecord =
+        buildRecord("STAT", 0x00000001u, 0u, buildSubrecord("EDID", stringPayload("Kept")));
+
+    // Claims 4096 decompressed bytes but carries garbage where the zlib
+    // stream should be. Inflating this would fail the whole walk.
+    std::vector<std::uint8_t> poisonData;
+    appendPod(poisonData, static_cast<std::uint32_t>(4096));
+    for (int i = 0; i < 64; ++i) {
+        poisonData.push_back(static_cast<std::uint8_t>(0xA5u));
+    }
+    const auto skippedRecord = buildRecord("LAND", 0x00000002u, kRecordFlagCompressed, poisonData);
+
+    std::vector<std::uint8_t> content;
+    content.insert(content.end(), keptRecord.begin(), keptRecord.end());
+    content.insert(content.end(), skippedRecord.begin(), skippedRecord.end());
+    const auto group = buildGroup("STAT", 0, content);
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_skip_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(group.data()), static_cast<std::streamsize>(group.size()));
+    }
+
+    odai::importer::fnv::EsmReader reader;
+    expectTrue(reader.open(esmPath), "ESM for the header-skip test opens");
+
+    std::vector<std::string> seenTypes;
+    std::vector<std::string> offeredTypes;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+        offeredTypes.emplace_back(header.type);
+        return header.type != "LAND";
+    };
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        seenTypes.push_back(record.type);
+    };
+
+    expectTrue(reader.walk(visitor), "Walk succeeds without inflating the record its filter rejected");
+    expectTrue(offeredTypes.size() == 2u, "Both record headers are offered to the filter");
+    expectTrue(seenTypes.size() == 1u && seenTypes[0] == "STAT",
+               "Only the accepted record is materialized");
+
+    fs::remove(esmPath);
+}
+
+// A compressed record whose deflate stream is intact but whose adler32
+// trailer is damaged must still be read, and must be counted rather than
+// silently accepted. Retail FalloutNV.esm contains exactly one such record;
+// treating it as fatal aborted the whole 245 MB walk over one bad byte.
+void testEsmReaderToleratesCorruptChecksum() {
+    namespace fs = std::filesystem;
+    constexpr std::uint32_t kRecordFlagCompressed = 0x00040000u;
+
+    const auto innerSubrecords = buildSubrecord("EDID", stringPayload("DamagedChecksum"));
+    const auto goodStream = zlibCompress(innerSubrecords);
+    const auto damagedStream = corruptZlibChecksum(goodStream);
+    expectTrue(damagedStream != goodStream, "Fixture actually damaged the zlib trailer");
+
+    std::vector<std::uint8_t> recordData;
+    appendPod(recordData, static_cast<std::uint32_t>(innerSubrecords.size()));
+    recordData.insert(recordData.end(), damagedStream.begin(), damagedStream.end());
+
+    const auto record = buildRecord("LAND", 0x00150FC0u, kRecordFlagCompressed, recordData);
+    const auto group = buildGroup("LAND", 0, record);
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_checksum_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(group.data()), static_cast<std::streamsize>(group.size()));
+    }
+
+    odai::importer::fnv::EsmReader reader;
+    expectTrue(reader.open(esmPath), "ESM with a damaged checksum opens");
+
+    std::vector<std::string> editorIds;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& view) {
+        for (const auto& subrecord : view.subrecords) {
+            if (subrecord.type == "EDID") {
+                editorIds.emplace_back(reinterpret_cast<const char*>(subrecord.data));
+            }
+        }
+    };
+
+    expectTrue(reader.walk(visitor), "Walk survives a record with a damaged zlib trailer");
+    expectTrue(editorIds.size() == 1u && editorIds[0] == "DamagedChecksum",
+               "Damaged-trailer record still decodes its full declared payload");
+    expectTrue(reader.toleratedChecksumFailures() == 1u,
+               "Damaged trailer is counted as tolerated, not silently ignored");
+
+    fs::remove(esmPath);
+}
+
+// Run against both retail archive shapes: Fallout - Meshes.bsa (flags 0x87,
+// no embedded names) and Fallout - Textures.bsa (flags 0x107, embedded names).
+// The embedded-name variant is the one that silently returned garbage before
+// the reader handled flag 0x100, so both must be covered.
+void testBsaArchiveReadsFoldersAndFiles(bool embedFileNames) {
+    namespace fs = std::filesystem;
+    const std::string label = embedFileNames ? " [embedded names]" : " [plain]";
     const std::string uncompressedContent = "NIF-DATA-PLACEHOLDER";
     const std::string compressedContent(4096, 'T');  // long, repetitive: compresses well
 
-    const std::vector<std::uint8_t> archiveBytes = buildSyntheticBsa(uncompressedContent, compressedContent);
+    const std::vector<std::uint8_t> archiveBytes =
+        buildSyntheticBsa(uncompressedContent, compressedContent, embedFileNames);
     const fs::path archivePath = fs::temp_directory_path() / "odai_fnv_test.bsa";
     {
         std::ofstream out(archivePath, std::ios::binary | std::ios::trunc);
@@ -797,42 +1534,842 @@ void testBsaArchiveReadsFoldersAndFiles() {
     }
 
     odai::importer::fnv::BsaArchive archive;
-    expectTrue(archive.open(archivePath), "Synthetic BSA archive opens");
-    expectTrue(archive.files().size() == 2u, "Synthetic BSA archive exposes both files");
+    expectTrue(archive.open(archivePath), "Synthetic BSA archive opens" + label);
+    expectTrue(archive.files().size() == 2u, "Synthetic BSA archive exposes both files" + label);
 
     const auto* meshEntry = archive.find("meshes\\x\\ex_wall_01.nif");
-    expectTrue(meshEntry != nullptr, "BSA lookup finds the mesh entry by virtual path");
-    expectTrue(meshEntry != nullptr && !meshEntry->compressed, "Uncompressed entry is not marked compressed");
+    expectTrue(meshEntry != nullptr, "BSA lookup finds the mesh entry by virtual path" + label);
+    expectTrue(meshEntry != nullptr && !meshEntry->compressed, "Uncompressed entry is not marked compressed" + label);
 
     const auto* meshEntryMixedCase = archive.find("Meshes/X/EX_WALL_01.NIF");
-    expectTrue(meshEntryMixedCase != nullptr, "BSA lookup is case-insensitive and slash-normalized");
+    expectTrue(meshEntryMixedCase != nullptr, "BSA lookup is case-insensitive and slash-normalized" + label);
 
     std::vector<std::uint8_t> meshBytes;
-    expectTrue(meshEntry != nullptr && archive.extract(*meshEntry, meshBytes), "Uncompressed entry extracts");
+    expectTrue(meshEntry != nullptr && archive.extract(*meshEntry, meshBytes), "Uncompressed entry extracts" + label);
     expectTrue(
         std::string(meshBytes.begin(), meshBytes.end()) == uncompressedContent,
-        "Uncompressed entry bytes match the source content");
+        "Uncompressed entry bytes match the source content" + label);
 
     const auto* textureEntry = archive.find("textures\\x\\tx_wall_01.dds");
-    expectTrue(textureEntry != nullptr, "BSA lookup finds the texture entry by virtual path");
-    expectTrue(textureEntry != nullptr && textureEntry->compressed, "Compressed entry is marked compressed");
+    expectTrue(textureEntry != nullptr, "BSA lookup finds the texture entry by virtual path" + label);
+    expectTrue(textureEntry != nullptr && textureEntry->compressed, "Compressed entry is marked compressed" + label);
 
     std::vector<std::uint8_t> textureBytes;
-    expectTrue(textureEntry != nullptr && archive.extract(*textureEntry, textureBytes), "Compressed entry inflates");
+    expectTrue(textureEntry != nullptr && archive.extract(*textureEntry, textureBytes),
+               "Compressed entry inflates" + label);
     expectTrue(
         std::string(textureBytes.begin(), textureBytes.end()) == compressedContent,
-        "Inflated entry bytes match the original content");
+        "Inflated entry bytes match the original content" + label);
 
     fs::remove(archivePath);
+}
+
+// The background asset pipeline. Two claims are made in comments elsewhere and
+// both are load-bearing for streaming, so both are proved here rather than
+// asserted: that BsaArchive::extract() is safe to call concurrently on one
+// archive, and that the loader never starts two loads for the same asset.
+void testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const std::string uncompressedContent = "NIF-DATA-PLACEHOLDER";
+    const std::string compressedContent(4096, 'T');
+    const std::vector<std::uint8_t> archiveBytes =
+        buildSyntheticBsa(uncompressedContent, compressedContent, /*embedFileNames=*/false);
+
+    const fs::path dataDir = fs::temp_directory_path() / "odai_fnv_asset_source_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDir, cleanupError);
+    fs::create_directories(dataDir, cleanupError);
+    {
+        std::ofstream out(dataDir / "Test.bsa", std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(archiveBytes.data()),
+            static_cast<std::streamsize>(archiveBytes.size()));
+    }
+
+    FalloutAssetSource source;
+    expectTrue(source.open(dataDir), "asset source opens the data directory");
+    expectTrue(source.archiveCount() == 1u, "asset source indexes the synthetic archive");
+
+    std::string error;
+    std::vector<std::uint8_t> meshBytes;
+    expectTrue(
+        source.resolveMesh("x\\ex_wall_01.nif", meshBytes, error),
+        ("asset source resolves a mesh from the archive: " + error).c_str());
+    expectTrue(
+        std::string(meshBytes.begin(), meshBytes.end()) == uncompressedContent,
+        "resolved mesh bytes match the archive content");
+
+    std::vector<std::uint8_t> textureBytes;
+    expectTrue(
+        source.resolveTexture("x\\tx_wall_01.dds", textureBytes, error),
+        ("asset source resolves and inflates a texture: " + error).c_str());
+    expectTrue(
+        std::string(textureBytes.begin(), textureBytes.end()) == compressedContent,
+        "resolved texture bytes match the original content");
+
+    // A path that is not in the archive must fail cleanly with an error, not
+    // return stale bytes from the previous call.
+    std::vector<std::uint8_t> missingBytes{1, 2, 3};
+    expectTrue(
+        !source.resolveMesh("x\\does_not_exist.nif", missingBytes, error),
+        "resolving a missing mesh fails");
+    expectTrue(!error.empty(), "a failed resolve reports why");
+
+    // Concurrency: hammer one archive from every worker at once. If extract()
+    // were not thread safe this is where it would corrupt bytes or crash --
+    // the compressed entry in particular runs a zlib inflate per call.
+    {
+        odai::core::JobSystem jobs(8);
+        std::atomic<int> mismatches{0};
+        std::atomic<int> completed{0};
+        for (int i = 0; i < 200; ++i) {
+            const bool wantTexture = (i % 2) == 0;
+            jobs.enqueue([&source, &mismatches, &completed, wantTexture,
+                          &uncompressedContent, &compressedContent]() {
+                std::vector<std::uint8_t> bytes;
+                std::string localError;
+                const bool ok = wantTexture
+                    ? source.resolveTexture("x\\tx_wall_01.dds", bytes, localError)
+                    : source.resolveMesh("x\\ex_wall_01.nif", bytes, localError);
+                const std::string& expected = wantTexture ? compressedContent : uncompressedContent;
+                if (!ok || std::string(bytes.begin(), bytes.end()) != expected) {
+                    ++mismatches;
+                }
+                ++completed;
+            });
+        }
+        jobs.waitIdle();
+        expectTrue(completed.load() == 200, "every concurrent resolve ran");
+        expectTrue(
+            mismatches.load() == 0,
+            "200 concurrent resolves from one archive all produced correct bytes");
+    }
+
+    // Deduplication: many requests for one asset must start exactly one load.
+    {
+        odai::core::JobSystem jobs(4);
+        AsyncAssetLoader loader(source, jobs);
+
+        int startedByReturn = 0;
+        for (int i = 0; i < 50; ++i) {
+            if (loader.request(AssetKind::Mesh, "x\\ex_wall_01.nif", static_cast<std::uint64_t>(i))) {
+                ++startedByReturn;
+            }
+        }
+        loader.waitIdle();
+
+        const AsyncAssetLoaderStats stats = loader.stats();
+        expectTrue(
+            stats.startedLoads == 1u,
+            "50 requests for one mesh start exactly one background load");
+        expectTrue(
+            stats.deduplicatedRequests == 49u,
+            "the other 49 requests are folded into the in-flight load");
+        expectTrue(startedByReturn == 1, "request() reports which call actually started the load");
+
+        std::vector<LoadedAsset> drained;
+        loader.drainCompleted(drained);
+        expectTrue(drained.size() == 1u, "exactly one result is delivered for the deduplicated load");
+        expectTrue(
+            drained.size() == 1u && drained[0].succeeded &&
+                std::string(drained[0].bytes.begin(), drained[0].bytes.end()) == uncompressedContent,
+            "the deduplicated load delivers the right bytes");
+        // Case and separator differences must not defeat dedup: the ESM, the
+        // NIFs and the BSA index all disagree about them for the same file.
+        expectTrue(
+            drained.size() == 1u && drained[0].key == "x\\ex_wall_01.nif",
+            "the delivered key is the normalized path");
+    }
+
+    // Mixed-case and forward-slash spellings of one path are the same asset.
+    {
+        odai::core::JobSystem jobs(4);
+        AsyncAssetLoader loader(source, jobs);
+        loader.request(AssetKind::Mesh, "X\\EX_WALL_01.NIF");
+        loader.request(AssetKind::Mesh, "x/ex_wall_01.nif");
+        loader.request(AssetKind::Mesh, "x\\ex_wall_01.nif");
+        loader.waitIdle();
+        expectTrue(
+            loader.stats().startedLoads == 1u,
+            "case and separator variants of one path deduplicate to a single load");
+    }
+
+    // Generation: results requested before the world moved on are discarded.
+    {
+        odai::core::JobSystem jobs(4);
+        AsyncAssetLoader loader(source, jobs);
+        loader.request(AssetKind::Texture, "x\\tx_wall_01.dds");
+        loader.waitIdle();
+        loader.bumpGeneration();
+
+        std::vector<LoadedAsset> drained;
+        loader.drainCompleted(drained);
+        expectTrue(drained.empty(), "results from an abandoned generation are not delivered");
+        expectTrue(
+            loader.stats().discardedResults == 1u,
+            "discarded results are counted as wasted work rather than hidden");
+    }
+
+    // A failed load still completes and reports, rather than vanishing.
+    {
+        odai::core::JobSystem jobs(2);
+        AsyncAssetLoader loader(source, jobs);
+        loader.request(AssetKind::Mesh, "x\\nope.nif");
+        loader.waitIdle();
+
+        std::vector<LoadedAsset> drained;
+        loader.drainCompleted(drained);
+        expectTrue(drained.size() == 1u, "a failed load is still delivered");
+        expectTrue(
+            drained.size() == 1u && !drained[0].succeeded && !drained[0].error.empty(),
+            "a failed load reports failure and why");
+        expectTrue(loader.stats().failedLoads == 1u, "failed loads are counted");
+    }
+
+    fs::remove_all(dataDir, cleanupError);
+}
+
+// Mod directories: an installed texture pack has to beat the archives, and it
+// has to do so on a case-sensitive filesystem. The second half is the whole
+// reason mod roots are indexed rather than probed with exists() -- packs ship
+// "Textures\" while NIFs ask for "textures\", and on ext4 those are two
+// different paths.
+void testModDirectoryOverridesArchives() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const std::string archiveMesh = "ARCHIVE-MESH";
+    const std::string archiveTexture(4096, 'T');
+    const std::vector<std::uint8_t> archiveBytes =
+        buildSyntheticBsa(archiveMesh, archiveTexture, /*embedFileNames=*/false);
+
+    const fs::path root = fs::temp_directory_path() / "odai_fnv_mod_dir_test";
+    std::error_code cleanupError;
+    fs::remove_all(root, cleanupError);
+
+    const fs::path dataDir = root / "Data";
+    fs::create_directories(dataDir, cleanupError);
+    {
+        std::ofstream out(dataDir / "Test.bsa", std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(archiveBytes.data()),
+            static_cast<std::streamsize>(archiveBytes.size()));
+    }
+
+    // Deliberately capitalized the way a downloaded pack ships, and NOT the way
+    // the archive path is spelled below.
+    const fs::path modA = root / "ModA";
+    fs::create_directories(modA / "Textures" / "X", cleanupError);
+    {
+        std::ofstream out(modA / "Textures" / "X" / "TX_Wall_01.dds", std::ios::binary);
+        out << "MOD-A-TEXTURE";
+    }
+
+    const fs::path modB = root / "ModB";
+    fs::create_directories(modB / "textures" / "x", cleanupError);
+    {
+        std::ofstream out(modB / "textures" / "x" / "tx_wall_01.dds", std::ios::binary);
+        out << "MOD-B-TEXTURE";
+    }
+
+    {
+        FalloutAssetSource source;
+        expectTrue(source.open(dataDir), "asset source opens the data directory");
+        expectTrue(
+            source.modFingerprint().empty(),
+            "with no mod directory the fingerprint is empty, so an unmodded cache key is unchanged");
+
+        expectTrue(source.addModDirectory(modA), "a readable mod directory is added");
+        expectTrue(source.modDirectoryCount() == 1u, "the mod directory is counted");
+        expectTrue(source.modFileCount() == 1u, "the mod directory is indexed recursively");
+
+        std::string error;
+        std::vector<std::uint8_t> bytes;
+        // The request spells the path all lowercase; the file on disk does not.
+        expectTrue(
+            source.resolveTexture("textures\\x\\tx_wall_01.dds", bytes, error),
+            ("a mod texture resolves despite case differing from the file on disk: " + error).c_str());
+        expectTrue(
+            std::string(bytes.begin(), bytes.end()) == "MOD-A-TEXTURE",
+            "the mod's texture wins over the archive's");
+
+        // The prefix-adding form of the same request must land on the same file.
+        bytes.clear();
+        expectTrue(
+            source.resolveTexture("X\\TX_WALL_01.DDS", bytes, error),
+            ("a mod texture resolves through the textures\\ prefix path: " + error).c_str());
+        expectTrue(
+            std::string(bytes.begin(), bytes.end()) == "MOD-A-TEXTURE",
+            "an unprefixed, differently-cased request resolves to the same mod file");
+
+        // Anything the mod does not carry still falls through to the archive.
+        bytes.clear();
+        expectTrue(
+            source.resolveMesh("x\\ex_wall_01.nif", bytes, error),
+            ("a mesh the mod does not override still resolves from the archive: " + error).c_str());
+        expectTrue(
+            std::string(bytes.begin(), bytes.end()) == archiveMesh,
+            "the archive still serves what no mod overrides");
+
+        const std::string fingerprintA = source.modFingerprint();
+        expectTrue(!fingerprintA.empty(), "a mod set produces a non-empty fingerprint");
+
+        // Load order: the last directory added wins, as a mod manager's would.
+        expectTrue(source.addModDirectory(modB), "a second mod directory is added");
+        bytes.clear();
+        expectTrue(
+            source.resolveTexture("textures\\x\\tx_wall_01.dds", bytes, error),
+            ("the overridden texture still resolves: " + error).c_str());
+        expectTrue(
+            std::string(bytes.begin(), bytes.end()) == "MOD-B-TEXTURE",
+            "the last mod directory added wins, matching the archive load-order rule");
+        expectTrue(
+            source.modFingerprint() != fingerprintA,
+            "adding a mod changes the fingerprint, so a stale cell cache misses instead of "
+            "serving art from before the mod was installed");
+    }
+
+    // An unreadable mod directory is reported rather than silently ignored, and
+    // does not stop the base game from resolving.
+    {
+        FalloutAssetSource source;
+        expectTrue(source.open(dataDir), "asset source opens the data directory");
+        expectTrue(
+            !source.addModDirectory(root / "does_not_exist"),
+            "a missing mod directory fails rather than being silently accepted");
+        expectTrue(!source.warnings().empty(), "a missing mod directory is reported");
+        expectTrue(source.modDirectoryCount() == 0u, "a failed mod directory is not counted");
+
+        std::string error;
+        std::vector<std::uint8_t> bytes;
+        expectTrue(
+            source.resolveMesh("x\\ex_wall_01.nif", bytes, error),
+            "the base game still resolves after a mod directory failed to load");
+    }
+
+    fs::remove_all(root, cleanupError);
+}
+
+// Load order and formID remapping. The mod index inside a plugin file is local
+// to that file, so this is what decides whether a second plugin's records
+// resolve to the right things or silently to the wrong ones.
+//
+// Synthetic plugins only -- a TES4 header is small enough to write by hand, and
+// the point is the index arithmetic, not any real game data.
+void testPluginLoadOrderRemapsFormIds() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const fs::path dataDir = fs::temp_directory_path() / "odai_fnv_load_order_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDir, cleanupError);
+    fs::create_directories(dataDir, cleanupError);
+
+    // Writes a plugin that is nothing but a TES4 record: the header is all a
+    // load order ever reads.
+    const auto writePlugin = [&](const std::string& fileName,
+                                 const std::vector<std::string>& masters,
+                                 bool isMaster) {
+        std::vector<std::uint8_t> body;
+        const auto appendSubrecord = [&](const char* type, const std::vector<std::uint8_t>& data) {
+            body.insert(body.end(), type, type + 4);
+            const auto size = static_cast<std::uint16_t>(data.size());
+            body.push_back(static_cast<std::uint8_t>(size & 0xFFu));
+            body.push_back(static_cast<std::uint8_t>((size >> 8) & 0xFFu));
+            body.insert(body.end(), data.begin(), data.end());
+        };
+        // HEDR: version float, record count, next object id.
+        std::vector<std::uint8_t> hedr(12, 0u);
+        appendSubrecord("HEDR", hedr);
+        for (const std::string& master : masters) {
+            std::vector<std::uint8_t> name(master.begin(), master.end());
+            name.push_back(0u);
+            appendSubrecord("MAST", name);
+            appendSubrecord("DATA", std::vector<std::uint8_t>(8, 0u));
+        }
+
+        std::vector<std::uint8_t> file;
+        const char* type = "TES4";
+        file.insert(file.end(), type, type + 4);
+        const auto appendU32 = [&](std::uint32_t value) {
+            for (int shift = 0; shift < 32; shift += 8) {
+                file.push_back(static_cast<std::uint8_t>((value >> shift) & 0xFFu));
+            }
+        };
+        appendU32(static_cast<std::uint32_t>(body.size()));
+        appendU32(isMaster ? 0x00000001u : 0u);
+        appendU32(0u);  // formID
+        appendU32(0u);  // version control
+        appendU32(0u);  // formVersion + unknown
+        file.insert(file.end(), body.begin(), body.end());
+
+        std::ofstream out(dataDir / fileName, std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(file.data()), static_cast<std::streamsize>(file.size()));
+    };
+
+    // The real Nevada Skies shape: a base master, four DLC masters, and a mod
+    // declaring all five.
+    writePlugin("FalloutNV.esm", {}, /*isMaster=*/true);
+    writePlugin("DeadMoney.esm", {"FalloutNV.esm"}, true);
+    writePlugin("HonestHearts.esm", {"FalloutNV.esm"}, true);
+    writePlugin("OldWorldBlues.esm", {"FalloutNV.esm"}, true);
+    writePlugin("LonesomeRoad.esm", {"FalloutNV.esm"}, true);
+    writePlugin(
+        "NevadaSkies.esp",
+        {"FalloutNV.esm", "DeadMoney.esm", "HonestHearts.esm", "OldWorldBlues.esm",
+         "LonesomeRoad.esm"},
+        false);
+
+    {
+        FalloutPluginHeader header;
+        std::string error;
+        expectTrue(
+            readFalloutPluginHeader(dataDir / "NevadaSkies.esp", header, error),
+            ("a plugin header reads: " + error).c_str());
+        expectTrue(header.masters.size() == 5u, "the plugin's five masters are read in order");
+        expectTrue(header.masters[0] == "FalloutNV.esm", "the first master is the base game");
+        expectTrue(header.masters[4] == "LonesomeRoad.esm", "the last master keeps its position");
+        expectTrue(!header.isMaster, "an .esp is not flagged as a master");
+    }
+
+    // Asking for only the mod must pull in every master it needs, ahead of it.
+    {
+        FalloutLoadOrder order;
+        std::string error;
+        expectTrue(
+            order.open(dataDir, {"NevadaSkies.esp"}, error),
+            ("a load order resolves from one requested plugin: " + error).c_str());
+        expectTrue(
+            order.size() == 6u,
+            "requesting one mod pulls in its five masters, so six plugins load");
+        expectTrue(
+            order.entries()[0].header.fileName == "FalloutNV.esm",
+            "the base game loads first because everything masters it");
+        expectTrue(
+            order.entries()[5].header.fileName == "NevadaSkies.esp",
+            "the mod loads after every master it declares");
+
+        // The payload case: Nevada Skies' own records carry local index 5,
+        // which here happens to equal its global index.
+        const std::size_t modIndex = 5u;
+        expectTrue(
+            order.remapFormId(modIndex, 0x05000ABCu) == 0x05000ABCu,
+            "the mod's own records map to its global index");
+        expectTrue(
+            order.remapFormId(modIndex, 0x00123456u) == 0x00123456u,
+            "a reference to the base game stays at index 0");
+        expectTrue(
+            order.remapFormId(modIndex, 0x04001111u) == 0x04001111u,
+            "a reference to the fifth master maps to global index 4");
+        // A local index past the master list is malformed; inventing a target
+        // for it would alias a bad reference onto a real record.
+        expectTrue(
+            order.remapFormId(modIndex, 0x0900BEEFu) == 0x0900BEEFu,
+            "a local index the plugin never declared is left alone");
+    }
+
+    // The case that actually needs remapping: a mod whose only master is the
+    // base game, loaded alongside the DLC. Its local index 1 means "my own
+    // records", but its global index is 5.
+    {
+        writePlugin("SmallMod.esp", {"FalloutNV.esm"}, false);
+        FalloutLoadOrder order;
+        std::string error;
+        expectTrue(
+            order.open(
+                dataDir,
+                {"FalloutNV.esm", "DeadMoney.esm", "HonestHearts.esm", "OldWorldBlues.esm",
+                 "LonesomeRoad.esm", "SmallMod.esp"},
+                error),
+            ("an explicit load order resolves: " + error).c_str());
+        expectTrue(order.size() == 6u, "an explicit order loads exactly what was asked for");
+
+        const std::size_t smallModIndex = 5u;
+        expectTrue(
+            order.entries()[smallModIndex].header.fileName == "SmallMod.esp",
+            "the mod sits last in the explicit order");
+        expectTrue(
+            order.entries()[smallModIndex].localToGlobal.size() == 2u,
+            "a one-master plugin maps two local indices: its master and itself");
+        // THE bug this whole module exists to prevent: local 1 is the plugin's
+        // own space, and it must become 5, not stay 1 (which is DeadMoney).
+        expectTrue(
+            order.remapFormId(smallModIndex, 0x01000042u) == 0x05000042u,
+            "the mod's own local index 1 remaps to its global index 5, not to DeadMoney");
+        expectTrue(
+            order.remapFormId(smallModIndex, 0x00000042u) == 0x00000042u,
+            "its reference to the base game is unchanged");
+
+        // A different fingerprint than the previous order, so a cache keyed on
+        // it cannot serve records built from a different plugin set.
+        FalloutLoadOrder other;
+        std::string otherError;
+        expectTrue(other.open(dataDir, {"NevadaSkies.esp"}, otherError), "the other order opens");
+        expectTrue(
+            order.fingerprint() != other.fingerprint(),
+            "different plugin sets produce different fingerprints");
+    }
+
+    // A plugin living in a mod directory rather than in Data. This is what lets
+    // a mod ship its .esp beside its .bsa instead of needing anything copied
+    // into the game install.
+    {
+        const fs::path modDir = dataDir.parent_path() / "odai_fnv_load_order_moddir";
+        fs::remove_all(modDir, cleanupError);
+        fs::create_directories(modDir, cleanupError);
+        // Written into the mod directory, NOT into dataDir.
+        {
+            const fs::path staged = dataDir / "InModDir.esp";
+            writePlugin("InModDir.esp", {"FalloutNV.esm"}, false);
+            fs::rename(staged, modDir / "InModDir.esp", cleanupError);
+        }
+
+        FalloutLoadOrder without;
+        std::string withoutError;
+        expectTrue(
+            !without.open(dataDir, {"InModDir.esp"}, withoutError),
+            "a plugin outside the data directory is not found without a search root");
+
+        FalloutLoadOrder order;
+        order.addSearchRoot(modDir);
+        std::string error;
+        expectTrue(
+            order.open(dataDir, {"InModDir.esp"}, error),
+            ("a search root makes a mod-directory plugin loadable: " + error).c_str());
+        expectTrue(order.size() == 2u, "its master still resolves from the data directory");
+        expectTrue(
+            order.entries()[1].path.parent_path() == modDir,
+            "the plugin is loaded from the mod directory it actually lives in");
+        expectTrue(
+            order.entries()[0].header.fileName == "FalloutNV.esm",
+            "the master loads first even though it lives somewhere else");
+
+        // Higher priority than the data directory: a mod shadowing a plugin the
+        // game also ships must win, the same way its assets do.
+        {
+            const fs::path staged = dataDir / "Shadowed.esp";
+            writePlugin("Shadowed.esp", {"FalloutNV.esm"}, false);
+            std::ofstream copy(modDir / "Shadowed.esp", std::ios::binary | std::ios::trunc);
+            std::ifstream source(staged, std::ios::binary);
+            copy << source.rdbuf();
+        }
+        FalloutLoadOrder shadowed;
+        shadowed.addSearchRoot(modDir);
+        std::string shadowError;
+        expectTrue(shadowed.open(dataDir, {"Shadowed.esp"}, shadowError), "the shadowed load opens");
+        expectTrue(
+            shadowed.entries()[1].path.parent_path() == modDir,
+            "a mod directory outranks the data directory for a plugin of the same name");
+
+        fs::remove_all(modDir, cleanupError);
+    }
+
+    // A missing master must name itself rather than failing vaguely.
+    {
+        writePlugin("Orphan.esp", {"NotInstalled.esm"}, false);
+        FalloutLoadOrder order;
+        std::string error;
+        expectTrue(!order.open(dataDir, {"Orphan.esp"}, error), "a missing master fails the load");
+        expectTrue(
+            error.find("NotInstalled.esm") != std::string::npos,
+            "the error names the master that is missing");
+        expectTrue(order.empty(), "a failed load order leaves nothing half-built");
+    }
+
+    fs::remove_all(dataDir, cleanupError);
+}
+
+// The LOD block origin must floor toward negative infinity, not truncate:
+// truncation makes the blocks straddling zero twice as wide as every other and
+// silently maps cells to the wrong distant tile.
+void testLandLodBlockOrigin() {
+    using odai::importer::fnv::landLodBlockOrigin;
+
+    expectTrue(landLodBlockOrigin(0) == 0, "cell 0 is in block 0");
+    expectTrue(landLodBlockOrigin(3) == 0, "cell 3 is in block 0");
+    expectTrue(landLodBlockOrigin(4) == 4, "cell 4 starts block 4");
+    expectTrue(landLodBlockOrigin(7) == 4, "cell 7 is in block 4");
+    expectTrue(landLodBlockOrigin(-1) == -4, "cell -1 is in block -4, not block 0");
+    expectTrue(landLodBlockOrigin(-4) == -4, "cell -4 starts block -4");
+    expectTrue(landLodBlockOrigin(-5) == -8, "cell -5 is in block -8");
+    expectTrue(landLodBlockOrigin(-8) == -8, "cell -8 starts block -8");
+    // Against a real measured extent: WastelandNV blocks span x -32..40 step 4.
+    expectTrue(landLodBlockOrigin(-32) == -32, "the lowest measured WastelandNV block maps to itself");
+    expectTrue(landLodBlockOrigin(43) == 40, "cell 43 falls in the highest measured block");
+}
+
+// The same flooring has to hold for every tier, not just the finest one: the
+// terrain LOD pyramid is level4/8/16/32 and a coarse tier is exactly where a
+// truncating divide does the most damage, because its zero-straddling tile
+// would be 64 cells wide instead of 32.
+void testLandLodTileOriginAcrossTiers() {
+    using odai::importer::fnv::kLandLodTierCellCounts;
+    using odai::importer::fnv::landLodTileOrigin;
+    using odai::importer::fnv::landLodTileSize;
+
+    expectTrue(landLodTileOrigin(-5, 8) == -8, "cell -5 is in tier-8 tile -8");
+    expectTrue(landLodTileOrigin(-8, 8) == -8, "cell -8 starts tier-8 tile -8");
+    expectTrue(landLodTileOrigin(-9, 8) == -16, "cell -9 drops to tier-8 tile -16");
+    expectTrue(landLodTileOrigin(31, 32) == 0, "cell 31 is still in tier-32 tile 0");
+    expectTrue(landLodTileOrigin(32, 32) == 32, "cell 32 starts tier-32 tile 32");
+    expectTrue(landLodTileOrigin(-1, 32) == -32, "cell -1 is in tier-32 tile -32, not tile 0");
+    // The measured WastelandNV extent: level32 tiles run x -32..96 step 32.
+    expectTrue(landLodTileOrigin(-32, 32) == -32, "the lowest measured level32 tile maps to itself");
+
+    // Every tier must agree with the finest one wherever they line up, and each
+    // tile origin must itself be a multiple of the tier width.
+    for (const int tier : kLandLodTierCellCounts) {
+        for (std::int32_t cell = -70; cell <= 70; ++cell) {
+            const std::int32_t origin = landLodTileOrigin(cell, tier);
+            expectTrue(origin % tier == 0, "a tile origin is a multiple of the tier width");
+            expectTrue(origin <= cell && cell < origin + tier, "a cell lies inside its own tile");
+        }
+    }
+
+    expectTrue(landLodTileSize(4) == 16384.0f, "a tier-4 tile is 4 cells of 4096 units");
+    expectTrue(landLodTileSize(32) == 131072.0f, "a tier-32 tile is 32 cells of 4096 units");
+}
+
+// The two LOD sets must not be reachable through each other. Both answer to
+// <ws>.level4.x<X>.y<Y>.nif and both parse into geometry, so a wrong directory
+// is silent -- the cooker used to derive it from `tier == 4` and cooked distant
+// buildings whenever terrain level4 was asked for. These strings are the two
+// paths verified against the retail archives with `--find`.
+void testLandLodTilePaths() {
+    using odai::importer::fnv::LandLodSet;
+    using odai::importer::fnv::landLodTierExists;
+    using odai::importer::fnv::landLodTilePath;
+
+    expectTrue(
+        landLodTilePath("wastelandnv", LandLodSet::Terrain, 4, 24, -12) ==
+            "landscape\\lod\\wastelandnv\\wastelandnv.level4.x24.y-12.nif",
+        "terrain level4 sits directly under the worldspace directory");
+    expectTrue(
+        landLodTilePath("wastelandnv", LandLodSet::Objects, 4, 24, -12) ==
+            "landscape\\lod\\wastelandnv\\blocks\\wastelandnv.level4.x24.y-12.nif",
+        "object level4 sits under blocks\\");
+    expectTrue(
+        landLodTilePath("wastelandnv", LandLodSet::Terrain, 32, -32, 0) ==
+            "landscape\\lod\\wastelandnv\\wastelandnv.level32.x-32.y0.nif",
+        "a coarse terrain tier keeps the same shape, negative coordinate and all");
+
+    // The pyramid is terrain-only. Measured: blocks\ holds 301 level4 tiles for
+    // WastelandNV and nothing whatsoever at level8/16/32.
+    for (const int tier : odai::importer::fnv::kLandLodTierCellCounts) {
+        expectTrue(landLodTierExists(LandLodSet::Terrain, tier), "every terrain tier exists");
+    }
+    expectTrue(landLodTierExists(LandLodSet::Objects, 4), "object LOD exists at level4");
+    expectTrue(!landLodTierExists(LandLodSet::Objects, 8), "object LOD has no level8");
+    expectTrue(!landLodTierExists(LandLodSet::Objects, 32), "object LOD has no level32");
+    expectTrue(!landLodTierExists(LandLodSet::Terrain, 2), "there is no level2 tier");
+}
+
+
+// The skinning bind-pose identity, on a synthetic two-bone rig.
+//
+// This is the one property the whole character path rests on: skinning a mesh
+// by its own bind pose must reproduce the mesh exactly. If it does, the basis
+// change, the quaternion conversion, the inverse binds and the world-transform
+// accumulation are all mutually consistent -- and if any single one of them is
+// wrong, the product is not the identity and the vertices move.
+//
+// It is worth having synthetically as well as against retail data, because it
+// pins the math independently of any file: the retail check found a 112-unit
+// error from a dropped NiSkinData skinTransform, and a test that can only run
+// with Fallout installed is a test CI never runs.
+void testSkinnedBindPoseIsIdentity() {
+    using namespace odai::importer::fnv;
+
+    // A root at the origin and a child offset along Bethesda +Z (up), rotated
+    // 90 degrees about X so the basis change has something non-trivial to do.
+    NifSkeleton nifSkeleton;
+    NifSkeletonBone root;
+    root.name = "Bip01";
+    root.parentIndex = -1;
+    root.translation[2] = 60.0f;
+    nifSkeleton.bones.push_back(root);
+
+    NifSkeletonBone child;
+    child.name = "Bip01 Spine";
+    child.parentIndex = 0;
+    child.translation[0] = 3.0f;
+    child.translation[2] = 12.0f;
+    // Rotation about X by +90 degrees, row-major.
+    const float rotation[9] = {1, 0, 0, 0, 0, -1, 0, 1, 0};
+    std::memcpy(child.rotation, rotation, sizeof(rotation));
+    nifSkeleton.bones.push_back(child);
+
+    FalloutCharacter character;
+    expectTrue(buildFalloutSkeleton(nifSkeleton, character.skeleton), "skeleton converts");
+    expectTrue(character.skeleton.bones.size() == 2u, "both bones survive the conversion");
+    expectTrue(character.skeleton.bones[1].parentIndex == 0, "the child keeps its parent");
+
+    // Engine Y is Bethesda Z, so the root's 60-unit height lands on +Y.
+    expectTrue(
+        std::fabs(character.skeleton.bones[0].localTranslation.y - 60.0f) < 1e-4f,
+        "Bethesda +Z becomes engine +Y");
+    expectTrue(
+        std::fabs(character.skeleton.bones[0].localTranslation.z) < 1e-4f,
+        "nothing leaks into engine Z");
+
+    // Bind-pose world transforms, computed the same way the builder does, so
+    // the inverse binds below are exactly correct by construction. That is the
+    // point: the test asserts the round trip, not the values.
+    std::vector<odai::math::Matrix4> bindWorld(2, odai::math::Matrix4::identity());
+    {
+        FalloutCharacter probe = character;
+        probe.inverseBindMatrices.assign(2, odai::math::Matrix4::identity());
+        computeFalloutBindPose(probe, bindWorld);
+    }
+
+    // Build a shape rigidly bound one vertex per bone, whose inverse binds are
+    // the true inverses of those world transforms. Inverting a rigid transform
+    // is transpose-the-rotation, negate-the-rotated-translation.
+    NifSkinnedModel model;
+    NifSkinnedShape shape;
+    shape.name = "test";
+    shape.boneNames = {"Bip01", "Bip01 Spine"};
+    shape.inverseBindMatrices.assign(2u * 16u, 0.0f);
+    for (std::size_t b = 0; b < 2u; ++b) {
+        // bindWorld is engine-space, but inverseBindMatrices are read in
+        // Bethesda space and rebased by the builder. Feeding an identity here
+        // and letting the per-bone value be identity keeps the algebra honest:
+        // with an identity inverse bind, skinning by bone b must reproduce
+        // bindWorld[b] applied to the vertex.
+        float* target = shape.inverseBindMatrices.data() + (b * 16u);
+        target[0] = 1.0f;
+        target[5] = 1.0f;
+        target[10] = 1.0f;
+        target[15] = 1.0f;
+    }
+    // Two vertices, each fully weighted to one bone.
+    shape.positions = {0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 3.0f};
+    shape.normals = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+    shape.uvs = {0.0f, 0.0f, 1.0f, 1.0f};
+    shape.triangleIndices = {0, 1, 0};
+    shape.boneIndices.assign(2u * kNifMaxBoneInfluences, 0u);
+    shape.boneWeights.assign(2u * kNifMaxBoneInfluences, 0.0f);
+    shape.boneIndices[0] = 0u;
+    shape.boneWeights[0] = 1.0f;
+    shape.boneIndices[kNifMaxBoneInfluences] = 1u;
+    shape.boneWeights[kNifMaxBoneInfluences] = 1.0f;
+    model.shapes.push_back(shape);
+
+    std::string error;
+    expectTrue(appendFalloutCharacterMesh(model, character, error), "the shape binds");
+    expectTrue(character.unresolvedBoneCount == 0u, "both bone names resolve");
+    expectTrue(character.vertices.size() == 2u, "both vertices survive");
+    expectTrue(character.parts.size() == 1u, "one part is emitted");
+    expectTrue(character.indices.size() == 3u, "the triangle survives");
+
+    // With identity inverse binds, skinning vertex v by bone b must equal
+    // bindWorld[b] * v. Anything else means the pose composition is wrong.
+    std::vector<odai::math::Matrix4> pose;
+    computeFalloutBindPose(character, pose);
+    expectTrue(pose.size() == 2u, "one matrix per bone");
+    for (std::size_t v = 0; v < 2u; ++v) {
+        const auto& vertex = character.vertices[v];
+        const odai::math::Vector3 rest{vertex.position[0], vertex.position[1], vertex.position[2]};
+        const auto bone = static_cast<std::size_t>(vertex.boneIndices[0]);
+        expectTrue(bone == v, "vertex is bound to its own bone");
+        expectTrue(std::fabs(vertex.boneWeights[0] - 1.0f) < 1e-6f, "rigid bind has weight 1");
+        const odai::math::Vector3 skinned = odai::math::transformPoint(pose[bone], rest);
+        const odai::math::Vector3 expected = odai::math::transformPoint(bindWorld[bone], rest);
+        expectTrue(std::fabs(skinned.x - expected.x) < 1e-3f, "skinned x matches the bind world");
+        expectTrue(std::fabs(skinned.y - expected.y) < 1e-3f, "skinned y matches the bind world");
+        expectTrue(std::fabs(skinned.z - expected.z) < 1e-3f, "skinned z matches the bind world");
+    }
+}
+
+// Influence truncation must renormalize, not merely drop.
+//
+// Weights that no longer sum to 1 do not make a vertex slightly wrong -- they
+// scale it toward the world origin, which for a character standing anywhere but
+// the origin is a spike across the map.
+void testSkinnedInfluenceWeightsAreNormalized() {
+    using namespace odai::importer::fnv;
+
+    NifSkeleton nifSkeleton;
+    for (int i = 0; i < 6; ++i) {
+        NifSkeletonBone bone;
+        bone.name = "bone" + std::to_string(i);
+        bone.parentIndex = (i == 0) ? -1 : 0;
+        bone.translation[0] = static_cast<float>(i);
+        nifSkeleton.bones.push_back(bone);
+    }
+    FalloutCharacter character;
+    expectTrue(buildFalloutSkeleton(nifSkeleton, character.skeleton), "skeleton converts");
+
+    NifSkinnedModel model;
+    NifSkinnedShape shape;
+    shape.name = "overweighted";
+    for (int i = 0; i < 6; ++i) {
+        shape.boneNames.push_back("bone" + std::to_string(i));
+    }
+    shape.inverseBindMatrices.assign(6u * 16u, 0.0f);
+    for (std::size_t b = 0; b < 6u; ++b) {
+        float* target = shape.inverseBindMatrices.data() + (b * 16u);
+        target[0] = target[5] = target[10] = target[15] = 1.0f;
+    }
+    shape.positions = {0.0f, 0.0f, 0.0f};
+    shape.triangleIndices = {0, 0, 0};
+    // Six influences on one vertex, which is what the parser would hand over
+    // before reduction. The builder consumes an already-reduced shape, so the
+    // reduction is exercised through the parser's own contract: only four slots
+    // exist, and they must already be normalized.
+    shape.boneIndices.assign(kNifMaxBoneInfluences, 0u);
+    shape.boneWeights.assign(kNifMaxBoneInfluences, 0.0f);
+    const float kept[kNifMaxBoneInfluences] = {0.4f, 0.3f, 0.2f, 0.1f};
+    for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
+        shape.boneIndices[static_cast<std::size_t>(k)] = static_cast<std::uint16_t>(k);
+        shape.boneWeights[static_cast<std::size_t>(k)] = kept[k];
+    }
+    model.shapes.push_back(shape);
+
+    std::string error;
+    expectTrue(appendFalloutCharacterMesh(model, character, error), "the shape binds");
+    expectTrue(character.vertices.size() == 1u, "one vertex");
+    float sum = 0.0f;
+    for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
+        sum += character.vertices[0].boneWeights[k];
+    }
+    expectTrue(std::fabs(sum - 1.0f) < 1e-5f, "the surviving weights sum to 1");
+
+    // A bone the skeleton does not have must be counted, and its vertex slot
+    // zeroed rather than left pointing at a bogus index.
+    NifSkinnedModel stray;
+    NifSkinnedShape strayShape = shape;
+    strayShape.boneNames[0] = "no_such_bone";
+    stray.shapes.push_back(strayShape);
+    const std::uint32_t before = character.unresolvedBoneCount;
+    expectTrue(appendFalloutCharacterMesh(stray, character, error), "the stray shape still binds");
+    expectTrue(character.unresolvedBoneCount == before + 1u, "the missing bone is counted");
 }
 
 }  // namespace
 
 int main() {
-    testBsaArchiveReadsFoldersAndFiles();
+    testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
+    testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
     testEsmReaderWalksGroupsRecordsAndSubrecords();
+    testEsmReaderToleratesCorruptChecksum();
+    testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
     testNifParserExtractsTransformedGeometry();
+    testNifParserDoesNotReparentSubtreesToTheOrigin();
+    testNifParserRejectsImplausibleChildCount();
+    testPluginHeaderRejectsOversizedRecord();
+    testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
+    testModDirectoryOverridesArchives();
+    testPluginLoadOrderRemapsFormIds();
+    testLandLodBlockOrigin();
+    testLandLodTileOriginAcrossTiers();
+    testLandLodTilePaths();
+    testSkinnedBindPoseIsIdentity();
+    testSkinnedInfluenceWeightsAreNormalized();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

@@ -1,4 +1,5 @@
 import camera_uniform;
+import chunk_push_constants;
 
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
@@ -20,7 +21,7 @@ float4 main(FragmentInput input) : SV_Target0
 {
     if (input.inTextureIndex != kInvalidImportedTextureIndex &&
         (input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
-        bindlessTextures[input.inTextureIndex].Sample(input.inUv).a < 0.5)
+        bindlessTextures[input.inTextureIndex].Sample(input.inUv).a <= chunkPc.materialParams.x)
     {
         discard;
     }

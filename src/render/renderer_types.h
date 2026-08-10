@@ -107,6 +107,69 @@ struct ShadowStats {
     ShadowFallbackReason fallbackReason = ShadowFallbackReason::None;
 };
 
+// An authored sky, as a Fallout WTHR record describes one. Colors are LINEAR
+// rgb in 0..1 -- WTHR stores them as sRGB bytes, so the caller decodes before
+// getting here, the same rule the rest of the renderer follows.
+//
+// `weight` blends over the procedural Rayleigh/Mie sky rather than replacing
+// it: 0 is the default and renders exactly as before, which is what keeps every
+// other game unaffected by this existing.
+
+// Fallout authors four cloud layers per weather. The ones a weather does not
+// use point at "sky\alpha.dds", a fully transparent 1520-byte placeholder, so
+// "four layers" in the record usually means one or two on screen.
+inline constexpr int kWeatherCloudLayerCount = 4;
+
+struct WeatherSkyParams {
+    float weight = 0.0f;
+    float skyUpper[3] = {0.0f, 0.0f, 0.0f};   // zenith
+    float skyLower[3] = {0.0f, 0.0f, 0.0f};   // the band just above the horizon
+    float horizon[3] = {0.0f, 0.0f, 0.0f};    // the skyline itself
+    float fogColor[3] = {0.0f, 0.0f, 0.0f};
+    float fogFarDistance = 0.0f;              // world units; 0 leaves fog alone
+
+    // Per-layer tint (linear, from PNAM) and coverage, updated per frame
+    // because both track time of day. A layer with opacity 0 costs nothing:
+    // the shader skips it.
+    float cloudTint[kWeatherCloudLayerCount][3] = {};
+    float cloudOpacity[kWeatherCloudLayerCount] = {};
+};
+
+// The textures behind those layers. Separate from WeatherSkyParams because
+// uploading is expensive and only happens when the weather changes, while the
+// tints above move every frame.
+struct WeatherCloudTextures {
+    // A layer with an empty texture (no pixels) is disabled. Textures are
+    // decoded DDS exactly as they come out of the mod's archive.
+    odai::importer::ImportedSceneTexture layers[kWeatherCloudLayerCount];
+    // Texture units per second, from the WTHR DATA block's cloud speeds.
+    float scrollSpeed[kWeatherCloudLayerCount] = {};
+    // Dome scale. These textures are fisheye maps of the whole sky, so this is
+    // NOT a tiling count: 1.0 puts the horizon on the texture's inscribed
+    // circle, and values above 1 push the rim past the horizon (and out of the
+    // texture). Never a reason to tile one of these.
+    float domeScale[kWeatherCloudLayerCount] = {};
+};
+
+// Which tone curve the post pass runs, and its parameters.
+//
+// The ENB values are Enhanced Shaders' own defaults for Fallout: New Vegas,
+// read out of its enbeffect.fx.ini. They were tuned against the same weather
+// records this engine now reads, which is why they are a better starting point
+// for that game than numbers picked here would be.
+enum class TonemapMode : std::uint32_t {
+    Aces = 0,  // the fixed rational fit; what every game rendered with before
+    Enb = 1,   // extended Reinhard, contrast on magnitude, saturation on hue
+};
+
+struct TonemapSettings {
+    TonemapMode mode = TonemapMode::Aces;
+    float contrast = 1.35f;             // ENB "Contrast Day"
+    float saturation = 1.25f;           // ENB "Saturation Day"
+    float curve = 8.0f;                 // ENB "ToneMapping Curve Day"
+    float overbrightDampening = 75.0f;  // ENB "Overbright Dampening Day"
+};
+
 struct CameraPose {
     float x;
     float y;

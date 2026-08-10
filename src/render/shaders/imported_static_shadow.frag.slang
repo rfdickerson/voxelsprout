@@ -1,3 +1,5 @@
+import chunk_push_constants;
+
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
 
@@ -21,7 +23,7 @@ void main(FragmentInput input)
     {
         return;
     }
-    if (bindlessTextures[input.inTextureIndex].Sample(input.inUv).a < 0.5)
+    if (bindlessTextures[input.inTextureIndex].Sample(input.inUv).a <= chunkPc.materialParams.x)
     {
         discard;
     }
