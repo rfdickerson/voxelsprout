@@ -368,6 +368,16 @@ struct ImportedScene {
     // takes the legacy per-vertex path. Never exceeds
     // kImportedSceneMaterialTableCapacity.
     std::vector<ImportedSceneMaterial> materials;
+    // True when the importer that built this scene stated alpha test / blend
+    // per shape from its source format (the FNV NIF path does: NiAlphaProperty
+    // is explicit). applyTextureAlphaCutoutFlags() then never runs -- inferring
+    // a cutout from texture CONTENT is only for sources with no authored alpha
+    // mode, and running it anyway forces alpha test onto authored-opaque shapes
+    // that merely SHARE a texture with a real cutout (Doc Mitchell's boarded-up
+    // planks share vehicles\MobileHome02NV.dds with shapes that test it, and
+    // the inference tore blob-shaped holes in them). Serialized at v24; older
+    // files default false and keep the inference, exactly as they were cooked.
+    bool alphaFlagsAuthored = false;
     std::uint32_t sourceTextureCount = 0;
     std::uint32_t sourceFileVersion = 0;
     std::uint32_t sourceMeshCount = 0;

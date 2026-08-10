@@ -48,7 +48,10 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v21 -> v22: a trailing doors section. Appended and version-gated, so v15-v21
 // files load with no doors and behave exactly as before -- unlike the vertex
 // widenings above, this one touches no existing bytes.
-constexpr std::uint32_t kImportedSceneVersion = 23u;
+// v23 -> v24: a trailing alphaFlagsAuthored byte (see ImportedScene). Appended
+// and version-gated like the doors section; older files read false and keep
+// running the content inference they were cooked under.
+constexpr std::uint32_t kImportedSceneVersion = 24u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 // The pre-v19 ImportedSceneVertex: position[3], normal[3], uv[2].
 constexpr std::size_t kImportedSceneVertexFloatsV18 = 8;
@@ -145,25 +148,6 @@ PackedRenderColor packedTerrainColor(float height) {
     return color;
 }
 
-// BC1 blocks signal punch-through alpha with color0 <= color1; texel index 3
-// is then transparent black.
-bool bc1BlockHasTransparentTexel(const std::uint8_t* block) {
-    const std::uint16_t color0 = static_cast<std::uint16_t>(block[0] | (block[1] << 8));
-    const std::uint16_t color1 = static_cast<std::uint16_t>(block[2] | (block[3] << 8));
-    if (color0 > color1) {
-        return false;
-    }
-    for (int byteIndex = 4; byteIndex < 8; ++byteIndex) {
-        std::uint8_t bits = block[byteIndex];
-        for (int texel = 0; texel < 4; ++texel) {
-            if ((bits & 0x3u) == 0x3u) {
-                return true;
-            }
-            bits >>= 2;
-        }
-    }
-    return false;
-}
 
 // Decodes the 8-byte BC3/BC5-style alpha block palette and folds each texel's
 // alpha into the transparent/visible presence flags.
@@ -207,6 +191,31 @@ struct AlphaBandCounts {
         return lowFraction >= kMinTransparentFraction && midFraction <= kMaxMidFraction;
     }
 };
+
+// Folds one BC1 block's 16 texels into the transparent/opaque bands.
+//
+// BC1 alpha is one bit and it is a SIDE EFFECT OF THE ENCODING MODE, not an
+// authored channel: a block signals 3-colour mode with color0 <= color1, and
+// index 3 in that mode is transparent black. Encoders choose that mode whenever
+// a block needs only three colours, and Fallout's encoder emits index-3 texels
+// for near-black pixels in textures that are entirely opaque.
+//
+// So "this block has a transparent texel" says almost nothing on its own, and
+// the counts are what matter. See the caller.
+void bc1BlockBands(const std::uint8_t* block, AlphaBandCounts& bands) {
+    const std::uint16_t color0 = static_cast<std::uint16_t>(block[0] | (block[1] << 8));
+    const std::uint16_t color1 = static_cast<std::uint16_t>(block[2] | (block[3] << 8));
+    const bool punchThrough = color0 <= color1;
+    for (int byteIndex = 4; byteIndex < 8; ++byteIndex) {
+        std::uint8_t bits = block[byteIndex];
+        for (int texel = 0; texel < 4; ++texel) {
+            const bool transparent = punchThrough && ((bits & 0x3u) == 0x3u);
+            // One bit of alpha: there is no mid band to land in.
+            bands.add(transparent ? 0u : 255u);
+            bits >>= 2;
+        }
+    }
+}
 
 void bc3AlphaBlockBands(const std::uint8_t* block, AlphaBandCounts& bands) {
     const std::uint8_t alpha0 = block[0];
@@ -256,12 +265,20 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             if (texture.rgba8.size() < baseBlockCount * 8u) {
                 return false;
             }
+            // This used to return true on the FIRST block holding a
+            // transparent texel, which is the same indefensible "any texel"
+            // test the bimodal rewrite removed from the other formats -- BC1
+            // was simply missed. Because BC1's transparency is an artifact of
+            // the block encoding mode, a handful of dark blocks in an opaque
+            // wall texture were enough to classify the whole thing as a cutout,
+            // and every one of those texels was then discarded. That is the
+            // ragged holes in Goodsprings' buildings: they cluster in the dark
+            // regions because that is where the encoder chose 3-colour mode.
+            AlphaBandCounts bands;
             for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
-                if (bc1BlockHasTransparentTexel(texture.rgba8.data() + (blockIndex * 8u))) {
-                    return true;
-                }
+                bc1BlockBands(texture.rgba8.data() + (blockIndex * 8u), bands);
             }
-            return false;
+            return bands.looksLikeCutout();
         }
         case TextureFormat::BC2: {
             // BC2 stores 16 explicit 4-bit alpha values in the first 8 bytes
@@ -329,6 +346,15 @@ bool textureIndexUsesAlphaCutout(const std::vector<bool>& mask, std::uint32_t te
 // importer itself: NiAlphaProperty can legitimately set both bits, and that
 // surface still wants its own threshold applied.
 void applyTextureAlphaCutoutFlags(ImportedScene& scene) {
+    // A scene whose importer authored the alpha mode per shape (FNV NIFs)
+    // never gets the content guess: a texture can be a real cutout for one
+    // shape and plain opaque decoration for another, and only the source
+    // format knows which is which. Overriding it here forced alpha test onto
+    // authored-opaque geometry that shared a cutout's texture -- see the
+    // field's comment in imported_scene.h.
+    if (scene.alphaFlagsAuthored) {
+        return;
+    }
     const std::vector<bool> textureAlphaCutoutMask = buildTextureAlphaCutoutMask(scene.textures);
     for (ImportedSceneMesh& mesh : scene.meshes) {
         for (ImportedSceneMeshPart& part : mesh.parts) {
@@ -1261,6 +1287,8 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     // after pageRanges are unaffected by its presence.
     writeSceneMaterials(output, scene.materials);
     writeSceneDoors(output, scene.doors);
+    // v24: whether alpha flags were authored by the importer (see header).
+    writeValue(output, static_cast<std::uint8_t>(scene.alphaFlagsAuthored ? 1u : 0u));
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -1504,6 +1532,15 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         setLastImportedSceneError("Failed to read imported scene doors: " + inputPath.string());
         return false;
     }
+    if (version >= 24u) {
+        std::uint8_t authored = 0;
+        if (!readValue(input, authored)) {
+            setLastImportedSceneError(
+                "Failed to read imported scene alpha-authored flag: " + inputPath.string());
+            return false;
+        }
+        scene.alphaFlagsAuthored = authored != 0u;
+    }
 
     applyTextureAlphaCutoutFlags(scene);
     outScene = std::move(scene);
@@ -1726,6 +1763,15 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     if (version >= 22u && !readSceneDoors(input, scene.doors)) {
         setLastImportedSceneError("Failed to read imported scene doors: " + inputPath.string());
         return false;
+    }
+    if (version >= 24u) {
+        std::uint8_t authored = 0;
+        if (!readValue(input, authored)) {
+            setLastImportedSceneError(
+                "Failed to read imported scene alpha-authored flag: " + inputPath.string());
+            return false;
+        }
+        scene.alphaFlagsAuthored = authored != 0u;
     }
     if (version < 3u) {
         computeImportedSceneBoundsFromPackedData(scene);

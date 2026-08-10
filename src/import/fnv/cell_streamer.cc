@@ -48,7 +48,12 @@ std::string cellAxisToken(std::int32_t value) {
 //     before this carry none, and ImportedScene::lights is serialized)
 // 9 = SCOL (static collection) references placed; their merged mesh is real
 //     geometry that every cached cell before this is missing
-constexpr int kCellBuildVersion = 9;
+// v9 -> v10: cell scenes set alphaFlagsAuthored, so the texture-content cutout
+// guess no longer forces alpha test onto authored-opaque shapes (Doc Mitchell's
+// boarded-up planks). The flag is honoured at load, but v9 caches were PACKED
+// with the guessed flags already baked into their vertices, so they must not
+// be served.
+constexpr int kCellBuildVersion = 10;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -78,15 +83,32 @@ std::uint64_t countBlendedDraws(const ImportedScene& scene) {
     return blended;
 }
 
-std::string pluginFingerprint(const std::filesystem::path& esmPath) {
+// `modFingerprint` and `maxTextureSize` join the key for the same reason the
+// build version does: a cached cell has its textures baked in, so installing a
+// texture pack or changing the mip-drop ceiling has to miss rather than keep
+// serving the art the cell was built with. Both are appended only when they are
+// non-default, so an unmodded cache directory keeps the name it always had and
+// existing caches stay valid.
+std::string pluginFingerprint(
+    const std::filesystem::path& esmPath,
+    const std::string& modFingerprint,
+    std::uint32_t maxTextureSize) {
     std::error_code sizeError;
     const auto size = std::filesystem::file_size(esmPath, sizeError);
     std::error_code timeError;
     const auto writeTime = std::filesystem::last_write_time(esmPath, timeError);
     const auto ticks = writeTime.time_since_epoch().count();
-    return std::to_string(sizeError ? 0ull : static_cast<std::uint64_t>(size)) + "_" +
-           std::to_string(timeError ? 0ll : static_cast<long long>(ticks)) + "_v" +
-           std::to_string(kCellBuildVersion);
+    std::string fingerprint =
+        std::to_string(sizeError ? 0ull : static_cast<std::uint64_t>(size)) + "_" +
+        std::to_string(timeError ? 0ll : static_cast<long long>(ticks)) + "_v" +
+        std::to_string(kCellBuildVersion);
+    if (maxTextureSize != 512u) {
+        fingerprint += "_t" + std::to_string(maxTextureSize);
+    }
+    if (!modFingerprint.empty()) {
+        fingerprint += "_m" + modFingerprint;
+    }
+    return fingerprint;
 }
 
 }  // namespace
@@ -105,6 +127,7 @@ struct CellStreamer::Pending {
         float buildMs = 0.0f;
         float cacheLoadMs = 0.0f;
         std::uint64_t effectMeshesSkipped = 0;
+        std::uint64_t nodeParseFailures = 0;
         std::uint64_t blendedParts = 0;
     };
 
@@ -137,8 +160,21 @@ bool CellStreamer::open(
         outError = "cannot read Fallout data directory " + dataFilesPath.string();
         return false;
     }
+    // After open(), which clears the warning list, and before it is drained
+    // below, so an unreadable mod directory actually gets reported.
+    for (const std::filesystem::path& modDirectory : m_modDirectories) {
+        m_assets.addModDirectory(modDirectory);
+    }
     for (const std::string& warning : m_assets.warnings()) {
         VOX_LOGW("streamer") << warning;
+    }
+    if (m_assets.modDirectoryCount() != 0u) {
+        // Archives are reported separately because a mod can ship nothing loose
+        // at all -- Nevada Skies is one 330 MB BSA -- and "0 files" next to a
+        // working mod is the most confusing thing this log could say.
+        VOX_LOGI("streamer") << "mods: " << m_assets.modDirectoryCount() << " directories, "
+                             << m_assets.modFileCount() << " loose files, "
+                             << m_assets.modArchiveCount() << " archives override the base game";
     }
 
     if (!buildFalloutWorldTables(m_esmPath, m_worldTables, outError)) {
@@ -174,7 +210,9 @@ bool CellStreamer::open(
     if (!m_cacheDirectory.empty()) {
         std::string loweredForPath = loweredWorldspace;
         const std::filesystem::path candidate =
-            m_cacheDirectory / pluginFingerprint(m_esmPath) / loweredForPath;
+            m_cacheDirectory /
+            pluginFingerprint(m_esmPath, m_assets.modFingerprint(), m_maxTextureSize) /
+            loweredForPath;
         std::error_code createError;
         std::filesystem::create_directories(candidate, createError);
         if (createError) {
@@ -244,7 +282,9 @@ void CellStreamer::update(
                         ("cell_" + cellAxisToken(cell.x) + "_" + cellAxisToken(cell.z) + ".bin");
         }
         DecodedTextureCache* textureCache = &m_textureCache;
-        m_jobs->enqueue([pending, esmPath, entry, cell, assets, tables, cachePath, textureCache]() {
+        const std::uint32_t maxTextureSize = m_maxTextureSize;
+        m_jobs->enqueue([pending, esmPath, entry, cell, assets, tables, cachePath, textureCache,
+                         maxTextureSize]() {
             const core::Stopwatch buildTimer;
             Pending::Result result;
             result.cell = cell;
@@ -289,6 +329,7 @@ void CellStreamer::update(
                     // result.error already set
                 } else {
                     CellSceneBuilder builder(*assets, *tables, textureCache);
+                    builder.setMaxTextureSize(maxTextureSize);
                     const std::vector<const FalloutCellRecord*> single{&record};
                     // A single cell is all the evidence there is for what the
                     // worldspace default ground texture should be; the cooker
@@ -299,6 +340,7 @@ void CellStreamer::update(
                     builder.finish(result.scene);
                     result.succeeded = true;
                     result.effectMeshesSkipped = builder.stats().effectMeshesSkipped;
+                    result.nodeParseFailures = builder.stats().nodeParseFailures;
                     result.blendedParts = countBlendedDraws(result.scene);
 
                     if (!cachePath.empty()) {
@@ -439,6 +481,7 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         m_residentChunks.emplace(result.cell, chunkIndex);
         ++m_stats.scenesLoaded;
         m_stats.effectMeshesSkipped += result.effectMeshesSkipped;
+        m_stats.nodeParseFailures += result.nodeParseFailures;
         m_stats.blendedPartsLoaded += result.blendedParts;
         if (m_onCellResident) {
             // Before result.scene is destroyed at the end of this loop.
