@@ -966,6 +966,7 @@ if(ODAI_BUILD_APP)
             src/games/newvegas/newvegas_main.cc
             src/games/newvegas/newvegas_app.cc
             src/games/newvegas/newvegas_collision.cc
+            src/games/newvegas/newvegas_ogg.cc
             src/core/job_system.cc
             src/import/cell_residency_planner.cc
             # The runtime reads the game's own files now: BSA archives, the ESM
@@ -978,6 +979,8 @@ if(ODAI_BUILD_APP)
         src/import/fnv/decoded_texture_cache.cc
             src/import/fnv/cell_streamer.cc
             src/import/fnv/esm_reader.cc
+            src/import/fnv/plugin_load_order.cc
+            src/import/fnv/weather_records.cc
             src/import/fnv/fallout_records.cc
             src/import/fnv/nif_scene.cc
             src/import/fnv/character_builder.cc
@@ -1511,6 +1514,21 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_dds_bundler PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
+    # FNV texture-pack normalizer — mip-drops a downloaded texture mod to the
+    # ceiling the runtime will ask for and lowercases its paths, producing a
+    # directory to hand to `odai_game_newvegas --mod`.
+    #   odai_fnv_texture_pack --in <dir> --out <dir> [--max-size 1024]
+    add_executable(odai_fnv_texture_pack
+        src/import/dds.cc
+        src/tools/fnv_texture_pack_main.cc
+    )
+    target_include_directories(odai_fnv_texture_pack PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_fnv_texture_pack PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+    else()
+        target_compile_options(odai_fnv_texture_pack PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     # SVG bundler — offline .svg → .odaivec tessellated geometry cache. Run once
     # per icon directory; VectorIconRegistry prefers a fresh .odaivec sidecar.
     #   odai_svg_bundler <file.svg> [...]
@@ -1550,6 +1568,8 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/cell_builder.cc
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/esm_reader.cc
+        src/import/fnv/plugin_load_order.cc
+        src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
         src/import/imported_scene.cc
@@ -1580,7 +1600,10 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/esm_reader.cc
+        src/import/fnv/plugin_load_order.cc
+        src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
+        src/import/fnv/dialogue_records.cc
         src/import/fnv/nif_scene.cc
         src/import/fnv/character_builder.cc
     )
@@ -1644,6 +1667,8 @@ if(BUILD_TESTING)
         src/import/fnv/async_asset_loader.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/esm_reader.cc
+        src/import/fnv/plugin_load_order.cc
+        src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
         src/import/fnv/character_builder.cc

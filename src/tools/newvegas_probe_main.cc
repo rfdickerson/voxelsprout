@@ -20,6 +20,7 @@
 #include "import/fnv/cell_builder.h"
 #include "import/fnv/character_builder.h"
 #include "import/fnv/esm_reader.h"
+#include "import/fnv/dialogue_records.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
@@ -193,6 +194,13 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
     std::size_t totalShapes = 0;
     std::size_t totalTriangles = 0;
     std::size_t totalSkippedShapes = 0;
+    // Node-recognition health. A nonzero failure count means a subtree was
+    // dropped; before the else-branch existed it meant one was silently
+    // relocated to the model origin instead.
+    std::size_t modelsUsingFooterRoots = 0;
+    std::size_t totalNodeParseFailures = 0;
+    std::size_t modelsWithNodeParseFailure = 0;
+    std::size_t totalUnhandledNodeTypes = 0;
     std::size_t totalMirroredShapes = 0;
     std::size_t totalReversedWinding = 0;
     std::array<std::size_t, 4> stencilDrawModes{};
@@ -221,6 +229,10 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
             continue;
         }
         totalSkippedShapes += model.skippedShapeCount;
+        if (model.usedFooterRoots) { ++modelsUsingFooterRoots; }
+        totalNodeParseFailures += model.nodeParseFailedCount;
+        totalUnhandledNodeTypes += model.unhandledNodeTypeCount;
+        if (model.nodeParseFailedCount != 0u) { ++modelsWithNodeParseFailure; }
         totalMirroredShapes += model.mirroredShapeCount;
         totalReversedWinding += model.reversedWindingShapeCount;
         for (int m = 0; m < 4; ++m) {
@@ -256,6 +268,10 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
               << "  shapes            " << totalShapes << "\n"
               << "  triangles         " << totalTriangles << "\n"
               << "  skipped shapes    " << totalSkippedShapes << "\n"
+              << "  footer-rooted     " << modelsUsingFooterRoots << " model(s)\n"
+              << "  node parse fails  " << totalNodeParseFailures << " across "
+              << modelsWithNodeParseFailure << " model(s); unhandled *Node types "
+              << totalUnhandledNodeTypes << "\n"
               << "  mirrored shapes   " << totalMirroredShapes << "  (negative-determinant transform)\n"
               << "  DRAW_CW shapes    " << totalReversedWinding << "  (stencil says CW is the front face)\n"
               << "  stencil drawModes ccwOrBoth=" << stencilDrawModes[0] << " ccw=" << stencilDrawModes[1]
@@ -310,6 +326,74 @@ int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virt
         for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
             std::cout << "  [" << i << "] " << summary.blockTypeNames[i]
                       << " (" << summary.blockSizes[i] << " bytes)\n";
+        }
+        // The FOOTER: "Num Roots" u32 then that many block refs, immediately
+        // after the last block. NIF states its roots here explicitly, and the
+        // importer does not read it -- it instead promotes every node that no
+        // other node claims as a child, walking each with an identity
+        // transform. That heuristic is what relocates a subtree to the model
+        // origin when its parent is unrecognized or fails to parse.
+        //
+        // Printed before anything depends on it, so the claim "the footer says
+        // which blocks are roots" can be checked against real archives rather
+        // than assumed.
+        std::cout << "footer:\n";
+        if (summary.blockStarts.empty()) {
+            std::cout << "  (no blocks)\n";
+        } else {
+            const std::size_t footerOffset =
+                summary.blockStarts.back() + summary.blockSizes.back();
+            if (footerOffset + 4u > bytes.size()) {
+                std::cout << "  MISSING: last block ends at " << footerOffset << " but file is "
+                          << bytes.size() << " bytes\n";
+            } else {
+                std::uint32_t rootCount = 0;
+                std::memcpy(&rootCount, bytes.data() + footerOffset, 4u);
+                std::cout << "  offset=" << footerOffset << " fileSize=" << bytes.size()
+                          << " trailingBytes=" << (bytes.size() - footerOffset)
+                          << " numRoots=" << rootCount << "\n";
+                // 4 bytes for the count plus one ref each; anything else means
+                // the offset is not actually the footer.
+                const std::size_t expected = 4u + (static_cast<std::size_t>(rootCount) * 4u);
+                if (rootCount > 64u || footerOffset + expected > bytes.size()) {
+                    std::cout << "  IMPLAUSIBLE root count -- offset is probably not the footer\n";
+                } else {
+                    for (std::uint32_t r = 0; r < rootCount; ++r) {
+                        std::int32_t rootRef = 0;
+                        std::memcpy(&rootRef, bytes.data() + footerOffset + 4u + (r * 4u), 4u);
+                        const bool inRange = rootRef >= 0 &&
+                            static_cast<std::size_t>(rootRef) < summary.blockTypeNames.size();
+                        std::cout << "  root[" << r << "] = block " << rootRef << " ("
+                                  << (inRange ? summary.blockTypeNames[static_cast<std::size_t>(rootRef)]
+                                              : std::string("OUT OF RANGE"))
+                                  << ")\n";
+                    }
+                    std::cout << "  exactBytes=" << (expected == (bytes.size() - footerOffset) ? "yes" : "no")
+                              << "\n";
+                }
+            }
+        }
+        // NiAlphaProperty decoded: flags u16 at block offset 12 (after nameRef,
+        // numExtraData=0, controllerRef), threshold u8 at 14. The function
+        // bits (10-12) are what the importer currently ignores; 4 is GREATER.
+        std::cout << "NiAlphaProperty decode:\n";
+        for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+            if (summary.blockTypeNames[i] != "NiAlphaProperty" || summary.blockSizes[i] < 15u) {
+                continue;
+            }
+            std::uint16_t flags = 0;
+            std::memcpy(&flags, bytes.data() + summary.blockStarts[i] + 12u, 2u);
+            const std::uint8_t threshold = bytes[summary.blockStarts[i] + 14u];
+            static const char* kTestFunctions[8] = {
+                "ALWAYS", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "NEVER"};
+            std::cout << "  [" << i << "] flags=0x" << std::hex << flags << std::dec
+                      << " blend=" << (flags & 1u)
+                      << " srcBlend=" << ((flags >> 1) & 0xFu)
+                      << " dstBlend=" << ((flags >> 5) & 0xFu)
+                      << " test=" << ((flags >> 9) & 1u)
+                      << " testFunc=" << kTestFunctions[(flags >> 10) & 7u]
+                      << " noSorter=" << ((flags >> 13) & 1u)
+                      << " threshold=" << static_cast<int>(threshold) << "\n";
         }
         // Raw words of small blocks: the last resort when a field's location is
         // in question, which is exactly the situation these dumps exist for.
@@ -736,7 +820,71 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
     // The GPU samples the compressed data directly, so decode base mip 0 to
     // RGBA only when the loader already did; otherwise report what is known.
     if (texture.format != TextureFormat::RGBA8 || texture.rgba8.empty()) {
-        std::cout << "  (compressed on the GPU; alpha lives in the block data)\n";
+        // Decode the block alpha into the same three bands the cutout
+        // classifier uses (imported_scene.cc AlphaBandCounts), so this mode
+        // answers "would the importer infer alpha test from this texture".
+        const std::size_t blockCount =
+            (static_cast<std::size_t>(texture.width) + 3u) / 4u *
+            ((static_cast<std::size_t>(texture.height) + 3u) / 4u);
+        std::size_t low = 0;
+        std::size_t mid = 0;
+        std::size_t high = 0;
+        const auto addAlpha = [&](std::uint8_t a) {
+            if (a < 32u) { ++low; } else if (a > 224u) { ++high; } else { ++mid; }
+        };
+        if (texture.format == TextureFormat::BC1 && texture.rgba8.size() >= blockCount * 8u) {
+            for (std::size_t b = 0; b < blockCount; ++b) {
+                const std::uint8_t* block = texture.rgba8.data() + (b * 8u);
+                const std::uint16_t c0 = static_cast<std::uint16_t>(block[0] | (block[1] << 8));
+                const std::uint16_t c1 = static_cast<std::uint16_t>(block[2] | (block[3] << 8));
+                const bool punchThrough = c0 <= c1;
+                for (int byteIndex = 4; byteIndex < 8; ++byteIndex) {
+                    std::uint8_t bits = block[byteIndex];
+                    for (int t = 0; t < 4; ++t) {
+                        addAlpha((punchThrough && ((bits & 0x3u) == 0x3u)) ? 0u : 255u);
+                        bits >>= 2;
+                    }
+                }
+            }
+        } else if (texture.format == TextureFormat::BC3 && texture.rgba8.size() >= blockCount * 16u) {
+            for (std::size_t b = 0; b < blockCount; ++b) {
+                const std::uint8_t* block = texture.rgba8.data() + (b * 16u);
+                const std::uint8_t a0 = block[0];
+                const std::uint8_t a1 = block[1];
+                std::uint8_t palette[8] = {a0, a1};
+                if (a0 > a1) {
+                    for (int s = 1; s <= 6; ++s) {
+                        palette[1 + s] = static_cast<std::uint8_t>(((7 - s) * a0 + s * a1) / 7);
+                    }
+                } else {
+                    for (int s = 1; s <= 4; ++s) {
+                        palette[1 + s] = static_cast<std::uint8_t>(((5 - s) * a0 + s * a1) / 5);
+                    }
+                    palette[6] = 0u;
+                    palette[7] = 255u;
+                }
+                std::uint64_t indexBits = 0;
+                for (int i = 0; i < 6; ++i) {
+                    indexBits |= static_cast<std::uint64_t>(block[2 + i]) << (8 * i);
+                }
+                for (int t = 0; t < 16; ++t) {
+                    addAlpha(palette[(indexBits >> (3 * t)) & 0x7u]);
+                }
+            }
+        } else {
+            std::cout << "  (compressed on the GPU; alpha lives in the block data)\n";
+            return 0;
+        }
+        const std::size_t total = low + mid + high;
+        const double lowFraction = total ? static_cast<double>(low) / static_cast<double>(total) : 0.0;
+        const double midFraction = total ? static_cast<double>(mid) / static_cast<double>(total) : 0.0;
+        std::cout << "  block alpha bands: low(<32)=" << low << " mid=" << mid
+                  << " high(>224)=" << high << " of " << total << "\n"
+                  << "  lowFraction=" << lowFraction << " midFraction=" << midFraction
+                  << " -> classifier verdict: "
+                  << ((lowFraction >= 0.01 && midFraction <= 0.20) ? "CUTOUT (alpha test inferred)"
+                                                                   : "opaque")
+                  << "\n";
         return 0;
     }
     std::array<std::size_t, 5> buckets{};
@@ -752,6 +900,116 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
     }
     std::cout << "  alpha: zero=" << buckets[0] << " <64=" << buckets[1] << " <128=" << buckets[2]
               << " <255=" << buckets[3] << " opaque=" << buckets[4] << " of " << pixelCount << "\n";
+    return 0;
+}
+
+// Census of the NIF FOOTER across the archives.
+//
+// The importer picks its roots by promoting every node no other node claims as
+// a child, each walked with an identity transform -- so an unrecognized or
+// unparsed parent silently relocates its whole subtree to the model origin.
+// NIF states its roots explicitly in a footer instead. Before making root
+// selection depend on that footer, this measures whether it is actually there
+// and well-formed across real content, rather than trusting the format spec.
+int probeFooters(const std::filesystem::path& dataPath, std::size_t limit) {
+    MeshIndex index = buildMeshIndex(dataPath);
+    std::cout << "Scanning footers across " << index.nifs.size() << " .nif entries (limit "
+              << limit << ").\n";
+
+    std::size_t examined = 0;
+    std::size_t extractFailures = 0;
+    std::size_t summaryFailures = 0;
+    std::size_t noBlocks = 0;
+    std::size_t footerPastEof = 0;
+    std::size_t implausible = 0;
+    std::size_t exactBytes = 0;
+    std::size_t rootOutOfRange = 0;
+    std::size_t rootIsBlockZero = 0;
+    std::map<std::uint32_t, std::size_t> rootCountHistogram;
+    std::map<std::string, std::size_t> rootBlockTypes;
+    std::vector<std::string> anomalies;
+
+    std::vector<std::uint8_t> bytes;
+    for (const auto& [archiveIndex, entry] : index.nifs) {
+        if (examined >= limit) {
+            break;
+        }
+        ++examined;
+        if (!index.archives[archiveIndex].extract(*entry, bytes)) {
+            ++extractFailures;
+            continue;
+        }
+        odai::importer::fnv::NifBlockSummary summary;
+        std::string error;
+        if (!odai::importer::fnv::parseNifBlockSummary(bytes, summary, error)) {
+            ++summaryFailures;
+            continue;
+        }
+        if (summary.blockStarts.empty()) {
+            ++noBlocks;
+            continue;
+        }
+        const std::size_t footerOffset = summary.blockStarts.back() + summary.blockSizes.back();
+        if (footerOffset + 4u > bytes.size()) {
+            ++footerPastEof;
+            if (anomalies.size() < 12u) {
+                anomalies.push_back("past-eof: " + entry->virtualPath);
+            }
+            continue;
+        }
+        std::uint32_t rootCount = 0;
+        std::memcpy(&rootCount, bytes.data() + footerOffset, 4u);
+        const std::size_t expected = 4u + (static_cast<std::size_t>(rootCount) * 4u);
+        if (rootCount > 64u || footerOffset + expected > bytes.size()) {
+            ++implausible;
+            if (anomalies.size() < 12u) {
+                anomalies.push_back("implausible numRoots=" + std::to_string(rootCount) + ": " +
+                                    entry->virtualPath);
+            }
+            continue;
+        }
+        ++rootCountHistogram[rootCount];
+        if (expected == (bytes.size() - footerOffset)) {
+            ++exactBytes;
+        }
+        for (std::uint32_t r = 0; r < rootCount; ++r) {
+            std::int32_t rootRef = 0;
+            std::memcpy(&rootRef, bytes.data() + footerOffset + 4u + (r * 4u), 4u);
+            if (rootRef < 0 || static_cast<std::size_t>(rootRef) >= summary.blockTypeNames.size()) {
+                ++rootOutOfRange;
+                if (anomalies.size() < 12u) {
+                    anomalies.push_back("root out of range: " + entry->virtualPath);
+                }
+                continue;
+            }
+            if (rootRef == 0) {
+                ++rootIsBlockZero;
+            }
+            ++rootBlockTypes[summary.blockTypeNames[static_cast<std::size_t>(rootRef)]];
+        }
+    }
+
+    std::cout << "examined " << examined << ": extractFail=" << extractFailures
+              << " summaryFail=" << summaryFailures << " noBlocks=" << noBlocks
+              << " footerPastEof=" << footerPastEof << " implausible=" << implausible << "\n"
+              << "  footers whose size is EXACTLY 4+4*numRoots: " << exactBytes << "\n"
+              << "  root refs out of range: " << rootOutOfRange
+              << ", roots that are block 0: " << rootIsBlockZero << "\n";
+    std::cout << "numRoots histogram:";
+    for (const auto& [count, files] : rootCountHistogram) {
+        std::cout << " " << count << "x" << files;
+    }
+    std::cout << "\nroot block types:";
+    for (const auto& [typeName, count] : rootBlockTypes) {
+        std::cout << " " << typeName << "=" << count;
+    }
+    std::cout << "\n";
+    if (!anomalies.empty()) {
+        std::cout << "anomalies (first " << anomalies.size() << "):\n";
+        for (const std::string& a : anomalies) {
+            std::cout << "  " << a << "\n";
+        }
+    }
     return 0;
 }
 
@@ -783,6 +1041,50 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                       << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
+            // Winding orientation: signed volume via the divergence theorem,
+            // plus the fraction of faces whose geometric normal agrees with
+            // the shape's authored vertex normals. A closed shell wound
+            // consistently outward has a strongly positive signed volume and
+            // an agreement fraction near 1; mixed winding sits near 0.5 and
+            // is what back-face culling turns into localized holes.
+            if (!shape.triangleIndices.empty() && !shape.positions.empty()) {
+                double signedVolume6 = 0.0;
+                std::size_t agree = 0;
+                std::size_t counted = 0;
+                for (std::size_t t = 0; t + 2 < shape.triangleIndices.size(); t += 3) {
+                    const std::uint32_t ia = shape.triangleIndices[t];
+                    const std::uint32_t ib = shape.triangleIndices[t + 1];
+                    const std::uint32_t ic = shape.triangleIndices[t + 2];
+                    if ((ic * 3u) + 2u >= shape.positions.size()) {
+                        continue;
+                    }
+                    const float* a = shape.positions.data() + (ia * 3u);
+                    const float* b = shape.positions.data() + (ib * 3u);
+                    const float* c = shape.positions.data() + (ic * 3u);
+                    const double abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+                    const double acx = c[0] - a[0], acy = c[1] - a[1], acz = c[2] - a[2];
+                    const double nx = (aby * acz) - (abz * acy);
+                    const double ny = (abz * acx) - (abx * acz);
+                    const double nz = (abx * acy) - (aby * acx);
+                    signedVolume6 += (a[0] * ((b[1] * c[2]) - (b[2] * c[1]))) -
+                                     (a[1] * ((b[0] * c[2]) - (b[2] * c[0]))) +
+                                     (a[2] * ((b[0] * c[1]) - (b[1] * c[0])));
+                    if (shape.normals.size() == shape.positions.size()) {
+                        const float* na = shape.normals.data() + (ia * 3u);
+                        const double dot = (nx * na[0]) + (ny * na[1]) + (nz * na[2]);
+                        ++counted;
+                        if (dot > 0.0) {
+                            ++agree;
+                        }
+                    }
+                }
+                std::cout << "      winding: signedVolume=" << (signedVolume6 / 6.0);
+                if (counted != 0u) {
+                    std::cout << " geomNormal-vs-authoredNormal agree="
+                              << (static_cast<double>(agree) / static_cast<double>(counted));
+                }
+                std::cout << "\n";
+            }
             if (!shape.uvs.empty()) {
                 // Two ranges, and the difference between them is the point: a
                 // vertex no triangle references never reaches a fragment, so
@@ -1519,6 +1821,191 @@ int probeNavmesh(const std::filesystem::path& pluginPath, std::size_t limit) {
 // The subrecord census at the end is the other half: it shows which subrecords
 // are always present, which are optional, and -- for container records like
 // SCOL -- which repeat.
+
+// Dumps one speaker's dialogue by walking DIAL topics and their child INFO
+// records. Measurement first: the INFO layout, and above all HOW A LINE IS
+// ATTRIBUTED TO A SPEAKER, are asserted nowhere in this codebase yet, and
+// Fallout does not store a speaker field on INFO at all -- the link is a CTDA
+// condition (GetIsID <actor>) inside the record. This prints what is actually
+// there so the importer can be written against measurements instead of against
+// a wiki page.
+//
+// CTDA is 28 bytes in FO3/FNV: type u8, 3 unused, comparison value f32,
+// function index u32, param1 u32, param2 u32, runOn u32, reference formID u32.
+int probeDialogue(const std::filesystem::path& pluginPath, const std::string& speakerSubstring,
+                  std::size_t limit) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(speakerSubstring);
+
+    // Pass 1: actor base records whose EDID matches, so we have formIDs to
+    // match CTDA parameters against.
+    std::map<std::uint32_t, std::string> speakers;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type != "CREA" && record.type != "NPC_") {
+                return;
+            }
+            for (const auto& sub : record.subrecords) {
+                if (sub.type != "EDID" || sub.size == 0u) {
+                    continue;
+                }
+                std::string edid(reinterpret_cast<const char*>(sub.data),
+                                 static_cast<std::size_t>(sub.size));
+                while (!edid.empty() && edid.back() == '\0') { edid.pop_back(); }
+                if (toLowerAscii(edid).find(wanted) != std::string::npos) {
+                    speakers[record.formId] = record.type + " " + edid;
+                }
+            }
+        };
+        reader.walk(visitor);
+    }
+    std::cout << "actor base records matching \"" << speakerSubstring << "\": " << speakers.size() << "\n";
+    for (const auto& [formId, name] : speakers) {
+        std::cout << "  " << std::hex << std::uppercase << formId << std::dec << "  " << name << "\n";
+    }
+    if (speakers.empty()) {
+        return 0;
+    }
+
+    // Pass 2: DIAL topics, then the INFO records in each topic's child group.
+    // Which CTDA function index means "the speaker is this actor" is DERIVED
+    // here rather than assumed: every function index whose parameter matches a
+    // matched actor formID is counted, and the histogram is printed.
+    std::string currentTopicEdid;
+    std::string currentTopicText;
+    std::map<std::uint32_t, std::size_t> functionIndexHistogram;
+    std::size_t printed = 0;
+    std::size_t infosForSpeaker = 0;
+    std::map<std::string, std::size_t> infoSubrecordCounts;
+
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        if (record.type == "DIAL") {
+            currentTopicEdid.clear();
+            currentTopicText.clear();
+            for (const auto& sub : record.subrecords) {
+                if (sub.size == 0u) { continue; }
+                std::string value(reinterpret_cast<const char*>(sub.data),
+                                  static_cast<std::size_t>(sub.size));
+                while (!value.empty() && value.back() == '\0') { value.pop_back(); }
+                if (sub.type == "EDID") { currentTopicEdid = value; }
+                else if (sub.type == "FULL") { currentTopicText = value; }
+            }
+            return;
+        }
+        if (record.type != "INFO") {
+            return;
+        }
+        // Does any CTDA in this record name one of our speakers?
+        bool mentionsSpeaker = false;
+        std::uint32_t matchedFunction = 0;
+        for (const auto& sub : record.subrecords) {
+            if (sub.type != "CTDA" || sub.size < 28u) { continue; }
+            std::uint32_t functionIndex = 0, param1 = 0;
+            std::memcpy(&functionIndex, sub.data + 8, 4);
+            std::memcpy(&param1, sub.data + 12, 4);
+            if (speakers.find(param1) != speakers.end()) {
+                mentionsSpeaker = true;
+                matchedFunction = functionIndex;
+                ++functionIndexHistogram[functionIndex];
+            }
+        }
+        if (!mentionsSpeaker) {
+            return;
+        }
+        ++infosForSpeaker;
+        for (const auto& sub : record.subrecords) {
+            ++infoSubrecordCounts[sub.type];
+        }
+        if (printed >= limit) {
+            return;
+        }
+        ++printed;
+        std::cout << "\n[" << printed << "] topic \"" << currentTopicEdid << "\""
+                  << (currentTopicText.empty() ? "" : (" (" + currentTopicText + ")"))
+                  << "  info=" << std::hex << std::uppercase << record.formId << std::dec
+                  << "  ctdaFunc=" << matchedFunction << "\n";
+        for (const auto& sub : record.subrecords) {
+            if (sub.size == 0u) { continue; }
+            if (sub.type == "NAM1" || sub.type == "NAM2") {
+                std::string value(reinterpret_cast<const char*>(sub.data),
+                                  static_cast<std::size_t>(sub.size));
+                while (!value.empty() && value.back() == '\0') { value.pop_back(); }
+                std::cout << "    " << sub.type << ": " << value << "\n";
+            } else if (sub.type == "TCLT" && sub.size >= 4u) {
+                std::uint32_t link = 0;
+                std::memcpy(&link, sub.data, 4);
+                std::cout << "    TCLT (choice -> topic): " << std::hex << std::uppercase
+                          << link << std::dec << "\n";
+            }
+        }
+    };
+    reader.walk(visitor);
+
+    std::cout << "\nINFO records naming a matched speaker: " << infosForSpeaker << "\n";
+    std::cout << "CTDA function indices seen with a speaker formID as param1:";
+    for (const auto& [functionIndex, count] : functionIndexHistogram) {
+        std::cout << " " << functionIndex << "x" << count;
+    }
+    std::cout << "\nsubrecords present on those INFOs:";
+    for (const auto& [type, count] : infoSubrecordCounts) {
+        std::cout << " " << type << "=" << count;
+    }
+    std::cout << "\n";
+    return 0;
+}
+
+
+// Builds the actual dialogue::DialogueTree the game would use and prints it as
+// a conversation, so the graph can be read the way a player would walk it
+// rather than as a record dump.
+int probeDialogueTree(const std::filesystem::path& pluginPath, const std::string& speakerEditorId,
+                      std::size_t depth) {
+    odai::dialogue::DialogueTree tree;
+    odai::importer::fnv::DialogueImportStats stats;
+    std::string error;
+    if (!odai::importer::fnv::buildSpeakerDialogueTree(pluginPath, speakerEditorId, tree, stats, error)) {
+        std::cout << "failed: " << error << "\n";
+        return 1;
+    }
+    std::cout << "speaker \"" << tree.id << "\": " << tree.nodes.size() << " nodes, start="
+              << tree.startNode << "\n"
+              << "  topics seen " << stats.topicsSeen << ", responses " << stats.responsesConcatenated
+              << ", choice links " << stats.choiceLinks << " (" << stats.danglingLinks
+              << " dropped as unreachable)\n"
+              << "  NOTE: CTDA conditions are not evaluated -- lines the real game gates\n"
+              << "        behind quest state are offered here.\n";
+
+    // Walk from the start node, following the first choice each time, so the
+    // output reads as one plausible run of the conversation.
+    std::string current = tree.startNode;
+    std::set<std::string> visited;
+    for (std::size_t step = 0; step < depth && !current.empty(); ++step) {
+        const auto it = tree.nodes.find(current);
+        if (it == tree.nodes.end() || visited.count(current) != 0u) {
+            break;
+        }
+        visited.insert(current);
+        const odai::dialogue::DialogueNode& node = it->second;
+        std::cout << "\n" << node.speaker << ": " << node.text << "\n";
+        if (node.choices.empty()) {
+            std::cout << "  [conversation ends]\n";
+            break;
+        }
+        for (std::size_t c = 0; c < node.choices.size(); ++c) {
+            std::cout << "  " << (c + 1) << ") " << node.choices[c].text
+                      << (c == 0 ? "   <- following this one" : "") << "\n";
+        }
+        current = node.choices.front().targetNode;
+    }
+    return 0;
+}
+
 int probeRecordType(const std::filesystem::path& pluginPath, const std::string& wantedType, std::size_t limit) {
     odai::importer::fnv::EsmReader reader;
     if (!reader.open(pluginPath)) {
@@ -2051,6 +2538,43 @@ int probeScene(const std::filesystem::path& scenePath) {
                   << scene.meshes.front().parts.size() << "\n";
     }
 
+    // Per-texture alpha-test census over the packed vertices. loadImportedScene
+    // just re-ran the content inference, so a texture the current classifier
+    // calls opaque that still shows flagged vertices here proves the flag was
+    // BAKED into the file by an older build -- the load-time pass only ORs
+    // flags in, it cannot clear a stale one.
+    {
+        struct TexFlagCounts {
+            std::size_t total = 0;
+            std::size_t alphaTested = 0;
+            std::size_t blended = 0;
+        };
+        std::map<std::uint32_t, TexFlagCounts> byTexture;
+        for (const auto& vertex : scene.packedVertices) {
+            TexFlagCounts& counts = byTexture[vertex.textureIndex];
+            ++counts.total;
+            if ((vertex.flags & odai::importer::kImportedSceneMaterialFlagAlphaTest) != 0u) {
+                ++counts.alphaTested;
+            }
+            if ((vertex.flags & odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u) {
+                ++counts.blended;
+            }
+        }
+        std::cout << "alpha-test census (textures with any flagged vertex):\n";
+        for (const auto& [textureIndex, counts] : byTexture) {
+            if (counts.alphaTested == 0u && counts.blended == 0u) {
+                continue;
+            }
+            const std::string name = textureIndex < scene.textures.size()
+                ? scene.textures[textureIndex].sourcePath
+                : std::string("<out of range>");
+            std::cout << "  tex[" << textureIndex << "] verts=" << counts.total
+                      << " alphaTest=" << counts.alphaTested
+                      << " blend=" << counts.blended
+                      << " \"" << name << "\"\n";
+        }
+    }
+
     auto summarize = [&](const char* label, std::uint32_t first, std::uint32_t last) {
         std::size_t indexTotal = 0;
         std::size_t emptyDraws = 0;
@@ -2135,6 +2659,9 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --footers [limit]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --dialogue <Plugin.esm> <speakerEdid> [limit]\n"
+              << "  odai_newvegas_probe <DataFilesPath> --dialoguetree <Plugin.esm> <speakerEdid> [steps]\n"
               << "  odai_newvegas_probe <DataFilesPath> --regions <Plugin.esm> [topN]\n"
               << "  odai_newvegas_probe <DataFilesPath> --texture <texturePath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --skeleton <virtualPath>\n"
@@ -2178,6 +2705,18 @@ int main(int argc, char** argv) {
     }
     if (mode == "--nif" && argc >= 4) {
         return probeSingleNif(dataPath, argv[3]);
+    }
+    if (mode == "--dialoguetree" && argc >= 5) {
+        return probeDialogueTree(dataPath / argv[3], argv[4],
+                                 argc >= 6 ? static_cast<std::size_t>(std::stoull(argv[5])) : 6u);
+    }
+    if (mode == "--dialogue" && argc >= 5) {
+        return probeDialogue(dataPath / argv[3], argv[4],
+                             argc >= 6 ? static_cast<std::size_t>(std::stoull(argv[5])) : 12u);
+    }
+    if (mode == "--footers") {
+        const std::size_t limit = argc >= 4 ? static_cast<std::size_t>(std::stoull(argv[3])) : 5000u;
+        return probeFooters(dataPath, limit);
     }
     if (mode == "--nifblocks" && argc >= 4) {
         return dumpNifBlocks(dataPath, argv[3]);
