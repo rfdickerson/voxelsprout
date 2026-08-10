@@ -82,6 +82,9 @@ struct CellBuildStats {
     std::size_t untexturedShapesGivenModelTexture = 0;
     std::size_t droppedTerrainLayers = 0;
     std::uint32_t skippedGeometryShapes = 0;
+    // See NifModel's fields of the same names (import/fnv/nif_scene.h).
+    std::uint32_t nodeParseFailures = 0;
+    std::uint32_t unhandledNodeTypes = 0;
     std::size_t terrainPartsEmitted = 0;
     // Where a cell's build time actually goes. Texture decode and NIF parse are
     // the two candidates for caching, and they are very differently sized.

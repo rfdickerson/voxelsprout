@@ -1,5 +1,7 @@
 #include "import/fnv/cell_builder.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -708,6 +710,11 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     continue;
                 }
                 m_stats.skippedGeometryShapes += nifModel.skippedShapeCount;
+                // Node-recognition health. Nonzero nodeParseFailures means a
+                // subtree was dropped rather than -- as it used to be --
+                // silently relocated to the model origin and drawn in the sky.
+                m_stats.nodeParseFailures += nifModel.nodeParseFailedCount;
+                m_stats.unhandledNodeTypes += nifModel.unhandledNodeTypeCount;
 
                 // A model's own most-used texture, for sub-shapes that carry no
                 // diffuse of their own. Same reasoning as the land-quadrant
@@ -804,6 +811,24 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         part.alphaBlend = shape.alphaBlend;
                         part.twoSided = shape.twoSided;
                         part.alphaThreshold = shape.alphaThreshold;
+                        // ODAI_FNV_LOG_ALPHATEST=1 names every surface that will
+                        // run the discard, with the threshold and texture it
+                        // will run against. "Some walls have holes" is otherwise
+                        // a hunt through hundreds of shapes for the few that
+                        // actually alpha-test.
+                        static const bool s_logAlphaTest =
+                            std::getenv("ODAI_FNV_LOG_ALPHATEST") != nullptr;
+                        if (s_logAlphaTest && part.alphaTest) {
+                            // std::cout rather than VOX_LOGI: this file is
+                            // linked into odai_newvegas_probe and
+                            // odai_newvegas_cooker, neither of which links
+                            // core/log.cc, and a debug line is not worth
+                            // growing their link closure.
+                            std::cout << "alphaTest model=" << staticModelPath
+                                      << " shape=" << shape.name
+                                      << " thr=" << static_cast<int>(part.alphaThreshold)
+                                      << " tex=" << shape.diffuseTexturePath << "\n";
+                        }
                         // A shape with no diffuse texture is not an error the
                         // resolver reports -- it silently shades from the
                         // per-model hashed colour, which reads as flat grey-brown
@@ -935,6 +960,11 @@ void CellSceneBuilder::finish(ImportedScene& outScene) {
         m_stats.terrainPartsEmitted = terrainMesh.parts.size();
     }
 
+    // Every part's alpha mode came off its NiAlphaProperty (or its absence),
+    // so the texture-content cutout guess must not run -- it forces alpha test
+    // onto authored-opaque shapes that share a cutout's texture. Set before
+    // packing: buildImportedScenePackedRenderData is a caller of the guess.
+    m_scene.alphaFlagsAuthored = true;
     buildImportedScenePackedRenderData(m_scene);
     buildImportedScenePageRanges(m_scene);
     outScene = std::move(m_scene);

@@ -81,6 +81,20 @@ struct NifModel {
     // know how to walk. Nonzero means geometry may be missing or, worse,
     // reparented to the origin — see isNodeTypeName in nif_scene.cc.
     std::uint32_t unhandledNodeTypeCount = 0;
+    // Blocks that were treated as nodes and whose field walk did not survive
+    // readNiNode's structural validation. Previously this outcome had no
+    // `else` at all: the block silently stopped being a node, its children
+    // stopped being claimed by anyone, and the root scan then promoted each of
+    // them to a root walked with an IDENTITY transform — which is precisely
+    // how a subtree ends up floating at the model origin. Nonzero here means
+    // geometry is being dropped rather than misplaced, which is the trade this
+    // parser deliberately makes.
+    std::uint32_t nodeParseFailedCount = 0;
+    // True when the DFS started from the footer's declared roots rather than
+    // from the legacy "every unclaimed node is a root" scan. Recorded because
+    // the two agree on a well-formed file, so without it a footer read that
+    // silently failed everywhere would look exactly like one that worked.
+    bool usedFooterRoots = false;
     // Type names of blocks referenced as a shape's property that this parser did
     // not turn into either a texture set or an alpha setting. A shape can hold a
     // shader property of a type the parser has no branch for, in which case it

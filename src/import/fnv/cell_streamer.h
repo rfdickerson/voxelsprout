@@ -79,6 +79,10 @@ struct CellStreamerStats {
     // Effect-only meshes (\effects\, fx*) dropped at build time. These are the
     // dust sheets and glow cards Fallout scatters as ordinary statics.
     std::uint64_t effectMeshesSkipped = 0;
+    // Nodes whose field walk was rejected, summed over cells built this run.
+    // Only cache MISSES contribute: a cell served from disk never parses a NIF,
+    // so this reads zero on a warm cache no matter what the meshes contain.
+    std::uint64_t nodeParseFailures = 0;
     // Draws carrying kImportedSceneMaterialFlagAlphaBlend, i.e. those replayed
     // through the blended pipeline instead of the opaque one.
     std::uint64_t blendedPartsLoaded = 0;
@@ -116,6 +120,33 @@ public:
     void setCacheDirectory(std::filesystem::path directory) {
         m_cacheDirectory = std::move(directory);
     }
+
+    // Mod roots searched ahead of the game's own files, in load order. Must be
+    // called before open(), which is where they are applied and where any
+    // warning about them is logged.
+    void addModDirectory(std::filesystem::path directory) {
+        m_modDirectories.push_back(std::move(directory));
+    }
+
+    // Mip-drop ceiling for every texture a cell brings in, longest side, in
+    // pixels. 0 disables the drop and keeps whatever the file ships.
+    //
+    // This is the single knob that decides whether a high-resolution texture
+    // pack is visible at all: the default clamps Fallout's own 1024-square
+    // diffuse maps to 512, and a 2048 mod texture would be dropped straight past
+    // its own resolution to the same 512. It costs memory quadratically -- a
+    // BC1 1024-square with mips is 683 KB against 171 KB at 512 -- so raising it
+    // on an integrated GPU is a real decision, not a free win.
+    //
+    // Folded into the cache key, because cells bake their textures in.
+    void setMaxTextureSize(std::uint32_t maxSize) { m_maxTextureSize = maxSize; }
+    [[nodiscard]] std::uint32_t maxTextureSize() const { return m_maxTextureSize; }
+
+    // The resolved asset source, valid after open(). Exposed so a caller can
+    // pull assets the streamer itself has no interest in -- weather cloud
+    // textures, which live in a mod's BSA -- without opening a second search
+    // path and duplicating the precedence rules.
+    [[nodiscard]] const FalloutAssetSource& assets() const { return m_assets; }
 
     void setConfig(const CellResidencyConfig& config) { m_planner.setConfig(config); }
     [[nodiscard]] const CellResidencyConfig& config() const { return m_planner.config(); }
@@ -196,6 +227,8 @@ private:
 
     CellResidencyPlanner m_planner;
     std::filesystem::path m_esmPath;
+    std::vector<std::filesystem::path> m_modDirectories;
+    std::uint32_t m_maxTextureSize = 512u;
     std::filesystem::path m_cacheDirectory;
     // m_cacheDirectory / <plugin fingerprint>, created on open(). Empty when
     // caching is off or the directory could not be created.

@@ -53,7 +53,15 @@ std::string cellAxisToken(std::int32_t value) {
 // boarded-up planks). The flag is honoured at load, but v9 caches were PACKED
 // with the guessed flags already baked into their vertices, so they must not
 // be served.
-constexpr int kCellBuildVersion = 10;
+// v10 -> v11: NIF roots now come from the file's own footer instead of "every
+// node nobody claims as a child", and node recognition covers all 31
+// NiNode-derived types from nif.xml rather than a hand-written twelve. Subtrees
+// under an unrecognized or unparsed parent used to be promoted to roots and
+// walked from IDENTITY, which baked their ancestors' translation OUT of the
+// vertices -- the meshes seen floating in the sky. Cached cells hold those
+// wrong world-space positions baked in, so they cannot be repaired at load and
+// must miss.
+constexpr int kCellBuildVersion = 11;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

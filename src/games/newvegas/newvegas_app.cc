@@ -1,5 +1,13 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "import/dds.h"
+#include "games/newvegas/newvegas_ogg.h"
+#include "import/fnv/bsa_archive.h"
+
+#include <fstream>
+#include <random>
+#include <chrono>
+
 #include "core/log.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/nif_scene.h"
@@ -602,6 +610,29 @@ bool NewVegasApp::onInit() {
         return false;
     }
 
+    // After streaming init, so a failed stream never leaves weather half-set,
+    // and after applyTimeOfDay so the first push uses the real hour.
+    if (const char* pluginsEnv = std::getenv("ODAI_FNV_PLUGINS")) {
+        const std::string plugins = pluginsEnv;
+        std::size_t start = 0;
+        while (start <= plugins.size()) {
+            const std::size_t end = plugins.find(',', start);
+            const std::string entry =
+                plugins.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!entry.empty()) {
+                m_extraPlugins.push_back(entry);
+            }
+            if (end == std::string::npos) {
+                break;
+            }
+            start = end + 1;
+        }
+    }
+    if (const char* weatherEnv = std::getenv("ODAI_FNV_WEATHER")) {
+        m_requestedWeatherEditorId = weatherEnv;
+    }
+    initWeather();
+
     // Pip-Boy palette for notifications, matching the HUD chrome.
     ui::ToastStyle toastStyle{};
     toastStyle.widthPx = 300.0f;
@@ -895,6 +926,501 @@ void NewVegasApp::applyTimeOfDay() {
     const float pitchDegrees = std::cos(dayFraction * 2.0f * kPi) * 75.0f;
     const float yawDegrees = 90.0f + (dayFraction * 360.0f);
     m_renderer.setSunAngles(yawDegrees, pitchDegrees);
+    applyWeather();
+}
+
+void NewVegasApp::initWeather() {
+    if (m_streamDirectory.empty()) {
+        return;  // a cooked scene has no plugin to read weather from
+    }
+    // Nothing to gain from reading 473 weather records when none of them can be
+    // selected and the procedural sky is what will render anyway.
+    if (m_extraPlugins.empty() && m_requestedWeatherEditorId.empty()) {
+        return;
+    }
+
+    std::vector<std::string> requested;
+    requested.push_back(m_streamPlugin);
+    requested.insert(requested.end(), m_extraPlugins.begin(), m_extraPlugins.end());
+
+    importer::fnv::FalloutLoadOrder order;
+    // Mod directories are searched for the plugin too, so a mod that ships an
+    // .esp beside its .bsa needs nothing copied into the game install.
+    for (const std::string& modDirectory : m_modDirectories) {
+        order.addSearchRoot(std::filesystem::path(modDirectory));
+    }
+    std::string error;
+    if (!order.open(std::filesystem::path(m_streamDirectory), requested, error)) {
+        VOX_LOGW("newvegas") << "weather disabled: " << error;
+        return;
+    }
+    if (!buildFalloutWeatherTables(order, m_weatherTables, error)) {
+        VOX_LOGW("newvegas") << "weather disabled: " << error;
+        return;
+    }
+
+    std::string loadOrderText;
+    for (const auto& entry : order.entries()) {
+        if (!loadOrderText.empty()) {
+            loadOrderText += " -> ";
+        }
+        loadOrderText += entry.header.fileName;
+    }
+    VOX_LOGI("newvegas") << "load order: " << loadOrderText;
+    VOX_LOGI("newvegas") << "weather: " << m_weatherTables.weathers.size() << " WTHR, "
+                         << m_weatherTables.climates.size() << " CLMT";
+
+    if (!m_requestedWeatherEditorId.empty()) {
+        const importer::fnv::FalloutWeatherRecord* weather =
+            m_weatherTables.findWeatherByEditorId(m_requestedWeatherEditorId);
+        if (weather == nullptr) {
+            VOX_LOGW("newvegas") << "no weather named \"" << m_requestedWeatherEditorId
+                                 << "\"; falling back to the climate";
+        } else {
+            m_activeWeatherFormId = weather->formId;
+            VOX_LOGI("newvegas") << "weather forced to " << weather->editorId << " (0x"
+                                 << std::hex << weather->formId << std::dec << ")";
+        }
+    }
+
+    if (m_activeWeatherFormId == 0u) {
+        // Fall back to the worldspace's own climate: whichever of its weathers
+        // has the highest chance is the closest thing to "what you would
+        // normally see here" without running the mod's selection scripts.
+        const importer::fnv::FalloutClimateRecord* bestClimate = nullptr;
+        for (const auto& [worldspaceFormId, climateFormId] :
+             m_weatherTables.climateByWorldspaceFormId) {
+            (void)worldspaceFormId;
+            const auto found = m_weatherTables.climates.find(climateFormId);
+            if (found != m_weatherTables.climates.end() && !found->second.weathers.empty()) {
+                bestClimate = &found->second;
+                break;
+            }
+        }
+        if (bestClimate != nullptr) {
+            const auto best = std::max_element(
+                bestClimate->weathers.begin(), bestClimate->weathers.end(),
+                [](const auto& a, const auto& b) { return a.chance < b.chance; });
+            m_activeWeatherFormId = best->weatherFormId;
+            const importer::fnv::FalloutWeatherRecord* weather =
+                m_weatherTables.findWeather(m_activeWeatherFormId);
+            VOX_LOGI("newvegas") << "weather from climate " << bestClimate->editorId << ": "
+                                 << (weather != nullptr ? weather->editorId : "<unresolved>");
+        }
+    }
+
+    // Cloud layers. These come out of the mod's own BSA, which the streamer's
+    // asset source already indexes -- reusing it means no second search path and
+    // no second copy of the loose-beats-archive precedence rules.
+    const importer::fnv::FalloutWeatherRecord* active =
+        m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
+    if (active != nullptr && m_streamer != nullptr) {
+        const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
+        render::WeatherCloudTextures clouds;
+        int loadedLayers = 0;
+        for (std::size_t layer = 0; layer < importer::fnv::FalloutWeatherRecord::kCloudLayerCount;
+             ++layer) {
+            m_cloudLayerEnabled[layer] = false;
+            const std::string& path = active->cloudTextures[layer];
+            if (importer::fnv::isEmptyCloudLayer(path)) {
+                continue;
+            }
+            std::vector<std::uint8_t> bytes;
+            std::string assetError;
+            if (!assets.resolveTexture(path, bytes, assetError)) {
+                VOX_LOGW("newvegas") << "cloud layer " << layer << " (" << path
+                                     << ") unresolved: " << assetError;
+                continue;
+            }
+            if (!importer::loadDdsFromMemory(bytes.data(), bytes.size(), clouds.layers[layer])) {
+                VOX_LOGW("newvegas") << "cloud layer " << layer << " (" << path << ") failed to decode";
+                clouds.layers[layer] = importer::ImportedSceneTexture{};
+                continue;
+            }
+            clouds.layers[layer].sourcePath = path;
+            // Layers 0/1 are the lower pair and 2/3 the upper, which is what the
+            // record's two cloud speeds refer to. Speeds are stored 0..255 over
+            // a range the game treats as roughly +/- one texture width a minute.
+            const std::uint8_t speedByte =
+                (layer < 2) ? active->cloudSpeedLower : active->cloudSpeedUpper;
+            // 128 is "still"; either side of it scrolls in opposite directions.
+            // Radians per second about the zenith -- a dome map rotates, it does
+            // not translate. 128 is "still"; either side turns the other way.
+            clouds.scrollSpeed[layer] =
+                (static_cast<float>(speedByte) - 128.0f) / 128.0f * 0.0035f;
+            // Dome scale: 1.0 puts the horizon exactly on the texture's
+            // inscribed circle, which is how these fisheye sky maps are drawn.
+            // Slightly under 1 for the upper layers pulls their rim inside the
+            // horizon so they read as higher and further away.
+            clouds.domeScale[layer] = (layer < 2) ? 1.0f : 0.92f;
+            m_cloudLayerEnabled[layer] = true;
+            ++loadedLayers;
+        }
+        VOX_LOGI("newvegas") << "cloud layers: " << loadedLayers << " of 4 in use";
+        m_renderer.setWeatherClouds(clouds);
+    }
+
+    applyWeather();
+    initWeatherAudio();
+
+    // ODAI_FNV_TONEMAP=enb switches the post pass to the curve Enhanced Shaders
+    // uses, with its own tuned Fallout values. Off by default: it is a distinct
+    // look, not a strict improvement, and every other game keeps the ACES fit
+    // regardless because the setting is per-renderer and only this game sets it.
+    if (const char* tonemapEnv = std::getenv("ODAI_FNV_TONEMAP")) {
+        std::string mode = tonemapEnv;
+        for (char& c : mode) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (mode == "enb" || mode == "1") {
+            render::TonemapSettings tonemap;
+            tonemap.mode = render::TonemapMode::Enb;
+            // Enhanced Shaders retunes these by time of day (contrast 1.35 day /
+            // 1.25 night, saturation 1.25 / 0.9, curve 8.0 / 10.0). Interpolate
+            // on the same day/night axis rather than picking one and calling it
+            // done -- the night values exist because the day ones look wrong
+            // after dark.
+            const bool night = m_timeOfDayHours < 6.0f || m_timeOfDayHours >= 19.0f;
+            tonemap.contrast = night ? 1.25f : 1.35f;
+            tonemap.saturation = night ? 0.90f : 1.25f;
+            tonemap.curve = night ? 10.0f : 8.0f;
+            tonemap.overbrightDampening = night ? 50.0f : 75.0f;
+            m_renderer.setTonemapSettings(tonemap);
+            VOX_LOGI("newvegas") << "tonemap: ENB (Enhanced Shaders values, "
+                                 << (night ? "night" : "day") << ")";
+        }
+    }
+}
+
+namespace {
+
+// Writes already-resolved sound bytes to a playable file and returns its path.
+//
+// Two reasons this exists rather than handing bytes straight to the audio
+// facade. It loads by std::filesystem::path only, and Fallout's ambient loops
+// are Ogg Vorbis, which miniaudio cannot decode at all -- so the .ogg is
+// converted to .wav here (see newvegas_ogg.cc). Cached by name, so a sound
+// costs one conversion per install rather than one per run.
+std::filesystem::path cacheWeatherSound(
+    const std::string& virtualPath,
+    const std::vector<std::uint8_t>& bytes,
+    const std::filesystem::path& cacheDirectory) {
+    if (cacheDirectory.empty() || bytes.empty()) {
+        return {};
+    }
+    std::string leaf = virtualPath;
+    const std::size_t lastSeparator = leaf.find_last_of("\\/");
+    if (lastSeparator != std::string::npos) {
+        leaf = leaf.substr(lastSeparator + 1u);
+    }
+    const std::filesystem::path raw = cacheDirectory / leaf;
+    std::filesystem::path playable = raw;
+    const bool needsConversion = raw.extension() == ".ogg";
+    if (needsConversion) {
+        playable.replace_extension(".wav");
+    }
+
+    std::error_code existsError;
+    if (std::filesystem::exists(playable, existsError) && !existsError) {
+        return playable;
+    }
+
+    std::error_code createError;
+    std::filesystem::create_directories(cacheDirectory, createError);
+    {
+        std::ofstream out(raw, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return {};
+        }
+        out.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+    }
+    if (needsConversion && !decodeOggToWav(raw, playable)) {
+        return {};
+    }
+    return playable;
+}
+
+}  // namespace
+
+void NewVegasApp::initWeatherAudio() {
+    const importer::fnv::FalloutWeatherRecord* weather =
+        m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
+    if (weather == nullptr || m_streamDirectory.empty() || m_streamer == nullptr) {
+        return;
+    }
+
+    const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
+    const std::filesystem::path dataFilesPath(m_streamDirectory);
+    const std::filesystem::path audioCache = m_streamCacheDirectory.empty()
+        ? std::filesystem::path{}
+        : std::filesystem::path(m_streamCacheDirectory) / "audio";
+
+    // Resolves the first candidate that exists, through the ordinary asset
+    // precedence, and caches it as a playable .wav.
+    //
+    // Order matters: a weather mod ships sounds authored for its own weathers
+    // inside its BSA, which is indexed as a mod archive, so it wins. Reaching
+    // past that into the base game's archives is how this first shipped, and it
+    // picked "emt_raintoggle_lp" -- a MONO 6-second object-emitter loop from Old
+    // World Blues, meant to play from a dripping pipe, not a global rain bed.
+    const auto loadFirst = [&](std::initializer_list<const char*> candidates,
+                               const char* what) -> audio::SoundHandle {
+        for (const char* candidate : candidates) {
+            std::vector<std::uint8_t> bytes;
+            std::string assetError;
+            if (!assets.resolveAsset(candidate, bytes, assetError) || bytes.empty()) {
+                continue;
+            }
+            const std::filesystem::path cached =
+                cacheWeatherSound(candidate, bytes, audioCache);
+            if (cached.empty()) {
+                continue;
+            }
+            const audio::SoundHandle handle =
+                m_audio.loadSound(cached, audio::SoundCategory::Ambient);
+            if (handle.id != 0u) {
+                VOX_LOGI("newvegas") << what << ": " << candidate;
+                return handle;
+            }
+        }
+        VOX_LOGW("newvegas") << "no " << what << " found in the loaded archives";
+        return {};
+    };
+
+    if (weather->hasPrecipitation()) {
+        // WTHR has no rain-intensity field -- classification only says "rainy" --
+        // so intensity comes from the editor ID, which is a heuristic and named
+        // as one. The fallbacks walk down to whatever exists.
+        std::string lowered = weather->editorId;
+        for (char& c : lowered) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const bool heavy = lowered.find("heavy") != std::string::npos ||
+            lowered.find("storm") != std::string::npos;
+        m_rainLoop = heavy
+            ? loadFirst({"sound\\fx\\weather\\amb_weather_rain_heavy_lp.wav",
+                         "sound\\fx\\weather\\amb_rainstorm_lp.wav",
+                         "sound\\fx\\weather\\amb_weather_rain_medium_lp.wav",
+                         "sound\\fx\\weather\\nvdlc02_rain-amb.wav"},
+                        "rain")
+            : loadFirst({"sound\\fx\\weather\\amb_weather_rain_medium_lp.wav",
+                         "sound\\fx\\weather\\amb_weather_rain_light_lp.wav",
+                         "sound\\fx\\weather\\amb_rain_lp.wav",
+                         "sound\\fx\\weather\\nvdlc02_rain-amb.wav"},
+                        "rain");
+        if (m_rainLoop.id != 0u) {
+            m_rainAmbient = m_audio.startAmbient(m_rainLoop, 2.5f);
+        }
+    }
+
+    if (weather->windSpeed > 40u) {
+        const bool strongWind = weather->windSpeed > 80u;
+        m_windLoop = loadFirst(
+            strongWind
+                ? std::initializer_list<const char*>{
+                      "sound\\fx\\weather\\amb_windheavy_lp.wav",
+                      "sound\\fx\\weather\\amb_windlight_lp.wav"}
+                : std::initializer_list<const char*>{
+                      "sound\\fx\\weather\\amb_windlight_lp.wav",
+                      "sound\\fx\\weather\\amb_windheavy_lp.wav"},
+            "wind");
+        if (m_windLoop.id != 0u) {
+            m_windAmbient = m_audio.startAmbient(m_windLoop, 3.0f);
+        }
+    }
+
+    // Radio, not score. Fallout keeps two separate sets of loose music: the
+    // orchestral exploration beds under Data\Music, and the 48 licensed radio
+    // songs under Data\Sound\songs\radionv -- Big Iron, Blue Moon, Johnny
+    // Guitar. The radio station is the one that sounds like Fallout, and it is
+    // what this plays.
+    //
+    // ODAI_FNV_MUSIC takes either a full path or a song name ("Big_Iron",
+    // "MUS_Big_Iron", "MUS_Big_Iron.mp3"); with nothing set, a track is picked
+    // from the station at random, like tuning in.
+    std::filesystem::path musicPath;
+    const std::filesystem::path stationDir = dataFilesPath / "Sound" / "songs" / "radionv";
+    if (const char* musicEnv = std::getenv("ODAI_FNV_MUSIC")) {
+        const std::string request = musicEnv;
+        std::error_code existsError;
+        if (std::filesystem::exists(request, existsError) && !existsError) {
+            musicPath = request;
+        } else {
+            // Match by name, case-insensitively, with or without the MUS_ prefix
+            // and the extension.
+            std::string wanted = request;
+            for (char& c : wanted) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            std::error_code iterError;
+            std::filesystem::directory_iterator iterator(stationDir, iterError);
+            if (!iterError) {
+                for (const auto& entry : iterator) {
+                    std::string name = entry.path().filename().string();
+                    for (char& c : name) {
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    }
+                    if (name.find(wanted) != std::string::npos) {
+                        musicPath = entry.path();
+                        break;
+                    }
+                }
+            }
+            if (musicPath.empty()) {
+                VOX_LOGW("newvegas") << "no song matching \"" << request << "\" in "
+                                     << stationDir.string();
+            }
+        }
+    }
+    if (musicPath.empty()) {
+        std::vector<std::filesystem::path> station;
+        std::error_code iterError;
+        std::filesystem::directory_iterator iterator(stationDir, iterError);
+        if (!iterError) {
+            for (const auto& entry : iterator) {
+                if (entry.path().extension() == ".mp3") {
+                    station.push_back(entry.path());
+                }
+            }
+        }
+        if (!station.empty()) {
+            // Sorted first so the pick depends only on the seed, not on readdir
+            // order, which differs between machines.
+            std::sort(station.begin(), station.end());
+            std::mt19937 rng(static_cast<std::uint32_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+            musicPath = station[rng() % station.size()];
+        }
+    }
+
+    std::error_code musicError;
+    if (!musicPath.empty() && std::filesystem::exists(musicPath, musicError) && !musicError) {
+        m_musicTrack = m_audio.loadMusic(musicPath);
+        if (m_musicTrack.id != 0u) {
+            m_audio.playMusic(m_musicTrack, 4.0f, true);
+            VOX_LOGI("newvegas") << "radio: " << musicPath.stem().string();
+        }
+    } else {
+        VOX_LOGW("newvegas") << "no radio songs found under " << stationDir.string();
+    }
+}
+
+void NewVegasApp::applyWeather() {
+    const importer::fnv::FalloutWeatherRecord* weather =
+        m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
+    if (weather == nullptr) {
+        return;  // leave the procedural sky alone
+    }
+
+    // WTHR colours are authored as sRGB bytes for a renderer that displayed them
+    // directly. This one is HDR: the frame goes through an ACES curve and auto
+    // exposure keyed to a sunlit desert sitting around 0.3 linear.
+    //
+    // Decoding to linear and stopping there is not enough, and the failure is
+    // silent. A heavy-overcast sky is authored sRGB 23,27,30 -- linear 0.0086 --
+    // which ACES maps to ~0.002 and the exposure scale then buries. The sky
+    // rendered PURE BLACK while the terrain looked correctly lit, because the
+    // values are display-referred and were being read as radiance.
+    //
+    // A flat gain cannot fix this. Measured on two real weathers: the gain that
+    // makes a heavy overcast readable (~10) washes a clear zenith from deep blue
+    // to pale haze, and the gain that keeps the blue (~3) puts the overcast back
+    // at pure black. The pipeline's response below ~0.05 linear is far steeper
+    // than the rest of its range, so darks need lifting MORE than brights.
+    //
+    // pow(linear, contrast) does exactly that, and one exponent covers both
+    // cases where no single multiplier does. This is a display-referred fudge,
+    // not physics; the principled fix is to invert the tonemap on the GPU, where
+    // the auto-exposure scale is actually known. Both knobs are env-tunable.
+    static const float s_skyContrast = []() {
+        const char* env = std::getenv("ODAI_FNV_SKY_CONTRAST");
+        const float value = env != nullptr ? static_cast<float>(std::atof(env)) : 0.60f;
+        return value > 0.0f ? value : 0.60f;
+    }();
+    static const float s_skyGain = []() {
+        const char* env = std::getenv("ODAI_FNV_SKY_GAIN");
+        const float value = env != nullptr ? static_cast<float>(std::atof(env)) : 1.6f;
+        return value > 0.0f ? value : 1.6f;
+    }();
+    // Enhanced Shaders runs 1.25 by day and 0.9 at night against these same
+    // weather records; 1.15 is a compromise for a single global value.
+    static const float s_skySaturation = []() {
+        const char* env = std::getenv("ODAI_FNV_SKY_SATURATION");
+        const float value = env != nullptr ? static_cast<float>(std::atof(env)) : 1.15f;
+        return value > 0.0f ? value : 1.15f;
+    }();
+    const auto decode = [&](const importer::fnv::FalloutColorRgb& color, float* out) {
+        const auto channel = [](std::uint8_t value) {
+            const float srgb = static_cast<float>(value) / 255.0f;
+            return srgb <= 0.04045f ? (srgb / 12.92f)
+                                    : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+        };
+        // Shape MAGNITUDE, keep HUE. Applying pow() per channel (which this
+        // did first) pulls the channels toward each other, so an exponent
+        // below 1 desaturates: it lifted the overcast greys correctly and
+        // simultaneously washed a clear zenith from deep blue to pale haze.
+        //
+        // Splitting magnitude from direction is how ENB's tonemap does it
+        // (Enhanced Shaders' enbeffect.fx: contrast on `color/normalize(color)`,
+        // saturation on `normalize(color)`), and it fixes the hue shift for the
+        // same reason -- the direction vector is left alone unless saturation
+        // explicitly touches it.
+        const float linear[3] = {channel(color.r), channel(color.g), channel(color.b)};
+        const float magnitude =
+            std::sqrt((linear[0] * linear[0]) + (linear[1] * linear[1]) + (linear[2] * linear[2]));
+        if (magnitude <= 1e-6f) {
+            out[0] = out[1] = out[2] = 0.0f;
+            return;
+        }
+        const float shaped = std::pow(magnitude, s_skyContrast) * s_skyGain;
+        for (int i = 0; i < 3; ++i) {
+            // pow on the unit direction is ENB's saturation control; above 1
+            // pushes the dominant channel further ahead of the others.
+            out[i] = std::pow(linear[i] / magnitude, s_skySaturation) * shaped;
+        }
+    };
+
+    using importer::fnv::FalloutWeatherColor;
+    const float hour = m_timeOfDayHours;
+    render::WeatherSkyParams params;
+    params.weight = 1.0f;
+    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::SkyUpper, hour), params.skyUpper);
+    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::SkyLower, hour), params.skyLower);
+    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::Horizon, hour), params.horizon);
+    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::Fog, hour), params.fogColor);
+    // Day fog until dusk, night fog after; the record authors the two
+    // separately and there is no third value to interpolate toward.
+    const bool daytime = hour >= 6.0f && hour < 19.0f;
+    params.fogFarDistance = daytime ? weather->fogDayFar : weather->fogNightFar;
+
+    // Cloud tints come from PNAM, one colour per layer per time slot, sampled
+    // the same way the sky colours are. Layers with no texture were switched
+    // off at upload time and their opacity is ignored.
+    for (int layer = 0; layer < render::kWeatherCloudLayerCount; ++layer) {
+        const importer::fnv::FalloutColorRgb tint =
+            sampleFalloutWeatherCloudTint(*weather, layer, hour);
+        decode(tint, params.cloudTint[layer]);
+        // ODAI_FNV_NOCLOUDS isolates the sky gradient from the cloud layers.
+        // Worth keeping: "the sky is black" has two very different causes
+        // (an authored-dark gradient vs. total cloud cover) and they are
+        // indistinguishable on screen.
+        static const bool s_noClouds = std::getenv("ODAI_FNV_NOCLOUDS") != nullptr;
+        params.cloudOpacity[layer] =
+            (m_cloudLayerEnabled[layer] && !s_noClouds) ? 1.0f : 0.0f;
+    }
+    // One line per weather change, not per frame: "the sky is black" is
+    // otherwise indistinguishable from "the sky is not being set at all".
+    static std::uint32_t s_loggedWeather = 0;
+    if (s_loggedWeather != m_activeWeatherFormId) {
+        s_loggedWeather = m_activeWeatherFormId;
+        VOX_LOGI("newvegas") << "sky linear rgb: upper(" << params.skyUpper[0] << ","
+                             << params.skyUpper[1] << "," << params.skyUpper[2] << ") horizon("
+                             << params.horizon[0] << "," << params.horizon[1] << ","
+                             << params.horizon[2] << ") weight=" << params.weight;
+    }
+    m_renderer.setWeatherSky(params);
 }
 
 void NewVegasApp::updateCamera(float deltaSeconds) {
@@ -1071,6 +1597,44 @@ bool NewVegasApp::initStreaming() {
     VOX_LOGI("newvegas") << "streaming workers: " << streamThreads;
     m_streamJobs = std::make_unique<core::JobSystem>(streamThreads);
     m_streamer = std::make_unique<importer::fnv::CellStreamer>();
+
+    // ODAI_FNV_MODS is ':'-separated, appended after any --mod so the flag
+    // keeps the lower priority position it was given on the command line and
+    // the env can layer on top.
+    if (const char* modsEnv = std::getenv("ODAI_FNV_MODS")) {
+        const std::string mods = modsEnv;
+        std::size_t start = 0;
+        while (start <= mods.size()) {
+            const std::size_t end = mods.find(':', start);
+            const std::string entry =
+                mods.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!entry.empty()) {
+                m_modDirectories.push_back(entry);
+            }
+            if (end == std::string::npos) {
+                break;
+            }
+            start = end + 1;
+        }
+    }
+    for (const std::string& modDirectory : m_modDirectories) {
+        VOX_LOGI("newvegas") << "mod directory: " << modDirectory;
+        m_streamer->addModDirectory(std::filesystem::path(modDirectory));
+    }
+
+    // ODAI_FNV_TEX_SIZE is the mip-drop ceiling. The 512 default is what makes
+    // the base game fit; a high-resolution texture pack is invisible without
+    // raising it, because its art gets dropped straight back down. Memory goes
+    // as the square, so this is the knob to reach for first when the GPU starts
+    // complaining.
+    if (const char* texSizeEnv = std::getenv("ODAI_FNV_TEX_SIZE")) {
+        const int requested = std::atoi(texSizeEnv);
+        if (requested >= 0) {
+            m_streamer->setMaxTextureSize(static_cast<std::uint32_t>(requested));
+            VOX_LOGI("newvegas") << "texture ceiling: "
+                                 << (requested == 0 ? "unclamped" : std::to_string(requested) + " px");
+        }
+    }
 
     if (m_streamCacheEnabled) {
         if (m_streamCacheDirectory.empty()) {
@@ -1339,6 +1903,7 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
                              << " cache(hit/miss)=" << stats.cacheHits << "/" << stats.cacheMisses
                              << " cacheLoadMs=" << stats.lastCacheLoadMs
                              << " fxSkipped=" << stats.effectMeshesSkipped
+                             << " nodeParseFails=" << stats.nodeParseFailures
                              << " blendedDraws=" << stats.blendedPartsLoaded;
     }
 }

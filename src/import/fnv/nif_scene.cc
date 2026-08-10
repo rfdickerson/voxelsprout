@@ -101,11 +101,35 @@ private:
 // node did not appear in `referencedAsChild`, so it was promoted to a root and
 // walked with an identity transform. That misplaced 459 subtrees by as much as
 // 25000 units. Neither case incremented skippedShapeCount.
+// The list below is not hand-curated any more: it is EVERY type that inherits
+// from NiNode, transitively, in niftools' nif.xml -- the format's own schema --
+// rather than the twelve someone happened to hit. Nine of them do NOT end in
+// "Node" (BSMasterParticleSystem, NiBone, NiRoom, NiRoomGroup, NiWall,
+// FxButton, FxRadioButton, FxWidget, NiCollisionSwitch), which is why matching
+// on the name suffix alone was never going to be enough: BSMasterParticleSystem
+// is the ROOT of 38 retail meshes and no suffix rule sees it.
+//
+// Deliberately NOT here: NiCamera. It inherits NiAVObject, not NiNode, so it has
+// no children list -- and nif.xml's Footer note says a camera is referenced in
+// the root list "even if it is not a root object", so it does turn up where
+// roots are read. Walking it as a node would read its projection fields as a
+// child count.
 bool isNodeTypeName(std::string_view typeName) {
-    return typeName == "NiNode" || typeName == "BSFadeNode" || typeName == "NiBSAnimationNode" ||
-        typeName == "BSMultiBoundNode" || typeName == "NiBillboardNode" || typeName == "BSOrderedNode" ||
-        typeName == "BSValueNode" || typeName == "BSDamageStage" || typeName == "BSBlastNode" ||
-        typeName == "BSDebrisNode" || typeName == "BSLeafAnimNode" || typeName == "BSTreeNode";
+    // Sorted; keep it that way for the binary search.
+    static constexpr std::string_view kNodeTypes[] = {
+        "AvoidNode",         "BSBlastNode",   "BSDamageStage",
+        "BSDebrisNode",      "BSDistantObjectInstancedNode",
+        "BSFadeNode",        "BSLeafAnimNode", "BSMasterParticleSystem",
+        "BSMultiBoundNode",  "BSOrderedNode", "BSRangeNode",
+        "BSTreeNode",        "BSValueNode",   "CsNiNode",
+        "FxButton",          "FxRadioButton", "FxWidget",
+        "JPSJigsawNode",     "NiBSAnimationNode", "NiBSParticleNode",
+        "NiBillboardNode",   "NiBone",        "NiCollisionSwitch",
+        "NiLODNode",         "NiNode",        "NiRoom",
+        "NiRoomGroup",       "NiSortAdjustNode", "NiSwitchNode",
+        "NiWall",            "RootCollisionNode",
+    };
+    return std::binary_search(std::begin(kNodeTypes), std::end(kNodeTypes), typeName);
 }
 
 // A type this parser does not know, whose name looks like a node, is the exact
@@ -115,6 +139,54 @@ bool isNodeTypeName(std::string_view typeName) {
 bool looksLikeUnhandledNodeType(std::string_view typeName) {
     return !isNodeTypeName(typeName) && typeName.size() > 4u &&
         typeName.substr(typeName.size() - 4u) == "Node";
+}
+
+// The file's own root list, which this parser used to ignore.
+//
+// nif.xml's Footer struct is "Num Roots" (uint) then that many Ref<NiObject>,
+// sitting immediately after the last block. Reading it replaces the heuristic
+// that produced the floating-geometry bug: promoting every node no other node
+// claimed as a child, each walked with an IDENTITY transform, so one
+// unrecognized parent relocated its whole subtree to the model origin.
+//
+// Measured over 20000 retail meshes before anything was made to depend on it:
+// the footer is present and exactly 4+4*numRoots bytes on 19999 of 19999, every
+// ref in range, 19998 files with one root and one with two. Multi-root files
+// existing is why "just take block 0" would have been wrong.
+//
+// Returns false when there is no plausible footer, leaving the caller to fall
+// back. Roots are NOT filtered to nodes here -- nif.xml notes a camera is listed
+// "even if it is not a root object", so the caller skips what it cannot walk.
+bool readFooterRoots(
+    const std::vector<std::uint8_t>& bytes,
+    const std::vector<std::size_t>& blockEnd,
+    std::vector<std::int32_t>& outRoots
+) {
+    outRoots.clear();
+    if (blockEnd.empty()) {
+        return false;
+    }
+    const std::size_t footerOffset = blockEnd.back();
+    if (footerOffset + sizeof(std::uint32_t) > bytes.size()) {
+        return false;
+    }
+    std::uint32_t rootCount = 0;
+    std::memcpy(&rootCount, bytes.data() + footerOffset, sizeof(rootCount));
+    // A count that does not fit the bytes that are actually there means this is
+    // not the footer -- a desynchronized block-size table, most likely.
+    const std::size_t needed =
+        sizeof(std::uint32_t) + (static_cast<std::size_t>(rootCount) * sizeof(std::int32_t));
+    if (rootCount == 0u || footerOffset + needed > bytes.size()) {
+        return false;
+    }
+    outRoots.resize(rootCount);
+    for (std::uint32_t i = 0; i < rootCount; ++i) {
+        std::memcpy(
+            &outRoots[i],
+            bytes.data() + footerOffset + sizeof(std::uint32_t) + (i * sizeof(std::int32_t)),
+            sizeof(std::int32_t));
+    }
+    return true;
 }
 
 struct NifHeader {
@@ -754,6 +826,20 @@ bool readAvObjectPrefix(ByteCursor& cursor, std::uint32_t userVersion2, AvObject
     return true;
 }
 
+// Returns false when the block does not look like an NiNode, which is now a
+// LOAD-BEARING answer rather than a rare truncation report: the caller uses it
+// to decide whether a block is a node at all, in place of matching its type
+// NAME. Measured justification for that move, from --footers over 20000 retail
+// meshes: BSMasterParticleSystem is NiNode-derived and is the ROOT of 38
+// models, yet it neither appears in any allowlist nor ends in "Node", so no
+// name-based rule recognizes it -- while NiCamera is a root that is NOT a node
+// and must be rejected. The name simply does not carry the information; the
+// layout does.
+//
+// The checks are deliberately STRUCTURAL rather than numeric. A desync shows up
+// as a child count that cannot fit in the block long before it shows up as an
+// implausible float, and a numeric tolerance risks rejecting a legitimate node
+// -- which costs a whole model, the exact outcome this file is trying to avoid.
 bool readNiNode(ByteCursor& cursor, std::uint32_t userVersion2, AvObjectFields& out) {
     if (!readAvObjectPrefix(cursor, userVersion2, out)) {
         return false;
@@ -762,14 +848,34 @@ bool readNiNode(ByteCursor& cursor, std::uint32_t userVersion2, AvObjectFields& 
     if (!cursor.read(numChildren)) {
         return false;
     }
+    // Bound the count against what is actually left in the block BEFORE
+    // resizing. Unbounded, a desynchronized read of 0xFFFFFFFF here asks for a
+    // ~17 GB allocation and takes the process down, on nothing worse than a
+    // malformed mod asset -- the vector was previously sized from this value
+    // and only then discovered to be unreadable, one element at a time.
+    const std::size_t remaining = cursor.size() - cursor.pos();
+    if (static_cast<std::size_t>(numChildren) * sizeof(std::int32_t) > remaining) {
+        return false;
+    }
     out.children.resize(numChildren);
     for (std::int32_t& child : out.children) {
         if (!cursor.read(child)) {
             return false;
         }
     }
-    // Effects list follows; unused, and the caller resumes at the block's
-    // declared end regardless, so it is intentionally not read here.
+    // The effects list follows and is unused -- the caller resumes at the
+    // block's declared end regardless -- but its COUNT must still be there.
+    // Requiring those 4 bytes is what gives this function teeth as a
+    // recognizer: a non-node block that happened to survive the field walk
+    // this far almost never lands with exactly enough room left.
+    //
+    // Note a `pos() > size()` check could never fire: the cursor spans exactly
+    // this block, and reads refuse to run past its end (the same argument the
+    // geometry reader's own comment makes). A minimum-trailer check is the
+    // form that actually asserts something here.
+    if ((cursor.size() - cursor.pos()) < sizeof(std::uint32_t)) {
+        return false;
+    }
     return true;
 }
 
@@ -1129,6 +1235,12 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 for (const std::int32_t child : nodeFields[i].children) {
                     referencedAsChild.insert(child);
                 }
+            } else {
+                // Counted rather than ignored. Salvaging the child refs here
+                // would be unsound -- a failed walk IS a desync, so those refs
+                // are exactly the bytes that cannot be trusted -- so the
+                // subtree is left unreachable and simply not drawn.
+                ++outModel.nodeParseFailedCount;
             }
         } else if (looksLikeUnhandledNodeType(typeName)) {
             ++outModel.unhandledNodeTypeCount;
@@ -1207,15 +1319,42 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         }
     }
 
-    // DFS from every NiNode never referenced as a child (the file's own
-    // root(s)), accumulating world transforms and emitting one NifShape per
-    // reachable NiTriShape with valid geometry.
+    // DFS from the file's declared roots, accumulating world transforms and
+    // emitting one NifShape per reachable NiTriShape with valid geometry.
+    //
+    // Roots come from the FOOTER, which states them explicitly. The old rule --
+    // "every node nobody claims as a child is a root" -- is what produced the
+    // floating geometry: an unrecognized or unparsed parent left its children
+    // unclaimed, so each was promoted to a root and walked from IDENTITY,
+    // dropping every ancestor translation and landing the subtree on the model
+    // origin. Reading the roots instead means an unreachable subtree is simply
+    // not drawn, which is a diagnosable outcome rather than a wrong one.
     std::vector<std::size_t> stack;
     std::vector<Mat4> transformStack;
-    for (std::size_t i = 0; i < numBlocks; ++i) {
-        if (isNiNode[i] && referencedAsChild.find(static_cast<std::int32_t>(i)) == referencedAsChild.end()) {
-            stack.push_back(i);
-            transformStack.push_back(Mat4{});
+    std::vector<std::int32_t> footerRoots;
+    if (readFooterRoots(bytes, blockEnd, footerRoots)) {
+        for (const std::int32_t root : footerRoots) {
+            // Skip what cannot be walked: nif.xml lists a first-person camera
+            // among the roots "even if it is not a root object", and NiCamera
+            // derives from NiAVObject, not NiNode -- it has no children list.
+            if (root >= 0 && static_cast<std::size_t>(root) < numBlocks &&
+                isNiNode[static_cast<std::size_t>(root)]) {
+                stack.push_back(static_cast<std::size_t>(root));
+                transformStack.push_back(Mat4{});
+            }
+        }
+        outModel.usedFooterRoots = !stack.empty();
+    }
+    // Fall back to the old scan only when the footer gave us nothing walkable,
+    // and only when every node in the file parsed -- a parse failure is exactly
+    // the condition under which the scan invents a wrong root.
+    if (stack.empty() && outModel.nodeParseFailedCount == 0u) {
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            if (isNiNode[i] &&
+                referencedAsChild.find(static_cast<std::int32_t>(i)) == referencedAsChild.end()) {
+                stack.push_back(i);
+                transformStack.push_back(Mat4{});
+            }
         }
     }
 
