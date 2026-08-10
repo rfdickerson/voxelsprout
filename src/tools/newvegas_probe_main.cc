@@ -2712,6 +2712,19 @@ int main(int argc, char** argv) {
     if (mode == "--nif" && argc >= 4) {
         return probeSingleNif(dataPath, argv[3]);
     }
+    if (mode == "--speakerpos" && argc >= 5) {
+        odai::importer::fnv::SpeakerPlacement placement;
+        std::string error;
+        if (!odai::importer::fnv::findSpeakerPlacement(dataPath / argv[3], argv[4], placement, error)) {
+            std::cout << "failed: " << error << "\n";
+            return 1;
+        }
+        std::cout << argv[4] << " ref=" << std::hex << std::uppercase << placement.referenceFormId
+                  << " cell=" << placement.cellFormId << std::dec
+                  << " pos=(" << placement.position[0] << ", " << placement.position[1] << ", "
+                  << placement.position[2] << ")\n";
+        return 0;
+    }
     if (mode == "--dialoguetree" && argc >= 5) {
         return probeDialogueTree(dataPath / argv[3], argv[4],
                                  argc >= 6 ? static_cast<std::size_t>(std::stoull(argv[5])) : 6u);

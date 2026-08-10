@@ -56,6 +56,29 @@ struct DialogueImportStats {
     std::uint32_t danglingLinks = 0;  // TCLT topics with no INFO for this speaker
 };
 
+// Where a speaker stands in the world, from its ACRE (creature) or ACHR (NPC)
+// reference. Bethesda coordinates, straight out of the reference's DATA -- the
+// caller converts to engine space the same way cell_builder does.
+//
+// Separate from the cell pipeline on purpose: that path places STAT records and
+// would need creature base records, model resolution and an opt-in filter to
+// avoid populating the whole Mojave with frozen actors (there is no .kf reader,
+// so every one of them would stand in bind pose). One named speaker does not
+// need any of that.
+struct SpeakerPlacement {
+    std::uint32_t referenceFormId = 0;
+    std::uint32_t cellFormId = 0;
+    float position[3] = {};
+    float rotationRadians[3] = {};
+    bool found = false;
+};
+
+bool findSpeakerPlacement(
+    const std::filesystem::path& pluginPath,
+    const std::string& speakerEditorId,
+    SpeakerPlacement& outPlacement,
+    std::string& outError);
+
 // Finds the CREA/NPC_ whose EDID equals `speakerEditorId` (case-insensitive)
 // and builds its tree. Returns false when the speaker or any dialogue for it
 // cannot be found; `outError` says which.

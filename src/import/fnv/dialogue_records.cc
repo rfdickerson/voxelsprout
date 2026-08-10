@@ -54,6 +54,87 @@ struct RawInfo {
 
 }  // namespace
 
+bool findSpeakerPlacement(
+    const std::filesystem::path& pluginPath,
+    const std::string& speakerEditorId,
+    SpeakerPlacement& outPlacement,
+    std::string& outError
+) {
+    outPlacement = SpeakerPlacement{};
+    outError.clear();
+
+    EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        outError = "cannot open plugin: " + reader.lastError();
+        return false;
+    }
+    const std::string wantedEditorId = toLowerAsciiCopy(speakerEditorId);
+
+    std::uint32_t speakerFormId = 0;
+    {
+        EsmReader::Visitor visitor;
+        visitor.onRecord = [&](const EsmRecordView& record) {
+            if (speakerFormId != 0u || (record.type != "CREA" && record.type != "NPC_")) {
+                return;
+            }
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "EDID" && toLowerAsciiCopy(subrecordString(sub)) == wantedEditorId) {
+                    speakerFormId = record.formId;
+                }
+            }
+        };
+        reader.walk(visitor);
+    }
+    if (speakerFormId == 0u) {
+        outError = "no CREA/NPC_ with EditorID \"" + speakerEditorId + "\"";
+        return false;
+    }
+
+    // ACRE places a creature, ACHR an NPC; both carry the same NAME (base) and
+    // DATA (position + rotation) subrecords a REFR does.
+    std::uint32_t currentCell = 0;
+    EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        if (record.type == "CELL") {
+            currentCell = record.formId;
+            return;
+        }
+        if (outPlacement.found || (record.type != "ACRE" && record.type != "ACHR")) {
+            return;
+        }
+        std::uint32_t base = 0;
+        bool hasData = false;
+        float data[6] = {};
+        for (const auto& sub : record.subrecords) {
+            if (sub.type == "NAME" && sub.size >= 4u) {
+                base = readU32(sub.data);
+            } else if (sub.type == "DATA" && sub.size >= 24u) {
+                std::memcpy(data, sub.data, sizeof(data));
+                hasData = true;
+            }
+        }
+        if (base != speakerFormId || !hasData) {
+            return;
+        }
+        outPlacement.referenceFormId = record.formId;
+        outPlacement.cellFormId = currentCell;
+        for (int i = 0; i < 3; ++i) {
+            outPlacement.position[i] = data[i];
+            outPlacement.rotationRadians[i] = data[3 + i];
+        }
+        outPlacement.found = true;
+    };
+    if (!reader.walk(visitor)) {
+        outError = "plugin walk failed while looking for the speaker's reference";
+        return false;
+    }
+    if (!outPlacement.found) {
+        outError = "no ACRE/ACHR reference places " + speakerEditorId;
+        return false;
+    }
+    return true;
+}
+
 bool buildSpeakerDialogueTree(
     const std::filesystem::path& pluginPath,
     const std::string& speakerEditorId,
