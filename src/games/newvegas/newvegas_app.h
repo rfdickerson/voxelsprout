@@ -1,5 +1,7 @@
 #pragma once
 
+#include "games/newvegas/newvegas_victor.h"
+
 // Free-roam viewer for cooked Fallout: New Vegas content.
 //
 // This exists because the only other thing that could display a cooked scene
@@ -42,6 +44,8 @@
 
 namespace odai::games::newvegas {
 
+// Victor, the Goodsprings Securitron: placed, talked to with E, and speaking
+// his own imported dialogue. See newvegas_victor.h.
 class NewVegasApp : public engine::GameApp {
 public:
     void setScenePath(std::string path) { m_scenePath = std::move(path); }
@@ -194,6 +198,8 @@ private:
     double m_lastCursorX = 0.0;
     double m_lastCursorY = 0.0;
     bool m_hasCursorSample = false;
+    VictorState m_victor;
+    bool m_victorPromptVisible = false;
     bool m_mouseCaptured = true;
 
     // Time of day in hours [0, 24). Drives the sun angle, and through it the

@@ -1670,6 +1670,14 @@ bool NewVegasApp::initStreaming() {
         if (!m_streamCacheDirectory.empty()) {
             m_streamer->setCacheDirectory(std::filesystem::path(m_streamCacheDirectory));
         }
+        {
+            importer::ImportedScene victorScene;
+            const std::filesystem::path dataPath(m_streamDirectory);
+            if (loadVictor(dataPath, dataPath / m_streamPlugin, m_victor, victorScene)) {
+                m_victor.chunkIndex = m_renderer.addImportedSceneChunk(victorScene);
+            }
+            VOX_LOGI("newvegas") << "Victor: " << m_victor.status;
+        }
     }
 
     std::string error;
@@ -1945,7 +1953,30 @@ void NewVegasApp::onTick(float deltaSeconds) {
         updateRegionDiscovery();
     }
 
+    // Talking to Victor. Held keys are edge-detected by keyDown(), so a choice
+    // is taken once per press rather than once per frame.
+    if (m_victor.talking) {
+        for (int slot = 0; slot < 9; ++slot) {
+            if (!keyDown(m_window, GLFW_KEY_1 + slot)) {
+                continue;
+            }
+            const auto choices = m_victor.runtime.availableChoices();
+            if (static_cast<std::size_t>(slot) < choices.size()) {
+                m_victor.runtime.choose(*choices[static_cast<std::size_t>(slot)]);
+                speakVictorLine(m_victor, std::filesystem::path(m_streamDirectory),
+                                std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
+            }
+        }
+        if (m_victor.runtime.isFinished() || m_victor.runtime.currentNode() == nullptr) {
+            m_victor.talking = false;
+        }
+    }
+
     if (keyDown(m_window, GLFW_KEY_ESCAPE)) {
+        if (m_victor.talking) {
+            m_victor.talking = false;  // leave the conversation, not the game
+            return;
+        }
         glfwSetWindowShouldClose(m_window, GLFW_TRUE);
         return;
     }
@@ -1974,7 +2005,18 @@ void NewVegasApp::onTick(float deltaSeconds) {
 
     // Edge-latched: holding E must not re-trigger on the door you arrive next
     // to, which is always within range of the one you just came through.
+    const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    m_victorPromptVisible =
+        !m_victor.talking && victorIsInReach(m_victor, cameraPosition, m_yawDegrees * (kPi / 180.0f));
     const bool doorPressed = keyDown(m_window, GLFW_KEY_E);
+    if (doorPressed && m_victorPromptVisible) {
+        m_victor.runtime.begin(m_victor.tree, m_victor.context);
+        m_victor.talking = true;
+        m_victor.spokenNodeId.clear();
+        speakVictorLine(m_victor, std::filesystem::path(m_streamDirectory),
+                        std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
+        return;  // E opened a conversation; do not also walk through a door
+    }
     if (doorPressed && !m_doorKeyLatch) {
         const int doorIndex = findUsableDoor();
         if (doorIndex >= 0) {
@@ -2170,6 +2212,34 @@ void NewVegasApp::drawPipBoyHud() {
         promptPosition.x = (static_cast<float>(screenWidth) - promptWidth) * 0.5f;
         promptPosition.y = static_cast<float>(screenHeight) - (96.0f * scale);
         m_uiDrawList.addText(m_uiFont, prompt, promptPosition, kPipGreen);
+    }
+
+    // Victor. The conversation is drawn straight onto the HUD draw list rather
+    // than through DialoguePanel: the panel wants a widget tree, and this app's
+    // HUD is immediate-mode text, so one path is simpler than bridging two.
+    if (m_victor.talking) {
+        if (const dialogue::DialogueNode* node = m_victor.runtime.currentNode()) {
+            float y = static_cast<float>(screenHeight) - (260.0f * scale);
+            const float x = 64.0f * scale;
+            m_uiDrawList.addText(m_uiFont, node->speaker + ":", ui::UiVec2{x, y}, kPipGreen);
+            y += 26.0f * scale;
+            m_uiDrawList.addText(m_uiFont, node->text, ui::UiVec2{x, y}, kPipGreen);
+            y += 34.0f * scale;
+            const auto choices = m_victor.runtime.availableChoices();
+            for (std::size_t i = 0; i < choices.size() && i < 9u; ++i) {
+                m_uiDrawList.addText(
+                    m_uiFont, std::to_string(i + 1) + ") " + choices[i]->text,
+                    ui::UiVec2{x, y}, kPipGreenDim);
+                y += 24.0f * scale;
+            }
+            if (choices.empty()) {
+                m_uiDrawList.addText(m_uiFont, "(Esc to end)", ui::UiVec2{x, y}, kPipGreenDim);
+            }
+        }
+    } else if (m_victorPromptVisible) {
+        m_uiDrawList.addText(m_uiFont, "E  talk to Victor",
+                             ui::UiVec2{64.0f * scale, static_cast<float>(screenHeight) - (132.0f * scale)},
+                             kPipGreen);
     }
 
     // Hint line, top-left. Names the buttons of whichever device is in use --

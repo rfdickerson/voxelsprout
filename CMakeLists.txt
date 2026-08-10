@@ -967,6 +967,9 @@ if(ODAI_BUILD_APP)
             src/games/newvegas/newvegas_app.cc
             src/games/newvegas/newvegas_collision.cc
             src/games/newvegas/newvegas_ogg.cc
+            src/games/newvegas/newvegas_victor.cc
+            src/import/fnv/dialogue_records.cc
+            src/dialogue/dialogue_runtime.cc
             src/core/job_system.cc
             src/import/cell_residency_planner.cc
             # The runtime reads the game's own files now: BSA archives, the ESM
