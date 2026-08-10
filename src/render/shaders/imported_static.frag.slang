@@ -219,6 +219,14 @@ float4 sampleImportedAlbedo(FragmentInput input)
     if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
         sampled.a <= chunkPc.materialParams.x)
     {
+        // ODAI_DEBUG_ALPHATEST_HIGHLIGHT paints what would be cut away instead
+        // of cutting it. ODAI_DEBUG_NO_ALPHATEST answers "is alpha test doing
+        // this"; this answers "WHICH surface", which is the harder half when a
+        // scene draws 490 alpha-tested shapes and only one of them is wrong.
+        if (chunkPc.materialParams.y > 0.5)
+        {
+            return float4(1.0, 0.0, 1.0, 1.0);
+        }
         discard;
     }
     // Fallout's landscape is a base texture per quadrant with additional layers

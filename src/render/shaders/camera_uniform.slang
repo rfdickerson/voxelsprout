@@ -41,6 +41,20 @@ public struct CameraUniform
     public float4 voxelGiGridOriginCellSize;
     public float4 voxelGiGridExtentStrength;
     public float4 fogMapConfig; // x=invExtentX, y=invExtentZ, z=unused, w=enabled
+    // Authored sky from a Fallout WTHR record; w of weatherSkyUpper is the
+    // blend weight over the procedural sky, and 0 means "procedural only".
+    // Mirrored in MvpUniform in src/render/renderer_shared.h.
+    public float4 weatherSkyUpper;
+    public float4 weatherSkyLower;
+    public float4 weatherHorizon;
+    public float4 weatherFog;
+    // Four planar cloud layers: tint.rgb + opacity in w, then
+    // (bindless slot, scroll speed, tiling, unused).
+    public float4 weatherCloudTint[4];
+    public float4 weatherCloudParams[4];
+    // (mode, contrast, saturation, curve knee) and (overbright dampening, ...).
+    public float4 tonemapConfig;
+    public float4 tonemapConfig2;
 };
 
 [[vk::binding(0, 0)]]

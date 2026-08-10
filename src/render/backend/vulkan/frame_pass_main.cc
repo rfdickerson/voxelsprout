@@ -301,6 +301,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             lastPushedThreshold = static_cast<int>(threshold);
             importedPushConstants.materialParams[0] =
                 s_disableAlphaTest ? -1.0f : (static_cast<float>(threshold) / 255.0f);
+            static const bool s_highlightAlphaTest =
+                std::getenv("ODAI_DEBUG_ALPHATEST_HIGHLIGHT") != nullptr;
+            importedPushConstants.materialParams[1] = s_highlightAlphaTest ? 1.0f : 0.0f;
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,

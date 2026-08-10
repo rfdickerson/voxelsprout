@@ -165,6 +165,27 @@ struct alignas(16) CameraUniform {
     float voxelGiGridOriginCellSize[4];
     float voxelGiGridExtentStrength[4];
     float fogMapConfig[4]; // [0]=invExtentX, [1]=invExtentZ, [2]=unused, [3]=enabled
+    // Authored sky, from a Fallout WTHR record. The procedural Rayleigh/Mie sky
+    // stays the default and stays the only path when weight is 0 -- these blend
+    // over it rather than replacing it, so every other game renders exactly as
+    // before. Appended at the end of the block so no existing field's offset
+    // moves. Mirrored in src/render/shaders/camera_uniform.slang.
+    float weatherSkyUpper[4];  // [0..2]=linear rgb at zenith, [3]=blend weight 0..1
+    float weatherSkyLower[4];  // [0..2]=linear rgb above the horizon band, [3]=unused
+    float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=unused
+    float weatherFog[4];       // [0..2]=linear fog rgb, [3]=fog far distance in world units
+    // Four planar cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
+    float weatherCloudTint[4][4];
+    // [0]=bindless texture slot as a float, [1]=rotation rad/s, [2]=dome scale,
+    // [3]=unused. Slot is carried as a float because the whole block is floats;
+    // the shader rounds it back to an index.
+    float weatherCloudParams[4][4];
+    // Tonemap selection and parameters.
+    // [0] = mode: 0 = the ACES fit, 1 = the ENB/Enhanced Shaders curve
+    // [1] = contrast, [2] = saturation, [3] = curve knee (ENB's "ToneMapping Curve")
+    float tonemapConfig[4];
+    // [0] = overbright dampening (ENB's "Overbright Dampening"), [1..3] spare.
+    float tonemapConfig2[4];
 };
 
 struct alignas(16) ChunkPushConstants {

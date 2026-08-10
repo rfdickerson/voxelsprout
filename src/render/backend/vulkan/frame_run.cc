@@ -1040,6 +1040,46 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig5[1] = std::clamp(m_skyDebugSettings.manualExposure, 0.05f, 8.0f);
     mvpUniform.skyConfig5[2] = (m_morrowindSkyTextureImageView != VK_NULL_HANDLE) ? 1.0f : 0.0f;
     mvpUniform.skyConfig5[3] = std::clamp(m_skyDebugSettings.waterRefractionDecay, 0.25f, 3.0f);
+
+    // Authored sky, if a WTHR record pushed one in. Weight 0 makes every term
+    // below inert, which is the state every game other than New Vegas is in.
+    mvpUniform.weatherSkyUpper[3] = std::clamp(m_weatherSky.weight, 0.0f, 1.0f);
+    for (int channel = 0; channel < 3; ++channel) {
+        mvpUniform.weatherSkyUpper[channel] = m_weatherSky.skyUpper[channel];
+        mvpUniform.weatherSkyLower[channel] = m_weatherSky.skyLower[channel];
+        mvpUniform.weatherHorizon[channel] = m_weatherSky.horizon[channel];
+        mvpUniform.weatherFog[channel] = m_weatherSky.fogColor[channel];
+    }
+    mvpUniform.weatherSkyLower[3] = 0.0f;
+    mvpUniform.weatherHorizon[3] = 0.0f;
+    mvpUniform.weatherFog[3] = m_weatherSky.fogFarDistance;
+
+    for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
+        const bool hasSlot = m_weatherCloudSlots[layer] != kInvalidImportedTextureSlot;
+        for (int channel = 0; channel < 3; ++channel) {
+            mvpUniform.weatherCloudTint[layer][channel] = m_weatherSky.cloudTint[layer][channel];
+        }
+        // Opacity is what gates the layer in the shader, so a layer whose
+        // texture failed to upload is switched off here rather than sampling
+        // whatever happens to live in slot 0.
+        mvpUniform.weatherCloudTint[layer][3] =
+            hasSlot ? std::clamp(m_weatherSky.cloudOpacity[layer], 0.0f, 1.0f) : 0.0f;
+        mvpUniform.weatherCloudParams[layer][0] =
+            hasSlot ? static_cast<float>(m_weatherCloudSlots[layer]) : -1.0f;
+        mvpUniform.weatherCloudParams[layer][1] = m_weatherCloudScroll[layer];
+        mvpUniform.weatherCloudParams[layer][2] = m_weatherCloudDomeScale[layer];
+        mvpUniform.weatherCloudParams[layer][3] = 0.0f;
+    }
+
+    mvpUniform.tonemapConfig[0] =
+        (m_tonemapSettings.mode == TonemapMode::Enb) ? 1.0f : 0.0f;
+    mvpUniform.tonemapConfig[1] = m_tonemapSettings.contrast;
+    mvpUniform.tonemapConfig[2] = m_tonemapSettings.saturation;
+    mvpUniform.tonemapConfig[3] = m_tonemapSettings.curve;
+    mvpUniform.tonemapConfig2[0] = m_tonemapSettings.overbrightDampening;
+    mvpUniform.tonemapConfig2[1] = 0.0f;
+    mvpUniform.tonemapConfig2[2] = 0.0f;
+    mvpUniform.tonemapConfig2[3] = 0.0f;
     mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceR, 0.0f, 4.0f);
     mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceG, 0.0f, 4.0f);
     mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceB, 0.0f, 4.0f);

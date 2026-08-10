@@ -446,6 +446,12 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    void setWeatherSky(const WeatherSkyParams& params) { m_weatherSky = params; }
+    // Uploads the cloud layer textures and holds their bindless slots. Only
+    // called when the weather changes; the per-frame tints ride on
+    // WeatherSkyParams instead.
+    void setWeatherClouds(const WeatherCloudTextures& clouds);
+    void setTonemapSettings(const TonemapSettings& settings) { m_tonemapSettings = settings; }
     // Drives the same DoF state the sky debug panel edits; clamping happens
     // where the values feed the frame uniform.
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
@@ -1916,6 +1922,18 @@ private:
     bool m_debugVisualizeAoNormals = false;
     ShadowDebugSettings m_shadowDebugSettings{};
     SkyDebugSettings m_skyDebugSettings{};
+    // Weight 0 by default, so the procedural sky is what every game gets until
+    // something authored is pushed in.
+    WeatherSkyParams m_weatherSky{};
+    TonemapSettings m_tonemapSettings{};
+    // ~0u is kInvalidImportedTextureSlot, which this header cannot see --
+    // renderer_shared.h is included inside `namespace odai::render` by some TUs
+    // and not at all by others. A static_assert in chunk_upload.cc, which sees
+    // both, holds the two together; this codebase has already been bitten once
+    // by a silently drifting mirrored constant.
+    std::uint32_t m_weatherCloudSlots[kWeatherCloudLayerCount] = {~0u, ~0u, ~0u, ~0u};
+    float m_weatherCloudScroll[kWeatherCloudLayerCount] = {};
+    float m_weatherCloudDomeScale[kWeatherCloudLayerCount] = {};
     VoxelGiDebugSettings m_voxelGiDebugSettings{};
     struct SkyTuningRuntimeState {
         bool initialized = false;

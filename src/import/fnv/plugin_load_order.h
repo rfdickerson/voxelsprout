@@ -1,0 +1,110 @@
+#pragma once
+
+// Load order for Fallout ESM/ESP plugins, and the formID remapping that makes
+// more than one of them loadable at once.
+//
+// THE PROBLEM THIS SOLVES. Every formID's high byte is a mod index, but the
+// index stored inside a plugin file is LOCAL to that plugin: it indexes that
+// plugin's own TES4 master list, and the value one past the last master means
+// "a record I define myself". The same byte means different things in different
+// files. NevadaSkies.esp declares five masters (FalloutNV + the four DLC), so
+// inside that file 0x00 is FalloutNV, 0x04 is LonesomeRoad, and 0x05 is Nevada
+// Skies' own 375 new weather records. Load it after a different set of plugins
+// and every one of those bytes has to mean something else.
+//
+// So a formID is only meaningful once remapped into the global load order.
+// Skipping this does not fail loudly -- it silently resolves references to the
+// wrong records, which is far worse than an error.
+//
+// Everything here is pure CPU and touches only each plugin's TES4 header (a few
+// hundred bytes at the front of the file), never its contents. Reading
+// FalloutNV.esm's masters does not map its 234 MB.
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace odai::importer::fnv {
+
+// A plugin's TES4 header, which is all that is needed to place it in a load
+// order.
+struct FalloutPluginHeader {
+    std::string fileName;  // "NevadaSkies.esp", as the masters of other plugins spell it
+    std::vector<std::string> masters;  // MAST subrecords, in declared order
+    std::uint32_t recordCount = 0;     // HEDR
+    bool isMaster = false;             // TES4 flag 0x1: an .esm-style master
+};
+
+// Reads just the TES4 record at the front of `path`. Returns false if the file
+// cannot be read or does not begin with a TES4 record.
+bool readFalloutPluginHeader(
+    const std::filesystem::path& path, FalloutPluginHeader& outHeader, std::string& outError);
+
+// One plugin, placed.
+struct FalloutLoadOrderEntry {
+    std::filesystem::path path;
+    FalloutPluginHeader header;
+    // This plugin's position in the load order, and the value its own records'
+    // formIDs must carry after remapping.
+    std::uint8_t globalIndex = 0;
+    // Local mod index -> global mod index. Sized masters.size() + 1; the last
+    // entry maps the plugin's own local index to globalIndex. A local index at
+    // or past this size is malformed and remapFormId leaves it alone rather
+    // than inventing a mapping.
+    std::vector<std::uint8_t> localToGlobal;
+};
+
+class FalloutLoadOrder {
+public:
+    // Extra directories searched for plugins, ahead of the Data directory and in
+    // the order added (later wins), matching how mod roots resolve assets.
+    //
+    // This is what lets a plugin live in the same mod directory as the BSA it
+    // ships with, instead of having to be copied into the game install or into a
+    // symlink farm mirroring it. Masters still resolve from wherever they are, so
+    // a mod directory holding nothing but the .esp works.
+    //
+    // Call before open(); open() does not clear the list.
+    void addSearchRoot(std::filesystem::path directory) {
+        m_searchRoots.push_back(std::move(directory));
+    }
+
+    // Resolves `requestedFileNames` (in the order the user wants them loaded)
+    // against `dataFilesPath`, pulling in every master each one declares.
+    //
+    // Masters are inserted ahead of the plugin that needs them, so asking for
+    // just "NevadaSkies.esp" yields FalloutNV.esm, the four DLC masters, then
+    // NevadaSkies.esp -- which is what the game would load and what makes the
+    // plugin's formIDs resolvable at all. A plugin already present keeps its
+    // first position rather than being moved, so an explicit order the caller
+    // gave is never silently rearranged.
+    //
+    // Returns false if a requested plugin or a declared master is missing;
+    // outError names the first one, because "load order is wrong" is useless
+    // and "DeadMoney.esm not found in <dir>" is actionable.
+    bool open(
+        const std::filesystem::path& dataFilesPath,
+        const std::vector<std::string>& requestedFileNames,
+        std::string& outError);
+
+    [[nodiscard]] const std::vector<FalloutLoadOrderEntry>& entries() const { return m_entries; }
+    [[nodiscard]] std::size_t size() const { return m_entries.size(); }
+    [[nodiscard]] bool empty() const { return m_entries.empty(); }
+
+    // Rewrites `localFormId`'s mod index from plugin `pluginIndex`'s local
+    // space into the global one. Returns the formID unchanged when the local
+    // index is not one this plugin declares -- a malformed reference is not
+    // worth inventing a target for.
+    [[nodiscard]] std::uint32_t remapFormId(std::size_t pluginIndex, std::uint32_t localFormId) const;
+
+    // A stable identifier for the whole load order, for folding into a cache
+    // key. Changing which plugins are loaded, or their order, changes this.
+    [[nodiscard]] std::string fingerprint() const;
+
+private:
+    std::vector<std::filesystem::path> m_searchRoots;  // ahead of Data; later wins
+    std::vector<FalloutLoadOrderEntry> m_entries;
+};
+
+}  // namespace odai::importer::fnv

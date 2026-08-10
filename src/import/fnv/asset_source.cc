@@ -90,6 +90,7 @@ bool FalloutAssetSource::open(
     m_dataFilesPath = dataFilesPath;
     m_archives.clear();
     m_warnings.clear();
+    m_contentMask = contentMask;
 
     std::error_code directoryError;
     std::filesystem::directory_iterator iterator(dataFilesPath, directoryError);
@@ -172,12 +173,169 @@ bool FalloutAssetSource::open(
     return true;
 }
 
+bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory) {
+    std::error_code iterError;
+    std::filesystem::recursive_directory_iterator iterator(
+        directory, std::filesystem::directory_options::skip_permission_denied, iterError);
+    if (iterError) {
+        m_warnings.push_back("cannot read mod directory " + directory.string());
+        return false;
+    }
+
+    ModDirectory mod;
+    mod.root = directory;
+    std::size_t caseCollisions = 0;
+    std::vector<std::filesystem::path> archivePaths;
+    for (const auto& entry : iterator) {
+        std::error_code typeError;
+        if (!entry.is_regular_file(typeError) || typeError) {
+            continue;
+        }
+        // A .bsa at the mod root is an archive to open, not a file to serve by
+        // path -- nothing ever asks to resolve "nevadaskies.bsa".
+        if (toLowerAsciiCopy(entry.path().extension().string()) == ".bsa" &&
+            entry.path().parent_path() == directory) {
+            archivePaths.push_back(entry.path());
+            continue;
+        }
+        std::error_code relativeError;
+        const std::filesystem::path relative =
+            std::filesystem::relative(entry.path(), directory, relativeError);
+        if (relativeError) {
+            continue;
+        }
+        // generic_string() so the separator is '/' on every host before the
+        // rewrite to Bethesda's '\'.
+        std::string key = toLowerAsciiCopy(relative.generic_string());
+        for (char& c : key) {
+            if (c == '/') {
+                c = '\\';
+            }
+        }
+        std::error_code sizeError;
+        const auto size = entry.file_size(sizeError);
+        if (!sizeError) {
+            mod.totalBytes += static_cast<std::uint64_t>(size);
+        }
+        // Two files differing only by case collapse to one key. The first wins,
+        // arbitrarily -- there is no right answer, and the game itself could not
+        // tell them apart either.
+        if (!mod.filesByLowerPath.emplace(std::move(key), entry.path()).second) {
+            ++caseCollisions;
+        }
+    }
+
+    if (caseCollisions != 0u) {
+        m_warnings.push_back(
+            "mod directory " + directory.string() + " has " + std::to_string(caseCollisions) +
+            " files differing only by case; the first of each was kept");
+    }
+
+    // Name order, so which archive wins a duplicate name is reproducible rather
+    // than being whatever readdir returned.
+    std::sort(
+        archivePaths.begin(), archivePaths.end(),
+        [](const std::filesystem::path& a, const std::filesystem::path& b) {
+            return toLowerAsciiCopy(a.filename().string()) < toLowerAsciiCopy(b.filename().string());
+        });
+    for (const std::filesystem::path& path : archivePaths) {
+        std::uint32_t fileFlags = 0;
+        if (!peekBsaContentFlags(path, fileFlags)) {
+            m_warnings.push_back("not a readable v104 BSA: " + path.string());
+            continue;
+        }
+        // Same conservative test as the game's own archives: skip only an
+        // archive that declares content AND declares nothing the caller wants.
+        if (fileFlags != 0u && (fileFlags & m_contentMask) == 0u) {
+            continue;
+        }
+        BsaArchive archive;
+        if (!archive.open(path)) {
+            m_warnings.push_back("failed to open BSA archive " + path.string());
+            continue;
+        }
+        mod.archives.push_back(std::move(archive));
+    }
+
+    m_modDirectories.push_back(std::move(mod));
+    return true;
+}
+
+std::size_t FalloutAssetSource::modArchiveCount() const {
+    std::size_t count = 0;
+    for (const ModDirectory& mod : m_modDirectories) {
+        count += mod.archives.size();
+    }
+    return count;
+}
+
+std::size_t FalloutAssetSource::modFileCount() const {
+    std::size_t count = 0;
+    for (const ModDirectory& mod : m_modDirectories) {
+        count += mod.filesByLowerPath.size();
+    }
+    return count;
+}
+
+std::string FalloutAssetSource::modFingerprint() const {
+    if (m_modDirectories.empty()) {
+        return {};
+    }
+    std::string fingerprint;
+    for (const ModDirectory& mod : m_modDirectories) {
+        if (!fingerprint.empty()) {
+            fingerprint += "-";
+        }
+        // The result becomes a directory name, so keep it to characters no
+        // filesystem argues about.
+        for (char c : toLowerAsciiCopy(mod.root.filename().string())) {
+            const bool safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+            fingerprint.push_back(safe ? c : '_');
+        }
+        fingerprint += "_" + std::to_string(mod.filesByLowerPath.size()) + "_" +
+            std::to_string(mod.totalBytes);
+    }
+    return fingerprint;
+}
+
 bool FalloutAssetSource::resolve(
     const std::string& loosePathSuffix,
     const std::filesystem::path& looseRoot,
     const std::string& archiveVirtualPath,
     std::vector<std::uint8_t>& outBytes,
     std::string& outError) const {
+    // Mods win over everything the game shipped. Reverse, for the same reason
+    // the archive loop below is reversed: m_modDirectories is in load order.
+    if (!m_modDirectories.empty()) {
+        const std::string modKey = toLowerAsciiCopy(archiveVirtualPath);
+        for (auto it = m_modDirectories.rbegin(); it != m_modDirectories.rend(); ++it) {
+            // This mod's loose files first, then its own archives -- the same
+            // "loose beats archives" rule the game applies, scoped to one mod.
+            const auto found = it->filesByLowerPath.find(modKey);
+            if (found != it->filesByLowerPath.end()) {
+                std::string modError;
+                if (readWholeFile(found->second, outBytes, modError)) {
+                    return true;
+                }
+                // Indexed but unreadable is worth reporting even if something
+                // later satisfies the request.
+                outError = modError;
+            }
+            for (auto archiveIt = it->archives.rbegin(); archiveIt != it->archives.rend();
+                 ++archiveIt) {
+                const BsaFileEntry* entry = archiveIt->find(archiveVirtualPath);
+                if (entry == nullptr) {
+                    continue;
+                }
+                std::string archiveError;
+                if (archiveIt->extract(*entry, outBytes, archiveError)) {
+                    return true;
+                }
+                outError = archiveError;
+            }
+        }
+    }
+
     const std::filesystem::path loosePath = joinBackslashPath(looseRoot, loosePathSuffix);
     std::error_code existsError;
     if (std::filesystem::exists(loosePath, existsError) && !existsError) {
@@ -207,6 +365,16 @@ bool FalloutAssetSource::resolve(
         outError = "not found in loose files or archives: " + archiveVirtualPath;
     }
     return false;
+}
+
+bool FalloutAssetSource::resolveAsset(
+    const std::string& virtualPath, std::vector<std::uint8_t>& outBytes,
+    std::string& outError) const {
+    outError.clear();
+    const std::string normalized = normalizeModelPath(virtualPath);
+    // Loose root is the Data directory itself, because the path is already
+    // rooted there -- exactly the texture rule, minus the prefix insertion.
+    return resolve(normalized, m_dataFilesPath, normalized, outBytes, outError);
 }
 
 bool FalloutAssetSource::resolveMesh(

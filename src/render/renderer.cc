@@ -312,6 +312,18 @@ void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
 }
 
+void Renderer::setWeatherSky(const WeatherSkyParams& params) {
+    m_backend->setWeatherSky(params);
+}
+
+void Renderer::setWeatherClouds(const WeatherCloudTextures& clouds) {
+    m_backend->setWeatherClouds(clouds);
+}
+
+void Renderer::setTonemapSettings(const TonemapSettings& settings) {
+    m_backend->setTonemapSettings(settings);
+}
+
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,
                                float maxRadiusPixels) {
     m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels);

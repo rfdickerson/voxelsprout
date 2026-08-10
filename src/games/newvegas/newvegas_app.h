@@ -28,6 +28,7 @@
 #include "import/fnv/character_builder.h"
 #include "games/newvegas/newvegas_collision.h"
 #include "import/fnv/cell_streamer.h"
+#include "import/fnv/weather_records.h"
 #include "ui/nav_focus.h"
 #include "ui/nav_input.h"
 #include "ui/toast_host.h"
@@ -59,6 +60,14 @@ public:
     // residency and a full-scene upload would clear its chunks.
     void setStreamDataPath(std::string path) { m_streamDirectory = std::move(path); }
     void setStreamPlugin(std::string plugin) { m_streamPlugin = std::move(plugin); }
+    // An additional plugin loaded after the main one, repeatable, in load order.
+    // Its masters are pulled in automatically, so naming only the mod is enough.
+    // Records are read for weather; cell contents still come from the main
+    // plugin alone.
+    void addPlugin(std::string plugin) { m_extraPlugins.push_back(std::move(plugin)); }
+    // Force a specific weather by editor ID (e.g. "WEAVarNV01"). Empty picks
+    // one from the worldspace's climate.
+    void setWeather(std::string editorId) { m_requestedWeatherEditorId = std::move(editorId); }
     void setStreamWorldspace(std::string worldspace) { m_streamWorldspace = std::move(worldspace); }
     // Spawn on the doorstep of this interior cell. Empty means "centre of the
     // worldspace" instead.
@@ -84,6 +93,9 @@ public:
     }
 
     // On-disk cache for built cells. Empty string disables it.
+    // Repeatable, in load order; later directories win. Only meaningful in
+    // streaming mode -- a cooked scene already has its textures baked in.
+    void addModDirectory(std::string path) { m_modDirectories.push_back(std::move(path)); }
     void setStreamCacheDirectory(std::string path) { m_streamCacheDirectory = std::move(path); }
     void setStreamCacheEnabled(bool enabled) { m_streamCacheEnabled = enabled; }
 
@@ -110,6 +122,15 @@ protected:
 
 private:
     void applyTimeOfDay();
+    // Reads WTHR/CLMT across the load order and picks the active weather. No-op
+    // unless a plugin beyond the base game is loaded or a weather was named.
+    void initWeather();
+    // Pushes the active weather's colours for the current hour at the renderer.
+    // Called from applyTimeOfDay, so moving time also moves the sky.
+    void applyWeather();
+    // Rain/wind loops and a music bed, pulled from the installed game's own
+    // audio. No-op when the weather is dry or the assets are missing.
+    void initWeatherAudio();
     // Reads keyboard AND gamepad into one device-agnostic nav snapshot. Both
     // always run: a player can have a controller plugged in and still reach for
     // Escape, and making them exclusive means whichever the game guessed wrong
@@ -178,6 +199,20 @@ private:
     // Time of day in hours [0, 24). Drives the sun angle, and through it the
     // shadow direction and the atmosphere's sky colour.
     float m_timeOfDayHours = 9.5f;
+    // Weather, from WTHR records across the load order. Empty tables mean the
+    // procedural sky, which is what an unmodded run gets.
+    importer::fnv::FalloutWeatherTables m_weatherTables;
+    std::vector<std::string> m_extraPlugins;  // beyond m_streamPlugin, in load order
+    std::string m_requestedWeatherEditorId;
+    std::uint32_t m_activeWeatherFormId = 0;
+    // Which cloud layers actually have a texture. A weather's unused layers
+    // point at the transparent placeholder and are never uploaded.
+    bool m_cloudLayerEnabled[4] = {};
+    audio::SoundHandle m_rainLoop{};
+    audio::SoundHandle m_windLoop{};
+    audio::AmbientHandle m_rainAmbient{};
+    audio::AmbientHandle m_windAmbient{};
+    audio::MusicHandle m_musicTrack{};
     bool m_dayCyclePaused = true;
     float m_dayCycleHoursPerSecond = 0.15f;
     bool m_bracketLeftLatch = false;
@@ -249,6 +284,8 @@ private:
     // Goodsprings.
     std::string m_streamSpawnInterior = "GSDocMitchellHouse";
     std::string m_streamCacheDirectory;
+    // Asset override roots, in load order. See addModDirectory.
+    std::vector<std::string> m_modDirectories;
     bool m_streamCacheEnabled = true;
     std::unique_ptr<core::JobSystem> m_streamJobs;
     std::unique_ptr<importer::fnv::CellStreamer> m_streamer;

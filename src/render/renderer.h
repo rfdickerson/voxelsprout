@@ -200,6 +200,15 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    // Authored sky from a Fallout WTHR record. Default-constructed params
+    // (weight 0) restore the procedural sky.
+    void setWeatherSky(const WeatherSkyParams& params);
+    // Cloud layer textures for the active weather. Upload-heavy, so call it
+    // when the weather changes rather than per frame.
+    void setWeatherClouds(const WeatherCloudTextures& clouds);
+    // Tone curve for the post pass. Default is ACES, so this is inert
+    // unless a game selects otherwise.
+    void setTonemapSettings(const TonemapSettings& settings);
     // Post-process depth of field (tilt-shift/diorama look). Focus is a view
     // distance in world units; geometry within +-focusRange stays sharp and
     // blur ramps to maxRadiusPixels beyond it.

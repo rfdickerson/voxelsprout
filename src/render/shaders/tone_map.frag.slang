@@ -24,6 +24,57 @@ float3 acesFilmTonemap(float3 color)
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
 }
 
+// The tonemap Enhanced Shaders uses (ENB's POSTPROCESS==2), transcribed from
+// enbeffect.fx with its own tuned defaults.
+//
+// Three things it does differently from the ACES fit above, and all three are
+// the reason it holds up on Fallout's authored weather colours:
+//
+//  * The curve is an extended Reinhard, x(1 + x/L)/(x + C), where C is the knee
+//    and L damps overbrights. Both are PARAMETERS -- ENB retunes them by time of
+//    day (C = 8.0 day, 10.0 night) where the ACES fit is a fixed rational.
+//  * Contrast is applied to the MAGNITUDE of the colour and saturation to its
+//    DIRECTION, so neither shifts hue. Doing contrast per channel desaturates
+//    as a side effect, which is exactly the trap the sky decode fell into.
+//  * Exposure divides by an adaptation term rather than multiplying, so the
+//    curve sees values in the 1-10 range its constants were chosen for.
+//
+// tonemapConfig carries the mode and parameters; see frame_run.cc.
+// Enhanced Shaders' "Adaptation Day Max/Min" from enbeffect.fx.ini.
+static const float kEnbAdaptationMax = 0.13;
+static const float kEnbAdaptationMin = 0.08;
+
+float3 enbTonemap(float3 color, float exposureScale, float contrast, float saturation,
+                  float curve, float overbrightDampening)
+{
+    // ENB DIVIDES by an adaptation term of roughly 0.1, which is what puts scene
+    // values in the 1-10 range its C=8 knee was chosen for. Multiplying by this
+    // engine's exposure scale instead (~0.6) leaves them near 0.2, where the
+    // same knee crushes everything to black -- which is exactly what the first
+    // version of this function did.
+    //
+    // ENB's grayadaptation is the ADAPTED SCENE LUMINANCE, not the reciprocal of
+    // an exposure multiplier. Auto-exposure solves exposureScale ~ target/avgLum,
+    // so recovering the luminance means avgLum ~ target/exposureScale with the
+    // usual 0.18 middle grey. Using 1/exposureScale instead inflates the
+    // adaptation ~5x, and the extra division is what crushed the shadows to
+    // black in the first working version of this.
+    const float kMiddleGrey = 0.18;
+    const float gray = (exposureScale > 1e-4) ? (kMiddleGrey / exposureScale) : kMiddleGrey;
+    const float adaptation = max((gray * kEnbAdaptationMax) + kEnbAdaptationMin, 1e-4);
+    color = color / adaptation;
+    color += 0.000001;  // ENB does this too: keeps normalize() defined at black
+
+    const float3 direction = normalize(color);
+    // color/direction is |color| per channel; ENB writes it this way and the
+    // magnitude is what contrast acts on.
+    const float3 magnitude = color / direction;
+    const float3 shaped = pow(magnitude, contrast) * pow(direction, saturation);
+
+    return (shaped * (1.0 + shaped / max(overbrightDampening, 1e-3))) /
+           (shaped + max(curve, 1e-3));
+}
+
 float3 applySaturation(float3 color, float saturation)
 {
     const float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
@@ -619,7 +670,22 @@ float4 main(FragmentInput input) : SV_Target0
         hdrColor += shaftTint * (shaftFactor * shaftStrength * geometryAttenuation * clamp(sunVisibility, 0.0, 1.0));
     }
 
-    float3 toneMapped = acesFilmTonemap(hdrColor * exposureScale);
+    // tonemapConfig.x selects the curve: 0 keeps the ACES fit every other game
+    // renders with, so this is inert unless a game asks for the other one.
+    float3 toneMapped;
+    if (camera.tonemapConfig.x > 0.5)
+    {
+        toneMapped = enbTonemap(
+            hdrColor, exposureScale,
+            camera.tonemapConfig.y,    // contrast
+            camera.tonemapConfig.z,    // saturation
+            camera.tonemapConfig.w,    // curve knee
+            camera.tonemapConfig2.x);  // overbright dampening
+    }
+    else
+    {
+        toneMapped = acesFilmTonemap(hdrColor * exposureScale);
+    }
     toneMapped = applyWhiteBalance(
         toneMapped,
         camera.colorGrading0.xyz

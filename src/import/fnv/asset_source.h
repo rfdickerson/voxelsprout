@@ -10,15 +10,20 @@
 //   * among archives, LAST in load order wins (Update.bsa overrides 36
 //     base-game meshes and has to win).
 //
-// THREADING: open() is single-threaded setup. Once it returns, resolveMesh()
-// and resolveTexture() are const and safe to call concurrently from any number
-// of worker threads -- BsaArchive::extract() opens its own ifstream per call
-// and the archive list is not mutated afterwards. This is the property the
-// background asset pipeline depends on.
+// Mod directories (see addModDirectory) sit ahead of both, which is where an
+// installed texture pack lives.
+//
+// THREADING: open() and addModDirectory() are single-threaded setup. Once they
+// have returned, resolveMesh() and resolveTexture() are const and safe to call
+// concurrently from any number of worker threads -- BsaArchive::extract() opens
+// its own ifstream per call, and neither the archive list nor the mod index is
+// mutated afterwards. This is the property the background asset pipeline
+// depends on.
 
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "import/fnv/bsa_archive.h"
@@ -53,6 +58,54 @@ public:
         const std::filesystem::path& dataFilesPath,
         std::uint32_t contentMask = kBsaContentMeshes | kBsaContentTextures);
 
+    // Adds a mod root laid out like the Data directory itself
+    // ("textures\...", "meshes\..."), searched ahead of the game's own loose
+    // files and archives.
+    //
+    // The directory is indexed recursively here rather than probed per lookup,
+    // keyed by LOWERCASED backslash-joined relative path. That is not an
+    // optimization, it is the only thing that works: resolve()'s loose-file path
+    // is a plain exists() on whatever case the NIF happened to store, which on a
+    // case-sensitive filesystem finds nothing when the pack ships "Textures\"
+    // and the NIF asks for "textures\". Archives never had this problem because
+    // BsaArchive::find is already case-insensitive. Indexing makes a lookup one
+    // hash probe with no stat at all, and 5403 files cost a few ms.
+    //
+    // Any .bsa sitting at the mod root is opened too, and loses to that same
+    // mod's loose files but beats everything earlier in the order -- the same
+    // shape as the game's own "loose beats archives" rule, applied per mod.
+    //
+    // Precedence matches the archive rule: LAST directory added wins, so adding
+    // mods in load order does what a mod manager would. May be called before or
+    // after open(); open() does not clear the mod list. When called before
+    // open(), mod archives are filtered by the default content mask, since the
+    // caller's mask is not known yet.
+    //
+    // Returns false if the directory cannot be read, which is also reported
+    // through warnings().
+    bool addModDirectory(const std::filesystem::path& directory);
+
+    // Archives opened from mod directories, across all of them.
+    [[nodiscard]] std::size_t modArchiveCount() const;
+
+    // Identifies the mod set, for folding into a cache key -- cached cells bake
+    // their textures in, so a cache built before a texture pack was installed
+    // has to miss rather than serve vanilla art forever. Empty when no mod
+    // directory was added, which keeps an unmodded cache key byte-identical to
+    // what it was before mods existed.
+    [[nodiscard]] std::string modFingerprint() const;
+
+    // Resolves an arbitrary virtual path -- "sound\\fx\\weather\\...", a menu XML,
+    // anything that is neither a mesh nor a texture -- with the same precedence
+    // as the two typed resolvers, and with no prefix inserted.
+    //
+    // This is what lets a mod's own audio win: Nevada Skies ships its weather
+    // loops inside its BSA, which is already indexed as a mod archive, so the
+    // sound the mod authored for a weather beats anything the base game has.
+    bool resolveAsset(
+        const std::string& virtualPath, std::vector<std::uint8_t>& outBytes,
+        std::string& outError) const;
+
     // Both are const and thread safe once open() has returned. outError is
     // written only on failure.
     bool resolveMesh(
@@ -62,11 +115,24 @@ public:
 
     [[nodiscard]] const std::vector<std::string>& warnings() const { return m_warnings; }
     [[nodiscard]] std::size_t archiveCount() const { return m_archives.size(); }
+    [[nodiscard]] std::size_t modDirectoryCount() const { return m_modDirectories.size(); }
+    [[nodiscard]] std::size_t modFileCount() const;
     [[nodiscard]] const std::filesystem::path& dataFilesPath() const { return m_dataFilesPath; }
 
 private:
-    // Shared tail of both resolvers: loose file first, then archives in reverse
-    // load order.
+    struct ModDirectory {
+        std::filesystem::path root;
+        // Lowercased "textures\foo\bar.dds" -> where it actually is on disk.
+        std::unordered_map<std::string, std::filesystem::path> filesByLowerPath;
+        // .bsa archives found at the mod root, in name order. A mod that ships
+        // an archive rather than loose files (Nevada Skies is 330 MB of one) is
+        // otherwise invisible: its cloud and sky textures exist only inside it.
+        std::vector<BsaArchive> archives;
+        std::uint64_t totalBytes = 0;
+    };
+
+    // Shared tail of both resolvers: mod directories first, then the game's own
+    // loose file, then archives in reverse load order.
     bool resolve(
         const std::string& loosePathSuffix,
         const std::filesystem::path& looseRoot,
@@ -76,6 +142,10 @@ private:
 
     std::filesystem::path m_dataFilesPath;
     std::vector<BsaArchive> m_archives;  // load order; later entries win
+    std::vector<ModDirectory> m_modDirectories;  // load order; later entries win
+    // Remembered from open() so a mod directory added afterwards filters its
+    // archives the same way the game's were.
+    std::uint32_t m_contentMask = kBsaContentMeshes | kBsaContentTextures;
     std::vector<std::string> m_warnings;
 };
 

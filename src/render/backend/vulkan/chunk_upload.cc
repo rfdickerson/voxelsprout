@@ -1153,6 +1153,134 @@ bool RendererBackend::ensureImportedTextureSampler() {
     return true;
 }
 
+// Uploads the cloud layers of one weather. Called when the weather changes, not
+// per frame, so the one-shot command pool here is not a hot path.
+//
+// Slots come from the same refcounted table imported geometry uses, which is
+// what makes the shared case free: two weathers naming the same cloud texture
+// (and they do -- "sky\alpha.dds", the empty-layer placeholder, appears in
+// nearly every record) resolve to one upload.
+static_assert(
+    kInvalidImportedTextureSlot == ~0u,
+    "m_weatherCloudSlots in renderer_backend.h initializes to ~0u because that header "
+    "cannot see this constant; if it changes, that initializer must change with it");
+
+void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
+    // Release first, then acquire: the refcount makes re-acquiring a texture the
+    // previous weather also used a no-op rather than an upload, and doing it in
+    // this order keeps the count from briefly dropping to zero and freeing the
+    // image we are about to ask for again.
+    std::uint32_t previousSlots[kWeatherCloudLayerCount];
+    for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
+        previousSlots[layer] = m_weatherCloudSlots[layer];
+        m_weatherCloudSlots[layer] = kInvalidImportedTextureSlot;
+        m_weatherCloudScroll[layer] = clouds.scrollSpeed[layer];
+        m_weatherCloudDomeScale[layer] = clouds.domeScale[layer];
+    }
+
+    // Same gate acquireImportedTexture applies; checking it here avoids
+    // building a command pool only to have every acquire refuse.
+    if (!m_supportsBindlessDescriptors || !m_bindlessBufferSet.valid() ||
+        m_bindlessTextureCapacity <= kBindlessTextureStaticCount) {
+        for (const std::uint32_t slot : previousSlots) {
+            releaseImportedTexture(slot);
+        }
+        return;
+    }
+
+    bool anyLayer = false;
+    for (const auto& texture : clouds.layers) {
+        anyLayer = anyLayer || !texture.rgba8.empty();
+    }
+    if (!anyLayer) {
+        for (const std::uint32_t slot : previousSlots) {
+            releaseImportedTexture(slot);
+        }
+        return;
+    }
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    if (vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool) != VK_SUCCESS) {
+        VOX_LOGE("render") << "weather cloud upload command pool creation failed";
+        for (const std::uint32_t slot : previousSlots) {
+            releaseImportedTexture(slot);
+        }
+        return;
+    }
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = commandPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer) != VK_SUCCESS ||
+        vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "weather cloud upload command buffer setup failed";
+        scheduleCommandPoolRelease(commandPool, 0);
+        for (const std::uint32_t slot : previousSlots) {
+            releaseImportedTexture(slot);
+        }
+        return;
+    }
+
+    std::vector<BufferHandle> stagingBufferHandles;
+    for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
+        const odai::importer::ImportedSceneTexture& texture = clouds.layers[layer];
+        if (texture.rgba8.empty()) {
+            continue;
+        }
+        m_weatherCloudSlots[layer] = acquireImportedTexture(
+            normalizedImportedTextureKey(texture.sourcePath), texture, commandBuffer,
+            stagingBufferHandles);
+    }
+
+    // Now that every acquire has run, drop the old references.
+    for (const std::uint32_t slot : previousSlots) {
+        releaseImportedTexture(slot);
+    }
+
+    std::uint64_t uploadTimelineValue = 0;
+    if (vkEndCommandBuffer(commandBuffer) == VK_SUCCESS) {
+        uploadTimelineValue = m_nextTimelineValue++;
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderTimelineSemaphore;
+        signalInfo.value = uploadTimelineValue;
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+        const VkResult submitResult =
+            vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit2(weatherCloudUpload)", submitResult);
+            uploadTimelineValue = 0;
+        } else {
+            m_pendingTransferTimelineValue =
+                std::max(m_pendingTransferTimelineValue, uploadTimelineValue);
+        }
+    }
+    for (const BufferHandle stagingHandle : stagingBufferHandles) {
+        if (stagingHandle != kInvalidBufferHandle) {
+            scheduleBufferRelease(stagingHandle, uploadTimelineValue);
+        }
+    }
+    scheduleCommandPoolRelease(commandPool, uploadTimelineValue);
+}
+
 std::uint32_t RendererBackend::acquireImportedTexture(
     const std::string& key,
     const odai::importer::ImportedSceneTexture& srcTexture,
