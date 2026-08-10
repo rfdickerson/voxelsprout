@@ -1675,6 +1675,17 @@ bool NewVegasApp::initStreaming() {
             const std::filesystem::path dataPath(m_streamDirectory);
             if (loadVictor(dataPath, dataPath / m_streamPlugin, m_victor, victorScene)) {
                 m_victor.chunkIndex = m_renderer.addImportedSceneChunk(victorScene);
+                VOX_LOGI("newvegas")
+                    << "Victor geometry: verts=" << victorScene.packedVertices.size()
+                    << " indices=" << victorScene.packedIndices.size()
+                    << " draws=" << victorScene.packedDraws.size()
+                    << " instances=" << victorScene.instances.size()
+                    << " bounds=(" << victorScene.boundsMin[0] << "," << victorScene.boundsMin[1]
+                    << "," << victorScene.boundsMin[2] << ")..(" << victorScene.boundsMax[0] << ","
+                    << victorScene.boundsMax[1] << "," << victorScene.boundsMax[2] << ")"
+                    << " chunk=" << (m_victor.chunkIndex == render::Renderer::kInvalidImportedChunkIndex
+                                         ? std::string("UPLOAD FAILED")
+                                         : std::to_string(m_victor.chunkIndex));
             }
             VOX_LOGI("newvegas") << "Victor: " << m_victor.status;
         }
@@ -1768,6 +1779,22 @@ bool NewVegasApp::initStreaming() {
         // worldspace-centre fallback still starts in fly mode, because it aims
         // the camera from well above the terrain.
         m_walkMode = spawnedAtDoorstep;
+        // AFTER the doorstep decision, which would otherwise overwrite it ten
+        // lines later -- the first attempt at this set walk mode above and was
+        // silently undone here, so every headless fly capture stayed ON FOOT.
+        // F toggles this interactively; these are the same switch for a
+        // headless run, which cannot press a key.
+        if (std::getenv("ODAI_FNV_SPAWN_POS") != nullptr) {
+            // Placing the camera explicitly implies flying it: walk mode
+            // re-snaps Y to the ground every frame, so an authored height
+            // survived exactly one frame.
+            m_walkMode = false;
+        }
+        if (const char* flyEnv = std::getenv("ODAI_FNV_FLY")) {
+            if (flyEnv[0] != '\0' && flyEnv[0] != '0') {
+                m_walkMode = false;
+            }
+        }
     }
     VOX_LOGI("newvegas") << "streaming " << m_streamer->availableCellCount()
                          << " cells from " << m_streamDirectory
