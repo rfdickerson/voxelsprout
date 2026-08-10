@@ -5,6 +5,7 @@
 #include "import/fnv/nif_scene.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <system_error>
@@ -99,6 +100,17 @@ bool loadVictor(
             } else {
                 vertex.normal[2] = 1.0f;
             }
+            // ODAI_FNV_VICTOR_MAGENTA=1 forces an unmissable colour. Kept
+            // because it answered a real question cheaply: with it on, zero
+            // magenta pixels appear anywhere in frame, which rules out "he is
+            // drawing in a colour that blends in" and says the geometry never
+            // reaches the rasterizer.
+            static const bool magenta = std::getenv("ODAI_FNV_VICTOR_MAGENTA") != nullptr;
+            if (magenta) {
+                vertex.color[0] = 1.0f;
+                vertex.color[1] = 0.0f;
+                vertex.color[2] = 1.0f;
+            }
             if (shape.uvs.size() >= (i * 2u) + 2u) {
                 vertex.uv[0] = shape.uvs[i * 2u];
                 vertex.uv[1] = shape.uvs[(i * 2u) + 1u];
@@ -153,6 +165,10 @@ bool loadVictor(
     // guess must not run over this scene.
     outScene.alphaFlagsAuthored = true;
     odai::importer::buildImportedScenePackedRenderData(outScene);
+    // Every scene the streamer uploads as a chunk has these; this one did not,
+    // and a chunk with no pages has nothing for the renderer's per-page frustum
+    // culling to walk -- so it uploaded cleanly and drew nothing.
+    odai::importer::buildImportedScenePageRanges(outScene);
 
     outState.placed = true;
     outState.status = "placed at (" + std::to_string(outState.position[0]) + ", " +
