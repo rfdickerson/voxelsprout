@@ -73,11 +73,17 @@ struct VictorState {
 // standing him at his reference. Returns false (with state.status set) when
 // anything is missing. `outScene` is what the caller hands to
 // Renderer::addImportedSceneChunk.
+// `positionOverride` (engine space, feet on the ground) stands him somewhere
+// other than his ACRE reference. His real spot is ~7400 units from the usual
+// spawn, which makes every "walk over and talk to him" test a hike across
+// Goodsprings; passing the spawn point instead puts him where he can actually
+// be exercised. Null uses his authored position.
 bool loadVictor(
     const std::filesystem::path& dataFilesPath,
     const std::filesystem::path& pluginPath,
     VictorState& outState,
-    odai::importer::ImportedScene& outScene);
+    odai::importer::ImportedScene& outScene,
+    const float* positionOverride = nullptr);
 
 // True when the camera is close enough and facing him for "press E to talk".
 [[nodiscard]] bool victorIsInReach(

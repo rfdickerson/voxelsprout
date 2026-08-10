@@ -1670,25 +1670,6 @@ bool NewVegasApp::initStreaming() {
         if (!m_streamCacheDirectory.empty()) {
             m_streamer->setCacheDirectory(std::filesystem::path(m_streamCacheDirectory));
         }
-        {
-            importer::ImportedScene victorScene;
-            const std::filesystem::path dataPath(m_streamDirectory);
-            if (loadVictor(dataPath, dataPath / m_streamPlugin, m_victor, victorScene)) {
-                m_victor.chunkIndex = m_renderer.addImportedSceneChunk(victorScene);
-                VOX_LOGI("newvegas")
-                    << "Victor geometry: verts=" << victorScene.packedVertices.size()
-                    << " indices=" << victorScene.packedIndices.size()
-                    << " draws=" << victorScene.packedDraws.size()
-                    << " instances=" << victorScene.instances.size()
-                    << " bounds=(" << victorScene.boundsMin[0] << "," << victorScene.boundsMin[1]
-                    << "," << victorScene.boundsMin[2] << ")..(" << victorScene.boundsMax[0] << ","
-                    << victorScene.boundsMax[1] << "," << victorScene.boundsMax[2] << ")"
-                    << " chunk=" << (m_victor.chunkIndex == render::Renderer::kInvalidImportedChunkIndex
-                                         ? std::string("UPLOAD FAILED")
-                                         : std::to_string(m_victor.chunkIndex));
-            }
-            VOX_LOGI("newvegas") << "Victor: " << m_victor.status;
-        }
     }
 
     std::string error;
@@ -1779,6 +1760,42 @@ bool NewVegasApp::initStreaming() {
         // worldspace-centre fallback still starts in fly mode, because it aims
         // the camera from well above the terrain.
         m_walkMode = spawnedAtDoorstep;
+        // Stand Victor beside wherever the player starts, rather than at his
+        // ACRE reference ~7400 units away. Talking to him is the thing being
+        // built; a hike across Goodsprings before every test is friction with
+        // no upside. ODAI_FNV_VICTOR_HOME=1 puts him back at his real spot.
+        if (std::getenv("ODAI_FNV_VICTOR_HOME") == nullptr) {
+            const float offsetX = 220.0f;
+            const float offsetZ = 220.0f;
+            m_victorSpawnPosition[0] = m_cameraX + offsetX;
+            m_victorSpawnPosition[2] = m_cameraZ + offsetZ;
+            float ground = 0.0f;
+            m_victorSpawnPosition[1] =
+                groundHeightAt(m_victorSpawnPosition[0], m_victorSpawnPosition[2], ground)
+                    ? ground
+                    : (m_cameraY - kEyeHeightUnits);
+        }
+        {
+            importer::ImportedScene victorScene;
+            const std::filesystem::path dataPath(m_streamDirectory);
+            if (loadVictor(dataPath, dataPath / m_streamPlugin, m_victor, victorScene,
+                           m_victorSpawnPosition[1] != 0.0f ? m_victorSpawnPosition : nullptr)) {
+                m_victor.chunkIndex = m_renderer.addImportedSceneChunk(victorScene);
+                VOX_LOGI("newvegas")
+                    << "Victor geometry: verts=" << victorScene.packedVertices.size()
+                    << " indices=" << victorScene.packedIndices.size()
+                    << " draws=" << victorScene.packedDraws.size()
+                    << " instances=" << victorScene.instances.size()
+                    << " bounds=(" << victorScene.boundsMin[0] << "," << victorScene.boundsMin[1]
+                    << "," << victorScene.boundsMin[2] << ")..(" << victorScene.boundsMax[0] << ","
+                    << victorScene.boundsMax[1] << "," << victorScene.boundsMax[2] << ")"
+                    << " chunk=" << (m_victor.chunkIndex == render::Renderer::kInvalidImportedChunkIndex
+                                         ? std::string("UPLOAD FAILED")
+                                         : std::to_string(m_victor.chunkIndex));
+            }
+            VOX_LOGI("newvegas") << "Victor: " << m_victor.status;
+        }
+
         // AFTER the doorstep decision, which would otherwise overwrite it ten
         // lines later -- the first attempt at this set walk mode above and was
         // silently undone here, so every headless fly capture stayed ON FOOT.

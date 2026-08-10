@@ -27,7 +27,8 @@ bool loadVictor(
     const std::filesystem::path& dataFilesPath,
     const std::filesystem::path& pluginPath,
     VictorState& outState,
-    odai::importer::ImportedScene& outScene
+    odai::importer::ImportedScene& outScene,
+    const float* positionOverride
 ) {
     outState = VictorState{};
     outScene = odai::importer::ImportedScene{};
@@ -40,9 +41,15 @@ bool loadVictor(
     }
     // Bethesda is Z-up; this engine is Y-up. Same conversion cell_builder makes
     // for every other reference: (x, y, z) -> (x, z, -y).
-    outState.position[0] = placement.position[0];
-    outState.position[1] = placement.position[2];
-    outState.position[2] = -placement.position[1];
+    if (positionOverride != nullptr) {
+        outState.position[0] = positionOverride[0];
+        outState.position[1] = positionOverride[1];
+        outState.position[2] = positionOverride[2];
+    } else {
+        outState.position[0] = placement.position[0];
+        outState.position[1] = placement.position[2];
+        outState.position[2] = -placement.position[1];
+    }
 
     importer::fnv::DialogueImportStats stats;
     if (!importer::fnv::buildSpeakerDialogueTree(

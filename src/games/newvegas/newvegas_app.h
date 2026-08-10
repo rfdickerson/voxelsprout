@@ -199,6 +199,8 @@ private:
     double m_lastCursorY = 0.0;
     bool m_hasCursorSample = false;
     VictorState m_victor;
+    // Engine space; y == 0 means "use his authored ACRE position".
+    float m_victorSpawnPosition[3] = {};
     bool m_victorPromptVisible = false;
     bool m_mouseCaptured = true;
 
