@@ -2241,6 +2241,55 @@ void NewVegasApp::drawPipBoyHud() {
         m_uiDrawList.addText(m_uiFont, prompt, promptPosition, kPipGreen);
     }
 
+    // Compass strip, top-centre, with a marker for Victor.
+    //
+    // Bearing convention: the camera's forward in XZ is (cos(yaw), sin(yaw)),
+    // and Fallout's north is +Y in its own space, which this engine stores as
+    // -Z. So north sits at yaw 270 and compass degrees are (yaw + 90) mod 360 --
+    // worth writing down because getting it wrong gives a compass that is
+    // plausibly wrong by 90 degrees, which is worse than none.
+    {
+        const auto compassDegrees = [](float yawDegrees) {
+            float d = std::fmod(yawDegrees + 90.0f, 360.0f);
+            return d < 0.0f ? d + 360.0f : d;
+        };
+        const float heading = compassDegrees(m_yawDegrees);
+        static const char* kPoints[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+        const char* cardinal = kPoints[static_cast<int>((heading + 22.5f) / 45.0f) % 8];
+
+        char headingText[64] = {};
+        std::snprintf(headingText, sizeof(headingText), "%s  %3d°", cardinal,
+                      static_cast<int>(heading + 0.5f) % 360);
+        const float headingWidth = m_uiFont.measureText(headingText);
+        m_uiDrawList.addText(
+            m_uiFont, headingText,
+            ui::UiVec2{(static_cast<float>(screenWidth) - headingWidth) * 0.5f, 12.0f * scale},
+            kPipGreen);
+
+        // Where Victor is from here, so "I cannot find him" becomes a bearing
+        // and a distance rather than a search.
+        if (m_victor.placed && !m_victor.talking) {
+            const float dx = m_victor.position[0] - m_cameraX;
+            const float dz = m_victor.position[2] - m_cameraZ;
+            const float distance = std::sqrt((dx * dx) + (dz * dz));
+            const float toVictor =
+                compassDegrees(std::atan2(dz, dx) * (180.0f / kPi));
+            // Signed turn, so the hint says which way to turn rather than
+            // leaving the player to subtract two bearings in their head.
+            float turn = std::fmod((toVictor - heading) + 540.0f, 360.0f) - 180.0f;
+            char victorText[96] = {};
+            std::snprintf(victorText, sizeof(victorText), "Victor  %4d u  %s %d°",
+                          static_cast<int>(distance),
+                          turn >= 0.0f ? "turn right" : "turn left",
+                          static_cast<int>(std::fabs(turn) + 0.5f));
+            const float victorWidth = m_uiFont.measureText(victorText);
+            m_uiDrawList.addText(
+                m_uiFont, victorText,
+                ui::UiVec2{(static_cast<float>(screenWidth) - victorWidth) * 0.5f, 34.0f * scale},
+                std::fabs(turn) < 12.0f ? kPipGreen : kPipGreenDim);
+        }
+    }
+
     // Victor. The conversation is drawn straight onto the HUD draw list rather
     // than through DialoguePanel: the panel wants a widget tree, and this app's
     // HUD is immediate-mode text, so one path is simpler than bridging two.
