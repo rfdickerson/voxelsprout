@@ -293,6 +293,7 @@ private:
     void updatePedestrians(float dt);
     void respawnPedestrian(Pedestrian& p);
 
+
     struct Boat {
         short cx = 0, cr = 0;
         signed char inX = 1, inZ = 0;
@@ -530,6 +531,14 @@ private:
     std::vector<procgen::TriMesh> m_carMeshes;             // lazily filled variants
     std::vector<Pedestrian> m_pedestrians;
     std::vector<procgen::TriMesh> m_pedMeshes;
+
+    // ODAI_CITY_SCREENSHOT=<path> [+ ODAI_CITY_SCREENSHOT_FRAMES]: render a few
+    // frames, write a PPM and quit. The same headless-verification hook
+    // odai_game_newvegas has -- a Wayland desktop refuses external screenshot
+    // capture, so without this a visual change cannot be checked from a script.
+    std::string m_screenshotPath;
+    int m_screenshotWarmupFrames = 120;
+    int m_framesRendered = 0;
     std::vector<Boat> m_boats;
     std::vector<procgen::TriMesh> m_boatMeshes;
     // Static scatter props, lazily generated like pumpkins/poles/lamps.

@@ -134,7 +134,137 @@ cmake-build-linux/odai_game_newvegas --stream "<.../Fallout New Vegas/Data>"   #
 `odai_newvegas_cooker` produces — that path is for baking a fixed region or a distant-LOD
 tier (`--lod`), not for normal play.
 
-Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+**Asset mods (texture packs).** `docs/FNV_MODS.md` has the install + launch commands; this
+section is the mechanism behind them. `--mod <dir>` (repeatable, later wins; or
+`ODAI_FNV_MODS`, `:`-separated) adds a root laid out like `Data` itself — `textures\...`, `meshes\...` —
+searched ahead of the game's loose files and archives. Mod roots are indexed recursively
+and looked up **case-insensitively**, which is load-bearing on Linux: packs ship
+`Textures/` while NIFs ask for `textures/`, and the game's own loose-file path is a
+case-sensitive `exists()` that would miss every one of them.
+
+Two traps, both silent:
+
+- **`ODAI_FNV_TEX_SIZE` gates whether a pack is visible at all.** The mip-drop ceiling
+  defaults to **512 px** (`CellSceneBuilder::m_maxTextureSize`), so a 1K/2K pack is
+  dropped straight back to vanilla resolution — full I/O cost, zero visual change. Set it
+  to `1024` to actually see the pack. Memory goes as the square (BC1 1024² with mips is
+  683 KB against 171 KB at 512), so this is the first knob to turn down on an iGPU.
+- **Cached cells bake their textures in.** The mod set and the ceiling are folded into the
+  cell-cache directory name, so installing a pack lands on a fresh cache rather than
+  serving vanilla art forever. Nothing is deleted — the old cache directory just stops
+  being consulted, and costs disk until removed.
+
+Run a downloaded pack through `odai_fnv_texture_pack` first (see Content generation tools):
+it mip-drops to the ceiling you intend to run and lowercases every path. NMC's SMALL pack
+goes 2.0 GB → 1.5 GB at a 1024 ceiling in about a second, and the levels above the ceiling
+are then read once here instead of on every cache miss.
+
+Only the streaming path honours mods — a cooked `--scene` already has its textures baked
+in, and `odai_newvegas_cooker` has no `--mod` flag yet.
+
+**Plugin mods and weather.** `--plugin-add <Plugin.esp>` (repeatable; or `ODAI_FNV_PLUGINS`,
+comma-separated) loads an additional plugin after `--plugin`. Plugins resolve from the
+`--mod` directories first and the `--stream` directory second (`FalloutLoadOrder::addSearchRoot`),
+so a mod's `.esp` lives beside the `.bsa` it ships with and nothing is copied into the game
+install. Masters resolve automatically, so naming only the mod is enough — `--plugin-add NevadaSkies.esp` pulls in FalloutNV.esm and
+the four DLC masters, in order.
+
+`src/import/fnv/plugin_load_order.{h,cc}` is what makes more than one plugin loadable. A
+formID's high byte is a mod index that is **local to the file it is stored in** — it indexes
+that plugin's own TES4 master list, and one past the last master means "a record I define".
+Inside `NevadaSkies.esp`, `0x05` is its own 375 new weather records; load the same mod next
+to a different plugin set and that byte has to mean something else. Getting this wrong does
+not fail loudly, it resolves references to the wrong records. `remapFormId()` rewrites local
+→ global; every formID that crosses into engine data structures must go through it.
+
+`src/import/fnv/weather_records.{h,cc}` reads WTHR/CLMT across the load order (473 weathers
+with Nevada Skies installed). `--weather <EditorID>` forces one by name; otherwise the
+worldspace's climate picks its highest-chance entry. WTHR's NAM0 is **10 color channels × 6
+time-of-day slots × RGBA** — New Vegas added noon and midnight to Fallout 3's four, which is
+why the record carries six `\x00IAD`–`\x05IAD` adapters and NAM0 is 240 bytes, not 160.
+
+Colors reach the sky through `Renderer::setWeatherSky(WeatherSkyParams)`. They **blend over**
+the procedural Rayleigh/Mie sky rather than replacing it: `weight` 0 is the default and
+renders byte-identically to before, which is what keeps every other game unaffected. WTHR
+authors three vertical stops (Horizon at the skyline, SkyLower just above it, SkyUpper at the
+zenith); collapsing that into a two-end gradient loses the narrow near-ground band that gives
+these skies their look.
+
+**Cloud layers** render from the same records. A weather's four layers (DNAM/CNAM/ANAM/BNAM,
+tinted per time of day by PNAM) are uploaded through the imported-texture slot table and
+sampled in the fullscreen sky pass. Two things there are non-obvious and were both bugs
+first: the cloud SHAPE lives in the texture's **alpha**, not its luminance (rgb is nearly
+white, so a luminance key makes the layer opaque), and the layer colour is PNAM's tint —
+multiplying it by the texture's rgb squares the darkness and renders a heavy overcast pure
+black.
+
+**These textures are SKY DOME MAPS, not tiling planes.** Each is a fisheye of the whole sky:
+zenith at the centre of the image, horizon on the rim of an inscribed circle. Nevada Skies'
+`WesternSky1.dds` is unmistakable about it — a cloud disc with sun rays radiating into the
+dark corners. So the mapping is angle-from-zenith → radius, compass bearing → angle, landing
+every sample inside one copy of the texture. Two earlier attempts got this wrong: a true
+plane projection `dir.xz / dir.y` diverges at the horizon into radial streaks, and the
+softened `dir.xz / (dir.y + k)` that replaced it maps the sky into roughly [-0.76, 0.76] of
+UV space, crosses zero, and lets the sampler WRAP — tiling the entire fisheye and putting a
+visible seam down the sky with the image repeating from it. Tiling a fisheye is meaningless;
+no amount of scale tuning hides it. Scrolling is likewise a ROTATION about the zenith, not a
+UV translation, which would slide the fisheye off its own centre.
+
+**`ODAI_FNV_SKY_GAIN` / `ODAI_FNV_SKY_CONTRAST` exist because WTHR colours are
+display-referred.** They were authored as final sRGB for a renderer that showed them
+directly; this one is HDR with an ACES curve and auto-exposure keyed to a sunlit desert.
+Decoding to linear and stopping there renders an overcast sky (sRGB 23,27,30) as pure
+black while the terrain looks correct. A flat gain cannot fix it — the value that makes
+overcast readable washes a clear zenith to pale haze — so the decode applies
+`pow(linear, contrast) * gain`, which lifts darks more than brights. This is a fudge; the
+principled fix is inverting the tonemap on the GPU, where the exposure scale is known.
+`ODAI_FNV_NOCLOUDS=1` separates "authored-dark gradient" from "total cloud cover", which
+look identical on screen.
+
+The decode shapes **magnitude and hue separately** — `pow(length(rgb), contrast)` on the
+magnitude, `pow(rgb/length(rgb), saturation)` on the direction. Doing it per channel (which
+it did first) pulls the channels toward each other, so lifting the darks also desaturated a
+clear zenith from deep blue to pale haze. The split is lifted from ENB's tonemap
+(Enhanced Shaders' `enbeffect.fx`), which applies contrast to `color/normalize(color)` and
+saturation to `normalize(color)` for exactly this reason. `ODAI_FNV_SKY_SATURATION` tunes
+it; ENB itself runs 1.25 by day against these same records and 0.9 at night.
+
+**`ODAI_FNV_TONEMAP=enb`** swaps the post pass's ACES fit for ENB's extended Reinhard
+`x(1+x/L)/(x+C)`, with Enhanced Shaders' tuned Fallout values. Two details are load-bearing:
+ENB *divides* by an adaptation term (~0.1) to put scene values in the 1-10 range its `C=8`
+knee expects — multiplying by this engine's exposure scale instead renders pure black — and
+`grayadaptation` is adapted scene *luminance*, recovered as `0.18 / exposureScale`, not the
+reciprocal of the exposure multiplier. Both mistakes were made and measured on the way in.
+Default is ACES, so every other game is unaffected.
+
+**Render scale defaults to native.** It used to default to 0.6, drawing the 3D scene at 36%
+of the pixels and upscaling into a native-resolution UI composite — visibly soft. Measured
+on the LNL iGPU at a 1920x1080 swapchain, 0.6 -> 1.0 costs ~3.5 ms (8.8 -> 12.3 ms/frame,
+~81 fps), and only two passes move: main (3.6 -> 5.7) and SSAO (0.46 -> 1.5). Shadow (~1.3)
+and prepass (~2.3) are **vertex-bound and do not change with resolution at all**, which is
+why dropping resolution bought far less than it appeared to. `ODAI_RENDER_SCALE` still dials
+it back, and is worth reaching for on a 4K swapchain.
+
+**Weather audio** comes from the installed game. Fallout ships music as ~199 loose `.mp3`
+under `Data/Music` (playable directly), but every ambient loop is `.ogg` inside a BSA, and
+**miniaudio has no Vorbis decoder** — only WAV/FLAC/MP3. `newvegas_ogg.cc` compiles
+`stb_vorbis` in its own TU and converts to `.wav` in the cell cache on first use, which is
+a smaller change than threading a custom decoding backend through the audio PIMPL. Rain
+plays only when the record's classification bits say it is raining. `ODAI_FNV_MUSIC`
+overrides the track.
+
+Not wired up yet: WTHR's **Ambient/Sunlight** channels, so terrain lighting does not yet
+respond to the weather, and there are no rain **particles** — the mood is sky, fog and
+sound only.
+
+Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+
+`ODAI_CITY_SCREENSHOT=<path>` (plus `ODAI_CITY_SCREENSHOT_FRAMES`) renders N frames, writes a
+PPM and quits — the same headless-verification hook `odai_game_newvegas --screenshot` has, and
+the only way to check a citybuilder visual change from a script on Wayland. Note the capture
+trips `VUID-vkCmdCopyImageToBuffer-srcImage-00186` (the swapchain image lacks
+`TRANSFER_SRC_BIT`); the images come out correct on this driver, but that is luck, not
+contract.
 
 **Shaders** compile automatically when `slangc` is on PATH; if it isn't, shader targets are skipped rather than failing the configure. Outputs are `.slang.spv` next to the source. Manual compile:
 ```bash
@@ -262,6 +392,7 @@ Ray-traced shadow/reflection variants compile the same `.slang` source with `-DO
 |---|---|
 | `docs/GAME_API.md` | **Read first when adding a game under `src/games/`** — `GameApp` contract, renderer/UI API surface, the CMake block to copy |
 | `docs/UI_LIBRARY.md` | UI architecture, widget catalog, theming, container reflow contract, integration walkthrough |
+| `docs/FNV_MODS.md` | **Read first to launch the FNV viewer with mods** — verified install + launch commands, env-var reference, and the silent traps |
 | `docs/FrameArena.md` | Per-frame GPU memory model |
 | `docs/ROADMAP.md` | Feature-by-feature status against the four touchstones, with explicit out-of-scope calls |
 | `docs/EARLY_ACCESS_PLAN.md`, `docs/devlog.md` | Planning and history |
