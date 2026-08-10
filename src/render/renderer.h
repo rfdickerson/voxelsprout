@@ -126,6 +126,9 @@ public:
     // that baseline comes out uniformly too dark or too bright. Worth enabling
     // for any scene with a wide dynamic range or a day/night cycle.
     void setAutoExposureEnabled(bool enabled);
+    // Sets every colour-grading term to its neutral value. See the backend's
+    // definition for why this is a reset rather than a bypass.
+    void setNeutralColorGrading();
     [[nodiscard]] bool isAutoExposureEnabled() const;
     void setVoxelGiEnabled(bool enabled);
     [[nodiscard]] bool isVoxelGiEnabled() const;

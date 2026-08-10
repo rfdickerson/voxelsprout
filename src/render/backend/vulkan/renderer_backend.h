@@ -298,6 +298,33 @@ public:
     // levels do not happen to match that fixed exposure renders uniformly too
     // dark or too bright with no way for the app to say otherwise.
     void setAutoExposureEnabled(bool enabled) { m_skyDebugSettings.autoExposureEnabled = enabled; }
+    // Collapses the post colour grade to identity: no saturation, vibrance,
+    // contrast or white-balance push. The grading chain in tone_map.frag.slang
+    // is applied unconditionally with no enable gate, so "off" has to mean
+    // "set every term to its neutral value" rather than a bypass flag.
+    //
+    // The defaults are a stylized look (preset 2, saturation 1.08, vibrance
+    // 0.12, contrast 1.10, blue pulled to 0.92), which suits the stylized games
+    // and is wrong for a viewer whose point is matching Fallout's own art:
+    // saturation and vibrance compound, and vibrance pushes the LEAST saturated
+    // pixels hardest, so a dusty landscape comes out vivid.
+    void setNeutralColorGrading() {
+        m_skyDebugSettings.postColorLookPreset = 0;
+        m_skyDebugSettings.colorGradingWhiteBalanceR = 1.0f;
+        m_skyDebugSettings.colorGradingWhiteBalanceG = 1.0f;
+        m_skyDebugSettings.colorGradingWhiteBalanceB = 1.0f;
+        m_skyDebugSettings.colorGradingContrast = 1.0f;
+        m_skyDebugSettings.colorGradingSaturation = 1.0f;
+        m_skyDebugSettings.colorGradingVibrance = 0.0f;
+        m_skyDebugSettings.colorGradingMidtoneContrast = 1.0f;
+        m_skyDebugSettings.colorGradingShadowDensity = 1.0f;
+        m_skyDebugSettings.colorGradingShadowTintR = 0.0f;
+        m_skyDebugSettings.colorGradingShadowTintG = 0.0f;
+        m_skyDebugSettings.colorGradingShadowTintB = 0.0f;
+        m_skyDebugSettings.colorGradingHighlightTintR = 0.0f;
+        m_skyDebugSettings.colorGradingHighlightTintG = 0.0f;
+        m_skyDebugSettings.colorGradingHighlightTintB = 0.0f;
+    }
     [[nodiscard]] bool isAutoExposureEnabled() const { return m_skyDebugSettings.autoExposureEnabled; }
     void setVoxelGiEnabled(bool enabled) { m_voxelGiRequested = enabled; }
     [[nodiscard]] bool isVoxelGiEnabled() const { return m_voxelGiRequested; }

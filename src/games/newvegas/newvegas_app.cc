@@ -576,6 +576,21 @@ bool NewVegasApp::onInit() {
     // shafts are all deliberately off here and nothing fills them. It also gives
     // the day/night cycle somewhere to go: at a fixed exposure midnight rendered
     // pure black rather than moonlit.
+    // Neutral colour grade. The post chain's defaults are a stylized look and
+    // are applied with no enable gate, so this viewer inherited +8% saturation,
+    // +12% vibrance, +10% contrast and an 8% blue cut on top of the tonemap.
+    // Measured on a Goodsprings frame that put mean pixel saturation at 0.43
+    // with a p90 of 0.80 -- a vivid image of a landscape that is meant to read
+    // as dust and sun-bleached tan.
+    //
+    // ODAI_FNV_COLOR_LOOK=stylized restores the defaults. There was no runtime
+    // knob for any of this, which is why the report of "oversaturated" had to
+    // be answered by reading the shader instead of an A/B.
+    if (const char* look = std::getenv("ODAI_FNV_COLOR_LOOK");
+        look == nullptr || std::string(look) != "stylized") {
+        m_renderer.setNeutralColorGrading();
+    }
+
     m_renderer.setAutoExposureEnabled(true);
 
     // Diagnostic A/B: ODAI_FNV_NOTEX forces every imported surface to shade from

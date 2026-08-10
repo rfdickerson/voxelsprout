@@ -150,6 +150,10 @@ bool Renderer::captureFrameToFile(const std::string& outputPath) {
     return m_backend->captureLastFrameToFile(outputPath);
 }
 
+void Renderer::setNeutralColorGrading() {
+    m_backend->setNeutralColorGrading();
+}
+
 void Renderer::setAutoExposureEnabled(bool enabled) {
     m_backend->setAutoExposureEnabled(enabled);
 }
