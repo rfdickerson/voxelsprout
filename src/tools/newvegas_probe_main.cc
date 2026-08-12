@@ -2580,6 +2580,83 @@ int probeActor(const std::filesystem::path& pluginPath, const std::string& wante
     return 0;
 }
 
+// Which CTDA function binds an INFO to a VOICE TYPE rather than to one actor.
+//
+// Derived the same way GetIsID was: histogram every CTDA function index whose
+// param1 is the wanted VTYP's formID, across every INFO in the plugin. The one
+// that dominates is the answer. Guessing from documentation is how you end up
+// attributing a whole town's dialogue through the wrong field and finding out
+// only when the lines are visibly wrong.
+int probeVoiceTypeDialogue(const std::filesystem::path& pluginPath, const std::string& wantedEditorId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(wantedEditorId);
+
+    std::uint32_t voiceTypeFormId = 0;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return voiceTypeFormId == 0u && header.type == "VTYP";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (voiceTypeFormId != 0u) { return; }
+            for (const auto& sub : record.subrecords) {
+                if (sub.type != "EDID") { continue; }
+                std::string edid(
+                    reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+                while (!edid.empty() && edid.back() == '\0') { edid.pop_back(); }
+                if (toLowerAscii(edid) == wanted) { voiceTypeFormId = record.formId; }
+            }
+        };
+        reader.walk(visitor);
+    }
+    if (voiceTypeFormId == 0u) {
+        std::cout << "no VTYP with EditorID \"" << wantedEditorId << "\"\n";
+        return 1;
+    }
+    std::cout << wantedEditorId << " = " << std::hex << voiceTypeFormId << std::dec << "\n";
+
+    std::map<std::uint32_t, std::size_t> functionHistogram;
+    std::size_t infosReferencing = 0;
+    std::size_t infosWithText = 0;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return header.type == "INFO";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            bool referenced = false;
+            bool hasText = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "NAM1" && sub.size > 1u) { hasText = true; }
+                if (sub.type != "CTDA" || sub.size < 28u) { continue; }
+                std::uint32_t function = 0;
+                std::uint32_t param1 = 0;
+                std::memcpy(&function, sub.data + 8, 4u);
+                std::memcpy(&param1, sub.data + 12, 4u);
+                if (param1 == voiceTypeFormId) {
+                    ++functionHistogram[function];
+                    referenced = true;
+                }
+            }
+            infosReferencing += referenced ? 1u : 0u;
+            infosWithText += (referenced && hasText) ? 1u : 0u;
+        };
+        reader.walk(visitor);
+    }
+
+    std::cout << infosReferencing << " INFO(s) name this voice type in a condition ("
+              << infosWithText << " of them carry spoken text)\n"
+              << "CTDA function indices whose param1 is this voice type:\n";
+    for (const auto& [function, count] : functionHistogram) {
+        std::cout << "  function " << function << "  x" << count << "\n";
+    }
+    return 0;
+}
+
 // Answers "what IS 0x104f04". A formID is how every record in the format
 // refers to every other one, so the usual question mid-investigation is what
 // type a reference lands on -- an inventory entry that resolves to nothing
@@ -3447,6 +3524,9 @@ int main(int argc, char** argv) {
         return probeRefsByBaseType(
             dataPath, dataPath / argv[3], argv[4],
             argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 15u);
+    }
+    if (mode == "--voicedialogue" && argc >= 5) {
+        return probeVoiceTypeDialogue(dataPath / argv[3], argv[4]);
     }
     if (mode == "--formid" && argc >= 5) {
         return probeFormId(

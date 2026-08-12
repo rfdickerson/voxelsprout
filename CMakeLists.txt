@@ -1704,6 +1704,7 @@ if(BUILD_TESTING)
         tests/fnv_import_tests.cc
         src/core/job_system.cc
         src/import/fnv/actor_records.cc
+        src/import/fnv/dialogue_records.cc
         src/import/fnv/asset_source.cc
         src/import/fnv/async_asset_loader.cc
         src/import/fnv/bsa_archive.cc

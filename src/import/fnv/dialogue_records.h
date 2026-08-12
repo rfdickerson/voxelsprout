@@ -26,10 +26,18 @@
 //
 // CONDITIONS ARE NOT EVALUATED. Every INFO is gated by CTDA conditions on quest
 // stage, faction, karma and prior topics, and this engine models none of that.
-// They are read only far enough to identify the speaker; the rest are ignored,
+// They are read only far enough to identify the SPEAKER; the rest are ignored,
 // which means the tree offers lines that the real game would gate. That is a
 // deliberate limitation of importing dialogue into an engine with no quest
 // system, not an oversight -- see kDialogueConditionsIgnored.
+//
+// That limitation became much more visible once generic dialogue was attributed
+// by voice type. A named character's tree is mostly his own lines and reads
+// correctly; a generic settler's whole tree is the voice-type pool, and the
+// conditions that would pick WHICH of those lines fits here are exactly the
+// ones not evaluated. So a Goodsprings settler will cheerfully recommend
+// talking to Chief Hanlon, who is at Camp Golf. The attribution is right and
+// the selection is not, and the selection needs quest and faction state.
 
 #include "dialogue/dialogue_types.h"
 
@@ -44,6 +52,20 @@ namespace odai::importer::fnv {
 // CTDA function index whose param1 is an actor formID and which Fallout uses to
 // bind an INFO to its speaker. Derived by measurement, not documentation.
 inline constexpr std::uint32_t kCtdaFunctionGetIsId = 72u;
+
+// The OTHER way an INFO names who says it: by VOICE TYPE rather than by actor.
+// Derived the same way (odai_newvegas_probe --voicedialogue histograms every
+// function index whose param1 is a given VTYP formID; 427 accounts for every
+// hit across the voice types Goodsprings uses).
+//
+// This is not a refinement, it is the only path most of a town has. Named
+// characters get lines bound with GetIsID -- Victor 133 topics, Easy Pete 108
+// -- but a generic settler is named by ZERO INFO records. What she has is a
+// handful of lines conditioned on the voice type she shares with every other
+// settler, which is exactly what "generic dialogue" means in this format.
+// Attributing by GetIsID alone renders a town where only the named characters
+// can be spoken to at all.
+inline constexpr std::uint32_t kCtdaFunctionGetIsVoiceType = 427u;
 
 // Stated in one place so callers can surface it rather than quietly imply the
 // conversation is faithful.
@@ -113,6 +135,11 @@ struct SpeakerDialogueRequest {
     // The actor BASE, which is what a CTDA names. A placement's own formID
     // matches nothing.
     std::uint32_t baseFormId = 0;
+    // The actor's VTYP, if it has one. Lines naming it are added to this
+    // speaker's tree alongside any bound to the base directly -- and are
+    // deliberately handed to EVERY speaker sharing the type, because a line
+    // conditioned on a voice type is a line anyone with that voice can say.
+    std::uint32_t voiceTypeFormId = 0;
     // Shown as the node's speaker and used as the tree's id. Usually the
     // actor's FULL, falling back to its EditorID.
     std::string displayName;

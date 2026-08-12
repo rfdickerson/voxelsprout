@@ -322,27 +322,29 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     return resolved;
 }
 
-std::string FalloutActorScan::voiceFolderFor(std::uint32_t baseFormId) const {
+std::uint32_t FalloutActorScan::voiceTypeFormIdFor(std::uint32_t baseFormId) const {
     const FalloutActorBase* traits = inheritedFrom(baseFormId, kActorTemplateUseTraits);
     if (traits == nullptr) {
-        return {};
+        return 0u;
     }
-    const auto folderFor = [this](std::uint32_t voiceTypeFormId) -> std::string {
-        const auto found = voiceTypes.find(voiceTypeFormId);
-        return found != voiceTypes.end() ? found->second : std::string();
-    };
-    if (traits->voiceTypeFormId != 0u) {
-        std::string folder = folderFor(traits->voiceTypeFormId);
-        if (!folder.empty()) {
-            return folder;
-        }
+    // Its own, but only if the table actually knows it -- a VTCK pointing at a
+    // VTYP this scan never read would resolve to an empty folder name while
+    // looking resolved.
+    if (traits->voiceTypeFormId != 0u &&
+        voiceTypes.find(traits->voiceTypeFormId) != voiceTypes.end()) {
+        return traits->voiceTypeFormId;
     }
     const auto race = races.find(traits->raceFormId);
     if (race == races.end()) {
-        return {};
+        return 0u;
     }
-    return folderFor(
-        traits->isFemale ? race->second.femaleVoiceTypeFormId : race->second.maleVoiceTypeFormId);
+    return traits->isFemale ? race->second.femaleVoiceTypeFormId
+                            : race->second.maleVoiceTypeFormId;
+}
+
+std::string FalloutActorScan::voiceFolderFor(std::uint32_t baseFormId) const {
+    const auto found = voiceTypes.find(voiceTypeFormIdFor(baseFormId));
+    return found != voiceTypes.end() ? found->second : std::string();
 }
 
 const FalloutActorBase* FalloutActorScan::inheritedFrom(

@@ -67,6 +67,10 @@ private:
 // filename. Scanning is what this needs and lookup is not enough: only the
 // formID half of the name is known here, never the quest/topic half.
 struct ActorVoiceIndex {
+    // The VTYP this actor speaks with. Also the key a CTDA names when it binds
+    // a GENERIC line to a voice type rather than to one actor, which is the
+    // only dialogue most of a town has -- see dialogue_records.h.
+    std::uint32_t voiceTypeFormId = 0;
     // The VTYP EditorID whose folder these lines live under. Actors sharing a
     // voice type share one index -- a town of ten has perhaps four.
     std::string voiceFolder;

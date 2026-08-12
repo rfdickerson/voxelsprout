@@ -180,6 +180,14 @@ struct FalloutActorScan {
     [[nodiscard]] const FalloutActorBase* inheritedFrom(
         std::uint32_t baseFormId, std::uint16_t templateUseFlag) const;
 
+    // The VTYP an actor speaks with, or 0. Its own VTCK first, then its RACE's
+    // male/female pair by sex -- most actors carry no VTCK and would otherwise
+    // resolve to nothing. Both are inheritable from a TPLT.
+    //
+    // The formID rather than the folder name, because this is also the key a
+    // CTDA names when it binds a generic line to a voice type.
+    [[nodiscard]] std::uint32_t voiceTypeFormIdFor(std::uint32_t baseFormId) const;
+
     // The voice folder an actor's recorded lines live under, or empty.
     //
     // Its own VTCK first, then its RACE's male/female pair by sex -- most

@@ -453,6 +453,7 @@ bool loadGoodspringsActors(
         // Which folder this actor's recorded lines live under. Resolved here
         // because this is where the scan is; the index itself is built later,
         // once per distinct folder, by loadActorVoices.
+        actor.voice.voiceTypeFormId = scan.voiceTypeFormIdFor(placement.baseFormId);
         actor.voice.voiceFolder = scan.voiceFolderFor(placement.baseFormId);
         actor.baseFormId = placement.baseFormId;
         actor.placed = true;
@@ -511,8 +512,8 @@ std::size_t loadActorDialogue(
                 return request.baseFormId == actor.baseFormId;
             });
         if (!alreadyRequested) {
-            requests.push_back(
-                importer::fnv::SpeakerDialogueRequest{actor.baseFormId, actor.displayName()});
+            requests.push_back(importer::fnv::SpeakerDialogueRequest{
+                actor.baseFormId, actor.voice.voiceTypeFormId, actor.displayName()});
         }
     }
     if (requests.empty()) {

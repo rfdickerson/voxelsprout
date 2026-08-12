@@ -239,8 +239,10 @@ bool buildSpeakerDialogueTree(
     std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree> trees;
     std::unordered_map<std::uint32_t, DialogueImportStats> stats;
     if (!buildSpeakerDialogueTrees(
-            pluginPath, {SpeakerDialogueRequest{speakerFormId, speakerName}}, trees, stats,
-            outError)) {
+            pluginPath,
+            std::vector<SpeakerDialogueRequest>{
+                SpeakerDialogueRequest{speakerFormId, /*voiceTypeFormId=*/0u, speakerName}},
+            trees, stats, outError)) {
         return false;
     }
     const auto tree = trees.find(speakerFormId);
@@ -277,9 +279,16 @@ bool buildSpeakerDialogueTrees(
     }
 
     std::unordered_map<std::uint32_t, std::string> nameByFormId;
+    // Voice type -> every speaker that uses it. One line naming a voice type is
+    // a line for all of them, so this is a list rather than a single owner.
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> speakersByVoiceType;
     for (const SpeakerDialogueRequest& speaker : speakers) {
-        if (speaker.baseFormId != 0u) {
-            nameByFormId.emplace(speaker.baseFormId, speaker.displayName);
+        if (speaker.baseFormId == 0u) {
+            continue;
+        }
+        nameByFormId.emplace(speaker.baseFormId, speaker.displayName);
+        if (speaker.voiceTypeFormId != 0u) {
+            speakersByVoiceType[speaker.voiceTypeFormId].push_back(speaker.baseFormId);
         }
     }
     if (nameByFormId.empty()) {
@@ -324,12 +333,30 @@ bool buildSpeakerDialogueTrees(
                 // CTDA (FO3/FNV, 28 bytes): type u8 @0, 3 unused, comparison
                 // f32 @4, function index u32 @8, param1 u32 @12, param2, runOn,
                 // reference.
-                if (readU32(sub.data + 8) != kCtdaFunctionGetIsId) {
+                const std::uint32_t function = readU32(sub.data + 8);
+                const bool byActor = function == kCtdaFunctionGetIsId;
+                const bool byVoiceType = function == kCtdaFunctionGetIsVoiceType;
+                if (!byActor && !byVoiceType) {
                     continue;
                 }
-                const std::uint32_t actor = readU32(sub.data + 12);
-                if (nameByFormId.find(actor) == nameByFormId.end()) {
-                    continue;
+                const std::uint32_t named = readU32(sub.data + 12);
+                // Whom this condition would hand the line to. For GetIsID that
+                // is one actor; for GetIsVoiceType it is everyone sharing the
+                // voice.
+                const std::vector<std::uint32_t>* claimants = nullptr;
+                std::vector<std::uint32_t> single;
+                if (byActor) {
+                    if (nameByFormId.find(named) == nameByFormId.end()) {
+                        continue;
+                    }
+                    single.push_back(named);
+                    claimants = &single;
+                } else {
+                    const auto sharing = speakersByVoiceType.find(named);
+                    if (sharing == speakersByVoiceType.end()) {
+                        continue;
+                    }
+                    claimants = &sharing->second;
                 }
                 // The operator in the type byte's top 3 bits has to be read, not
                 // just the function and its parameter. Fallout writes "everyone
@@ -345,9 +372,13 @@ bool buildSpeakerDialogueTrees(
                 const bool positive = (comparisonOperator == 0u && comparisonValue == 1.0f) ||
                     (comparisonOperator == 2u && comparisonValue == 0.0f) ||
                     (comparisonOperator == 3u && comparisonValue == 1.0f);
-                if (positive &&
-                    std::find(owners.begin(), owners.end(), actor) == owners.end()) {
-                    owners.push_back(actor);
+                if (!positive) {
+                    continue;
+                }
+                for (const std::uint32_t claimant : *claimants) {
+                    if (std::find(owners.begin(), owners.end(), claimant) == owners.end()) {
+                        owners.push_back(claimant);
+                    }
                 }
             }
             if (owners.empty()) {

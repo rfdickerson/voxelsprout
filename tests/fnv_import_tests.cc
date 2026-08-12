@@ -17,6 +17,7 @@
 #include "import/fnv/character_builder.h"
 #include "import/fnv/kf_animation.h"
 #include "import/fnv/actor_records.h"
+#include "import/fnv/dialogue_records.h"
 #include "import/fnv/async_asset_loader.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/esm_reader.h"
@@ -2713,6 +2714,156 @@ void testKfBSplineDecoding() {
     expectTrue(track.scaleKeys.empty(), "an unset static scale contributes no key");
 }
 
+// An INFO names who says it in one of TWO ways, and a reader that knows only
+// the first renders a town where nobody generic can be spoken to.
+//
+// GetIsID (72) binds a line to one actor; GetIsVoiceType (427) binds it to a
+// voice type, and so to everyone sharing it. Measured on the retail plugin:
+// named characters get the first (Victor 133 topics, Easy Pete 108) while
+// GSSettlerAM is named by ZERO INFO records and has only the second.
+//
+// Also pins the negative form, which is the trap: Fallout writes "everyone
+// EXCEPT this actor" as the SAME function with the SAME parameter and only the
+// comparison differing, so an attribution that reads function and parameter
+// alone hands a character every other character's exclusions.
+void testDialogueAttributionByActorAndVoiceType() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr std::uint32_t kNamedActorFormId = 0x00000010u;
+    constexpr std::uint32_t kGenericOneFormId = 0x00000011u;
+    constexpr std::uint32_t kGenericTwoFormId = 0x00000012u;
+    constexpr std::uint32_t kVoiceTypeFormId = 0x00000020u;
+    constexpr std::uint32_t kTopicFormId = 0x00000030u;
+
+    const auto append = [](std::vector<std::uint8_t>& out, const std::vector<std::uint8_t>& sub) {
+        out.insert(out.end(), sub.begin(), sub.end());
+    };
+    // CTDA (FO3/FNV, 28 bytes): type u8 @0 with the operator in its top 3 bits,
+    // 3 unused, comparison f32 @4, function u32 @8, param1 u32 @12, then
+    // param2, runOn and reference.
+    const auto buildCtda = [](std::uint32_t function, std::uint32_t param1, bool positive) {
+        std::vector<std::uint8_t> out;
+        out.push_back(0u);  // operator EQUAL in the top bits
+        out.push_back(0u);
+        out.push_back(0u);
+        out.push_back(0u);
+        appendPod(out, positive ? 1.0f : 0.0f);  // ... == 1 is "is", == 0 is "is not"
+        appendPod(out, function);
+        appendPod(out, param1);
+        appendPod(out, static_cast<std::uint32_t>(0));
+        appendPod(out, static_cast<std::uint32_t>(0));
+        appendPod(out, static_cast<std::uint32_t>(0));
+        return out;
+    };
+
+    std::vector<std::uint8_t> topicSubrecords;
+    append(topicSubrecords, buildSubrecord("EDID", stringPayload("GREETING")));
+    append(topicSubrecords, buildSubrecord("FULL", stringPayload("GREETING")));
+
+    // One line for the named actor alone.
+    // The function indices are written as the MEASURED literals, not as the
+    // constants under test. Using the constants would make the fixture and the
+    // reader agree by construction, so a wrong value would pass -- and these
+    // were derived by histogramming the retail plugin, which is exactly the
+    // kind of fact that needs pinning.
+    constexpr std::uint32_t kMeasuredGetIsId = 72u;
+    constexpr std::uint32_t kMeasuredGetIsVoiceType = 427u;
+    expectTrue(kCtdaFunctionGetIsId == kMeasuredGetIsId, "GetIsID is function 72");
+    expectTrue(
+        kCtdaFunctionGetIsVoiceType == kMeasuredGetIsVoiceType, "GetIsVoiceType is function 427");
+
+    std::vector<std::uint8_t> namedInfo;
+    append(namedInfo, buildSubrecord("CTDA", buildCtda(kMeasuredGetIsId, kNamedActorFormId, true)));
+    append(namedInfo, buildSubrecord("NAM1", stringPayload("I am the named one.")));
+
+    // One line for the voice type, which both generic actors share.
+    std::vector<std::uint8_t> genericInfo;
+    append(genericInfo,
+           buildSubrecord("CTDA", buildCtda(kMeasuredGetIsVoiceType, kVoiceTypeFormId, true)));
+    append(genericInfo, buildSubrecord("NAM1", stringPayload("Nice weather we're having.")));
+
+    // "Everyone EXCEPT the named actor" -- must be attributed to nobody.
+    std::vector<std::uint8_t> exclusionInfo;
+    append(exclusionInfo,
+           buildSubrecord("CTDA", buildCtda(kMeasuredGetIsId, kNamedActorFormId, false)));
+    append(exclusionInfo, buildSubrecord("NAM1", stringPayload("SHOULD NOT BE ATTRIBUTED.")));
+
+    std::vector<std::uint8_t> content;
+    const auto appendGroup = [&](const char* type, const std::vector<std::uint8_t>& record) {
+        const auto group = buildGroup(type, 0, record);
+        content.insert(content.end(), group.begin(), group.end());
+    };
+    // INFOs stream immediately after the DIAL that owns them, which is how the
+    // reader knows each response's topic without group bookkeeping.
+    std::vector<std::uint8_t> dialGroup;
+    const auto dial = buildRecord("DIAL", kTopicFormId, 0u, topicSubrecords);
+    dialGroup.insert(dialGroup.end(), dial.begin(), dial.end());
+    for (const auto* info : {&namedInfo, &genericInfo, &exclusionInfo}) {
+        static std::uint32_t nextInfoFormId = 0x00000100u;
+        const auto record = buildRecord("INFO", nextInfoFormId++, 0u, *info);
+        dialGroup.insert(dialGroup.end(), record.begin(), record.end());
+    }
+    appendGroup("DIAL", dialGroup);
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_dialogue_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(content.data()),
+            static_cast<std::streamsize>(content.size()));
+    }
+
+    const std::vector<SpeakerDialogueRequest> speakers{
+        SpeakerDialogueRequest{kNamedActorFormId, kVoiceTypeFormId, "Named"},
+        SpeakerDialogueRequest{kGenericOneFormId, kVoiceTypeFormId, "Generic One"},
+        SpeakerDialogueRequest{kGenericTwoFormId, 0u, "Generic Two"},
+    };
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree> trees;
+    std::unordered_map<std::uint32_t, DialogueImportStats> stats;
+    std::string error;
+    expectTrue(
+        buildSpeakerDialogueTrees(esmPath, speakers, trees, stats, error),
+        ("batch dialogue scan succeeds: " + error).c_str());
+
+    // The named actor gets his own line AND the voice-type line he qualifies
+    // for -- the two attributions add up rather than one replacing the other.
+    const auto named = trees.find(kNamedActorFormId);
+    expectTrue(named != trees.end(), "the named actor gets a tree");
+    if (named != trees.end()) {
+        expectTrue(
+            named->second.nodes.size() == 2u,
+            "the named actor gets both his own line and his voice type's");
+    }
+
+    // A generic actor gets the voice-type line and nothing else.
+    const auto genericOne = trees.find(kGenericOneFormId);
+    expectTrue(genericOne != trees.end(), "an actor with only a voice type still gets a tree");
+    if (genericOne != trees.end()) {
+        expectTrue(
+            genericOne->second.nodes.size() == 1u,
+            "the voice-type line is shared with everyone using that voice");
+    }
+
+    // No actor formID of its own and no voice type: nothing to attribute.
+    expectTrue(
+        trees.find(kGenericTwoFormId) == trees.end(),
+        "an actor named by nothing gets no tree at all");
+
+    // The exclusion line must not have reached anybody.
+    for (const auto& [speakerFormId, tree] : trees) {
+        (void)speakerFormId;
+        for (const auto& [nodeId, node] : tree.nodes) {
+            (void)nodeId;
+            expectTrue(
+                node.text.find("SHOULD NOT") == std::string::npos,
+                "a negative GetIsID condition attributes the line to nobody");
+        }
+    }
+
+    fs::remove(esmPath);
+}
+
 // An NPC_ has no geometry of its own: its body is its RACE's part models with
 // whatever it is wearing swapped in over them. This builds the smallest plugin
 // that exercises the whole chain -- RACE part slots, an ARMO reached through a
@@ -2917,6 +3068,7 @@ int main() {
     testKfAnimationStrideAndBasisChange();
     testKfBSplineDecoding();
     testActorRaceAndWardrobeAssembly();
+    testDialogueAttributionByActorAndVoiceType();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";
