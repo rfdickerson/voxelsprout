@@ -601,9 +601,16 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
     CellCoord chosen = centre;
     float terrainHeight = 0.0f;
     bool haveHeight = false;
-    for (std::int32_t ring = 0; ring <= kMaxSpawnSearchRings && !haveHeight; ++ring) {
-        for (std::int32_t dz = -ring; dz <= ring && !haveHeight; ++dz) {
-            for (std::int32_t dx = -ring; dx <= ring && !haveHeight; ++dx) {
+    float contentHeight = 0.0f;
+    bool haveContentHeight = false;
+    // Keep looking until a cell with something PLACED in it turns up, keeping
+    // the first cell that merely had terrain as a fallback. Stopping at the
+    // first terrain is what put the Megaton spawn in an empty edge cell whose
+    // ground is nine thousand units below the town.
+    bool haveContent = false;
+    for (std::int32_t ring = 0; ring <= kMaxSpawnSearchRings && !haveContent; ++ring) {
+        for (std::int32_t dz = -ring; dz <= ring && !haveContent; ++dz) {
+            for (std::int32_t dx = -ring; dx <= ring && !haveContent; ++dx) {
                 // Only the ring's perimeter; the interior was covered already.
                 if (ring != 0 && std::abs(dx) != ring && std::abs(dz) != ring) {
                     continue;
@@ -619,10 +626,44 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
                     record.land == nullptr || !record.land->hasHeights) {
                     continue;
                 }
-                chosen = candidate;
-                terrainHeight = *std::max_element(
+                const float candidatePeak = *std::max_element(
                     std::begin(record.land->heights), std::end(record.land->heights));
+                // WHAT IS PLACED IN THE CELL, not just what the terrain does.
+                // Megaton is a town built inside a crater out of scrap: its
+                // LAND peaks at 2872 while the town itself sits at ~12900, so
+                // spawning above the terrain put the camera nine thousand units
+                // underneath everything and looking at a bare white hill.
+                //
+                // The MEDIAN reference height rather than the maximum, because
+                // a worldspace is entitled to one marker parked in the sky and
+                // the maximum would follow it. Where content sits on the ground
+                // -- the Capital Wasteland, the Mojave -- the median lands at
+                // ground level and the terrain peak still wins, so this changes
+                // nothing there.
+                std::vector<float> referenceHeights;
+                referenceHeights.reserve(record.references.size());
+                for (const FalloutPlacedReference& reference : record.references) {
+                    referenceHeights.push_back(reference.position[2]);
+                }
+                if (referenceHeights.empty()) {
+                    // Terrain but nothing on it: remember it and keep looking.
+                    if (!haveHeight) {
+                        chosen = candidate;
+                        terrainHeight = candidatePeak;
+                        haveHeight = true;
+                    }
+                    continue;
+                }
+                const std::size_t middle = referenceHeights.size() / 2u;
+                std::nth_element(
+                    referenceHeights.begin(), referenceHeights.begin() + middle,
+                    referenceHeights.end());
+                chosen = candidate;
+                terrainHeight = candidatePeak;
+                contentHeight = referenceHeights[middle];
                 haveHeight = true;
+                haveContentHeight = true;
+                haveContent = true;
             }
         }
     }
@@ -632,7 +673,10 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
                              << " rings of the centre; falling back to a guessed height";
     } else {
         VOX_LOGI("streamer") << "spawn: cell " << chosen.x << "," << chosen.z
-                             << " peak terrain height " << terrainHeight;
+                             << " peak terrain height " << terrainHeight
+                             << (haveContentHeight
+                                     ? (", median placed height " + std::to_string(contentHeight))
+                                     : std::string(", nothing placed"));
     }
 
     const float cellSize = m_planner.config().cellSize;
@@ -643,7 +687,11 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
     // Clear of the cell's HIGHEST post, not its average, so a ridge running
     // through the cell does not swallow the camera.
     constexpr float kSpawnClearanceUnits = 600.0f;
-    fallout[2] = (haveHeight ? terrainHeight : 12000.0f) + kSpawnClearanceUnits;
+    float groundHeight = haveHeight ? terrainHeight : 12000.0f;
+    if (haveContentHeight) {
+        groundHeight = std::max(groundHeight, contentHeight);
+    }
+    fallout[2] = groundHeight + kSpawnClearanceUnits;
 
     falloutToEngine(fallout, outPosition);
     return true;

@@ -228,16 +228,39 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     const FalloutActorBase& traits = traitsSource != nullptr ? *traitsSource : found->second;
     const FalloutActorBase& wardrobe =
         wardrobeSource != nullptr ? *wardrobeSource : found->second;
-    // The skeleton is a templated field too, and taking the record's own MODL
-    // when it does not own one is how an actor ends up bound to
-    // marker_creature.nif with every bone unresolved.
-    const FalloutActorBase* modelSource =
-        inheritedFrom(baseFormId, kActorTemplateUseModelAnimation);
-    const std::string& skeletonPath =
-        modelSource != nullptr ? modelSource->skeletonPath : found->second.skeletonPath;
-
     const auto race = races.find(traits.raceFormId);
-    if (race == races.end() || skeletonPath.empty()) {
+    if (race == races.end()) {
+        return resolved;
+    }
+
+    // A RACE-ASSEMBLED ACTOR'S SKELETON LIVES BESIDE ITS RACE'S BODY PARTS, not
+    // in its own MODL.
+    //
+    // MODL looks like the answer and mostly reads like one -- every New Vegas
+    // NPC_ stores "Characters\_Male\Skeleton.NIF" there -- but that is
+    // convention, not the source of truth. Fallout 3 is full of records storing
+    // "marker_creature.nif" instead, and not only the ones whose template flags
+    // say they borrow a model: Stockholm's flags claim he owns his (0x0002,
+    // stats only) while his MODL is a marker. A marker is a real, parseable NIF
+    // carrying none of the bones a body is weighted to, so using it does not
+    // fail -- it binds a character with every bone unresolved. Measured: 85 of
+    // them on Stockholm, 91 on a Springvale raider.
+    //
+    // Deriving it from the race's own body-part directory is the same
+    // convention creatures already rely on for mtidle.kf, and it agrees with
+    // MODL wherever MODL was right: characters\_Male\UpperBody.nif and
+    // characters\_Male\Skeleton.NIF are the same directory.
+    const auto* bodyModels =
+        traits.isFemale ? race->second.femaleBodyModels : race->second.maleBodyModels;
+    std::string skeletonPath = directoryOf(bodyModels[kRaceUpperBodySlot]) + "skeleton.nif";
+    if (bodyModels[kRaceUpperBodySlot].empty()) {
+        // No body to stand beside: fall back to what the record claims, through
+        // any template that owns the model on its behalf.
+        const FalloutActorBase* modelSource =
+            inheritedFrom(baseFormId, kActorTemplateUseModelAnimation);
+        skeletonPath = modelSource != nullptr ? modelSource->skeletonPath : found->second.skeletonPath;
+    }
+    if (skeletonPath.empty()) {
         return resolved;
     }
 
@@ -247,7 +270,6 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
 
     const bool female = traits.isFemale;
     const auto* headModels = female ? race->second.femaleHeadModels : race->second.maleHeadModels;
-    const auto* bodyModels = female ? race->second.femaleBodyModels : race->second.maleBodyModels;
 
     // The four slots a body is assembled from, seeded with bare skin. Worn
     // armour overwrites a slot rather than being added to it: an outfit's NIF
