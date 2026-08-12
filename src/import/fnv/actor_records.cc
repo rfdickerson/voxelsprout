@@ -103,6 +103,11 @@ FalloutRaceParts parseRaceParts(const EsmRecordView& record) {
             race.editorId = subrecordText(sub);
             continue;
         }
+        if (sub.type == "VTCK" && sub.size >= 8u) {
+            race.maleVoiceTypeFormId = readU32(sub, 0);
+            race.femaleVoiceTypeFormId = readU32(sub, 4);
+            continue;
+        }
         if (done) {
             continue;
         }
@@ -317,6 +322,29 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     return resolved;
 }
 
+std::string FalloutActorScan::voiceFolderFor(std::uint32_t baseFormId) const {
+    const FalloutActorBase* traits = inheritedFrom(baseFormId, kActorTemplateUseTraits);
+    if (traits == nullptr) {
+        return {};
+    }
+    const auto folderFor = [this](std::uint32_t voiceTypeFormId) -> std::string {
+        const auto found = voiceTypes.find(voiceTypeFormId);
+        return found != voiceTypes.end() ? found->second : std::string();
+    };
+    if (traits->voiceTypeFormId != 0u) {
+        std::string folder = folderFor(traits->voiceTypeFormId);
+        if (!folder.empty()) {
+            return folder;
+        }
+    }
+    const auto race = races.find(traits->raceFormId);
+    if (race == races.end()) {
+        return {};
+    }
+    return folderFor(
+        traits->isFemale ? race->second.femaleVoiceTypeFormId : race->second.maleVoiceTypeFormId);
+}
+
 const FalloutActorBase* FalloutActorScan::inheritedFrom(
     std::uint32_t baseFormId, std::uint16_t templateUseFlag
 ) const {
@@ -365,9 +393,18 @@ bool findActorsNear(
         EsmReader::Visitor visitor;
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "CREA" || header.type == "NPC_" || header.type == "LVLC" ||
-                header.type == "LVLI" || header.type == "RACE" || header.type == "ARMO";
+                header.type == "LVLI" || header.type == "RACE" || header.type == "ARMO" ||
+                header.type == "VTYP";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
+            if (record.type == "VTYP") {
+                for (const EsmSubrecordView& sub : record.subrecords) {
+                    if (sub.type == "EDID") {
+                        outScan.voiceTypes[record.formId] = subrecordText(sub);
+                    }
+                }
+                return;
+            }
             if (record.type == "RACE") {
                 outScan.races[record.formId] = parseRaceParts(record);
                 return;
@@ -424,6 +461,8 @@ bool findActorsNear(
                     base.templateFormId = readU32(sub);
                 } else if (sub.type == "RNAM") {
                     base.raceFormId = readU32(sub);
+                } else if (sub.type == "VTCK" && sub.size >= 4u) {
+                    base.voiceTypeFormId = readU32(sub);
                 } else if (sub.type == "CNTO" && sub.size >= 4u) {
                     base.inventoryFormIds.push_back(readU32(sub));
                 } else if (sub.type == "ACBS" && sub.size >= 4u) {

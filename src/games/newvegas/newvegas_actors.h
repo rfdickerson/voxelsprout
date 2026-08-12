@@ -10,6 +10,7 @@
 
 #include "anim/animation_clip.h"
 #include "anim/animation_sampler.h"
+#include "audio/audio.h"
 #include "dialogue/dialogue_context.h"
 #include "dialogue/dialogue_runtime.h"
 #include "dialogue/dialogue_types.h"
@@ -20,6 +21,7 @@
 #include "math/math.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -65,6 +67,9 @@ private:
 // filename. Scanning is what this needs and lookup is not enough: only the
 // formID half of the name is known here, never the quest/topic half.
 struct ActorVoiceIndex {
+    // The VTYP EditorID whose folder these lines live under. Actors sharing a
+    // voice type share one index -- a town of ten has perhaps four.
+    std::string voiceFolder;
     // Node id -> virtual path of its .ogg inside the BSA.
     std::unordered_map<std::string, std::string> pathByNodeId;
     std::string status;
@@ -234,6 +239,36 @@ std::size_t loadActorDialogue(
     const std::filesystem::path& pluginPath,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail);
+
+// Indexes the recorded lines for every voice type the actors use, ONCE per
+// distinct folder, and hands each actor the index for its own.
+//
+// Indexing is what this needs and lookup is not enough: only the formID half of
+// a voice filename is derivable from a dialogue node, never the quest/topic
+// half, so the file can only be found by scanning the archive's name list. That
+// list is 105517 entries in Fallout - Voices1.bsa alone, which is why
+// BsaArchive::open's folder-prefix filter is load-bearing here and why the
+// index is shared rather than built per actor.
+//
+// Actors with no dialogue are skipped -- an index nothing will ever look up is
+// pure cost. Silent failure is fine: no archive means readable dialogue with no
+// audio, which is how this degrades everywhere else too.
+std::size_t loadActorVoices(
+    const std::filesystem::path& dataFilesPath,
+    std::vector<SkinnedActor>& actors,
+    std::string& outDetail);
+
+// Starts the current dialogue node's recorded audio, if the actor's voice index
+// has one for it. Does nothing when the node has already been spoken, so it is
+// safe to call every frame.
+//
+// The file is Ogg Vorbis, which miniaudio cannot decode, so it is converted to
+// a .wav in `cacheDirectory` on first use -- the same trick the weather
+// ambients use (see newvegas_ogg.h).
+void speakActorLine(
+    SkinnedActor& actor,
+    const std::filesystem::path& cacheDirectory,
+    odai::audio::Audio& audioSystem);
 
 // Advances every actor's clip and writes this frame's bone matrices, world
 // placement folded in. Hand each actor's poseScratch to setSkinnedActorPose.

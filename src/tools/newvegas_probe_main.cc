@@ -2281,6 +2281,10 @@ int probeActorsNear(
                       << "  carried=" << resolved.base->inventoryFormIds.size()
                       << "  worn=" << resolved.wornArmorFormIds.size();
         }
+        if (resolved.base != nullptr) {
+            const std::string voiceFolder = scan.voiceFolderFor(resolved.base->formId);
+            std::cout << "  voice=" << (voiceFolder.empty() ? std::string("<none>") : voiceFolder);
+        }
         if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::None &&
             resolved.base != nullptr) {
             std::cout << "  tplt=" << std::hex << resolved.base->templateFormId

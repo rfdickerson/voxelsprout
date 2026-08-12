@@ -2044,7 +2044,7 @@ bool NewVegasApp::initStreaming() {
             // scan needs the formID his own placement lookup finds.
             SkinnedActor victor;
             const bool victorLoaded =
-                loadVictor(dataPath, dataPath / m_streamPlugin, m_streamer->assets(), victor,
+                loadVictor(dataPath / m_streamPlugin, m_streamer->assets(), victor,
                            m_victorSpawnPosition[1] != 0.0f ? m_victorSpawnPosition : nullptr);
             if (victorLoaded) {
                 // Turn him to face wherever the player starts. His authored
@@ -2082,6 +2082,11 @@ bool NewVegasApp::initStreaming() {
                     std::string dialogueDetail;
                     loadActorDialogue(dataPath / m_streamPlugin, m_actors, dialogueDetail);
                     VOX_LOGI("newvegas") << "actor dialogue: " << dialogueDetail;
+                    // AFTER the dialogue: an actor with nothing to say needs no
+                    // voice index, and skipping those is most of the town.
+                    std::string voiceDetail;
+                    loadActorVoices(dataPath, m_actors, voiceDetail);
+                    VOX_LOGI("newvegas") << "actor voices: " << voiceDetail;
                 }
                 // ODAI_FNV_ACTORS_PARADE lines every built actor up in front of
                 // the spawn, for the same reason Victor stands beside it: the
@@ -2508,7 +2513,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // node has been spoken, so polling it costs a map lookup and cannot start a
     // line twice.
     if (speaker != nullptr && !m_streamCacheDirectory.empty()) {
-        speakVictorLine(
+        speakActorLine(
             *speaker, std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
     }
 
@@ -2563,7 +2568,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
     m_doorKeyLatch = doorPressed;
     if (doorEdge && m_activationActor >= 0) {
         beginConversation(m_activationActor);
-        // The line itself is started by the single speakVictorLine poll above,
+        // The line itself is started by the single speakActorLine poll above,
         // on the next tick.
         return;  // E opened a conversation; do not also walk through a door
     }

@@ -39,7 +39,7 @@ using VictorState = SkinnedActor;
 // Nothing here touches the renderer. The caller uploads
 // `state.textures` (Renderer::uploadSkinnedActorTextures), rewrites each
 // vertex's textureIndex to the bindless slot it gets back, and then uploads the
-// template -- see remapVictorTextureSlots below.
+// template -- see remapActorTextureSlots in newvegas_actors.h.
 //
 // `assets` is the caller's already-open archive index -- pass the streamer's.
 // Opening a second one here cost ~50 ms of redundant indexing, and worse, a
@@ -49,7 +49,6 @@ using VictorState = SkinnedActor;
 // `positionOverride` (engine space, feet on the ground) stands him somewhere
 // other than his ACRE reference, which is ~7400 units from the usual spawn.
 bool loadVictor(
-    const std::filesystem::path& dataFilesPath,
     const std::filesystem::path& pluginPath,
     const odai::importer::fnv::FalloutAssetSource& assets,
     VictorState& outState,
@@ -59,20 +58,7 @@ bool loadVictor(
 // and live in newvegas_actors.h: remapActorTextureSlots, updateActorPoses,
 // actorIsInReach / findActorInReach.
 
-// Starts the current dialogue node's recorded audio, if the voice archive has
-// one for it. Does nothing when the node has already been spoken, so it is safe
-// to call every frame.
-//
-// The file is Ogg Vorbis, which miniaudio cannot decode, so it is converted to
-// a .wav in `cacheDirectory` on first use -- the same trick the weather
-// ambients use (see newvegas_ogg.h).
-// Takes no Data directory: the voice archive is opened once by loadVictor and
-// held open, because a line can only be found by scanning the full name list
-// (see VictorVoiceIndex) and re-indexing 105517 entries per spoken line is not
-// an option.
-void speakVictorLine(
-    VictorState& state,
-    const std::filesystem::path& cacheDirectory,
-    odai::audio::Audio& audioSystem);
+// Playing a line is not Victor-specific and lives in newvegas_actors.h:
+// loadActorVoices indexes each voice type once, speakActorLine plays from it.
 
 }  // namespace odai::games::newvegas

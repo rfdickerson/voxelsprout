@@ -2,6 +2,8 @@
 
 #include "core/log.h"
 #include "import/dds.h"
+#include "games/newvegas/newvegas_ogg.h"
+#include "import/fnv/bsa_archive.h"
 #include "import/fnv/dialogue_records.h"
 #include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
@@ -9,6 +11,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
+#include <fstream>
 #include <unordered_map>
 
 namespace odai::games::newvegas {
@@ -25,6 +29,128 @@ std::string toLowerAscii(std::string value) {
 std::string directoryOf(const std::string& path) {
     const std::size_t slash = path.find_last_of("\\/");
     return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+
+
+// One open archive set per voice folder, held for the process.
+//
+// Per FOLDER rather than per actor: three settlers sharing MaleAdult01DefaultB
+// share one index, and the archive behind it can only be searched by name list.
+// A vector because a voice type's lines can be split across the base game's
+// archive and a DLC's.
+std::unordered_map<std::string, std::vector<importer::fnv::BsaArchive>>& voiceArchives() {
+    static std::unordered_map<std::string, std::vector<importer::fnv::BsaArchive>> archives;
+    return archives;
+}
+
+// Pulls the 8-hex-digit formID field out of "<quest>_<topic>_<infoFormId>_1.ogg"
+// and turns it into the id the dialogue importer used for that node.
+//
+// Scanning for the field rather than counting underscores is deliberate: quest
+// and topic names contain underscores of their own.
+std::string voiceNodeIdFromLeaf(const std::string& loweredLeaf) {
+    std::string formIdHex;
+    std::size_t start = 0;
+    while (start < loweredLeaf.size()) {
+        const std::size_t end = loweredLeaf.find('_', start);
+        const std::string field = loweredLeaf.substr(
+            start, end == std::string::npos ? std::string::npos : end - start);
+        if (field.size() == 8u && std::all_of(field.begin(), field.end(), [](unsigned char c) {
+                return std::isxdigit(c) != 0;
+            })) {
+            formIdHex = field;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1u;
+    }
+    if (formIdHex.empty()) {
+        return {};
+    }
+    // DialogueTree ids are "info_%08X" -- UPPERCASE hex -- while the filenames
+    // are lowercase. Keying without this conversion builds an index that never
+    // matches anything and fails silently.
+    std::string nodeId = "info_";
+    for (const char c : formIdHex) {
+        nodeId.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    return nodeId;
+}
+
+// Indexes one voice folder across every archive that carries voices.
+void buildVoiceIndexForFolder(
+    const std::filesystem::path& dataFilesPath,
+    const std::string& voiceFolder,
+    ActorVoiceIndex& outIndex
+) {
+    outIndex.voiceFolder = voiceFolder;
+    const std::string folderNoSlash =
+        toLowerAscii("sound\\voice\\falloutnv.esm\\" + voiceFolder);
+    // Trailing separator included: this is a prefix test, and without it
+    // "maleadult01" would also match "maleadult01defaultb".
+    const std::string folderPrefix = folderNoSlash + "\\";
+
+    std::error_code listError;
+    std::vector<std::filesystem::path> archivePaths;
+    for (const auto& entry : std::filesystem::directory_iterator(dataFilesPath, listError)) {
+        if (entry.is_regular_file() && toLowerAscii(entry.path().extension().string()) == ".bsa") {
+            archivePaths.push_back(entry.path());
+        }
+    }
+    if (listError) {
+        outIndex.status = "cannot list archives";
+        return;
+    }
+    std::sort(archivePaths.begin(), archivePaths.end());
+
+    std::vector<importer::fnv::BsaArchive> matched;
+    std::vector<std::string> matchedNames;
+    for (const auto& archivePath : archivePaths) {
+        std::uint32_t contentFlags = 0;
+        if (!importer::fnv::peekBsaContentFlags(archivePath, contentFlags) ||
+            (contentFlags & importer::fnv::kBsaContentVoices) == 0u) {
+            continue;
+        }
+        importer::fnv::BsaArchive archive;
+        // Index only this one folder. Unfiltered, keeping the ~500 lines an
+        // actor needs pulls all 105517 entries of Fallout - Voices1.bsa into
+        // memory -- ~120 ms and tens of MB, per voice type.
+        if (!archive.open(archivePath, folderNoSlash)) {
+            continue;
+        }
+        std::size_t foundHere = 0;
+        for (const importer::fnv::BsaFileEntry& entry : archive.files()) {
+            const std::string lowered = toLowerAscii(entry.virtualPath);
+            if (lowered.compare(0, folderPrefix.size(), folderPrefix) != 0) {
+                continue;
+            }
+            if (lowered.size() < 4u || lowered.compare(lowered.size() - 4u, 4u, ".ogg") != 0) {
+                continue;
+            }
+            std::string nodeId =
+                voiceNodeIdFromLeaf(lowered.substr(lowered.find_last_of('\\') + 1u));
+            if (nodeId.empty()) {
+                continue;
+            }
+            outIndex.pathByNodeId.emplace(std::move(nodeId), entry.virtualPath);
+            ++foundHere;
+        }
+        if (foundHere != 0u) {
+            matched.push_back(std::move(archive));
+            matchedNames.push_back(archivePath.filename().string());
+        }
+    }
+
+    if (outIndex.pathByNodeId.empty()) {
+        outIndex.status = "no voice archive holds " + folderPrefix;
+        return;
+    }
+    voiceArchives()[toLowerAscii(voiceFolder)] = std::move(matched);
+    outIndex.status = std::to_string(outIndex.pathByNodeId.size()) + " lines from ";
+    for (std::size_t i = 0; i < matchedNames.size(); ++i) {
+        outIndex.status += (i == 0 ? "" : ", ") + matchedNames[i];
+    }
 }
 
 }  // namespace
@@ -324,6 +450,10 @@ bool loadGoodspringsActors(
         SkinnedActor actor;
         actor.name = resolved.base != nullptr ? resolved.base->editorId : std::string("actor");
         actor.fullName = resolved.base != nullptr ? resolved.base->fullName : std::string();
+        // Which folder this actor's recorded lines live under. Resolved here
+        // because this is where the scan is; the index itself is built later,
+        // once per distinct folder, by loadActorVoices.
+        actor.voice.voiceFolder = scan.voiceFolderFor(placement.baseFormId);
         actor.baseFormId = placement.baseFormId;
         actor.placed = true;
         actor.character = built.character;
@@ -415,6 +545,131 @@ std::size_t loadActorDialogue(
     outDetail = std::to_string(attached) + " of " + std::to_string(actors.size()) +
         " actors can talk (" + std::to_string(requests.size()) + " bases asked, one plugin walk)";
     return attached;
+}
+
+std::size_t loadActorVoices(
+    const std::filesystem::path& dataFilesPath,
+    std::vector<SkinnedActor>& actors,
+    std::string& outDetail
+) {
+    // One index per DISTINCT folder, built once and copied to everyone using
+    // it. Building per actor would re-scan the same archive for the same ~500
+    // lines once per settler.
+    std::unordered_map<std::string, ActorVoiceIndex> indexByFolder;
+    std::size_t voiced = 0;
+    for (SkinnedActor& actor : actors) {
+        // Skip actors with nothing to say: an index nothing will look up is
+        // pure cost, and most of a town is in that state.
+        if (!actor.canTalk() || actor.voice.voiceFolder.empty() ||
+            !actor.voice.pathByNodeId.empty()) {
+            continue;
+        }
+        const std::string key = toLowerAscii(actor.voice.voiceFolder);
+        auto existing = indexByFolder.find(key);
+        if (existing == indexByFolder.end()) {
+            ActorVoiceIndex index;
+            buildVoiceIndexForFolder(dataFilesPath, actor.voice.voiceFolder, index);
+            existing = indexByFolder.emplace(key, std::move(index)).first;
+        }
+        actor.voice = existing->second;
+        if (!actor.voice.pathByNodeId.empty()) {
+            ++voiced;
+        }
+    }
+
+    if (indexByFolder.empty()) {
+        outDetail = "no speaking actor has a voice type";
+        return 0;
+    }
+    outDetail = std::to_string(voiced) + " actors voiced from " +
+        std::to_string(indexByFolder.size()) + " voice type(s):";
+    for (const auto& [folder, index] : indexByFolder) {
+        outDetail += " " + index.voiceFolder + "(" +
+            std::to_string(index.pathByNodeId.size()) + ")";
+    }
+    return voiced;
+}
+
+void speakActorLine(
+    SkinnedActor& actor,
+    const std::filesystem::path& cacheDirectory,
+    odai::audio::Audio& audioSystem
+) {
+    if (!actor.talking || cacheDirectory.empty()) {
+        return;
+    }
+    const dialogue::DialogueNode* node = actor.runtime.currentNode();
+    if (node == nullptr || node->id == actor.spokenNodeId) {
+        return;
+    }
+    actor.spokenNodeId = node->id;
+
+    const auto found = actor.voice.pathByNodeId.find(node->id);
+    if (found == actor.voice.pathByNodeId.end()) {
+        return;  // a line the game never recorded, or a topic node
+    }
+    const auto archives = voiceArchives().find(toLowerAscii(actor.voice.voiceFolder));
+    if (archives == voiceArchives().end()) {
+        return;
+    }
+    importer::fnv::BsaArchive* holder = nullptr;
+    const importer::fnv::BsaFileEntry* entry = nullptr;
+    for (importer::fnv::BsaArchive& archive : archives->second) {
+        if (const importer::fnv::BsaFileEntry* hit = archive.find(found->second)) {
+            holder = &archive;
+            entry = hit;
+            break;
+        }
+    }
+    if (entry == nullptr || holder == nullptr) {
+        return;
+    }
+
+    // Cached by leaf name, so a line costs one extract + one Vorbis decode per
+    // install rather than one per playback.
+    std::string leaf = found->second;
+    const std::size_t lastSeparator = leaf.find_last_of("\\/");
+    if (lastSeparator != std::string::npos) {
+        leaf = leaf.substr(lastSeparator + 1u);
+    }
+    const std::filesystem::path oggPath = cacheDirectory / leaf;
+    std::filesystem::path wavPath = oggPath;
+    wavPath.replace_extension(".wav");
+
+    std::error_code existsError;
+    if (!std::filesystem::exists(wavPath, existsError) || existsError) {
+        std::error_code createError;
+        std::filesystem::create_directories(cacheDirectory, createError);
+        std::vector<std::uint8_t> oggBytes;
+        std::string extractError;
+        if (!holder->extract(*entry, oggBytes, extractError) || oggBytes.empty()) {
+            VOX_LOGW("newvegas") << actor.displayName() << " voice extract failed for " << node->id
+                                 << ": " << extractError;
+            return;
+        }
+        {
+            std::ofstream out(oggPath, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                return;
+            }
+            out.write(
+                reinterpret_cast<const char*>(oggBytes.data()),
+                static_cast<std::streamsize>(oggBytes.size()));
+        }
+        if (!decodeOggToWav(oggPath, wavPath)) {
+            VOX_LOGW("newvegas") << actor.displayName() << " voice decode failed for " << node->id;
+            return;
+        }
+    }
+
+    // Ui, not Ambient: there is no Voice bus in SoundCategory, and Ui is the
+    // non-spatialized 2D one, which is what a conversation line is here -- the
+    // camera is a step away and the line should not duck with distance.
+    const odai::audio::SoundHandle clip =
+        audioSystem.loadSound(wavPath, odai::audio::SoundCategory::Ui);
+    if (clip.valid()) {
+        audioSystem.playSound(clip);
+    }
 }
 
 void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {

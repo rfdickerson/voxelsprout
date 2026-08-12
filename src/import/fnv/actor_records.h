@@ -65,6 +65,10 @@ struct FalloutActorBase {
     // to ARMO biped models is what stops the townsfolk rendering naked.
     std::vector<std::uint32_t> inventoryFormIds;
     bool isFemale = false;  // ACBS flag bit 0, picks RACE's FNAM parts over MNAM
+    // VTCK. Names a VTYP record whose EditorID IS the voice folder under
+    // sound\voice\<plugin>\ -- so this, not the actor's name, is what finds a
+    // recorded line. Zero means "inherit the race's", which most actors do.
+    std::uint32_t voiceTypeFormId = 0;
     // ACBS's trailing u16. Which fields the record actually OWNS rather than
     // borrows from its TPLT -- see kActorTemplateUse* below. A record that
     // borrows its traits still stores a race and a sex of its own, and they are
@@ -91,6 +95,10 @@ inline constexpr std::size_t kRaceRightHandSlot = 2;
 struct FalloutRaceParts {
     std::uint32_t formId = 0;
     std::string editorId;
+    // VTCK, which on a RACE is a PAIR: male voice type then female, 8 bytes.
+    // An actor with no VTCK of its own takes whichever its sex selects.
+    std::uint32_t maleVoiceTypeFormId = 0;
+    std::uint32_t femaleVoiceTypeFormId = 0;
     std::string maleHeadModels[kRaceHeadPartCount];
     std::string femaleHeadModels[kRaceHeadPartCount];
     std::string maleBodyModels[kRaceBodyPartCount];
@@ -156,6 +164,10 @@ struct FalloutActorScan {
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> leveledItems;
     std::unordered_map<std::uint32_t, FalloutRaceParts> races;
     std::unordered_map<std::uint32_t, FalloutArmorPiece> armors;
+    // VTYP formID -> its EditorID, which is the voice folder's name verbatim
+    // ("MaleAdult11", "RobotVictor"). Collected wholesale for the same reason
+    // the bases are: resolving them one at a time would be one walk each.
+    std::unordered_map<std::uint32_t, std::string> voiceTypes;
 
     // Follows TPLT to whichever base actually carries geometry, and assembles
     // an NPC_'s body from its race and its wardrobe. Returns a source of None
@@ -167,6 +179,13 @@ struct FalloutActorScan {
     // formID; a base with no template is its own answer.
     [[nodiscard]] const FalloutActorBase* inheritedFrom(
         std::uint32_t baseFormId, std::uint16_t templateUseFlag) const;
+
+    // The voice folder an actor's recorded lines live under, or empty.
+    //
+    // Its own VTCK first, then its RACE's male/female pair by sex -- most
+    // actors carry no VTCK and would otherwise resolve to silence. Both are
+    // inheritable from a TPLT, so both go through inheritedFrom.
+    [[nodiscard]] std::string voiceFolderFor(std::uint32_t baseFormId) const;
 };
 
 // Scans `pluginPath` for every ACRE/ACHR placed within `radius` of the Bethesda
