@@ -1674,6 +1674,29 @@ int probeBuildCell(
         return 1;
     }
 
+    // Per-quadrant BASE texture, which is what an untextured-looking terrain
+    // comes down to: BTXT names an LTEX per quadrant, and a quadrant naming
+    // none falls back to the cell set's dominant texture -- which is itself
+    // nothing when no quadrant anywhere named one.
+    if (cell.land != nullptr) {
+        std::cout << "  land base textures (BTXT) per quadrant:";
+        for (const std::uint32_t formId : cell.land->quadrantBaseTextureFormId) {
+            std::cout << " ";
+            if (formId == 0u) {
+                std::cout << "<none>";
+            } else {
+                const auto path = tables.landTexturePaths.find(formId);
+                std::cout << std::hex << formId << std::dec
+                          << (path != tables.landTexturePaths.end()
+                                  ? ("=" + path->second)
+                                  : std::string("=UNRESOLVED"));
+            }
+        }
+        std::cout << "\n  land texture LAYERS (ATXT): " << cell.land->textureLayers.size() << "\n";
+    } else {
+        std::cout << "  no LAND record\n";
+    }
+
     const auto buildStart = std::chrono::steady_clock::now();
     CellSceneBuilder builder(assets, tables);
     const std::vector<const FalloutCellRecord*> cells{&cell};

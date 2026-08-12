@@ -569,16 +569,31 @@ std::uint32_t CellSceneBuilder::dominantLandTexture(
             }
         }
     }
+    // Most-used candidate that ACTUALLY RESOLVES, not simply most-used.
+    //
+    // A BTXT is free to name a formID that is not a land texture at all --
+    // Fallout 3's MegatonWorld cell -1,-6 names 0xa8b, which is a levelled NPC
+    // list. Picking it because it was the only candidate and then failing to
+    // resolve it leaves the whole cell with no fallback, so every quadrant
+    // draws untextured. Bethesda never saw it because Megaton's crater floor is
+    // hidden under the town.
+    std::uint32_t best = kNoTextureIndex;
     std::uint32_t bestFormId = 0;
     std::size_t bestUse = 0;
     for (const auto& [formId, count] : useCounts) {
         // Ties broken by formID so a cook stays reproducible.
-        if (count > bestUse || (count == bestUse && formId < bestFormId)) {
-            bestFormId = formId;
-            bestUse = count;
+        if (count < bestUse || (count == bestUse && formId >= bestFormId)) {
+            continue;
         }
+        const std::uint32_t resolved = resolveLandTexture(formId, /*exact=*/true);
+        if (resolved == kNoTextureIndex) {
+            continue;
+        }
+        best = resolved;
+        bestFormId = formId;
+        bestUse = count;
     }
-    return (bestFormId == 0u) ? kNoTextureIndex : resolveLandTexture(bestFormId, /*exact=*/true);
+    return best;
 }
 
 void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {

@@ -2761,17 +2761,16 @@ void testTemplateSkeletonThroughNestedLeveledLists() {
         return out;
     };
 
-    // A minimal race: one body slot and one head, male only.
+    // A race with a HEAD but NO body model, so there is nothing for the
+    // skeleton to stand beside and the template chain is what has to supply it.
+    // That is the fallback path; the primary rule (skeleton beside the race's
+    // body parts) is covered by testActorRaceAndWardrobeAssembly.
     std::vector<std::uint8_t> raceSubrecords;
     append(raceSubrecords, buildSubrecord("EDID", stringPayload("TestRace")));
     append(raceSubrecords, buildSubrecord("NAM0", {}));
     append(raceSubrecords, buildSubrecord("MNAM", {}));
     append(raceSubrecords, buildSubrecord("INDX", u32Payload(0)));
     append(raceSubrecords, buildSubrecord("MODL", stringPayload("heads\\male.nif")));
-    append(raceSubrecords, buildSubrecord("NAM1", {}));
-    append(raceSubrecords, buildSubrecord("MNAM", {}));
-    append(raceSubrecords, buildSubrecord("INDX", u32Payload(0)));
-    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\upper.nif")));
 
     // The real actor at the bottom of the chain, with the true skeleton.
     std::vector<std::uint8_t> realActor;
@@ -2857,7 +2856,8 @@ void testTemplateSkeletonThroughNestedLeveledLists() {
     // The whole point: NOT marker_creature.nif.
     expectTrue(
         resolved.skeletonPath == "skeletons\\human.nif",
-        "the skeleton comes from the template, two levels of levelled list down");
+        "with no race body to stand beside, the skeleton comes from the template "
+        "two levels of levelled list down");
 
     // An actor that OWNS its model must keep it, template or not.
     const ResolvedActorBase ownModel = scan.resolve(kRealActorFormId);
@@ -3170,8 +3170,13 @@ void testActorRaceAndWardrobeAssembly() {
     expectTrue(
         resolved.geometrySource == ActorGeometrySource::Race,
         "an NPC_ with no parts of its own resolves through its race");
+    // NOT "skeletons\\human.nif", which is what this NPC_'s own MODL says. A
+    // race-assembled actor's skeleton lives beside its race's body parts, and
+    // those are in "body\\" -- see the template test below for why MODL is not
+    // to be trusted here.
     expectTrue(
-        resolved.skeletonPath == "skeletons\\human.nif", "the NPC_'s own MODL is its skeleton");
+        resolved.skeletonPath == "body\\skeleton.nif",
+        "the skeleton is looked for beside the race's own body parts");
     expectTrue(
         resolved.wornArmorFormIds.size() == 1u &&
             resolved.wornArmorFormIds[0] == kOutfitFormId,
