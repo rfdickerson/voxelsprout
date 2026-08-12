@@ -41,6 +41,29 @@ namespace odai::render {
 class CoreFrameGraphOrderValidator;
 struct CoreFrameGraphPlan;
 
+// Dedup key for an imported texture: its source path, lowercased with separators
+// unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
+// on both casing and slash direction for the same file, so a raw-string key
+// would upload "Textures\Landscape\Rock01.dds" and "textures/landscape/rock01.dds"
+// as two different images. An empty path stays empty, which disables dedup for
+// that texture rather than collapsing every unnamed texture onto one slot.
+//
+// Shared by every acquireImportedTexture caller -- scene chunks, weather clouds,
+// skinned actors -- and it has to be ONE definition: reference counting is keyed
+// on this string, so two callers normalizing differently would upload the same
+// file twice and release the wrong slot.
+inline std::string normalizedImportedTextureKey(std::string_view sourcePath) {
+    std::string key(sourcePath);
+    for (char& c : key) {
+        if (c == '\\') {
+            c = '/';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return key;
+}
+
 struct RtVertex {
     float position[3];
 };
@@ -385,6 +408,9 @@ public:
     // each slot owns its own template/pose/draws (see the SkinnedInstanceSlot
     // array below) -- sized for a small party, not a mass-battle crowd.
     bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
+    std::vector<std::uint32_t> uploadSkinnedActorTextures(
+        std::uint32_t instanceIndex,
+        const std::vector<odai::importer::ImportedSceneTexture>& textures);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     // Debug bypass: when true, recordSkinningPass leaves the last-skinned (or
     // rest-pose, if never skinned) output untouched instead of dispatching --
@@ -482,11 +508,12 @@ public:
     // Drives the same DoF state the sky debug panel edits; clamping happens
     // where the values feed the frame uniform.
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
-                         float maxRadiusPixels) {
+                         float maxRadiusPixels, float nearBlurScale = 0.0f) {
         m_skyDebugSettings.depthOfFieldEnabled = enabled;
         m_skyDebugSettings.depthOfFieldFocusDistance = focusDistance;
         m_skyDebugSettings.depthOfFieldFocusRange = focusRange;
         m_skyDebugSettings.depthOfFieldMaxRadiusPixels = maxRadiusPixels;
+        m_skyDebugSettings.depthOfFieldNearBlurScale = nearBlurScale;
     }
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
     void setImportedSceneInteriorMode(bool enabled);
@@ -619,9 +646,19 @@ private:
     bool createDiffuseTextureResources();
     bool createWaterNormalTextureResources();
     bool createDescriptorResources();
+    // cameraSliceOffset is the camera UBO's byte offset within the FrameArena
+    // upload ring. It is passed separately because the two descriptor paths
+    // need it in different places and cannot share one field: the classic path
+    // leaves cameraBufferInfo.offset at 0 and applies this as a DYNAMIC offset
+    // at bind time, while the descriptor-buffer path has no dynamic offset at
+    // all and must fold it into the device address instead. Reading
+    // cameraBufferInfo.offset there instead (which is always 0) aims every
+    // descriptor-buffer consumer at ring offset 0 rather than at this frame's
+    // camera slice.
     void updateFrameDescriptorSets(
         uint32_t aoFrameIndex,
         const VkDescriptorBufferInfo& cameraBufferInfo,
+        VkDeviceSize cameraSliceOffset,
         VkBuffer autoExposureHistogramBuffer,
         VkBuffer autoExposureStateBuffer,
         const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo = nullptr,
@@ -1627,6 +1664,10 @@ private:
         // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
         // FrameArena slot is actually active. See both functions' comments.
         std::vector<odai::math::Matrix4> pendingBoneMatrices;
+        // Bindless slots this slot holds a reference on, from
+        // uploadSkinnedActorTextures. Kept per instance so a re-upload (or
+        // teardown) releases exactly what it took.
+        std::vector<std::uint32_t> textureSlots;
     };
     std::array<SkinnedInstanceSlot, kMaxSkinnedInstances> m_skinningInstances{};
     // One past the highest instanceIndex ever uploaded via
@@ -1926,7 +1967,16 @@ private:
     UiRenderer m_uiRenderer;
     odai::ui::UiDrawData m_uiDrawData;
     float m_debugCameraFovDegrees = 90.0f;
-    bool m_debugCameraFovInitialized = false;
+    // False (the default) means the APP owns field of view: whatever
+    // RenderCameraState carries is used, every frame, so a game can animate it
+    // -- a conversation dolly, an aim-down-sights zoom, a stylistic push-in.
+    // Set true only when someone drags the debug slider, and cleared by its
+    // "Follow app" button.
+    //
+    // This replaced a first-frame latch that copied camera.fovDegrees once and
+    // ignored it forever after, which made every subsequent per-frame FOV an
+    // app set a silent no-op.
+    bool m_debugCameraFovOverride = false;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
     bool m_shadowCascadeSplitsLogged = false;

@@ -93,6 +93,12 @@ void AnimationSampler::bindSkeleton(const Skeleton& skeleton) {
     }
 }
 
+void AnimationSampler::bindSkeleton(const Skeleton& skeleton,
+                                     std::vector<Matrix4> inverseBindMatrices) {
+    (void)skeleton;
+    inverseBindMatrices_ = std::move(inverseBindMatrices);
+}
+
 void AnimationSampler::sample(const Skeleton& skeleton, const AnimationClip& clip, float timeSeconds,
                                std::vector<Matrix4>& outMatrices) const {
     const float t = wrapTime(timeSeconds, clip.duration, clip.loop);

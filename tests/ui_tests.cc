@@ -2452,6 +2452,44 @@ void testNavRepeat() {
     expectTrue(presses >= 2, "a long frame still delivers a repeat");
 }
 
+// A direction driven by several sources at once must still produce ONE press
+// per physical press.
+//
+// The regression: an app with a stick, a d-pad and arrow keys called
+// UiNavStickMapper::apply() and then folded the digital sources in with
+// `if (key) setAction(action, true)`. setAction derives its press edge from the
+// previous value of `down`, so the second call each frame saw the first call's
+// `false` as last frame's state and manufactured a new press. Holding one arrow
+// key advanced a menu once per FRAME -- ~100 items a second -- which looks like
+// a broken auto-repeat and is not.
+void testNavCombinedSourcesPressOncePerPress() {
+    using namespace odai::ui;
+    UiNavStickMapper mapper;
+    UiNavInput input;
+
+    // One frame of "arrow key held, stick centred", done the correct way:
+    // resolve the stick, OR every source, set the action once.
+    const auto frame = [&](bool keyHeld, float stickY) {
+        input.beginFrame();
+        int directionX = 0;
+        int directionY = 0;
+        mapper.resolveDirection(0.0f, stickY, directionX, directionY);
+        input.setAction(UiNavAction::Down, keyHeld || directionY > 0);
+        return input.pressed(UiNavAction::Down);
+    };
+
+    expectTrue(frame(true, 0.0f), "the first frame of a held key is a press");
+    expectTrue(!frame(true, 0.0f), "holding it is NOT a press again");
+    expectTrue(!frame(true, 0.0f), "still not, however long it is held");
+    expectTrue(!frame(false, 0.0f), "releasing is not a press");
+    expectTrue(frame(true, 0.0f), "pressing again is a press");
+
+    // And the stick alone still works through the same path.
+    expectTrue(!frame(false, 0.0f), "released");
+    expectTrue(frame(false, 0.9f), "stick past the threshold presses");
+    expectTrue(!frame(false, 0.9f), "held stick does not re-press");
+}
+
 // Stick input needs hysteresis or a stick resting near the threshold chatters.
 void testNavStickHysteresis() {
     using namespace odai::ui;
@@ -2636,6 +2674,7 @@ int main() {
     testToastDrawEmitsGeometry();
     testToastBannerPlacement();
     testNavRepeat();
+    testNavCombinedSourcesPressOncePerPress();
     testNavStickHysteresis();
     testNavFocusSpatial();
     testNavFocusSkipsDisabled();

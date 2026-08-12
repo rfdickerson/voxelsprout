@@ -62,6 +62,12 @@ struct NifShape {
     // foliage cards and awnings this way; drawn single-sided they lose
     // whichever face points away from the camera.
     bool twoSided = false;
+    // BSShaderNoLightingProperty: the surface is SELF-LIT and must not be
+    // shaded. Fallout uses it for anything that emits its own light -- CRT
+    // screens, neon, glow panels. Shaded like a normal surface, Victor's face
+    // screen renders as a black rectangle whenever the sun is not square on
+    // it, which is most of the day.
+    bool unlit = false;
     // NiAlphaProperty's blend bit. The imported static path draws opaque only,
     // so a blended shape (glass, an additive effect billboard) rendered through
     // it appears as a solid slab -- Goodsprings' window panes and dust effects
@@ -186,6 +192,8 @@ struct NifSkinnedShape {
     std::uint8_t alphaThreshold = 128;
     bool alphaBlend = false;
     bool twoSided = false;
+    // BSShaderNoLightingProperty -- see NifShape::unlit.
+    bool unlit = false;
 
     // Bone names this shape binds to, in the order its own skin data uses.
     // These index nothing on their own -- resolve them against a NifSkeleton.

@@ -33,6 +33,8 @@ static const uint kImportedMaterialFlagAlphaTest = 1u;
 static const uint kImportedMaterialFlagPbr = 4u;
 static const uint kImportedMaterialFlagVertexColorTint = 8u;
 static const uint kImportedMaterialFlagTerrainLayers = 16u;
+// kImportedSceneMaterialFlagUnlit -- BSShaderNoLightingProperty.
+static const uint kImportedMaterialFlagUnlit = 128u;
 static const uint kImportedMaterialRoughnessShift = 8u;
 static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
@@ -721,6 +723,19 @@ float4 main(FragmentInput input) : SV_Target0
     const float4 albedoFull = sampleImportedAlbedo(input);
     if (chunkPc.cascadeData.w > 0.5) {
         return float4(saturate(albedoFull.rgb * 1.25), 1.0);
+    }
+    // Self-lit surfaces bypass shading entirely: a CRT screen or a neon tube
+    // is a light source, and running it through the diffuse chain leaves it as
+    // dark as whatever happens to be falling on it. Placed before the normal is
+    // even read, because none of the shading below applies to one.
+    //
+    // The albedo is authored display-referred, like every other Fallout
+    // texture, so it is scaled toward the exposure the rest of the scene sits
+    // at rather than emitted at 1.0 -- which on an auto-exposed HDR frame keyed
+    // to a sunlit desert would read as a dim grey card, not a lit screen.
+    if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u)
+    {
+        return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
     const float3 normal = normalize(input.inWorldNormal);
     // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)

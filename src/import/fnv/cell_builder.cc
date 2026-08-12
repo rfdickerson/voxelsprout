@@ -809,6 +809,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         }
                         part.alphaTest = shape.alphaTest;
                         part.alphaBlend = shape.alphaBlend;
+                        part.unlit = shape.unlit;
                         part.twoSided = shape.twoSided;
                         part.alphaThreshold = shape.alphaThreshold;
                         // ODAI_FNV_LOG_ALPHATEST=1 names every surface that will

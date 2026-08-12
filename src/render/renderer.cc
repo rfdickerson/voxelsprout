@@ -74,6 +74,12 @@ bool Renderer::uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const Impo
     return m_backend->uploadSkinnedMeshTemplate(instanceIndex, meshTemplate);
 }
 
+std::vector<std::uint32_t> Renderer::uploadSkinnedActorTextures(
+    std::uint32_t instanceIndex, const std::vector<odai::importer::ImportedSceneTexture>& textures
+) {
+    return m_backend->uploadSkinnedActorTextures(instanceIndex, textures);
+}
+
 void Renderer::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose) {
     m_backend->setSkinnedActorPose(instanceIndex, pose);
 }
@@ -329,8 +335,8 @@ void Renderer::setTonemapSettings(const TonemapSettings& settings) {
 }
 
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,
-                               float maxRadiusPixels) {
-    m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels);
+                               float maxRadiusPixels, float nearBlurScale) {
+    m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels, nearBlurScale);
 }
 
 void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug) {

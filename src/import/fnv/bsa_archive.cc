@@ -125,7 +125,7 @@ bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFi
     return true;
 }
 
-bool BsaArchive::open(const std::filesystem::path& path) {
+bool BsaArchive::open(const std::filesystem::path& path, std::string_view folderPrefixFilter) {
     m_lastError.clear();
     m_files.clear();
     m_pathIndex.clear();
@@ -167,7 +167,11 @@ bool BsaArchive::open(const std::filesystem::path& path) {
     struct PendingFile {
         std::string folderPath;
         BsaRawFileRecord raw;
+        // Decided once per FOLDER, carried per file so the name-block pass can
+        // read past a filtered-out name without rebuilding the decision.
+        bool keep = true;
     };
+    const std::string loweredFolderPrefix = toLowerAscii(std::string(folderPrefixFilter));
     std::vector<PendingFile> pending;
     pending.reserve(header.fileCount);
 
@@ -188,9 +192,15 @@ bool BsaArchive::open(const std::filesystem::path& path) {
             m_lastError = "Truncated BSA folder name: " + path.string();
             return false;
         }
+        // An archive without folder names cannot be filtered by folder, so it
+        // keeps everything rather than silently indexing nothing.
+        const bool folderKept = loweredFolderPrefix.empty() || !hasFolderNames ||
+            toLowerAscii(folderName).compare(
+                0, loweredFolderPrefix.size(), loweredFolderPrefix) == 0;
         for (std::uint32_t fileIndex = 0; fileIndex < folder.fileCount; ++fileIndex) {
             PendingFile file{};
             file.folderPath = folderName;
+            file.keep = folderKept;
             if (!readValue(input, file.raw)) {
                 m_lastError = "Truncated BSA file record table: " + path.string();
                 return false;
@@ -220,6 +230,9 @@ bool BsaArchive::open(const std::filesystem::path& path) {
                 m_lastError = "Truncated BSA file name block: " + path.string();
                 return false;
             }
+            if (!file.keep) {
+                continue;  // name consumed to keep the stream aligned, nothing kept
+            }
             std::string virtualPath = file.folderPath.empty()
                 ? fileName
                 : file.folderPath + "\\" + fileName;
@@ -238,6 +251,9 @@ bool BsaArchive::open(const std::filesystem::path& path) {
         // No file-name block: expose entries by hash only. Path-based lookup
         // (find()) will not resolve these; callers must iterate files().
         for (const PendingFile& file : pending) {
+            if (!file.keep) {
+                continue;
+            }
             BsaFileEntry entry{};
             entry.nameHash = file.raw.nameHash;
             entry.dataOffset = file.raw.offset;

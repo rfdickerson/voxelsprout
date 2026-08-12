@@ -1224,6 +1224,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<std::string> sourceTexturePaths(numBlocks);
     std::vector<std::string> texturingPropertyPaths(numBlocks);
     std::vector<std::string> noLightingTexturePaths(numBlocks);
+    std::vector<bool> noLightingProperty(numBlocks, false);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
     std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
     std::unordered_set<std::int32_t> referencedAsChild;
@@ -1288,6 +1289,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 shaderTextureSetRefs[i] = textureSetRef;
             }
         } else if (typeName == "BSShaderNoLightingProperty") {
+            noLightingProperty[i] = true;
             std::string fileName;
             if (readBsShaderNoLightingTexture(blockCursor, fileName)) {
                 noLightingTexturePaths[i] = std::move(fileName);
@@ -1445,6 +1447,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     continue;
                 }
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
+                shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
                 if (noLightingFallback.empty() && !noLightingTexturePaths[propertyIndex].empty()) {
                     noLightingFallback = noLightingTexturePaths[propertyIndex];
                 }
@@ -1901,6 +1904,7 @@ bool parseNifSkinnedMesh(
     std::vector<bool> isTriShape(numBlocks, false);
     std::vector<GeometryBlock> geometry(numBlocks);
     std::vector<TextureSetBlock> textureSets(numBlocks);
+    std::vector<bool> noLightingProperty(numBlocks, false);
     std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
     std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
@@ -1953,6 +1957,8 @@ bool parseNifSkinnedMesh(
             if (readBsShaderTextureSetRef(blockCursor, textureSetRef)) {
                 shaderTextureSetRefs[i] = textureSetRef;
             }
+        } else if (typeName == "BSShaderNoLightingProperty") {
+            noLightingProperty[i] = true;
         } else if (typeName == "BSShaderTextureSet") {
             TextureSetBlock set;
             if (readBsShaderTextureSet(blockCursor, set)) {
@@ -2031,6 +2037,7 @@ bool parseNifSkinnedMesh(
                 continue;
             }
             const auto propertyIndex = static_cast<std::size_t>(propertyRef);
+            shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
             if (alphaProperties[propertyIndex].valid) {
                 shape.alphaTest = alphaProperties[propertyIndex].alphaTest;
                 shape.alphaBlend = alphaProperties[propertyIndex].alphaBlend;

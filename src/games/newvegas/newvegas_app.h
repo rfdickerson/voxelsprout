@@ -1,5 +1,6 @@
 #pragma once
 
+#include "games/newvegas/newvegas_actors.h"
 #include "games/newvegas/newvegas_victor.h"
 
 // Free-roam viewer for cooked Fallout: New Vegas content.
@@ -48,6 +49,12 @@ namespace odai::games::newvegas {
 // his own imported dialogue. See newvegas_victor.h.
 class NewVegasApp : public engine::GameApp {
 public:
+    // Normal exploration FOV, and the narrowed one a conversation eases to.
+    // 75 -> 55 is a 1.36x magnification: enough that Victor reads as the
+    // subject of the shot, gentle enough not to feel like a cutscene.
+    static constexpr float kDefaultFovDegrees = 75.0f;
+    static constexpr float kConversationFovDegrees = 55.0f;
+
     void setScenePath(std::string path) { m_scenePath = std::move(path); }
     // Render this many frames, write a PPM capture, then quit. Lets a visual
     // change be checked without a human at the monitor -- the reason it exists
@@ -148,6 +155,12 @@ private:
     void drawPauseMenu();
     void updateCamera(float deltaSeconds);
     void drawHud();
+    // The conversation, as a centred modal card rather than text in the corner.
+    // Split out of drawHud because it is the one piece of this HUD with real
+    // layout in it -- wrapping, measured row heights, a selection highlight --
+    // and inlining that left drawHud unreadable.
+    void drawDialoguePanel(
+        const dialogue::DialogueNode& node, int screenWidth, int screenHeight, float scale);
     // Flattens the cooked terrain mesh into a regular height lattice so the
     // camera can be ground-clamped without a per-frame ray cast.
     void buildGroundHeightField(const importer::ImportedScene& scene);
@@ -171,7 +184,51 @@ private:
     std::vector<importer::ImportedSceneDoor> m_doors;
     std::filesystem::path m_sceneDirectory;
     std::string m_exteriorStem;
+    bool m_choiceKeyLatch[9] = {};
     bool m_doorKeyLatch = false;
+
+    // Conversation type, one step above the HUD's body face. The dialogue is
+    // the only thing in this app a player READS at length rather than glances
+    // at, and it is read from a couch -- so it gets its own scale steps rather
+    // than borrowing the 28 px body size the status strip uses. Both are
+    // optional: a failed bake falls back to the body face, which loses the
+    // hierarchy but never the text.
+    ui::Font m_dialogueFont;        // what Victor says
+    ui::Font m_dialogueChoiceFont;  // what the player can say back
+    // Which reply is highlighted. Reset whenever the conversation moves to a
+    // new node, tracked by id rather than by a "node changed" flag because the
+    // runtime offers no such signal.
+    int m_dialogueChoice = 0;
+    std::string m_dialogueChoiceNodeId;
+    // Top edge of the conversation card in framebuffer pixels, published by
+    // drawDialoguePanel and consumed by updateCamera's aim.
+    //
+    // The camera has to know how tall the card actually is: it frames Victor's
+    // face just ABOVE it, and the card grows with the number of replies and
+    // with how far the text wraps. Framing against a fixed fraction instead
+    // works for a four-reply node and puts the card over his face on a taller
+    // one. One frame stale (drawing happens after the camera update), which is
+    // invisible against a 0.12 s eased turn.
+    float m_dialoguePanelTopPx = 0.0f;
+    // Live field of view, eased. A conversation narrows it, which magnifies the
+    // speaker without moving the player -- the same read as Skyrim's dolly, but
+    // it cannot walk the camera into geometry or fight collision the way an
+    // actual position push-in would.
+    //
+    // The aim's pitch offset is derived from this same value rather than from a
+    // constant, because the offset that puts his face above the card is a
+    // function of FOV: hold one fixed while the other eases and the framing
+    // slides during the zoom.
+    float m_cameraFovDegrees = kDefaultFovDegrees;
+    // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
+    // does not only magnify, it throws the background out — the two arriving
+    // together is what makes the shot read as a lens rather than as a crop.
+    float m_dialogueDofBlend = 0.0f;
+    // Whether the renderer's DoF is currently ours. Outside a conversation this
+    // game does not touch DoF at all, so the debug sliders keep working; this
+    // flag is what lets it hand the setting back exactly once on the way out
+    // instead of overwriting it every frame forever.
+    bool m_dialogueDofActive = false;
     // Screenshot-and-quit mode; empty path means normal interactive running.
     std::string m_screenshotPath;
     int m_screenshotWarmupFrames = 8;
@@ -199,12 +256,32 @@ private:
     double m_lastCursorY = 0.0;
     bool m_hasCursorSample = false;
     VictorState m_victor;
-    // Held until the first frame has rendered: adding the chunk during onInit
-    // is the one thing no other caller of addImportedSceneChunk does, and is
-    // the prime suspect for his geometry uploading as zeros. The streamer's
-    // cells are all added from the frame loop.
-    odai::importer::ImportedScene m_victorPendingScene;
-    bool m_victorChunkPending = false;
+    // Held until the first frame has rendered, the same deferral his static
+    // chunk needed: uploading during onInit is the one thing no other caller
+    // does, and the streamer's cells are all added from the frame loop.
+    bool m_victorUploadPending = false;
+    // Which skinned instance slot he owns.
+    //
+    // NOT slot 0: --character's isolation harness uploads there, and the two
+    // modes are NOT mutually exclusive -- character mode streams the world, so
+    // Victor loads alongside it. Sharing a slot meant Victor's template
+    // overwrote the harness's and both pushed a pose to it every frame, each
+    // clobbering the other. They happen to have the same bone count (both are
+    // Securitrons in the obvious test), so the pose-size guard never caught it.
+    static constexpr std::uint32_t kVictorSkinnedInstance = 1u;
+    // The rest of the town starts above Victor. Slot 0 stays with --character's
+    // isolation harness.
+    static constexpr std::uint32_t kFirstCrowdSkinnedInstance = 2u;
+    // How far around the player to populate, in Bethesda units (~70/metre), so
+    // ~170 m. Wide enough to cover Goodsprings from the spawn, tight enough
+    // that the slot budget is spent on actors the player can actually see.
+    static constexpr float kActorLoadRadius = 12000.0f;
+
+    // Everyone else in Goodsprings: wildlife and, once NPC bodies can be
+    // assembled, the townsfolk. Held for the process lifetime because a skinned
+    // template is uploaded from spans into these.
+    std::vector<SkinnedActor> m_actors;
+    bool m_actorsUploadPending = false;
     // Engine space; y == 0 means "use his authored ACRE position".
     float m_victorSpawnPosition[3] = {};
     bool m_victorPromptVisible = false;
@@ -271,7 +348,12 @@ private:
     ui::ToastHost m_banner;
     ui::ToastHost m_toasts;
     ui::UiNavInput m_nav;
-    ui::UiNavRepeater m_navRepeat;
+    // Slower than the library default (0.40 s / 0.11 s), because every list in
+    // this app is SHORT. 0.11 s is nine rows a second, which is right for
+    // scrolling an inventory and far too quick for a four-reply conversation or
+    // a four-row menu -- a held key laps the list twice a second and overshoots
+    // whatever you were aiming at. A tap still moves exactly one either way.
+    ui::UiNavRepeater m_navRepeat{ui::UiNavRepeatConfig{0.45f, 0.18f}};
     ui::UiNavStickMapper m_navStick;
     ui::NavFocusRing m_menuFocus;
     bool m_menuOpen = false;

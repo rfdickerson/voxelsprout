@@ -67,10 +67,22 @@ struct DialogueImportStats {
 // need any of that.
 struct SpeakerPlacement {
     std::uint32_t referenceFormId = 0;
+    // The actor BASE this reference instances. A caller that also populates the
+    // area generically needs it to avoid rendering this actor twice, once from
+    // each system -- excluding by editor-ID string would work until two mods
+    // disagreed about the name.
+    std::uint32_t baseFormId = 0;
     std::uint32_t cellFormId = 0;
     float position[3] = {};
     float rotationRadians[3] = {};
     bool found = false;
+    // A creature's MODL names its SKELETON, not a mesh -- the geometry is the
+    // NIFZ list of body parts, which are skinned to that skeleton and stored
+    // beside it. Guessing a mesh filename instead gets you
+    // securitron_static.nif, which is a GROUP prop of several deactivated
+    // robots (one shape spanning 401x367 units) rather than one actor.
+    std::string skeletonPath;                 // e.g. creatures\NVSecuritron\Skeleton.nif
+    std::vector<std::string> bodyPartPaths;   // resolved beside the skeleton
 };
 
 bool findSpeakerPlacement(

@@ -6,6 +6,37 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 find_package(Threads REQUIRED)
+
+# ---------------------------------------------------------------------------
+# Compiler cache
+#
+# This tree compiles the SAME shared sources into many targets rather than into
+# one shared library -- src/render/renderer.cc and the whole Vulkan backend are
+# listed again in odai, in every src/games/* target, and in several tools. So a
+# one-line edit to a widely-included header is not a handful of translation
+# units, it is that handful MULTIPLIED BY every target that lists them:
+# touching render/backend/vulkan/renderer_backend.h (25 direct includers) puts
+# the build into the high hundreds of compiles, and a full tree rebuild is ~910.
+#
+# ccache turns the repeats of that back into cache hits, which is the single
+# biggest lever available without restructuring the targets. Detected rather
+# than required: without it installed the build is exactly what it was.
+#
+#   Fedora: sudo dnf install ccache
+#
+# -DODAI_ENABLE_CCACHE=OFF opts out (e.g. to time a genuinely cold build).
+option(ODAI_ENABLE_CCACHE "Use ccache to compile, when it is installed." ON)
+if(ODAI_ENABLE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    find_program(ODAI_CCACHE_PROGRAM ccache)
+    if(ODAI_CCACHE_PROGRAM)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${ODAI_CCACHE_PROGRAM}")
+        set(CMAKE_C_COMPILER_LAUNCHER "${ODAI_CCACHE_PROGRAM}")
+        message(STATUS "odai: compiling through ccache (${ODAI_CCACHE_PROGRAM})")
+    else()
+        message(STATUS "odai: ccache not found; compiling directly "
+                       "(install it to make header-touching rebuilds much faster)")
+    endif()
+endif()
 option(ODAI_BUILD_APP "Build the main Vulkan toy application." ON)
 option(ODAI_BUILD_TOOLS "Build offline content tools." ON)
 option(ODAI_BUILD_EXAMPLES "Build standalone odai_ui SDK integration samples." OFF)
@@ -968,7 +999,9 @@ if(ODAI_BUILD_APP)
             src/games/newvegas/newvegas_collision.cc
             src/games/newvegas/newvegas_ogg.cc
             src/games/newvegas/newvegas_victor.cc
+            src/games/newvegas/newvegas_actors.cc
             src/import/fnv/dialogue_records.cc
+            src/import/fnv/actor_records.cc
             src/dialogue/dialogue_runtime.cc
             src/core/job_system.cc
             src/import/cell_residency_planner.cc
@@ -987,6 +1020,8 @@ if(ODAI_BUILD_APP)
             src/import/fnv/fallout_records.cc
             src/import/fnv/nif_scene.cc
             src/import/fnv/character_builder.cc
+            src/import/fnv/kf_animation.cc
+            src/anim/animation_sampler.cc
             src/engine/game_app.cc
             src/engine/plugin.cc
             src/import/dds.cc
@@ -1607,8 +1642,10 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/dialogue_records.cc
+        src/import/fnv/actor_records.cc
         src/import/fnv/nif_scene.cc
         src/import/fnv/character_builder.cc
+        src/import/fnv/kf_animation.cc
     )
     target_include_directories(odai_newvegas_probe PRIVATE src)
     target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB)
@@ -1666,6 +1703,7 @@ if(BUILD_TESTING)
     add_executable(odai_fnv_import_tests
         tests/fnv_import_tests.cc
         src/core/job_system.cc
+        src/import/fnv/actor_records.cc
         src/import/fnv/asset_source.cc
         src/import/fnv/async_asset_loader.cc
         src/import/fnv/bsa_archive.cc
@@ -1675,6 +1713,7 @@ if(BUILD_TESTING)
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
         src/import/fnv/character_builder.cc
+        src/import/fnv/kf_animation.cc
     )
     target_include_directories(odai_fnv_import_tests PRIVATE src)
     target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB)

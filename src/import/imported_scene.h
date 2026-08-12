@@ -58,6 +58,8 @@ struct ImportedSceneMeshPart {
     bool alphaBlend = false;
     // NiStencilProperty DRAW_BOTH. See kImportedSceneMaterialFlagTwoSided.
     bool twoSided = false;
+    // BSShaderNoLightingProperty. See kImportedSceneMaterialFlagUnlit.
+    bool unlit = false;
     // What alphaTest compares the sampled alpha against, quantized 0-255 the
     // way the source formats store it. 128 is the neutral 0.5 that every
     // caller which does not author a threshold gets.
@@ -202,6 +204,13 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaBlend = 1u << 5;
 // which is why it rides alongside the blend flag rather than in a general
 // material system.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTwoSided = 1u << 6;
+
+// Surface is SELF-LIT and must bypass shading entirely (Fallout's
+// BSShaderNoLightingProperty). A CRT screen, a neon tube or a glow panel emits
+// its own light; run through the normal diffuse chain it is only as bright as
+// the sun happens to make it, which rendered Victor's face -- a lit screen
+// facing away from the sun -- as a black rectangle in a bezel.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagUnlit = 1u << 7;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;

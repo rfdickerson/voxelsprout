@@ -106,23 +106,9 @@ std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) 
     }
 }
 
-// Dedup key for an imported texture: its source path, lowercased with separators
-// unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
-// on both casing and slash direction for the same file, so a raw-string key
-// would upload "Textures\Landscape\Rock01.dds" and "textures/landscape/rock01.dds"
-// as two different images. An empty path stays empty, which disables dedup for
-// that texture rather than collapsing every unnamed texture onto one slot.
-std::string normalizedImportedTextureKey(std::string_view sourcePath) {
-    std::string key(sourcePath);
-    for (char& c : key) {
-        if (c == '\\') {
-            c = '/';
-        } else {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-    }
-    return key;
-}
+// normalizedImportedTextureKey moved to renderer_backend.h: the skinned-actor
+// texture upload acquires from the same reference-counted table and has to
+// normalize identically, which only one definition can guarantee.
 
 VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
     switch (format) {

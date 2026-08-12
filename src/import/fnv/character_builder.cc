@@ -12,6 +12,7 @@ namespace {
 using odai::math::Matrix4;
 using odai::math::Quaternion;
 using odai::math::Vector3;
+using odai::math::Vector4;
 
 // Bethesda Z-up -> engine Y-up, as a 3x3 basis change: (x, y, z) -> (x, z, -y).
 // The same mapping cell_builder's bethesdaToEngine applies to points, written
@@ -176,6 +177,85 @@ bool buildFalloutSkeleton(const NifSkeleton& source, anim::Skeleton& outSkeleton
     return true;
 }
 
+bool buildFalloutAnimationClip(
+    const KfAnimation& source,
+    const anim::Skeleton& skeleton,
+    anim::AnimationClip& outClip,
+    FalloutAnimationStats& outStats
+) {
+    outClip = anim::AnimationClip{};
+    outStats = FalloutAnimationStats{};
+    if (skeleton.bones.empty()) {
+        return false;
+    }
+
+    std::unordered_map<std::string, int> boneIndexByName;
+    boneIndexByName.reserve(skeleton.bones.size());
+    for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+        boneIndexByName.emplace(skeleton.bones[i].name, static_cast<int>(i));
+    }
+
+    outClip.name = source.name;
+    outClip.duration = source.duration();
+    outClip.loop = source.loops();
+    outStats.tracks = source.tracks.size();
+    outClip.tracks.reserve(source.tracks.size());
+
+    // Quaternion -> row-major 3x3 -> rebased 3x3 -> quaternion. The round trip
+    // through matrices is deliberate: it runs the keys through the SAME
+    // changeRotationBasis/quaternionFromRotation pair the bind pose went
+    // through, so the two cannot drift apart. It costs nothing that matters --
+    // this runs once per key at load, never per frame.
+    const auto rebaseRotation = [](const Quaternion& q) {
+        const Matrix4 asMatrix = odai::math::toMatrix(q);
+        float rotation[9] = {};
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                rotation[(row * 3) + col] = asMatrix(row, col);
+            }
+        }
+        float rebased[9] = {};
+        changeRotationBasis(rotation, rebased);
+        return quaternionFromRotation(rebased);
+    };
+
+    for (const KfBoneTrack& sourceTrack : source.tracks) {
+        const auto found = boneIndexByName.find(sourceTrack.nodeName);
+        if (found == boneIndexByName.end()) {
+            ++outStats.unresolvedNodes;
+            continue;
+        }
+        anim::BoneTrack track;
+        track.boneIndex = found->second;
+        track.translationKeys.reserve(sourceTrack.translationKeys.size());
+        for (const KfVector3Key& key : sourceTrack.translationKeys) {
+            anim::Vector3Key converted;
+            converted.time = key.time;
+            converted.value = changePointBasis(key.value.x, key.value.y, key.value.z);
+            track.translationKeys.push_back(converted);
+        }
+        track.rotationKeys.reserve(sourceTrack.rotationKeys.size());
+        for (const KfQuaternionKey& key : sourceTrack.rotationKeys) {
+            anim::QuaternionKey converted;
+            converted.time = key.time;
+            converted.value = rebaseRotation(normalize(key.value));
+            track.rotationKeys.push_back(converted);
+        }
+        // Scale is a scalar in the file and stays one: a rotation cannot make
+        // a uniform scale non-uniform, so no basis change applies.
+        track.scaleKeys.reserve(sourceTrack.scaleKeys.size());
+        for (const KfVector3Key& key : sourceTrack.scaleKeys) {
+            anim::Vector3Key converted;
+            converted.time = key.time;
+            converted.value = key.value;
+            track.scaleKeys.push_back(converted);
+        }
+        outClip.tracks.push_back(std::move(track));
+        ++outStats.boundTracks;
+    }
+    return !outClip.tracks.empty() && outClip.duration > 0.0f;
+}
+
 bool appendFalloutCharacterMesh(
     const NifSkinnedModel& model, FalloutCharacter& character, std::string& outError) {
     if (character.skeleton.bones.empty()) {
@@ -246,6 +326,26 @@ bool appendFalloutCharacterMesh(
             }
         }
 
+        // A SHAPE'S VERTICES ARE NOT NECESSARILY IN THE CHARACTER'S SPACE.
+        //
+        // NiSkinData's overall skinTransform maps the character's space into
+        // this shape's own geometry space. That is what makes the composition
+        // above agree across shapes authored in different spaces -- and it is
+        // why a bone two such shapes share reports no conflict. But composing
+        // it normalizes the BINDING only. Nothing has normalized the GEOMETRY,
+        // so the vertices are still in the shape's own space and the skinning
+        // product faithfully leaves them there.
+        //
+        // Fallout's human parts are where this becomes visible: a hand NIF is
+        // authored around the hand, a head NIF around the head, and a body NIF
+        // around the whole character. Left uncorrected, a settler renders as a
+        // clothed torso with his head and both hands piled at his feet -- each
+        // the right shape, in the wrong place. Every creature part in the game
+        // has an identity skinTransform, which is why the actors built before
+        // the townsfolk never showed it.
+        const Matrix4 geometryToCharacter = inverse(changeMatrixBasis(shape.skinTransform));
+        const bool moveGeometry = matricesDiffer(geometryToCharacter, Matrix4::identity());
+
         const auto baseVertex = static_cast<std::uint32_t>(character.vertices.size());
         FalloutCharacterPart part;
         part.name = shape.name;
@@ -254,22 +354,30 @@ bool appendFalloutCharacterMesh(
         part.alphaThreshold = shape.alphaThreshold;
         part.alphaBlend = shape.alphaBlend;
         part.twoSided = shape.twoSided;
+        part.unlit = shape.unlit;
         part.firstIndex = static_cast<std::uint32_t>(character.indices.size());
         part.indexCount = static_cast<std::uint32_t>(shape.triangleIndices.size());
 
         character.vertices.reserve(character.vertices.size() + vertexCount);
         for (std::size_t v = 0; v < vertexCount; ++v) {
             odai::render::ImportedSkinnedMeshVertex vertex;
-            const Vector3 position = changePointBasis(
+            Vector3 position = changePointBasis(
                 shape.positions[v * 3u], shape.positions[(v * 3u) + 1u],
                 shape.positions[(v * 3u) + 2u]);
+            if (moveGeometry) {
+                position = transformPoint(geometryToCharacter, position);
+            }
             vertex.position[0] = position.x;
             vertex.position[1] = position.y;
             vertex.position[2] = position.z;
             if ((v * 3u) + 2u < shape.normals.size()) {
-                const Vector3 normal = changePointBasis(
+                Vector3 normal = changePointBasis(
                     shape.normals[v * 3u], shape.normals[(v * 3u) + 1u],
                     shape.normals[(v * 3u) + 2u]);
+                if (moveGeometry) {
+                    // A direction, so translation must not apply.
+                    normal = normalize(transformDirection(geometryToCharacter, normal));
+                }
                 vertex.normal[0] = normal.x;
                 vertex.normal[1] = normal.y;
                 vertex.normal[2] = normal.z;
@@ -315,6 +423,119 @@ bool appendFalloutCharacterMesh(
         character.parts.push_back(std::move(part));
     }
 
+    return true;
+}
+
+bool appendFalloutCharacterRigidMesh(
+    const NifModel& model,
+    const std::string& rootNodeName,
+    FalloutCharacter& character,
+    std::string& outError) {
+    const int boneIndex = character.skeleton.findBone(rootNodeName);
+    if (boneIndex < 0) {
+        outError = "no skeleton bone named " + rootNodeName;
+        return false;
+    }
+    if (model.shapes.empty()) {
+        outError = "static parse produced no shapes";
+        return false;
+    }
+
+    // Where to bake the prop's vertices so that skinning them to this one bone
+    // reproduces "rigidly parented to the bone".
+    //
+    // Skinning computes  actorWorld * boneWorld * inverseBind * v, so for the
+    // prop to land at  actorWorld * boneWorld * vLocal  the baked vertex has to
+    // satisfy  inverseBind * vBaked == vLocal  -- that is, vBaked is vLocal put
+    // through the INVERSE of this bone's stored inverse bind.
+    //
+    // Deriving the bone's bind-pose world transform from the skeleton instead
+    // is the obvious thing and it is wrong whenever NiSkinData disagrees with
+    // the skeleton's own bind pose, which is exactly the case
+    // FalloutCharacter::inverseBindMatrices exists to record. A bone no skinned
+    // shape binds keeps identity there, and identity is also the right answer
+    // for it: vBaked == vLocal.
+    //
+    // This READS the shared inverse-bind entry rather than overwriting it,
+    // which is what makes weighting the prop safe -- an earlier version emitted
+    // these vertices unweighted to avoid touching that shared state, and
+    // unweighted is not merely un-animated: the skinning shader passes an
+    // unweighted vertex through at its authored position, so it never receives
+    // the actor's world placement either and the prop renders at the world
+    // origin, thousands of units from the character.
+    const auto boneSlot = static_cast<std::size_t>(boneIndex);
+    const Matrix4 attach = (boneSlot < character.inverseBindMatrices.size())
+        ? odai::math::inverse(character.inverseBindMatrices[boneSlot])
+        : Matrix4::identity();
+
+    bool appended = false;
+    for (const NifShape& shape : model.shapes) {
+        const std::size_t vertexCount = shape.positions.size() / 3u;
+        if (vertexCount == 0u || shape.triangleIndices.empty()) {
+            continue;
+        }
+        const auto baseVertex = static_cast<std::uint32_t>(character.vertices.size());
+        FalloutCharacterPart part;
+        part.name = shape.name;
+        part.diffuseTexturePath = shape.diffuseTexturePath;
+        part.alphaTest = shape.alphaTest;
+        part.alphaThreshold = shape.alphaThreshold;
+        part.alphaBlend = shape.alphaBlend;
+        part.twoSided = shape.twoSided;
+        part.unlit = shape.unlit;
+        part.firstIndex = static_cast<std::uint32_t>(character.indices.size());
+        part.indexCount = static_cast<std::uint32_t>(shape.triangleIndices.size());
+
+        character.vertices.reserve(character.vertices.size() + vertexCount);
+        for (std::size_t v = 0; v < vertexCount; ++v) {
+            const Vector3 local = changePointBasis(
+                shape.positions[v * 3u], shape.positions[(v * 3u) + 1u],
+                shape.positions[(v * 3u) + 2u]);
+            const Vector4 posed = attach * Vector4{local.x, local.y, local.z, 1.0f};
+
+            odai::render::ImportedSkinnedMeshVertex vertex{};
+            vertex.position[0] = posed.x;
+            vertex.position[1] = posed.y;
+            vertex.position[2] = posed.z;
+            if ((v * 3u) + 2u < shape.normals.size()) {
+                const Vector3 n = changePointBasis(
+                    shape.normals[v * 3u], shape.normals[(v * 3u) + 1u],
+                    shape.normals[(v * 3u) + 2u]);
+                const Vector4 posedNormal = attach * Vector4{n.x, n.y, n.z, 0.0f};
+                const float length = std::sqrt((posedNormal.x * posedNormal.x) +
+                                               (posedNormal.y * posedNormal.y) +
+                                               (posedNormal.z * posedNormal.z));
+                if (length > 1e-6f) {
+                    vertex.normal[0] = posedNormal.x / length;
+                    vertex.normal[1] = posedNormal.y / length;
+                    vertex.normal[2] = posedNormal.z / length;
+                } else {
+                    vertex.normal[1] = 1.0f;
+                }
+            } else {
+                vertex.normal[1] = 1.0f;
+            }
+            if ((v * 2u) + 1u < shape.uvs.size()) {
+                vertex.uv[0] = shape.uvs[v * 2u];
+                vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
+            }
+            // Rigidly bound: all of the weight on the one attachment bone, so
+            // the prop rides that bone through every pose the way a parented
+            // node would.
+            vertex.boneIndices[0] = static_cast<std::uint16_t>(boneIndex);
+            vertex.boneWeights[0] = 1.0f;
+            character.vertices.push_back(vertex);
+        }
+        for (const std::uint32_t index : shape.triangleIndices) {
+            character.indices.push_back(baseVertex + index);
+        }
+        character.parts.push_back(std::move(part));
+        appended = true;
+    }
+    if (!appended) {
+        outError = "every shape was empty";
+        return false;
+    }
     return true;
 }
 

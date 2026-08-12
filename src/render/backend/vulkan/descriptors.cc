@@ -269,18 +269,33 @@ bool RendererBackend::createDescriptorResources() {
 void RendererBackend::updateFrameDescriptorSets(
     uint32_t aoFrameIndex,
     const VkDescriptorBufferInfo& cameraBufferInfo,
+    VkDeviceSize cameraSliceOffset,
     VkBuffer autoExposureHistogramBuffer,
     VkBuffer autoExposureStateBuffer,
     const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo,
     const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo
 ) {
     // Camera UBO device address (frame-arena slice) for descriptor-buffer writes.
+    //
+    // cameraSliceOffset, NOT cameraBufferInfo.offset -- the latter is always 0.
+    // (It is left at 0 for a classic descriptor-set path that would carry the
+    // slice as a dynamic offset; no 3-D pass takes that path any more, which is
+    // why FrameExecutionContext::mvpDynamicOffset is now unread.)
+    // Adding 0 here pointed every descriptor-buffer consumer of the camera --
+    // main, voxel GI, sun shafts, SSAO -- at ring offset 0 rather than at this
+    // frame's camera slice. That was survivable only for as long as the camera
+    // UBO happened to be the first allocation of every frame: the first
+    // allocation taken ahead of it (the skinned-actor bone matrices) shifted
+    // the camera slice, left ring offset 0 holding those matrices, and every
+    // pass then read a garbage view-projection -- which renders as a flat
+    // single-colour frame with the UI still correct on top of it, because the
+    // UI does not go through this camera.
     VkBufferDeviceAddressInfo cameraAddressInfo{};
     cameraAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     cameraAddressInfo.buffer = cameraBufferInfo.buffer;
     const VkDeviceAddress cameraDeviceAddress =
         (cameraBufferInfo.buffer != VK_NULL_HANDLE)
-            ? vkGetBufferDeviceAddress(m_device, &cameraAddressInfo) + cameraBufferInfo.offset
+            ? vkGetBufferDeviceAddress(m_device, &cameraAddressInfo) + cameraSliceOffset
             : 0;
 
     VkDescriptorImageInfo hdrSceneImageInfo{};

@@ -79,6 +79,16 @@ public:
     // (see renderer_types.h) -- each slot is fully independent (own template,
     // own pose, own draws), sized for a small party, not a mass-battle crowd.
     bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
+    // Uploads a skinned actor's textures and returns one bindless slot per
+    // input, in order (0xffffffff where a texture was unusable). Those slots
+    // are what ImportedSkinnedMeshVertex::textureIndex must hold: a skinned
+    // template's vertices go to the GPU verbatim, with none of the scene-index
+    // remapping addImportedSceneChunk does for world geometry, so there is no
+    // other way for a skinned actor to be textured. Call before
+    // uploadSkinnedMeshTemplate and write the slots into the vertices.
+    std::vector<std::uint32_t> uploadSkinnedActorTextures(
+        std::uint32_t instanceIndex,
+        const std::vector<odai::importer::ImportedSceneTexture>& textures);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     void setSkinningDebugBypass(bool bypass);
     // Temporal AA (camera reprojection; static world). Off by default.
@@ -212,10 +222,23 @@ public:
     // Tone curve for the post pass. Default is ACES, so this is inert
     // unless a game selects otherwise.
     void setTonemapSettings(const TonemapSettings& settings);
-    // Post-process depth of field (tilt-shift/diorama look). Focus is a view
-    // distance in world units; geometry within +-focusRange stays sharp and
-    // blur ramps to maxRadiusPixels beyond it.
-    void setDepthOfField(bool enabled, float focusDistance, float focusRange, float maxRadiusPixels);
+    // Post-process depth of field. Focus is a view distance in world units;
+    // blur ramps to maxRadiusPixels over focusRange BEHIND the focal plane and,
+    // scaled by nearBlurScale, over focusRange/nearBlurScale IN FRONT of it.
+    //
+    // nearBlurScale is the near-field ramp rate, and it is the knob that picks
+    // the look: 0 is far-only (a blurred backdrop with a sharp foreground),
+    // ~1.25 blurs both ends hard for a tilt-shift/diorama miniature, and a
+    // value BELOW 1 stretches the near ramp out -- which is what a portrait
+    // framing wants, so a subject standing a little in front of the focal
+    // plane does not go soft along with the ground it is standing on.
+    //
+    // It DEFAULTS TO 0 so that adding the near field changed no existing
+    // caller's look: before this parameter the shader blurred only the far
+    // side, and a caller that does not ask for a near field still gets exactly
+    // that.
+    void setDepthOfField(bool enabled, float focusDistance, float focusRange,
+                         float maxRadiusPixels, float nearBlurScale = 0.0f);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(

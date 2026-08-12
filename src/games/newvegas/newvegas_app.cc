@@ -1,5 +1,7 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "import/fnv/dialogue_records.h"
+
 #include "import/dds.h"
 #include "games/newvegas/newvegas_ogg.h"
 #include "import/fnv/bsa_archive.h"
@@ -414,6 +416,28 @@ bool NewVegasApp::onInit() {
             kTvBodySize, kTvNumericSize, kTvCaptionSize, kTvDisplaySize)) {
         VOX_LOGE("newvegas") << "failed to load UI fonts";
         return false;
+    }
+
+    // Conversation type. Baked here rather than through loadFonts because
+    // GameApp's four slots (body/numeric/caption/display) are a shared contract
+    // every game uses, and widening it for one game's dialogue would change all
+    // of them. registerUiFontAtlas is public for exactly this.
+    //
+    // 48/40 px against a 28 px body: a reply the player has to READ and CHOOSE
+    // from across a room is not the same reading task as a status strip, and
+    // the previous pass drew both at body size in a corner.
+    constexpr float kDialogueLineSize = 48.0f;
+    constexpr float kDialogueChoiceSize = 40.0f;
+    const std::string regularFontPath = resolveAssetPath("assets/fonts/Inter-Regular.ttf");
+    if (m_dialogueFont.loadFromFile(regularFontPath, kDialogueLineSize)) {
+        m_dialogueFont.setTextureId(m_renderer.registerUiFontAtlas(
+            m_dialogueFont.atlasPixels().data(), m_dialogueFont.atlasWidth(),
+            m_dialogueFont.atlasHeight()));
+    }
+    if (m_dialogueChoiceFont.loadFromFile(regularFontPath, kDialogueChoiceSize)) {
+        m_dialogueChoiceFont.setTextureId(m_renderer.registerUiFontAtlas(
+            m_dialogueChoiceFont.atlasPixels().data(), m_dialogueChoiceFont.atlasWidth(),
+            m_dialogueChoiceFont.atlasHeight()));
     }
 
     if (m_streamDirectory.empty()) {
@@ -910,6 +934,20 @@ void NewVegasApp::updateCharacterPose() {
     if (std::getenv("ODAI_FNV_CHAR_NOPOSE") != nullptr) {
         return;
     }
+    // ODAI_FNV_CHAR_IDENTITY=1 submits a pose of the right SHAPE but with no
+    // data in it: as many identity matrices as the slot expects. It separates
+    // the two ways this path can fail, which look identical on screen -- a
+    // mechanical fault in the per-frame upload (wrong buffer, missing barrier)
+    // still corrupts the frame with identity matrices, whereas a fault in the
+    // bind-pose MATRICES themselves cannot, and the actor merely collapses to
+    // the origin.
+    if (std::getenv("ODAI_FNV_CHAR_IDENTITY") != nullptr) {
+        m_characterPoseScratch.assign(m_characterBindPose.size(), odai::math::Matrix4::identity());
+        render::ImportedSkinnedActorFrameData identityPose{};
+        identityPose.boneMatrices = m_characterPoseScratch;
+        m_renderer.setSkinnedActorPose(0u, identityPose);
+        return;
+    }
     // World placement rides on the bone matrices, pre-multiplied: the skinning
     // pass consumes bone matrices and nothing else, so there is no separate
     // instance transform to put it in.
@@ -918,6 +956,15 @@ void NewVegasApp::updateCharacterPose() {
     m_characterPoseScratch.resize(m_characterBindPose.size());
     for (std::size_t i = 0; i < m_characterBindPose.size(); ++i) {
         m_characterPoseScratch[i] = actorWorld * m_characterBindPose[i];
+    }
+    static bool loggedPose = false;
+    if (!loggedPose && !m_characterPoseScratch.empty()) {
+        loggedPose = true;
+        const odai::math::Matrix4& b = m_characterBindPose[0];
+        const odai::math::Matrix4& f = m_characterPoseScratch[0];
+        VOX_LOGI("newvegas") << "pose[0] bind translation (" << b(0, 3) << "," << b(1, 3) << ","
+                             << b(2, 3) << ") final (" << f(0, 3) << "," << f(1, 3) << ","
+                             << f(2, 3) << ") bones=" << m_characterPoseScratch.size();
     }
     render::ImportedSkinnedActorFrameData pose{};
     pose.boneMatrices = m_characterPoseScratch;
@@ -1510,7 +1557,16 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     // arbitrary amount -- which silently defeats ODAI_FNV_YAW/PITCH and makes
     // two captures of "the same view" incomparable. That cost a bogus A/B.
     const bool suppressMouseLook = !m_screenshotPath.empty();
-    if (m_mouseCaptured && !suppressMouseLook) {
+    // A conversation is MODAL, the way Skyrim's is: while it is up the player
+    // neither walks nor looks around, and the camera turns onto the speaker.
+    //
+    // Mouselook is suppressed rather than the cursor being re-captured, and
+    // m_lastCursorX/Y keep being written below either way. That is what makes
+    // leaving a conversation seamless: the else-branch clears m_hasCursorSample,
+    // so the first frame after the card closes applies no delta at all instead
+    // of one worth however far the mouse travelled while it was open.
+    const bool inConversation = m_victor.talking;
+    if (m_mouseCaptured && !suppressMouseLook && !inConversation) {
         if (m_hasCursorSample) {
             m_yawDegrees += static_cast<float>(cursorX - m_lastCursorX) * kMouseSensitivity;
             m_pitchDegrees -= static_cast<float>(cursorY - m_lastCursorY) * kMouseSensitivity;
@@ -1522,6 +1578,152 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     }
     m_lastCursorX = cursorX;
     m_lastCursorY = cursorY;
+
+    // Turn to the speaker's face and hold there.
+    //
+    // Aiming at his ORIGIN would point the camera at his wheel: he stands ~187
+    // units tall and his feet are the placement. The face screen is the thing a
+    // conversation is about, so that is what gets centred.
+    //
+    // Eased rather than snapped, and re-aimed every frame rather than once on
+    // open: a hard cut to a new orientation is disorienting, and he is animated,
+    // so a one-shot aim would drift off him as the idle moves him.
+    // The dolly. Eased on the way in AND on the way out, so leaving a
+    // conversation widens back rather than snapping.
+    {
+        constexpr float kFovTauSeconds = 0.22f;
+        const float targetFov = inConversation ? kConversationFovDegrees : kDefaultFovDegrees;
+        const float blend = 1.0f - std::exp(-deltaSeconds / kFovTauSeconds);
+        m_cameraFovDegrees += (targetFov - m_cameraFovDegrees) * blend;
+    }
+
+    if (inConversation && m_victor.placed) {
+        constexpr float kVictorFaceHeightUnits = 150.0f;
+        // Time constant, not a per-frame fraction: a fixed fraction converges
+        // at whatever rate the machine happens to render at, so the turn would
+        // be visibly faster on a fast GPU.
+        constexpr float kAimTauSeconds = 0.12f;
+        const float dx = m_victor.position[0] - m_cameraX;
+        const float dy = (m_victor.position[1] + kVictorFaceHeightUnits) - m_cameraY;
+        const float dz = m_victor.position[2] - m_cameraZ;
+        const float horizontal = std::sqrt((dx * dx) + (dz * dz));
+        if (horizontal > 1e-3f) {
+            const float desiredYaw = std::atan2(dz, dx) * (180.0f / kPi);
+
+            // Aiming AT his face centres it -- directly behind the card, which
+            // is the one thing a conversation must not hide. Skyrim keeps the
+            // speaker in frame and puts the words under them, so the camera
+            // aims low enough that his face rises to just above the card's top
+            // edge.
+            //
+            // The offset is derived from the projection rather than dialled in
+            // by eye: a point f half-heights above centre subtends
+            // atan(f * tan(fovY/2)), so the pitch has to come DOWN by that much
+            // to lift the face there. A hardcoded degree count would drift the
+            // moment the FOV changed.
+            int framebufferWidth = 0;
+            int framebufferHeight = 0;
+            framebufferSize(framebufferWidth, framebufferHeight);
+            float pitchOffsetDegrees = 0.0f;
+            if (framebufferHeight > 0) {
+                const auto heightPx = static_cast<float>(framebufferHeight);
+                // Before the card has ever been drawn there is no measured top
+                // edge; 0.30 is where a typical four-reply card starts.
+                const float panelTopPx =
+                    m_dialoguePanelTopPx > 1.0f ? m_dialoguePanelTopPx : (heightPx * 0.30f);
+                const float faceTargetPx =
+                    std::max(heightPx * 0.10f, panelTopPx - (heightPx * 0.07f));
+                const float halfHeights =
+                    std::clamp(((heightPx * 0.5f) - faceTargetPx) / (heightPx * 0.5f), 0.0f, 0.9f);
+                // The LIVE fov, not the default: it is easing while this runs,
+                // and the offset that lands his face above the card is a
+                // function of it. Using the constant here would slide the
+                // framing down over the length of the zoom.
+                const float halfFovTangent =
+                    std::tan((m_cameraFovDegrees * 0.5f) * (kPi / 180.0f));
+                pitchOffsetDegrees =
+                    std::atan(halfHeights * halfFovTangent) * (180.0f / kPi);
+            }
+            const float desiredPitch = std::clamp(
+                (std::atan2(dy, horizontal) * (180.0f / kPi)) - pitchOffsetDegrees,
+                -kPitchLimitDegrees, kPitchLimitDegrees);
+            // Shortest way round: without the wrap, turning from 350 to 10
+            // degrees takes the camera the long way, a full spin past the
+            // world, which reads as the view being thrown rather than turned.
+            float yawDelta = std::fmod((desiredYaw - m_yawDegrees) + 540.0f, 360.0f) - 180.0f;
+            const float blend = 1.0f - std::exp(-deltaSeconds / kAimTauSeconds);
+            m_yawDegrees += yawDelta * blend;
+            m_pitchDegrees += (desiredPitch - m_pitchDegrees) * blend;
+        }
+    }
+
+    // Shallow focus on the speaker, arriving with the dolly.
+    //
+    // What an 80 mm portrait lens actually does is throw everything off the
+    // subject plane out, and that is the half a narrower FOV cannot fake: at
+    // 55 degrees the background is merely smaller, not separated. Focus rides
+    // the measured distance to Victor's face -- the same point the aim uses --
+    // so it stays locked on him rather than on a fixed distance he happens to
+    // stand at.
+    //
+    // The focus RANGE is not the physical depth of field. A real 80 mm at f/2.8
+    // on a subject 4.4 m away holds about 24 cm sharp, which here is ~17 units
+    // and would blur Victor's own body along with the town. This is the
+    // distance over which blur ramps to full BEYOND him, so it is set to keep
+    // the robot sharp and take everything past him: ~3 m.
+    {
+        constexpr float kDofTauSeconds = 0.28f;
+        constexpr float kFocusRangeUnits = 220.0f;
+        constexpr float kMaxBlurRadiusPixels = 12.0f;
+        constexpr float kVictorFaceHeightUnits = 150.0f;
+        // Well below the 1.25 diorama default, which stretches the near ramp to
+        // ~400 units. Victor is a solid object roughly 100 units deep standing
+        // ON the focal plane, so a near ramp as short as the far one blurs his
+        // own front along with the ground -- measured: his edge detail dropped
+        // 25% at 1.25 and holds at this. Long enough to still take the fence
+        // and the dirt the camera is standing over.
+        constexpr float kNearBlurScale = 0.55f;
+
+        // ODAI_FNV_DIALOGUE_NODOF=1 keeps the conversation framing -- the aim,
+        // the dolly, the modal lock -- and only drops the lens blur. It is the
+        // control for measuring the DoF: with the camera pointed anywhere else
+        // the same screen crop is not the same content, so a no-conversation
+        // capture cannot be the baseline.
+        static const bool s_noDialogueDof = std::getenv("ODAI_FNV_DIALOGUE_NODOF") != nullptr;
+        const bool wantDof = inConversation && m_victor.placed && !s_noDialogueDof;
+        const float easeBlend = 1.0f - std::exp(-deltaSeconds / kDofTauSeconds);
+        m_dialogueDofBlend += ((wantDof ? 1.0f : 0.0f) - m_dialogueDofBlend) * easeBlend;
+
+        const float dx = m_victor.position[0] - m_cameraX;
+        const float dy = (m_victor.position[1] + kVictorFaceHeightUnits) - m_cameraY;
+        const float dz = m_victor.position[2] - m_cameraZ;
+        const float focusDistance =
+            std::max(std::sqrt((dx * dx) + (dy * dy) + (dz * dz)), 1.0f);
+
+        // The renderer's radius is in PIXELS, which is the honest contract for a
+        // post-process kernel but means a fixed number is a different-sized
+        // blur on every display -- the same shot reads as a strong lens at
+        // 1080p and a mild one at 4K. Scale it so the effect is a constant
+        // fraction of the image instead, which is what "an 80 mm lens" means
+        // to anyone looking at it.
+        int dofWidth = 0;
+        int dofHeight = 0;
+        framebufferSize(dofWidth, dofHeight);
+        const float resolutionScale =
+            dofHeight > 0 ? (static_cast<float>(dofHeight) / 1080.0f) : 1.0f;
+
+        if (m_dialogueDofBlend > 0.002f) {
+            m_renderer.setDepthOfField(
+                true, focusDistance, kFocusRangeUnits,
+                kMaxBlurRadiusPixels * resolutionScale * m_dialogueDofBlend, kNearBlurScale);
+            m_dialogueDofActive = true;
+        } else if (m_dialogueDofActive) {
+            // Hand it back once, flipping only the enable so anything dialled
+            // into the debug sliders survives.
+            m_renderer.setDepthOfField(false, focusDistance, kFocusRangeUnits, 0.0f, kNearBlurScale);
+            m_dialogueDofActive = false;
+        }
+    }
 
     // Must match the renderer's own camera basis exactly, or WASD walks off at
     // an angle to where you are looking. computeCameraForward
@@ -1539,12 +1741,20 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     float moveX = 0.0f;
     float moveY = 0.0f;
     float moveZ = 0.0f;
-    if (keyDown(m_window, GLFW_KEY_W)) { moveX += forwardX; moveZ += forwardZ; }
-    if (keyDown(m_window, GLFW_KEY_S)) { moveX -= forwardX; moveZ -= forwardZ; }
-    if (keyDown(m_window, GLFW_KEY_D)) { moveX += rightX;   moveZ += rightZ; }
-    if (keyDown(m_window, GLFW_KEY_A)) { moveX -= rightX;   moveZ -= rightZ; }
-    if (keyDown(m_window, GLFW_KEY_SPACE)) { moveY += 1.0f; }
-    if (keyDown(m_window, GLFW_KEY_LEFT_CONTROL)) { moveY -= 1.0f; }
+    // Rooted for the conversation. The keys are not merely ignored further
+    // down -- they are never read -- so a held W does not accumulate anywhere
+    // and release the moment the card closes. Everything below this point
+    // still runs: gravity, the terrain pin and the collision push-out all keep
+    // working, so a conversation opened while stepping off a kerb still settles
+    // the player onto the ground rather than freezing them mid-air.
+    if (!inConversation) {
+        if (keyDown(m_window, GLFW_KEY_W)) { moveX += forwardX; moveZ += forwardZ; }
+        if (keyDown(m_window, GLFW_KEY_S)) { moveX -= forwardX; moveZ -= forwardZ; }
+        if (keyDown(m_window, GLFW_KEY_D)) { moveX += rightX;   moveZ += rightZ; }
+        if (keyDown(m_window, GLFW_KEY_A)) { moveX -= rightX;   moveZ -= rightZ; }
+        if (keyDown(m_window, GLFW_KEY_SPACE)) { moveY += 1.0f; }
+        if (keyDown(m_window, GLFW_KEY_LEFT_CONTROL)) { moveY -= 1.0f; }
+    }
 
     const float lengthSquared = (moveX * moveX) + (moveZ * moveZ);
     if (lengthSquared > 1e-6f) {
@@ -1776,38 +1986,84 @@ bool NewVegasApp::initStreaming() {
                     : (m_cameraY - kEyeHeightUnits);
         }
         {
-            importer::ImportedScene victorScene;
             const std::filesystem::path dataPath(m_streamDirectory);
-            if (loadVictor(dataPath, dataPath / m_streamPlugin, m_victor, victorScene,
+            if (loadVictor(dataPath, dataPath / m_streamPlugin, m_streamer->assets(), m_victor,
                            m_victorSpawnPosition[1] != 0.0f ? m_victorSpawnPosition : nullptr)) {
-                m_victorPendingScene = victorScene;
-                m_victorChunkPending = true;
-                VOX_LOGI("newvegas")
-                    << "Victor geometry: verts=" << victorScene.packedVertices.size()
-                    << " indices=" << victorScene.packedIndices.size()
-                    << " draws=" << victorScene.packedDraws.size()
-                    << " instances=" << victorScene.instances.size()
-                    << " pages=" << victorScene.pageRanges.size()
-                    << " bounds=(" << victorScene.boundsMin[0] << "," << victorScene.boundsMin[1]
-                    << "," << victorScene.boundsMin[2] << ")..(" << victorScene.boundsMax[0] << ","
-                    << victorScene.boundsMax[1] << "," << victorScene.boundsMax[2] << ")"
-                    << " chunk=" << (m_victor.chunkIndex == render::Renderer::kInvalidImportedChunkIndex
-                                         ? std::string("UPLOAD FAILED")
-                                         : std::to_string(m_victor.chunkIndex));
+                m_victorUploadPending = true;
+                // Turn him to face wherever the player starts. His authored
+                // ACRE rotation is not used: standing him beside the spawn
+                // already overrode his authored POSITION, and a robot facing
+                // the direction he faces in a different part of town reads as
+                // broken rather than as fidelity.
+                m_victor.yawRadians = std::atan2(
+                    m_cameraZ - m_victor.position[2], m_cameraX - m_victor.position[0]);
             }
             VOX_LOGI("newvegas") << "Victor: " << m_victor.status;
-            // ODAI_FNV_VICTOR_DUMP=<path.bin>: save his scene so it can be
-            // opened with --scene, i.e. through the cooked-scene upload path.
-            // That path demonstrably renders untextured vertex-colour geometry
-            // (the strategy map), so it splits "his geometry is bad" from "the
-            // chunk path mishandles it" in one run with no new render code.
-            if (const char* dump = std::getenv("ODAI_FNV_VICTOR_DUMP")) {
-                if (importer::saveImportedScene(victorScene, dump)) {
-                    VOX_LOGI("newvegas") << "Victor scene dumped to " << dump;
-                } else {
-                    VOX_LOGW("newvegas") << "Victor scene dump FAILED: "
-                                         << importer::getImportedSceneLastError();
+            // The rest of the town, discovered from the plugin around wherever
+            // the player actually is rather than from a hardcoded list.
+            {
+                const float engineCentre[3] = {m_cameraX, m_cameraY, m_cameraZ};
+                float bethesdaCentre[3] = {};
+                importer::fnv::CellStreamer::engineToFallout(engineCentre, bethesdaCentre);
+                const float centreXY[2] = {bethesdaCentre[0], bethesdaCentre[1]};
+                ActorPopulationStats actorStats;
+                loadGoodspringsActors(
+                    dataPath / m_streamPlugin, m_streamer->assets(), centreXY, kActorLoadRadius,
+                    kFirstCrowdSkinnedInstance,
+                    render::kMaxSkinnedInstances - kFirstCrowdSkinnedInstance,
+                    {m_victor.baseFormId}, m_actors, actorStats);
+                m_actorsUploadPending = !m_actors.empty();
+                // ODAI_FNV_ACTORS_PARADE lines every built actor up in front of
+                // the spawn, for the same reason Victor stands beside it: the
+                // town's people are spread over 12000 units and a screenshot
+                // run cannot walk to them, so without this a change to how a
+                // body is assembled cannot be looked at at all.
+                if (const char* parade = std::getenv("ODAI_FNV_ACTORS_PARADE")) {
+                    // Laid out along the camera's own right vector at a fixed
+                    // distance ahead of it, so ODAI_FNV_YAW alone chooses what
+                    // the parade stands in front of -- a fixed compass
+                    // direction puts them behind Doc Mitchell's house.
+                    const float spacing = 130.0f;
+                    const float distance = std::max(200.0f, static_cast<float>(std::atof(parade)));
+                    const float yaw = m_yawDegrees * (kPi / 180.0f);
+                    const float forwardX = std::cos(yaw);
+                    const float forwardZ = std::sin(yaw);
+                    const float centreX = m_cameraX + (forwardX * distance);
+                    const float centreZ = m_cameraZ + (forwardZ * distance);
+                    for (std::size_t i = 0; i < m_actors.size(); ++i) {
+                        SkinnedActor& actor = m_actors[i];
+                        const float offset =
+                            (static_cast<float>(i) -
+                             (static_cast<float>(m_actors.size() - 1) * 0.5f)) * spacing;
+                        // Right vector is forward rotated -90 degrees in XZ.
+                        actor.position[0] = centreX + (forwardZ * offset);
+                        actor.position[2] = centreZ - (forwardX * offset);
+                        float ground = 0.0f;
+                        actor.position[1] =
+                            groundHeightAt(actor.position[0], actor.position[2], ground)
+                                ? ground
+                                : (m_cameraY - kEyeHeightUnits);
+                        // Facing the camera, so a face that failed to build is
+                        // visible as a face and not as the back of a head.
+                        actor.yawRadians = std::atan2(forwardX, forwardZ);
+                    }
                 }
+                VOX_LOGI("newvegas") << "Goodsprings actors: " << actorStats.detail;
+                for (const SkinnedActor& actor : m_actors) {
+                    VOX_LOGI("newvegas")
+                        << "  actor " << actor.name << " slot=" << actor.instanceSlot << " at ("
+                        << actor.position[0] << ", " << actor.position[1] << ", "
+                        << actor.position[2] << ") verts=" << actor.character.vertices.size()
+                        << " parts=" << actor.character.parts.size()
+                        << " unresolvedBones=" << actor.character.unresolvedBoneCount
+                        << " bindConflicts=" << actor.character.conflictingInverseBindCount
+                        << " clip=" << (actor.idleClip.tracks.empty() ? "none" : "idle");
+                }
+            }
+            if (m_victor.placed) {
+                VOX_LOGI("newvegas") << "Victor animation: " << m_victor.animationStatus;
+                VOX_LOGI("newvegas") << "Victor load: " << m_victor.timing;
+                VOX_LOGI("newvegas") << "Victor voice: " << m_victor.voice.status;
             }
         }
 
@@ -2000,7 +2256,11 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // panel and the player never sees the one thing it existed to tell them --
     // and while it lasted, two pieces of large centred type sat on top of each
     // other. Held here, it plays the moment the menu closes.
-    if (!m_menuOpen) {
+    //
+    // A conversation counts for the same reason, and now more literally: the
+    // dialogue card is centred large type, and "Goodsprings / Location
+    // discovered" landed straight across Victor's first two replies.
+    if (!m_menuOpen && !m_victor.talking) {
         m_banner.update(deltaSeconds);
     }
     // Region lookup walks the cell index, so it is polled a few times a second
@@ -2012,34 +2272,174 @@ void NewVegasApp::onTick(float deltaSeconds) {
         updateRegionDiscovery();
     }
 
-    // Deferred from onInit: see m_victorChunkPending's comment.
-    if (m_victorChunkPending) {
-        m_victorChunkPending = false;
-        m_victor.chunkIndex = m_renderer.addImportedSceneChunk(m_victorPendingScene);
-        m_victorPendingScene = importer::ImportedScene{};
-        VOX_LOGI("newvegas") << "Victor chunk added from frame loop: "
-                             << (m_victor.chunkIndex == render::Renderer::kInvalidImportedChunkIndex
-                                     ? std::string("FAILED")
-                                     : std::to_string(m_victor.chunkIndex));
+    // Uploaded from the frame loop, not onInit: an init-time GPU upload lands
+    // as zeros (see chunk_upload.cc's add-time note) and draws nothing at all.
+    //
+    // Textures first, because their bindless slots have to be written into the
+    // vertices before the template carrying those vertices goes to the GPU --
+    // a skinned template is uploaded verbatim, with none of the index remapping
+    // a scene chunk gets.
+    if (m_victorUploadPending) {
+        m_victorUploadPending = false;
+        const std::vector<std::uint32_t> textureSlots =
+            m_renderer.uploadSkinnedActorTextures(kVictorSkinnedInstance, m_victor.textures);
+        remapVictorTextureSlots(m_victor, textureSlots);
+
+        render::ImportedSkinnedMeshTemplate meshTemplate{};
+        meshTemplate.vertices = m_victor.character.vertices;
+        meshTemplate.indices = m_victor.character.indices;
+        meshTemplate.draws = m_victor.draws;
+        meshTemplate.boneCount =
+            static_cast<std::uint32_t>(m_victor.character.skeleton.bones.size());
+        m_victor.uploaded =
+            m_renderer.uploadSkinnedMeshTemplate(kVictorSkinnedInstance, meshTemplate);
+        std::size_t texturedSlots = 0;
+        for (const std::uint32_t slot : textureSlots) {
+            texturedSlots += (slot != 0xffffffffu) ? 1u : 0u;
+        }
+        VOX_LOGI("newvegas") << "Victor upload: "
+                             << (m_victor.uploaded ? "ok" : "FAILED") << ", " << texturedSlots
+                             << "/" << textureSlots.size() << " textures bound";
+    }
+
+    if (m_actorsUploadPending) {
+        m_actorsUploadPending = false;
+        std::size_t uploaded = 0;
+        for (SkinnedActor& actor : m_actors) {
+            const std::vector<std::uint32_t> slots =
+                m_renderer.uploadSkinnedActorTextures(actor.instanceSlot, actor.textures);
+            for (odai::render::ImportedSkinnedMeshVertex& vertex : actor.character.vertices) {
+                vertex.textureIndex = (vertex.textureIndex < slots.size())
+                    ? slots[vertex.textureIndex]
+                    : 0xffffffffu;
+            }
+            render::ImportedSkinnedMeshTemplate meshTemplate{};
+            meshTemplate.vertices = actor.character.vertices;
+            meshTemplate.indices = actor.character.indices;
+            meshTemplate.draws = actor.draws;
+            meshTemplate.boneCount =
+                static_cast<std::uint32_t>(actor.character.skeleton.bones.size());
+            actor.uploaded = m_renderer.uploadSkinnedMeshTemplate(actor.instanceSlot, meshTemplate);
+            uploaded += actor.uploaded ? 1u : 0u;
+        }
+        VOX_LOGI("newvegas") << "Goodsprings actors uploaded: " << uploaded << "/"
+                             << m_actors.size();
+    }
+    if (!m_actors.empty()) {
+        updateActorPoses(m_actors, deltaSeconds);
+        for (const SkinnedActor& actor : m_actors) {
+            if (!actor.uploaded) {
+                continue;
+            }
+            render::ImportedSkinnedActorFrameData pose{};
+            pose.boneMatrices = actor.poseScratch;
+            m_renderer.setSkinnedActorPose(actor.instanceSlot, pose);
+        }
+    }
+
+    // Pose him every frame, whether or not he is being talked to -- the idle
+    // clip is what makes him read as a machine that is running rather than a
+    // statue of one.
+    if (m_victor.uploaded) {
+        updateVictorPose(m_victor, deltaSeconds);
+        render::ImportedSkinnedActorFrameData pose{};
+        pose.boneMatrices = m_victor.poseScratch;
+        m_renderer.setSkinnedActorPose(kVictorSkinnedInstance, pose);
+    }
+
+    // ODAI_FNV_VICTOR_TALK=1 opens the conversation on the first tick, so the
+    // dialogue UI can be checked from a --screenshot run, which cannot press E.
+    if (!m_victor.talking && m_victor.placed && !m_victor.tree.nodes.empty() &&
+        std::getenv("ODAI_FNV_VICTOR_TALK") != nullptr) {
+        static bool autoTalked = false;
+        if (!autoTalked) {
+            autoTalked = true;
+            m_victor.runtime.begin(m_victor.tree, m_victor.context);
+            m_victor.talking = true;
+            VOX_LOGI("newvegas") << "auto-talk: node="
+                                 << (m_victor.runtime.currentNode() != nullptr
+                                         ? m_victor.runtime.currentNode()->id
+                                         : std::string("<null>"))
+                                 << " finished=" << m_victor.runtime.isFinished();
+        }
     }
 
     // Talking to Victor. Held keys are edge-detected by keyDown(), so a choice
     // is taken once per press rather than once per frame.
+    // Edge-latched per slot. keyDown() is level-triggered, so an unlatched read
+    // takes one choice PER FRAME: a normal ~100 ms press on "1" consumed six
+    // choices, ran off the end of the branch and closed the conversation before
+    // it could be read, which looked exactly like Victor refusing to talk.
+    for (int slot = 0; slot < 9; ++slot) {
+        const bool pressed = keyDown(m_window, GLFW_KEY_1 + slot);
+        const bool edge = pressed && !m_choiceKeyLatch[slot];
+        m_choiceKeyLatch[slot] = pressed;
+        if (!edge || !m_victor.talking) {
+            continue;
+        }
+        const auto choices = m_victor.runtime.availableChoices();
+        if (static_cast<std::size_t>(slot) < choices.size()) {
+            m_victor.runtime.choose(*choices[static_cast<std::size_t>(slot)]);
+        }
+    }
+    // Highlight-and-confirm, alongside the number keys rather than instead of
+    // them. The numbers are the fast path for someone at a keyboard; up/down
+    // and Accept are the only ones that work from a couch, and they come from
+    // UiNavInput so a gamepad drives them identically (pollNavInput already
+    // folds the d-pad, the left stick and the arrow keys into the same
+    // actions, with auto-repeat, so a held direction scrolls instead of
+    // jumping one row per frame).
     if (m_victor.talking) {
-        for (int slot = 0; slot < 9; ++slot) {
-            if (!keyDown(m_window, GLFW_KEY_1 + slot)) {
-                continue;
-            }
-            const auto choices = m_victor.runtime.availableChoices();
-            if (static_cast<std::size_t>(slot) < choices.size()) {
-                m_victor.runtime.choose(*choices[static_cast<std::size_t>(slot)]);
-                speakVictorLine(m_victor, std::filesystem::path(m_streamDirectory),
-                                std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
+        const auto choices = m_victor.runtime.availableChoices();
+        const auto choiceCount = static_cast<int>(choices.size());
+        // A new node means a new set of replies; leaving the old index in
+        // place would highlight an unrelated line, or one that no longer
+        // exists.
+        const dialogue::DialogueNode* currentNode = m_victor.runtime.currentNode();
+        const std::string currentNodeId = currentNode != nullptr ? currentNode->id : std::string();
+        if (currentNodeId != m_dialogueChoiceNodeId) {
+            m_dialogueChoiceNodeId = currentNodeId;
+            m_dialogueChoice = 0;
+            // ODAI_FNV_DIALOGUE_SELECT=<n> starts on the nth reply (0-based).
+            // The highlight is the whole point of this panel and a --screenshot
+            // run cannot press a key, so without this the only row that can
+            // ever be photographed is the first one -- and "the highlight is
+            // drawn" and "the highlight tracks the selection" are different
+            // claims.
+            if (const char* fromEnv = std::getenv("ODAI_FNV_DIALOGUE_SELECT")) {
+                m_dialogueChoice = std::atoi(fromEnv);
             }
         }
+        if (choiceCount > 0) {
+            if (m_nav.pressed(ui::UiNavAction::Up)) {
+                // Wrapping, not clamping: a four-item list on a controller is
+                // faster to reach the end of by going up once.
+                m_dialogueChoice = (m_dialogueChoice + choiceCount - 1) % choiceCount;
+            }
+            if (m_nav.pressed(ui::UiNavAction::Down)) {
+                m_dialogueChoice = (m_dialogueChoice + 1) % choiceCount;
+            }
+            m_dialogueChoice = std::clamp(m_dialogueChoice, 0, choiceCount - 1);
+            if (m_nav.pressed(ui::UiNavAction::Accept)) {
+                m_victor.runtime.choose(*choices[static_cast<std::size_t>(m_dialogueChoice)]);
+                m_dialogueChoice = 0;
+            }
+        } else {
+            m_dialogueChoice = 0;
+        }
+    }
+    if (m_victor.talking) {
         if (m_victor.runtime.isFinished() || m_victor.runtime.currentNode() == nullptr) {
             m_victor.talking = false;
         }
+    }
+    // One call site rather than one per way a conversation can advance (a
+    // choice, opening it, the auto-talk hook). It is a no-op once the current
+    // node has been spoken, so polling it costs a map lookup and cannot start a
+    // line twice.
+    if (m_victor.talking && !m_streamCacheDirectory.empty()) {
+        speakVictorLine(
+            m_victor, std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
     }
 
     if (keyDown(m_window, GLFW_KEY_ESCAPE)) {
@@ -2078,22 +2478,28 @@ void NewVegasApp::onTick(float deltaSeconds) {
     const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
     m_victorPromptVisible =
         !m_victor.talking && victorIsInReach(m_victor, cameraPosition, m_yawDegrees * (kPi / 180.0f));
+    // Latch BEFORE the branch below. It used to be updated after an early
+    // return that the Victor path took, so the latch stayed false while E was
+    // held: the next frame saw a fresh "press" and walked the player through
+    // Doc Mitchell's door -- which is a step from where Victor stands -- so the
+    // conversation opened and an interior load closed it in the same keypress.
     const bool doorPressed = keyDown(m_window, GLFW_KEY_E);
-    if (doorPressed && m_victorPromptVisible) {
+    const bool doorEdge = doorPressed && !m_doorKeyLatch;
+    m_doorKeyLatch = doorPressed;
+    if (doorEdge && m_victorPromptVisible) {
         m_victor.runtime.begin(m_victor.tree, m_victor.context);
         m_victor.talking = true;
         m_victor.spokenNodeId.clear();
-        speakVictorLine(m_victor, std::filesystem::path(m_streamDirectory),
-                        std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
+        // The line itself is started by the single speakVictorLine poll above,
+        // on the next tick.
         return;  // E opened a conversation; do not also walk through a door
     }
-    if (doorPressed && !m_doorKeyLatch) {
+    if (doorEdge) {
         const int doorIndex = findUsableDoor();
         if (doorIndex >= 0) {
             useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
         }
     }
-    m_doorKeyLatch = doorPressed;
 
     const bool walkPressed = keyDown(m_window, GLFW_KEY_F);
     if (walkPressed && !m_walkModeLatch) {
@@ -2124,6 +2530,56 @@ namespace {
 // HUD reads as one instrument rather than a pile of independently styled boxes.
 constexpr ui::UiColor kPipGreen{0.42f, 1.00f, 0.52f, 1.00f};
 constexpr ui::UiColor kPipGreenDim{0.26f, 0.66f, 0.32f, 1.00f};
+
+// Greedy word wrap against a baked font's own metrics.
+//
+// The HUD's addText draws one unwrapped run, which is fine for a status strip
+// and wrong for a paragraph: Victor's longer lines ran off the side of the
+// screen. Written here rather than reached for through rich_text because that
+// path parses <b>/<color=...> markup, and this text comes out of a 1998 game's
+// dialogue records -- a stray '<' in a line is content, not a tag.
+//
+// A single word longer than maxWidth is emitted on its own over-long line
+// rather than split mid-word: it cannot be made to fit, and breaking it is
+// less readable than letting one line run.
+std::vector<std::string> wrapTextToWidth(
+    const ui::Font& font, const std::string& text, float maxWidth
+) {
+    std::vector<std::string> lines;
+    if (text.empty()) {
+        return lines;
+    }
+    if (maxWidth <= 0.0f) {
+        lines.push_back(text);
+        return lines;
+    }
+    std::string line;
+    std::size_t wordStart = 0;
+    while (wordStart <= text.size()) {
+        std::size_t wordEnd = text.find(' ', wordStart);
+        if (wordEnd == std::string::npos) {
+            wordEnd = text.size();
+        }
+        const std::string word = text.substr(wordStart, wordEnd - wordStart);
+        if (!word.empty()) {
+            const std::string candidate = line.empty() ? word : (line + " " + word);
+            if (!line.empty() && font.measureText(candidate) > maxWidth) {
+                lines.push_back(line);
+                line = word;
+            } else {
+                line = candidate;
+            }
+        }
+        if (wordEnd == text.size()) {
+            break;
+        }
+        wordStart = wordEnd + 1;
+    }
+    if (!line.empty()) {
+        lines.push_back(line);
+    }
+    return lines;
+}
 constexpr ui::UiColor kPipPanel{0.02f, 0.07f, 0.03f, 0.82f};
 constexpr ui::UiColor kPipPanelSolid{0.02f, 0.07f, 0.03f, 0.95f};
 
@@ -2169,18 +2625,27 @@ void NewVegasApp::pollNavInput(float deltaSeconds) {
                         pad.buttons[GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER] == GLFW_PRESS);
     }
 
-    // Stick first, then OR in the d-pad and arrow keys. The stick mapper owns
-    // the four directions' latched state, so digital sources are folded in
-    // after it rather than fighting it for the same flags.
-    m_navStick.apply(m_nav, stickX, stickY);
+    // All three sources for a direction -- stick, d-pad, arrow key -- combined
+    // into ONE level, then set once.
+    //
+    // This used to call m_navStick.apply() and then fold the digital sources in
+    // with `if (key) setAction(action, true)`. Two setAction calls per action
+    // per frame, and the second one saw the first's `false` as the previous
+    // frame's state, so every frame an arrow key was held produced a fresh
+    // press edge. The dialogue list scrolled at frame rate -- about 100 items a
+    // second on this machine -- which is what "the selection moves too fast"
+    // actually was. The auto-repeat timing was never involved.
+    int stickDirectionX = 0;
+    int stickDirectionY = 0;
+    m_navStick.resolveDirection(stickX, stickY, stickDirectionX, stickDirectionY);
     const bool padUp = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_UP] == GLFW_PRESS;
     const bool padDown = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_DOWN] == GLFW_PRESS;
     const bool padLeft = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_LEFT] == GLFW_PRESS;
     const bool padRight = hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_DPAD_RIGHT] == GLFW_PRESS;
-    if (keyUp || padUp) { m_nav.setAction(ui::UiNavAction::Up, true); }
-    if (keyDownArrow || padDown) { m_nav.setAction(ui::UiNavAction::Down, true); }
-    if (keyLeft || padLeft) { m_nav.setAction(ui::UiNavAction::Left, true); }
-    if (keyRight || padRight) { m_nav.setAction(ui::UiNavAction::Right, true); }
+    m_nav.setAction(ui::UiNavAction::Up, keyUp || padUp || stickDirectionY < 0);
+    m_nav.setAction(ui::UiNavAction::Down, keyDownArrow || padDown || stickDirectionY > 0);
+    m_nav.setAction(ui::UiNavAction::Left, keyLeft || padLeft || stickDirectionX < 0);
+    m_nav.setAction(ui::UiNavAction::Right, keyRight || padRight || stickDirectionX > 0);
     m_nav.setAction(ui::UiNavAction::Accept, accept);
     m_nav.setAction(ui::UiNavAction::Cancel, cancel);
     m_nav.setAction(ui::UiNavAction::Menu, menu);
@@ -2193,7 +2658,12 @@ void NewVegasApp::pollNavInput(float deltaSeconds) {
     m_navDriving = m_navDriving || m_nav.active;
     m_nav.active = false;
 
-    if (m_nav.pressed(ui::UiNavAction::Menu)) {
+    // Not while a conversation is up: Escape is both Menu and Cancel, and this
+    // runs at the top of the tick, before the dialogue's own Escape handling.
+    // Backing out of a conversation therefore closed it AND opened the menu in
+    // one press -- two modal states toggled by one key, which reads as the menu
+    // appearing for no reason.
+    if (m_nav.pressed(ui::UiNavAction::Menu) && !m_victor.talking) {
         m_menuOpen = !m_menuOpen;
         // Releasing the mouse with the menu up is what makes it usable on PC;
         // on a controller it costs nothing.
@@ -2338,22 +2808,7 @@ void NewVegasApp::drawPipBoyHud() {
     // HUD is immediate-mode text, so one path is simpler than bridging two.
     if (m_victor.talking) {
         if (const dialogue::DialogueNode* node = m_victor.runtime.currentNode()) {
-            float y = static_cast<float>(screenHeight) - (260.0f * scale);
-            const float x = 64.0f * scale;
-            m_uiDrawList.addText(m_uiFont, node->speaker + ":", ui::UiVec2{x, y}, kPipGreen);
-            y += 26.0f * scale;
-            m_uiDrawList.addText(m_uiFont, node->text, ui::UiVec2{x, y}, kPipGreen);
-            y += 34.0f * scale;
-            const auto choices = m_victor.runtime.availableChoices();
-            for (std::size_t i = 0; i < choices.size() && i < 9u; ++i) {
-                m_uiDrawList.addText(
-                    m_uiFont, std::to_string(i + 1) + ") " + choices[i]->text,
-                    ui::UiVec2{x, y}, kPipGreenDim);
-                y += 24.0f * scale;
-            }
-            if (choices.empty()) {
-                m_uiDrawList.addText(m_uiFont, "(Esc to end)", ui::UiVec2{x, y}, kPipGreenDim);
-            }
+            drawDialoguePanel(*node, screenWidth, screenHeight, scale);
         }
     } else if (m_victorPromptVisible) {
         m_uiDrawList.addText(m_uiFont, "E  talk to Victor",
@@ -2494,6 +2949,156 @@ void NewVegasApp::drawPauseMenu() {
         kPipGreenDim);
 }
 
+void NewVegasApp::drawDialoguePanel(
+    const dialogue::DialogueNode& node, int screenWidth, int screenHeight, float scale
+) {
+    // Fall back to the body face when a dialogue bake failed; the layout below
+    // measures whatever font it is handed, so it stays correct either way.
+    const ui::Font& lineFont = m_dialogueFont.valid() ? m_dialogueFont : m_uiFont;
+    const ui::Font& choiceFont = m_dialogueChoiceFont.valid() ? m_dialogueChoiceFont : m_uiFont;
+
+    const auto width = static_cast<float>(screenWidth);
+    const auto height = static_cast<float>(screenHeight);
+
+    // Width is capped in *scaled* units as well as as a fraction of the screen.
+    // A line of text that spans an entire 4K width is unreadable no matter how
+    // big the glyphs are -- the eye loses the start of the next line -- so the
+    // card stops growing once it is wide enough for a comfortable measure.
+    const float panelWidth = std::min(width * 0.74f, 1500.0f * scale);
+    const float padding = 40.0f * scale;
+    const float innerWidth = panelWidth - (padding * 2.0f);
+
+    const std::vector<std::string> spokenLines =
+        wrapTextToWidth(lineFont, node.text, innerWidth);
+    const float spokenLineHeight = lineFont.lineHeightPx() * 1.18f;
+
+    // Replies are indented past their number, and the wrap has to account for
+    // that or a long reply overruns the card it is measured against.
+    const float choiceIndent = 56.0f * scale;
+    const float choiceRowPadding = 14.0f * scale;
+    const float choiceLineHeight = choiceFont.lineHeightPx() * 1.15f;
+    const auto choices = m_victor.runtime.availableChoices();
+    const std::size_t choiceCount = std::min<std::size_t>(choices.size(), 9u);
+    std::vector<std::vector<std::string>> choiceLines;
+    choiceLines.reserve(choiceCount);
+    float choicesHeight = 0.0f;
+    for (std::size_t i = 0; i < choiceCount; ++i) {
+        choiceLines.push_back(
+            wrapTextToWidth(choiceFont, choices[i]->text, innerWidth - choiceIndent));
+        const float rows = static_cast<float>(std::max<std::size_t>(choiceLines.back().size(), 1u));
+        choicesHeight += (rows * choiceLineHeight) + (choiceRowPadding * 2.0f);
+    }
+
+    const float speakerHeight = m_uiFontBold.valid() ? m_uiFontBold.lineHeightPx()
+                                                     : m_uiFont.lineHeightPx();
+    // Weighted toward the replies: the rule belongs to the block above it, and
+    // an equal gap on both sides made the first reply's highlight border read
+    // as if it were touching the rule.
+    const float ruleGapAbove = 22.0f * scale;
+    const float ruleGapBelow = 30.0f * scale;
+    const float ruleGap = ruleGapAbove + ruleGapBelow;
+    const float footerHeight = m_uiFont.lineHeightPx() + (18.0f * scale);
+    const float spokenHeight =
+        static_cast<float>(std::max<std::size_t>(spokenLines.size(), 1u)) * spokenLineHeight;
+    const float panelHeight = (padding * 2.0f) + speakerHeight + (12.0f * scale) + spokenHeight +
+                              ruleGap + choicesHeight + footerHeight;
+
+    const float panelX = (width - panelWidth) * 0.5f;
+    const float panelY = (height - panelHeight) * 0.5f;
+    const ui::UiRect panel{panelX, panelY, panelX + panelWidth, panelY + panelHeight};
+    const float corner = 10.0f * scale;
+    // Published for updateCamera, which frames Victor's face above this edge.
+    m_dialoguePanelTopPx = panelY;
+
+    // The card sits over the world, so it needs to separate from whatever is
+    // behind it: a shadow to lift it off the terrain, a near-opaque fill so
+    // text never competes with a bright sky, and a phosphor edge to tie it to
+    // the rest of the HUD.
+    m_uiDrawList.addDropShadow(panel, ui::UiColor{0.0f, 0.0f, 0.0f, 0.55f}, 18.0f * scale, corner);
+    m_uiDrawList.addRoundRectFilled(panel, kPipPanelSolid, corner);
+    m_uiDrawList.addRoundRect(panel, kPipGreenDim, corner, 2.0f * scale);
+
+    float y = panel.minY + padding;
+
+    // Speaker, centred over the line, in caps -- a name label, not prose.
+    std::string speaker = node.speaker.empty() ? std::string("VICTOR") : node.speaker;
+    for (char& c : speaker) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    const ui::Font& speakerFont = m_uiFontBold.valid() ? m_uiFontBold : m_uiFont;
+    m_uiDrawList.addText(
+        speakerFont, speaker,
+        ui::UiVec2{panel.minX + ((panelWidth - speakerFont.measureText(speaker)) * 0.5f), y},
+        kPipGreenDim);
+    y += speakerHeight + (12.0f * scale);
+
+    // What Victor says: centred, because it is one short block and centring it
+    // under the name reads as a single unit.
+    for (const std::string& text : spokenLines) {
+        m_uiDrawList.addText(
+            lineFont, text,
+            ui::UiVec2{panel.minX + ((panelWidth - lineFont.measureText(text)) * 0.5f), y},
+            kPipGreen);
+        y += spokenLineHeight;
+    }
+
+    y += ruleGapAbove;
+    m_uiDrawList.addRectFilled(
+        ui::UiRect{panel.minX + padding, y, panel.maxX - padding, y + (1.0f * scale)},
+        ui::UiColor{kPipGreenDim.r, kPipGreenDim.g, kPipGreenDim.b, 0.45f});
+    y += ruleGapBelow;
+
+    // The replies: LEFT aligned, unlike the block above. They are a list to be
+    // scanned down, and centring a list makes every row start in a different
+    // place, which is exactly what the eye uses to track position.
+    for (std::size_t i = 0; i < choiceCount; ++i) {
+        const float rows = static_cast<float>(std::max<std::size_t>(choiceLines[i].size(), 1u));
+        const float rowHeight = (rows * choiceLineHeight) + (choiceRowPadding * 2.0f);
+        const bool selected = static_cast<int>(i) == m_dialogueChoice;
+        const ui::UiRect row{panel.minX + (padding * 0.5f), y,
+                             panel.maxX - (padding * 0.5f), y + rowHeight};
+
+        // Selection is stated three ways at once, because any one of them alone
+        // fails somewhere: a fill is invisible to the colour-blind against a
+        // green-on-green palette, a colour change alone is easy to miss across
+        // a room, and a caret alone is small. Together they are unmistakable at
+        // TV distance.
+        if (selected) {
+            m_uiDrawList.addRoundRectFilled(
+                row, ui::UiColor{kPipGreen.r, kPipGreen.g, kPipGreen.b, 0.20f}, corner * 0.6f);
+            m_uiDrawList.addRoundRect(row, kPipGreen, corner * 0.6f, 2.0f * scale);
+            m_uiDrawList.addText(
+                choiceFont, ">",
+                ui::UiVec2{row.minX + (16.0f * scale), y + choiceRowPadding}, kPipGreen);
+        }
+
+        const std::string number = std::to_string(i + 1) + ".";
+        m_uiDrawList.addText(
+            choiceFont, number,
+            ui::UiVec2{row.minX + (40.0f * scale), y + choiceRowPadding},
+            selected ? kPipGreen : kPipGreenDim);
+
+        float choiceY = y + choiceRowPadding;
+        for (const std::string& text : choiceLines[i]) {
+            m_uiDrawList.addText(
+                choiceFont, text,
+                ui::UiVec2{row.minX + choiceIndent + (30.0f * scale), choiceY},
+                selected ? kPipGreen : kPipGreenDim);
+            choiceY += choiceLineHeight;
+        }
+        y += rowHeight;
+    }
+
+    const std::string footer = choiceCount == 0
+        ? std::string("Esc  end conversation")
+        : std::string("Up/Down  select     Enter  choose     Esc  leave");
+    m_uiDrawList.addText(
+        m_uiFont, footer,
+        ui::UiVec2{panel.minX + ((panelWidth - m_uiFont.measureText(footer)) * 0.5f),
+                   panel.maxY - padding - m_uiFont.lineHeightPx() + (10.0f * scale)},
+        kPipGreenDim);
+}
+
 void NewVegasApp::drawHud() {
     drawPipBoyHud();
     drawPauseMenu();
@@ -2510,7 +3115,7 @@ void NewVegasApp::drawHud() {
     // body face -- the size jump between them is what makes the location name
     // read as the headline rather than as another line of HUD text. Falls back
     // to the body face if loadFonts was not given a display size.
-    if (!m_menuOpen) {
+    if (!m_menuOpen && !m_victor.talking) {
         const ui::Font& bannerFont = m_uiFontDisplay.valid() ? m_uiFontDisplay : m_uiFont;
         m_banner.draw(m_uiDrawList, bannerFont, m_uiFont, screen, contentScale());
     }
@@ -2532,7 +3137,7 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
     camera.z = m_cameraZ;
     camera.yawDegrees = m_yawDegrees;
     camera.pitchDegrees = m_pitchDegrees;
-    camera.fovDegrees = 75.0f;
+    camera.fovDegrees = m_cameraFovDegrees;
     submitFrame(camera);
 
     // Capture AFTER submitFrame: the capture reads the last presented image, so

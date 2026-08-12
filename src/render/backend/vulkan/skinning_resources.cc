@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -166,6 +167,10 @@ void RendererBackend::destroySkinningComputeResources() {
         slot.boneCount = 0;
         slot.meshDraws.clear();
         slot.pendingBoneMatrices.clear();
+        for (const std::uint32_t textureSlot : slot.textureSlots) {
+            releaseImportedTexture(textureSlot);
+        }
+        slot.textureSlots.clear();
     }
     if (m_skinningDescriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_skinningDescriptorSetLayout, nullptr);
@@ -472,6 +477,131 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         m_skinningMeshDraws.insert(m_skinningMeshDraws.end(), draws.begin(), draws.end());
     }
     return true;
+}
+
+// Uploads a skinned actor's textures into the shared bindless table and hands
+// back one slot per input, in order.
+//
+// A skinned actor cannot reach a texture the way imported world geometry does.
+// A chunk's textures are uploaded by addImportedSceneChunk, which remaps every
+// vertex's scene-local texture index onto a bindless slot on the way in; the
+// caller never sees the mapping and has no way to ask for it. A skinned
+// template's vertices are uploaded verbatim, so whatever
+// ImportedSkinnedMeshVertex::textureIndex holds has to ALREADY be a bindless
+// slot. This is how a caller gets one.
+//
+// The shape (transient command pool, acquire, submit on the render timeline,
+// defer the staging buffers to that value) is setWeatherClouds' -- the other
+// caller that uploads textures outside any scene. Slots are reference counted
+// by source path in the same table, so an actor sharing a texture with the
+// world costs nothing extra.
+std::vector<std::uint32_t> RendererBackend::uploadSkinnedActorTextures(
+    std::uint32_t instanceIndex, const std::vector<odai::importer::ImportedSceneTexture>& textures
+) {
+    std::vector<std::uint32_t> slots(textures.size(), kInvalidImportedTextureSlot);
+    if (instanceIndex >= kMaxSkinnedInstances || textures.empty()) {
+        return slots;
+    }
+    // Released only after the new acquires have run, so a texture shared
+    // between the old set and the new one keeps its reference and its image
+    // rather than being destroyed and re-uploaded.
+    SkinnedInstanceSlot& slot = m_skinningInstances[instanceIndex];
+    const std::vector<std::uint32_t> previousSlots = std::move(slot.textureSlots);
+    slot.textureSlots.clear();
+
+    // The same gate acquireImportedTexture applies; checking it up front avoids
+    // building a command pool only to have every acquire refuse.
+    if (!m_supportsBindlessDescriptors || !m_bindlessBufferSet.valid() ||
+        m_bindlessTextureCapacity <= kBindlessTextureStaticCount) {
+        for (const std::uint32_t previous : previousSlots) {
+            releaseImportedTexture(previous);
+        }
+        return slots;
+    }
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    if (vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool) != VK_SUCCESS) {
+        VOX_LOGE("render") << "skinned actor texture upload command pool creation failed";
+        for (const std::uint32_t previous : previousSlots) {
+            releaseImportedTexture(previous);
+        }
+        return slots;
+    }
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = commandPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer) != VK_SUCCESS ||
+        vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "skinned actor texture upload command buffer setup failed";
+        scheduleCommandPoolRelease(commandPool, 0);
+        for (const std::uint32_t previous : previousSlots) {
+            releaseImportedTexture(previous);
+        }
+        return slots;
+    }
+
+    std::vector<BufferHandle> stagingBufferHandles;
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        const odai::importer::ImportedSceneTexture& texture = textures[i];
+        if (texture.rgba8.empty()) {
+            continue;
+        }
+        slots[i] = acquireImportedTexture(
+            normalizedImportedTextureKey(texture.sourcePath), texture, commandBuffer,
+            stagingBufferHandles);
+        if (slots[i] != kInvalidImportedTextureSlot) {
+            slot.textureSlots.push_back(slots[i]);
+        }
+    }
+
+    for (const std::uint32_t previous : previousSlots) {
+        releaseImportedTexture(previous);
+    }
+
+    std::uint64_t uploadTimelineValue = 0;
+    if (vkEndCommandBuffer(commandBuffer) == VK_SUCCESS) {
+        uploadTimelineValue = m_nextTimelineValue++;
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderTimelineSemaphore;
+        signalInfo.value = uploadTimelineValue;
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+        const VkResult submitResult =
+            vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit2(skinnedActorTextureUpload)", submitResult);
+            uploadTimelineValue = 0;
+        } else {
+            m_pendingTransferTimelineValue =
+                std::max(m_pendingTransferTimelineValue, uploadTimelineValue);
+        }
+    }
+    for (const BufferHandle stagingHandle : stagingBufferHandles) {
+        if (stagingHandle != kInvalidBufferHandle) {
+            scheduleBufferRelease(stagingHandle, uploadTimelineValue);
+        }
+    }
+    scheduleCommandPoolRelease(commandPool, uploadTimelineValue);
+    return slots;
 }
 
 // Public entry point (Renderer::setSkinnedActorPose), called by app code

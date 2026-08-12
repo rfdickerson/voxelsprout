@@ -21,7 +21,9 @@
 #include "import/fnv/character_builder.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/dialogue_records.h"
+#include "import/fnv/actor_records.h"
 #include "import/fnv/fallout_records.h"
+#include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
@@ -427,6 +429,197 @@ int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virt
     return 1;
 }
 
+// Dumps a .kf animation file's block layout and the raw words of its
+// NiControllerSequence.
+//
+// Exists for the same reason --nifblocks does: the ControlledBlock layout is
+// the one part of the KF format that is genuinely version-conditional (a
+// string-palette offset before 20.1.0.3, a header string index after), and
+// guessing which branch retail New Vegas took is exactly the mistake this file
+// header warns about. --nifblocks cannot be used instead because its index is
+// filtered to ".nif" and a .kf is not one.
+int dumpKfAnimation(const std::filesystem::path& dataPath, const std::string& virtualPath) {
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "cannot index archives under " << dataPath << "\n";
+        return 1;
+    }
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    if (!assets.resolveMesh(virtualPath, bytes, error)) {
+        std::cout << "resolve failed: " << error << "\n";
+        return 1;
+    }
+    odai::importer::fnv::NifBlockSummary summary;
+    if (!odai::importer::fnv::parseNifBlockSummary(bytes, summary, error)) {
+        std::cout << "header parse FAILED: " << error << "\n";
+        return 1;
+    }
+    std::cout << virtualPath << ": " << bytes.size() << " bytes, "
+              << summary.blockTypeNames.size() << " blocks, " << summary.strings.size()
+              << " strings\n";
+
+    std::map<std::string, std::size_t> typeCounts;
+    for (const std::string& typeName : summary.blockTypeNames) {
+        ++typeCounts[typeName];
+    }
+    std::cout << "block types:\n";
+    for (const auto& [typeName, count] : typeCounts) {
+        std::cout << "  " << count << "x " << typeName << "\n";
+    }
+
+    // The sequence block, word by word. Its header is a handful of floats and
+    // refs followed by the controlled-block array, and reading the words as
+    // both int and float side by side is what makes the boundary visible --
+    // start/stop time are recognisable floats, refs are small ints.
+    for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+        if (summary.blockTypeNames[i] != "NiControllerSequence") {
+            continue;
+        }
+        const std::size_t start = summary.blockStarts[i];
+        const std::size_t words = summary.blockSizes[i] / 4u;
+        std::cout << "[" << i << "] NiControllerSequence, " << summary.blockSizes[i]
+                  << " bytes (" << words << " words):\n";
+        for (std::size_t w = 0; w < words && w < 96u; ++w) {
+            std::int32_t asInt = 0;
+            float asFloat = 0.0f;
+            std::memcpy(&asInt, bytes.data() + start + (w * 4u), 4u);
+            std::memcpy(&asFloat, bytes.data() + start + (w * 4u), 4u);
+            std::cout << "  w" << w << " int=" << asInt << " float=" << asFloat;
+            if (asInt >= 0 && static_cast<std::size_t>(asInt) < summary.strings.size()) {
+                std::cout << " str=\"" << summary.strings[static_cast<std::size_t>(asInt)] << "\"";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // First interpolator/data pair, same treatment.
+    for (const char* wanted : {"NiTransformInterpolator", "NiTransformData"}) {
+        for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+            if (summary.blockTypeNames[i] != wanted) {
+                continue;
+            }
+            const std::size_t start = summary.blockStarts[i];
+            const std::size_t words = summary.blockSizes[i] / 4u;
+            std::cout << "[" << i << "] " << wanted << ", " << summary.blockSizes[i]
+                      << " bytes (" << words << " words):\n";
+            for (std::size_t w = 0; w < words && w < 40u; ++w) {
+                std::int32_t asInt = 0;
+                float asFloat = 0.0f;
+                std::memcpy(&asInt, bytes.data() + start + (w * 4u), 4u);
+                std::memcpy(&asFloat, bytes.data() + start + (w * 4u), 4u);
+                std::cout << "  w" << w << " int=" << asInt << " float=" << asFloat << "\n";
+            }
+            break;
+        }
+    }
+
+    // And what the reader itself makes of it -- the dump above is only useful
+    // next to the parse it is supposed to justify.
+    odai::importer::fnv::KfAnimation animation;
+    if (!odai::importer::fnv::parseKfAnimation(bytes, animation, error)) {
+        std::cout << "parseKfAnimation FAILED: " << error << "\n";
+        return 1;
+    }
+    std::cout << "parsed \"" << animation.name << "\": " << animation.duration() << "s, "
+              << (animation.loops() ? "looping" : "one-shot") << ", " << animation.tracks.size()
+              << " tracks (" << animation.stats.transformInterpolators << " transform, "
+              << animation.stats.unsupportedInterpolators << " unsupported, of "
+              << animation.stats.controlledBlocks << " controlled blocks)\n";
+    if (!animation.stats.unsupportedNodes.empty()) {
+        std::cout << "  undecoded (B-spline) nodes:";
+        for (const std::string& node : animation.stats.unsupportedNodes) {
+            std::cout << " " << node;
+        }
+        std::cout << "\n";
+    }
+    std::size_t shownTracks = 0;
+    for (const auto& track : animation.tracks) {
+        if (shownTracks++ >= 8u) {
+            break;
+        }
+        std::cout << "  " << track.nodeName << ": " << track.rotationKeys.size() << " rot, "
+                  << track.translationKeys.size() << " trans, " << track.scaleKeys.size()
+                  << " scale";
+        if (!track.rotationKeys.empty()) {
+            std::cout << "  t[" << track.rotationKeys.front().time << ".."
+                      << track.rotationKeys.back().time << "]";
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << "string table:\n";
+    for (std::size_t i = 0; i < summary.strings.size() && i < 40u; ++i) {
+        std::cout << "  [" << i << "] \"" << summary.strings[i] << "\"\n";
+    }
+    return 0;
+}
+
+// Parses every .kf under a folder and reports what the reader made of each.
+//
+// One file parsing is not evidence the layout is right -- it is evidence it is
+// right for that file. The securitron alone ships 89 clips spanning every key
+// type and both interpolator families, and a stride error shows up as a
+// scattering of failures across them rather than a clean break.
+int probeKfFolder(const std::filesystem::path& dataPath, const std::string& folderNeedle) {
+    const std::string loweredNeedle = toLowerAscii(folderNeedle);
+    std::size_t parsed = 0;
+    std::size_t failed = 0;
+    std::size_t noTracks = 0;
+    std::size_t totalTracks = 0;
+    std::size_t totalUnsupported = 0;
+    std::map<std::string, std::size_t> failureReasons;
+
+    for (const auto& archivePath : listArchives(dataPath)) {
+        std::uint32_t contentFlags = 0;
+        if (odai::importer::fnv::peekBsaContentFlags(archivePath, contentFlags) &&
+            (contentFlags & odai::importer::fnv::kBsaContentMeshes) == 0u) {
+            continue;
+        }
+        BsaArchive archive;
+        if (!archive.open(archivePath)) {
+            continue;
+        }
+        for (const BsaFileEntry& entry : archive.files()) {
+            const std::string lowered = toLowerAscii(entry.virtualPath);
+            if (lowered.size() < 4u || lowered.compare(lowered.size() - 3u, 3u, ".kf") != 0) {
+                continue;
+            }
+            if (lowered.find(loweredNeedle) == std::string::npos) {
+                continue;
+            }
+            std::vector<std::uint8_t> bytes;
+            std::string error;
+            if (!archive.extract(entry, bytes, error)) {
+                ++failed;
+                ++failureReasons["extract: " + error];
+                continue;
+            }
+            odai::importer::fnv::KfAnimation animation;
+            if (!odai::importer::fnv::parseKfAnimation(bytes, animation, error)) {
+                ++failed;
+                ++failureReasons[error];
+                continue;
+            }
+            ++parsed;
+            totalTracks += animation.tracks.size();
+            totalUnsupported += animation.stats.unsupportedInterpolators;
+            if (animation.tracks.empty()) {
+                ++noTracks;
+                std::cout << "  NO TRACKS: " << entry.virtualPath << "\n";
+            }
+        }
+    }
+    std::cout << parsed << " parsed, " << failed << " failed, " << noTracks
+              << " parsed but empty\n"
+              << "  " << totalTracks << " tracks total, " << totalUnsupported
+              << " unsupported interpolators skipped\n";
+    for (const auto& [reason, count] : failureReasons) {
+        std::cout << "  " << count << "x " << reason << "\n";
+    }
+    return failed == 0 ? 0 : 1;
+}
+
 // Dumps a skeleton NIF's bone hierarchy as an indented tree.
 //
 // The tree shape is the check that matters and it is one a human has to make:
@@ -507,6 +700,22 @@ int probeSkinnedNif(const std::filesystem::path& dataPath, const std::string& vi
             std::cout << "  \"" << shape.name << "\" verts " << vertexCount << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", bones " << shape.boneNames.size()
                       << ", diffuse \"" << shape.diffuseTexturePath << "\"\n";
+            // Where the geometry actually sits, in the file's own space, and
+            // the transform that is supposed to carry it into the skeleton's.
+            // A part in the wrong place on screen is one or the other, and the
+            // two need different fixes.
+            float rawMin[3] = {1e30f, 1e30f, 1e30f};
+            float rawMax[3] = {-1e30f, -1e30f, -1e30f};
+            for (std::size_t v = 0; v + 2u < shape.positions.size(); v += 3u) {
+                for (int a2 = 0; a2 < 3; ++a2) {
+                    rawMin[a2] = std::min(rawMin[a2], shape.positions[v + static_cast<std::size_t>(a2)]);
+                    rawMax[a2] = std::max(rawMax[a2], shape.positions[v + static_cast<std::size_t>(a2)]);
+                }
+            }
+            std::cout << "      skin-space bounds (" << rawMin[0] << ".." << rawMax[0] << ", "
+                      << rawMin[1] << ".." << rawMax[1] << ", " << rawMin[2] << ".." << rawMax[2]
+                      << ")  skinTransform t(" << shape.skinTransform[3] << ", "
+                      << shape.skinTransform[7] << ", " << shape.skinTransform[11] << ")\n";
             // How many bones each vertex actually uses, after truncation. A
             // column at 1 on a body mesh means the weights did not parse.
             std::size_t byCount[odai::importer::fnv::kNifMaxBoneInfluences + 1] = {};
@@ -2012,6 +2221,408 @@ int probeDialogueTree(const std::filesystem::path& pluginPath, const std::string
     return 0;
 }
 
+// Everything the plugin says about how one actor gets into the world and moves
+// around it: the base record's AI package list and script, every ACRE/ACHR that
+// places him (with its enable-parent, which is how Bethesda swaps one actor
+// between locations), and the packages/script those name.
+//
+// Written because "how does Victor move around Goodsprings" cannot be answered
+// from the reference alone -- a reference is a fixed position. Movement lives in
+// PACK records and in script text, and the several places he appears are
+// several references toggled by quest state, not one reference being driven.
+// Every actor placed within `radius` of a world XY, with what its base record
+// offers a renderer.
+//
+// The point is the last column. A CREA carries its own geometry (MODL is the
+// skeleton, NIFZ the body parts) and can be loaded the way Victor is. An NPC_
+// carries a skeleton and NOTHING else: its body comes from its RACE's part
+// models plus whatever it is wearing, which is a different and much larger
+// import path. "Populate the town" is cheap or expensive depending entirely on
+// which of these the town is made of, and that is not guessable.
+int probeActorsNear(
+    const std::filesystem::path& pluginPath, float centreX, float centreY, float radius
+) {
+    odai::importer::fnv::FalloutActorScan scan;
+    std::string error;
+    if (!odai::importer::fnv::findActorsNear(pluginPath, centreX, centreY, radius, scan, error)) {
+        std::cout << "scan failed: " << error << "\n";
+        return 1;
+    }
+    const auto sourceName = [](odai::importer::fnv::ActorGeometrySource source) {
+        switch (source) {
+            case odai::importer::fnv::ActorGeometrySource::OwnBodyParts: return "own-parts";
+            case odai::importer::fnv::ActorGeometrySource::Template:     return "TEMPLATE ";
+            case odai::importer::fnv::ActorGeometrySource::Race:         return "race     ";
+            default:                                                     return "NONE     ";
+        }
+    };
+    std::map<std::string, std::size_t> bySource;
+    std::size_t disabled = 0;
+    std::cout << scan.placements.size() << " placement(s) within " << radius << " units of ("
+              << centreX << ", " << centreY << "), " << scan.bases.size() << " actor bases:\n";
+    for (const auto& placement : scan.placements) {
+        const auto resolved = scan.resolve(placement.baseFormId);
+        ++bySource[sourceName(resolved.geometrySource)];
+        disabled += placement.initiallyDisabled ? 1u : 0u;
+        const float dx = placement.position[0] - centreX;
+        const float dy = placement.position[1] - centreY;
+        std::cout << "  " << sourceName(resolved.geometrySource) << " "
+                  << (resolved.base != nullptr ? resolved.base->recordType : std::string("?"))
+                  << " " << (resolved.base != nullptr ? resolved.base->editorId : std::string("?"))
+                  << "  d=" << static_cast<int>(std::sqrt((dx * dx) + (dy * dy)))
+                  << "  parts=" << resolved.bodyPartPaths.size();
+        if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::Template) {
+            std::cout << "  via=" << std::hex << resolved.resolvedBaseFormId << std::dec;
+        }
+        if (resolved.base != nullptr && resolved.base->raceFormId != 0u &&
+            resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::Race) {
+            std::cout << "  race=" << std::hex << resolved.base->raceFormId << std::dec
+                      << (resolved.base->isFemale ? " female" : " male")
+                      << "  carried=" << resolved.base->inventoryFormIds.size()
+                      << "  worn=" << resolved.wornArmorFormIds.size();
+        }
+        if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::None &&
+            resolved.base != nullptr) {
+            std::cout << "  tplt=" << std::hex << resolved.base->templateFormId
+                      << " race=" << resolved.base->raceFormId << std::dec
+                      << " modl=\"" << resolved.base->skeletonPath << "\"";
+        }
+        if (placement.initiallyDisabled) { std::cout << "  INITIALLY-DISABLED"; }
+        std::cout << "\n";
+        // The assembled part list, which is the whole answer for an NPC_ and
+        // the only place a wrong slot (a hat where the head should be, an
+        // outfit that never resolved) is visible before it reaches a screen.
+        for (const std::string& part : resolved.bodyPartPaths) {
+            std::cout << "        " << part << "\n";
+        }
+        // An NPC_ who resolved no armour at all is standing in the race's
+        // underwear. Naming what he was carrying is the only way to tell
+        // "carries nothing wearable" from "carries something this does not
+        // follow yet".
+        if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::Race &&
+            resolved.wornArmorFormIds.empty() && resolved.base != nullptr) {
+            const auto* wardrobe = scan.inheritedFrom(
+                resolved.base->formId, odai::importer::fnv::kActorTemplateUseInventory);
+            std::cout << "        UNDRESSED, carrying:";
+            if (wardrobe != nullptr) {
+                for (const std::uint32_t item : wardrobe->inventoryFormIds) {
+                    std::cout << " " << std::hex << item << std::dec
+                              << (scan.leveledItems.count(item) != 0u ? "(list)" : "");
+                }
+            }
+            std::cout << "\n";
+        }
+    }
+    std::cout << "\nby geometry source:\n";
+    for (const auto& [name, count] : bySource) {
+        std::cout << "  " << name << " " << count << "\n";
+    }
+    std::cout << "  (" << disabled << " initially disabled)\n";
+    return 0;
+}
+
+int probeActor(const std::filesystem::path& pluginPath, const std::string& wantedEditorId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(wantedEditorId);
+
+    const auto readU32 = [](const odai::importer::fnv::EsmSubrecordView& sub, std::size_t offset) {
+        std::uint32_t value = 0;
+        if (sub.size >= offset + 4u) {
+            std::memcpy(&value, sub.data + offset, 4u);
+        }
+        return value;
+    };
+    const auto subString = [](const odai::importer::fnv::EsmSubrecordView& sub) {
+        std::string out(reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+        while (!out.empty() && out.back() == '\0') { out.pop_back(); }
+        return out;
+    };
+
+    // Pass 1: the base actor -- its script and its AI package list.
+    std::uint32_t actorFormId = 0;
+    std::uint32_t scriptFormId = 0;
+    std::vector<std::uint32_t> packageFormIds;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return actorFormId == 0u && (header.type == "CREA" || header.type == "NPC_");
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (actorFormId != 0u) { return; }
+            bool match = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "EDID" && toLowerAscii(subString(sub)) == wanted) { match = true; }
+            }
+            if (!match) { return; }
+            actorFormId = record.formId;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "SCRI") { scriptFormId = readU32(sub, 0); }
+                else if (sub.type == "PKID") { packageFormIds.push_back(readU32(sub, 0)); }
+            }
+        };
+        reader.walk(visitor);
+    }
+    if (actorFormId == 0u) {
+        std::cout << "no CREA/NPC_ with EditorID \"" << wantedEditorId << "\"\n";
+        return 1;
+    }
+    std::cout << wantedEditorId << " = " << std::hex << actorFormId << std::dec
+              << "   script=" << std::hex << scriptFormId << std::dec
+              << "   " << packageFormIds.size() << " AI packages\n";
+
+    // Pass 2: every placement of him, and the cells they sit in.
+    struct Placement {
+        std::uint32_t refFormId = 0;
+        std::uint32_t cellFormId = 0;
+        float position[3] = {};
+        std::uint32_t enableParent = 0;
+        bool initiallyDisabled = false;
+    };
+    std::vector<Placement> placements;
+    std::map<std::uint32_t, std::string> cellNames;
+    {
+        std::uint32_t currentCell = 0;
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return header.type == "CELL" || header.type == "ACRE" || header.type == "ACHR";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type == "CELL") {
+                currentCell = record.formId;
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "EDID") { cellNames[record.formId] = subString(sub); }
+                }
+                return;
+            }
+            std::uint32_t base = 0;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "NAME") { base = readU32(sub, 0); }
+            }
+            if (base != actorFormId) { return; }
+            Placement placement;
+            placement.refFormId = record.formId;
+            placement.cellFormId = currentCell;
+            // Record header flag 0x800 is "Initially Disabled" -- the switch
+            // that makes a placement dormant until something enables it.
+            placement.initiallyDisabled = (record.flags & 0x00000800u) != 0u;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "DATA" && sub.size >= 12u) {
+                    std::memcpy(placement.position, sub.data, sizeof(placement.position));
+                } else if (sub.type == "XESP") {
+                    placement.enableParent = readU32(sub, 0);
+                }
+            }
+            placements.push_back(placement);
+        };
+        reader.walk(visitor);
+    }
+    std::cout << "\n" << placements.size() << " placement(s):\n";
+    for (const Placement& placement : placements) {
+        const auto named = cellNames.find(placement.cellFormId);
+        std::cout << "  ref " << std::hex << placement.refFormId << std::dec
+                  << "  cell " << std::hex << placement.cellFormId << std::dec
+                  << " (" << (named == cellNames.end() ? std::string("<unnamed>") : named->second) << ")"
+                  << "  pos (" << placement.position[0] << ", " << placement.position[1]
+                  << ", " << placement.position[2] << ")";
+        if (placement.initiallyDisabled) { std::cout << "  INITIALLY-DISABLED"; }
+        if (placement.enableParent != 0u) {
+            std::cout << "  enableParent=" << std::hex << placement.enableParent << std::dec;
+        }
+        std::cout << "\n";
+    }
+
+    // Pass 3: the AI packages he carries, and the script that drives him.
+    std::vector<std::uint32_t> packageTargets;
+    {
+        std::set<std::uint32_t> wantedPackages(packageFormIds.begin(), packageFormIds.end());
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return (header.type == "PACK" && wantedPackages.count(header.formId) != 0u) ||
+                   (header.type == "SCPT" && header.formId == scriptFormId);
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type == "PACK") {
+                std::string edid;
+                std::uint32_t packageType = 0xffffffffu;
+                std::uint32_t locationType = 0xffffffffu;
+                std::uint32_t locationTarget = 0;
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "EDID") { edid = subString(sub); }
+                    // PKDT: u32 flags, u8 type, ...
+                    else if (sub.type == "PKDT" && sub.size >= 5u) { packageType = sub.data[4]; }
+                    // PLDT: u32 type, u32 target, i32 radius.
+                    else if (sub.type == "PLDT" && sub.size >= 8u) {
+                        locationType = readU32(sub, 0);
+                        locationTarget = readU32(sub, 4);
+                    }
+                }
+                std::cout << "  PACK " << std::hex << record.formId << std::dec << " " << edid
+                          << "  type=" << static_cast<int>(packageType);
+                if (locationType != 0xffffffffu) {
+                    std::cout << "  locationType=" << locationType
+                              << " target=" << std::hex << locationTarget << std::dec;
+                    if (locationTarget != 0u) { packageTargets.push_back(locationTarget); }
+                }
+                std::cout << "\n";
+                return;
+            }
+            // SCPT: SCTX is the uncompiled source, which is where MoveTo /
+            // Enable / Disable actually appear in readable form.
+            for (const auto& sub : record.subrecords) {
+                if (sub.type != "SCTX") { continue; }
+                std::cout << "\n--- script source (" << sub.size << " bytes) ---\n"
+                          << subString(sub) << "\n--- end script ---\n";
+            }
+        };
+        std::cout << "\nAI packages:\n";
+        reader.walk(visitor);
+    }
+
+    // Pass 4: resolve what the packages and enable-parents actually POINT AT.
+    // A package target is a formID, and "target=16adc6" says nothing about
+    // whether he is patrolling a marker, a door or another actor.
+    // Patrol route. A Patrol package names ONE marker; the route is the chain
+    // of markers reached from it by XLKR (linked reference), which is how
+    // Bethesda expresses "walk this circuit". Every XMarker REFR is collected in
+    // a single pass and the chain is then followed in memory -- following it by
+    // re-walking the plugin per hop would be one full pass per marker.
+    {
+        struct Marker { float position[3] = {}; std::uint32_t linked = 0; };
+        std::map<std::uint32_t, Marker> markers;
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return header.type == "REFR";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            Marker marker;
+            bool linkedFound = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "XLKR") { marker.linked = readU32(sub, 0); linkedFound = true; }
+                else if (sub.type == "DATA" && sub.size >= 12u) {
+                    std::memcpy(marker.position, sub.data, sizeof(marker.position));
+                }
+            }
+            if (linkedFound) { markers[record.formId] = marker; }
+        };
+        reader.walk(visitor);
+
+        for (const std::uint32_t packageTarget : packageTargets) {
+            if (markers.count(packageTarget) == 0u) { continue; }
+            std::cout << "\npatrol route from " << std::hex << packageTarget << std::dec << ":\n";
+            std::uint32_t current = packageTarget;
+            std::set<std::uint32_t> visited;
+            int hop = 0;
+            while (current != 0u && visited.insert(current).second && hop < 32) {
+                const auto found = markers.find(current);
+                if (found == markers.end()) {
+                    std::cout << "  " << hop << ": " << std::hex << current << std::dec
+                              << " (not a linked marker)\n";
+                    break;
+                }
+                std::cout << "  " << hop << ": " << std::hex << current << std::dec << "  ("
+                          << found->second.position[0] << ", " << found->second.position[1]
+                          << ", " << found->second.position[2] << ")\n";
+                current = found->second.linked;
+                ++hop;
+            }
+            if (current != 0u && visited.count(current) != 0u) {
+                std::cout << "  loops back to " << std::hex << current << std::dec << "\n";
+            }
+        }
+    }
+
+    std::set<std::uint32_t> lookups;
+    for (const Placement& placement : placements) {
+        if (placement.enableParent != 0u) { lookups.insert(placement.enableParent); }
+    }
+    if (!lookups.empty()) {
+        std::cout << "\nreferenced records:\n";
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return lookups.count(header.formId) != 0u;
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            std::string edid;
+            std::uint32_t base = 0;
+            float position[3] = {};
+            bool hasPosition = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "EDID") { edid = subString(sub); }
+                else if (sub.type == "NAME") { base = readU32(sub, 0); }
+                else if (sub.type == "DATA" && sub.size >= 12u) {
+                    std::memcpy(position, sub.data, sizeof(position));
+                    hasPosition = true;
+                }
+            }
+            std::cout << "  " << std::hex << record.formId << std::dec << " " << record.type
+                      << " " << edid;
+            if (base != 0u) { std::cout << "  base=" << std::hex << base << std::dec; }
+            if (hasPosition) {
+                std::cout << "  pos (" << position[0] << ", " << position[1] << ", "
+                          << position[2] << ")";
+            }
+            std::cout << "\n    subrecords:";
+            for (const auto& sub : record.subrecords) {
+                std::cout << " " << sub.type << "(" << sub.size << ")";
+            }
+            std::cout << "\n";
+        };
+        reader.walk(visitor);
+    }
+    return 0;
+}
+
+// Answers "what IS 0x104f04". A formID is how every record in the format
+// refers to every other one, so the usual question mid-investigation is what
+// type a reference lands on -- an inventory entry that resolves to nothing
+// wearable could be ammo, a note, or an outfit this code does not follow yet,
+// and those need different fixes.
+int probeFormId(const std::filesystem::path& pluginPath, std::uint32_t wantedFormId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    bool found = false;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+        return !found && header.formId == wantedFormId;
+    };
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        if (found) { return; }
+        found = true;
+        std::cout << std::hex << record.formId << std::dec << " " << record.type << "\n";
+        for (const auto& sub : record.subrecords) {
+            std::cout << "  " << sub.type << "(" << sub.size << ")";
+            const std::string text(
+                reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+            const bool printable = !text.empty() &&
+                std::all_of(text.begin(), text.end() - 1, [](char c) {
+                    return static_cast<unsigned char>(c) >= 32u &&
+                        static_cast<unsigned char>(c) < 127u;
+                });
+            if (printable && text.back() == '\0') {
+                std::cout << " \"" << text.substr(0, text.size() - 1) << "\"";
+            } else if (sub.size == 4u) {
+                std::uint32_t value = 0;
+                std::memcpy(&value, sub.data, 4u);
+                std::cout << " = " << std::hex << value << std::dec;
+            }
+            std::cout << "\n";
+        }
+    };
+    reader.walk(visitor);
+    if (!found) {
+        std::cout << "no record with formID " << std::hex << wantedFormId << std::dec << "\n";
+        return 1;
+    }
+    return 0;
+}
+
 int probeRecordType(const std::filesystem::path& pluginPath, const std::string& wantedType, std::size_t limit) {
     odai::importer::fnv::EsmReader reader;
     if (!reader.open(pluginPath)) {
@@ -2665,6 +3276,9 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --kf <virtualPath.kf>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --kfsweep <folderSubstring>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --actor <Plugin.esm> <ActorEditorID>\n"
               << "  odai_newvegas_probe <DataFilesPath> --footers [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --dialogue <Plugin.esm> <speakerEdid> [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --dialoguetree <Plugin.esm> <speakerEdid> [steps]\n"
@@ -2712,6 +3326,52 @@ int main(int argc, char** argv) {
     if (mode == "--nif" && argc >= 4) {
         return probeSingleNif(dataPath, argv[3]);
     }
+    if (mode == "--basemodel" && argc >= 5) {
+        odai::importer::fnv::EsmReader reader;
+        if (!reader.open(dataPath / argv[3])) {
+            std::cout << "open failed: " << reader.lastError() << "\n";
+            return 1;
+        }
+        const std::string wanted = toLowerAscii(argv[4]);
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type != "CREA" && record.type != "NPC_") return;
+            std::string edid, modl;
+            for (const auto& sub : record.subrecords) {
+                if (sub.size == 0u) continue;
+                std::string v(reinterpret_cast<const char*>(sub.data), sub.size);
+                while (!v.empty() && v.back() == '\0') v.pop_back();
+                if (sub.type == "EDID") edid = v;
+                else if (sub.type == "MODL") modl = v;
+            }
+            if (!edid.empty() && toLowerAscii(edid) == wanted) {
+                std::cout << record.type << " " << edid << " form=" << std::hex
+                          << std::uppercase << record.formId << std::dec
+                          << " MODL=\"" << modl << "\"\n";
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "NIFZ" && sub.size != 0u) {
+                        // Creature body-part meshes: NUL-separated model paths.
+                        // MODL on a CREA names the SKELETON, so this is where
+                        // the geometry actually lives.
+                        std::string blob(reinterpret_cast<const char*>(sub.data), sub.size);
+                        std::size_t begin = 0;
+                        while (begin < blob.size()) {
+                            const std::size_t end = blob.find('\0', begin);
+                            const std::string part = blob.substr(
+                                begin, end == std::string::npos ? std::string::npos : end - begin);
+                            if (!part.empty()) {
+                                std::cout << "   NIFZ part: \"" << part << "\"\n";
+                            }
+                            if (end == std::string::npos) break;
+                            begin = end + 1;
+                        }
+                    }
+                }
+            }
+        };
+        reader.walk(visitor);
+        return 0;
+    }
     if (mode == "--speakerpos" && argc >= 5) {
         odai::importer::fnv::SpeakerPlacement placement;
         std::string error;
@@ -2722,7 +3382,11 @@ int main(int argc, char** argv) {
         std::cout << argv[4] << " ref=" << std::hex << std::uppercase << placement.referenceFormId
                   << " cell=" << placement.cellFormId << std::dec
                   << " pos=(" << placement.position[0] << ", " << placement.position[1] << ", "
-                  << placement.position[2] << ")\n";
+                  << placement.position[2] << ")\n"
+                  << "  skeleton=\"" << placement.skeletonPath << "\"\n";
+        for (const std::string& part : placement.bodyPartPaths) {
+            std::cout << "  part=\"" << part << "\"\n";
+        }
         return 0;
     }
     if (mode == "--dialoguetree" && argc >= 5) {
@@ -2739,6 +3403,20 @@ int main(int argc, char** argv) {
     }
     if (mode == "--nifblocks" && argc >= 4) {
         return dumpNifBlocks(dataPath, argv[3]);
+    }
+    if (mode == "--kf" && argc >= 4) {
+        return dumpKfAnimation(dataPath, argv[3]);
+    }
+    if (mode == "--actorsnear" && argc >= 7) {
+        return probeActorsNear(dataPath / argv[3], static_cast<float>(std::atof(argv[4])),
+                               static_cast<float>(std::atof(argv[5])),
+                               static_cast<float>(std::atof(argv[6])));
+    }
+    if (mode == "--actor" && argc >= 5) {
+        return probeActor(dataPath / argv[3], argv[4]);
+    }
+    if (mode == "--kfsweep" && argc >= 4) {
+        return probeKfFolder(dataPath, argv[3]);
     }
     if (mode == "--regions" && argc >= 4) {
         return probeRegions(dataPath / argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 15u);
@@ -2765,6 +3443,10 @@ int main(int argc, char** argv) {
         return probeRefsByBaseType(
             dataPath, dataPath / argv[3], argv[4],
             argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 15u);
+    }
+    if (mode == "--formid" && argc >= 5) {
+        return probeFormId(
+            dataPath / argv[3], static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 16)));
     }
     if (mode == "--record" && argc >= 5) {
         return probeRecordType(

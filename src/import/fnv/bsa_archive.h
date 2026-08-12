@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -69,7 +70,18 @@ bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFi
 
 class BsaArchive {
 public:
-    bool open(const std::filesystem::path& path);
+    // `folderPrefixFilter` indexes only files whose FOLDER path starts with it
+    // (case-insensitive, backslash-separated, no trailing slash). Empty -- the
+    // default -- indexes the whole archive, exactly as before.
+    //
+    // This exists because indexing is dominated by per-file bookkeeping, not by
+    // reading: every entry costs a built virtual-path string, a vector slot and
+    // a lowercased key in the path index. "Fallout - Voices1.bsa" holds 105517
+    // files, and a caller that wants one actor's 487 voice lines pays for all
+    // of them in both time and resident memory. The name block still has to be
+    // read sequentially (the names are NUL-terminated in order, so they cannot
+    // be seeked past), but a filtered-out file skips everything after that.
+    bool open(const std::filesystem::path& path, std::string_view folderPrefixFilter = {});
 
     // Mask of BsaContentFlags declared by the archive header.
     std::uint32_t contentFlags() const { return m_fileFlags; }

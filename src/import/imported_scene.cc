@@ -528,6 +528,36 @@ std::size_t legacyPackedVertexStride(std::uint32_t version) {
     return kImportedScenePackedVertexWordsV19 * sizeof(std::uint32_t);
 }
 
+
+// A count read out of a scene file is UNTRUSTED. A cache file truncated by a
+// killed process or a full disk still parses a valid header, and every count
+// after the truncation point is then whatever bytes happened to be on disk --
+// which is how a 15 MB cached cell came to claim 608,890,047 vertices and kill
+// the streaming worker with std::bad_alloc instead of simply rebuilding.
+//
+// Bounding by the bytes the stream can still supply, BEFORE allocating, turns
+// that into a clean parse failure that the caller already handles. The element
+// size passed is the SMALLEST the on-disk record can be across every supported
+// version, so the check never rejects a file it should accept.
+[[nodiscard]] bool countFitsInStream(
+    std::istream& input, std::uint32_t count, std::size_t minBytesPerElement) {
+    if (count == 0u) {
+        return true;
+    }
+    const std::streampos here = input.tellg();
+    if (here < 0) {
+        return true;  // not seekable; nothing to check against
+    }
+    input.seekg(0, std::ios::end);
+    const std::streampos end = input.tellg();
+    input.seekg(here, std::ios::beg);
+    if (!input || end < here) {
+        return false;
+    }
+    const auto remaining = static_cast<std::uintmax_t>(end - here);
+    return (static_cast<std::uintmax_t>(count) * minBytesPerElement) <= remaining;
+}
+
 bool readMeshVertexArray(
     std::istream& input,
     std::uint32_t version,
@@ -814,7 +844,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                 const std::uint32_t partFlags =
                     (part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u) |
                     (part.alphaBlend ? kImportedSceneMaterialFlagAlphaBlend : 0u) |
-                    (part.twoSided ? kImportedSceneMaterialFlagTwoSided : 0u);
+                    (part.twoSided ? kImportedSceneMaterialFlagTwoSided : 0u) |
+                    (part.unlit ? kImportedSceneMaterialFlagUnlit : 0u);
                 for (std::size_t indexOffset = firstPartIndex; indexOffset < lastPartIndex; ++indexOffset) {
                     const std::uint32_t index = mesh.indices[indexOffset];
                     if (index >= mesh.vertices.size()) {
@@ -1365,6 +1396,9 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     scene.sourceLightCount = lightCount;
     scene.sourceUnresolvedRefCount = unresolvedRefCount;
 
+    if (!countFitsInStream(input, textureCount, 12u)) {
+        return false;
+    }
     scene.textures.resize(textureCount);
     for (ImportedSceneTexture& texture : scene.textures) {
         if (!readString(input, texture.sourcePath) ||
@@ -1386,12 +1420,18 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         if (!readValue(input, rgbaSize)) {
             return false;
         }
+        if (!countFitsInStream(input, static_cast<std::uint32_t>(rgbaSize), 1u)) {
+            return false;
+        }
         texture.rgba8.resize(rgbaSize);
         if (rgbaSize != 0 && !readExact(input, texture.rgba8.data(), rgbaSize)) {
             return false;
         }
     }
 
+    if (!countFitsInStream(input, meshCount, 16u)) {
+        return false;
+    }
     scene.meshes.resize(meshCount);
     for (ImportedSceneMesh& mesh : scene.meshes) {
         std::uint32_t vertexCount = 0;
@@ -1401,6 +1441,12 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
             !readValue(input, vertexCount) ||
             !readValue(input, indexCount) ||
             !readValue(input, partCount)) {
+            return false;
+        }
+        // 32 bytes is the pre-v19 vertex (8 floats); v21+ records are larger.
+        if (!countFitsInStream(input, vertexCount, 32u) ||
+            !countFitsInStream(input, indexCount, 4u) ||
+            !countFitsInStream(input, partCount, 12u)) {
             return false;
         }
         mesh.vertices.resize(vertexCount);
@@ -1486,6 +1532,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     }
 
     if (version >= 2u) {
+        if (!countFitsInStream(input, packedVertexCount, 32u) ||
+            !countFitsInStream(input, packedIndexCount, 4u) ||
+            !countFitsInStream(input, packedDrawCount, 12u)) {
+            return false;
+        }
         scene.packedVertices.resize(packedVertexCount);
         scene.packedIndices.resize(packedIndexCount);
         scene.packedDraws.resize(packedDrawCount);
@@ -1611,6 +1662,9 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     scene.sourceLightCount = lightCount;
     scene.sourceUnresolvedRefCount = unresolvedRefCount;
 
+    if (!countFitsInStream(input, textureCount, 12u)) {
+        return false;
+    }
     scene.textures.resize(textureCount);
     for (ImportedSceneTexture& texture : scene.textures) {
         if (!readString(input, texture.sourcePath) ||
@@ -1630,6 +1684,9 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         }
         std::uint32_t rgbaSize = 0;
         if (!readValue(input, rgbaSize)) {
+            return false;
+        }
+        if (!countFitsInStream(input, static_cast<std::uint32_t>(rgbaSize), 1u)) {
             return false;
         }
         texture.rgba8.resize(rgbaSize);
@@ -1729,6 +1786,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         }
     }
 
+    if (!countFitsInStream(input, packedVertexCount, 32u) ||
+        !countFitsInStream(input, packedIndexCount, 4u) ||
+        !countFitsInStream(input, packedDrawCount, 12u)) {
+        return false;
+    }
     scene.packedVertices.resize(packedVertexCount);
     scene.packedIndices.resize(packedIndexCount);
     scene.packedDraws.resize(packedDrawCount);

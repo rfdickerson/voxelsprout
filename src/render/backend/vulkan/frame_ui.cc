@@ -318,7 +318,17 @@ void RendererBackend::buildFrameStatsUi() {
 
     const float autoScale = std::numeric_limits<float>::max();
     if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
+        // See the twin of this in ui_panels.cc: dragging claims FOV from the
+        // game, "Follow app" hands it back.
+        if (ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg")) {
+            m_debugCameraFovOverride = true;
+        }
+        if (m_debugCameraFovOverride) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Follow app")) {
+                m_debugCameraFovOverride = false;
+            }
+        }
         ImGui::Text("Map Draws: %u", static_cast<unsigned>(m_importedMeshDraws.size()));
     }
 

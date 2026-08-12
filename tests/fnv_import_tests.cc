@@ -15,6 +15,8 @@
 #include "import/fnv/asset_source.h"
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/character_builder.h"
+#include "import/fnv/kf_animation.h"
+#include "import/fnv/actor_records.h"
 #include "import/fnv/async_asset_loader.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/esm_reader.h"
@@ -1537,6 +1539,34 @@ void testBsaArchiveReadsFoldersAndFiles(bool embedFileNames) {
     expectTrue(archive.open(archivePath), "Synthetic BSA archive opens" + label);
     expectTrue(archive.files().size() == 2u, "Synthetic BSA archive exposes both files" + label);
 
+    // Folder-prefix filtering. The fixture has one file under "meshes\\x" and
+    // one under "textures\\x", which is enough to prove the filter keeps the
+    // matching folder, drops the other, and -- the part that actually breaks if
+    // the name block is mis-walked -- still resolves the kept file's NAME.
+    // Filtered-out names must still be consumed from the sequential name block,
+    // so a bug there shows up as the surviving entry having the wrong name
+    // rather than as a missing entry.
+    {
+        odai::importer::fnv::BsaArchive filtered;
+        expectTrue(filtered.open(archivePath, "textures\\x"),
+                   "BSA opens with a folder filter" + label);
+        expectTrue(filtered.files().size() == 1u,
+                   "folder filter keeps only the matching folder" + label);
+        expectTrue(filtered.find("textures\\x\\tx_wall_01.dds") != nullptr,
+                   "the kept entry still resolves by its full path" + label);
+        expectTrue(filtered.find("meshes\\x\\ex_wall_01.nif") == nullptr,
+                   "the filtered-out entry is absent" + label);
+
+        // Case-insensitive, and an unmatched prefix yields an empty index
+        // rather than silently falling back to everything.
+        odai::importer::fnv::BsaArchive mixedCase;
+        expectTrue(mixedCase.open(archivePath, "TEXTURES\\X") && mixedCase.files().size() == 1u,
+                   "folder filter is case-insensitive" + label);
+        odai::importer::fnv::BsaArchive noMatch;
+        expectTrue(noMatch.open(archivePath, "sound\\voice") && noMatch.files().empty(),
+                   "a prefix matching nothing indexes nothing" + label);
+    }
+
     const auto* meshEntry = archive.find("meshes\\x\\ex_wall_01.nif");
     expectTrue(meshEntry != nullptr, "BSA lookup finds the mesh entry by virtual path" + label);
     expectTrue(meshEntry != nullptr && !meshEntry->compressed, "Uncompressed entry is not marked compressed" + label);
@@ -2351,6 +2381,520 @@ void testSkinnedInfluenceWeightsAreNormalized() {
 
 }  // namespace
 
+// The .kf ControlledBlock stride, and the basis change applied to its keys.
+//
+// Both are places where being wrong produces confident nonsense rather than a
+// failure. A ControlledBlock at NIF 20.2.0.7 is 29 bytes and is NOT 4-byte
+// aligned -- a one-byte priority sits between two string indices -- so reading
+// it as an aligned struct still yields in-range-looking refs for the first
+// entry or two before wandering off. And an animation key is a bone's local
+// transform, the same kind of quantity as its bind pose, so it has to go
+// through the same Bethesda-to-engine conversion; converting it differently
+// gives a character whose rest pose is right and whose every animated frame is
+// rotated into the floor.
+void testKfAnimationStrideAndBasisChange() {
+    using namespace odai::importer::fnv;
+
+    std::vector<std::uint8_t> sequenceBlock;
+    appendPod(sequenceBlock, static_cast<std::int32_t>(2));   // name -> "TestClip"
+    appendPod(sequenceBlock, static_cast<std::uint32_t>(1));  // numControlledBlocks
+    appendPod(sequenceBlock, static_cast<std::uint32_t>(0));  // arrayGrowBy
+    // The 29-byte ControlledBlock, field by field.
+    appendPod(sequenceBlock, static_cast<std::int32_t>(1));   // interpolator -> block 1
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // controller (absent in a .kf)
+    appendPod(sequenceBlock, static_cast<std::uint8_t>(20));  // priority -- the misaligning byte
+    appendPod(sequenceBlock, static_cast<std::int32_t>(0));   // nodeName -> "Bip01 Test"
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // propertyType
+    appendPod(sequenceBlock, static_cast<std::int32_t>(1));   // controllerType
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // controllerID
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // interpolatorID
+    appendPod(sequenceBlock, 1.0f);                           // weight
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // textKeys
+    appendPod(sequenceBlock, static_cast<std::uint32_t>(0));  // cycleType: loop
+    appendPod(sequenceBlock, 1.0f);                           // frequency
+    appendPod(sequenceBlock, 0.0f);                           // startTime
+    appendPod(sequenceBlock, 2.0f);                           // stopTime
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // manager
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // accumRootName
+
+    // NiTransformInterpolator: every static channel unset (-FLT_MAX), data in
+    // block 2.
+    const float kUnset = -std::numeric_limits<float>::max();
+    std::vector<std::uint8_t> interpolatorBlock;
+    for (int i = 0; i < 3; ++i) appendPod(interpolatorBlock, kUnset);  // translation
+    for (int i = 0; i < 4; ++i) appendPod(interpolatorBlock, kUnset);  // rotation (w,x,y,z)
+    appendPod(interpolatorBlock, kUnset);                              // scale
+    appendPod(interpolatorBlock, static_cast<std::int32_t>(2));        // data -> block 2
+
+    std::vector<std::uint8_t> dataBlock;
+    appendPod(dataBlock, static_cast<std::uint32_t>(2));  // numRotationKeys
+    appendPod(dataBlock, static_cast<std::uint32_t>(1));  // LINEAR_KEY
+    // NIF stores a quaternion W FIRST.
+    appendPod(dataBlock, 0.0f);   // key 0 time
+    appendPod(dataBlock, 1.0f);   // w
+    appendPod(dataBlock, 0.0f);   // x
+    appendPod(dataBlock, 0.0f);   // y
+    appendPod(dataBlock, 0.0f);   // z
+    appendPod(dataBlock, 2.0f);   // key 1 time
+    appendPod(dataBlock, 0.0f);   // w
+    appendPod(dataBlock, 1.0f);   // x  (180 degrees about Bethesda X)
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, static_cast<std::uint32_t>(1));  // translation numKeys
+    appendPod(dataBlock, static_cast<std::uint32_t>(1));  // LINEAR_KEY
+    appendPod(dataBlock, 0.0f);   // time
+    appendPod(dataBlock, 1.0f);   // x
+    appendPod(dataBlock, 2.0f);   // y
+    appendPod(dataBlock, 3.0f);   // z
+    appendPod(dataBlock, static_cast<std::uint32_t>(0));  // scale numKeys
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(11));
+    appendPod(fileBytes, static_cast<std::uint32_t>(3));   // numBlocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(34));  // userVersion2
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(3));   // numBlockTypes
+    appendSizedString32(fileBytes, "NiControllerSequence");
+    appendSizedString32(fileBytes, "NiTransformInterpolator");
+    appendSizedString32(fileBytes, "NiTransformData");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));
+    appendPod(fileBytes, static_cast<std::uint16_t>(2));
+    appendPod(fileBytes, static_cast<std::uint32_t>(sequenceBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(interpolatorBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(dataBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(3));   // numStrings
+    appendPod(fileBytes, static_cast<std::uint32_t>(24));  // maxStringLength
+    appendSizedString32(fileBytes, "Bip01 Test");
+    appendSizedString32(fileBytes, "NiTransformController");
+    appendSizedString32(fileBytes, "TestClip");
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));   // numGroups
+    fileBytes.insert(fileBytes.end(), sequenceBlock.begin(), sequenceBlock.end());
+    fileBytes.insert(fileBytes.end(), interpolatorBlock.begin(), interpolatorBlock.end());
+    fileBytes.insert(fileBytes.end(), dataBlock.begin(), dataBlock.end());
+
+    KfAnimation animation;
+    std::string error;
+    expectTrue(parseKfAnimation(fileBytes, animation, error),
+               ("synthetic .kf parses: " + error).c_str());
+    expectTrue(animation.name == "TestClip", "clip name comes from the header string table");
+    expectTrue(animation.loops(), "cycleType 0 is a looping clip");
+    expectNear(animation.duration(), 2.0f, 1e-5f, "duration is stopTime - startTime");
+    expectTrue(animation.tracks.size() == 1u, "one controlled block yields one track");
+    if (animation.tracks.size() != 1u) {
+        return;
+    }
+    const KfBoneTrack& track = animation.tracks.front();
+    // The stride assertion: the node name resolves only if priority was read as
+    // ONE byte and the four string indices after it landed on their real offsets.
+    expectTrue(track.nodeName == "Bip01 Test",
+               "ControlledBlock node name resolves (29-byte stride, unaligned priority)");
+    expectTrue(track.rotationKeys.size() == 2u, "both rotation keys read");
+    expectTrue(track.translationKeys.size() == 1u, "the translation KeyGroup read");
+    if (track.translationKeys.size() == 1u) {
+        // Still Bethesda space at this layer, by design.
+        expectNear(track.translationKeys[0].value.x, 1.0f, 1e-5f, "raw key x");
+        expectNear(track.translationKeys[0].value.y, 2.0f, 1e-5f, "raw key y");
+        expectNear(track.translationKeys[0].value.z, 3.0f, 1e-5f, "raw key z");
+    }
+    if (track.rotationKeys.size() == 2u) {
+        // W-first in the file, (x,y,z,w) in odai::math.
+        expectNear(track.rotationKeys[0].value.w, 1.0f, 1e-5f, "quaternion W is read first");
+        expectNear(track.rotationKeys[1].value.x, 1.0f, 1e-5f, "quaternion X follows W");
+    }
+
+    // And the conversion into engine space, against a skeleton carrying that
+    // bone: (x, y, z) -> (x, z, -y), the same mapping buildFalloutSkeleton
+    // applies to the bind pose.
+    NifSkeleton nifSkeleton;
+    NifSkeletonBone bone;
+    bone.name = "Bip01 Test";
+    bone.parentIndex = -1;
+    nifSkeleton.bones.push_back(bone);
+    odai::anim::Skeleton skeleton;
+    expectTrue(buildFalloutSkeleton(nifSkeleton, skeleton), "one-bone skeleton builds");
+
+    odai::anim::AnimationClip clip;
+    FalloutAnimationStats stats;
+    expectTrue(buildFalloutAnimationClip(animation, skeleton, clip, stats),
+               "clip binds to the skeleton");
+    expectTrue(stats.boundTracks == 1u, "the track resolves to bone 0 by name");
+    expectTrue(clip.tracks.size() == 1u && clip.tracks[0].boneIndex == 0,
+               "track carries the resolved bone index");
+    if (!clip.tracks.empty() && clip.tracks[0].translationKeys.size() == 1u) {
+        const odai::math::Vector3 converted = clip.tracks[0].translationKeys[0].value;
+        expectNear(converted.x, 1.0f, 1e-5f, "engine-space key x is Bethesda x");
+        expectNear(converted.y, 3.0f, 1e-5f, "engine-space key y is Bethesda z");
+        expectNear(converted.z, -2.0f, 1e-5f, "engine-space key z is negated Bethesda y");
+    }
+
+    // A stride error does not fail quietly: claiming more controlled blocks
+    // than the block can hold is rejected rather than read past the end.
+    {
+        std::vector<std::uint8_t> corrupted = fileBytes;
+        KfAnimation ignored;
+        std::string corruptError;
+        const std::size_t countOffset = fileBytes.size() - sequenceBlock.size() -
+                                        interpolatorBlock.size() - dataBlock.size() + 4u;
+        const auto absurdCount = static_cast<std::uint32_t>(10000);
+        std::memcpy(corrupted.data() + countOffset, &absurdCount, sizeof(absurdCount));
+        expectTrue(!parseKfAnimation(corrupted, ignored, corruptError),
+                   "an impossible controlled-block count is rejected, not read past the end");
+    }
+}
+
+// The B-spline decoder, on a curve whose answer is known in closed form.
+//
+// FOUR control points at degree 3 is exactly one span, and a clamped knot
+// vector makes that span a Bezier -- so the curve must pass THROUGH the first
+// and last control point and nowhere near the middle two. That pins both
+// halves of the decode at once: the /32767 dequantization (wrong scale moves
+// the endpoints) and the clamped knot convention (an unclamped spline starts a
+// sixth of the way in and never reaches either end).
+//
+// Worth testing rather than eyeballing because the failure is quiet: a bone
+// whose curve decodes wrong is still a bone with keys, and the sampler poses it
+// without complaint.
+void testKfBSplineDecoding() {
+    using namespace odai::importer::fnv;
+
+    constexpr float kMultiplier = 100.0f;
+
+    std::vector<std::uint8_t> sequenceBlock;
+    appendPod(sequenceBlock, static_cast<std::int32_t>(2));   // name -> "BSplineClip"
+    appendPod(sequenceBlock, static_cast<std::uint32_t>(1));  // numControlledBlocks
+    appendPod(sequenceBlock, static_cast<std::uint32_t>(0));  // arrayGrowBy
+    appendPod(sequenceBlock, static_cast<std::int32_t>(1));   // interpolator -> block 1
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // controller
+    appendPod(sequenceBlock, static_cast<std::uint8_t>(20));  // priority
+    appendPod(sequenceBlock, static_cast<std::int32_t>(0));   // nodeName -> "Bip01 Test"
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // propertyType
+    appendPod(sequenceBlock, static_cast<std::int32_t>(1));   // controllerType
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // controllerID
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // interpolatorID
+    appendPod(sequenceBlock, 1.0f);                           // weight
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // textKeys
+    appendPod(sequenceBlock, static_cast<std::uint32_t>(0));  // cycleType: loop
+    appendPod(sequenceBlock, 1.0f);                           // frequency
+    appendPod(sequenceBlock, 0.0f);                           // startTime
+    appendPod(sequenceBlock, 2.0f);                           // stopTime
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // manager
+    appendPod(sequenceBlock, static_cast<std::int32_t>(-1));  // accumRootName
+
+    constexpr float kUnset = -std::numeric_limits<float>::max();
+    std::vector<std::uint8_t> interpolatorBlock;
+    appendPod(interpolatorBlock, 0.0f);                          // startTime
+    appendPod(interpolatorBlock, 2.0f);                          // stopTime
+    appendPod(interpolatorBlock, static_cast<std::int32_t>(2));  // splineData -> block 2
+    appendPod(interpolatorBlock, static_cast<std::int32_t>(3));  // basisData -> block 3
+    appendPod(interpolatorBlock, kUnset);                        // static translation x/y/z
+    appendPod(interpolatorBlock, kUnset);
+    appendPod(interpolatorBlock, kUnset);
+    appendPod(interpolatorBlock, 1.0f);                          // static rotation w
+    appendPod(interpolatorBlock, 0.0f);                          // x
+    appendPod(interpolatorBlock, 0.0f);                          // y
+    appendPod(interpolatorBlock, 0.0f);                          // z
+    appendPod(interpolatorBlock, kUnset);                        // static scale
+    appendPod(interpolatorBlock, static_cast<std::uint32_t>(0));           // translationOffset
+    appendPod(interpolatorBlock, static_cast<std::uint32_t>(0xffffffffu)); // rotationOffset: none
+    appendPod(interpolatorBlock, static_cast<std::uint32_t>(0xffffffffu)); // scaleOffset: none
+    appendPod(interpolatorBlock, 0.0f);          // translationBias
+    appendPod(interpolatorBlock, kMultiplier);   // translationMultiplier
+    appendPod(interpolatorBlock, 0.0f);          // rotationBias
+    appendPod(interpolatorBlock, 1.0f);          // rotationMultiplier
+    appendPod(interpolatorBlock, 0.0f);          // scaleBias
+    appendPod(interpolatorBlock, 1.0f);          // scaleMultiplier
+
+    // Four control points, three components each, quantized: the curve runs
+    // from (0,0,0) to (0,100,0) and bulges toward (100,0,0) in between.
+    const std::array<std::array<std::int16_t, 3>, 4> controlPoints{{
+        {{0, 0, 0}},
+        {{32767, 0, 0}},
+        {{32767, 0, 0}},
+        {{0, 32767, 0}},
+    }};
+    std::vector<std::uint8_t> splineDataBlock;
+    appendPod(splineDataBlock, static_cast<std::uint32_t>(0));  // numFloatControlPoints
+    appendPod(splineDataBlock, static_cast<std::uint32_t>(controlPoints.size() * 3u));
+    for (const auto& point : controlPoints) {
+        for (const std::int16_t component : point) {
+            appendPod(splineDataBlock, component);
+        }
+    }
+
+    std::vector<std::uint8_t> basisDataBlock;
+    appendPod(basisDataBlock, static_cast<std::uint32_t>(controlPoints.size()));
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(11));
+    appendPod(fileBytes, static_cast<std::uint32_t>(4));   // numBlocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(34));  // userVersion2
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(4));   // numBlockTypes
+    appendSizedString32(fileBytes, "NiControllerSequence");
+    appendSizedString32(fileBytes, "NiBSplineCompTransformInterpolator");
+    appendSizedString32(fileBytes, "NiBSplineData");
+    appendSizedString32(fileBytes, "NiBSplineBasisData");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));
+    appendPod(fileBytes, static_cast<std::uint16_t>(2));
+    appendPod(fileBytes, static_cast<std::uint16_t>(3));
+    appendPod(fileBytes, static_cast<std::uint32_t>(sequenceBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(interpolatorBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(splineDataBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(basisDataBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(3));   // numStrings
+    appendPod(fileBytes, static_cast<std::uint32_t>(24));  // maxStringLength
+    appendSizedString32(fileBytes, "Bip01 Test");
+    appendSizedString32(fileBytes, "NiTransformController");
+    appendSizedString32(fileBytes, "BSplineClip");
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));   // numGroups
+    fileBytes.insert(fileBytes.end(), sequenceBlock.begin(), sequenceBlock.end());
+    fileBytes.insert(fileBytes.end(), interpolatorBlock.begin(), interpolatorBlock.end());
+    fileBytes.insert(fileBytes.end(), splineDataBlock.begin(), splineDataBlock.end());
+    fileBytes.insert(fileBytes.end(), basisDataBlock.begin(), basisDataBlock.end());
+
+    KfAnimation animation;
+    std::string error;
+    expectTrue(
+        parseKfAnimation(fileBytes, animation, error),
+        ("synthetic B-spline .kf parses: " + error).c_str());
+    expectTrue(
+        animation.stats.bSplineInterpolators == 1u,
+        "the B-spline interpolator is decoded rather than counted as unsupported");
+    expectTrue(
+        animation.stats.unsupportedInterpolators == 0u,
+        "nothing is left undecoded");
+    expectTrue(animation.tracks.size() == 1u, "the B-spline block yields one track");
+    if (animation.tracks.size() != 1u) {
+        return;
+    }
+    const KfBoneTrack& track = animation.tracks.front();
+    expectTrue(track.nodeName == "Bip01 Test", "the B-spline track binds to its node");
+    // One span, two samples per span, plus the closing sample.
+    expectTrue(track.translationKeys.size() == 3u, "the curve is sampled across its one span");
+    if (track.translationKeys.size() != 3u) {
+        return;
+    }
+    const KfVector3Key& first = track.translationKeys.front();
+    const KfVector3Key& last = track.translationKeys.back();
+    expectNear(first.time, 0.0f, 1e-5f, "sampling starts at the interpolator's start time");
+    expectNear(last.time, 2.0f, 1e-3f, "sampling ends at the interpolator's stop time");
+    expectNear(first.value.x, 0.0f, 0.05f, "the curve starts at the first control point (x)");
+    expectNear(first.value.y, 0.0f, 0.05f, "the curve starts at the first control point (y)");
+    expectNear(last.value.x, 0.0f, 0.2f, "the curve ends at the last control point (x)");
+    expectNear(
+        last.value.y, kMultiplier, 0.2f,
+        "the curve ends at the last control point, dequantized by multiplier/32767");
+    // The middle sample must be pulled toward the interior control points and
+    // must not simply be the midpoint of the endpoints -- that is what an
+    // unweighted or linear fallback would produce.
+    expectTrue(
+        track.translationKeys[1].value.x > 25.0f,
+        "the interior sample is pulled toward the interior control points");
+    // A channel with no curve falls back to the interpolator's static value.
+    expectTrue(
+        track.rotationKeys.size() == 1u,
+        "an absent rotation channel falls back to the static rotation");
+    expectTrue(track.scaleKeys.empty(), "an unset static scale contributes no key");
+}
+
+// An NPC_ has no geometry of its own: its body is its RACE's part models with
+// whatever it is wearing swapped in over them. This builds the smallest plugin
+// that exercises the whole chain -- RACE part slots, an ARMO reached through a
+// levelled item list, and the biped flags that decide which slot it claims --
+// because every step of it is silent when wrong. A missed LVLI or a misread
+// INDX does not fail, it just puts the town in its underwear.
+void testActorRaceAndWardrobeAssembly() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr std::uint32_t kRaceFormId = 0x00000100u;
+    constexpr std::uint32_t kOutfitFormId = 0x00000200u;
+    constexpr std::uint32_t kOutfitListFormId = 0x00000300u;
+    constexpr std::uint32_t kNpcFormId = 0x00000400u;
+    constexpr std::uint32_t kPlacementFormId = 0x00000500u;
+
+    // RACE. The section markers and the per-slot INDX are the whole point: the
+    // female models are deliberately different strings, and the head section
+    // deliberately comes first, so reading MODL without tracking state picks up
+    // the wrong one.
+    std::vector<std::uint8_t> raceSubrecords;
+    const auto append = [](std::vector<std::uint8_t>& out, const std::vector<std::uint8_t>& sub) {
+        out.insert(out.end(), sub.begin(), sub.end());
+    };
+    const auto indexPayload = [](std::uint32_t value) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, value);
+        return out;
+    };
+    append(raceSubrecords, buildSubrecord("EDID", stringPayload("TestRace")));
+    append(raceSubrecords, buildSubrecord("NAM0", {}));           // head section
+    append(raceSubrecords, buildSubrecord("MNAM", {}));           // male
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("heads\\male.nif")));
+    append(raceSubrecords, buildSubrecord("FNAM", {}));           // female
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("heads\\female.nif")));
+    append(raceSubrecords, buildSubrecord("NAM1", {}));           // body section
+    append(raceSubrecords, buildSubrecord("MNAM", {}));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\upper.nif")));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(1)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\lefthand.nif")));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(2)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\righthand.nif")));
+    // Slot 3 is a FaceGen texture, not a mesh, and must not become a body part.
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(3)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\upper.egt")));
+    append(raceSubrecords, buildSubrecord("FNAM", {}));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\upper_f.nif")));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(1)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\lefthand_f.nif")));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(2)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\righthand_f.nif")));
+    // Past the parts: HNAM ends the section list, and the MNAM/FNAM/INDX after
+    // it introduce FaceGen data where those types mean something else.
+    append(raceSubrecords, buildSubrecord("HNAM", {}));
+    append(raceSubrecords, buildSubrecord("MNAM", {}));
+    append(raceSubrecords, buildSubrecord("INDX", indexPayload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("NOT_A_BODY_PART.nif")));
+
+    // ARMO covering the upper body only, so the race's hands survive it.
+    std::vector<std::uint8_t> armorSubrecords;
+    append(armorSubrecords, buildSubrecord("EDID", stringPayload("TestOutfit")));
+    {
+        std::vector<std::uint8_t> bmdt;
+        appendPod(bmdt, static_cast<std::uint32_t>(0x00000004u));  // upper body
+        appendPod(bmdt, static_cast<std::uint32_t>(0));
+        append(armorSubrecords, buildSubrecord("BMDT", bmdt));
+    }
+    append(armorSubrecords, buildSubrecord("MODL", stringPayload("armor\\outfit_m.nif")));
+    append(armorSubrecords, buildSubrecord("MOD3", stringPayload("armor\\outfit_f.nif")));
+
+    // The outfit is not carried directly -- it is one entry of a levelled list,
+    // which is how Fallout actually dresses a settler.
+    std::vector<std::uint8_t> listSubrecords;
+    append(listSubrecords, buildSubrecord("EDID", stringPayload("TestOutfitList")));
+    {
+        std::vector<std::uint8_t> lvlo;
+        appendPod(lvlo, static_cast<std::uint16_t>(1));  // level
+        appendPod(lvlo, static_cast<std::uint16_t>(0));  // unused
+        appendPod(lvlo, kOutfitFormId);
+        appendPod(lvlo, static_cast<std::uint32_t>(1));  // count
+        append(listSubrecords, buildSubrecord("LVLO", lvlo));
+    }
+
+    std::vector<std::uint8_t> npcSubrecords;
+    append(npcSubrecords, buildSubrecord("EDID", stringPayload("TestSettler")));
+    append(npcSubrecords, buildSubrecord("MODL", stringPayload("skeletons\\human.nif")));
+    {
+        std::vector<std::uint8_t> acbs(24u, 0u);
+        const std::uint32_t flags = 0x00000001u;  // female
+        std::memcpy(acbs.data(), &flags, sizeof(flags));
+        append(npcSubrecords, buildSubrecord("ACBS", acbs));
+    }
+    append(npcSubrecords, buildSubrecord("RNAM", indexPayload(kRaceFormId)));
+    {
+        std::vector<std::uint8_t> cnto;
+        appendPod(cnto, kOutfitListFormId);
+        appendPod(cnto, static_cast<std::uint32_t>(1));
+        append(npcSubrecords, buildSubrecord("CNTO", cnto));
+    }
+
+    std::vector<std::uint8_t> placementSubrecords;
+    append(placementSubrecords, buildSubrecord("NAME", indexPayload(kNpcFormId)));
+    {
+        std::vector<std::uint8_t> data;
+        appendPod(data, 100.0f);   // x
+        appendPod(data, 200.0f);   // y
+        appendPod(data, 300.0f);   // z
+        appendPod(data, 0.0f);
+        appendPod(data, 0.0f);
+        appendPod(data, 0.0f);
+        append(placementSubrecords, buildSubrecord("DATA", data));
+    }
+
+    std::vector<std::uint8_t> content;
+    const auto appendGroup = [&](const char* type, const std::vector<std::uint8_t>& record) {
+        const auto group = buildGroup(type, 0, record);
+        content.insert(content.end(), group.begin(), group.end());
+    };
+    appendGroup("RACE", buildRecord("RACE", kRaceFormId, 0u, raceSubrecords));
+    appendGroup("ARMO", buildRecord("ARMO", kOutfitFormId, 0u, armorSubrecords));
+    appendGroup("LVLI", buildRecord("LVLI", kOutfitListFormId, 0u, listSubrecords));
+    appendGroup("NPC_", buildRecord("NPC_", kNpcFormId, 0u, npcSubrecords));
+    appendGroup("ACHR", buildRecord("ACHR", kPlacementFormId, 0u, placementSubrecords));
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_actor_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(content.data()),
+            static_cast<std::streamsize>(content.size()));
+    }
+
+    FalloutActorScan scan;
+    std::string error;
+    expectTrue(
+        findActorsNear(esmPath, 100.0f, 200.0f, 1000.0f, scan, error),
+        ("actor scan succeeds: " + error).c_str());
+    expectTrue(scan.placements.size() == 1u, "the placement inside the radius is found");
+    expectTrue(scan.races.count(kRaceFormId) == 1u, "the RACE record is collected");
+    expectTrue(scan.armors.count(kOutfitFormId) == 1u, "the ARMO record is collected");
+    expectTrue(
+        scan.leveledItems.count(kOutfitListFormId) == 1u,
+        "the LVLI record is collected, so a carried outfit list can be expanded");
+
+    const ResolvedActorBase resolved = scan.resolve(kNpcFormId);
+    expectTrue(
+        resolved.geometrySource == ActorGeometrySource::Race,
+        "an NPC_ with no parts of its own resolves through its race");
+    expectTrue(
+        resolved.skeletonPath == "skeletons\\human.nif", "the NPC_'s own MODL is its skeleton");
+    expectTrue(
+        resolved.wornArmorFormIds.size() == 1u &&
+            resolved.wornArmorFormIds[0] == kOutfitFormId,
+        "the outfit is reached through the levelled list and worn");
+
+    // Female, so the ARMO's MOD3 and the race's FNAM parts win. Order is the
+    // assembly order: body, hands, head.
+    const std::vector<std::string> expected{
+        "armor\\outfit_f.nif",
+        "body\\lefthand_f.nif",
+        "body\\righthand_f.nif",
+        "heads\\female.nif",
+    };
+    expectTrue(
+        resolved.bodyPartPaths == expected,
+        "the assembled body is the female race parts with the outfit over the upper body");
+
+    // A creature's NIFZ names are relative to its skeleton; a race's are not.
+    // Both leave resolve() as full paths, which is what the caller loads.
+    for (const std::string& part : resolved.bodyPartPaths) {
+        expectTrue(
+            part.find("skeletons\\") != 0u,
+            "race part paths are not prefixed with the skeleton's directory");
+    }
+
+    fs::remove(esmPath);
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -2370,6 +2914,9 @@ int main() {
     testLandLodTilePaths();
     testSkinnedBindPoseIsIdentity();
     testSkinnedInfluenceWeightsAreNormalized();
+    testKfAnimationStrideAndBasisChange();
+    testKfBSplineDecoding();
+    testActorRaceAndWardrobeAssembly();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

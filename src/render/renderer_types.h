@@ -247,14 +247,22 @@ struct ImportedSkinnedActorFrameData {
     std::span<const odai::math::Matrix4> boneMatrices;
 };
 
-// Skinning supports a small, fixed number of independent instance slots --
-// enough for a Dragon Age: Origins-style small party (4-8 characters on
-// screen at once), not an RTS mass-battle crowd system. See docs/ROADMAP.md's
-// explicit out-of-scope note on thousands-of-units rendering. Each slot has
-// its own rest-pose template, pose, and draws via
+// Skinning supports a fixed number of independent instance slots. Each has its
+// own rest-pose template, pose, and draws via
 // Renderer::uploadSkinnedMeshTemplate(instanceIndex, ...) /
 // Renderer::setSkinnedActorPose(instanceIndex, ...).
-inline constexpr std::uint32_t kMaxSkinnedInstances = 8;
+//
+// This is still NOT a mass-battle crowd system (see docs/ROADMAP.md's
+// out-of-scope note on thousands of units): every slot is fully independent,
+// so an ACTIVE one costs its own device-local rest-pose/index/output buffers,
+// its own descriptor-buffer set, and one compute dispatch plus one FrameArena
+// pose upload per frame. The ceiling is what a populated Fallout settlement
+// needs -- Goodsprings alone places 37 actors -- not what a battle does.
+//
+// An UNUSED slot costs only an empty struct, so the array being larger than any
+// one game needs is close to free; raising it from the original 8 was measured
+// at no startup or frame cost with nothing extra uploaded.
+inline constexpr std::uint32_t kMaxSkinnedInstances = 48;
 
 enum class InventoryItemId : std::uint8_t {
     Empty = 0,

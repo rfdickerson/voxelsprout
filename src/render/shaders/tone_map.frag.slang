@@ -192,9 +192,32 @@ float depthOfFieldRadiusPixels(float viewDepth)
     const float sharpDistance = max(camera.dofConfig.y, 0.5);
     const float falloffDistance = max(camera.dofConfig.z, 0.5);
     const float maxRadiusPixels = max(camera.dofConfig.w, 0.0);
+
+    // Behind the subject.
     const float distanceBeyondFocus = max(viewDepth - sharpDistance, 0.0);
-    const float focusFalloff = smoothstep(0.0, falloffDistance, distanceBeyondFocus);
-    return focusFalloff * maxRadiusPixels;
+    const float farFalloff = smoothstep(0.0, falloffDistance, distanceBeyondFocus);
+
+    // In FRONT of the subject. A lens defocuses on both sides of the focal
+    // plane, and leaving this out is very visible on a portrait framing: the
+    // background separates but whatever the camera is standing behind -- a
+    // fence, a doorway, the ground -- stays razor sharp, which reads as a
+    // blurred backdrop rather than as a shallow lens.
+    //
+    // The near side ramps FASTER than the far side, which is also what real
+    // optics do (near depth of field is roughly half the far at portrait
+    // distances), and dofConfig2.x is how much faster. It was already uploaded
+    // for this and simply never read; 0 disables the near field and restores
+    // the far-only behaviour exactly.
+    const float nearBlurScale = camera.dofConfig2.x;
+    float nearFalloff = 0.0;
+    if (nearBlurScale > 0.0001)
+    {
+        const float distanceBeforeFocus = max(sharpDistance - viewDepth, 0.0);
+        nearFalloff =
+            smoothstep(0.0, falloffDistance / nearBlurScale, distanceBeforeFocus);
+    }
+
+    return max(farFalloff, nearFalloff) * maxRadiusPixels;
 }
 
 float3 sampleDepthOfField(

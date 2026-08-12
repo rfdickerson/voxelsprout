@@ -129,9 +129,13 @@ void RendererBackend::renderFrame(
             (m_displayRefreshDurationNs * m_framePacingStats.cadenceDivisor) * 1.0e-6
         );
     }
-    if (!m_debugCameraFovInitialized) {
+    // The app's FOV is followed every frame unless the debug slider has been
+    // dragged. Tracking the app's value into m_debugCameraFovDegrees while it
+    // is NOT overriding is what makes the slider start from whatever the game
+    // is currently showing rather than snapping to a stale number the moment
+    // it is touched.
+    if (!m_debugCameraFovOverride) {
         m_debugCameraFovDegrees = camera.fovDegrees;
-        m_debugCameraFovInitialized = true;
     }
     m_debugCameraFovDegrees = std::clamp(m_debugCameraFovDegrees, 20.0f, 120.0f);
     const float activeFovDegrees = m_debugCameraFovDegrees;
@@ -244,6 +248,35 @@ void RendererBackend::renderFrame(
     m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
     collectCompletedBufferReleases();
     m_frameArena.beginFrame(m_currentFrame);
+    // ODAI_ARENA_POISON=<bytes> takes a slice here, before any pass allocates,
+    // and writes to it. It carries no data and nothing reads it: the point is
+    // purely to consume ring space at this exact moment, so that nothing else
+    // lands at ring offset 0.
+    //
+    // This is the regression probe for a bug that made the renderer look
+    // broken by adding a character to it. The camera UBO was published to the
+    // descriptor-buffer path at ring offset 0 rather than at its actual slice
+    // offset (see updateFrameDescriptorSets), which was survivable only while
+    // the camera happened to be the frame's FIRST allocation. The
+    // skinned-actor pose upload below is one earlier allocation, and it was
+    // enough: every pass then read a garbage view-projection and the whole 3-D
+    // frame collapsed to one flat colour with the UI still correct on top.
+    //
+    // With the fix in place, ANY value here must render identically to an
+    // unset one. It is worth keeping precisely because nothing else in the
+    // renderer notices the difference -- the failure is invisible until some
+    // unrelated feature happens to allocate first.
+    static const char* const poisonBytes = std::getenv("ODAI_ARENA_POISON");
+    if (poisonBytes != nullptr) {
+        const auto requested = static_cast<VkDeviceSize>(std::strtoull(poisonBytes, nullptr, 10));
+        if (requested > 0) {
+            const std::optional<FrameArenaSlice> poisonSlice =
+                m_frameArena.allocateUpload(requested, 256u, FrameArenaUploadKind::Unknown);
+            if (poisonSlice.has_value() && poisonSlice->mapped != nullptr) {
+                std::memset(poisonSlice->mapped, 0, static_cast<std::size_t>(requested));
+            }
+        }
+    }
     // Must run after beginFrame so this frame's bone-matrix FrameArena slice
     // belongs to the frame index recordSkinningPass will actually record for
     // -- see setSkinnedActorPose/uploadSkinnedActorPoseForFrame's comments.
@@ -1713,6 +1746,7 @@ void RendererBackend::renderFrame(
     updateFrameDescriptorSets(
         aoFrameIndex,
         bufferInfo,
+        mvpSliceOpt->offset,
         autoExposureHistogramBuffer,
         autoExposureStateBuffer,
         voxelGiChunkMetaDescriptorInfo.has_value() ? &(*voxelGiChunkMetaDescriptorInfo) : nullptr,

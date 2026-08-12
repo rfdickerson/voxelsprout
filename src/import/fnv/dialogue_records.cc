@@ -73,13 +73,49 @@ bool findSpeakerPlacement(
     std::uint32_t speakerFormId = 0;
     {
         EsmReader::Visitor visitor;
+        // Reject by TYPE before the body is touched. Without this the walk
+        // materializes every record in the file to hand it to onRecord, which
+        // means inflating FalloutNV.esm's 29363 compressed LAND records to look
+        // for a creature -- ~3.4 s and hundreds of MB of heap, per scan. See
+        // EsmReader::Visitor::onRecordHeader.
+        visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+            return speakerFormId == 0u && (header.type == "CREA" || header.type == "NPC_");
+        };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (speakerFormId != 0u || (record.type != "CREA" && record.type != "NPC_")) {
                 return;
             }
+            bool isWanted = false;
             for (const auto& sub : record.subrecords) {
                 if (sub.type == "EDID" && toLowerAsciiCopy(subrecordString(sub)) == wantedEditorId) {
-                    speakerFormId = record.formId;
+                    isWanted = true;
+                }
+            }
+            if (!isWanted) {
+                return;
+            }
+            speakerFormId = record.formId;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "MODL") {
+                    outPlacement.skeletonPath = subrecordString(sub);
+                } else if (sub.type == "NIFZ" && sub.size != 0u) {
+                    // NUL-separated body-part filenames, relative to the
+                    // skeleton's own directory.
+                    const std::string blob(
+                        reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+                    std::size_t begin = 0;
+                    while (begin < blob.size()) {
+                        const std::size_t end = blob.find('\0', begin);
+                        std::string part = blob.substr(
+                            begin, end == std::string::npos ? std::string::npos : end - begin);
+                        if (!part.empty()) {
+                            outPlacement.bodyPartPaths.push_back(std::move(part));
+                        }
+                        if (end == std::string::npos) {
+                            break;
+                        }
+                        begin = end + 1;
+                    }
                 }
             }
         };
@@ -90,10 +126,19 @@ bool findSpeakerPlacement(
         return false;
     }
 
+    outPlacement.baseFormId = speakerFormId;
+
     // ACRE places a creature, ACHR an NPC; both carry the same NAME (base) and
     // DATA (position + rotation) subrecords a REFR does.
     std::uint32_t currentCell = 0;
     EsmReader::Visitor visitor;
+    // CELL for the enclosing-cell id, ACRE/ACHR for the placement itself.
+    // Everything else -- crucially the compressed LAND records interleaved
+    // among them -- is rejected on its header.
+    visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+        return !outPlacement.found &&
+               (header.type == "CELL" || header.type == "ACRE" || header.type == "ACHR");
+    };
     visitor.onRecord = [&](const EsmRecordView& record) {
         if (record.type == "CELL") {
             currentCell = record.formId;
@@ -160,6 +205,9 @@ bool buildSpeakerDialogueTree(
     std::string speakerName;
     {
         EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+            return speakerFormId == 0u && (header.type == "CREA" || header.type == "NPC_");
+        };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (speakerFormId != 0u || (record.type != "CREA" && record.type != "NPC_")) {
                 return;
@@ -195,6 +243,9 @@ bool buildSpeakerDialogueTree(
     std::uint32_t currentTopic = 0;
     {
         EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+            return header.type == "DIAL" || header.type == "INFO";
+        };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (record.type == "DIAL") {
                 currentTopic = record.formId;

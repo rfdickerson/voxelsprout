@@ -257,6 +257,165 @@ Not wired up yet: WTHR's **Ambient/Sunlight** channels, so terrain lighting does
 respond to the weather, and there are no rain **particles** — the mood is sky, fog and
 sound only.
 
+**Victor** (`src/games/newvegas/newvegas_victor.{h,cc}`) is the one live NPC: a GPU-skinned
+Securitron standing beside the spawn, animated from the game's own `.kf` clips, who answers
+**E** with his real DIAL/INFO dialogue and his real recorded voice. He is the worked example
+of the whole actor path, and four things about it were each a bug first:
+
+- **A skinned template's vertices reach the GPU verbatim.** There is no
+  scene-index-to-bindless-slot remap like `addImportedSceneChunk` does for world geometry, so
+  `ImportedSkinnedMeshVertex::textureIndex` must already hold a bindless slot.
+  `Renderer::uploadSkinnedActorTextures` is how a caller gets one.
+- **`AnimationSampler::bindSkeleton(skeleton)` is the wrong overload for Fallout.** It derives
+  inverse binds from the skeleton; NiSkinData stores them explicitly and they differ (see
+  `FalloutCharacter::inverseBindMatrices`). Pass them in.
+- **An unweighted vertex is not merely un-animated.** The skinning shader passes it through at
+  its authored position, so it misses the actor's world placement too and draws at the world
+  origin — rigid props parented to a bone (Victor's face screen) must be weighted 1.0 to it.
+- **A creature's NIFZ list carries every part the model *can* wear**, including alternate face
+  screens the game swaps at runtime, plus alpha-blended glare quads the opaque skinned path
+  renders as solid slabs. Drawing the list literally gives Victor colour bars for a face.
+
+**Any new scan of a plugin MUST set `EsmReader::Visitor::onRecordHeader`.** Leaving it null
+materializes every record in the file to hand to `onRecord`, which means inflating
+FalloutNV.esm's 29363 compressed LAND records to go looking for a creature. Measured: two
+scans that forgot it (Victor's placement and his dialogue) cost **3.4 s each** and took launch
+from 2.2 s to 8.8 s. Filtering by record type on the header brought them to 73 ms and 82 ms
+with byte-identical output. The failure is invisible in the result and shows up only as a slow
+start, so it will not be caught by anything except looking.
+
+Related startup costs, for scale: mod-directory indexing is ~0.2 s (5431 loose files for NMC),
+and `BsaArchive::open` takes an optional **folder-prefix filter** — unfiltered it indexes all
+105517 entries of `Fallout - Voices1.bsa` to keep the 487 an actor needs. Pass Victor's asset
+source in rather than opening a second one: a private one carries no `--mod` directories, so
+he silently ignores texture packs the world around him is using.
+
+`.kf` reading is `src/import/fnv/kf_animation.{h,cc}` (parse, Bethesda space) plus
+`buildFalloutAnimationClip` (bone-name resolution + the basis change, which must match
+`buildFalloutSkeleton`'s exactly). 5009 of the game's 5014 `.kf` files parse; the 5 failures
+are older NIF versions.
+
+**B-spline-compressed interpolators are decoded** (`NiBSplineCompTransformInterpolator`):
+cubic curves with 16-bit quantized control points, sampled into ordinary keys at parse time so
+nothing downstream knows they existed. This is not an optional refinement — Bethesda stores
+the bones that carry a *human* animation this way (both arms, both legs, the head), and keeps
+the near-static ones (pelvis, spine, toes) as plain keyframes. A reader that decodes only the
+second kind reports a healthy 42-of-58 tracks bound on a townsperson's idle **and still renders
+a T-pose**, which is what the track count hides. Two conventions in the decode are load-bearing
+and both are pinned by `testKfBSplineDecoding` (four control points = one span = a Bézier, so
+the curve's endpoints are exactly its outer control points): the knot vector is **clamped**
+(an unclamped spline never reaches either end of the pose), and control points dequantize as
+`bias + multiplier * short / 32767`.
+
+## Goodsprings' other actors
+
+`src/games/newvegas/newvegas_actors.{h,cc}` + `src/import/fnv/actor_records.{h,cc}` populate
+the town around Victor: every ACRE/ACHR within `kActorLoadRadius`, discovered from the plugin
+rather than from a hardcoded list. `--actorsnear <plugin> <x> <y> <radius>` on the probe prints
+the whole resolution, part paths included, which is where to look first.
+
+There are **three kinds of actor** and only the first is a creature-shaped problem:
+
+- A **CREA with a NIFZ list** carries its own geometry — MODL is its skeleton, NIFZ names the
+  parts beside it. Victor is one.
+- A **CREA with no NIFZ** is a spawn variant whose TPLT usually lands on a **levelled creature
+  list (LVLC)**, not on another actor. Following TPLT only through CREA/NPC_ resolves none of
+  the VSpawnTier1 coyotes.
+- An **NPC_ carries a skeleton and nothing else.** Its body is assembled from RACE part slots —
+  upper body, left hand, right hand, head — and then individual slots are replaced by what it
+  is wearing. RACE is a **positional** format (NAM0 opens the head section, NAM1 the body,
+  MNAM/FNAM switch sex, each INDX names the slot the next MODL fills), and the same subrecord
+  types reappear past HNAM meaning something else entirely.
+
+Two traps in the wardrobe, both of which render as an undressed town rather than as an error:
+an outfit is usually **not carried directly** but as an **LVLI** the inventory walk has to
+expand (a settler carries "CondOutfitRepublican02", not a shirt), and an actor's race, sex and
+inventory are each **individually inheritable from its TPLT** via ACBS's template-use flags.
+`resolve()` hands back **full mesh paths in every case**, because NIFZ stores names relative to
+the skeleton's directory and RACE/ARMO store full ones.
+
+Every human body NIF also ships its own **dismemberment caps** — "bodycaps", "meatneck01",
+"meathead01" — ordinary skinned shapes in the same file as the skin. Drawn literally they hang
+slabs of raw meat off an otherwise fine settler. They are filtered on the one thing they share,
+the `textures\gore\` folder.
+
+`ODAI_FNV_ACTORS_PARADE=<distance>` lines every built actor up in front of the camera (along
+its own right vector, so `ODAI_FNV_YAW` alone picks what they stand in front of). The town's
+people are spread over 12000 units and a `--screenshot` run cannot walk to them, so without it
+a change to how a body is assembled cannot be looked at at all.
+
+**A skinned shape's vertices are not necessarily in the character's space.** NiSkinData's
+overall `skinTransform` maps the character's space into the *shape's own* geometry space, and
+`appendFalloutCharacterMesh` composes it into the inverse bind — which normalizes the BINDING
+and leaves the GEOMETRY where it was. Fallout's human parts are where that becomes visible: a
+hand NIF is authored around the hand, a head NIF around the head, a body NIF around the whole
+character, so a settler renders as a clothed torso with his head and both hands piled at his
+feet, each the right shape in the wrong place. The vertices need the inverse of that transform
+applied at append time. Every *creature* part in the game has an identity `skinTransform`,
+which is why Victor never showed it. Note the bind-pose round-trip check in
+`odai_newvegas_probe --character` is only a valid test for shapes whose skin space IS model
+space — for a head or a hand, the correct bind pose deliberately MOVES the geometry, and
+chasing a zero round-trip there is what introduced this bug in the first place.
+
+A conversation is **modal, Skyrim-style**: movement keys are not read at all while it is up (so
+a held W does not accumulate and release when the card closes), mouselook is suppressed, and
+the camera eases onto Victor and holds. Two details there are not obvious. The aim targets a
+point ~150 units up his body, because his placement is his FEET and aiming at the origin points
+the camera at his wheel. And it deliberately aims *below* his face by a pitch offset derived
+from the projection (`atan(f · tan(fovY/2))`, using the card's measured top edge) — aiming AT
+the face centres it, which is exactly where the card is, and a conversation must not hide the
+person talking. Gravity, the terrain pin and collision keep running, so opening a conversation
+mid-step still settles the player on the ground.
+
+It also **dollies in** (75° → 55°) and pulls **depth of field** onto the speaker, both eased.
+Two things were fixed to make that possible, and both are general:
+
+- **`camera.fovDegrees` is now honoured every frame.** It used to be latched on the first frame
+  and ignored forever after, so any per-frame FOV an app set was a silent no-op. The ImGui
+  slider now claims FOV only once someone actually drags it and hands it back via "Follow app"
+  (`m_debugCameraFovOverride`) — without that handshake the slider and an animating game would
+  fight and the value would flicker.
+- **DoF grew a near field.** `tone_map.frag.slang` blurred only *beyond* the focal plane, which
+  on a portrait framing separates the background but leaves whatever the camera stands behind
+  razor sharp. `dofConfig2.x` was already being uploaded for this and simply never read.
+  `setDepthOfField`'s new `nearBlurScale` **defaults to 0**, so no existing caller's look
+  changed; ~1.25 is a tilt-shift miniature, and *below 1* stretches the near ramp for a
+  portrait — needed here because Victor is ~100 units deep standing ON the focal plane, and a
+  near ramp as short as the far one measurably softens his own front along with the ground.
+
+`maxRadiusPixels` is in pixels, so a fixed value is a different-sized blur per display; the
+conversation scales it by framebuffer height so the look is resolution-independent.
+`ODAI_FNV_DIALOGUE_NODOF=1` keeps the framing and drops only the blur, which is the control a
+measurement needs — with the camera pointed anywhere else the same crop is not the same content.
+
+The conversation itself draws as a **centred modal card** sized for a TV: its own 48 px / 40 px
+type steps (baked in the game, not through `GameApp::loadFonts`, whose four slots are a shared
+contract), word-wrapped against the font's own metrics, with the highlighted reply stated three
+ways at once — fill, border, and caret — because on a green-on-green palette any one of them
+alone fails for someone. Replies are driven by `UiNavInput`, so a gamepad works identically to
+the arrow keys, with the number keys kept as the keyboard fast path. Anything else that draws
+large centred type (the location-discovery banner) must be held while it is up.
+
+Diagnostics: `ODAI_FNV_VICTOR_TALK=1` opens the conversation on the first tick so a
+`--screenshot` run can exercise it, `ODAI_FNV_DIALOGUE_SELECT=<n>` starts on the nth reply
+(a screenshot run cannot press a key, so this is the only way to photograph the highlight
+anywhere but row 1), `ODAI_FNV_VICTOR_NOANIM=1` freezes him at bind pose (the control that
+makes a screenshot diff of his own pixels attributable — frozen is byte-identical across
+frames, animated is not), and `ODAI_FNV_VICTOR_HOME=1` puts him back at his authored ACRE
+position instead of beside the spawn. `odai_newvegas_probe --kf <path>` dumps one clip (and
+names any node left undecoded, which is the difference between "a few finger joints are stiff"
+and "both arms never move"); `--kfsweep <folderSubstring>` parses every `.kf` under a folder
+and reports the failures. `--formid <hex>` answers "what IS 0x104f04" — the usual question
+when a reference resolves to nothing.
+
+**`ODAI_ARENA_POISON=<bytes>`** takes a FrameArena slice before any pass allocates. It is the
+regression probe for a camera-UBO bug worth knowing by its symptom: the descriptor-buffer path
+published the camera at ring offset **0** rather than at its real slice offset, which worked
+only while the camera was the frame's first allocation. One earlier allocation (the skinned
+pose) made every pass read a garbage view-projection, and that renders as **a single flat
+colour with the UI still correct on top of it**. Flat frame + intact UI means the camera, not
+the geometry. Any value here must now render identically to unset.
+
 Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
 
 `ODAI_CITY_SCREENSHOT=<path>` (plus `ODAI_CITY_SCREENSHOT_FRAMES`) renders N frames, writes a
