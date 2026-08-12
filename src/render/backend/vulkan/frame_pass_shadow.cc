@@ -555,18 +555,28 @@ void RendererBackend::dumpShadowAtlas(const char* outputPath) {
             if (vkMapMemory(m_device, stagingMemory, 0, bufferSize, 0, &mapped) == VK_SUCCESS &&
                 mapped != nullptr) {
                 const float* depths = static_cast<const float*>(mapped);
-                std::vector<unsigned char> pixels(static_cast<std::size_t>(pixelCount));
+                // 16-BIT, not 8. One 8-bit step is 1/255 of a cascade's depth
+                // range, which at cascade 3 (~20000 world units deep) is ~79
+                // world units -- so a 60-unit occluder separation lands BELOW
+                // the quantization floor and reads as "no shadow" no matter
+                // what the renderer did. That artifact cost a round of chasing
+                // a cascade-3 bug that was not there. 16-bit puts the step at
+                // 0.31 units, comfortably under anything worth measuring.
+                std::vector<unsigned char> pixels(static_cast<std::size_t>(pixelCount) * 2u);
                 double sum = 0.0;
                 std::size_t nonZero = 0;
-                for (std::size_t i = 0; i < pixels.size(); ++i) {
+                for (std::size_t i = 0; i < static_cast<std::size_t>(pixelCount); ++i) {
                     const float d = depths[i];
                     sum += d;
                     nonZero += (d > 0.0f) ? 1u : 0u;
-                    pixels[i] = static_cast<unsigned char>(
-                        std::clamp(d, 0.0f, 1.0f) * 255.0f + 0.5f);
+                    const auto q = static_cast<std::uint16_t>(
+                        std::clamp(d, 0.0f, 1.0f) * 65535.0f + 0.5f);
+                    // PGM is big-endian.
+                    pixels[i * 2u] = static_cast<unsigned char>(q >> 8);
+                    pixels[(i * 2u) + 1u] = static_cast<unsigned char>(q & 0xffu);
                 }
                 if (std::FILE* file = std::fopen(outputPath, "wb")) {
-                    std::fprintf(file, "P5\n%u %u\n255\n", kShadowAtlasSize, kShadowAtlasSize);
+                    std::fprintf(file, "P5\n%u %u\n65535\n", kShadowAtlasSize, kShadowAtlasSize);
                     std::fwrite(pixels.data(), 1, pixels.size(), file);
                     std::fclose(file);
                 }
@@ -582,18 +592,49 @@ void RendererBackend::dumpShadowAtlas(const char* outputPath) {
                 for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
                     const ShadowAtlasRect rect = kShadowAtlasRects[cascadeIndex];
                     std::size_t tileNonZero = 0;
+                    float tileMin = 1.0f;
+                    float tileMax = 0.0f;
+                    double tileSum = 0.0;
                     for (uint32_t y = 0; y < rect.size; ++y) {
                         for (uint32_t x = 0; x < rect.size; ++x) {
                             const std::size_t index =
                                 (static_cast<std::size_t>(rect.y + y) * kShadowAtlasSize) +
                                 (rect.x + x);
-                            tileNonZero += (depths[index] > 0.0f) ? 1u : 0u;
+                            const float d = depths[index];
+                            if (d > 0.0f) {
+                                ++tileNonZero;
+                                tileMin = std::min(tileMin, d);
+                                tileMax = std::max(tileMax, d);
+                                tileSum += d;
+                            }
                         }
                     }
                     const std::size_t tileTexels =
                         static_cast<std::size_t>(rect.size) * static_cast<std::size_t>(rect.size);
                     VOX_LOGI("render") << "  cascade " << cascadeIndex << " tile "
-                                       << tileNonZero << "/" << tileTexels << " written";
+                                       << tileNonZero << "/" << tileTexels << " written"
+                                       << " depth min/mean/max "
+                                       << (tileNonZero != 0u ? tileMin : 0.0f) << "/"
+                                       << (tileNonZero != 0u
+                                               ? tileSum / static_cast<double>(tileNonZero)
+                                               : 0.0)
+                                       << "/" << tileMax;
+                    // The SAMPLING matrix for this cascade, so a CPU cross-check
+                    // can replicate the shader's ref-vs-stored comparison against
+                    // this very dump. Row-major, 16 floats.
+                    const odai::math::Matrix4& lp = m_shadowRenderedMatrices[cascadeIndex];
+                    std::string matrixText;
+                    for (int mi = 0; mi < 16; ++mi) {
+                        // %.9e, NOT to_string: these coefficients are ~1e-5
+                        // against world coordinates ~1e5, so six decimals of
+                        // text injects more error than the bug being chased.
+                        char field[32];
+                        std::snprintf(field, sizeof(field), "%.9e", lp.m[mi]);
+                        matrixText += (mi != 0 ? " " : "");
+                        matrixText += field;
+                    }
+                    VOX_LOGI("render") << "  cascade " << cascadeIndex << " sampleMatrix "
+                                       << matrixText;
                 }
                 vkUnmapMemory(m_device, stagingMemory);
             }

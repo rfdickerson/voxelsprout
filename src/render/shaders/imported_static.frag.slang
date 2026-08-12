@@ -792,6 +792,7 @@ float4 main(FragmentInput input) : SV_Target0
         shadowVisibility = sampleImportedCascadedShadow(input.inWorldPosition, normal, viewDepth, ndotl);
 #endif
     }
+
     const bool interiorMode = chunkPc.cascadeData.y > 0.5;
     const float3 skyProbeNormal = float3(0.0, 1.0, 0.0);
     const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
@@ -810,8 +811,18 @@ float4 main(FragmentInput input) : SV_Target0
     // sun, so sunlit faces stay clean instead of muddying under an AO halo.
     const float ambientOcclusion =
         (interiorMode ? lerp(0.28, 1.0, skyVisibility) : 1.0) * sampleSsaoAmbientFactor(input.inScreenPosition);
+    // THE EXTERIOR FLOOR IS WHAT HID THE SHADOWS. It is added unconditionally,
+    // so it is light a shadow cannot take away: at 0.18-0.21 it set a floor no
+    // occluder could darken past, and putting EVERY pixel in full shadow moved
+    // the frame by only 3.9% RMSE. The shadow maps were correct the whole time
+    // (see the atlas dump); there was simply almost no direct light to remove.
+    //
+    // Kept nonzero deliberately -- a shadow that reaches pure black reads as a
+    // hole, and the Mojave's sky bounce is real -- but it is now small next to
+    // the sky irradiance that varies with the weather and the hour, rather than
+    // dominating it.
     const float3 ambient =
-        (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.18, 0.19, 0.21)) +
+        (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.055, 0.060, 0.070)) +
         (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));
     const float3 voxelGi = interiorMode
         ? sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35
@@ -889,7 +900,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float occludedWrap = directCore + (directFill * ambientOcclusion);
     const float3 direct =
         camera.sunColorShadow.xyz *
-        (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+        (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.95));
     const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
 
     if (usePbr)

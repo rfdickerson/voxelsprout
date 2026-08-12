@@ -567,8 +567,33 @@ bool NewVegasApp::onInit() {
     m_renderer.setVoxelGiEnabled(false);
     // No TLAS to trace against once GI is off, so stop building acceleration
     // structures on every uploadImportedScene too.
-    m_renderer.setRayTracingEnabled(false);
-    m_renderer.setSunShaftsEnabled(false);
+    //
+    // ODAI_FNV_RT=1 keeps the RT runtime alive anyway. GI is not the only
+    // possible TLAS consumer any more: ray-traced sun shadows want one too, and
+    // the shading side for those is already written and compiled
+    // (sampleRayTracedDirectionalShadow / imported_static_rt.frag.slang.spv).
+    // This line is the ONLY thing standing between the streaming path and a
+    // TLAS -- the BLAS record block in uploadImportedSceneInternal is not gated
+    // on the chunk path at all, it is gated on rayTracingRuntimeReady().
+    //
+    // Off by default until the acceleration-structure build cost on a STREAMING
+    // world is measured; the whole reason this line exists is that those builds
+    // were expensive per upload, and a cell stream calls upload constantly.
+    const bool rayTracingRequested = std::getenv("ODAI_FNV_RT") != nullptr;
+    m_renderer.setRayTracingEnabled(rayTracingRequested);
+    if (rayTracingRequested) {
+        VOX_LOGI("newvegas") << "ODAI_FNV_RT: ray tracing runtime left enabled "
+                                "(acceleration structures will build per cell upload)";
+    }
+    // Volumetric sun shafts. sun_shafts.comp.slang is a real single-scattering
+    // raymarch -- height-falloff density, Henyey-Greenstein phase, shadow-map
+    // visibility sampled per step -- so this is the atmosphere pass, not a
+    // radial blur. ODAI_FNV_SHAFTS=0 turns it back off.
+    const bool sunShaftsRequested = [] {
+        const char* env = std::getenv("ODAI_FNV_SHAFTS");
+        return env == nullptr || env[0] != '0';
+    }();
+    m_renderer.setSunShaftsEnabled(sunShaftsRequested);
     // Temporal AA. This is what stops textured surfaces shimmering in motion
     // -- measured at 13x the frame-to-frame instability of flat-shaded
     // geometry before TAA existed. ODAI_TAA=0 turns it off for A/B.
