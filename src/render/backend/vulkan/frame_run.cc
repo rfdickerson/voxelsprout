@@ -1079,8 +1079,69 @@ void RendererBackend::renderFrame(
         ? 0.0f
         : std::clamp(m_skyDebugSettings.volumetricFogDensity, 0.0f, 1.0f);
     mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
-    mvpUniform.skyConfig4[2] = m_skyDebugSettings.volumetricFogBaseHeight;
+    // VOLUMETRIC FOG BASE HEIGHT IS AN ABSOLUTE WORLD Y, which cannot be one
+    // constant across games at different scales. The 42.0 default suits a
+    // voxel world whose ground is near the origin; Fallout's terrain sits at
+    // y 8700-13000, so `worldPos.y - 42` is ~9000 and the marcher's
+    // exp(-relativeHeight * falloff) underflows to zero at every step. The
+    // pass ran, cost its 1.9 ms, and produced nothing.
+    //
+    // For an imported scene, anchor it to the camera instead: fog is a local
+    // effect and the interesting band is the few hundred units around the
+    // viewer, not an altitude fixed at world build time.
+    float fogBaseHeight = m_skyDebugSettings.volumetricFogBaseHeight;
+    if (renderingImportedScene) {
+        fogBaseHeight = eye.y - 240.0f;
+    }
+    // An authored weather says how far it can be seen through, and that beats
+    // any constant density here. WTHR's fog-far is in world units, so deriving
+    // the density from it makes the haze correct at Bethesda's ~70 units/metre
+    // without a scene-specific tuning pass.
+    //
+    // Two things about the height term have to change with it, and both were
+    // visible whitewash before:
+    //
+    //  - `exp(-(h - base) * falloff)` GROWS below the base, up to the shader's
+    //    e^7 clamp -- a thousandfold. With the base pinned 240 units under the
+    //    eye, standing on Goodsprings' hill put the whole valley floor below it
+    //    and rendered a solid white lake over the town.
+    //  - A desert vista is aerial perspective, not ground fog: near-uniform
+    //    density with a very slow falloff over thousands of units.
+    if (renderingImportedScene && m_weatherSky.weight > 0.0f
+        && m_weatherSky.fogFarDistance > 1.0f) {
+        // Mean of fogExtinctionCoefficient() in tone_map.frag.slang, which is
+        // what the density is multiplied by before it reaches transmittance.
+        constexpr float kMeanExtinction = 0.20f;
+        // Leave ~6% of the far surface visible at the authored distance rather
+        // than driving it to zero: the record's fog-far is where the game hid
+        // its draw distance, and a wall of opaque haze there is worse than the
+        // horizon reading through faintly.
+        //
+        // Half of that 2.8, because this is not the only atmosphere in the
+        // frame: imported_static.frag.slang's aerial perspective calibrates
+        // itself against the same fog-far and the two compose multiplicatively.
+        constexpr float kOpticalDepthAtFogFar = 1.4f;
+        const float density =
+            kOpticalDepthAtFogFar / (m_weatherSky.fogFarDistance * kMeanExtinction);
+        mvpUniform.skyConfig4[0] = std::clamp(density, 1.0e-5f, 0.02f);
+        mvpUniform.skyConfig4[1] = 0.00012f;  // ~20% thinner per 2000 units up
+        fogBaseHeight = eye.y;
+    }
+    // Tuning knobs -- these are look values and want sweeping per scene.
+    if (const char* env = std::getenv("ODAI_FOG_BASE")) {
+        fogBaseHeight = static_cast<float>(std::atof(env));
+    }
+    if (const char* env = std::getenv("ODAI_FOG_DENSITY")) {
+        mvpUniform.skyConfig4[0] = std::clamp(static_cast<float>(std::atof(env)), 0.0f, 1.0f);
+    }
+    if (const char* env = std::getenv("ODAI_FOG_FALLOFF")) {
+        mvpUniform.skyConfig4[1] = std::clamp(static_cast<float>(std::atof(env)), 0.0f, 1.0f);
+    }
+    mvpUniform.skyConfig4[2] = fogBaseHeight;
     mvpUniform.skyConfig4[3] = std::clamp(m_skyDebugSettings.volumetricSunScattering, 0.0f, 8.0f);
+    if (const char* env = std::getenv("ODAI_FOG_SCATTER")) {
+        mvpUniform.skyConfig4[3] = std::clamp(static_cast<float>(std::atof(env)), 0.0f, 8.0f);
+    }
     const uint32_t autoExposureUpdateIntervalFrames = std::max(
         1u,
         static_cast<uint32_t>(std::max(1, m_skyDebugSettings.autoExposureUpdateIntervalFrames))

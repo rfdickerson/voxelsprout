@@ -179,7 +179,21 @@ float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDi
     // Distance at which roughly 1/e of the surface's own colour survives. ~15000
     // Bethesda units is a little over 200 m: far enough that near geometry is
     // untouched, close enough that the far ridges of a cooked region sit back.
-    const float kAerialEFoldDistance = 15000.0;
+    //
+    // An authored weather overrides it, because the record knows better: WTHR's
+    // fog-far is the distance the weather is meant to be seen through, and it
+    // ranges over an order of magnitude (25000 units for a toxic haze, 200000
+    // for a clear western sky). Held at the constant, a clear day put Goodsprings
+    // 1500 units away behind the same wall of air as a dust storm.
+    //
+    // The 1.4 pairs with tone_map.frag.slang's volumetric fog, which calibrates
+    // its density the same way: the two atmospheres compose, so each takes half
+    // the optical depth the record asks for at its fog-far distance.
+    const float weatherWeight = saturate(camera.weatherSkyUpper.w);
+    const float authoredFogFar = camera.weatherFog.w;
+    const float weatherEFold =
+        (authoredFogFar > 1.0) ? (authoredFogFar / 1.4) : 15000.0;
+    const float kAerialEFoldDistance = lerp(15000.0, weatherEFold, weatherWeight);
     const float3 cameraPosition = camera.shadowVoxelGridSize.xyz;
     const float viewDistance = length(worldPosition - cameraPosition);
     const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
@@ -193,7 +207,13 @@ float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDi
     // it. pow(,6) keeps the effect close to the sun rather than tinting the
     // whole sky.
     const float sunAlignment = saturate(dot(viewDirection, toSun));
-    const float3 skyInscatter = float3(0.40, 0.56, 0.82);
+    // The haze has to be the colour of the sky it hangs under. This constant is
+    // a clear-blue-sky assumption, and under an authored weather it is simply
+    // the wrong colour -- it washed a sunset town blue-grey while the sky above
+    // it burned orange. WTHR's Fog channel is the authored answer, sampled at
+    // this hour, and weight 0 leaves every other game byte-identical.
+    const float3 skyInscatter =
+        lerp(float3(0.40, 0.56, 0.82), camera.weatherFog.xyz, weatherWeight);
     const float3 sunInscatter = float3(1.00, 0.86, 0.66);
     const float3 inscatterColor =
         lerp(skyInscatter, sunInscatter, pow(sunAlignment, 6.0) * 0.85);

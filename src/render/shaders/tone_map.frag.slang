@@ -485,7 +485,29 @@ float3 volumetricIncidentRadiance(
     const float3 groundBounce = lerp(float3(0.54, 0.49, 0.40), float3(0.66, 0.46, 0.30), twilightFactor);
     const float3 skyRadiance = lerp(skyHorizon, skyZenith, pow(skyT, 0.45));
     const float ambientStrength = lerp(0.86, 1.26, dayFactor);
-    const float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
+    float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
+
+    // THE PALETTE ABOVE IS A CLEAR-BLUE-SKY ASSUMPTION. Fog is lit by the sky
+    // it sits under, so hardcoding one sky makes the haze disagree with any
+    // authored weather: a Mojave dust weather renders an olive sky with
+    // blue-grey haze in front of it, which reads as two unrelated atmospheres
+    // meeting at the horizon line.
+    //
+    // A WTHR record already ships the answer -- its Fog channel is the colour
+    // the game authored for distance haze under exactly this weather, at
+    // exactly this hour -- and it was being uploaded to `weatherFog` and read
+    // by nothing at all. Weight 0 (every game but New Vegas) leaves the
+    // procedural palette byte-identical.
+    const float weatherWeight = saturate(camera.weatherSkyUpper.w);
+    if (weatherWeight > 0.0)
+    {
+        // Fog colour for horizontal and downward rays, which is where geometry
+        // is; only a ray heading for the zenith picks up the sky colour, and
+        // that one is mostly looking at sky the fog pass never touches.
+        const float3 weatherHaze =
+            lerp(camera.weatherFog.xyz, camera.weatherSkyUpper.xyz, smoothstep(0.5, 1.0, skyT));
+        ambientRadiance = lerp(ambientRadiance, weatherHaze, weatherWeight);
+    }
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
     const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z);

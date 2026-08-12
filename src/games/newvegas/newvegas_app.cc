@@ -1546,7 +1546,10 @@ void NewVegasApp::applyWeather() {
         VOX_LOGI("newvegas") << "sky linear rgb: upper(" << params.skyUpper[0] << ","
                              << params.skyUpper[1] << "," << params.skyUpper[2] << ") horizon("
                              << params.horizon[0] << "," << params.horizon[1] << ","
-                             << params.horizon[2] << ") weight=" << params.weight;
+                             << params.horizon[2] << ") fog(" << params.fogColor[0] << ","
+                             << params.fogColor[1] << "," << params.fogColor[2]
+                             << ") fogFar=" << params.fogFarDistance
+                             << " weight=" << params.weight;
     }
     m_renderer.setWeatherSky(params);
 }
@@ -3219,6 +3222,20 @@ void NewVegasApp::drawDialoguePanel(
 }
 
 void NewVegasApp::drawHud() {
+    // ODAI_FNV_NOHUD=1 draws the world and nothing else. A screenshot meant to
+    // show the RENDERER has its own subject, and the Pip-Boy chrome, the key
+    // hints and the debug readouts all sit on top of it.
+    static const bool s_noHud = [] {
+        const char* env = std::getenv("ODAI_FNV_NOHUD");
+        return env != nullptr && env[0] != '0';
+    }();
+    if (s_noHud) {
+        // The software cursor is not part of the HUD -- GameApp draws it after
+        // this returns -- and it is drawn wherever the desktop happened to
+        // leave the pointer, so it lands in the corner of the capture.
+        setCursorVisible(false);
+        return;
+    }
     drawPipBoyHud();
     drawPauseMenu();
 

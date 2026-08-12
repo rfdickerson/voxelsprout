@@ -428,8 +428,10 @@ void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlph
     drawPerfOverlay();
 
     // Custom cursor: drawn last so it renders above every widget. GameApp tools
-    // have no mouselook mode, so it's always shown.
-    odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, contentScale());
+    // have no mouselook mode, so it's shown unless a game suppresses it.
+    if (m_cursorVisible) {
+        odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, contentScale());
+    }
     m_renderer.setUiDrawData(m_uiDrawList.data());
 
     const world::ChunkGrid& grid = (worldContent && worldContent->chunkGrid)

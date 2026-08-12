@@ -75,6 +75,12 @@ protected:
     // pipeline-creation time.
     virtual bool wantsStrategyMapTuning() const { return true; }
 
+    // Draw the software mouse cursor over the frame. Off is for a capture that
+    // is the product rather than a diagnostic: the cursor sits wherever the
+    // desktop left it and lands in the swapchain image like any other quad, so
+    // a headless screenshot run bakes a stray arrow into the corner.
+    void setCursorVisible(bool visible) { m_cursorVisible = visible; }
+
     // Initial audio volumes/mute state, passed to Audio::init() in init() before onInit()
     // runs. Default is AudioConfig{}'s built-in defaults (see audio/audio_types.h). Override
     // if a game wants different starting volumes; there is no persisted GameApp-level config
@@ -192,6 +198,7 @@ private:
     GameFrameProfiler m_frameProfiler;
     bool m_perfOverlayVisible = false;
     bool m_perfOverlayKeyPrev = false;
+    bool m_cursorVisible = true;
 };
 
 } // namespace odai::engine
