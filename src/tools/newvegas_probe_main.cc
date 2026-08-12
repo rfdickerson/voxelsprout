@@ -2256,6 +2256,10 @@ int probeActorsNear(
             default:                                                     return "NONE     ";
         }
     };
+    std::cout << "scan tables: " << scan.bases.size() << " bases, " << scan.leveledLists.size()
+              << " levelled actor lists, " << scan.leveledItems.size() << " levelled item lists, "
+              << scan.races.size() << " races, " << scan.armors.size() << " armors, "
+              << scan.voiceTypes.size() << " voice types\n";
     std::map<std::string, std::size_t> bySource;
     std::size_t disabled = 0;
     std::cout << scan.placements.size() << " placement(s) within " << radius << " units of ("
@@ -2281,6 +2285,12 @@ int probeActorsNear(
                       << "  carried=" << resolved.base->inventoryFormIds.size()
                       << "  worn=" << resolved.wornArmorFormIds.size();
         }
+        if (resolved.base != nullptr && resolved.base->templateFlags != 0u) {
+            std::cout << "  tplFlags=0x" << std::hex << resolved.base->templateFlags << std::dec
+                      << " tplt=" << std::hex << resolved.base->templateFormId << std::dec
+                      << " modl=\"" << resolved.base->skeletonPath << "\""
+                      << " -> skeleton=\"" << resolved.skeletonPath << "\"";
+        }
         if (resolved.base != nullptr) {
             const std::string voiceFolder = scan.voiceFolderFor(resolved.base->formId);
             std::cout << "  voice=" << (voiceFolder.empty() ? std::string("<none>") : voiceFolder);
@@ -2289,7 +2299,8 @@ int probeActorsNear(
             resolved.base != nullptr) {
             std::cout << "  tplt=" << std::hex << resolved.base->templateFormId
                       << " race=" << resolved.base->raceFormId << std::dec
-                      << " modl=\"" << resolved.base->skeletonPath << "\"";
+                      << " modl=\"" << resolved.base->skeletonPath << "\""
+                      << " -> skeleton=\"" << resolved.skeletonPath << "\"";
         }
         if (placement.initiallyDisabled) { std::cout << "  INITIALLY-DISABLED"; }
         std::cout << "\n";

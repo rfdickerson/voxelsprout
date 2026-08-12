@@ -2714,6 +2714,160 @@ void testKfBSplineDecoding() {
     expectTrue(track.scaleKeys.empty(), "an unset static scale contributes no key");
 }
 
+
+// A template actor's skeleton is NOT on the record that names it.
+//
+// An actor that borrows its model stores "marker_creature.nif" as its own MODL
+// -- a real, parseable NIF carrying none of the bones a body is weighted to.
+// Using it therefore does not FAIL, it binds a character whose every bone is
+// unresolved. Measured on Fallout 3, where a levelled raider reported 71
+// unresolved bones and stood in bind pose.
+//
+// And the hop is nested: TPLT lands on a levelled list whose entries are
+// routinely MORE LISTS (Fallout 3's EncRaiderMelee is one), so following a
+// single level finds no actor and quietly hands back the marker.
+void testTemplateSkeletonThroughNestedLeveledLists() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr std::uint32_t kRaceFormId = 0x00000100u;
+    constexpr std::uint32_t kOuterListFormId = 0x00000200u;
+    constexpr std::uint32_t kInnerListFormId = 0x00000201u;
+    constexpr std::uint32_t kRealActorFormId = 0x00000300u;
+    constexpr std::uint32_t kMarkerActorFormId = 0x00000400u;
+    constexpr std::uint32_t kPlacementFormId = 0x00000500u;
+
+    const auto append = [](std::vector<std::uint8_t>& out, const std::vector<std::uint8_t>& sub) {
+        out.insert(out.end(), sub.begin(), sub.end());
+    };
+    const auto u32Payload = [](std::uint32_t value) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, value);
+        return out;
+    };
+    const auto acbs = [](std::uint16_t templateFlags, bool female) {
+        std::vector<std::uint8_t> out(24u, 0u);
+        const std::uint32_t flags = female ? 1u : 0u;
+        std::memcpy(out.data(), &flags, sizeof(flags));
+        std::memcpy(out.data() + 22, &templateFlags, sizeof(templateFlags));
+        return out;
+    };
+    const auto lvlo = [](std::uint32_t formId) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, static_cast<std::uint16_t>(1));  // level
+        appendPod(out, static_cast<std::uint16_t>(0));  // unused
+        appendPod(out, formId);
+        appendPod(out, static_cast<std::uint32_t>(1));  // count
+        return out;
+    };
+
+    // A minimal race: one body slot and one head, male only.
+    std::vector<std::uint8_t> raceSubrecords;
+    append(raceSubrecords, buildSubrecord("EDID", stringPayload("TestRace")));
+    append(raceSubrecords, buildSubrecord("NAM0", {}));
+    append(raceSubrecords, buildSubrecord("MNAM", {}));
+    append(raceSubrecords, buildSubrecord("INDX", u32Payload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("heads\\male.nif")));
+    append(raceSubrecords, buildSubrecord("NAM1", {}));
+    append(raceSubrecords, buildSubrecord("MNAM", {}));
+    append(raceSubrecords, buildSubrecord("INDX", u32Payload(0)));
+    append(raceSubrecords, buildSubrecord("MODL", stringPayload("body\\upper.nif")));
+
+    // The real actor at the bottom of the chain, with the true skeleton.
+    std::vector<std::uint8_t> realActor;
+    append(realActor, buildSubrecord("EDID", stringPayload("RealRaider")));
+    append(realActor, buildSubrecord("MODL", stringPayload("skeletons\\human.nif")));
+    append(realActor, buildSubrecord("ACBS", acbs(0u, false)));
+    append(realActor, buildSubrecord("RNAM", u32Payload(kRaceFormId)));
+
+    // The placed actor: a marker model, and a template it borrows the model,
+    // traits and inventory from.
+    // Written as the MEASURED bits, not as the constants under test. Building
+    // the fixture from the constants would make it and the reader agree by
+    // construction, so a wrong bit would pass -- and these were read off real
+    // records (Fallout 3's LvlRaiderMelee carries 0x1df).
+    constexpr std::uint16_t kMeasuredUseTraits = 0x0001u;
+    constexpr std::uint16_t kMeasuredUseModelAnimation = 0x0040u;
+    constexpr std::uint16_t kMeasuredUseInventory = 0x0100u;
+    expectTrue(kActorTemplateUseTraits == kMeasuredUseTraits, "Use Traits is ACBS bit 0x0001");
+    expectTrue(
+        kActorTemplateUseModelAnimation == kMeasuredUseModelAnimation,
+        "Use Model/Animation is ACBS bit 0x0040");
+    expectTrue(
+        kActorTemplateUseInventory == kMeasuredUseInventory, "Use Inventory is ACBS bit 0x0100");
+    constexpr std::uint16_t kBorrowsModelTraitsAndInventory =
+        kMeasuredUseTraits | kMeasuredUseModelAnimation | kMeasuredUseInventory;
+    std::vector<std::uint8_t> markerActor;
+    append(markerActor, buildSubrecord("EDID", stringPayload("LvlRaider")));
+    append(markerActor, buildSubrecord("MODL", stringPayload("marker_creature.nif")));
+    append(markerActor, buildSubrecord("ACBS", acbs(kBorrowsModelTraitsAndInventory, false)));
+    append(markerActor, buildSubrecord("TPLT", u32Payload(kOuterListFormId)));
+    append(markerActor, buildSubrecord("RNAM", u32Payload(kRaceFormId)));
+
+    // Outer list -> inner list -> the real actor. Two levels, deliberately.
+    std::vector<std::uint8_t> outerList;
+    append(outerList, buildSubrecord("EDID", stringPayload("EncRaiderOuter")));
+    append(outerList, buildSubrecord("LVLO", lvlo(kInnerListFormId)));
+    std::vector<std::uint8_t> innerList;
+    append(innerList, buildSubrecord("EDID", stringPayload("EncRaiderInner")));
+    append(innerList, buildSubrecord("LVLO", lvlo(kRealActorFormId)));
+
+    std::vector<std::uint8_t> placementSubrecords;
+    append(placementSubrecords, buildSubrecord("NAME", u32Payload(kMarkerActorFormId)));
+    {
+        std::vector<std::uint8_t> data;
+        for (int i = 0; i < 6; ++i) { appendPod(data, 0.0f); }
+        append(placementSubrecords, buildSubrecord("DATA", data));
+    }
+
+    std::vector<std::uint8_t> content;
+    const auto appendGroup = [&](const char* type, const std::vector<std::uint8_t>& record) {
+        const auto group = buildGroup(type, 0, record);
+        content.insert(content.end(), group.begin(), group.end());
+    };
+    appendGroup("RACE", buildRecord("RACE", kRaceFormId, 0u, raceSubrecords));
+    appendGroup("NPC_", buildRecord("NPC_", kRealActorFormId, 0u, realActor));
+    appendGroup("NPC_", buildRecord("NPC_", kMarkerActorFormId, 0u, markerActor));
+    // LVLN, not LVLC: the NPC flavour of a levelled actor list, which is what
+    // an NPC_'s template lands on.
+    appendGroup("LVLN", buildRecord("LVLN", kOuterListFormId, 0u, outerList));
+    appendGroup("LVLN", buildRecord("LVLN", kInnerListFormId, 0u, innerList));
+    appendGroup("ACHR", buildRecord("ACHR", kPlacementFormId, 0u, placementSubrecords));
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_fnv_template_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(
+            reinterpret_cast<const char*>(content.data()),
+            static_cast<std::streamsize>(content.size()));
+    }
+
+    FalloutActorScan scan;
+    std::string error;
+    expectTrue(
+        findActorsNear(esmPath, 0.0f, 0.0f, 100.0f, scan, error),
+        ("template actor scan succeeds: " + error).c_str());
+    expectTrue(
+        scan.leveledLists.size() == 2u, "both LVLN levels are collected as levelled actor lists");
+
+    const ResolvedActorBase resolved = scan.resolve(kMarkerActorFormId);
+    expectTrue(
+        resolved.geometrySource == ActorGeometrySource::Race,
+        "a marker-model NPC_ still resolves through its race");
+    // The whole point: NOT marker_creature.nif.
+    expectTrue(
+        resolved.skeletonPath == "skeletons\\human.nif",
+        "the skeleton comes from the template, two levels of levelled list down");
+
+    // An actor that OWNS its model must keep it, template or not.
+    const ResolvedActorBase ownModel = scan.resolve(kRealActorFormId);
+    expectTrue(
+        ownModel.skeletonPath == "skeletons\\human.nif",
+        "an actor owning its model is unaffected by the template walk");
+
+    fs::remove(esmPath);
+}
+
 // An INFO names who says it in one of TWO ways, and a reader that knows only
 // the first renders a town where nobody generic can be spoken to.
 //
@@ -3069,6 +3223,7 @@ int main() {
     testKfBSplineDecoding();
     testActorRaceAndWardrobeAssembly();
     testDialogueAttributionByActorAndVoiceType();
+    testTemplateSkeletonThroughNestedLeveledLists();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

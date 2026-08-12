@@ -228,14 +228,22 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     const FalloutActorBase& traits = traitsSource != nullptr ? *traitsSource : found->second;
     const FalloutActorBase& wardrobe =
         wardrobeSource != nullptr ? *wardrobeSource : found->second;
+    // The skeleton is a templated field too, and taking the record's own MODL
+    // when it does not own one is how an actor ends up bound to
+    // marker_creature.nif with every bone unresolved.
+    const FalloutActorBase* modelSource =
+        inheritedFrom(baseFormId, kActorTemplateUseModelAnimation);
+    const std::string& skeletonPath =
+        modelSource != nullptr ? modelSource->skeletonPath : found->second.skeletonPath;
+
     const auto race = races.find(traits.raceFormId);
-    if (race == races.end() || found->second.skeletonPath.empty()) {
+    if (race == races.end() || skeletonPath.empty()) {
         return resolved;
     }
 
     resolved.geometrySource = ActorGeometrySource::Race;
     resolved.resolvedBaseFormId = baseFormId;
-    resolved.skeletonPath = found->second.skeletonPath;
+    resolved.skeletonPath = skeletonPath;
 
     const bool female = traits.isFemale;
     const auto* headModels = female ? race->second.femaleHeadModels : race->second.maleHeadModels;
@@ -347,6 +355,39 @@ std::string FalloutActorScan::voiceFolderFor(std::uint32_t baseFormId) const {
     return found != voiceTypes.end() ? found->second : std::string();
 }
 
+const FalloutActorBase* FalloutActorScan::firstActorFrom(
+    std::uint32_t formId, std::uint32_t excludeFormId
+) const {
+    // A template hop is usually NOT to another actor: it lands on a levelled
+    // list (LVLC for creatures, LVLN for NPCs) whose entries are the real ones.
+    // And those entries are routinely MORE LISTS -- Fallout 3's EncRaiderMelee
+    // is a list of lists -- so following one level finds nothing and hands back
+    // the marker record, which is a skeleton with none of the bones a body is
+    // weighted to.
+    //
+    // Breadth-first so the shallowest real actor wins, and bounded because
+    // nothing in the format forbids a list containing itself.
+    std::vector<std::uint32_t> queue{formId};
+    std::vector<std::uint32_t> seen;
+    for (std::size_t i = 0; i < queue.size() && queue.size() < 256u; ++i) {
+        const std::uint32_t candidate = queue[i];
+        if (candidate == 0u || candidate == excludeFormId ||
+            std::find(seen.begin(), seen.end(), candidate) != seen.end()) {
+            continue;
+        }
+        seen.push_back(candidate);
+        const auto actor = bases.find(candidate);
+        if (actor != bases.end()) {
+            return &actor->second;
+        }
+        const auto list = leveledLists.find(candidate);
+        if (list != leveledLists.end()) {
+            queue.insert(queue.end(), list->second.begin(), list->second.end());
+        }
+    }
+    return nullptr;
+}
+
 const FalloutActorBase* FalloutActorScan::inheritedFrom(
     std::uint32_t baseFormId, std::uint16_t templateUseFlag
 ) const {
@@ -361,11 +402,12 @@ const FalloutActorBase* FalloutActorScan::inheritedFrom(
         if ((current->templateFlags & templateUseFlag) == 0u || current->templateFormId == 0u) {
             return current;
         }
-        const auto next = bases.find(current->templateFormId);
-        if (next == bases.end() || next->second.formId == current->formId) {
+        const FalloutActorBase* next =
+            firstActorFrom(current->templateFormId, current->formId);
+        if (next == nullptr) {
             return current;
         }
-        current = &next->second;
+        current = next;
     }
     return current;
 }
@@ -395,8 +437,8 @@ bool findActorsNear(
         EsmReader::Visitor visitor;
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "CREA" || header.type == "NPC_" || header.type == "LVLC" ||
-                header.type == "LVLI" || header.type == "RACE" || header.type == "ARMO" ||
-                header.type == "VTYP";
+                header.type == "LVLN" || header.type == "LVLI" || header.type == "RACE" ||
+                header.type == "ARMO" || header.type == "VTYP";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (record.type == "VTYP") {
@@ -431,7 +473,7 @@ bool findActorsNear(
                 }
                 return;
             }
-            if (record.type == "LVLC" || record.type == "LVLI") {
+            if (record.type == "LVLC" || record.type == "LVLN" || record.type == "LVLI") {
                 // LVLO is a 12-byte entry; the referenced formID sits at offset
                 // 4, after a u16 level and two unused bytes.
                 std::vector<std::uint32_t> entries;
@@ -441,8 +483,8 @@ bool findActorsNear(
                     }
                 }
                 if (!entries.empty()) {
-                    (record.type == "LVLC" ? outScan.leveledLists
-                                           : outScan.leveledItems)[record.formId] =
+                    (record.type == "LVLI" ? outScan.leveledItems
+                                           : outScan.leveledLists)[record.formId] =
                         std::move(entries);
                 }
                 return;

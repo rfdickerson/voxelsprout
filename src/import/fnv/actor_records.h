@@ -76,9 +76,17 @@ struct FalloutActorBase {
     std::uint16_t templateFlags = 0;
 };
 
-// ACBS template flags, the two that decide where an NPC_'s body comes from.
+// ACBS template flags: which fields the record BORROWS from its TPLT rather
+// than owning. These three decide where an actor's body comes from.
 inline constexpr std::uint16_t kActorTemplateUseTraits = 0x0001;     // race, sex
 inline constexpr std::uint16_t kActorTemplateUseInventory = 0x0100;  // CNTO, so clothing
+// The SKELETON. A record that borrows its model stores "marker_creature.nif"
+// as its own MODL -- a real, parseable NIF with none of the bones a body is
+// weighted to, so using it does not fail: it binds a character whose bones are
+// all unresolved and which silently collapses. Measured on Fallout 3, where a
+// levelled raider reported 71 unresolved bones and stood in bind pose because
+// of exactly this.
+inline constexpr std::uint16_t kActorTemplateUseModelAnimation = 0x0040;
 
 // A race's body, which FNV stores as a set of SLOTS rather than one model: the
 // game assembles a human from an upper body, two hands and a head, then swaps
@@ -154,8 +162,10 @@ struct ResolvedActorBase {
 struct FalloutActorScan {
     std::vector<FalloutActorPlacement> placements;  // sorted nearest-first
     std::unordered_map<std::uint32_t, FalloutActorBase> bases;
-    // LVLC formID -> the actor formIDs it can spawn, in list order. A template
-    // actor's TPLT lands here rather than on another actor.
+    // LVLC/LVLN formID -> the actor formIDs it can spawn, in list order. A
+    // template actor's TPLT usually lands here rather than on another actor:
+    // LVLC for creatures, LVLN for NPCs. One map because the two play the same
+    // role and a chain never cares which kind it landed on.
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> leveledLists;
     // LVLI formID -> the item formIDs it can hand out. A settler does not carry
     // an outfit, she carries "OutfitSettlerFemale", which is one of these; an
@@ -177,6 +187,12 @@ struct FalloutActorScan {
     // The record an actor's `templateUseFlag`-governed fields actually come
     // from -- itself, when it owns them. Returns null only for an unknown
     // formID; a base with no template is its own answer.
+    // The first real actor reachable from `formId`, following levelled lists
+    // through as many levels as they nest. Returns null when the chain holds
+    // no actor this scan knows.
+    [[nodiscard]] const FalloutActorBase* firstActorFrom(
+        std::uint32_t formId, std::uint32_t excludeFormId = 0) const;
+
     [[nodiscard]] const FalloutActorBase* inheritedFrom(
         std::uint32_t baseFormId, std::uint16_t templateUseFlag) const;
 

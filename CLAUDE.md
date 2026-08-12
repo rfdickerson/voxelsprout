@@ -126,8 +126,17 @@ Capital Wasteland with no Fallout-3-specific code: every BSA opens, 38443 exteri
 and actors build, animate and talk. Two things were New-Vegas-shaped and are no longer: a voice
 path's first component is the **plugin's own file name** (`sound\voice\fallout3.esm\...`), which
 was hardcoded and silently voiced none of Fallout 3's 46 actors; and the default spawn interior
-`GSDocMitchellHouse` is a New Vegas default rather than a constant. Known gap: a few FO3 actors
-report a high `unresolvedBones` (91 on `SpringvaleElemMiniboss`) and stand in bind pose.
+`GSDocMitchellHouse` is a New Vegas default rather than a constant.
+
+**A TEMPLATE ACTOR'S SKELETON IS NOT ON THE RECORD THAT NAMES IT.** An actor whose ACBS
+template flags borrow the model (`0x0040`, Use Model/Animation) stores `marker_creature.nif` as
+its own MODL -- a real, parseable NIF carrying none of the bones a body is weighted to. Taking
+it does not fail: it binds a character whose every bone is unresolved. And the hop is NESTED --
+TPLT lands on a levelled actor list (LVLC for creatures, **LVLN** for NPCs) whose entries are
+routinely more lists, so following one level finds no actor and quietly hands the marker back.
+Measured on Fallout 3: 91 unresolved bones on `SpringvaleElemMiniboss` and 71 on
+`LvlRaiderMelee`, both standing in bind pose. Following the chain properly takes Fallout 3 from
+43 to 46 of 46 actors animated and 211 to 193 placements with no resolvable geometry.
 
 **Fallout: New Vegas viewer** — streams the worldspace straight out of the game's own
 `FalloutNV.esm` and `.bsa` archives. No cooking step and no cooked assets on disk:
