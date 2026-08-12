@@ -877,16 +877,16 @@ void RendererBackend::renderFrame(
     //
     // A skipped cascade samples with the matrix its tile was RENDERED with
     // (cached), never this frame's -- content and matrix must agree or far
-    // shadows swim. Skinned actors would break the exact-skip (they move
-    // without moving the matrix), so any skinned draws disable skipping
-    // entirely; the Fallout viewer currently has none.
+    // shadows swim. Skinned actors break the exact-skip (they move without
+    // moving the matrix); see the note below for why that does not also rule
+    // out deferring the far cascades.
     std::uint32_t shadowSkipCascadeMask = 0;
     static const bool s_shadowInterleaveDisabled =
         std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
         std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
     m_shadowInterleaveParity ^= 1u;
     const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
-    if (!s_shadowInterleaveDisabled && !anySkinnedShadowCasters) {
+    if (!s_shadowInterleaveDisabled) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             if (!m_shadowRenderedValid[cascadeIndex]) {
                 continue;
@@ -896,9 +896,26 @@ void RendererBackend::renderFrame(
                     m_shadowRenderedMatrices[cascadeIndex].m,
                     lightViewProjMatrices[cascadeIndex].m,
                     sizeof(lightViewProjMatrices[cascadeIndex].m)) == 0;
+            // THE EXACT-SKIP AND THE PARITY DEFERRAL ARE DIFFERENT CLAIMS, and
+            // conflating them is what made a single skinned actor cost the
+            // whole atlas.
+            //
+            // The exact-skip says "nothing in this cascade moved", which a
+            // skinned actor falsifies: it animates without moving the light
+            // matrix, so its shadow would freeze while it walked out of it.
+            //
+            // The parity deferral says only "this cascade may be one frame
+            // stale", which is a bound on ERROR rather than a claim of
+            // stillness -- and it is only applied to cascades 2 and 3, which
+            // start 107 world units out and have texels 0.75 and 3.4 units
+            // across. An actor covers a fraction of one of those texels per
+            // frame. Refusing it whenever any skinned actor exists anywhere was
+            // free when the Fallout viewer had none; with a populated town it
+            // means every cascade re-renders every frame forever.
+            const bool canExactSkip = matrixUnchanged && !anySkinnedShadowCasters;
             const bool parityDefersFarCascade =
                 cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
-            if (matrixUnchanged || parityDefersFarCascade) {
+            if (canExactSkip || parityDefersFarCascade) {
                 shadowSkipCascadeMask |= (1u << cascadeIndex);
                 lightViewProjMatrices[cascadeIndex] = m_shadowRenderedMatrices[cascadeIndex];
             }

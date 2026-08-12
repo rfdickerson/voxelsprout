@@ -2,7 +2,11 @@
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include "sim/network_procedural.h"
 #include "render/backend/vulkan/frame_graph_runtime.h"
@@ -417,6 +421,187 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     );
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
+
+    // Dumps the PREVIOUS frame's atlas -- this frame's is still only recorded,
+    // not submitted -- which is what you want anyway: a fully streamed one.
+    if (const char* dumpPath = std::getenv("ODAI_SHADOW_DUMP")) {
+        if (!m_shadowAtlasDumped && m_shadowAtlasDumpCountdown-- <= 0) {
+            m_shadowAtlasDumped = true;
+            dumpShadowAtlas(dumpPath);
+        }
+    }
+}
+
+
+// ODAI_SHADOW_DUMP=<path> writes the shadow atlas out as a PGM, once.
+//
+// An EMPTY atlas and a correctly-populated-but-wrongly-sampled one look
+// identical on screen -- everything lit -- because with reverse-Z the clear is
+// 0.0 and "receiver depth >= 0" is always true. Reading the image back is the
+// only thing that separates those two, and they need opposite fixes.
+//
+// Reverse-Z, so in the output BLACK IS EMPTY (far/cleared) and brighter is a
+// caster nearer the light. A tile that is uniformly black was never drawn into.
+void RendererBackend::dumpShadowAtlas(const char* outputPath) {
+    if (m_shadowDepthImage == VK_NULL_HANDLE || m_device == VK_NULL_HANDLE) {
+        VOX_LOGW("render") << "shadow atlas dump: no atlas image";
+        return;
+    }
+    vkDeviceWaitIdle(m_device);
+
+    const VkDeviceSize pixelCount =
+        static_cast<VkDeviceSize>(kShadowAtlasSize) * static_cast<VkDeviceSize>(kShadowAtlasSize);
+    const VkDeviceSize bufferSize = pixelCount * sizeof(float);
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = bufferSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &staging) != VK_SUCCESS) {
+            VOX_LOGW("render") << "shadow atlas dump: staging buffer creation failed";
+            return;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(m_device, staging, &requirements);
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = requirements.size;
+        VkPhysicalDeviceMemoryProperties memoryProperties{};
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
+        constexpr VkMemoryPropertyFlags kWanted =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        uint32_t memoryTypeIndex = memoryProperties.memoryTypeCount;
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+            if (((requirements.memoryTypeBits & (1u << i)) != 0u) &&
+                ((memoryProperties.memoryTypes[i].propertyFlags & kWanted) == kWanted)) {
+                memoryTypeIndex = i;
+                break;
+            }
+        }
+        if (memoryTypeIndex == memoryProperties.memoryTypeCount) {
+            VOX_LOGW("render") << "shadow atlas dump: no host-visible memory type";
+            vkDestroyBuffer(m_device, staging, nullptr);
+            return;
+        }
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &stagingMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(m_device, staging, stagingMemory, 0) != VK_SUCCESS) {
+            VOX_LOGW("render") << "shadow atlas dump: staging memory allocation failed";
+            vkDestroyBuffer(m_device, staging, nullptr);
+            return;
+        }
+    }
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &pool) == VK_SUCCESS) {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = pool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(m_device, &allocInfo, &cmd) == VK_SUCCESS) {
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cmd, &beginInfo);
+
+            const auto barrier = [&](VkImageLayout oldLayout, VkImageLayout newLayout) {
+                VkImageMemoryBarrier2 imageBarrier{};
+                imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+                imageBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                imageBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+                imageBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                imageBarrier.dstAccessMask =
+                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+                imageBarrier.oldLayout = oldLayout;
+                imageBarrier.newLayout = newLayout;
+                imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imageBarrier.image = m_shadowDepthImage;
+                imageBarrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+                VkDependencyInfo dependency{};
+                dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+                dependency.imageMemoryBarrierCount = 1;
+                dependency.pImageMemoryBarriers = &imageBarrier;
+                vkCmdPipelineBarrier2(cmd, &dependency);
+            };
+
+            barrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            region.imageExtent = {kShadowAtlasSize, kShadowAtlasSize, 1u};
+            vkCmdCopyImageToBuffer(
+                cmd, m_shadowDepthImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+            barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            vkEndCommandBuffer(cmd);
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &cmd;
+            vkQueueSubmit(m_graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+            vkQueueWaitIdle(m_graphicsQueue);
+
+            void* mapped = nullptr;
+            if (vkMapMemory(m_device, stagingMemory, 0, bufferSize, 0, &mapped) == VK_SUCCESS &&
+                mapped != nullptr) {
+                const float* depths = static_cast<const float*>(mapped);
+                std::vector<unsigned char> pixels(static_cast<std::size_t>(pixelCount));
+                double sum = 0.0;
+                std::size_t nonZero = 0;
+                for (std::size_t i = 0; i < pixels.size(); ++i) {
+                    const float d = depths[i];
+                    sum += d;
+                    nonZero += (d > 0.0f) ? 1u : 0u;
+                    pixels[i] = static_cast<unsigned char>(
+                        std::clamp(d, 0.0f, 1.0f) * 255.0f + 0.5f);
+                }
+                if (std::FILE* file = std::fopen(outputPath, "wb")) {
+                    std::fprintf(file, "P5\n%u %u\n255\n", kShadowAtlasSize, kShadowAtlasSize);
+                    std::fwrite(pixels.data(), 1, pixels.size(), file);
+                    std::fclose(file);
+                }
+                // The counts are the actual finding; the image is for looking at
+                // WHERE the content is, once you know there is any.
+                VOX_LOGI("render") << "shadow atlas dump -> " << outputPath << ": "
+                                   << nonZero << "/" << pixels.size() << " texels written ("
+                                   << (100.0 * static_cast<double>(nonZero) /
+                                       static_cast<double>(pixels.size()))
+                                   << "%), mean depth " << (sum / static_cast<double>(pixels.size()));
+                // Per cascade tile, because a whole-atlas percentage hides
+                // "cascade 0 is empty and cascade 3 is fine".
+                for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+                    const ShadowAtlasRect rect = kShadowAtlasRects[cascadeIndex];
+                    std::size_t tileNonZero = 0;
+                    for (uint32_t y = 0; y < rect.size; ++y) {
+                        for (uint32_t x = 0; x < rect.size; ++x) {
+                            const std::size_t index =
+                                (static_cast<std::size_t>(rect.y + y) * kShadowAtlasSize) +
+                                (rect.x + x);
+                            tileNonZero += (depths[index] > 0.0f) ? 1u : 0u;
+                        }
+                    }
+                    const std::size_t tileTexels =
+                        static_cast<std::size_t>(rect.size) * static_cast<std::size_t>(rect.size);
+                    VOX_LOGI("render") << "  cascade " << cascadeIndex << " tile "
+                                       << tileNonZero << "/" << tileTexels << " written";
+                }
+                vkUnmapMemory(m_device, stagingMemory);
+            }
+        }
+        vkDestroyCommandPool(m_device, pool, nullptr);
+    }
+    vkDestroyBuffer(m_device, staging, nullptr);
+    vkFreeMemory(m_device, stagingMemory, nullptr);
 }
 
 }  // namespace odai::render

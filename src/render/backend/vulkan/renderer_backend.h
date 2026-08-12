@@ -527,6 +527,10 @@ public:
     float cameraFovDegrees() const;
     void shutdown();
 
+    // Reads the shadow atlas back and writes it as a PGM. Reverse-Z, so black
+    // is the cleared/far value: a uniformly black tile was never rendered into.
+    void dumpShadowAtlas(const char* outputPath);
+
 private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
     static constexpr uint32_t kShadowCascadeCount = 4;
@@ -540,6 +544,10 @@ private:
     // 4096 atlas. main raised both together; taking only its atlas size here
     // would have left the image twice the size the rects address.
     static constexpr uint32_t kShadowAtlasSize = 4096;
+    bool m_shadowAtlasDumped = false;
+    // Let the world stream in before dumping; an atlas from frame 1 is empty
+    // for reasons that have nothing to do with the bug being chased.
+    int m_shadowAtlasDumpCountdown = 60;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
     static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
