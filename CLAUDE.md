@@ -120,6 +120,15 @@ cmake-build-release\odai.exe
 cmake-build-release\odai_game_citybuilder.exe   # also _snake, _minesweeper, _stellaris, _swtor, _voxelcraft
 ```
 
+**Fallout 3 works through the same path.** Both games are the same engine and the same
+formats, so `--stream <FO3 Data> --plugin Fallout3.esm --worldspace Wasteland` streams the
+Capital Wasteland with no Fallout-3-specific code: every BSA opens, 38443 exterior cells index,
+and actors build, animate and talk. Two things were New-Vegas-shaped and are no longer: a voice
+path's first component is the **plugin's own file name** (`sound\voice\fallout3.esm\...`), which
+was hardcoded and silently voiced none of Fallout 3's 46 actors; and the default spawn interior
+`GSDocMitchellHouse` is a New Vegas default rather than a constant. Known gap: a few FO3 actors
+report a high `unresolvedBones` (91 on `SpringvaleElemMiniboss`) and stand in bind pose.
+
 **Fallout: New Vegas viewer** — streams the worldspace straight out of the game's own
 `FalloutNV.esm` and `.bsa` archives. No cooking step and no cooked assets on disk:
 

@@ -82,7 +82,10 @@ public:
     void setStreamWorldspace(std::string worldspace) { m_streamWorldspace = std::move(worldspace); }
     // Spawn on the doorstep of this interior cell. Empty means "centre of the
     // worldspace" instead.
-    void setStreamSpawnInterior(std::string editorId) { m_streamSpawnInterior = std::move(editorId); }
+    void setStreamSpawnInterior(std::string editorId) {
+        m_streamSpawnInterior = std::move(editorId);
+        m_streamSpawnInteriorExplicit = true;
+    }
     // Stand one GPU-skinned character in bind pose against the sky, instead of
     // loading a world at all.
     //
@@ -397,7 +400,11 @@ private:
     std::string m_streamWorldspace = "WastelandNV";
     // Where the game itself starts you: the doorstep of Doc Mitchell's house in
     // Goodsprings.
+    // Doc Mitchell's house, which is where New Vegas starts you. A DEFAULT, not
+    // a constant: streaming Fallout 3 through the same path looked for a cell
+    // that game has never heard of, and warned about it every launch.
     std::string m_streamSpawnInterior = "GSDocMitchellHouse";
+    bool m_streamSpawnInteriorExplicit = false;
     std::string m_streamCacheDirectory;
     // Asset override roots, in load order. See addModDirectory.
     std::vector<std::string> m_modDirectories;

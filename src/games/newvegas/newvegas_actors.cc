@@ -81,12 +81,15 @@ std::string voiceNodeIdFromLeaf(const std::string& loweredLeaf) {
 // Indexes one voice folder across every archive that carries voices.
 void buildVoiceIndexForFolder(
     const std::filesystem::path& dataFilesPath,
+    const std::string& pluginFileName,
     const std::string& voiceFolder,
     ActorVoiceIndex& outIndex
 ) {
     outIndex.voiceFolder = voiceFolder;
+    // The plugin's own file name is a path component: Fallout 3's lines live
+    // under sound\voice\fallout3.esm\, New Vegas's under falloutnv.esm\.
     const std::string folderNoSlash =
-        toLowerAscii("sound\\voice\\falloutnv.esm\\" + voiceFolder);
+        toLowerAscii("sound\\voice\\" + pluginFileName + "\\" + voiceFolder);
     // Trailing separator included: this is a prefix test, and without it
     // "maleadult01" would also match "maleadult01defaultb".
     const std::string folderPrefix = folderNoSlash + "\\";
@@ -146,7 +149,8 @@ void buildVoiceIndexForFolder(
         outIndex.status = "no voice archive holds " + folderPrefix;
         return;
     }
-    voiceArchives()[toLowerAscii(voiceFolder)] = std::move(matched);
+    outIndex.archiveKey = toLowerAscii(pluginFileName + "\\" + voiceFolder);
+    voiceArchives()[outIndex.archiveKey] = std::move(matched);
     outIndex.status = std::to_string(outIndex.pathByNodeId.size()) + " lines from ";
     for (std::size_t i = 0; i < matchedNames.size(); ++i) {
         outIndex.status += (i == 0 ? "" : ", ") + matchedNames[i];
@@ -550,6 +554,7 @@ std::size_t loadActorDialogue(
 
 std::size_t loadActorVoices(
     const std::filesystem::path& dataFilesPath,
+    const std::string& pluginFileName,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail
 ) {
@@ -565,11 +570,15 @@ std::size_t loadActorVoices(
             !actor.voice.pathByNodeId.empty()) {
             continue;
         }
-        const std::string key = toLowerAscii(actor.voice.voiceFolder);
+        // Keyed by plugin AND folder: FemaleAdult01Default exists in both
+        // games and means a different set of recordings in each.
+        const std::string key =
+            toLowerAscii(pluginFileName + "\\" + actor.voice.voiceFolder);
         auto existing = indexByFolder.find(key);
         if (existing == indexByFolder.end()) {
             ActorVoiceIndex index;
-            buildVoiceIndexForFolder(dataFilesPath, actor.voice.voiceFolder, index);
+            buildVoiceIndexForFolder(
+                dataFilesPath, pluginFileName, actor.voice.voiceFolder, index);
             existing = indexByFolder.emplace(key, std::move(index)).first;
         }
         actor.voice = existing->second;
@@ -609,7 +618,7 @@ void speakActorLine(
     if (found == actor.voice.pathByNodeId.end()) {
         return;  // a line the game never recorded, or a topic node
     }
-    const auto archives = voiceArchives().find(toLowerAscii(actor.voice.voiceFolder));
+    const auto archives = voiceArchives().find(actor.voice.archiveKey);
     if (archives == voiceArchives().end()) {
         return;
     }

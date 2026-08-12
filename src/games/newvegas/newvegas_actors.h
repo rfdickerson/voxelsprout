@@ -74,6 +74,10 @@ struct ActorVoiceIndex {
     // The VTYP EditorID whose folder these lines live under. Actors sharing a
     // voice type share one index -- a town of ten has perhaps four.
     std::string voiceFolder;
+    // Which open archive set holds them: "<plugin>\\<folder>", lowercased.
+    // Keyed by plugin as well as folder because FemaleAdult01Default exists in
+    // both games and means a different set of recordings in each.
+    std::string archiveKey;
     // Node id -> virtual path of its .ogg inside the BSA.
     std::unordered_map<std::string, std::string> pathByNodeId;
     std::string status;
@@ -257,8 +261,14 @@ std::size_t loadActorDialogue(
 // Actors with no dialogue are skipped -- an index nothing will ever look up is
 // pure cost. Silent failure is fine: no archive means readable dialogue with no
 // audio, which is how this degrades everywhere else too.
+// `pluginFileName` is the plugin the lines belong to ("FalloutNV.esm",
+// "Fallout3.esm"), because a voice path is
+// sound\voice\<plugin>\<VTYP EditorID>\ and that first component is NOT a
+// constant. Hardcoding it to falloutnv.esm is why Fallout 3 loaded 46 actors,
+// resolved four voice types for them, and voiced none of them.
 std::size_t loadActorVoices(
     const std::filesystem::path& dataFilesPath,
+    const std::string& pluginFileName,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail);
 

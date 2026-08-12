@@ -1870,6 +1870,12 @@ bool NewVegasApp::initStreaming() {
     if (const char* env = std::getenv("ODAI_FNV_STREAM_THREADS")) {
         streamThreads = std::max(1u, static_cast<unsigned>(std::atoi(env)));
     }
+    // A spawn interior nobody asked for is a New Vegas default, so do not hunt
+    // for it in somebody else's plugin -- Fallout 3 warned about a missing
+    // GSDocMitchellHouse on every launch.
+    if (!m_streamSpawnInteriorExplicit && toLowerAscii(m_streamPlugin) != "falloutnv.esm") {
+        m_streamSpawnInterior.clear();
+    }
     VOX_LOGI("newvegas") << "streaming workers: " << streamThreads;
     m_streamJobs = std::make_unique<core::JobSystem>(streamThreads);
     m_streamer = std::make_unique<importer::fnv::CellStreamer>();
@@ -2085,7 +2091,7 @@ bool NewVegasApp::initStreaming() {
                     // AFTER the dialogue: an actor with nothing to say needs no
                     // voice index, and skipping those is most of the town.
                     std::string voiceDetail;
-                    loadActorVoices(dataPath, m_actors, voiceDetail);
+                    loadActorVoices(dataPath, m_streamPlugin, m_actors, voiceDetail);
                     VOX_LOGI("newvegas") << "actor voices: " << voiceDetail;
                 }
                 // ODAI_FNV_ACTORS_PARADE lines every built actor up in front of
@@ -2123,7 +2129,7 @@ bool NewVegasApp::initStreaming() {
                         actor.yawRadians = std::atan2(forwardX, forwardZ);
                     }
                 }
-                VOX_LOGI("newvegas") << "Goodsprings actors: " << actorStats.detail;
+                VOX_LOGI("newvegas") << "actors: " << actorStats.detail;
                 for (const SkinnedActor& actor : m_actors) {
                     VOX_LOGI("newvegas")
                         << "  actor " << actor.name << " slot=" << actor.instanceSlot << " at ("
