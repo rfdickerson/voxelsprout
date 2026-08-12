@@ -10,6 +10,9 @@
 
 #include "anim/animation_clip.h"
 #include "anim/animation_sampler.h"
+#include "dialogue/dialogue_context.h"
+#include "dialogue/dialogue_runtime.h"
+#include "dialogue/dialogue_types.h"
 #include "import/fnv/actor_records.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/character_builder.h"
@@ -18,29 +21,126 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace odai::games::newvegas {
 
+// How close, and how squarely faced, an actor has to be for "press E to talk".
+// Generous on both: a conversation the player has to hunt for the exact angle
+// of is worse than one that occasionally offers itself a step early.
+inline constexpr float kActorTalkRange = 500.0f;
+inline constexpr float kActorTalkFacingDot = 0.25f;
+
+// Flags/approval storage the dialogue runtime needs. Fallout's own gating lives
+// in CTDA conditions this engine only partly evaluates, so little ever sets
+// these -- the runtime's conditions are mostly default-constructed and
+// therefore pass. Present because DialogueRuntime requires a context.
+class ActorDialogueContext final : public odai::dialogue::DialogueContext {
+public:
+    bool flag(const std::string& name) const override {
+        const auto it = flags_.find(name);
+        return it != flags_.end() && it->second;
+    }
+    void setFlag(const std::string& name, bool value) override { flags_[name] = value; }
+    int approval(const std::string& companionId) const override {
+        const auto it = approval_.find(companionId);
+        return it == approval_.end() ? 0 : it->second;
+    }
+    void adjustApproval(const std::string& companionId, int delta) override {
+        approval_[companionId] += delta;
+    }
+
+private:
+    std::unordered_map<std::string, bool> flags_;
+    std::unordered_map<std::string, int> approval_;
+};
+
+// An actor's voice lines, indexed by the dialogue node they belong to.
+//
+// Fallout names a voice file after the INFO record it belongs to
+// (<quest>_<topic>_<infoFormId>_1.ogg) and the dialogue importer uses that same
+// formID as its node id, so the index is built by scanning the voice archive
+// for the actor's VOICE TYPE folder and pulling the formID out of each
+// filename. Scanning is what this needs and lookup is not enough: only the
+// formID half of the name is known here, never the quest/topic half.
+struct ActorVoiceIndex {
+    // Node id -> virtual path of its .ogg inside the BSA.
+    std::unordered_map<std::string, std::string> pathByNodeId;
+    std::string status;
+};
+
 // One built, posable actor. Geometry and textures are held rather than consumed
 // at upload because ImportedSkinnedMeshTemplate takes spans.
+//
+// ONE TYPE FOR EVERY ACTOR, talkative or not. Victor was a separate struct
+// until the town arrived, and the two had already drifted -- the conversation,
+// the camera framing and the activation prompt each existed once for him and
+// would have had to be written a second time for everybody else. An actor with
+// nothing to say simply carries an empty `tree`, which costs a few empty
+// containers per actor and is what makes "talk to anyone" a change to one code
+// path instead of two.
 struct SkinnedActor {
+    // EditorID -- stable, unique, and what a diagnostic env var names.
     std::string name;
+    // FULL -- what the game shows a player. Empty for most creatures.
+    std::string fullName;
+    // The actor BASE this instances. Dialogue is attributed by this formID (see
+    // dialogue_records.h), and the generic town scan skips bases handled
+    // elsewhere by it.
+    std::uint32_t baseFormId = 0;
     odai::importer::fnv::FalloutCharacter character;
     std::vector<odai::importer::ImportedSceneTexture> textures;
     std::vector<odai::importer::ImportedScenePackedDraw> draws;
 
+    // idle plays whenever the actor is not in conversation; talk plays while it
+    // is. An actor with no talk clip keeps idling through the conversation.
     odai::anim::AnimationClip idleClip;
+    odai::anim::AnimationClip talkClip;
     odai::anim::AnimationSampler sampler;
     std::vector<odai::math::Matrix4> poseScratch;
     float animationSeconds = 0.0f;
+    // Which clip the last pose came from, so a switch can restart the clock.
+    bool posedTalking = false;
 
     // Engine space, feet on the ground.
     float position[3] = {};
     float yawRadians = 0.0f;
+    // Top of the actor's own rest-pose geometry, above its feet. A conversation
+    // aims at a fraction of this rather than at a constant, because a bighorner,
+    // a settler and a Securitron are not the same height and a placement's
+    // origin is at the FEET -- aiming at the origin points the camera at the
+    // ground.
+    float standingHeightUnits = 0.0f;
 
+    // The conversation, when this actor has one. An empty `tree` means it
+    // cannot be talked to.
+    odai::dialogue::DialogueTree tree;
+    ActorDialogueContext context;
+    odai::dialogue::DialogueRuntime runtime;
+    bool talking = false;
+    // Node whose voice line has been started, so a line plays once rather than
+    // restarting every frame the node is current.
+    std::string spokenNodeId;
+    ActorVoiceIndex voice;
+
+    bool placed = false;
     std::uint32_t instanceSlot = 0;
     bool uploaded = false;
+
+    std::string status;           // one line for the startup log, success or reason
+    std::string animationStatus;
+    // Per-phase load cost, "placement 12ms  dialogue 900ms  ...". This is the
+    // only thing that makes a slow launch attributable, and a slow launch is the
+    // only symptom a forgotten onRecordHeader filter produces.
+    std::string timing;
+
+    [[nodiscard]] bool canTalk() const { return placed && !tree.nodes.empty(); }
+    // What to put on screen. Falls back to the EditorID rather than to nothing,
+    // because an unnamed actor still has to be addressable in a prompt.
+    [[nodiscard]] const std::string& displayName() const {
+        return fullName.empty() ? name : fullName;
+    }
 };
 
 // Builds the skinned geometry, textures and draws for one actor from its
@@ -120,8 +220,53 @@ bool loadGoodspringsActors(
     std::vector<SkinnedActor>& outActors,
     ActorPopulationStats& outStats);
 
+// Attaches a conversation to every actor that has one, in ONE walk over the
+// plugin. Actors that already carry a tree are left alone, and actors the
+// plugin gives no lines are simply left unable to talk.
+//
+// Separate from loadGoodspringsActors because it is a different question about
+// the same actors, and because it must run after every actor is in the list --
+// including any the caller added itself, like Victor.
+//
+// Returns the number of actors that gained a conversation; `outDetail` is one
+// line for the startup log.
+std::size_t loadActorDialogue(
+    const std::filesystem::path& pluginPath,
+    std::vector<SkinnedActor>& actors,
+    std::string& outDetail);
+
 // Advances every actor's clip and writes this frame's bone matrices, world
 // placement folded in. Hand each actor's poseScratch to setSkinnedActorPose.
 void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds);
+
+// Rewrites every vertex's textureIndex from an index into `actor.textures` to
+// the bindless slot the renderer handed back for it.
+//
+// This exists because a skinned template's vertices reach the GPU verbatim: the
+// scene-index-to-bindless-slot remap that addImportedSceneChunk performs for
+// world geometry has no equivalent on the skinned path, so the caller has to do
+// it. Must run after Renderer::uploadSkinnedActorTextures and before
+// Renderer::uploadSkinnedMeshTemplate.
+void remapActorTextureSlots(SkinnedActor& actor, const std::vector<std::uint32_t>& bindlessSlots);
+
+// Rest-pose height above the actor's own origin. The origin is its FEET, so
+// this is what a caller needs to aim at anything above the ground.
+[[nodiscard]] float actorStandingHeight(const odai::importer::fnv::FalloutCharacter& character);
+
+// Where a conversation should look: below the speaker's face by enough that the
+// dialogue card, which sits centred, does not cover the person talking.
+[[nodiscard]] float conversationFaceHeight(const SkinnedActor& actor);
+
+// True when the camera is close enough to `actor` and facing it -- the test
+// behind "press E to talk".
+[[nodiscard]] bool actorIsInReach(
+    const SkinnedActor& actor, const float cameraPosition[3], float cameraYawRadians);
+
+// The actor the player is looking at and close enough to talk to, or -1. When
+// two are in reach the nearer one wins, so standing between two townsfolk picks
+// the one being faced rather than whichever was built first.
+[[nodiscard]] int findActorInReach(
+    const std::vector<SkinnedActor>& actors, const float cameraPosition[3],
+    float cameraYawRadians);
 
 }  // namespace odai::games::newvegas

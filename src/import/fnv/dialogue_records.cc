@@ -233,23 +233,77 @@ bool buildSpeakerDialogueTree(
         return false;
     }
 
-    // Pass 2: topics, and the responses under them that belong to this speaker.
-    //
-    // INFO records stream immediately after the DIAL that owns them (they live
-    // in its child group), so tracking the most recent DIAL is enough to know
-    // each response's topic -- no group bookkeeping required.
+    // Pass 2 is the batch reader, which is the same walk with one entry in the
+    // wanted set. Keeping one implementation means the single-speaker path
+    // cannot drift away from the one the town actually uses.
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree> trees;
+    std::unordered_map<std::uint32_t, DialogueImportStats> stats;
+    if (!buildSpeakerDialogueTrees(
+            pluginPath, {SpeakerDialogueRequest{speakerFormId, speakerName}}, trees, stats,
+            outError)) {
+        return false;
+    }
+    const auto tree = trees.find(speakerFormId);
+    if (tree == trees.end()) {
+        outError = "no dialogue responses found for " + speakerName;
+        return false;
+    }
+    outTree = std::move(tree->second);
+    const auto stat = stats.find(speakerFormId);
+    if (stat != stats.end()) {
+        outStats = stat->second;
+    }
+    return true;
+}
+
+bool buildSpeakerDialogueTrees(
+    const std::filesystem::path& pluginPath,
+    const std::vector<SpeakerDialogueRequest>& speakers,
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
+    std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
+    std::string& outError
+) {
+    outTrees.clear();
+    outStats.clear();
+    outError.clear();
+    if (speakers.empty()) {
+        return true;
+    }
+
+    EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        outError = "cannot open plugin: " + reader.lastError();
+        return false;
+    }
+
+    std::unordered_map<std::uint32_t, std::string> nameByFormId;
+    for (const SpeakerDialogueRequest& speaker : speakers) {
+        if (speaker.baseFormId != 0u) {
+            nameByFormId.emplace(speaker.baseFormId, speaker.displayName);
+        }
+    }
+    if (nameByFormId.empty()) {
+        return true;
+    }
+
+    // One walk over DIAL/INFO for everybody. INFO records stream immediately
+    // after the DIAL that owns them (they live in its child group), so tracking
+    // the most recent DIAL is enough to know each response's topic -- no group
+    // bookkeeping required.
     std::unordered_map<std::uint32_t, std::string> topicPlayerText;
-    std::vector<RawInfo> infos;
+    std::unordered_map<std::uint32_t, std::vector<RawInfo>> infosBySpeaker;
     std::uint32_t currentTopic = 0;
+    std::uint32_t topicsSeen = 0;
+    std::unordered_map<std::uint32_t, DialogueImportStats> stats;
     {
         EsmReader::Visitor visitor;
-        visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+        visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "DIAL" || header.type == "INFO";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (record.type == "DIAL") {
                 currentTopic = record.formId;
-                ++outStats.topicsSeen;
+                ++topicsSeen;
                 for (const auto& sub : record.subrecords) {
                     if (sub.type == "FULL") {
                         topicPlayerText[record.formId] = subrecordString(sub);
@@ -260,7 +314,9 @@ bool buildSpeakerDialogueTree(
             if (record.type != "INFO") {
                 return;
             }
-            bool isSpeaker = false;
+            // Which of the wanted speakers this line belongs to. A line can name
+            // more than one, so this collects rather than stopping at the first.
+            std::vector<std::uint32_t> owners;
             for (const auto& sub : record.subrecords) {
                 if (sub.type != "CTDA" || sub.size < 28u) {
                     continue;
@@ -268,37 +324,40 @@ bool buildSpeakerDialogueTree(
                 // CTDA (FO3/FNV, 28 bytes): type u8 @0, 3 unused, comparison
                 // f32 @4, function index u32 @8, param1 u32 @12, param2, runOn,
                 // reference.
-                //
-                // The operator in the type byte's top 3 bits has to be read,
-                // not just the function and its parameter. Fallout writes
-                // "everyone EXCEPT this actor" as GetIsID <actor> == 0, which
-                // is the same function and the same parameter as the line that
-                // belongs to him -- only the comparison differs. Ignoring it
-                // attributed other characters' lines to the speaker.
-                if (readU32(sub.data + 8) != kCtdaFunctionGetIsId ||
-                    readU32(sub.data + 12) != speakerFormId) {
+                if (readU32(sub.data + 8) != kCtdaFunctionGetIsId) {
                     continue;
                 }
+                const std::uint32_t actor = readU32(sub.data + 12);
+                if (nameByFormId.find(actor) == nameByFormId.end()) {
+                    continue;
+                }
+                // The operator in the type byte's top 3 bits has to be read, not
+                // just the function and its parameter. Fallout writes "everyone
+                // EXCEPT this actor" as GetIsID <actor> == 0, which is the same
+                // function and the same parameter as the line that belongs to
+                // him -- only the comparison differs. Ignoring it attributed
+                // other characters' lines to the speaker.
                 float comparisonValue = 0.0f;
                 std::memcpy(&comparisonValue, sub.data + 4, sizeof(comparisonValue));
-                const std::uint8_t comparisonOperator =
-                    static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
+                const auto comparisonOperator = static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
                 // 0 = EQUAL, 2 = GREATER, 3 = GREATER-OR-EQUAL: all read as
                 // "is this actor" when tested against 1.
-                const bool positive =
-                    (comparisonOperator == 0u && comparisonValue == 1.0f) ||
+                const bool positive = (comparisonOperator == 0u && comparisonValue == 1.0f) ||
                     (comparisonOperator == 2u && comparisonValue == 0.0f) ||
                     (comparisonOperator == 3u && comparisonValue == 1.0f);
-                if (positive) {
-                    isSpeaker = true;
+                if (positive &&
+                    std::find(owners.begin(), owners.end(), actor) == owners.end()) {
+                    owners.push_back(actor);
                 }
             }
-            if (!isSpeaker) {
+            if (owners.empty()) {
                 return;
             }
+
             RawInfo info;
             info.formId = record.formId;
             info.topicFormId = currentTopic;
+            std::uint32_t responses = 0;
             for (const auto& sub : record.subrecords) {
                 if (sub.type == "NAM1") {
                     const std::string line = subrecordString(sub);
@@ -312,7 +371,7 @@ bool buildSpeakerDialogueTree(
                         info.text += "  ";
                     }
                     info.text += line;
-                    ++outStats.responsesConcatenated;
+                    ++responses;
                 } else if (sub.type == "TCLT" && sub.size >= 4u) {
                     info.linkedTopics.push_back(readU32(sub.data));
                 }
@@ -320,67 +379,83 @@ bool buildSpeakerDialogueTree(
             if (info.text.empty()) {
                 return;  // a silent INFO (script-only) is not a line to show
             }
-            infos.push_back(std::move(info));
-            ++outStats.infosForSpeaker;
+            for (const std::uint32_t owner : owners) {
+                infosBySpeaker[owner].push_back(info);
+                DialogueImportStats& speakerStats = stats[owner];
+                ++speakerStats.infosForSpeaker;
+                speakerStats.responsesConcatenated += responses;
+            }
         };
         if (!reader.walk(visitor)) {
             outError = "plugin walk failed while reading dialogue";
             return false;
         }
     }
-    if (infos.empty()) {
-        outError = "no dialogue responses found for " + speakerName;
-        return false;
-    }
 
-    // Topic -> the speaker's first response under it. First rather than a list
-    // because choosing a topic has to land somewhere definite and conditions
-    // (which would pick between them) are not evaluated -- see the header.
-    std::unordered_map<std::uint32_t, std::uint32_t> firstInfoForTopic;
-    for (const RawInfo& info : infos) {
-        firstInfoForTopic.emplace(info.topicFormId, info.formId);
-    }
+    for (const auto& [speakerFormId, infos] : infosBySpeaker) {
+        if (infos.empty()) {
+            continue;
+        }
+        const auto nameIt = nameByFormId.find(speakerFormId);
+        const std::string& speakerName =
+            nameIt != nameByFormId.end() ? nameIt->second : std::string();
+        DialogueImportStats& speakerStats = stats[speakerFormId];
+        speakerStats.topicsSeen = topicsSeen;
 
-    for (const RawInfo& info : infos) {
-        odai::dialogue::DialogueNode node;
-        node.id = nodeIdFor(info.formId);
-        node.speaker = speakerName;
-        node.text = info.text;
-        for (const std::uint32_t topic : info.linkedTopics) {
-            ++outStats.choiceLinks;
-            const auto targetIt = firstInfoForTopic.find(topic);
-            if (targetIt == firstInfoForTopic.end()) {
-                // The topic exists but this speaker has nothing to say under
-                // it -- usually because the line that would answer is gated
-                // behind a quest condition we cannot evaluate. Dropped rather
-                // than offered as a choice that would dead-end.
-                ++outStats.danglingLinks;
-                continue;
+        // Topic -> the speaker's first response under it. First rather than a
+        // list because choosing a topic has to land somewhere definite and
+        // conditions (which would pick between them) are not evaluated -- see
+        // the header.
+        std::unordered_map<std::uint32_t, std::uint32_t> firstInfoForTopic;
+        for (const RawInfo& info : infos) {
+            firstInfoForTopic.emplace(info.topicFormId, info.formId);
+        }
+
+        odai::dialogue::DialogueTree tree;
+        for (const RawInfo& info : infos) {
+            odai::dialogue::DialogueNode node;
+            node.id = nodeIdFor(info.formId);
+            node.speaker = speakerName;
+            node.text = info.text;
+            for (const std::uint32_t topic : info.linkedTopics) {
+                ++speakerStats.choiceLinks;
+                const auto targetIt = firstInfoForTopic.find(topic);
+                if (targetIt == firstInfoForTopic.end()) {
+                    // The topic exists but this speaker has nothing to say under
+                    // it -- usually because the line that would answer is gated
+                    // behind a quest condition we cannot evaluate. Dropped
+                    // rather than offered as a choice that would dead-end.
+                    ++speakerStats.danglingLinks;
+                    continue;
+                }
+                odai::dialogue::DialogueChoice choice;
+                const auto textIt = topicPlayerText.find(topic);
+                choice.text = (textIt != topicPlayerText.end() && !textIt->second.empty())
+                    ? textIt->second
+                    : std::string("...");
+                choice.targetNode = nodeIdFor(targetIt->second);
+                node.choices.push_back(std::move(choice));
             }
-            odai::dialogue::DialogueChoice choice;
-            const auto textIt = topicPlayerText.find(topic);
-            choice.text = (textIt != topicPlayerText.end() && !textIt->second.empty())
-                ? textIt->second
-                : std::string("...");
-            choice.targetNode = nodeIdFor(targetIt->second);
-            node.choices.push_back(std::move(choice));
+            tree.nodes.emplace(node.id, std::move(node));
         }
-        outTree.nodes.emplace(node.id, std::move(node));
-    }
 
-    // Open on a GREETING, which is what the game does. Falls back to any node
-    // so a speaker whose greeting is gated still yields a usable tree.
-    for (const RawInfo& info : infos) {
-        const auto textIt = topicPlayerText.find(info.topicFormId);
-        if (textIt != topicPlayerText.end() && toLowerAsciiCopy(textIt->second) == "greeting") {
-            outTree.startNode = nodeIdFor(info.formId);
-            break;
+        // Open on a GREETING, which is what the game does. Falls back to any
+        // node so a speaker whose greeting is gated still yields a usable tree.
+        for (const RawInfo& info : infos) {
+            const auto textIt = topicPlayerText.find(info.topicFormId);
+            if (textIt != topicPlayerText.end() &&
+                toLowerAsciiCopy(textIt->second) == "greeting") {
+                tree.startNode = nodeIdFor(info.formId);
+                break;
+            }
         }
+        if (tree.startNode.empty()) {
+            tree.startNode = nodeIdFor(infos.front().formId);
+        }
+        tree.id = speakerName;
+        outTrees.emplace(speakerFormId, std::move(tree));
     }
-    if (outTree.startNode.empty()) {
-        outTree.startNode = nodeIdFor(infos.front().formId);
-    }
-    outTree.id = speakerName;
+    outStats = std::move(stats);
     return true;
 }
 

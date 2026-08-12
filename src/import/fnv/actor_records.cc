@@ -414,6 +414,8 @@ bool findActorsNear(
             for (const EsmSubrecordView& sub : record.subrecords) {
                 if (sub.type == "EDID") {
                     base.editorId = subrecordText(sub);
+                } else if (sub.type == "FULL") {
+                    base.fullName = subrecordText(sub);
                 } else if (sub.type == "MODL") {
                     base.skeletonPath = subrecordText(sub);
                 } else if (sub.type == "NIFZ" && sub.size != 0u) {

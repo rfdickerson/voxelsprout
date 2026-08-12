@@ -40,14 +40,6 @@ constexpr const char* kVoiceFolderPrefix = "sound\\voice\\falloutnv.esm\\robotvi
 // folder path, which carries no trailing slash.
 constexpr const char* kVoiceFolderNoSlash = "sound\\voice\\falloutnv.esm\\robotvictor";
 
-// He stands ~2.6 m tall; talk range is generous enough that you do not have to
-// hunt for a spot, tight enough that you cannot start a conversation from
-// across the road. Bethesda units, ~70 per metre.
-// ~7 m. Wider than the game's own activate distance on purpose: this is a
-// free camera with no crosshair-highlight, so a range that only lit up when you
-// were touching him gave no hint the conversation existed at all.
-constexpr float kTalkRange = 500.0f;
-constexpr float kTalkFacingDot = 0.25f;
 
 std::string toLowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -425,6 +417,12 @@ bool loadVictor(
     lap("voiceindex", outState.timing);
 
     outState.placed = true;
+    // He is an ordinary actor from here on, so he needs what every actor has:
+    // a name the activation prompt can offer, and a height the conversation
+    // camera can aim by.
+    outState.name = kVictorEditorId;
+    outState.fullName = kVictorEditorId;
+    outState.standingHeightUnits = actorStandingHeight(outState.character);
     outState.status = "placed at (" + std::to_string(outState.position[0]) + ", " +
                       std::to_string(outState.position[1]) + ", " +
                       std::to_string(outState.position[2]) + ") -- " +
@@ -434,82 +432,6 @@ bool loadVictor(
                       std::to_string(outState.character.skeleton.bones.size()) + " bones, " +
                       std::to_string(outState.tree.nodes.size()) + " dialogue nodes";
     return true;
-}
-
-void remapVictorTextureSlots(VictorState& state, const std::vector<std::uint32_t>& bindlessSlots) {
-    for (odai::render::ImportedSkinnedMeshVertex& vertex : state.character.vertices) {
-        vertex.textureIndex = (vertex.textureIndex < bindlessSlots.size())
-            ? bindlessSlots[vertex.textureIndex]
-            : 0xffffffffu;
-    }
-}
-
-void updateVictorPose(VictorState& state, float deltaSeconds) {
-    if (!state.placed || state.character.skeleton.bones.empty()) {
-        return;
-    }
-    // Restart the clock when the clip changes, so a conversation opens on the
-    // first frame of the gesture cycle rather than wherever the idle happened
-    // to have got to -- entering talk 4 seconds into a 5-second clip reads as
-    // Victor finishing a gesture he never started.
-    const bool wantsTalkClip = state.talking && !state.talkClip.tracks.empty();
-    if (wantsTalkClip != state.posedTalking) {
-        state.posedTalking = wantsTalkClip;
-        state.animationSeconds = 0.0f;
-    }
-    state.animationSeconds += deltaSeconds;
-
-    // ODAI_FNV_VICTOR_NOANIM=1 freezes him at the bind pose while leaving every
-    // other part of the path running -- same upload, same per-frame pose
-    // submission, same draws. It is the control for "is he actually animating":
-    // a screenshot diff of his own pixels across two moments is otherwise
-    // impossible to attribute, because the world is streaming in behind him and
-    // the light is moving, so SOMETHING always changes.
-    static const bool freezeAtBindPose = std::getenv("ODAI_FNV_VICTOR_NOANIM") != nullptr;
-
-    const anim::AnimationClip& clip = wantsTalkClip ? state.talkClip : state.idleClip;
-    if (freezeAtBindPose || clip.tracks.empty() || clip.duration <= 0.0f) {
-        // No clip: hold the bind pose rather than leaving the previous frame's
-        // matrices, which for the very first frame would be none at all.
-        importer::fnv::computeFalloutBindPose(state.character, state.poseScratch);
-    } else {
-        state.sampler.sample(
-            state.character.skeleton, clip, state.animationSeconds, state.poseScratch);
-    }
-
-    // World placement rides on the bone matrices, pre-multiplied: the skinning
-    // pass consumes bone matrices and nothing else, so there is no separate
-    // instance transform to put it in.
-    const odai::math::Matrix4 actorWorld =
-        odai::math::Matrix4::translation(
-            odai::math::Vector3{state.position[0], state.position[1], state.position[2]}) *
-        odai::math::Matrix4::rotationY(state.yawRadians);
-    for (odai::math::Matrix4& matrix : state.poseScratch) {
-        matrix = actorWorld * matrix;
-    }
-}
-
-bool victorIsInReach(
-    const VictorState& state, const float cameraPosition[3], float cameraYawRadians
-) {
-    if (!state.placed) {
-        return false;
-    }
-    const float dx = state.position[0] - cameraPosition[0];
-    const float dy = state.position[1] - cameraPosition[1];
-    const float dz = state.position[2] - cameraPosition[2];
-    const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
-    if (distanceSquared > kTalkRange * kTalkRange) {
-        return false;
-    }
-    const float horizontal = std::sqrt((dx * dx) + (dz * dz));
-    if (horizontal < 1e-3f) {
-        return true;  // standing on top of him counts as facing him
-    }
-    // Same basis the camera uses: forward is (cos(yaw), sin(yaw)) in XZ.
-    const float forwardX = std::cos(cameraYawRadians);
-    const float forwardZ = std::sin(cameraYawRadians);
-    return (((dx / horizontal) * forwardX) + ((dz / horizontal) * forwardZ)) >= kTalkFacingDot;
 }
 
 void speakVictorLine(

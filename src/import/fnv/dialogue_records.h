@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace odai::importer::fnv {
@@ -97,11 +98,42 @@ bool findSpeakerPlacement(
 //
 // `outTree.startNode` is a GREETING response when one exists, because that is
 // what the game opens a conversation with.
+//
+// TWO plugin walks: one to turn the EditorID into a formID, one to read the
+// dialogue. Prefer buildSpeakerDialogueTrees when the caller already knows the
+// formIDs, which anything populating a settlement does.
 bool buildSpeakerDialogueTree(
     const std::filesystem::path& pluginPath,
     const std::string& speakerEditorId,
     odai::dialogue::DialogueTree& outTree,
     DialogueImportStats& outStats,
+    std::string& outError);
+
+struct SpeakerDialogueRequest {
+    // The actor BASE, which is what a CTDA names. A placement's own formID
+    // matches nothing.
+    std::uint32_t baseFormId = 0;
+    // Shown as the node's speaker and used as the tree's id. Usually the
+    // actor's FULL, falling back to its EditorID.
+    std::string displayName;
+};
+
+// Builds a tree per speaker in ONE walk over the plugin's DIAL/INFO records.
+//
+// The reason this exists rather than a loop over the single-speaker version:
+// that one walks the whole plugin per speaker, and the dialogue pass alone is
+// ~75 ms against FalloutNV.esm. A town of ten actors would spend most of a
+// second re-reading the same records to answer the same question ten times.
+// Attribution is by formID, which every caller populating a settlement already
+// has, so nothing is lost by skipping the EditorID lookup.
+//
+// Speakers with no dialogue are simply absent from `outTrees` -- most actors in
+// a cell have nothing to say, and that is not an error.
+bool buildSpeakerDialogueTrees(
+    const std::filesystem::path& pluginPath,
+    const std::vector<SpeakerDialogueRequest>& speakers,
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
+    std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
     std::string& outError);
 
 }  // namespace odai::importer::fnv

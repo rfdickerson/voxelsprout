@@ -53,6 +53,9 @@ enum class ActorGeometrySource : std::uint8_t {
 struct FalloutActorBase {
     std::uint32_t formId = 0;
     std::string editorId;
+    // FULL -- the name the game shows. An EditorID reads as "GSSettlerAM"; a
+    // prompt offering to talk to that is a debug string on screen.
+    std::string fullName;
     std::string recordType;   // "CREA" or "NPC_"
     std::string skeletonPath; // MODL -- the skeleton for a CREA, and for an NPC_ too
     std::vector<std::string> bodyPartPaths;  // NIFZ, relative to the skeleton's directory

@@ -255,12 +255,7 @@ private:
     double m_lastCursorX = 0.0;
     double m_lastCursorY = 0.0;
     bool m_hasCursorSample = false;
-    VictorState m_victor;
-    // Held until the first frame has rendered, the same deferral his static
-    // chunk needed: uploading during onInit is the one thing no other caller
-    // does, and the streamer's cells are all added from the frame loop.
-    bool m_victorUploadPending = false;
-    // Which skinned instance slot he owns.
+    // Which skinned instance slot Victor owns.
     //
     // NOT slot 0: --character's isolation harness uploads there, and the two
     // modes are NOT mutually exclusive -- character mode streams the world, so
@@ -277,14 +272,38 @@ private:
     // that the slot budget is spent on actors the player can actually see.
     static constexpr float kActorLoadRadius = 12000.0f;
 
-    // Everyone else in Goodsprings: wildlife and, once NPC bodies can be
-    // assembled, the townsfolk. Held for the process lifetime because a skinned
-    // template is uploaded from spans into these.
+    // EVERYONE, Victor included. He used to be his own member of his own type,
+    // which meant the upload, the pose, the conversation and the camera framing
+    // each existed twice by the time the town arrived. Held for the process
+    // lifetime because a skinned template is uploaded from spans into these.
     std::vector<SkinnedActor> m_actors;
     bool m_actorsUploadPending = false;
+    // Victor's index in m_actors, or -1. He is an ordinary actor now; this
+    // exists only for his spawn-side placement and the log lines that name him.
+    int m_victorIndex = -1;
+    // The actor the player is in conversation with, or -1. An index rather than
+    // a pointer because m_actors outlives any one frame but is not stable
+    // across a reload.
+    int m_talkingActor = -1;
+
+    [[nodiscard]] SkinnedActor* talkingActor() {
+        return (m_talkingActor >= 0 && m_talkingActor < static_cast<int>(m_actors.size()))
+            ? &m_actors[static_cast<std::size_t>(m_talkingActor)]
+            : nullptr;
+    }
+    [[nodiscard]] const SkinnedActor* talkingActor() const {
+        return (m_talkingActor >= 0 && m_talkingActor < static_cast<int>(m_actors.size()))
+            ? &m_actors[static_cast<std::size_t>(m_talkingActor)]
+            : nullptr;
+    }
+    void beginConversation(int actorIndex);
+    void endConversation();
     // Engine space; y == 0 means "use his authored ACRE position".
     float m_victorSpawnPosition[3] = {};
-    bool m_victorPromptVisible = false;
+    // The actor "press E to talk" is currently offering, or -1. Resolved once
+    // per tick by findActorInReach so the prompt and the keypress can never
+    // disagree about who is being addressed.
+    int m_activationActor = -1;
     bool m_mouseCaptured = true;
 
     // Time of day in hours [0, 24). Drives the sun angle, and through it the

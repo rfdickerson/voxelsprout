@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "import/dds.h"
+#include "import/fnv/dialogue_records.h"
 #include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
 
@@ -174,6 +175,18 @@ bool buildSkinnedActor(
     return true;
 }
 
+float actorStandingHeight(const importer::fnv::FalloutCharacter& character) {
+    // Rest-pose extent above the actor's own origin, which is its FEET. Good
+    // enough to aim a camera at without posing anything: an idle moves a head
+    // by a few units, and the alternative is a per-frame bounds recompute over
+    // every skinned vertex.
+    float highest = 0.0f;
+    for (const odai::render::ImportedSkinnedMeshVertex& vertex : character.vertices) {
+        highest = std::max(highest, vertex.position[1]);
+    }
+    return highest;
+}
+
 bool loadActorIdleClip(
     const importer::fnv::FalloutAssetSource& assets,
     const std::string& skeletonPath,
@@ -310,7 +323,11 @@ bool loadGoodspringsActors(
 
         SkinnedActor actor;
         actor.name = resolved.base != nullptr ? resolved.base->editorId : std::string("actor");
+        actor.fullName = resolved.base != nullptr ? resolved.base->fullName : std::string();
+        actor.baseFormId = placement.baseFormId;
+        actor.placed = true;
         actor.character = built.character;
+        actor.standingHeightUnits = actorStandingHeight(built.character);
         actor.textures = built.textures;
         actor.draws = built.draws;
         actor.idleClip = built.idleClip;
@@ -345,19 +362,99 @@ bool loadGoodspringsActors(
     return true;
 }
 
+std::size_t loadActorDialogue(
+    const std::filesystem::path& pluginPath,
+    std::vector<SkinnedActor>& actors,
+    std::string& outDetail
+) {
+    // One request per DISTINCT base. Goodsprings places two ravens off the same
+    // record; asking twice would read the same INFOs twice and hand back the
+    // same tree.
+    std::vector<importer::fnv::SpeakerDialogueRequest> requests;
+    for (const SkinnedActor& actor : actors) {
+        if (actor.baseFormId == 0u || !actor.tree.nodes.empty()) {
+            continue;
+        }
+        const bool alreadyRequested = std::any_of(
+            requests.begin(), requests.end(),
+            [&](const importer::fnv::SpeakerDialogueRequest& request) {
+                return request.baseFormId == actor.baseFormId;
+            });
+        if (!alreadyRequested) {
+            requests.push_back(
+                importer::fnv::SpeakerDialogueRequest{actor.baseFormId, actor.displayName()});
+        }
+    }
+    if (requests.empty()) {
+        outDetail = "no actors needed dialogue";
+        return 0;
+    }
+
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree> trees;
+    std::unordered_map<std::uint32_t, importer::fnv::DialogueImportStats> stats;
+    std::string error;
+    if (!importer::fnv::buildSpeakerDialogueTrees(pluginPath, requests, trees, stats, error)) {
+        outDetail = "dialogue scan failed: " + error;
+        return 0;
+    }
+
+    std::size_t attached = 0;
+    for (SkinnedActor& actor : actors) {
+        if (!actor.tree.nodes.empty()) {
+            continue;
+        }
+        const auto tree = trees.find(actor.baseFormId);
+        if (tree == trees.end() || tree->second.nodes.empty()) {
+            continue;
+        }
+        // Copied rather than moved: two placements of the same base are two
+        // actors who each need their own runtime to talk from.
+        actor.tree = tree->second;
+        ++attached;
+    }
+    outDetail = std::to_string(attached) + " of " + std::to_string(actors.size()) +
+        " actors can talk (" + std::to_string(requests.size()) + " bases asked, one plugin walk)";
+    return attached;
+}
+
 void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
+    // ODAI_FNV_NOANIM=1 freezes every actor at bind pose while leaving the rest
+    // of the path running -- same upload, same per-frame pose submission, same
+    // draws. It is the control for "is this actually animating": a screenshot
+    // diff of an actor's own pixels across two moments is otherwise impossible
+    // to attribute, because the world is streaming in behind it and the light is
+    // moving, so SOMETHING always changes.
+    static const bool freezeAtBindPose = std::getenv("ODAI_FNV_NOANIM") != nullptr ||
+        std::getenv("ODAI_FNV_VICTOR_NOANIM") != nullptr;
+
     for (SkinnedActor& actor : actors) {
         if (actor.character.skeleton.bones.empty()) {
             continue;
         }
+        // Restart the clock when the clip changes, so a conversation opens on
+        // the first frame of the gesture cycle rather than wherever the idle had
+        // got to -- entering talk 4 seconds into a 5-second clip reads as an
+        // actor finishing a gesture it never started.
+        const bool wantsTalkClip = actor.talking && !actor.talkClip.tracks.empty();
+        if (wantsTalkClip != actor.posedTalking) {
+            actor.posedTalking = wantsTalkClip;
+            actor.animationSeconds = 0.0f;
+        }
         actor.animationSeconds += deltaSeconds;
-        if (actor.idleClip.tracks.empty() || actor.idleClip.duration <= 0.0f) {
+
+        const anim::AnimationClip& clip = wantsTalkClip ? actor.talkClip : actor.idleClip;
+        if (freezeAtBindPose || clip.tracks.empty() || clip.duration <= 0.0f) {
+            // No clip: hold the bind pose rather than leaving the previous
+            // frame's matrices, which on the first frame would be none at all.
             importer::fnv::computeFalloutBindPose(actor.character, actor.poseScratch);
         } else {
             actor.sampler.sample(
-                actor.character.skeleton, actor.idleClip, actor.animationSeconds,
-                actor.poseScratch);
+                actor.character.skeleton, clip, actor.animationSeconds, actor.poseScratch);
         }
+
+        // World placement rides on the bone matrices, pre-multiplied: the
+        // skinning pass consumes bone matrices and nothing else, so there is no
+        // separate instance transform to put it in.
         const odai::math::Matrix4 actorWorld =
             odai::math::Matrix4::translation(odai::math::Vector3{
                 actor.position[0], actor.position[1], actor.position[2]}) *
@@ -366,6 +463,68 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
             matrix = actorWorld * matrix;
         }
     }
+}
+
+void remapActorTextureSlots(SkinnedActor& actor, const std::vector<std::uint32_t>& bindlessSlots) {
+    for (odai::render::ImportedSkinnedMeshVertex& vertex : actor.character.vertices) {
+        vertex.textureIndex = (vertex.textureIndex < bindlessSlots.size())
+            ? bindlessSlots[vertex.textureIndex]
+            : 0xffffffffu;
+    }
+}
+
+float conversationFaceHeight(const SkinnedActor& actor) {
+    // Victor's tuned value was 150 units against a ~230-unit Securitron, so
+    // ~0.65 of standing height -- roughly the shoulders, which is where the
+    // camera wants to sit for a portrait. Falling back to his old constant
+    // keeps an actor whose geometry never measured from aiming at its feet.
+    constexpr float kFaceFraction = 0.65f;
+    constexpr float kFallbackUnits = 150.0f;
+    return actor.standingHeightUnits > 1.0f ? (actor.standingHeightUnits * kFaceFraction)
+                                            : kFallbackUnits;
+}
+
+bool actorIsInReach(
+    const SkinnedActor& actor, const float cameraPosition[3], float cameraYawRadians
+) {
+    if (!actor.placed) {
+        return false;
+    }
+    const float dx = actor.position[0] - cameraPosition[0];
+    const float dy = actor.position[1] - cameraPosition[1];
+    const float dz = actor.position[2] - cameraPosition[2];
+    if (((dx * dx) + (dy * dy) + (dz * dz)) > (kActorTalkRange * kActorTalkRange)) {
+        return false;
+    }
+    const float horizontal = std::sqrt((dx * dx) + (dz * dz));
+    if (horizontal < 1e-3f) {
+        return true;  // standing on top of them counts as facing them
+    }
+    // Same basis the camera uses: forward is (cos(yaw), sin(yaw)) in XZ.
+    const float forwardX = std::cos(cameraYawRadians);
+    const float forwardZ = std::sin(cameraYawRadians);
+    return (((dx / horizontal) * forwardX) + ((dz / horizontal) * forwardZ)) >= kActorTalkFacingDot;
+}
+
+int findActorInReach(
+    const std::vector<SkinnedActor>& actors, const float cameraPosition[3], float cameraYawRadians
+) {
+    int best = -1;
+    float bestDistanceSquared = 0.0f;
+    for (std::size_t i = 0; i < actors.size(); ++i) {
+        if (!actors[i].canTalk() || !actorIsInReach(actors[i], cameraPosition, cameraYawRadians)) {
+            continue;
+        }
+        const float dx = actors[i].position[0] - cameraPosition[0];
+        const float dy = actors[i].position[1] - cameraPosition[1];
+        const float dz = actors[i].position[2] - cameraPosition[2];
+        const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+        if (best < 0 || distanceSquared < bestDistanceSquared) {
+            best = static_cast<int>(i);
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+    return best;
 }
 
 }  // namespace odai::games::newvegas
