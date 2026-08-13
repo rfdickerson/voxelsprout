@@ -47,6 +47,15 @@ namespace {
 using odai::importer::fnv::BsaArchive;
 using odai::importer::fnv::BsaFileEntry;
 
+// Small hex formatter: the enable-parent report in the floater dump is built as
+// a string, so it cannot lean on the stream's std::hex the way the other formID
+// prints do.
+std::string toHex(std::uint32_t value) {
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), "%x", value);
+    return buffer;
+}
+
 std::string toLowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -1228,6 +1237,105 @@ int probeFooters(const std::filesystem::path& dataPath, std::size_t limit) {
     return 0;
 }
 
+// Independent ground truth for the VHGT decode. The game ships its own distant
+// terrain as meshes -- meshes\landscape\lod\<worldspace>\blocks\*.nif -- baked
+// by the GECK from the same LAND records the streamer reads. Their vertices are
+// already in world space (a level4 block's bounds land exactly on its 4x4 cell
+// footprint), so the height they report at an XY can be compared directly with
+// the height our own decode produces there.
+//
+// This is what answers "is the terrain wrong or is the reference high", which
+// clearances alone cannot: every placed reference in a cell is positioned
+// relative to the same terrain, so if that terrain is wrong they all agree with
+// each other and still disagree with the game.
+//
+// Caveat worth stating up front: level4 is the FINEST LOD and is still ~20x
+// coarser than the full 33x33-per-cell heightfield (855 vertices over 4x4
+// cells, ~585 units apart). It resolves a hillside, not a doorstep -- so a
+// disagreement of tens of units means nothing and one of ~170 means a great
+// deal.
+int lodHeightAt(const std::filesystem::path& dataPath, const std::string& nifPath,
+                float worldX, float worldY) {
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "asset source open FAILED\n";
+        return 1;
+    }
+    std::vector<std::uint8_t> nifBytes;
+    std::string error;
+    if (!assets.resolveMesh(nifPath, nifBytes, error)) {
+        std::cout << "resolve FAILED: " << error << "\n";
+        return 1;
+    }
+    odai::importer::fnv::NifModel model;
+    if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, model, error)) {
+        std::cout << "parse FAILED: " << error << "\n";
+        return 1;
+    }
+    struct Near {
+        float distanceSquared;
+        float x;
+        float y;
+        float z;
+    };
+    // A LOD block carries a SKIRT: a second ring of vertices at the block's
+    // edge dropped far below the surface, so neighbouring blocks cannot show a
+    // crack between them. They sit at the same XY as the surface vertex above
+    // them and at the block's minimum Z (-14098 in the x-20.y0 block, against a
+    // terrain around 8200), so averaging them in reports a height thousands of
+    // units below anything real. Collapsing each XY to its HIGHEST vertex drops
+    // the skirt and keeps the surface, without needing to know the skirt depth.
+    std::map<std::pair<int, int>, float> surfaceByXy;
+    for (const odai::importer::fnv::NifShape& shape : model.shapes) {
+        const std::size_t vertexCount = shape.positions.size() / 3u;
+        for (std::size_t v = 0; v < vertexCount; ++v) {
+            const float vx = shape.positions[(v * 3u) + 0];
+            const float vy = shape.positions[(v * 3u) + 1];
+            const float vz = shape.positions[(v * 3u) + 2];
+            const std::pair<int, int> key{static_cast<int>(std::lround(vx)),
+                                          static_cast<int>(std::lround(vy))};
+            const auto existing = surfaceByXy.find(key);
+            if (existing == surfaceByXy.end() || vz > existing->second) {
+                surfaceByXy[key] = vz;
+            }
+        }
+    }
+    std::vector<Near> nearest;
+    nearest.reserve(surfaceByXy.size());
+    for (const auto& [xy, z] : surfaceByXy) {
+        const float dx = static_cast<float>(xy.first) - worldX;
+        const float dy = static_cast<float>(xy.second) - worldY;
+        nearest.push_back(
+            Near{(dx * dx) + (dy * dy), static_cast<float>(xy.first),
+                 static_cast<float>(xy.second), z});
+    }
+    if (nearest.empty()) {
+        std::cout << "no vertices in " << nifPath << "\n";
+        return 1;
+    }
+    std::sort(nearest.begin(), nearest.end(),
+              [](const Near& a, const Near& b) { return a.distanceSquared < b.distanceSquared; });
+    std::cout << nifPath << ": " << nearest.size() << " surface vertices (skirt removed)\n";
+    std::cout << "  query (" << worldX << ", " << worldY << ")\n";
+    const std::size_t show = std::min<std::size_t>(nearest.size(), 8u);
+    // Inverse-distance blend of the nearest few, which is the best a scattered
+    // LOD grid supports -- it is not a regular lattice this can bilerp on.
+    double weightSum = 0.0;
+    double heightSum = 0.0;
+    for (std::size_t i = 0; i < show; ++i) {
+        const float distance = std::sqrt(nearest[i].distanceSquared);
+        std::cout << "    d=" << static_cast<int>(distance) << "  ("
+                  << static_cast<int>(nearest[i].x) << ", " << static_cast<int>(nearest[i].y)
+                  << ")  z=" << nearest[i].z << "\n";
+        const double weight = 1.0 / std::max(1.0, static_cast<double>(distance));
+        weightSum += weight;
+        heightSum += weight * static_cast<double>(nearest[i].z);
+    }
+    std::cout << "  LOD height at query (inverse-distance over " << show
+              << " nearest) = " << (heightSum / std::max(1e-9, weightSum)) << "\n";
+    return 0;
+}
+
 int probeSingleNif(const std::filesystem::path& dataPath, const std::string& virtualPath) {
     MeshIndex index = buildMeshIndex(dataPath);
     for (std::size_t a = 0; a < index.archives.size(); ++a) {
@@ -1815,6 +1923,114 @@ int probeFloaters(
                (at(x0, y1) * (1 - fx) * fy) + (at(x1, y1) * fx * fy);
     };
 
+    // ODAI_FLOATERS_LAND prints the decoded 33x33 VHGT grid as a coarse map.
+    // "Is the terrain wrong here" is otherwise unanswerable from clearances
+    // alone: a floater over FLAT ground means the placement is high, a floater
+    // over ground that should have a berm means the LAND decode lost it.
+    if (std::getenv("ODAI_FLOATERS_LAND") != nullptr) {
+        float minH = std::numeric_limits<float>::max();
+        float maxH = std::numeric_limits<float>::lowest();
+        for (int i = 0; i < kLandGridSize * kLandGridSize; ++i) {
+            minH = std::min(minH, cell.land->heights[i]);
+            maxH = std::max(maxH, cell.land->heights[i]);
+        }
+        std::cout << "  LAND 33x33 heights " << minH << " .. " << maxH
+                  << " (row 0 = south edge, col 0 = west edge; 128 units per post)\n";
+        for (int y = kLandGridSize - 1; y >= 0; --y) {
+            std::cout << "   y" << (y < 10 ? " " : "") << y << " ";
+            for (int x = 0; x < kLandGridSize; ++x) {
+                std::cout << " " << static_cast<int>(cell.land->heights[(y * kLandGridSize) + x]);
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // ODAI_FLOATERS_LOD=<lod block virtual path> validates the VHGT decode
+    // against the game's own baked distant terrain, across the whole cell
+    // rather than at one point. If our heightfield were wrong by the ~170 units
+    // a floating road implies, this sweep is where it would show as a bias; a
+    // mean near zero with a spread of a few tens of units is just the LOD being
+    // ~20x coarser than the heightfield it was baked from.
+    if (const char* lodEnv = std::getenv("ODAI_FLOATERS_LOD")) {
+        odai::importer::fnv::FalloutAssetSource lodAssets;
+        std::vector<std::uint8_t> lodBytes;
+        std::string lodError;
+        odai::importer::fnv::NifModel lodModel;
+        if (lodAssets.open(dataPath) && lodAssets.resolveMesh(lodEnv, lodBytes, lodError) &&
+            odai::importer::fnv::parseNifStaticMesh(lodBytes, lodModel, lodError)) {
+            // Collapse each XY to its highest vertex: LOD blocks carry a skirt
+            // far below the surface at the block edge (see --lodheight).
+            std::map<std::pair<int, int>, float> surfaceByXy;
+            for (const odai::importer::fnv::NifShape& shape : lodModel.shapes) {
+                const std::size_t vertexCount = shape.positions.size() / 3u;
+                for (std::size_t v = 0; v < vertexCount; ++v) {
+                    const std::pair<int, int> key{
+                        static_cast<int>(std::lround(shape.positions[(v * 3u) + 0])),
+                        static_cast<int>(std::lround(shape.positions[(v * 3u) + 1]))};
+                    const float vz = shape.positions[(v * 3u) + 2];
+                    const auto existing = surfaceByXy.find(key);
+                    if (existing == surfaceByXy.end() || vz > existing->second) {
+                        surfaceByXy[key] = vz;
+                    }
+                }
+            }
+            double sumDiff = 0.0;
+            double sumAbsDiff = 0.0;
+            float worstDiff = 0.0f;
+            float worstX = 0.0f;
+            float worstY = 0.0f;
+            std::size_t samples = 0;
+            for (int gy = 0; gy < kLandGridSize; gy += 2) {
+                for (int gx = 0; gx < kLandGridSize; gx += 2) {
+                    const float wx = cellOriginX + (static_cast<float>(gx) * kLandPostSpacing);
+                    const float wy = cellOriginY + (static_cast<float>(gy) * kLandPostSpacing);
+                    // Inverse-distance over the nearest few LOD surface points.
+                    std::vector<std::pair<float, float>> byDistance;  // (d, z)
+                    byDistance.reserve(surfaceByXy.size());
+                    for (const auto& [xy, z] : surfaceByXy) {
+                        const float dx = static_cast<float>(xy.first) - wx;
+                        const float dy = static_cast<float>(xy.second) - wy;
+                        byDistance.emplace_back(std::sqrt((dx * dx) + (dy * dy)), z);
+                    }
+                    std::partial_sort(byDistance.begin(),
+                                      byDistance.begin() + std::min<std::size_t>(byDistance.size(), 4u),
+                                      byDistance.end(),
+                                      [](const auto& a, const auto& b) { return a.first < b.first; });
+                    double weightSum = 0.0;
+                    double heightSum = 0.0;
+                    for (std::size_t i = 0; i < std::min<std::size_t>(byDistance.size(), 4u); ++i) {
+                        const double weight = 1.0 / std::max(1.0f, byDistance[i].first);
+                        weightSum += weight;
+                        heightSum += weight * byDistance[i].second;
+                    }
+                    if (weightSum <= 0.0) {
+                        continue;
+                    }
+                    const float lodHeight = static_cast<float>(heightSum / weightSum);
+                    const float ourHeight = cell.land->heights[(gy * kLandGridSize) + gx];
+                    const float diff = ourHeight - lodHeight;
+                    sumDiff += diff;
+                    sumAbsDiff += std::abs(diff);
+                    if (std::abs(diff) > std::abs(worstDiff)) {
+                        worstDiff = diff;
+                        worstX = wx;
+                        worstY = wy;
+                    }
+                    ++samples;
+                }
+            }
+            if (samples > 0) {
+                std::cout << "  LAND-vs-LOD over " << samples << " posts: mean(ours-lod)="
+                          << (sumDiff / static_cast<double>(samples))
+                          << "  mean|diff|=" << (sumAbsDiff / static_cast<double>(samples))
+                          << "  worst=" << worstDiff << " at (" << static_cast<int>(worstX) << ","
+                          << static_cast<int>(worstY) << ")\n";
+            }
+        } else {
+            std::cout << "  LAND-vs-LOD skipped: " << lodError << "\n";
+        }
+    }
+
     // Ground truth for "is it floating": transform the mesh's own vertices into
     // world space and take the MINIMUM clearance over the terrain beneath them.
     // The reference origin sitting high means nothing on its own -- a sloped
@@ -1860,16 +2076,37 @@ int probeFloaters(
         float localY;
         bool outsideCell;
         std::string model;
+        // Absolute values behind the two offsets above. A delta alone cannot
+        // say WHICH side is wrong -- a road 167 units over the ground is either
+        // a placement that is too high or terrain that is too low, and those
+        // have opposite fixes.
+        float originZ;
+        float groundZ;
+        bool initiallyDisabled;
+        std::uint32_t refFormId;
+        std::uint32_t recordFlags;
+        bool hasEnableParent;
+        std::uint32_t enableParentFormId;
+        bool enableParentOpposite;
+        float euler[3];
     };
     std::vector<Entry> entries;
     std::size_t unknownBaseCount = 0;
+    std::map<std::string, std::vector<std::uint32_t>> droppedByType;
     for (const FalloutPlacedReference& ref : cell.references) {
         const auto modelIt = tables.staticModelPaths.find(ref.baseFormId);
         if (modelIt == tables.staticModelPaths.end()) {
-            // The base record is not a STAT this importer knows. Every such
+            // The base record is not one this importer places. Every such
             // reference is silently dropped from the scene, which is how a road
-            // can end up resting on nothing.
+            // can end up resting on nothing -- so name them rather than just
+            // counting them. A count says something is missing; the TYPE says
+            // whether it is geometry that should have been there.
             ++unknownBaseCount;
+            const auto droppedTypeIt = tables.staticRecordTypes.find(ref.baseFormId);
+            droppedByType[droppedTypeIt == tables.staticRecordTypes.end()
+                              ? std::string("<base record not found>")
+                              : droppedTypeIt->second]
+                .push_back(ref.baseFormId);
             continue;
         }
         const float ground = terrainHeightAt(ref.position[0], ref.position[1]);
@@ -1907,7 +2144,13 @@ int probeFloaters(
             minClearance = 0.0f;  // no mesh points; do not report it as floating
         }
         entries.push_back(Entry{ref.position[2] - ground, minClearance, rotationMagnitude,
-                                ref.scale, localX, localY, outsideCell, modelIt->second});
+                                ref.scale, localX, localY, outsideCell, modelIt->second,
+                                ref.position[2], ground,
+                                (ref.recordFlags & 0x00000800u) != 0u, ref.formId, ref.recordFlags,
+                                ref.hasEnableParent, ref.enableParentFormId,
+                                ref.enableParentOpposite,
+                                {ref.rotationRadians[0], ref.rotationRadians[1],
+                                 ref.rotationRadians[2]}});
     }
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         return a.minClearance > b.minClearance;
@@ -1946,7 +2189,14 @@ int probeFloaters(
 
     std::cout << "cell (" << cellX << "," << cellZ << "): " << entries.size()
               << " placed statics, " << unknownBaseCount
-              << " references DROPPED (base record is not a known STAT)\n";
+              << " references DROPPED (base record carries no model this importer places)\n";
+    for (const auto& [type, formIds] : droppedByType) {
+        std::cout << "    DROPPED " << type << " x" << formIds.size() << " :";
+        for (std::size_t i = 0; i < formIds.size() && i < 8u; ++i) {
+            std::cout << " 0x" << std::hex << formIds[i] << std::dec;
+        }
+        std::cout << "\n";
+    }
     std::size_t floating = 0;
     for (const Entry& e : entries) {
         if (e.minClearance > 50.0f) {
@@ -1955,14 +2205,31 @@ int probeFloaters(
     }
     std::cout << "  " << floating << " have their ENTIRE mesh more than 50 units clear of the "
               << "terrain (i.e. genuinely floating)\n";
-    const std::size_t show = std::min<std::size_t>(entries.size(), 14u);
+    // ODAI_FLOATERS_ALL lists every placement, not just the worst 14. A floater
+    // is only diagnosable against its NEIGHBOURS -- "is the terrain wrong here
+    // or is this one reference high" is answered by what sits beside it.
+    const bool showAll = std::getenv("ODAI_FLOATERS_ALL") != nullptr;
+    const std::size_t show =
+        showAll ? entries.size() : std::min<std::size_t>(entries.size(), 14u);
     for (std::size_t i = 0; i < show; ++i) {
-        std::cout << "  clearance +" << static_cast<int>(entries[i].minClearance)
+        std::cout << "  ref 0x" << std::hex << entries[i].refFormId << std::dec
+                  << "  clearance +" << static_cast<int>(entries[i].minClearance)
                   << "  origin +" << static_cast<int>(entries[i].offset) << " units  rot "
                   << static_cast<int>(entries[i].rotationMagnitudeDegrees) << " deg  scale "
                   << entries[i].scale << (entries[i].outsideCell ? "  OUTSIDE-CELL" : "")
                   << "  local(" << static_cast<int>(entries[i].localX) << ","
-                  << static_cast<int>(entries[i].localY) << ")  " << entries[i].model << "\n";
+                  << static_cast<int>(entries[i].localY) << ")  z=" << entries[i].originZ
+                  << " ground=" << entries[i].groundZ
+                  << "  flags=0x" << toHex(entries[i].recordFlags)
+                  << (entries[i].initiallyDisabled ? "  INITIALLY-DISABLED" : "")
+                  << (entries[i].hasEnableParent
+                          ? ("  ENABLE-PARENT=0x" + toHex(entries[i].enableParentFormId) +
+                             (entries[i].enableParentOpposite ? "(opposite)" : ""))
+                          : std::string())
+                  << "  rotXYZ(" << static_cast<int>(entries[i].euler[0] * 57.2957795f) << ","
+                  << static_cast<int>(entries[i].euler[1] * 57.2957795f) << ","
+                  << static_cast<int>(entries[i].euler[2] * 57.2957795f) << ")"
+                  << "  " << entries[i].model << "\n";
     }
     return 0;
 }
@@ -3391,6 +3658,7 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --lodheight <lodBlock.nif> <worldX> <worldY>\n"
               << "  odai_newvegas_probe <DataFilesPath> --kf <virtualPath.kf>\n"
               << "  odai_newvegas_probe <DataFilesPath> --kfsweep <folderSubstring>\n"
               << "  odai_newvegas_probe <DataFilesPath> --actor <Plugin.esm> <ActorEditorID>\n"
@@ -3440,6 +3708,10 @@ int main(int argc, char** argv) {
     }
     if (mode == "--nif" && argc >= 4) {
         return probeSingleNif(dataPath, argv[3]);
+    }
+    if (mode == "--lodheight" && argc >= 6) {
+        return lodHeightAt(dataPath, argv[3], static_cast<float>(std::atof(argv[4])),
+                           static_cast<float>(std::atof(argv[5])));
     }
     if (mode == "--basemodel" && argc >= 5) {
         odai::importer::fnv::EsmReader reader;

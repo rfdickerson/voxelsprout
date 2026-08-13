@@ -256,6 +256,13 @@ struct FalloutRegionRecord {
 struct FalloutPlacedReference {
     std::uint32_t formId = 0;
     std::uint32_t baseFormId = 0;  // NAME: the STAT (or other base record) this instance places
+    // The record header's own flags. Bit 0x0800 is "Initially Disabled": the
+    // game does not render the reference until something enables it.
+    std::uint32_t recordFlags = 0;
+    // XESP: enabled state follows another reference's, optionally inverted.
+    bool hasEnableParent = false;
+    std::uint32_t enableParentFormId = 0;
+    bool enableParentOpposite = false;
     float position[3] = {};        // DATA, world units
     float rotationRadians[3] = {};  // DATA
     float scale = 1.0f;             // XSCL, defaults to 1 when absent

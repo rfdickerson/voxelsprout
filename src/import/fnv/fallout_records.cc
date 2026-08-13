@@ -205,6 +205,7 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
     }
     FalloutPlacedReference ref{};
     ref.formId = record.formId;
+    ref.recordFlags = record.flags;
     ref.scale = 1.0f;
     bool hasData = false;
     for (const EsmSubrecordView& sub : record.subrecords) {
@@ -220,6 +221,14 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             hasData = true;
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             ref.scale = readF32(sub.data);
+        } else if (sub.type == "XESP" && sub.size >= 8u) {
+            // Enable parent: this reference's enabled state follows another
+            // reference's, optionally inverted (flag bit 0). Bethesda uses it to
+            // ship two versions of a thing in the same spot and let quest state
+            // pick one.
+            ref.hasEnableParent = true;
+            ref.enableParentFormId = readU32(sub.data);
+            ref.enableParentOpposite = (readU32(sub.data + 4) & 0x00000001u) != 0u;
         } else if (sub.type == "XTEL" && sub.size >= 28u) {
             // formID of the destination door reference, then the arrival
             // position and rotation in that door's cell.
