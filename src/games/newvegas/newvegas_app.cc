@@ -1554,7 +1554,184 @@ void NewVegasApp::applyWeather() {
     m_renderer.setWeatherSky(params);
 }
 
+namespace {
+
+// The tour, in engine space: where the camera is and what it is pointed at.
+//
+// THESE ARE THE TOWN'S OWN LANDMARKS, not invented viewpoints. Each look-at is
+// the doorstep of a named interior cell, read out of the plugin by spawning at
+// it (--spawn GSProspectorSaloonInterior and friends print the position), so
+// the tour is aimed at the buildings Goodsprings actually has rather than at
+// coordinates that looked good once and drift the moment anything moves.
+//
+//   Prospector Saloon      (-67452, 8472, -4900)
+//   General Store          (-69319, 8501, -3528)
+//   Gas Station            (-75169, 8880, -4076)
+//   Doc Mitchell's House   (-73163, 8806, -1312)
+//   Schoolhouse            (-74482, 8354,  4780)
+//   Victor's Shack         (-72319, 8440,  5928)
+//
+// Camera heights are absolute rather than ground-relative: the tour is a drone
+// shot over a valley whose floor moves 500 units under it, and clamping to the
+// terrain would make the camera bob over every rise it crossed.
+struct FlyWaypoint {
+    float position[3];
+    float lookAt[3];
+};
+
+constexpr FlyWaypoint kGoodspringsTour[] = {
+    // High and south, the whole town in frame.
+    {{-70600.0f, 10600.0f, -10200.0f}, {-70600.0f, 8700.0f, -4400.0f}},
+    // Down toward the saloon, the first building anyone sees.
+    {{-69100.0f,  9500.0f,  -7200.0f}, {-67452.0f, 8620.0f, -4900.0f}},
+    // Low across the saloon front, turning onto Easy Pete's spot beside it.
+    {{-67500.0f,  8830.0f,  -5300.0f}, {-67845.0f, 8480.0f, -3334.0f}},
+    // The general store, on the corner of the main road.
+    {{-68400.0f,  8980.0f,  -4100.0f}, {-69319.0f, 8620.0f, -3528.0f}},
+    // Along the road toward Doc Mitchell's, Victor parked outside it.
+    {{-71400.0f,  9080.0f,  -2600.0f}, {-72943.0f, 8780.0f, -1092.0f}},
+    // Over the spawn, then north up the rise to the schoolhouse.
+    {{-73200.0f,  9100.0f,   -200.0f}, {-74482.0f, 8560.0f,  4780.0f}},
+    {{-73900.0f,  9050.0f,   2900.0f}, {-74482.0f, 8500.0f,  4780.0f}},
+    // Victor's shack at the north end, then the turn back south.
+    {{-73000.0f,  8900.0f,   4900.0f}, {-72319.0f, 8560.0f,  5928.0f}},
+    {{-71200.0f,  8980.0f,   4400.0f}, {-68000.0f, 8500.0f,  2200.0f}},
+    // Down to head height over the east end of town, which is where the people
+    // are: the five Powder Gangers stand around (-66131, 1645), with a settler
+    // and the bighorners between there and the road.
+    {{-68900.0f,  8760.0f,   2300.0f}, {-66991.0f, 8300.0f,  1981.0f}},
+    {{-67400.0f,  8600.0f,   2350.0f}, {-66500.0f, 8350.0f,  1900.0f}},
+    {{-65700.0f,  8700.0f,   2050.0f}, {-65300.0f, 8420.0f,  1500.0f}},
+};
+
+// Where the tour stops aiming at coordinates and starts aiming at whoever is
+// there. The last waypoints are over the east end of town, and the people
+// standing there WANDER -- up to 950 units from where the plugin put them --
+// so a fixed look-at is a coin flip that lands on empty dirt about as often as
+// it lands on a person. See updateFlythrough.
+constexpr float kTourActorTrackStart = 0.72f;
+constexpr float kTourActorTrackFull = 0.86f;
+constexpr int kGoodspringsTourCount =
+    static_cast<int>(sizeof(kGoodspringsTour) / sizeof(kGoodspringsTour[0]));
+
+// Catmull-Rom through four control points. Passes through p1 and p2, which is
+// what a hand-authored waypoint list wants: a Bezier would treat them as pulls
+// and the camera would never reach the spot it was told to fly to.
+float catmullRom(float p0, float p1, float p2, float p3, float t) {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    return 0.5f * ((2.0f * p1) + ((-p0 + p2) * t) + (((2.0f * p0) - (5.0f * p1) + (4.0f * p2) - p3) * t2) +
+                   ((-p0 + (3.0f * p1) - (3.0f * p2) + p3) * t3));
+}
+
+void sampleTour(float u, float outPosition[3], float outLookAt[3]) {
+    const float span = static_cast<float>(kGoodspringsTourCount - 1);
+    const float scaled = std::clamp(u, 0.0f, 1.0f) * span;
+    const int segment = std::min(static_cast<int>(scaled), kGoodspringsTourCount - 2);
+    const float t = scaled - static_cast<float>(segment);
+    // Duplicate the ends rather than wrapping: this is a path, not a loop, and
+    // wrapping would curve the first segment toward the last landmark.
+    const auto at = [](int index) -> const FlyWaypoint& {
+        return kGoodspringsTour[std::clamp(index, 0, kGoodspringsTourCount - 1)];
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+        outPosition[axis] = catmullRom(
+            at(segment - 1).position[axis], at(segment).position[axis],
+            at(segment + 1).position[axis], at(segment + 2).position[axis], t);
+        outLookAt[axis] = catmullRom(
+            at(segment - 1).lookAt[axis], at(segment).lookAt[axis],
+            at(segment + 1).lookAt[axis], at(segment + 2).lookAt[axis], t);
+    }
+}
+
+}  // namespace
+
+bool NewVegasApp::updateFlythrough(float deltaSeconds) {
+    m_flythroughTime += deltaSeconds;
+    const float raw = std::clamp(m_flythroughTime / m_flythroughSeconds, 0.0f, 1.0f);
+    // Ease only the ENDS, at constant speed in between.
+    //
+    // A smoothstep over the whole path is the obvious thing and it is wrong for
+    // a tour: it makes the middle -- where all the landmarks are -- rush past
+    // at nearly double speed while the first and last waypoints get a third of
+    // the running time each. This is the integral of a speed profile that ramps
+    // up over the first `kEase` of the run, holds, and ramps back down.
+    constexpr float kEase = 0.07f;
+    const float total = 1.0f - kEase;  // area under that profile
+    float eased = raw;
+    if (raw < kEase) {
+        eased = ((raw * raw) / (2.0f * kEase)) / total;
+    } else if (raw > 1.0f - kEase) {
+        const float remaining = 1.0f - raw;
+        eased = (1.0f - ((remaining * remaining) / (2.0f * kEase))) / total;
+        eased = std::min(eased, 1.0f);
+    } else {
+        eased = ((kEase * 0.5f) + (raw - kEase)) / total;
+    }
+
+    float position[3] = {};
+    float lookAt[3] = {};
+    sampleTour(eased, position, lookAt);
+    m_cameraX = position[0];
+    m_cameraY = position[1];
+    m_cameraZ = position[2];
+
+    // Hand the aim over to a real inhabitant for the last stretch. Nearest
+    // walker to the camera, aimed at the chest rather than the feet, blended in
+    // so the camera drifts onto them instead of snapping.
+    if (eased > kTourActorTrackStart) {
+        const SkinnedActor* best = nullptr;
+        float bestDistanceSq = 4000.0f * 4000.0f;
+        for (const SkinnedActor& actor : m_actors) {
+            if (!actor.placed || !actor.wanders) {
+                continue;
+            }
+            const float dx = actor.position[0] - m_cameraX;
+            const float dz = actor.position[2] - m_cameraZ;
+            const float distanceSq = (dx * dx) + (dz * dz);
+            // Not the one under the camera's nose: at a few hundred units an
+            // actor fills the frame and the town behind them is gone.
+            if (distanceSq < 300.0f * 300.0f || distanceSq >= bestDistanceSq) {
+                continue;
+            }
+            bestDistanceSq = distanceSq;
+            best = &actor;
+        }
+        if (best != nullptr) {
+            const float weight = std::clamp(
+                (eased - kTourActorTrackStart) / (kTourActorTrackFull - kTourActorTrackStart),
+                0.0f, 1.0f);
+            const float smooth = weight * weight * (3.0f - (2.0f * weight));
+            const float target[3] = {
+                best->position[0],
+                best->position[1] + conversationFaceHeight(*best),
+                best->position[2]};
+            for (int axis = 0; axis < 3; ++axis) {
+                lookAt[axis] += (target[axis] - lookAt[axis]) * smooth;
+            }
+        }
+    }
+
+    const float dx = lookAt[0] - m_cameraX;
+    const float dy = lookAt[1] - m_cameraY;
+    const float dz = lookAt[2] - m_cameraZ;
+    const float horizontal = std::sqrt((dx * dx) + (dz * dz));
+    if (horizontal > 1e-3f) {
+        m_yawDegrees = std::atan2(dz, dx) * (180.0f / kPi);
+        m_pitchDegrees = std::clamp(
+            std::atan2(dy, horizontal) * (180.0f / kPi), -kPitchLimitDegrees, kPitchLimitDegrees);
+    }
+    return raw < 1.0f;
+}
+
 void NewVegasApp::updateCamera(float deltaSeconds) {
+    // The scripted tour owns the camera outright -- no input, no collision, no
+    // ground clamp. It flies over rooftops on purpose.
+    if (m_flythroughSeconds > 0.0f) {
+        updateFlythrough(deltaSeconds);
+        return;
+    }
+
     // ODAI_FNV_BENCH=1 walks the camera forward on a slow turn instead of
     // reading input. "It is jittery when I move" is not reproducible from a
     // standing start, and a hand-driven walk is not comparable between runs --
@@ -2147,11 +2324,17 @@ bool NewVegasApp::initStreaming() {
                         // Right vector is forward rotated -90 degrees in XZ.
                         actor.position[0] = centreX + (forwardZ * offset);
                         actor.position[2] = centreZ - (forwardX * offset);
+                        // The terrain under THIS actor, not under the player.
+                        // groundHeightAt resolves against the camera's own foot
+                        // height, so over a valley it stood the whole parade in
+                        // the air at the player's altitude -- which is what
+                        // "the actors are floating in the sky" was.
                         float ground = 0.0f;
+                        const bool onGround = m_streamer
+                            ? m_collision.terrainHeight(actor.position[0], actor.position[2], ground)
+                            : groundHeightAt(actor.position[0], actor.position[2], ground);
                         actor.position[1] =
-                            groundHeightAt(actor.position[0], actor.position[2], ground)
-                                ? ground
-                                : (m_cameraY - kEyeHeightUnits);
+                            onGround ? ground : (m_cameraY - kEyeHeightUnits);
                         // Facing the camera, so a face that failed to build is
                         // visible as a face and not as the back of a head.
                         actor.yawRadians = std::atan2(forwardX, forwardZ);
@@ -2360,6 +2543,13 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
 }
 
 void NewVegasApp::onTick(float deltaSeconds) {
+    // A recording runs on its own clock. Everything downstream of here -- the
+    // tour, the wander, the animation, the day cycle -- takes this dt, so the
+    // world advances one authored frame per rendered frame however long the
+    // rendering took. See setCaptureSequence.
+    if (m_captureFixedDt > 0.0f) {
+        deltaSeconds = m_captureFixedDt;
+    }
     // Before anything reads input: the menu toggle decided here gates whether
     // camera movement runs at all this frame.
     pollNavInput(deltaSeconds);
@@ -2426,6 +2616,20 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // idle clip is what makes an actor read as someone standing there rather
     // than a statue of them.
     if (!m_actors.empty()) {
+        // Move before posing: the pose folds in world placement, so wandering
+        // afterwards would draw everyone one frame behind where they are.
+        updateActorWandering(
+            m_actors, deltaSeconds,
+            [this](float x, float z, float referenceY, float& outHeight) {
+                // The ACTOR's own foot height is the reference, not the
+                // camera's. groundHeight uses it to reject ceilings and to
+                // raise onto walkable geometry, so a settler on a porch stays
+                // on the porch instead of sinking to the terrain under it --
+                // and, crucially, someone across town is not held at whatever
+                // altitude the player happens to be standing at.
+                return m_streamer ? m_collision.groundHeight(x, z, referenceY, outHeight) : false;
+            },
+            m_talkingActor);
         updateActorPoses(m_actors, deltaSeconds);
         for (const SkinnedActor& actor : m_actors) {
             if (!actor.uploaded) {
@@ -3287,6 +3491,31 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
                 VOX_LOGE("newvegas") << "screenshot capture failed";
             }
             glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+        }
+    }
+
+    // Frame-sequence recording. One PPM per frame, numbered, for ffmpeg to
+    // stitch afterwards -- there is no video encoder in this tree and a
+    // recording is not worth linking one in for.
+    if (!m_captureDirectory.empty() && m_captureWritten < m_captureFrames) {
+        ++m_framesRendered;
+        if (m_framesRendered > m_captureWarmupFrames) {
+            char leaf[32] = {};
+            std::snprintf(leaf, sizeof(leaf), "/frame_%05d.ppm", m_captureWritten);
+            if (!m_renderer.captureFrameToFile(m_captureDirectory + leaf)) {
+                VOX_LOGE("newvegas") << "sequence capture failed at frame " << m_captureWritten;
+                glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+            }
+            ++m_captureWritten;
+            // Progress, because a 900-frame capture is minutes of silence
+            // otherwise and a stalled one looks identical to a slow one.
+            if ((m_captureWritten % 60) == 0) {
+                VOX_LOGI("newvegas")
+                    << "captured " << m_captureWritten << "/" << m_captureFrames << " frames";
+            }
+            if (m_captureWritten >= m_captureFrames) {
+                glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+            }
         }
     }
 }

@@ -65,6 +65,23 @@ public:
         m_screenshotWarmupFrames = warmupFrames;
     }
 
+    // Fly a fixed cinematic path through Goodsprings instead of reading input.
+    // Non-zero seconds is the whole tour; the path itself is kGoodspringsTour.
+    void setFlythroughSeconds(float seconds) { m_flythroughSeconds = seconds; }
+
+    // Record every frame as <directory>/frame_%05d.ppm and quit after `frames`.
+    //
+    // The world advances by a FIXED 1/fps step while this is on, not by real
+    // elapsed time. A recording has to play at the speed it was authored for,
+    // and a 28 ms frame that took 60 ms to render would otherwise stretch that
+    // moment of the tour to twice its length -- the camera slows down exactly
+    // where the renderer is busiest, which is where the interesting geometry is.
+    void setCaptureSequence(std::string directory, int frames, float fps) {
+        m_captureDirectory = std::move(directory);
+        m_captureFrames = frames;
+        m_captureFixedDt = (fps > 0.0f) ? (1.0f / fps) : (1.0f / 30.0f);
+    }
+
     // Stream directly from the game's own data directory (the one holding
     // FalloutNV.esm and the .bsa archives) instead of loading a cooked scene.
     // Mutually exclusive with setScenePath(): the streamer owns renderer
@@ -157,6 +174,9 @@ private:
     // acts on app state directly.
     void drawPauseMenu();
     void updateCamera(float deltaSeconds);
+    // Advances the scripted tour and points the camera. Returns false once the
+    // path has run out, which hands the camera back to the player.
+    bool updateFlythrough(float deltaSeconds);
     void drawHud();
     // The conversation, as a centred modal card rather than text in the corner.
     // Split out of drawHud because it is the one piece of this HUD with real
@@ -236,6 +256,18 @@ private:
     std::string m_screenshotPath;
     int m_screenshotWarmupFrames = 8;
     int m_framesRendered = 0;
+
+    // Scripted tour and frame-sequence recording. See the setters.
+    float m_flythroughSeconds = 0.0f;
+    float m_flythroughTime = 0.0f;
+    std::string m_captureDirectory;
+    int m_captureFrames = 0;
+    int m_captureWritten = 0;
+    float m_captureFixedDt = 0.0f;
+    // Frames to render before the first is kept. Streaming, auto-exposure and
+    // TAA all need a few: recording from frame 0 opens on a half-loaded town
+    // under a mid-adaptation exposure.
+    int m_captureWarmupFrames = 60;
 
     // Terrain height lattice: row-major, m_groundCols * m_groundRows samples at
     // kGroundGridSpacing, with m_groundOriginX/Z the world position of sample 0.

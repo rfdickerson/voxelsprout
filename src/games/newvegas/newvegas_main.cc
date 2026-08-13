@@ -81,12 +81,37 @@ int main(int argc, char** argv) {
                 }
             }
             app.setScreenshotRequest(path, warmupFrames);
+        } else if (std::strcmp(argv[i], "--flythrough") == 0) {
+            // Scripted tour of Goodsprings. Optional length in seconds.
+            float seconds = 40.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                seconds = static_cast<float>(std::atof(argv[++i]));
+            }
+            app.setFlythroughSeconds(seconds > 1.0f ? seconds : 40.0f);
+        } else if (std::strcmp(argv[i], "--capture-seq") == 0 && i + 1 < argc) {
+            // <dir> [fps] [seconds]. Frames are numbered PPMs for ffmpeg.
+            const std::string directory = argv[++i];
+            float fps = 30.0f;
+            float seconds = 40.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                fps = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                seconds = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (fps < 1.0f) {
+                fps = 30.0f;
+            }
+            app.setCaptureSequence(directory, static_cast<int>(fps * seconds), fps);
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::cout << "odai_game_newvegas [--scene <path.bin>]\n"
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
                       << "odai_game_newvegas --screenshot <out.ppm> [frames]\n"
                       << "  Render `frames` frames (default 8), write a PPM, and quit.\n"
                       << "  Cook a scene first with odai_newvegas_cooker.\n"
+                      << "odai_game_newvegas --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
+                      << "  Fly the Goodsprings tour and write numbered PPMs, then quit.\n"
+                      << "  Stitch them with: ffmpeg -framerate <fps> -i <dir>/frame_%05d.ppm out.mp4\n"
                       << "odai_game_newvegas --character [<skeleton.nif> <part.nif>...]\n"
                       << "  Stand one GPU-skinned character in bind pose, no world.\n"
                       << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n"

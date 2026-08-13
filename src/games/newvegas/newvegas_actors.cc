@@ -1,5 +1,6 @@
 #include "games/newvegas/newvegas_actors.h"
 
+#include "core/lcg.h"
 #include "core/log.h"
 #include "import/dds.h"
 #include "games/newvegas/newvegas_ogg.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <unordered_map>
@@ -374,6 +376,136 @@ bool loadActorIdleClip(
     return false;
 }
 
+bool loadActorWalkClip(
+    const importer::fnv::FalloutAssetSource& assets,
+    const std::string& skeletonPath,
+    const anim::Skeleton& skeleton,
+    bool female,
+    anim::AnimationClip& outClip,
+    float& outSpeedUnitsPerSecond,
+    std::string& outWhy
+) {
+    outSpeedUnitsPerSecond = 0.0f;
+    const std::string directory = directoryOf(skeletonPath);
+    // "mt" is Bethesda's movement type prefix and "forward" the direction, so
+    // mtforward.kf is the ordinary walk for anything that walks. Humans keep
+    // theirs one level down under locomotion\<sex>\; creatures keep a single
+    // clip beside the skeleton or under a flat locomotion\.
+    std::vector<std::string> candidates;
+    if (female) {
+        candidates.push_back(directory + "locomotion\\female\\mtforward.kf");
+    }
+    candidates.push_back(directory + "locomotion\\male\\mtforward.kf");
+    candidates.push_back(directory + "locomotion\\mtforward.kf");
+    candidates.push_back(directory + "mtforward.kf");
+
+    for (const std::string& clipPath : candidates) {
+        std::vector<std::uint8_t> bytes;
+        if (!assets.resolveMesh(clipPath, bytes, outWhy)) {
+            continue;
+        }
+        importer::fnv::KfAnimation animation;
+        if (!importer::fnv::parseKfAnimation(bytes, animation, outWhy)) {
+            continue;
+        }
+        importer::fnv::FalloutAnimationStats stats;
+        if (!importer::fnv::buildFalloutAnimationClip(animation, skeleton, outClip, stats)) {
+            outWhy = "no track bound";
+            continue;
+        }
+        if (outClip.tracks.size() < 8u || outClip.duration <= 0.0f) {
+            outWhy = "only " + std::to_string(outClip.tracks.size()) + " tracks bound";
+            outClip = anim::AnimationClip{};
+            continue;
+        }
+
+        // A LOCOMOTION CLIP CARRIES ITS OWN ROOT MOTION. The game moves the
+        // actor by consuming that translation; here the wander code moves it
+        // instead, so playing the clip untouched adds the walk twice -- the
+        // actor slides forward through the cycle and snaps back at the loop.
+        //
+        // Take the horizontal displacement of the root over the clip as the
+        // speed the animation was authored for, then flatten the root's
+        // horizontal channel to its first key. Driving the actor at exactly
+        // that speed is what keeps the feet planted instead of skating: the
+        // stride length and the ground speed are then the same number.
+        // Vertical is left alone -- that is the walk's bob, and it belongs to
+        // the pose rather than to the path.
+        // WHICH bone carries it is not obvious and getting it wrong is silent:
+        // Bethesda accumulates on "Bip01" while the skeleton's actual root is a
+        // scene node above it that no clip ever animates. Taking the topmost
+        // bone therefore finds a track with no keys, derives a speed of zero,
+        // and leaves the actor standing still forever.
+        int rootBone = -1;
+        for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+            if (toLowerAscii(skeleton.bones[i].name) == "bip01") {
+                rootBone = static_cast<int>(i);
+                break;
+            }
+        }
+        if (rootBone < 0) {
+            for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+                if (skeleton.bones[i].parentIndex < 0) {
+                    rootBone = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        for (anim::BoneTrack& track : outClip.tracks) {
+            if (track.boneIndex != rootBone || track.translationKeys.size() < 2u) {
+                continue;
+            }
+            const odai::math::Vector3 first = track.translationKeys.front().value;
+            const odai::math::Vector3 last = track.translationKeys.back().value;
+            const float dx = last.x - first.x;
+            const float dz = last.z - first.z;
+            outSpeedUnitsPerSecond = std::sqrt((dx * dx) + (dz * dz)) / outClip.duration;
+            for (anim::Vector3Key& key : track.translationKeys) {
+                key.value.x = first.x;
+                key.value.z = first.z;
+            }
+            break;
+        }
+        // A clip with no root translation is an in-place walk -- some creature
+        // sets are authored that way -- so fall back rather than refusing to
+        // move. ~100 units/s is a 1.4 m/s stroll at ~70 units per metre.
+        const bool derived = outSpeedUnitsPerSecond > 1.0f;
+        if (!derived) {
+            outSpeedUnitsPerSecond = 100.0f;
+        }
+        VOX_LOGD("newvegas") << "walk clip " << clipPath << ": " << outClip.tracks.size()
+                             << " tracks, " << outClip.duration << "s, "
+                             << outSpeedUnitsPerSecond << " u/s"
+                             << (derived ? " (from root motion)" : " (no root motion, assumed)");
+        outClip.loop = true;
+        return true;
+    }
+    return false;
+}
+
+// Facing for a yaw, and the yaw for a facing.
+//
+// EMPIRICAL, and worth stating because two call sites in this codebase already
+// disagreed about it: Victor turns to the player with atan2(dz, dx) and the
+// diagnostic parade turns to the camera with atan2(fx, fz), which cannot both
+// be right. The pair below is the one that makes an actor walk in the direction
+// it is facing, checked against a capture of the town on the move.
+odai::math::Vector3 actorFacing(float yawRadians) {
+    return odai::math::Vector3{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
+}
+
+float actorYawForDirection(float dx, float dz) { return std::atan2(dz, dx); }
+
+// Shortest signed angle from `from` to `to`, in radians.
+float angleDelta(float from, float to) {
+    constexpr float kTwoPi = 6.28318530718f;
+    float delta = std::fmod(to - from + 3.14159265f, kTwoPi);
+    if (delta < 0.0f) {
+        delta += kTwoPi;
+    }
+    return delta - 3.14159265f;
+}
+
 bool loadGoodspringsActors(
     const std::filesystem::path& pluginPath,
     const importer::fnv::FalloutAssetSource& assets,
@@ -408,6 +540,9 @@ bool loadGoodspringsActors(
         std::vector<odai::importer::ImportedScenePackedDraw> draws;
         anim::AnimationClip idleClip;
         bool hasClip = false;
+        anim::AnimationClip walkClip;
+        float walkSpeed = 0.0f;
+        bool hasWalk = false;
     };
     std::unordered_map<std::uint32_t, BuiltBase> builtByBase;
     std::uint32_t nextSlot = firstInstanceSlot;
@@ -444,6 +579,10 @@ bool loadGoodspringsActors(
                 built.hasClip = loadActorIdleClip(
                     assets, resolved.skeletonPath, built.character.skeleton, builtByBase.size(),
                     built.idleClip, clipWhy);
+                const bool female = resolved.base != nullptr && resolved.base->isFemale;
+                built.hasWalk = loadActorWalkClip(
+                    assets, resolved.skeletonPath, built.character.skeleton, female,
+                    built.walkClip, built.walkSpeed, clipWhy);
             }
         }
         if (!built.ok) {
@@ -466,6 +605,8 @@ bool loadGoodspringsActors(
         actor.textures = built.textures;
         actor.draws = built.draws;
         actor.idleClip = built.idleClip;
+        actor.walkClip = built.walkClip;
+        actor.walkSpeedUnitsPerSecond = built.walkSpeed;
         actor.instanceSlot = nextSlot++;
         // Bethesda Z-up -> engine Y-up: (x, y, z) -> (x, z, -y).
         actor.position[0] = placement.position[0];
@@ -479,6 +620,28 @@ bool loadGoodspringsActors(
         actor.animationSeconds =
             static_cast<float>(outActors.size()) * 0.7f;
         actor.sampler.bindSkeleton(actor.character.skeleton, actor.character.inverseBindMatrices);
+        // Wander from where the plugin put them. The authored position is the
+        // anchor rather than the destination: a town whose people each hold one
+        // spot reads as a diorama, and one whose people walk anywhere reads as
+        // a crowd that has lost its buildings.
+        actor.wanders = built.hasWalk && actor.walkSpeedUnitsPerSecond > 1.0f;
+        actor.wanderOrigin[0] = actor.position[0];
+        actor.wanderOrigin[1] = actor.position[1];
+        actor.wanderOrigin[2] = actor.position[2];
+        // Target starts AT the actor, so the first update takes the arrival
+        // branch and picks a real destination. Left at the default it is the
+        // world origin, tens of thousands of units away, and the whole town
+        // sets off toward the same point on the map.
+        actor.wanderTarget[0] = actor.position[0];
+        actor.wanderTarget[1] = actor.position[1];
+        actor.wanderTarget[2] = actor.position[2];
+        // Distinct per actor and stable across runs: same seed, same walk.
+        actor.wanderRng = 0x9e3779b9u ^ (placement.refFormId * 2654435761u);
+        // Staggered starts, or the whole town steps off together on frame one.
+        actor.wanderPauseSeconds = static_cast<float>(outActors.size() % 7u) * 0.9f;
+        if (built.hasWalk) {
+            ++outStats.walking;
+        }
         if (built.hasClip) {
             ++outStats.animated;
         }
@@ -488,7 +651,7 @@ bool loadGoodspringsActors(
 
     outStats.detail =
         std::to_string(outStats.built) + " built (" + std::to_string(outStats.animated) +
-        " animated) of " + std::to_string(outStats.placementsConsidered) + " placements; skipped " +
+        " animated, " + std::to_string(outStats.walking) + " able to walk) of " + std::to_string(outStats.placementsConsidered) + " placements; skipped " +
         std::to_string(outStats.skippedDisabled) + " disabled, " +
         std::to_string(outStats.skippedNoGeometry) + " without geometry, " +
         std::to_string(outStats.skippedBuildFailed) + " unbuildable, " +
@@ -707,7 +870,10 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
         }
         actor.animationSeconds += deltaSeconds;
 
-        const anim::AnimationClip& clip = wantsTalkClip ? actor.talkClip : actor.idleClip;
+        const bool wantsWalkClip =
+            !wantsTalkClip && actor.walking && !actor.walkClip.tracks.empty();
+        const anim::AnimationClip& clip = wantsTalkClip ? actor.talkClip
+            : (wantsWalkClip ? actor.walkClip : actor.idleClip);
         if (freezeAtBindPose || clip.tracks.empty() || clip.duration <= 0.0f) {
             // No clip: hold the bind pose rather than leaving the previous
             // frame's matrices, which on the first frame would be none at all.
@@ -727,6 +893,108 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
         for (odai::math::Matrix4& matrix : actor.poseScratch) {
             matrix = actorWorld * matrix;
         }
+    }
+}
+
+void updateActorWandering(
+    std::vector<SkinnedActor>& actors,
+    float deltaSeconds,
+    const std::function<bool(float, float, float, float&)>& groundHeightAt,
+    int skipIndex
+) {
+    // ODAI_FNV_NOWANDER=1 pins everyone to their authored spot. The control for
+    // "is this actor in the wrong place because the wander put it there or
+    // because the placement did".
+    static const bool s_disabled = std::getenv("ODAI_FNV_NOWANDER") != nullptr;
+    if (s_disabled || deltaSeconds <= 0.0f) {
+        return;
+    }
+    // How far from the authored spot a townsperson will stray, and how close
+    // counts as arrived. The radius is deliberately small -- ~14 m -- because
+    // nothing here knows where the walls are: staying near a position the game
+    // itself chose is the entire collision strategy.
+    constexpr float kWanderRadius = 950.0f;
+    constexpr float kArriveDistance = 55.0f;
+    constexpr float kTurnRateRadiansPerSecond = 2.6f;
+    // Beyond this the actor is off-screen for any camera that matters, and a
+    // pose it walks into is a pose nobody sees. Cheap because the alternative
+    // is a ground query per actor per frame.
+    constexpr float kMaxStepUnits = 400.0f;
+
+    for (std::size_t i = 0; i < actors.size(); ++i) {
+        if (static_cast<int>(i) == skipIndex) {
+            continue;
+        }
+        SkinnedActor& actor = actors[i];
+        if (!actor.placed) {
+            continue;
+        }
+
+        // Settle EVERY actor onto the ground every frame, walking or not. Two
+        // things need it: a placement whose cell was not resident when the
+        // actor was built has no ground to stand on yet and would hold its
+        // authored height forever, and anything repositioned from outside (the
+        // diagnostic parade, the spawn-side placement) arrives with a height
+        // that came from wherever the PLAYER was standing.
+        {
+            float ground = 0.0f;
+            if (groundHeightAt(actor.position[0], actor.position[2], actor.position[1], ground)) {
+                actor.position[1] = ground;
+            }
+        }
+
+        if (!actor.wanders || actor.talking) {
+            actor.walking = false;
+            continue;
+        }
+
+        if (actor.wanderPauseSeconds > 0.0f) {
+            actor.wanderPauseSeconds -= deltaSeconds;
+            actor.walking = false;
+            continue;
+        }
+
+        const float toTargetX = actor.wanderTarget[0] - actor.position[0];
+        const float toTargetZ = actor.wanderTarget[2] - actor.position[2];
+        const float distance = std::sqrt((toTargetX * toTargetX) + (toTargetZ * toTargetZ));
+        if (distance < kArriveDistance) {
+            // Arrived (or never had a target): stand for a moment, then pick
+            // the next spot. The pause is most of what makes this read as
+            // people rather than as patrol routes -- a town where everyone is
+            // permanently in motion looks as wrong as one where nobody is.
+            core::Lcg32 rng(actor.wanderRng);
+            const float angle =
+                static_cast<float>(rng.next24() % 3600u) * (3.14159265f / 1800.0f);
+            const float reach =
+                0.35f + (static_cast<float>(rng.next24() % 1000u) * 0.00065f);  // 0.35..1.0
+            actor.wanderTarget[0] =
+                actor.wanderOrigin[0] + (std::cos(angle) * kWanderRadius * reach);
+            actor.wanderTarget[2] =
+                actor.wanderOrigin[2] + (std::sin(angle) * kWanderRadius * reach);
+            actor.wanderPauseSeconds =
+                1.5f + (static_cast<float>(rng.next24() % 1000u) * 0.0055f);  // 1.5..7.0 s
+            actor.wanderRng = rng.state();
+            actor.walking = false;
+            continue;
+        }
+
+        // Turn first, then walk along the facing rather than straight at the
+        // target: an actor that translates toward a point it is not yet facing
+        // moon-walks sideways for the length of the turn.
+        const float desiredYaw = actorYawForDirection(toTargetX, toTargetZ);
+        const float delta = angleDelta(actor.yawRadians, desiredYaw);
+        const float maxTurn = kTurnRateRadiansPerSecond * deltaSeconds;
+        actor.yawRadians += std::clamp(delta, -maxTurn, maxTurn);
+
+        const odai::math::Vector3 facing = actorFacing(actor.yawRadians);
+        const float step =
+            std::min(actor.walkSpeedUnitsPerSecond * deltaSeconds, kMaxStepUnits);
+        // Only commit to the stride once roughly aimed, so a sharp turn happens
+        // on the spot instead of as a wide arc through a building.
+        const float alignment = std::abs(delta) < 0.7f ? 1.0f : 0.15f;
+        actor.position[0] += facing.x * step * alignment;
+        actor.position[2] += facing.z * step * alignment;
+        actor.walking = true;
     }
 }
 

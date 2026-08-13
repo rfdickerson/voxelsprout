@@ -1107,8 +1107,18 @@ void RendererBackend::renderFrame(
     //    and rendered a solid white lake over the town.
     //  - A desert vista is aerial perspective, not ground fog: near-uniform
     //    density with a very slow falloff over thousands of units.
-    if (renderingImportedScene && m_weatherSky.weight > 0.0f
-        && m_weatherSky.fogFarDistance > 1.0f) {
+    //
+    // An imported scene with NO weather record takes the same treatment against
+    // a default distance. It has the same problem for the same reason -- the
+    // constant density and the growing height term are both authored for a
+    // world at the origin -- and leaving it out meant an unmodded run, the one
+    // with no weather plugin loaded, was the only configuration still rendering
+    // the white lake.
+    constexpr float kDefaultFogFarDistance = 60000.0f;  // ~850 m, a clear day
+    if (renderingImportedScene) {
+        const bool authored = m_weatherSky.weight > 0.0f && m_weatherSky.fogFarDistance > 1.0f;
+        const float fogFarDistance =
+            authored ? m_weatherSky.fogFarDistance : kDefaultFogFarDistance;
         // Mean of fogExtinctionCoefficient() in tone_map.frag.slang, which is
         // what the density is multiplied by before it reaches transmittance.
         constexpr float kMeanExtinction = 0.20f;
@@ -1121,8 +1131,7 @@ void RendererBackend::renderFrame(
         // frame: imported_static.frag.slang's aerial perspective calibrates
         // itself against the same fog-far and the two compose multiplicatively.
         constexpr float kOpticalDepthAtFogFar = 1.4f;
-        const float density =
-            kOpticalDepthAtFogFar / (m_weatherSky.fogFarDistance * kMeanExtinction);
+        const float density = kOpticalDepthAtFogFar / (fogFarDistance * kMeanExtinction);
         mvpUniform.skyConfig4[0] = std::clamp(density, 1.0e-5f, 0.02f);
         mvpUniform.skyConfig4[1] = 0.00012f;  // ~20% thinner per 2000 units up
         fogBaseHeight = eye.y;

@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -110,6 +111,11 @@ struct SkinnedActor {
     // is. An actor with no talk clip keeps idling through the conversation.
     odai::anim::AnimationClip idleClip;
     odai::anim::AnimationClip talkClip;
+    // The game's own mtforward, with the root motion taken out of the pose and
+    // handed to walkSpeedUnitsPerSecond instead -- see loadActorWalkClip. Empty
+    // for anything with no locomotion clip beside its skeleton.
+    odai::anim::AnimationClip walkClip;
+    float walkSpeedUnitsPerSecond = 0.0f;
     odai::anim::AnimationSampler sampler;
     std::vector<odai::math::Matrix4> poseScratch;
     float animationSeconds = 0.0f;
@@ -119,6 +125,19 @@ struct SkinnedActor {
     // Engine space, feet on the ground.
     float position[3] = {};
     float yawRadians = 0.0f;
+
+    // ---- Wandering ---------------------------------------------------
+    // Enough state for a townsperson to walk between spots near where the
+    // plugin placed them. Not AI and not pathfinding: there is no navmesh
+    // consulted here and nothing avoids anything, which is affordable because
+    // the destinations stay inside a radius of an authored standing position --
+    // somewhere the game already believed an actor could be.
+    bool wanders = false;   // has a locomotion clip, so it can move at all
+    bool walking = false;   // moving right now, which picks walkClip over idle
+    float wanderOrigin[3] = {};
+    float wanderTarget[3] = {};
+    float wanderPauseSeconds = 0.0f;
+    std::uint32_t wanderRng = 0;
     // Top of the actor's own rest-pose geometry, above its feet. A conversation
     // aims at a fraction of this rather than at a constant, because a bighorner,
     // a settler and a Securitron are not the same height and a placement's
@@ -203,6 +222,9 @@ struct ActorPopulationStats {
     std::size_t skippedExcluded = 0;
     std::size_t built = 0;
     std::size_t animated = 0;
+    // Actors that resolved a locomotion clip, and so can wander rather than
+    // hold one spot. A creature with no mtforward.kf is not a failure.
+    std::size_t walking = 0;
     std::string detail;
 };
 
@@ -287,6 +309,28 @@ void speakActorLine(
 // Advances every actor's clip and writes this frame's bone matrices, world
 // placement folded in. Hand each actor's poseScratch to setSkinnedActorPose.
 void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds);
+
+// Walks the ones that can walk: picks a spot near where they were placed, turns
+// toward it, and moves at the speed their own animation was authored for.
+//
+// `groundHeightAt(x, z, referenceY, outHeight)` clamps feet to whatever they
+// should be standing on, and must answer false where no cell is resident -- an
+// actor over a hole keeps its current height rather than dropping to zero,
+// which is the difference between a townsperson at the edge of the streamed set
+// and one falling through the world.
+//
+// referenceY is the ACTOR's own feet, not the player's. Passing the player's
+// puts everyone at the player's altitude: on a hillside town that stands the
+// whole population in the air over the valley, which is exactly what the
+// diagnostic parade used to do.
+//
+// `skipIndex` is the actor the player is talking to: someone who walks off
+// mid-sentence is worse than someone who stands still.
+void updateActorWandering(
+    std::vector<SkinnedActor>& actors,
+    float deltaSeconds,
+    const std::function<bool(float, float, float, float&)>& groundHeightAt,
+    int skipIndex);
 
 // Rewrites every vertex's textureIndex from an index into `actor.textures` to
 // the bindless slot the renderer handed back for it.
