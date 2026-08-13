@@ -1256,6 +1256,7 @@ void updateActorWandering(
     std::vector<SkinnedActor>& actors,
     float deltaSeconds,
     const std::function<bool(float, float, float, float&)>& groundHeightAt,
+    const std::function<void(float&, float&, float, float, float)>& slideOutOfWalls,
     int skipIndex
 ) {
     // ODAI_FNV_NOWANDER=1 pins everyone to their authored spot. The control for
@@ -1270,9 +1271,11 @@ void updateActorWandering(
     // manufactured one. Ground settling is not wandering.
     static const bool s_wanderDisabled = std::getenv("ODAI_FNV_NOWANDER") != nullptr;
     // How far from the authored spot a townsperson will stray, and how close
-    // counts as arrived. The radius is deliberately small -- ~14 m -- because
-    // nothing here knows where the walls are: staying near a position the game
-    // itself chose is the entire collision strategy.
+    // counts as arrived. The radius stays small -- ~14 m -- because an authored
+    // spot is somewhere the game already believed an actor could stand, and
+    // staying near one keeps a townsperson in the part of town they belong to.
+    // It is no longer the ONLY thing keeping them out of walls; see
+    // slideOutOfWalls below.
     constexpr float kWanderRadius = 950.0f;
     constexpr float kArriveDistance = 55.0f;
     constexpr float kTurnRateRadiansPerSecond = 2.6f;
@@ -1367,8 +1370,39 @@ void updateActorWandering(
         // Only commit to the stride once roughly aimed, so a sharp turn happens
         // on the spot instead of as a wide arc through a building.
         const float alignment = std::abs(delta) < 0.7f ? 1.0f : 0.15f;
-        actor.position[0] += facing.x * step * alignment;
-        actor.position[2] += facing.z * step * alignment;
+        const float fromX = actor.position[0];
+        const float fromZ = actor.position[2];
+        const float stride = step * alignment;
+        actor.position[0] = fromX + (facing.x * stride);
+        actor.position[2] = fromZ + (facing.z * stride);
+
+        // Push back out of anything solid. The capsule is the actor's own: the
+        // player's is 34 units around a 120-unit body, so scaling by height
+        // keeps a bighorner wide and a radroach narrow rather than giving every
+        // creature a person's girth. Clamped because a rig that failed to
+        // measure would otherwise be either intangible or a moving wall.
+        if (slideOutOfWalls) {
+            const float height =
+                actor.standingHeightUnits > 1.0f ? actor.standingHeightUnits : 120.0f;
+            const float radius = std::clamp(height * 0.28f, 12.0f, 48.0f);
+            slideOutOfWalls(
+                actor.position[0], actor.position[2], actor.position[1],
+                actor.position[1] + height, radius);
+        }
+
+        // A blocked actor picks somewhere else to go rather than leaning on the
+        // wall for the rest of its stride. Without this the slide above is
+        // silent and permanent: the walk animation keeps playing against a
+        // surface the actor can never get past, which reads worse than the
+        // clipping did.
+        const float movedX = actor.position[0] - fromX;
+        const float movedZ = actor.position[2] - fromZ;
+        const float moved = std::sqrt((movedX * movedX) + (movedZ * movedZ));
+        if (stride > 1e-3f && moved < (stride * 0.35f)) {
+            actor.wanderPauseSeconds = 0.0f;
+            actor.wanderTarget[0] = actor.position[0];
+            actor.wanderTarget[2] = actor.position[2];  // counts as arrived: repick next tick
+        }
         actor.walking = true;
     }
 }

@@ -296,11 +296,21 @@ bool CollisionWorld::groundHeight(
 }
 
 void CollisionWorld::resolveHorizontal(float& worldX, float eyeY, float& worldZ) const {
-    const float feetY = eyeY - m_tuning.eyeHeight;
-    const float headY = eyeY;
-    // Anything the player can step onto is not a wall, however steep its
+    resolveHorizontalFor(
+        worldX, worldZ, eyeY - m_tuning.eyeHeight, eyeY, m_tuning.radius, m_tuning.stepHeight);
+}
+
+void CollisionWorld::resolveHorizontalFor(
+    float& worldX,
+    float& worldZ,
+    float feetY,
+    float headY,
+    float radius,
+    float stepHeight
+) const {
+    // Anything the body can step onto is not a wall, however steep its
     // triangles are. Without this, the lip of every rock and kerb is solid.
-    const float blockingFloorY = feetY + m_tuning.stepHeight;
+    const float blockingFloorY = feetY + stepHeight;
 
     for (int pass = 0; pass < 2; ++pass) {
         float pushX = 0.0f;
@@ -342,7 +352,7 @@ void CollisionWorld::resolveHorizontal(float& worldX, float eyeY, float& worldZ)
                     bestZ = cz;
                 }
             }
-            if (bestDistanceSq >= m_tuning.radius * m_tuning.radius) {
+            if (bestDistanceSq >= radius * radius) {
                 return;
             }
 
@@ -358,7 +368,7 @@ void CollisionWorld::resolveHorizontal(float& worldX, float eyeY, float& worldZ)
                 dirX = 1.0f;
                 dirZ = 0.0f;
             }
-            const float penetration = m_tuning.radius - distance;
+            const float penetration = radius - distance;
             // Accumulate the deepest push rather than summing every triangle of
             // a wall, which would launch the player away from flat surfaces.
             if ((pushX * dirX) + (pushZ * dirZ) < penetration) {

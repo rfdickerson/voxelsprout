@@ -358,10 +358,18 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds);
 //
 // `skipIndex` is the actor the player is talking to: someone who walks off
 // mid-sentence is worse than someone who stands still.
+//
+// `slideOutOfWalls` takes (x, z, feetY, headY, radius) and pushes the position
+// out of anything solid. Without it an actor has NO horizontal collision at all
+// -- the wander radius was the entire strategy, on the theory that staying near
+// an authored spot keeps everyone indoors-or-outdoors as the game intended. It
+// does not: a companion spawned beside the player has no authored spot, and
+// walks through the nearest wall and out through the floor beyond it.
 void updateActorWandering(
     std::vector<SkinnedActor>& actors,
     float deltaSeconds,
     const std::function<bool(float, float, float, float&)>& groundHeightAt,
+    const std::function<void(float&, float&, float, float, float)>& slideOutOfWalls,
     int skipIndex);
 
 // Rewrites every vertex's textureIndex from an index into `actor.textures` to

@@ -2749,6 +2749,12 @@ void NewVegasApp::onTick(float deltaSeconds) {
                 // altitude the player happens to be standing at.
                 return m_streamer ? m_collision.groundHeight(x, z, referenceY, outHeight) : false;
             },
+            [this](float& x, float& z, float feetY, float headY, float radius) {
+                if (m_streamer) {
+                    m_collision.resolveHorizontalFor(
+                        x, z, feetY, headY, radius, m_collision.tuning().stepHeight);
+                }
+            },
             m_talkingActor);
         updateActorPoses(m_actors, deltaSeconds);
         for (const SkinnedActor& actor : m_actors) {
