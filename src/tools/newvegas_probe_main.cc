@@ -1861,13 +1861,56 @@ int probeFloaters(
     using namespace odai::importer::fnv;
 
     std::string error;
+    // ODAI_FLOATERS_PLUGINS=<comma-separated plugin file names> builds the same
+    // merged view of the world the streamer uses when extra plugins are loaded,
+    // so a floater introduced BY a mod can be told apart from one the base game
+    // ships. Without it this reads one plugin, which is what it always did.
+    FalloutLoadOrder order;
+    bool useOrder = false;
+    if (const char* pluginsEnv = std::getenv("ODAI_FLOATERS_PLUGINS")) {
+        std::vector<std::string> requested;
+        requested.push_back(esmPath.filename().string());
+        std::string current;
+        for (const char* cursor = pluginsEnv; ; ++cursor) {
+            if (*cursor == ',' || *cursor == '\0') {
+                if (!current.empty()) {
+                    requested.push_back(current);
+                    current.clear();
+                }
+                if (*cursor == '\0') {
+                    break;
+                }
+                continue;
+            }
+            current.push_back(*cursor);
+        }
+        if (const char* rootsEnv = std::getenv("ODAI_FLOATERS_MODROOTS")) {
+            order.addSearchRoot(std::filesystem::path(rootsEnv));
+        }
+        std::string orderError;
+        if (!order.open(dataPath, requested, orderError)) {
+            std::cout << "load order FAILED: " << orderError << "\n";
+            return 1;
+        }
+        useOrder = true;
+        std::cout << "load order:";
+        for (const auto& loaded : order.entries()) {
+            std::cout << " " << loaded.header.fileName;
+        }
+        std::cout << "\n";
+    }
+
     FalloutWorldTables tables;
-    if (!buildFalloutWorldTables(esmPath, tables, error)) {
+    const bool worldOk = useOrder ? buildFalloutWorldTables(order, tables, error)
+                                  : buildFalloutWorldTables(esmPath, tables, error);
+    if (!worldOk) {
         std::cout << "world tables FAILED: " << error << "\n";
         return 1;
     }
     FalloutCellIndex index;
-    if (!buildFalloutCellIndex(esmPath, index, error)) {
+    const bool indexOk = useOrder ? buildFalloutCellIndex(order, index, error)
+                                  : buildFalloutCellIndex(esmPath, index, error);
+    if (!indexOk) {
         std::cout << "cell index FAILED: " << error << "\n";
         return 1;
     }
@@ -1891,13 +1934,20 @@ int probeFloaters(
     }
 
     EsmReader reader;
-    if (!reader.open(esmPath)) {
+    if (!useOrder && !reader.open(esmPath)) {
         return 1;
     }
     FalloutCellRecord cell;
-    if (!extractFalloutCellAt(reader, *entry, cell, error)) {
+    const bool extracted = useOrder
+        ? extractFalloutCellMerged(index, order, *entry, cell, error)
+        : extractFalloutCellAt(reader, *entry, cell, error);
+    if (!extracted) {
         std::cout << "extract FAILED: " << error << "\n";
         return 1;
+    }
+    if (useOrder) {
+        std::cout << "cell contributions: " << entry->contributions.size()
+                  << "  merged references: " << cell.references.size() << "\n";
     }
     if (cell.land == nullptr || !cell.land->hasHeights) {
         std::cout << "cell has no LAND heights to compare against\n";
@@ -2036,7 +2086,17 @@ int probeFloaters(
     // The reference origin sitting high means nothing on its own -- a sloped
     // road piece is authored with its origin at the raised end.
     FalloutAssetSource assets;
-    const bool haveAssets = assets.open(dataPath);
+    bool haveAssets = assets.open(dataPath);
+    // Mod directories must reach the ASSET source too, not just plugin
+    // resolution. A reference whose mesh does not resolve scores zero clearance
+    // and is silently never reported as floating -- so with the mod's meshes
+    // missing, every placement the mod introduces is invisible to this check,
+    // which is exactly the geometry a new mod is most likely to get wrong.
+    if (haveAssets) {
+        if (const char* rootsEnv = std::getenv("ODAI_FLOATERS_MODROOTS")) {
+            assets.addModDirectory(std::filesystem::path(rootsEnv));
+        }
+    }
     std::unordered_map<std::uint32_t, std::vector<std::array<float, 3>>> meshPointsByFormId;
     const auto meshPointsFor = [&](std::uint32_t baseFormId,
                                    const std::string& modelPath) -> const std::vector<std::array<float, 3>>& {
