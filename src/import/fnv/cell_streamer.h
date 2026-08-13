@@ -191,6 +191,37 @@ public:
     // terrain heights. Returns false when no cells are available.
     bool suggestedSpawnEngineSpace(float outPosition[3]) const;
 
+    // Everything a room needs that is not its geometry: how it is lit, and
+    // somewhere inside it to stand.
+    struct InteriorScene {
+        // As authored, sRGB 0..1. See FalloutCellRecord's XCLL note: an interior
+        // has no sun, so ambient is usually the whole rig.
+        bool hasLighting = false;
+        float ambientColor[3] = {};
+        float directionalColor[3] = {};
+        float fogColor[3] = {};
+        float fogNear = 0.0f;
+        float fogFar = 0.0f;
+        // Engine space, on the floor. Taken from the room's own teleport door
+        // and stepped inward, because a door is the one reference in an interior
+        // guaranteed to stand somewhere a person can.
+        bool hasSpawn = false;
+        float spawnPosition[3] = {};
+        float spawnYawDegrees = 0.0f;
+    };
+
+    // Builds one INTERIOR cell into a scene, synchronously -- interiors are one
+    // room, not a streaming grid, and Doc Mitchell's house is ~1.6 s cold and
+    // far less warm. Uses the same extract-and-build path the streaming jobs do,
+    // so an interior cannot drift from how an exterior cell is made.
+    //
+    // Returns false if no interior with that EditorID exists.
+    bool buildInteriorScene(
+        const std::string& interiorEditorId,
+        ImportedScene& outScene,
+        InteriorScene& outInterior,
+        std::string& outError);
+
     // Spawn on the doorstep of a named interior, in ENGINE space -- e.g.
     // "GSDocMitchellHouse" for where Fallout: New Vegas actually starts you.
     //

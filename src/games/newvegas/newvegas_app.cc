@@ -2295,15 +2295,65 @@ bool NewVegasApp::initStreaming() {
     // coordinate to m_cameraY put the camera tens of thousands of units below
     // the terrain -- the streamed world rendered correctly and the player was
     // simply underneath it.
+    // START INSIDE A ROOM, which is where New Vegas itself begins -- you wake up
+    // on Doc Mitchell's table, not on his porch.
+    //
+    // Built and uploaded here rather than streamed: an interior is ONE room, not
+    // a grid, so there is nothing for the residency planner to plan. It goes in
+    // as an ordinary scene chunk and into collision as an ordinary cell, so
+    // walls, floors and the ground clamp all work with no interior-specific
+    // code anywhere downstream.
+    if (!m_startInsideInterior.empty()) {
+        importer::ImportedScene interiorScene;
+        importer::fnv::CellStreamer::InteriorScene interior;
+        std::string interiorError;
+        if (!m_streamer->buildInteriorScene(
+                m_startInsideInterior, interiorScene, interior, interiorError)) {
+            VOX_LOGE("newvegas") << "cannot start inside " << m_startInsideInterior << ": "
+                                 << interiorError;
+            return false;
+        }
+        if (m_renderer.addImportedSceneChunk(interiorScene) ==
+            render::Renderer::kInvalidImportedChunkIndex) {
+            VOX_LOGE("newvegas") << "failed to upload interior " << m_startInsideInterior;
+            return false;
+        }
+        // An interior has its own coordinate space with no grid, so it gets one
+        // synthetic cell of its own. The coordinate only has to be consistent
+        // and not collide with a streamed exterior cell, and an interior sits
+        // nowhere near the worldspace grid to begin with.
+        const importer::CellCoord interiorCell{
+            static_cast<std::int32_t>(std::floor(interior.spawnPosition[0] / 4096.0f)),
+            static_cast<std::int32_t>(std::floor(interior.spawnPosition[2] / 4096.0f))};
+        m_collision.addCell(interiorCell, interiorScene);
+
+        if (interior.hasSpawn) {
+            m_cameraX = interior.spawnPosition[0];
+            m_cameraY = interior.spawnPosition[1] + m_collision.tuning().eyeHeight;
+            m_cameraZ = interior.spawnPosition[2];
+            m_yawDegrees = interior.spawnYawDegrees;
+            m_pitchDegrees = 0.0f;
+        }
+        // XCLL is read and reported but not yet APPLIED: the renderer has no
+        // ambient override to hand it to, so the room is lit by the outdoor rig
+        // with the roof shadowing it. Stated here so the gap is visible rather
+        // than looking like the values were wrong.
+        VOX_LOGI("newvegas") << "started inside " << m_startInsideInterior
+                             << (interior.hasLighting
+                                     ? " (XCLL read; not applied -- no ambient override yet)"
+                                     : " (no XCLL lighting on this cell)");
+        m_interiorStarted = true;
+    }
+
     float spawn[3] = {0.0f, 0.0f, 0.0f};
     // Doc Mitchell's doorstep first -- that is where New Vegas actually begins.
     // Fall back to the middle of the worldspace if the cell is missing, so a
     // different plugin or a trimmed install still starts somewhere sensible.
     const bool spawnedAtDoorstep =
-        !m_streamSpawnInterior.empty() &&
+        !m_interiorStarted && !m_streamSpawnInterior.empty() &&
         m_streamer->spawnAtInteriorDoorEngineSpace(m_streamSpawnInterior, spawn);
     const bool haveSpawn =
-        spawnedAtDoorstep || m_streamer->suggestedSpawnEngineSpace(spawn);
+        !m_interiorStarted && (spawnedAtDoorstep || m_streamer->suggestedSpawnEngineSpace(spawn));
     if (haveSpawn) {
         m_cameraX = spawn[0];
         m_cameraY = spawn[1];  // height

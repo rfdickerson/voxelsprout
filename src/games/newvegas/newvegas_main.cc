@@ -52,6 +52,10 @@ int main(int argc, char** argv) {
             app.setStreamCacheDirectory(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
             app.setStreamCacheEnabled(false);
+        } else if (std::strcmp(argv[i], "--interior") == 0 && i + 1 < argc) {
+            // Start INSIDE this interior rather than on its doorstep, which is
+            // where New Vegas itself begins: --interior GSDocMitchellHouse.
+            app.startInsideInterior(argv[++i]);
         } else if (std::strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
             // Interior cell whose doorstep to start on, e.g. GSDocMitchellHouse.
             app.setStreamSpawnInterior(argv[++i]);

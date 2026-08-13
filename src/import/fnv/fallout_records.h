@@ -479,6 +479,17 @@ struct FalloutCellContribution {
 
 struct FalloutCellIndexEntry {
     std::uint32_t cellFormId = 0;
+    // XCLL, carried from the CELL record so extractFalloutCellAt can hand it
+    // back: that function rebuilds a cell from this entry plus the children
+    // GRUP and never re-reads the CELL's own subrecords, so anything living
+    // only on the record is invisible to every streaming caller. See the same
+    // fields on FalloutCellRecord for what they mean.
+    bool hasLighting = false;
+    float ambientColor[3] = {};
+    float directionalColor[3] = {};
+    float fogColor[3] = {};
+    float fogNear = 0.0f;
+    float fogFar = 0.0f;
     // EDID, when the cell has one. Interiors are named ("GSDocMitchellHouse");
     // most exterior cells are not. This is what lets a caller ask for a place by
     // name instead of by grid coordinate.

@@ -638,6 +638,14 @@ bool buildFalloutCellIndex(
         entry.gridZ = parsed.gridZ;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.isInterior = parsed.isInterior;
+        entry.hasLighting = parsed.hasLighting;
+        for (int channel = 0; channel < 3; ++channel) {
+            entry.ambientColor[channel] = parsed.ambientColor[channel];
+            entry.directionalColor[channel] = parsed.directionalColor[channel];
+            entry.fogColor[channel] = parsed.fogColor[channel];
+        }
+        entry.fogNear = parsed.fogNear;
+        entry.fogFar = parsed.fogFar;
         entry.regionFormIds = parsed.regionFormIds;
         entry.cellRecordOffset = pendingCellRecordOffset;
         outIndex.cells.push_back(entry);
@@ -852,6 +860,14 @@ bool extractFalloutCellAt(
     outCell.gridX = entry.gridX;
     outCell.gridZ = entry.gridZ;
     outCell.worldspaceFormId = entry.worldspaceFormId;
+    outCell.hasLighting = entry.hasLighting;
+    for (int channel = 0; channel < 3; ++channel) {
+        outCell.ambientColor[channel] = entry.ambientColor[channel];
+        outCell.directionalColor[channel] = entry.directionalColor[channel];
+        outCell.fogColor[channel] = entry.fogColor[channel];
+    }
+    outCell.fogNear = entry.fogNear;
+    outCell.fogFar = entry.fogFar;
 
     if (entry.childrenGroupSize == 0u) {
         return true;  // a cell with no children group simply has no contents

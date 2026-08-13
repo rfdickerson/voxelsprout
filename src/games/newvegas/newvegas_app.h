@@ -113,6 +113,11 @@ public:
     void setStreamWorldspace(std::string worldspace) { m_streamWorldspace = std::move(worldspace); }
     // Spawn on the doorstep of this interior cell. Empty means "centre of the
     // worldspace" instead.
+    // Start inside a named interior cell -- the room is built and uploaded at
+    // startup and the player stands in it, instead of spawning on its doorstep
+    // out in the worldspace.
+    void startInsideInterior(std::string editorId) { m_startInsideInterior = std::move(editorId); }
+
     void setStreamSpawnInterior(std::string editorId) {
         m_streamSpawnInterior = std::move(editorId);
         m_streamSpawnInteriorExplicit = true;
@@ -461,6 +466,10 @@ private:
     // that game has never heard of, and warned about it every launch.
     std::string m_streamSpawnInterior = "GSDocMitchellHouse";
     bool m_streamSpawnInteriorExplicit = false;
+    // Start INSIDE this interior rather than on its doorstep. Empty means the
+    // doorstep, which is what the viewer has always done.
+    std::string m_startInsideInterior;
+    bool m_interiorStarted = false;
     std::string m_streamCacheDirectory;
     // Asset override roots, in load order. See addModDirectory.
     std::vector<std::string> m_modDirectories;

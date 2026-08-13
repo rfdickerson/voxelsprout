@@ -539,6 +539,158 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
     m_stats.worstApplyMs = std::max(m_stats.worstApplyMs, m_stats.lastApplyMs);
 }
 
+namespace {
+
+// Case-insensitive lookup of a cell by EditorID. Interiors are the only cells
+// that reliably have one.
+const FalloutCellIndexEntry* findCellByEditorId(
+    const FalloutCellIndex& index, const std::string& editorId
+) {
+    std::string wanted = editorId;
+    for (char& c : wanted) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        if (entry.editorId.empty()) {
+            continue;
+        }
+        std::string lowered = entry.editorId;
+        for (char& c : lowered) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lowered == wanted) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+bool CellStreamer::buildInteriorScene(
+    const std::string& interiorEditorId,
+    ImportedScene& outScene,
+    InteriorScene& outInterior,
+    std::string& outError
+) {
+    outScene = ImportedScene{};
+    outInterior = InteriorScene{};
+    outError.clear();
+
+    const FalloutCellIndexEntry* entry = findCellByEditorId(m_cellIndex, interiorEditorId);
+    if (entry == nullptr) {
+        outError = "no cell named \"" + interiorEditorId + "\"";
+        return false;
+    }
+
+    EsmReader reader;
+    if (!m_useLoadOrder && !reader.open(m_esmPath)) {
+        outError = reader.lastError();
+        return false;
+    }
+    FalloutCellRecord record;
+    const bool extracted = m_useLoadOrder
+        ? extractFalloutCellMerged(m_cellIndex, m_loadOrder, *entry, record, outError)
+        : extractFalloutCellAt(reader, *entry, record, outError);
+    if (!extracted) {
+        return false;
+    }
+
+    // The same builder the streaming jobs use, so an interior cannot drift from
+    // how an exterior cell is made. No terrain pass and no fallback land
+    // texture: an interior has no LAND record at all.
+    CellSceneBuilder builder(m_assets, m_worldTables, &m_textureCache);
+    builder.setMaxTextureSize(m_maxTextureSize);
+    builder.addCellStatics(record);
+    builder.finish(outScene);
+
+    outInterior.hasLighting = record.hasLighting;
+    for (int channel = 0; channel < 3; ++channel) {
+        outInterior.ambientColor[channel] = record.ambientColor[channel];
+        outInterior.directionalColor[channel] = record.directionalColor[channel];
+        outInterior.fogColor[channel] = record.fogColor[channel];
+    }
+    outInterior.fogNear = record.fogNear;
+    outInterior.fogFar = record.fogFar;
+
+    // Somewhere inside to stand: THE BIGGEST TRIANGLE OF THE ROOM'S OWN NAVMESH.
+    //
+    // Fallout authored a navmesh for every interior, and it is the exact answer
+    // to "where can a person stand in here" -- no guessing, no clearance test.
+    // The largest triangle is open floor rather than the strip behind a door or
+    // the gap beside a bed, which is what makes its centroid a sane place to put
+    // somebody.
+    //
+    // The first attempt stepped inward from the teleport door toward the
+    // centroid of every reference in the cell, and it put the player's face
+    // against a wall: a house is several rooms, so the average of its contents
+    // is not reliably inside any of them, and the line to it crosses walls.
+    const FalloutNavMeshRecord* bestMesh = nullptr;
+    std::size_t bestTriangle = 0;
+    double bestArea = 0.0;
+    for (const FalloutNavMeshRecord& mesh : record.navMeshes) {
+        const std::size_t vertexCount = mesh.vertices.size() / 3u;
+        for (std::size_t t = 0; t < mesh.triangles.size(); ++t) {
+            const FalloutNavMeshTriangle& tri = mesh.triangles[t];
+            if (tri.vertex[0] >= vertexCount || tri.vertex[1] >= vertexCount ||
+                tri.vertex[2] >= vertexCount) {
+                continue;
+            }
+            const float* a = &mesh.vertices[static_cast<std::size_t>(tri.vertex[0]) * 3u];
+            const float* b = &mesh.vertices[static_cast<std::size_t>(tri.vertex[1]) * 3u];
+            const float* c = &mesh.vertices[static_cast<std::size_t>(tri.vertex[2]) * 3u];
+            // Twice the area in the ground plane, which is all the comparison
+            // needs -- Fallout's floors are flat enough that the horizontal
+            // projection ranks them the same way the true area would.
+            const double area = std::abs(
+                (static_cast<double>(b[0] - a[0]) * static_cast<double>(c[1] - a[1])) -
+                (static_cast<double>(c[0] - a[0]) * static_cast<double>(b[1] - a[1])));
+            if (area > bestArea) {
+                bestArea = area;
+                bestMesh = &mesh;
+                bestTriangle = t;
+            }
+        }
+    }
+    if (bestMesh != nullptr) {
+        const FalloutNavMeshTriangle& tri = bestMesh->triangles[bestTriangle];
+        float fallout[3] = {0.0f, 0.0f, 0.0f};
+        for (int corner = 0; corner < 3; ++corner) {
+            const float* v = &bestMesh->vertices[static_cast<std::size_t>(tri.vertex[corner]) * 3u];
+            for (int axis = 0; axis < 3; ++axis) {
+                fallout[axis] += v[axis] / 3.0f;
+            }
+        }
+        falloutToEngine(fallout, outInterior.spawnPosition);
+        // Face the room's teleport door, so the way out is the first thing in
+        // view. Failing that, keep the default heading rather than inventing one.
+        for (const FalloutPlacedReference& ref : record.references) {
+            if (!ref.hasTeleport) {
+                continue;
+            }
+            const float toDoorX = ref.position[0] - fallout[0];
+            const float toDoorY = ref.position[1] - fallout[1];
+            if ((toDoorX * toDoorX) + (toDoorY * toDoorY) > 1.0f) {
+                // Engine space is (x, y, z) -> (x, z, -y), so a Fallout +y step
+                // is an engine -z one; the yaw is measured in engine space
+                // because that is what the camera reads.
+                outInterior.spawnYawDegrees =
+                    std::atan2(-toDoorY, toDoorX) * (180.0f / 3.14159265358979323846f);
+            }
+            break;
+        }
+        outInterior.hasSpawn = true;
+    }
+
+    VOX_LOGI("streamer") << "interior " << interiorEditorId << ": " << record.references.size()
+                         << " refs, " << outScene.packedVertices.size() << " verts, ambient ("
+                         << static_cast<int>(outInterior.ambientColor[0] * 255.0f) << ","
+                         << static_cast<int>(outInterior.ambientColor[1] * 255.0f) << ","
+                         << static_cast<int>(outInterior.ambientColor[2] * 255.0f) << ")"
+                         << (outInterior.hasSpawn ? "" : ", NO teleport door to stand by");
+    return true;
+}
+
 bool CellStreamer::spawnAtInteriorDoorEngineSpace(
     const std::string& interiorEditorId, float outPosition[3]) const {
     std::string wanted = interiorEditorId;
