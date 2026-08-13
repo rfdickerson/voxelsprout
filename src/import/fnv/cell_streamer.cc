@@ -106,7 +106,8 @@ std::uint64_t countBlendedDraws(const ImportedScene& scene) {
 std::string pluginFingerprint(
     const std::filesystem::path& esmPath,
     const std::string& modFingerprint,
-    std::uint32_t maxTextureSize) {
+    std::uint32_t maxTextureSize,
+    const std::string& loadOrderFingerprint) {
     std::error_code sizeError;
     const auto size = std::filesystem::file_size(esmPath, sizeError);
     std::error_code timeError;
@@ -121,6 +122,12 @@ std::string pluginFingerprint(
     }
     if (!modFingerprint.empty()) {
         fingerprint += "_m" + modFingerprint;
+    }
+    // A cell built against one load order has that order's overrides BAKED in --
+    // moved references, replaced terrain. Serving it to a different order is
+    // serving another mod list's world.
+    if (!loadOrderFingerprint.empty()) {
+        fingerprint += "_l" + loadOrderFingerprint;
     }
     return fingerprint;
 }
@@ -191,11 +198,24 @@ bool CellStreamer::open(
                              << m_assets.modArchiveCount() << " archives override the base game";
     }
 
-    if (!buildFalloutWorldTables(m_esmPath, m_worldTables, outError)) {
-        return false;
-    }
-    if (!buildFalloutCellIndex(m_esmPath, m_cellIndex, outError)) {
-        return false;
+    // With a load order, base records and cell contents are merged across every
+    // plugin in it, later winning. Without one this is the single-plugin path it
+    // has always been, and the results are identical -- a load order of one
+    // remaps every formID to itself.
+    if (m_useLoadOrder) {
+        if (!buildFalloutWorldTables(m_loadOrder, m_worldTables, outError)) {
+            return false;
+        }
+        if (!buildFalloutCellIndex(m_loadOrder, m_cellIndex, outError)) {
+            return false;
+        }
+    } else {
+        if (!buildFalloutWorldTables(m_esmPath, m_worldTables, outError)) {
+            return false;
+        }
+        if (!buildFalloutCellIndex(m_esmPath, m_cellIndex, outError)) {
+            return false;
+        }
     }
 
     std::string loweredWorldspace = worldspaceEditorId;
@@ -225,7 +245,8 @@ bool CellStreamer::open(
         std::string loweredForPath = loweredWorldspace;
         const std::filesystem::path candidate =
             m_cacheDirectory /
-            pluginFingerprint(m_esmPath, m_assets.modFingerprint(), m_maxTextureSize) /
+            pluginFingerprint(m_esmPath, m_assets.modFingerprint(), m_maxTextureSize,
+                              m_useLoadOrder ? m_loadOrder.fingerprint() : std::string()) /
             loweredForPath;
         std::error_code createError;
         std::filesystem::create_directories(candidate, createError);
@@ -283,6 +304,11 @@ void CellStreamer::update(
         m_planner.markLoadStarted(cell);
         const FalloutCellIndexEntry entry = m_cellIndex.cells[available->second];
         const std::filesystem::path esmPath = m_esmPath;
+        // Both are copied per job rather than referenced: the streamer can be
+        // destroyed while jobs are still in flight, and these are small (a path
+        // list and a per-plugin index remap table).
+        const FalloutCellIndex* cellIndex = &m_cellIndex;
+        const FalloutLoadOrder* loadOrder = m_useLoadOrder ? &m_loadOrder : nullptr;
         const FalloutAssetSource* assets = &m_assets;
         const FalloutWorldTables* tables = &m_worldTables;
         std::shared_ptr<Pending> pending = m_pending;
@@ -298,7 +324,7 @@ void CellStreamer::update(
         DecodedTextureCache* textureCache = &m_textureCache;
         const std::uint32_t maxTextureSize = m_maxTextureSize;
         m_jobs->enqueue([pending, esmPath, entry, cell, assets, tables, cachePath, textureCache,
-                         maxTextureSize]() {
+                         maxTextureSize, cellIndex, loadOrder]() {
             const core::Stopwatch buildTimer;
             Pending::Result result;
             result.cell = cell;
@@ -335,11 +361,17 @@ void CellStreamer::update(
             // Each job owns its reader: EsmReader records walk state in members
             // and is not safe to share. Opening one is a memory map, not a read.
             EsmReader reader;
-            if (!reader.open(esmPath)) {
+            const bool needBaseReader = loadOrder == nullptr;
+            if (needBaseReader && !reader.open(esmPath)) {
                 result.error = reader.lastError();
             } else {
                 FalloutCellRecord record;
-                if (!extractFalloutCellAt(reader, entry, record, result.error)) {
+                const bool extracted =
+                    (loadOrder != nullptr)
+                        ? extractFalloutCellMerged(*cellIndex, *loadOrder, entry, record,
+                                                   result.error)
+                        : extractFalloutCellAt(reader, entry, record, result.error);
+                if (!extracted) {
                     // result.error already set
                 } else {
                     CellSceneBuilder builder(*assets, *tables, textureCache);

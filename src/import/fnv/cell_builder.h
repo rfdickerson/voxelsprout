@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "import/fnv/asset_source.h"
+#include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
 #include "import/imported_scene.h"
@@ -61,6 +62,15 @@ struct FalloutWorldTables {
 // decompressed. This is what makes it affordable at startup.
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError);
+
+// As above, across a whole load order. Every plugin's records are rewritten from
+// its own local mod-index space into the order's global one, and a later plugin
+// REPLACES an earlier one's record with the same formID -- which is the whole
+// mechanism an override patch works by. A plugin that fails to read is skipped
+// with a warning rather than failing the build: losing a patch's records is a
+// degraded scene, losing the base game's is no scene.
+bool buildFalloutWorldTables(
+    const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError);
 
 // True for meshes that only make sense alpha-blended or additive: dust, glow
 // billboards, light beams, sand. The imported static path draws opaque, so

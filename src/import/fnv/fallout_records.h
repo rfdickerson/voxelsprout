@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "import/fnv/esm_reader.h"
+#include "import/fnv/plugin_load_order.h"
 
 namespace odai::importer::fnv {
 
@@ -449,6 +450,15 @@ struct FalloutExtractFilter {
 // bytes each this index is under 800 KB for the entire worldspace, and because
 // EsmReader memory-maps the plugin, going from an entry to that cell's actual
 // LAND/REFR/NAVM records is a pointer walk plus that one cell's decompression.
+// One plugin's contribution to a cell: where its children group sits in ITS
+// file. Offsets are positions in that plugin, so the plugin index is not
+// decoration -- reading a range against the wrong file is undefined.
+struct FalloutCellContribution {
+    std::size_t pluginIndex = 0;
+    std::uint64_t childrenGroupOffset = 0;
+    std::uint32_t childrenGroupSize = 0;
+};
+
 struct FalloutCellIndexEntry {
     std::uint32_t cellFormId = 0;
     // EDID, when the cell has one. Interiors are named ("GSDocMitchellHouse");
@@ -466,6 +476,15 @@ struct FalloutCellIndexEntry {
     std::vector<std::uint32_t> regionFormIds;
     // Byte offset of the CELL record's own header.
     std::uint64_t cellRecordOffset = 0;
+    // Every plugin that has something to say about this cell, in load order.
+    // A cell's contents are not owned by one file: an override plugin ships a
+    // children group holding ONLY the references it changes or adds, and the
+    // rest still come from the master. So the contents are the merge of these,
+    // later plugins winning per reference formID -- see extractFalloutCellMerged.
+    //
+    // The single-plugin builder fills exactly one of these, so both paths read
+    // the same way.
+    std::vector<FalloutCellContribution> contributions;
     // The cell-children GRUP that holds this cell's REFR/LAND/NAVM records.
     // Zero size means the cell has no children group at all (no contents).
     std::uint64_t childrenGroupOffset = 0;
@@ -474,6 +493,9 @@ struct FalloutCellIndexEntry {
 
 struct FalloutCellIndex {
     std::vector<FalloutCellIndexEntry> cells;
+    // Indexed by FalloutCellContribution::pluginIndex, so a contribution can be
+    // read without carrying the load order alongside the index everywhere.
+    std::vector<std::filesystem::path> pluginPaths;
     std::vector<FalloutWorldspaceRecord> worldspaces;
     // Every placed reference's owning cell, by the reference's own formID --
     // built from record headers alone, exactly as extractFalloutScene does.
@@ -487,6 +509,26 @@ struct FalloutCellIndex {
 // (needed for EDID and the XCLC grid coordinates the streamer ranks by).
 bool buildFalloutCellIndex(
     const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError);
+
+// As above, across a whole load order. Cells are merged by their REMAPPED
+// formID, so the same cell described by several plugins becomes one entry with
+// several contributions, and a later plugin's CELL record replaces the earlier
+// one's metadata (editor ID, grid, regions). Every formID the index carries is
+// in the order's global space.
+bool buildFalloutCellIndex(
+    const FalloutLoadOrder& order, FalloutCellIndex& outIndex, std::string& outError);
+
+// Materializes one cell by merging every plugin that contributes to it, in load
+// order. References are keyed by formID with the later plugin winning, which is
+// how an override patch moves or deletes a placement; LAND and navmeshes are
+// replaced wholesale by the last plugin that supplies one. All formIDs come out
+// remapped into the order's global space, matching the world tables.
+bool extractFalloutCellMerged(
+    const FalloutCellIndex& index,
+    const FalloutLoadOrder& order,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError);
 
 // Materializes exactly one cell from an already-open reader, using an entry
 // from buildFalloutCellIndex. The reader must be open on the same plugin the

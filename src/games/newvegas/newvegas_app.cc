@@ -2228,6 +2228,33 @@ bool NewVegasApp::initStreaming() {
     }
 
     std::string error;
+    // Stream across the whole load order when extra plugins are loaded, so a
+    // patch's record fixes -- moved statics, corrected models, replaced terrain
+    // -- actually reach the scene. YUP alone ships 18871 reference overrides,
+    // none of which did anything while cells came from one plugin.
+    //
+    // Deliberately skipped when nothing was added: re-indexing seven plugins
+    // costs startup time for no override, and the single-plugin path is the one
+    // every measurement in this project was taken on.
+    if (!m_extraPlugins.empty()) {
+        std::vector<std::string> requestedPlugins;
+        requestedPlugins.push_back(m_streamPlugin);
+        requestedPlugins.insert(
+            requestedPlugins.end(), m_extraPlugins.begin(), m_extraPlugins.end());
+        importer::fnv::FalloutLoadOrder streamOrder;
+        for (const std::string& modDirectory : m_modDirectories) {
+            streamOrder.addSearchRoot(std::filesystem::path(modDirectory));
+        }
+        std::string orderError;
+        if (!streamOrder.open(
+                std::filesystem::path(m_streamDirectory), requestedPlugins, orderError)) {
+            VOX_LOGW("newvegas") << "streaming one plugin only: " << orderError;
+        } else {
+            VOX_LOGI("newvegas") << "streaming across " << streamOrder.size()
+                                 << " plugins (record overrides active)";
+            m_streamer->setLoadOrder(std::move(streamOrder));
+        }
+    }
     if (!m_streamer->open(
             std::filesystem::path(m_streamDirectory), std::filesystem::path(m_streamPlugin),
             m_streamWorldspace, *m_streamJobs, error)) {

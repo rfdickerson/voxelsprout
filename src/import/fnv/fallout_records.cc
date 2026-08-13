@@ -1,5 +1,6 @@
 #include "import/fnv/fallout_records.h"
 
+#include <iostream>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
@@ -517,6 +518,7 @@ void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell
 bool buildFalloutCellIndex(
     const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError) {
     outIndex = FalloutCellIndex{};
+    outIndex.pluginPaths.push_back(esmPath);
     EsmReader reader;
     if (!reader.open(esmPath)) {
         outError = reader.lastError();
@@ -574,6 +576,11 @@ bool buildFalloutCellIndex(
                 FalloutCellIndexEntry& entry = outIndex.cells[found->second];
                 entry.childrenGroupOffset = group.fileOffset;
                 entry.childrenGroupSize = group.groupSize;
+                // The same range, expressed the way the merged reader wants it,
+                // so a single-plugin index is just a load order of one.
+                entry.contributions.clear();
+                entry.contributions.push_back(
+                    FalloutCellContribution{0u, group.fileOffset, group.groupSize});
             }
             // Descend anyway: the REFR headers inside are what build
             // cellIndexByReferenceFormId, and headers are cheap.
@@ -628,6 +635,193 @@ bool buildFalloutCellIndex(
     if (!reader.walk(visitor)) {
         outError = reader.lastError();
         return false;
+    }
+    return true;
+}
+
+bool buildFalloutCellIndex(
+    const FalloutLoadOrder& order, FalloutCellIndex& outIndex, std::string& outError) {
+    outIndex = FalloutCellIndex{};
+    if (order.empty()) {
+        outError = "empty load order";
+        return false;
+    }
+    for (const FalloutLoadOrderEntry& entry : order.entries()) {
+        outIndex.pluginPaths.push_back(entry.path);
+    }
+
+    // Cells merge by their REMAPPED formID: the same cell described by the base
+    // game and by a patch is one cell with two contributions, not two cells.
+    std::unordered_map<std::uint32_t, std::size_t> entryByCellFormId;
+
+    for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
+        FalloutCellIndex single;
+        std::string error;
+        if (!buildFalloutCellIndex(order.entries()[pluginIndex].path, single, error)) {
+            // Same rule as the world tables: a patch that will not read costs
+            // its own records, not the base game's.
+            std::cerr << "[fnv] cell index: skipping "
+                      << order.entries()[pluginIndex].header.fileName << ": " << error << "\n";
+            continue;
+        }
+        const auto remap = [&](std::uint32_t formId) {
+            return formId == 0u ? 0u : order.remapFormId(pluginIndex, formId);
+        };
+        for (FalloutCellIndexEntry& cell : single.cells) {
+            const std::uint32_t cellFormId = remap(cell.cellFormId);
+            cell.cellFormId = cellFormId;
+            cell.worldspaceFormId = remap(cell.worldspaceFormId);
+            for (std::uint32_t& regionFormId : cell.regionFormIds) {
+                regionFormId = remap(regionFormId);
+            }
+            // Point this plugin's contribution at ITS file, whatever the
+            // single-plugin builder recorded (index 0, meaning itself).
+            std::vector<FalloutCellContribution> contributions;
+            if (cell.childrenGroupSize != 0u) {
+                contributions.push_back(FalloutCellContribution{
+                    pluginIndex, cell.childrenGroupOffset, cell.childrenGroupSize});
+            }
+            const auto existing = entryByCellFormId.find(cellFormId);
+            if (existing == entryByCellFormId.end()) {
+                cell.contributions = std::move(contributions);
+                entryByCellFormId.emplace(cellFormId, outIndex.cells.size());
+                outIndex.cells.push_back(std::move(cell));
+                continue;
+            }
+            // A later plugin's CELL record replaces the earlier one's metadata,
+            // but its contributions ACCUMULATE -- the base game still supplies
+            // every reference the patch did not mention.
+            FalloutCellIndexEntry& merged = outIndex.cells[existing->second];
+            std::vector<FalloutCellContribution> combined = std::move(merged.contributions);
+            combined.insert(combined.end(), contributions.begin(), contributions.end());
+            if (!cell.editorId.empty()) {
+                merged.editorId = cell.editorId;
+            }
+            if (cell.hasGridCoords) {
+                merged.gridX = cell.gridX;
+                merged.gridZ = cell.gridZ;
+                merged.hasGridCoords = true;
+            }
+            if (!cell.regionFormIds.empty()) {
+                merged.regionFormIds = cell.regionFormIds;
+            }
+            merged.contributions = std::move(combined);
+        }
+        for (const auto& [referenceFormId, cellSlot] : single.cellIndexByReferenceFormId) {
+            if (cellSlot >= single.cells.size()) {
+                continue;
+            }
+            const auto found = entryByCellFormId.find(single.cells[cellSlot].cellFormId);
+            if (found != entryByCellFormId.end()) {
+                outIndex.cellIndexByReferenceFormId[remap(referenceFormId)] = found->second;
+            }
+        }
+        if (outIndex.worldspaces.empty()) {
+            outIndex.worldspaces = single.worldspaces;
+        }
+    }
+    return true;
+}
+
+// Rewrites every formID a cell carries from `pluginIndex`'s local mod-index
+// space into the load order's global one.
+//
+// The list is exhaustive on purpose: a formID left un-remapped does not fail, it
+// silently addresses a DIFFERENT record -- the base a reference places, the LTEX
+// a terrain layer paints with, the door a teleport leads to. Missing one is the
+// class of bug that renders as the wrong mesh in the right place.
+void remapCellFormIds(const FalloutLoadOrder& order, std::size_t pluginIndex,
+                      FalloutCellRecord& cell) {
+    const auto remap = [&](std::uint32_t formId) {
+        return formId == 0u ? 0u : order.remapFormId(pluginIndex, formId);
+    };
+    cell.formId = remap(cell.formId);
+    cell.worldspaceFormId = remap(cell.worldspaceFormId);
+    for (std::uint32_t& regionFormId : cell.regionFormIds) {
+        regionFormId = remap(regionFormId);
+    }
+    for (FalloutPlacedReference& ref : cell.references) {
+        ref.formId = remap(ref.formId);
+        ref.baseFormId = remap(ref.baseFormId);
+        ref.teleportTargetRefFormId = remap(ref.teleportTargetRefFormId);
+        ref.enableParentFormId = remap(ref.enableParentFormId);
+    }
+    if (cell.land != nullptr) {
+        cell.land->cellFormId = remap(cell.land->cellFormId);
+        for (std::uint32_t& baseTexture : cell.land->quadrantBaseTextureFormId) {
+            baseTexture = remap(baseTexture);
+        }
+        for (FalloutLandTextureLayer& layer : cell.land->textureLayers) {
+            layer.textureFormId = remap(layer.textureFormId);
+        }
+    }
+    for (FalloutNavMeshRecord& navMesh : cell.navMeshes) {
+        navMesh.cellFormId = remap(navMesh.cellFormId);
+    }
+}
+
+bool extractFalloutCellMerged(
+    const FalloutCellIndex& index,
+    const FalloutLoadOrder& order,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError) {
+    outCell = FalloutCellRecord{};
+    outCell.formId = entry.cellFormId;
+    outCell.editorId = entry.editorId;
+    outCell.worldspaceFormId = entry.worldspaceFormId;
+    outCell.gridX = entry.gridX;
+    outCell.gridZ = entry.gridZ;
+    outCell.hasGridCoords = entry.hasGridCoords;
+    outCell.isInterior = entry.isInterior;
+    outCell.regionFormIds = entry.regionFormIds;
+
+    // References keyed by formID, remembering the order they were first seen so
+    // the merged list is deterministic rather than hash-ordered. A later
+    // plugin's version REPLACES an earlier one in place: that is what moving or
+    // retexturing a placement looks like on disk.
+    std::unordered_map<std::uint32_t, std::size_t> referenceSlotByFormId;
+
+    for (const FalloutCellContribution& contribution : entry.contributions) {
+        if (contribution.childrenGroupSize == 0u ||
+            contribution.pluginIndex >= index.pluginPaths.size()) {
+            continue;
+        }
+        EsmReader reader;
+        if (!reader.open(index.pluginPaths[contribution.pluginIndex])) {
+            // A plugin that will not open costs its overrides, not the cell.
+            continue;
+        }
+        FalloutCellIndexEntry single = entry;
+        single.childrenGroupOffset = contribution.childrenGroupOffset;
+        single.childrenGroupSize = contribution.childrenGroupSize;
+        FalloutCellRecord part;
+        std::string error;
+        if (!extractFalloutCellAt(reader, single, part, error)) {
+            outError = error;
+            return false;
+        }
+        remapCellFormIds(order, contribution.pluginIndex, part);
+
+        for (FalloutPlacedReference& ref : part.references) {
+            const auto slot = referenceSlotByFormId.find(ref.formId);
+            if (slot == referenceSlotByFormId.end()) {
+                referenceSlotByFormId.emplace(ref.formId, outCell.references.size());
+                outCell.references.push_back(std::move(ref));
+            } else {
+                outCell.references[slot->second] = std::move(ref);
+            }
+        }
+        // Terrain and navmesh are whole-record overrides: a plugin either ships
+        // a LAND for this cell or says nothing about it. Only replace when it
+        // actually supplied one, or a patch that touches only references would
+        // erase the terrain under them.
+        if (part.land != nullptr) {
+            outCell.land = std::move(part.land);
+        }
+        if (!part.navMeshes.empty()) {
+            outCell.navMeshes = std::move(part.navMeshes);
+        }
     }
     return true;
 }

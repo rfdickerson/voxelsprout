@@ -42,6 +42,7 @@
 #include "import/cell_residency_planner.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/cell_builder.h"
+#include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
 
@@ -117,6 +118,15 @@ public:
     // The plugin's size and modification time are folded into a subdirectory
     // name, so a changed or different plugin simply misses rather than reading
     // stale geometry -- nothing is ever deleted to invalidate. Empty disables it.
+    // Stream with an explicit load order instead of one plugin. The order's
+    // FIRST entry must be the plugin the worldspace lives in; the rest override
+    // it in ascending priority. Call before open(). Without this the streamer
+    // reads exactly one plugin, which is what it always did.
+    void setLoadOrder(FalloutLoadOrder order) {
+        m_loadOrder = std::move(order);
+        m_useLoadOrder = !m_loadOrder.empty();
+    }
+
     void setCacheDirectory(std::filesystem::path directory) {
         m_cacheDirectory = std::move(directory);
     }
@@ -227,6 +237,12 @@ private:
 
     CellResidencyPlanner m_planner;
     std::filesystem::path m_esmPath;
+    // The whole load order, when the caller supplied extra plugins. Cells,
+    // references and base records are then merged across it with later plugins
+    // overriding earlier ones -- the only way a patch's fixes reach the scene.
+    // Empty means the single-plugin path, which stays byte-identical.
+    FalloutLoadOrder m_loadOrder;
+    bool m_useLoadOrder = false;
     std::vector<std::filesystem::path> m_modDirectories;
     std::uint32_t m_maxTextureSize = 512u;
     std::filesystem::path m_cacheDirectory;

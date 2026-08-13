@@ -422,6 +422,109 @@ bool isEffectOnlyModelPath(std::string_view modelPath) {
     return baseName.rfind("fx", 0) == 0;
 }
 
+namespace {
+
+// Fills `outTables` from one plugin's records, rewriting every formID from that
+// plugin's local mod-index space into the load order's global one.
+//
+// `laterWins` is what makes an override plugin work. The single-plugin path
+// keeps first-wins (emplace) because it is the same either way with one file,
+// and changing it would be a behaviour change for no reason.
+void mergeWorldTablesFromScene(
+    const FalloutSceneData& data,
+    const FalloutLoadOrder& order,
+    std::size_t pluginIndex,
+    bool laterWins,
+    FalloutWorldTables& outTables) {
+    const auto remap = [&](std::uint32_t formId) {
+        return order.remapFormId(pluginIndex, formId);
+    };
+    const auto put = [&](auto& map, const auto& key, const auto& value) {
+        if (laterWins) {
+            map.insert_or_assign(key, value);
+        } else {
+            map.emplace(key, value);
+        }
+    };
+    for (const FalloutStaticRecord& entry : data.statics) {
+        const std::uint32_t formId = remap(entry.formId);
+        if (!entry.modelPath.empty()) {
+            put(outTables.staticModelPaths, formId, entry.modelPath);
+        }
+        if (!entry.editorId.empty()) {
+            put(outTables.staticEditorIds, formId, entry.editorId);
+        }
+        if (!entry.recordType.empty()) {
+            put(outTables.staticRecordTypes, formId, entry.recordType);
+        }
+    }
+    for (const FalloutLightRecord& entry : data.lights) {
+        FalloutLightRecord light = entry;
+        light.formId = remap(entry.formId);
+        put(outTables.lightsByFormId, light.formId, light);
+    }
+    for (const FalloutLandTextureRecord& entry : data.landTextures) {
+        if (!entry.diffuseTexturePath.empty()) {
+            put(outTables.landTexturePaths, remap(entry.formId), entry.diffuseTexturePath);
+        }
+    }
+    for (const FalloutRegionRecord& entry : data.regions) {
+        if (entry.isDiscoverable()) {
+            put(outTables.regionNamesByFormId, remap(entry.formId), entry.mapName);
+        }
+    }
+    for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
+        if (!entry.editorId.empty()) {
+            put(outTables.worldspaceFormIdsByEditorId, toLowerAsciiCopy(entry.editorId),
+                remap(entry.formId));
+        }
+    }
+}
+
+// The filter both builders use: reject every worldspace group and every cell's
+// contents, so no LAND record is ever decompressed. That is what makes this
+// affordable at startup.
+FalloutExtractFilter worldTableFilter() {
+    FalloutExtractFilter filter{};
+    filter.wantWorldspace = [](std::uint32_t) { return false; };
+    filter.wantCellContents = [](const FalloutCellRecord&) { return false; };
+    return filter;
+}
+
+}  // namespace
+
+bool buildFalloutWorldTables(
+    const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError) {
+    outTables = FalloutWorldTables{};
+    if (order.empty()) {
+        outError = "empty load order";
+        return false;
+    }
+    // Ascending load order: each plugin's records replace what an earlier one
+    // offered, which is what an override plugin is for. A base record a patch
+    // fixes -- a corrected MODL, a light's parameters -- takes effect here.
+    for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
+        const FalloutLoadOrderEntry& entry = order.entries()[pluginIndex];
+        FalloutSceneData data;
+        const FalloutExtractFilter filter = worldTableFilter();
+        std::string error;
+        if (!extractFalloutScene(entry.path, filter, data, error)) {
+            // One unreadable plugin must not take the whole world down: the
+            // base game's records are already in, and losing a patch's is a
+            // degraded scene rather than no scene.
+            //
+            // std::cerr rather than VOX_LOGW for the reason the alpha-test log
+            // below states: this file links into odai_newvegas_probe and
+            // odai_newvegas_cooker, neither of which links core/log.cc.
+            std::cerr << "[fnv] world tables: skipping " << entry.header.fileName << ": " << error
+                      << "\n";
+            continue;
+        }
+        mergeWorldTablesFromScene(data, order, pluginIndex, /*laterWins=*/true, outTables);
+    }
+    return true;
+}
+
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError) {
     outTables = FalloutWorldTables{};
