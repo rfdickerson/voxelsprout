@@ -374,15 +374,111 @@ bool buildSkinnedActor(
 }
 
 float actorStandingHeight(const importer::fnv::FalloutCharacter& character) {
-    // Rest-pose extent above the actor's own origin, which is its FEET. Good
-    // enough to aim a camera at without posing anything: an idle moves a head
-    // by a few units, and the alternative is a per-frame bounds recompute over
-    // every skinned vertex.
+    // Extent above the actor's own origin, which is its FEET, measured in the
+    // BIND POSE -- see actorHeadHeight for why the raw vertex data is a
+    // different space than the drawn body and reads far too short.
+    //
+    // Still bind rather than per-frame: an idle moves a head by a few units, and
+    // the alternative is a bounds recompute over every skinned vertex every
+    // frame.
+    std::vector<odai::math::Matrix4> bindPose;
+    importer::fnv::computeFalloutBindPose(character, bindPose);
     float highest = 0.0f;
     for (const odai::render::ImportedSkinnedMeshVertex& vertex : character.vertices) {
-        highest = std::max(highest, vertex.position[1]);
+        int dominant = -1;
+        float bestWeight = 0.0f;
+        for (int influence = 0; influence < 4; ++influence) {
+            if (vertex.boneWeights[influence] > bestWeight) {
+                bestWeight = vertex.boneWeights[influence];
+                dominant = static_cast<int>(vertex.boneIndices[influence]);
+            }
+        }
+        if (dominant < 0 || static_cast<std::size_t>(dominant) >= bindPose.size()) {
+            continue;
+        }
+        const odai::math::Matrix4& matrix = bindPose[static_cast<std::size_t>(dominant)];
+        highest = std::max(highest,
+            (matrix(1, 0) * vertex.position[0]) + (matrix(1, 1) * vertex.position[1]) +
+                (matrix(1, 2) * vertex.position[2]) + matrix(1, 3));
     }
     return highest;
+}
+
+void findActorHeadAnchor(
+    const importer::fnv::FalloutCharacter& character,
+    int& outBone,
+    float outLocal[3],
+    float& outBindHeight
+) {
+    outBone = -1;
+    outLocal[0] = outLocal[1] = outLocal[2] = 0.0f;
+    outBindHeight = 0.0f;
+
+    const anim::Skeleton& skeleton = character.skeleton;
+    // Bethesda's rigs all carry a Bip01 hierarchy; the exact name first, then a
+    // suffix match for the creature rigs that decorate it. "Bip01 HeadNub" is
+    // deliberately NOT matched -- it is the tip past the head, and aiming there
+    // overshoots.
+    int head = skeleton.findBone("Bip01 Head");
+    if (head < 0) {
+        for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+            const std::string name = toLowerAscii(skeleton.bones[i].name);
+            if (name.size() >= 4u && name.compare(name.size() - 4u, 4u, "head") == 0) {
+                head = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    if (head < 0) {
+        return;
+    }
+
+    // The centroid of the head bone's own vertices, in the space they are
+    // authored in -- which is what makes it a point the LIVE pose can carry:
+    // poseScratch[head] is exactly the matrix the skinning shader applies to
+    // these vertices, so one matrix-vector multiply per frame gives the head's
+    // real world position, animation included.
+    //
+    // The centroid rather than the top of the skull: the top is where a hat
+    // sits, and a conversation wants the face.
+    double sum[3] = {0.0, 0.0, 0.0};
+    std::size_t counted = 0;
+    for (const odai::render::ImportedSkinnedMeshVertex& vertex : character.vertices) {
+        // Dominant bone only. A vertex on the jaw is partly the neck's, and
+        // averaging over every influence drags the centroid down the throat.
+        int dominant = -1;
+        float bestWeight = 0.0f;
+        for (int influence = 0; influence < 4; ++influence) {
+            if (vertex.boneWeights[influence] > bestWeight) {
+                bestWeight = vertex.boneWeights[influence];
+                dominant = static_cast<int>(vertex.boneIndices[influence]);
+            }
+        }
+        if (dominant != head) {
+            continue;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            sum[axis] += static_cast<double>(vertex.position[axis]);
+        }
+        ++counted;
+    }
+    if (counted == 0u) {
+        return;  // a rig with a head bone that nothing is weighted to
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        outLocal[axis] = static_cast<float>(sum[axis] / static_cast<double>(counted));
+    }
+    outBone = head;
+
+    // The same point through the BIND pose, as the fallback for the frames
+    // before the actor has ever been posed.
+    std::vector<odai::math::Matrix4> bindPose;
+    importer::fnv::computeFalloutBindPose(character, bindPose);
+    if (static_cast<std::size_t>(head) < bindPose.size()) {
+        const odai::math::Matrix4& matrix = bindPose[static_cast<std::size_t>(head)];
+        outBindHeight = (matrix(1, 0) * outLocal[0]) + (matrix(1, 1) * outLocal[1]) +
+            (matrix(1, 2) * outLocal[2]) + matrix(1, 3);
+    }
 }
 
 bool loadActorIdleClip(
@@ -805,6 +901,8 @@ bool loadGoodspringsActors(
         actor.placed = true;
         actor.character = built.character;
         actor.standingHeightUnits = actorStandingHeight(built.character);
+        findActorHeadAnchor(built.character, actor.headAnchorBone, actor.headAnchorLocal,
+                            actor.headHeightUnits);
         actor.textures = built.textures;
         actor.draws = built.draws;
         actor.idleClip = built.idleClip;
@@ -1284,10 +1382,41 @@ void remapActorTextureSlots(SkinnedActor& actor, const std::vector<std::uint32_t
 }
 
 float conversationFaceHeight(const SkinnedActor& actor) {
-    // Victor's tuned value was 150 units against a ~230-unit Securitron, so
-    // ~0.65 of standing height -- roughly the shoulders, which is where the
-    // camera wants to sit for a portrait. Falling back to his old constant
-    // keeps an actor whose geometry never measured from aiming at its feet.
+    // WHERE THE HEAD ACTUALLY IS THIS FRAME, not where the bind pose put it.
+    //
+    // poseScratch holds the matrices the skinning shader itself applies, with
+    // the actor's world placement already folded in, so pushing the head
+    // centroid through its own bone matrix gives the head's world position --
+    // the one on screen. Subtracting the placement turns it back into a height
+    // above the feet, which is what the caller adds it to.
+    //
+    // This is what a static measurement could not do. Willow's idle displaces
+    // her body far enough that a bind-pose height framed her at the waist while
+    // every number in the camera arithmetic checked out; freezing her with
+    // ODAI_FNV_NOANIM=1 framed her correctly and was what isolated it. A head
+    // moves when an actor animates, so the aim has to move with it.
+    if (actor.headAnchorBone >= 0 &&
+        static_cast<std::size_t>(actor.headAnchorBone) < actor.poseScratch.size()) {
+        const odai::math::Matrix4& matrix =
+            actor.poseScratch[static_cast<std::size_t>(actor.headAnchorBone)];
+        const float worldY = (matrix(1, 0) * actor.headAnchorLocal[0]) +
+            (matrix(1, 1) * actor.headAnchorLocal[1]) +
+            (matrix(1, 2) * actor.headAnchorLocal[2]) + matrix(1, 3);
+        const float aboveFeet = worldY - actor.position[1];
+        // Guard against a pose that has not been written yet, or a rig whose
+        // head lands below its own feet: either would aim at the ground.
+        if (aboveFeet > 1.0f) {
+            return aboveFeet;
+        }
+    }
+    if (actor.headHeightUnits > 1.0f) {
+        return actor.headHeightUnits;  // measured, but bind pose only
+    }
+    // NO HEAD BONE at all -- a radroach, a floating eyebot. The old fraction,
+    // which keeps them framed exactly as they were rather than at their feet.
+    // 0.65 came from Victor, whose face is a SCREEN mounted low on a ball on a
+    // wheel; a human's head is at ~0.88 of their height, which is why a single
+    // fraction was never going to serve both and the bone is looked for first.
     constexpr float kFaceFraction = 0.65f;
     constexpr float kFallbackUnits = 150.0f;
     return actor.standingHeightUnits > 1.0f ? (actor.standingHeightUnits * kFaceFraction)

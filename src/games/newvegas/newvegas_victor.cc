@@ -326,6 +326,8 @@ bool loadVictor(
     outState.name = kVictorEditorId;
     outState.fullName = kVictorEditorId;
     outState.standingHeightUnits = actorStandingHeight(outState.character);
+    findActorHeadAnchor(outState.character, outState.headAnchorBone, outState.headAnchorLocal,
+                        outState.headHeightUnits);
     outState.status = "placed at (" + std::to_string(outState.position[0]) + ", " +
                       std::to_string(outState.position[1]) + ", " +
                       std::to_string(outState.position[2]) + ") -- " +

@@ -156,6 +156,17 @@ struct SkinnedActor {
     // origin is at the FEET -- aiming at the origin points the camera at the
     // ground.
     float standingHeightUnits = 0.0f;
+    // Where the actor's HEAD is, as a point the live pose can carry.
+    //
+    // A bone index plus the centroid of that bone's own vertices, in the space
+    // those vertices are authored in, so the head's WORLD position each frame is
+    // one matrix-vector multiply against poseScratch. Static heights measured off
+    // the bind pose are not enough: an animation moves a head, and Willow's idle
+    // moves hers far enough that a bind-pose number framed her at the waist.
+    // -1 means the rig names no head; headHeightUnits is then the fallback.
+    int headAnchorBone = -1;
+    float headAnchorLocal[3] = {};
+    float headHeightUnits = 0.0f;
 
     // The conversation, when this actor has one. An empty `tree` means it
     // cannot be talked to.
@@ -366,6 +377,16 @@ void remapActorTextureSlots(SkinnedActor& actor, const std::vector<std::uint32_t
 // Rest-pose height above the actor's own origin. The origin is its FEET, so
 // this is what a caller needs to aim at anything above the ground.
 [[nodiscard]] float actorStandingHeight(const odai::importer::fnv::FalloutCharacter& character);
+
+// Locates the rig's head: the bone, the centroid of its vertices in their
+// authored space, and the bind-pose height of that centroid above the actor's
+// feet. outBone is -1 when the skeleton names no head. Walks every vertex, so
+// call it once per built base rather than per frame.
+void findActorHeadAnchor(
+    const odai::importer::fnv::FalloutCharacter& character,
+    int& outBone,
+    float outLocal[3],
+    float& outBindHeight);
 
 // Where a conversation should look: below the speaker's face by enough that the
 // dialogue card, which sits centred, does not cover the person talking.

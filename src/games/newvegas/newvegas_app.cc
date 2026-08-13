@@ -3423,13 +3423,14 @@ void NewVegasApp::drawDialoguePanel(
         : decltype(speakingActor->runtime.availableChoices()){};
     const std::size_t choiceCount = std::min<std::size_t>(choices.size(), 9u);
     std::vector<std::vector<std::string>> choiceLines;
+    std::vector<float> choiceHeights;
     choiceLines.reserve(choiceCount);
-    float choicesHeight = 0.0f;
+    choiceHeights.reserve(choiceCount);
     for (std::size_t i = 0; i < choiceCount; ++i) {
         choiceLines.push_back(
             wrapTextToWidth(choiceFont, choices[i]->text, innerWidth - choiceIndent));
         const float rows = static_cast<float>(std::max<std::size_t>(choiceLines.back().size(), 1u));
-        choicesHeight += (rows * choiceLineHeight) + (choiceRowPadding * 2.0f);
+        choiceHeights.push_back((rows * choiceLineHeight) + (choiceRowPadding * 2.0f));
     }
 
     const float speakerHeight = m_uiFontBold.valid() ? m_uiFontBold.lineHeightPx()
@@ -3443,6 +3444,51 @@ void NewVegasApp::drawDialoguePanel(
     const float footerHeight = m_uiFont.lineHeightPx() + (18.0f * scale);
     const float spokenHeight =
         static_cast<float>(std::max<std::size_t>(spokenLines.size(), 1u)) * spokenLineHeight;
+
+    // THE CARD IS CAPPED, AND THE REPLIES SCROLL INSIDE IT.
+    //
+    // It used to grow with the reply count and stay centred, so Easy Pete's nine
+    // replies made a card spanning nearly the whole screen -- and the camera,
+    // which frames the speaker's face just above the card's top edge, had
+    // nowhere left to put him. He was completely hidden behind his own
+    // dialogue. A conversation must not hide the person talking, which is the
+    // same rule the pitch offset exists to serve; the offset simply cannot
+    // honour it once the card has eaten the frame.
+    //
+    // 0.62 leaves the top third of the screen clear, which at this card's width
+    // is enough for a head and shoulders at conversation distance.
+    const float fixedHeight = (padding * 2.0f) + speakerHeight + (12.0f * scale) + spokenHeight +
+                              ruleGap + footerHeight;
+    const float choiceBudget = std::max(0.0f, (height * 0.62f) - fixedHeight);
+
+    // The window of replies that fits, slid just far enough to keep the
+    // highlighted one inside it. Sliding by one rather than paging keeps the
+    // list still under the cursor for as long as possible.
+    const auto fitFrom = [&](std::size_t start) {
+        float used = 0.0f;
+        std::size_t shown = 0;
+        for (std::size_t i = start; i < choiceCount; ++i) {
+            if (shown > 0u && (used + choiceHeights[i]) > choiceBudget) {
+                break;
+            }
+            used += choiceHeights[i];
+            ++shown;
+        }
+        return shown;
+    };
+    std::size_t firstChoice = 0;
+    std::size_t visibleChoices = fitFrom(0);
+    const auto selected = static_cast<std::size_t>(std::max(m_dialogueChoice, 0));
+    while (selected >= (firstChoice + visibleChoices) && (firstChoice + visibleChoices) < choiceCount) {
+        ++firstChoice;
+        visibleChoices = fitFrom(firstChoice);
+    }
+    float choicesHeight = 0.0f;
+    for (std::size_t i = firstChoice; i < firstChoice + visibleChoices; ++i) {
+        choicesHeight += choiceHeights[i];
+    }
+    const bool choicesClipped = visibleChoices < choiceCount;
+
     const float panelHeight = (padding * 2.0f) + speakerHeight + (12.0f * scale) + spokenHeight +
                               ruleGap + choicesHeight + footerHeight;
 
@@ -3497,9 +3543,8 @@ void NewVegasApp::drawDialoguePanel(
     // The replies: LEFT aligned, unlike the block above. They are a list to be
     // scanned down, and centring a list makes every row start in a different
     // place, which is exactly what the eye uses to track position.
-    for (std::size_t i = 0; i < choiceCount; ++i) {
-        const float rows = static_cast<float>(std::max<std::size_t>(choiceLines[i].size(), 1u));
-        const float rowHeight = (rows * choiceLineHeight) + (choiceRowPadding * 2.0f);
+    for (std::size_t i = firstChoice; i < firstChoice + visibleChoices; ++i) {
+        const float rowHeight = choiceHeights[i];
         const bool selected = static_cast<int>(i) == m_dialogueChoice;
         const ui::UiRect row{panel.minX + (padding * 0.5f), y,
                              panel.maxX - (padding * 0.5f), y + rowHeight};
@@ -3535,9 +3580,18 @@ void NewVegasApp::drawDialoguePanel(
         y += rowHeight;
     }
 
-    const std::string footer = choiceCount == 0
+    // The count is stated when the list is clipped, because a reply the player
+    // cannot see is a reply they do not know to scroll to -- and the numbers on
+    // the visible rows are the TRUE indices, so "7." appearing first is only
+    // legible next to "of 9".
+    std::string footer = choiceCount == 0
         ? std::string("Esc  end conversation")
         : std::string("Up/Down  select     Enter  choose     Esc  leave");
+    if (choicesClipped) {
+        footer = "Up/Down  select (" + std::to_string(firstChoice + 1u) + "-" +
+            std::to_string(firstChoice + visibleChoices) + " of " + std::to_string(choiceCount) +
+            ")     Enter  choose     Esc  leave";
+    }
     m_uiDrawList.addText(
         m_uiFont, footer,
         ui::UiVec2{panel.minX + ((panelWidth - m_uiFont.measureText(footer)) * 0.5f),
