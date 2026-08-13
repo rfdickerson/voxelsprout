@@ -262,6 +262,9 @@ private:
     // Seeded at the 16:9 conversion of the default so the very first frame,
     // before a framebuffer size is known, is already close.
     float m_cameraFovDegrees = 45.0f;
+    // The streaming load order, kept so actor discovery and dialogue can use the
+    // same one the cell streamer does. Empty when no extra plugins were loaded.
+    importer::fnv::FalloutLoadOrder m_streamLoadOrder;
     // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
     // does not only magnify, it throws the background out — the two arriving
     // together is what makes the shot read as a lens rather than as a crop.

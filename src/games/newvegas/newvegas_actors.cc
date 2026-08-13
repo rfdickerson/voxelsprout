@@ -508,6 +508,7 @@ float angleDelta(float from, float to) {
 
 bool loadGoodspringsActors(
     const std::filesystem::path& pluginPath,
+    const importer::fnv::FalloutLoadOrder* loadOrder,
     const importer::fnv::FalloutAssetSource& assets,
     const float bethesdaCentre[2],
     float radius,
@@ -522,8 +523,20 @@ bool loadGoodspringsActors(
 
     importer::fnv::FalloutActorScan scan;
     std::string error;
-    if (!importer::fnv::findActorsNear(
-            pluginPath, bethesdaCentre[0], bethesdaCentre[1], radius, scan, error)) {
+    // A companion mod defines its NPC, its placement, its race and its armour in
+    // ITS OWN plugin, so scanning only the worldspace's finds nothing of it.
+    // voiceFolderPlugin remembers which file each base came from, because a
+    // voice path's first component is the DEFINING plugin's own name
+    // (sound\voice\NVWillow.esp\...), not the load order's first entry.
+    std::unordered_map<std::uint32_t, std::string> voiceFolderPlugin;
+    const bool scanned =
+        (loadOrder != nullptr && !loadOrder->empty())
+            ? importer::fnv::findActorsNearAcrossOrder(
+                  *loadOrder, bethesdaCentre[0], bethesdaCentre[1], radius, scan,
+                  voiceFolderPlugin, error)
+            : importer::fnv::findActorsNear(
+                  pluginPath, bethesdaCentre[0], bethesdaCentre[1], radius, scan, error);
+    if (!scanned) {
         outStats.detail = "scan failed: " + error;
         return false;
     }
@@ -647,6 +660,27 @@ bool loadGoodspringsActors(
         }
         outActors.push_back(std::move(actor));
         ++outStats.built;
+    }
+
+    // ODAI_FNV_ACTORS_LIST names what was actually built. Counts alone cannot
+    // answer "is the companion I just installed among these" -- and with a mod
+    // loaded the answer decides whether the problem is discovery, the build, or
+    // only the look.
+    if (std::getenv("ODAI_FNV_ACTORS_LIST") != nullptr) {
+        for (const SkinnedActor& built : outActors) {
+            const importer::fnv::FalloutActorBase* base = nullptr;
+            const auto found = scan.bases.find(built.baseFormId);
+            if (found != scan.bases.end()) {
+                base = &found->second;
+            }
+            VOX_LOGI("newvegas")
+                << "  actor base 0x" << std::hex << built.baseFormId << std::dec << " "
+                << (base != nullptr && !base->editorId.empty() ? base->editorId : "<unnamed>")
+                << (base != nullptr && !base->fullName.empty() ? (" \"" + base->fullName + "\"")
+                                                               : std::string())
+                << (base != nullptr && base->isFemale ? " female" : "")
+                << " voice=" << (built.voice.voiceFolder.empty() ? "<none>" : built.voice.voiceFolder);
+        }
     }
 
     outStats.detail =

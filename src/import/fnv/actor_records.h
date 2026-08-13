@@ -37,6 +37,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "import/fnv/plugin_load_order.h"
+
 namespace odai::importer::fnv {
 
 enum class ActorGeometrySource : std::uint8_t {
@@ -224,6 +226,28 @@ bool findActorsNear(
     float centreY,
     float radius,
     FalloutActorScan& outScan,
+    std::string& outError);
+
+// As above, across a whole load order. Every plugin is scanned and its formIDs
+// rewritten into the order's global space; bases, races, armour and voice types
+// merge later-wins, and placements merge by reference formID so an override
+// moves an actor rather than duplicating it.
+//
+// A companion mod is the reason this exists: its NPC, its placement, its race
+// and its armour all live in ITS plugin, so scanning only the worldspace's
+// plugin finds nothing at all.
+//
+// outVoiceFolderPlugin maps each base formID to the FILE NAME of the plugin that
+// defined it. Voice paths start with the defining plugin's own name
+// (sound\voice\NVWillow.esp\...), so this cannot be derived from the load
+// order's first entry -- see FalloutActorScan::voiceFolderFor.
+bool findActorsNearAcrossOrder(
+    const FalloutLoadOrder& order,
+    float centreX,
+    float centreY,
+    float radius,
+    FalloutActorScan& outScan,
+    std::unordered_map<std::uint32_t, std::string>& outVoiceFolderPlugin,
     std::string& outError);
 
 }  // namespace odai::importer::fnv

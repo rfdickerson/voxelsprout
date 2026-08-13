@@ -243,6 +243,10 @@ struct ActorPopulationStats {
 // rooftop or a rock to the ground under them.
 bool loadGoodspringsActors(
     const std::filesystem::path& pluginPath,
+    // Optional; when non-null and non-empty, actors are discovered across the
+    // whole load order instead of from pluginPath alone. A companion mod's NPC,
+    // placement, race and armour all live in its own plugin.
+    const odai::importer::fnv::FalloutLoadOrder* loadOrder,
     const odai::importer::fnv::FalloutAssetSource& assets,
     const float bethesdaCentre[2],
     float radius,

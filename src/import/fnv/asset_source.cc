@@ -157,7 +157,7 @@ bool FalloutAssetSource::open(
         // failure mode would be a silently missing mesh rather than an error.
         std::uint32_t fileFlags = 0;
         if (!peekBsaContentFlags(path, fileFlags)) {
-            m_warnings.push_back("not a readable v104 BSA: " + path.string());
+            m_warnings.push_back("not a readable v103/v104 BSA: " + path.string());
             continue;
         }
         if (fileFlags != 0u && (fileFlags & contentMask) == 0u) {
@@ -253,7 +253,7 @@ bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory)
     for (const std::filesystem::path& path : archivePaths) {
         std::uint32_t fileFlags = 0;
         if (!peekBsaContentFlags(path, fileFlags)) {
-            m_warnings.push_back("not a readable v104 BSA: " + path.string());
+            m_warnings.push_back("not a readable v103/v104 BSA: " + path.string());
             continue;
         }
         // Same conservative test as the game's own archives: skip only an

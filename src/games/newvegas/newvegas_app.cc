@@ -2252,6 +2252,9 @@ bool NewVegasApp::initStreaming() {
         } else {
             VOX_LOGI("newvegas") << "streaming across " << streamOrder.size()
                                  << " plugins (record overrides active)";
+            // Kept on the app too: actor discovery needs the same order, and a
+            // companion mod's NPC/placement/race/armour all live in its plugin.
+            m_streamLoadOrder = streamOrder;
             m_streamer->setLoadOrder(std::move(streamOrder));
         }
     }
@@ -2387,7 +2390,9 @@ bool NewVegasApp::initStreaming() {
                 const float centreXY[2] = {bethesdaCentre[0], bethesdaCentre[1]};
                 ActorPopulationStats actorStats;
                 loadGoodspringsActors(
-                    dataPath / m_streamPlugin, m_streamer->assets(), centreXY, kActorLoadRadius,
+                    dataPath / m_streamPlugin,
+                    m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
+                    m_streamer->assets(), centreXY, kActorLoadRadius,
                     kFirstCrowdSkinnedInstance,
                     render::kMaxSkinnedInstances - kFirstCrowdSkinnedInstance,
                     {victor.baseFormId}, m_actors, actorStats);

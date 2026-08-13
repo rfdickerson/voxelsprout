@@ -3,6 +3,7 @@
 #include "import/fnv/esm_reader.h"
 
 #include <algorithm>
+#include <iostream>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -432,6 +433,142 @@ const FalloutActorBase* FalloutActorScan::inheritedFrom(
         current = next;
     }
     return current;
+}
+
+namespace {
+
+// Rewrites every formID one plugin's scan produced into the load order's global
+// space. Exhaustive on purpose, for the reason the cell merge states: an
+// un-remapped ID does not fail, it addresses a different record -- the wrong
+// race, the wrong armour, the wrong voice.
+void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
+                    FalloutActorScan& scan) {
+    const auto remap = [&](std::uint32_t formId) {
+        return formId == 0u ? 0u : order.remapFormId(pluginIndex, formId);
+    };
+    const auto remapKeyed = [&](auto& map, auto rewriteValue) {
+        std::decay_t<decltype(map)> rebuilt;
+        rebuilt.reserve(map.size());
+        for (auto& [key, value] : map) {
+            rewriteValue(value);
+            rebuilt.emplace(remap(key), std::move(value));
+        }
+        map = std::move(rebuilt);
+    };
+
+    for (FalloutActorPlacement& placement : scan.placements) {
+        placement.refFormId = remap(placement.refFormId);
+        placement.baseFormId = remap(placement.baseFormId);
+    }
+    remapKeyed(scan.bases, [&](FalloutActorBase& base) {
+        base.formId = remap(base.formId);
+        base.templateFormId = remap(base.templateFormId);
+        base.raceFormId = remap(base.raceFormId);
+        base.voiceTypeFormId = remap(base.voiceTypeFormId);
+        for (std::uint32_t& item : base.inventoryFormIds) {
+            item = remap(item);
+        }
+    });
+    remapKeyed(scan.leveledLists, [&](std::vector<std::uint32_t>& entries) {
+        for (std::uint32_t& entry : entries) {
+            entry = remap(entry);
+        }
+    });
+    remapKeyed(scan.leveledItems, [&](std::vector<std::uint32_t>& entries) {
+        for (std::uint32_t& entry : entries) {
+            entry = remap(entry);
+        }
+    });
+    remapKeyed(scan.races, [&](FalloutRaceParts& race) {
+        race.formId = remap(race.formId);
+        race.maleVoiceTypeFormId = remap(race.maleVoiceTypeFormId);
+        race.femaleVoiceTypeFormId = remap(race.femaleVoiceTypeFormId);
+    });
+    remapKeyed(scan.armors, [&](FalloutArmorPiece& armor) {
+        armor.formId = remap(armor.formId);
+    });
+    remapKeyed(scan.voiceTypes, [](std::string&) {});
+}
+
+}  // namespace
+
+bool findActorsNearAcrossOrder(
+    const FalloutLoadOrder& order,
+    float centreX,
+    float centreY,
+    float radius,
+    FalloutActorScan& outScan,
+    std::unordered_map<std::uint32_t, std::string>& outVoiceFolderPlugin,
+    std::string& outError) {
+    outScan = FalloutActorScan{};
+    outVoiceFolderPlugin.clear();
+    outError.clear();
+    if (order.empty()) {
+        outError = "empty load order";
+        return false;
+    }
+
+    // Placements keyed by reference formID: an override MOVES an actor, it does
+    // not add a second one standing inside the first.
+    std::unordered_map<std::uint32_t, std::size_t> placementSlotByFormId;
+
+    for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
+        const FalloutLoadOrderEntry& entry = order.entries()[pluginIndex];
+        FalloutActorScan scan;
+        std::string error;
+        if (!findActorsNear(entry.path, centreX, centreY, radius, scan, error)) {
+            // A plugin that will not scan costs its actors, not everyone else's.
+            // std::cerr, not VOX_LOGW: this file links into the probe and the
+            // cooker, neither of which links core/log.cc.
+            std::cerr << "[fnv] actors: skipping " << entry.header.fileName << ": " << error
+                      << "\n";
+            continue;
+        }
+        remapActorScan(order, pluginIndex, scan);
+
+        for (auto& [formId, base] : scan.bases) {
+            outScan.bases[formId] = std::move(base);
+            outVoiceFolderPlugin[formId] = entry.header.fileName;
+        }
+        for (auto& [formId, list] : scan.leveledLists) {
+            outScan.leveledLists[formId] = std::move(list);
+        }
+        for (auto& [formId, list] : scan.leveledItems) {
+            outScan.leveledItems[formId] = std::move(list);
+        }
+        for (auto& [formId, race] : scan.races) {
+            outScan.races[formId] = std::move(race);
+        }
+        for (auto& [formId, armor] : scan.armors) {
+            outScan.armors[formId] = std::move(armor);
+        }
+        for (auto& [formId, voice] : scan.voiceTypes) {
+            outScan.voiceTypes[formId] = std::move(voice);
+        }
+        for (FalloutActorPlacement& placement : scan.placements) {
+            const auto slot = placementSlotByFormId.find(placement.refFormId);
+            if (slot == placementSlotByFormId.end()) {
+                placementSlotByFormId.emplace(placement.refFormId, outScan.placements.size());
+                outScan.placements.push_back(std::move(placement));
+            } else {
+                outScan.placements[slot->second] = std::move(placement);
+            }
+        }
+    }
+
+    // findActorsNear returns its own placements nearest-first; merging several
+    // scans destroys that, so restore it here rather than leaving callers to
+    // discover the order silently changed when a second plugin loaded.
+    std::sort(
+        outScan.placements.begin(), outScan.placements.end(),
+        [&](const FalloutActorPlacement& a, const FalloutActorPlacement& b) {
+            const float ax = a.position[0] - centreX;
+            const float ay = a.position[1] - centreY;
+            const float bx = b.position[0] - centreX;
+            const float by = b.position[1] - centreY;
+            return ((ax * ax) + (ay * ay)) < ((bx * bx) + (by * by));
+        });
+    return true;
 }
 
 bool findActorsNear(

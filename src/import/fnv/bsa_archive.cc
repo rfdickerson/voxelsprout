@@ -14,6 +14,13 @@ namespace {
 
 constexpr std::uint32_t kBsaMagic = 0x00415342u;  // "BSA\0"
 constexpr std::uint32_t kBsaVersionFo3Fnv = 104u;
+// Oblivion-era BSA. Plenty of New Vegas mods still ship one -- Willow's 258 MB
+// archive is v103 -- and the game reads them, because the folder and file record
+// layouts are identical to v104. The version differences are in which archive
+// FLAGS are defined, and this reader only consults the two (folder names, file
+// names) that both versions share. Rejecting it cost every mesh, texture and
+// voice line the mod ships.
+constexpr std::uint32_t kBsaVersionOblivion = 103u;
 
 constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
 constexpr std::uint32_t kFlagHasFileNames = 0x2u;
@@ -118,7 +125,8 @@ bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFi
         return false;
     }
     BsaHeader header{};
-    if (!readValue(input, header) || header.magic != kBsaMagic || header.version != kBsaVersionFo3Fnv) {
+    if (!readValue(input, header) || header.magic != kBsaMagic ||
+        (header.version != kBsaVersionFo3Fnv && header.version != kBsaVersionOblivion)) {
         return false;
     }
     outFileFlags = header.fileFlags;
@@ -143,9 +151,9 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
         m_lastError = "Not a BSA archive (bad magic): " + path.string();
         return false;
     }
-    if (header.version != kBsaVersionFo3Fnv) {
+    if (header.version != kBsaVersionFo3Fnv && header.version != kBsaVersionOblivion) {
         m_lastError = "Unsupported BSA version " + std::to_string(header.version) +
-            " (only Fallout 3 / New Vegas v104 archives are supported): " + path.string();
+            " (only v103 and v104 archives are supported): " + path.string();
         return false;
     }
 
