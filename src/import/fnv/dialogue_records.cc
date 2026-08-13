@@ -315,6 +315,35 @@ bool buildSpeakerDialogueTreesImpl(
     std::unordered_map<std::uint32_t, std::string> topicEditorId;
     std::unordered_map<std::uint32_t, std::uint8_t> topicType;
     std::unordered_map<std::uint32_t, std::vector<RawInfo>> infosBySpeaker;
+
+    // A line whose speaker is named by its QUEST rather than by itself.
+    //
+    // The GECK lets a quest carry conditions that apply to every INFO in it, and
+    // that is where a companion mod puts "GetIsID <me>" -- once, on the quest,
+    // instead of on each of hundreds of lines. The INFOs then carry only what
+    // varies between them (quest variables, faction, karma), so a reader that
+    // looks for the speaker on the INFO alone finds NOBODY and drops the lot.
+    //
+    // Measured on Willow: 82 of her 90 greeting INFOs name no speaker at all and
+    // belong to quest AWillowD, whose single condition is GetIsID 0x1000ADD --
+    // her. That is why she had 84 recorded greetings on disk and none in her
+    // tree.
+    //
+    // Resolved after every plugin is walked, because nothing orders a quest
+    // ahead of the dialogue that cites it -- and the quest may be in a different
+    // plugin than the line.
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> ownersByQuest;
+    // Every line in walk order, with its speakers left unresolved. Collected
+    // rather than filed immediately so that quest-attributed lines keep their
+    // position among the rest: "the first INFO under this topic" and "the first
+    // greeting" both depend on this order.
+    struct CollectedInfo {
+        RawInfo info;
+        std::vector<std::uint32_t> owners;
+        std::uint32_t questFormId = 0;
+        std::uint32_t responses = 0;
+    };
+    std::vector<CollectedInfo> collected;
     std::uint32_t currentTopic = 0;
     std::uint32_t topicsSeen = 0;
     std::unordered_map<std::uint32_t, DialogueImportStats> stats;
@@ -360,9 +389,90 @@ bool buildSpeakerDialogueTreesImpl(
             return true;
         };
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
-            return header.type == "DIAL" || header.type == "INFO";
+            return header.type == "DIAL" || header.type == "INFO" || header.type == "QUST";
+        };
+        // Every speaker a record's CTDA conditions hand it to. Shared by INFO
+        // and QUST because the conditions are the same format and mean the same
+        // thing in both places -- the only difference is that a quest's apply to
+        // all of its dialogue rather than to one line.
+        //
+        // outNamedSomeone reports whether the record named ANY speaker, matched
+        // or not. That is the difference between "this line says who says it and
+        // it is not one of ours" and "this line says nothing", and only the
+        // second may fall back to the quest -- see the QSTI handling below.
+        const auto collectOwners = [&](const EsmRecordView& record,
+                                       std::vector<std::uint32_t>& owners,
+                                       bool* outNamedSomeone = nullptr) {
+            for (const auto& sub : record.subrecords) {
+                if (sub.type != "CTDA" || sub.size < 28u) {
+                    continue;
+                }
+                // CTDA (FO3/FNV, 28 bytes): type u8 @0, 3 unused, comparison
+                // f32 @4, function index u32 @8, param1 u32 @12, param2, runOn,
+                // reference.
+                const std::uint32_t function = readU32(sub.data + 8);
+                const bool byActor = function == kCtdaFunctionGetIsId;
+                const bool byVoiceType = function == kCtdaFunctionGetIsVoiceType;
+                if (!byActor && !byVoiceType) {
+                    continue;
+                }
+                const std::uint32_t named = remap(readU32(sub.data + 12));
+                // The operator in the type byte's top 3 bits has to be read, not
+                // just the function and its parameter. Fallout writes "everyone
+                // EXCEPT this actor" as GetIsID <actor> == 0, which is the same
+                // function and the same parameter as the line that belongs to
+                // him -- only the comparison differs. Ignoring it attributed
+                // other characters' lines to the speaker.
+                float comparisonValue = 0.0f;
+                std::memcpy(&comparisonValue, sub.data + 4, sizeof(comparisonValue));
+                const auto comparisonOperator = static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
+                // 0 = EQUAL, 2 = GREATER, 3 = GREATER-OR-EQUAL: all read as
+                // "is this actor" when tested against 1.
+                const bool positive = (comparisonOperator == 0u && comparisonValue == 1.0f) ||
+                    (comparisonOperator == 2u && comparisonValue == 0.0f) ||
+                    (comparisonOperator == 3u && comparisonValue == 1.0f);
+                if (!positive) {
+                    continue;
+                }
+                // Tested BEFORE matching against the wanted speakers: a line
+                // that names an actor nobody asked about has still named one,
+                // and must not be handed to whoever the quest belongs to.
+                if (outNamedSomeone != nullptr) {
+                    *outNamedSomeone = true;
+                }
+                // Whom this condition hands the line to. For GetIsID that is one
+                // actor; for GetIsVoiceType it is everyone sharing the voice.
+                const std::vector<std::uint32_t>* claimants = nullptr;
+                std::vector<std::uint32_t> single;
+                if (byActor) {
+                    if (nameByFormId.find(named) == nameByFormId.end()) {
+                        continue;
+                    }
+                    single.push_back(named);
+                    claimants = &single;
+                } else {
+                    const auto sharing = speakersByVoiceType.find(named);
+                    if (sharing == speakersByVoiceType.end()) {
+                        continue;
+                    }
+                    claimants = &sharing->second;
+                }
+                for (const std::uint32_t claimant : *claimants) {
+                    if (std::find(owners.begin(), owners.end(), claimant) == owners.end()) {
+                        owners.push_back(claimant);
+                    }
+                }
+            }
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
+            if (record.type == "QUST") {
+                std::vector<std::uint32_t> owners;
+                collectOwners(record, owners);
+                if (!owners.empty()) {
+                    ownersByQuest[remap(record.formId)] = std::move(owners);
+                }
+                return;
+            }
             if (record.type == "DIAL") {
                 currentTopic = remap(record.formId);
                 ++topicsSeen;
@@ -390,62 +500,27 @@ bool buildSpeakerDialogueTreesImpl(
             // Which of the wanted speakers this line belongs to. A line can name
             // more than one, so this collects rather than stopping at the first.
             std::vector<std::uint32_t> owners;
-            for (const auto& sub : record.subrecords) {
-                if (sub.type != "CTDA" || sub.size < 28u) {
-                    continue;
-                }
-                // CTDA (FO3/FNV, 28 bytes): type u8 @0, 3 unused, comparison
-                // f32 @4, function index u32 @8, param1 u32 @12, param2, runOn,
-                // reference.
-                const std::uint32_t function = readU32(sub.data + 8);
-                const bool byActor = function == kCtdaFunctionGetIsId;
-                const bool byVoiceType = function == kCtdaFunctionGetIsVoiceType;
-                if (!byActor && !byVoiceType) {
-                    continue;
-                }
-                const std::uint32_t named = remap(readU32(sub.data + 12));
-                // Whom this condition would hand the line to. For GetIsID that
-                // is one actor; for GetIsVoiceType it is everyone sharing the
-                // voice.
-                const std::vector<std::uint32_t>* claimants = nullptr;
-                std::vector<std::uint32_t> single;
-                if (byActor) {
-                    if (nameByFormId.find(named) == nameByFormId.end()) {
-                        continue;
-                    }
-                    single.push_back(named);
-                    claimants = &single;
-                } else {
-                    const auto sharing = speakersByVoiceType.find(named);
-                    if (sharing == speakersByVoiceType.end()) {
-                        continue;
-                    }
-                    claimants = &sharing->second;
-                }
-                // The operator in the type byte's top 3 bits has to be read, not
-                // just the function and its parameter. Fallout writes "everyone
-                // EXCEPT this actor" as GetIsID <actor> == 0, which is the same
-                // function and the same parameter as the line that belongs to
-                // him -- only the comparison differs. Ignoring it attributed
-                // other characters' lines to the speaker.
-                float comparisonValue = 0.0f;
-                std::memcpy(&comparisonValue, sub.data + 4, sizeof(comparisonValue));
-                const auto comparisonOperator = static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
-                // 0 = EQUAL, 2 = GREATER, 3 = GREATER-OR-EQUAL: all read as
-                // "is this actor" when tested against 1.
-                const bool positive = (comparisonOperator == 0u && comparisonValue == 1.0f) ||
-                    (comparisonOperator == 2u && comparisonValue == 0.0f) ||
-                    (comparisonOperator == 3u && comparisonValue == 1.0f);
-                if (!positive) {
-                    continue;
-                }
-                for (const std::uint32_t claimant : *claimants) {
-                    if (std::find(owners.begin(), owners.end(), claimant) == owners.end()) {
-                        owners.push_back(claimant);
+            bool namedSomeone = false;
+            collectOwners(record, owners, &namedSomeone);
+            // QSTI is the quest this line belongs to, and the fallback when the
+            // line names NOBODY: the quest's conditions then name the speaker
+            // for all of its dialogue at once.
+            //
+            // Only when it names nobody. A quest holds one character's lines but
+            // not exclusively -- companion mods put other actors' responses in
+            // the same quest, each named on its own INFO -- so falling back
+            // whenever the wanted speaker simply did not match would hand the
+            // quest's owner every other character's dialogue too.
+            std::uint32_t questFormId = 0;
+            if (!namedSomeone) {
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "QSTI" && sub.size >= 4u) {
+                        questFormId = remap(readU32(sub.data));
+                        break;
                     }
                 }
             }
-            if (owners.empty()) {
+            if (owners.empty() && questFormId == 0u) {
                 return;
             }
 
@@ -474,16 +549,32 @@ bool buildSpeakerDialogueTreesImpl(
             if (info.text.empty()) {
                 return;  // a silent INFO (script-only) is not a line to show
             }
-            for (const std::uint32_t owner : owners) {
-                infosBySpeaker[owner].push_back(info);
-                DialogueImportStats& speakerStats = stats[owner];
-                ++speakerStats.infosForSpeaker;
-                speakerStats.responsesConcatenated += responses;
-            }
+            collected.push_back(CollectedInfo{std::move(info), std::move(owners), questFormId,
+                                             responses});
         };
         if (!reader.walk(visitor)) {
             outError = "plugin walk failed while reading dialogue";
             return false;
+        }
+    }
+
+    // Now that every plugin's quests are known, file each line under its
+    // speakers -- in walk order, so a quest-attributed line sits where it was
+    // read rather than after everything else.
+    for (CollectedInfo& entry : collected) {
+        const std::vector<std::uint32_t>* owners = &entry.owners;
+        if (owners->empty()) {
+            const auto questIt = ownersByQuest.find(entry.questFormId);
+            if (questIt == ownersByQuest.end()) {
+                continue;  // names nobody, and its quest names nobody either
+            }
+            owners = &questIt->second;
+        }
+        for (const std::uint32_t owner : *owners) {
+            infosBySpeaker[owner].push_back(entry.info);
+            DialogueImportStats& speakerStats = stats[owner];
+            ++speakerStats.infosForSpeaker;
+            speakerStats.responsesConcatenated += entry.responses;
         }
     }
 
