@@ -366,6 +366,24 @@ struct FalloutCellRecord {
     std::int32_t gridX = 0;
     std::int32_t gridZ = 0;
     std::uint32_t worldspaceFormId = 0;  // 0 for interior cells
+
+    // XCLL: how an INTERIOR is lit. An interior has no sun and, in Fallout's
+    // own data, usually no LIGH placements either -- Doc Mitchell's house has
+    // none at all -- so this subrecord is the whole lighting rig for the room,
+    // and a reader that skips it renders the interior pitch black or, worse,
+    // lets the exterior sun through the walls.
+    //
+    // 40 bytes in FO3/FNV: ambient RGBA, directional RGBA, fog-near RGBA, then
+    // fog near/far as floats. Measured on GSDocMitchellHouse: ambient
+    // (47,70,69), directional (0,0,0) -- black, i.e. the room is ambient-only --
+    // fog (77,62,32), near 100, far 1500.
+    bool hasLighting = false;
+    float ambientColor[3] = {};
+    float directionalColor[3] = {};
+    float fogColor[3] = {};
+    float fogNear = 0.0f;
+    float fogFar = 0.0f;
+
     std::vector<FalloutPlacedReference> references;
     // XCLR: the regions this cell belongs to, by REGN formID. A cell can be in
     // several at once (measured: up to 6), and 4363 of FalloutNV.esm's 30497

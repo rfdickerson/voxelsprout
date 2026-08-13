@@ -187,6 +187,20 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
             entry.hasGridCoords = true;
             entry.gridX = readI32(sub.data);
             entry.gridZ = readI32(sub.data + 4);
+        } else if (sub.type == "XCLL" && sub.size >= 20u) {
+            // Bytes are sRGB as authored; the renderer works in linear, and the
+            // decode belongs with the consumer rather than here, so these stay
+            // 0..1 sRGB and are converted where they are used.
+            entry.hasLighting = true;
+            for (int channel = 0; channel < 3; ++channel) {
+                entry.ambientColor[channel] =
+                    static_cast<float>(sub.data[channel]) / 255.0f;
+                entry.directionalColor[channel] =
+                    static_cast<float>(sub.data[4 + channel]) / 255.0f;
+                entry.fogColor[channel] = static_cast<float>(sub.data[8 + channel]) / 255.0f;
+            }
+            std::memcpy(&entry.fogNear, sub.data + 12, sizeof(entry.fogNear));
+            std::memcpy(&entry.fogFar, sub.data + 16, sizeof(entry.fogFar));
         } else if (sub.type == "XCLR") {
             // A packed array of REGN formIDs. Every retail size is a multiple
             // of 4 (measured: 4, 8, 12, 16, 20 and one 24), which is what pins

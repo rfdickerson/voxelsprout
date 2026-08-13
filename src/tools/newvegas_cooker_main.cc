@@ -686,6 +686,29 @@ int cookOne(
         return 1;
     }
     std::cout << "Cooking " << selectedCells.size() << " cell(s).\n";
+    // An interior's lighting is the whole rig for the room -- see XCLL in
+    // fallout_records.h -- so report it rather than letting a black interior be
+    // a mystery.
+    for (const auto* cell : selectedCells) {
+        if (cell == nullptr || !cell->isInterior) {
+            continue;
+        }
+        if (!cell->hasLighting) {
+            std::cout << "  " << cell->editorId << ": interior with NO XCLL lighting\n";
+            continue;
+        }
+        std::cout << "  " << cell->editorId << ": ambient ("
+                  << static_cast<int>(cell->ambientColor[0] * 255.0f) << ","
+                  << static_cast<int>(cell->ambientColor[1] * 255.0f) << ","
+                  << static_cast<int>(cell->ambientColor[2] * 255.0f) << ") directional ("
+                  << static_cast<int>(cell->directionalColor[0] * 255.0f) << ","
+                  << static_cast<int>(cell->directionalColor[1] * 255.0f) << ","
+                  << static_cast<int>(cell->directionalColor[2] * 255.0f) << ") fog ("
+                  << static_cast<int>(cell->fogColor[0] * 255.0f) << ","
+                  << static_cast<int>(cell->fogColor[1] * 255.0f) << ","
+                  << static_cast<int>(cell->fogColor[2] * 255.0f) << ") near " << cell->fogNear
+                  << " far " << cell->fogFar << "\n";
+    }
 
     std::unordered_map<std::uint32_t, const odai::importer::fnv::FalloutStaticRecord*> staticsByFormId;
     for (const auto& stat : scene.statics) {
