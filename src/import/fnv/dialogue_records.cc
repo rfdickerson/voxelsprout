@@ -258,8 +258,9 @@ bool buildSpeakerDialogueTree(
     return true;
 }
 
-bool buildSpeakerDialogueTrees(
+bool buildSpeakerDialogueTreesImpl(
     const std::filesystem::path& pluginPath,
+    const FalloutLoadOrder* order,
     const std::vector<SpeakerDialogueRequest>& speakers,
     std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
     std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
@@ -272,10 +273,19 @@ bool buildSpeakerDialogueTrees(
         return true;
     }
 
-    EsmReader reader;
-    if (!reader.open(pluginPath)) {
-        outError = "cannot open plugin: " + reader.lastError();
-        return false;
+    // One entry per plugin to walk. A single-plugin call is one entry with the
+    // identity rewrite, so both paths run the same code and cannot drift.
+    struct DialogueSource {
+        std::filesystem::path path;
+        std::size_t pluginIndex = 0;
+    };
+    std::vector<DialogueSource> sources;
+    if (order != nullptr && !order->empty()) {
+        for (std::size_t i = 0; i < order->entries().size(); ++i) {
+            sources.push_back(DialogueSource{order->entries()[i].path, i});
+        }
+    } else {
+        sources.push_back(DialogueSource{pluginPath, 0u});
     }
 
     std::unordered_map<std::uint32_t, std::string> nameByFormId;
@@ -304,18 +314,38 @@ bool buildSpeakerDialogueTrees(
     std::uint32_t currentTopic = 0;
     std::uint32_t topicsSeen = 0;
     std::unordered_map<std::uint32_t, DialogueImportStats> stats;
-    {
+    for (const DialogueSource& source : sources) {
+        EsmReader reader;
+        if (!reader.open(source.path)) {
+            if (sources.size() == 1u) {
+                outError = "cannot open plugin: " + reader.lastError();
+                return false;
+            }
+            continue;  // one unreadable plugin costs its lines, not everyone's
+        }
+        // Rewrites this plugin's local formIDs into the order's global space.
+        // EVERY id leaving this walk goes through it: the topic a response hangs
+        // under, the response itself, the speaker or voice type a condition
+        // names, and each linked topic. A missed one silently attributes a line
+        // to a different actor.
+        const auto remap = [&](std::uint32_t formId) {
+            if (order == nullptr || formId == 0u) {
+                return formId;
+            }
+            return order->remapFormId(source.pluginIndex, formId);
+        };
+        currentTopic = 0u;  // a topic does not carry across plugins
         EsmReader::Visitor visitor;
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "DIAL" || header.type == "INFO";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (record.type == "DIAL") {
-                currentTopic = record.formId;
+                currentTopic = remap(record.formId);
                 ++topicsSeen;
                 for (const auto& sub : record.subrecords) {
                     if (sub.type == "FULL") {
-                        topicPlayerText[record.formId] = subrecordString(sub);
+                        topicPlayerText[currentTopic] = subrecordString(sub);
                     }
                 }
                 return;
@@ -339,7 +369,7 @@ bool buildSpeakerDialogueTrees(
                 if (!byActor && !byVoiceType) {
                     continue;
                 }
-                const std::uint32_t named = readU32(sub.data + 12);
+                const std::uint32_t named = remap(readU32(sub.data + 12));
                 // Whom this condition would hand the line to. For GetIsID that
                 // is one actor; for GetIsVoiceType it is everyone sharing the
                 // voice.
@@ -386,7 +416,7 @@ bool buildSpeakerDialogueTrees(
             }
 
             RawInfo info;
-            info.formId = record.formId;
+            info.formId = remap(record.formId);
             info.topicFormId = currentTopic;
             std::uint32_t responses = 0;
             for (const auto& sub : record.subrecords) {
@@ -404,7 +434,7 @@ bool buildSpeakerDialogueTrees(
                     info.text += line;
                     ++responses;
                 } else if (sub.type == "TCLT" && sub.size >= 4u) {
-                    info.linkedTopics.push_back(readU32(sub.data));
+                    info.linkedTopics.push_back(remap(readU32(sub.data)));
                 }
             }
             if (info.text.empty()) {
@@ -488,6 +518,29 @@ bool buildSpeakerDialogueTrees(
     }
     outStats = std::move(stats);
     return true;
+}
+
+bool buildSpeakerDialogueTrees(
+    const std::filesystem::path& pluginPath,
+    const std::vector<SpeakerDialogueRequest>& speakers,
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
+    std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
+    std::string& outError
+) {
+    return buildSpeakerDialogueTreesImpl(
+        pluginPath, nullptr, speakers, outTrees, outStats, outError);
+}
+
+bool buildSpeakerDialogueTreesAcrossOrder(
+    const FalloutLoadOrder& order,
+    const std::vector<SpeakerDialogueRequest>& speakers,
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
+    std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
+    std::string& outError
+) {
+    return buildSpeakerDialogueTreesImpl(
+        order.empty() ? std::filesystem::path{} : order.entries().front().path, &order, speakers,
+        outTrees, outStats, outError);
 }
 
 }  // namespace odai::importer::fnv

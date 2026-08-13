@@ -85,6 +85,7 @@ void buildVoiceIndexForFolder(
     const std::filesystem::path& dataFilesPath,
     const std::string& pluginFileName,
     const std::string& voiceFolder,
+    const std::vector<std::string>& modDirectories,
     ActorVoiceIndex& outIndex
 ) {
     outIndex.voiceFolder = voiceFolder;
@@ -95,6 +96,50 @@ void buildVoiceIndexForFolder(
     // Trailing separator included: this is a prefix test, and without it
     // "maleadult01" would also match "maleadult01defaultb".
     const std::string folderPrefix = folderNoSlash + "\\";
+
+    // LOOSE FIRST, and it wins: a mod shipping a plain voice tree is the common
+    // case for a companion, and the game applies the same loose-beats-archive
+    // rule. Walking the whole mod root is affordable -- Willow's is 3367 files
+    // -- and it sidesteps having to guess the on-disk CASE of every component,
+    // which is "Sound\Voice\NVWillow.esp\WillowsVoice" on disk against an
+    // all-lowercase lookup.
+    for (const std::string& modDirectory : modDirectories) {
+        std::error_code walkError;
+        std::filesystem::recursive_directory_iterator walk(
+            std::filesystem::path(modDirectory),
+            std::filesystem::directory_options::skip_permission_denied, walkError);
+        if (walkError) {
+            continue;
+        }
+        for (const auto& entry : walk) {
+            std::error_code typeError;
+            if (!entry.is_regular_file(typeError) || typeError) {
+                continue;
+            }
+            std::string relative =
+                std::filesystem::relative(entry.path(), std::filesystem::path(modDirectory))
+                    .string();
+            for (char& c : relative) {
+                if (c == '/') {
+                    c = '\\';
+                }
+            }
+            const std::string lowered = toLowerAscii(relative);
+            if (lowered.size() < folderPrefix.size() ||
+                lowered.compare(0, folderPrefix.size(), folderPrefix) != 0) {
+                continue;
+            }
+            if (lowered.size() < 4u || lowered.compare(lowered.size() - 4u, 4u, ".ogg") != 0) {
+                continue;
+            }
+            std::string nodeId =
+                voiceNodeIdFromLeaf(lowered.substr(lowered.find_last_of('\\') + 1u));
+            if (nodeId.empty()) {
+                continue;
+            }
+            outIndex.loosePathByNodeId.emplace(std::move(nodeId), entry.path());
+        }
+    }
 
     std::error_code listError;
     std::vector<std::filesystem::path> archivePaths;
@@ -153,7 +198,9 @@ void buildVoiceIndexForFolder(
     }
     outIndex.archiveKey = toLowerAscii(pluginFileName + "\\" + voiceFolder);
     voiceArchives()[outIndex.archiveKey] = std::move(matched);
-    outIndex.status = std::to_string(outIndex.pathByNodeId.size()) + " lines from ";
+    outIndex.status =
+        std::to_string(outIndex.pathByNodeId.size() + outIndex.loosePathByNodeId.size()) +
+        " lines from ";
     for (std::size_t i = 0; i < matchedNames.size(); ++i) {
         outIndex.status += (i == 0 ? "" : ", ") + matchedNames[i];
     }
@@ -729,6 +776,12 @@ bool loadGoodspringsActors(
         // once per distinct folder, by loadActorVoices.
         actor.voice.voiceTypeFormId = scan.voiceTypeFormIdFor(placement.baseFormId);
         actor.voice.voiceFolder = scan.voiceFolderFor(placement.baseFormId);
+        // Which plugin DEFINED this actor's base -- its voice tree lives under
+        // that plugin's name, not the worldspace's.
+        if (const auto voicePluginIt = voiceFolderPlugin.find(placement.baseFormId);
+            voicePluginIt != voiceFolderPlugin.end()) {
+            actor.voice.voicePlugin = voicePluginIt->second;
+        }
         actor.baseFormId = placement.baseFormId;
         actor.placed = true;
         actor.character = built.character;
@@ -814,6 +867,7 @@ bool loadGoodspringsActors(
 
 std::size_t loadActorDialogue(
     const std::filesystem::path& pluginPath,
+    const importer::fnv::FalloutLoadOrder* loadOrder,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail
 ) {
@@ -843,7 +897,12 @@ std::size_t loadActorDialogue(
     std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree> trees;
     std::unordered_map<std::uint32_t, importer::fnv::DialogueImportStats> stats;
     std::string error;
-    if (!importer::fnv::buildSpeakerDialogueTrees(pluginPath, requests, trees, stats, error)) {
+    const bool built =
+        (loadOrder != nullptr && !loadOrder->empty())
+            ? importer::fnv::buildSpeakerDialogueTreesAcrossOrder(
+                  *loadOrder, requests, trees, stats, error)
+            : importer::fnv::buildSpeakerDialogueTrees(pluginPath, requests, trees, stats, error);
+    if (!built) {
         outDetail = "dialogue scan failed: " + error;
         return 0;
     }
@@ -870,6 +929,7 @@ std::size_t loadActorDialogue(
 std::size_t loadActorVoices(
     const std::filesystem::path& dataFilesPath,
     const std::string& pluginFileName,
+    const std::vector<std::string>& modDirectories,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail
 ) {
@@ -886,18 +946,25 @@ std::size_t loadActorVoices(
             continue;
         }
         // Keyed by plugin AND folder: FemaleAdult01Default exists in both
-        // games and means a different set of recordings in each.
-        const std::string key =
-            toLowerAscii(pluginFileName + "\\" + actor.voice.voiceFolder);
+        // games and means a different set of recordings in each -- and now, in
+        // both the base game and a companion mod within ONE load order.
+        const std::string voicePlugin =
+            actor.voice.voicePlugin.empty() ? pluginFileName : actor.voice.voicePlugin;
+        const std::string key = toLowerAscii(voicePlugin + "\\" + actor.voice.voiceFolder);
         auto existing = indexByFolder.find(key);
         if (existing == indexByFolder.end()) {
             ActorVoiceIndex index;
             buildVoiceIndexForFolder(
-                dataFilesPath, pluginFileName, actor.voice.voiceFolder, index);
+                dataFilesPath, voicePlugin, actor.voice.voiceFolder, modDirectories, index);
             existing = indexByFolder.emplace(key, std::move(index)).first;
         }
+        // Preserve which plugin this actor's lines came from: the shared index
+        // is reused across actors, and overwriting it would make the next
+        // actor's lookup key wrong.
+        const std::string keepPlugin = actor.voice.voicePlugin;
         actor.voice = existing->second;
-        if (!actor.voice.pathByNodeId.empty()) {
+        actor.voice.voicePlugin = keepPlugin;
+        if (!actor.voice.pathByNodeId.empty() || !actor.voice.loosePathByNodeId.empty()) {
             ++voiced;
         }
     }
@@ -909,8 +976,10 @@ std::size_t loadActorVoices(
     outDetail = std::to_string(voiced) + " actors voiced from " +
         std::to_string(indexByFolder.size()) + " voice type(s):";
     for (const auto& [folder, index] : indexByFolder) {
+        // Both sources: a mod's lines are usually loose, and reporting only the
+        // archive count showed a fully voiced companion as "(0)".
         outDetail += " " + index.voiceFolder + "(" +
-            std::to_string(index.pathByNodeId.size()) + ")";
+            std::to_string(index.pathByNodeId.size() + index.loosePathByNodeId.size()) + ")";
     }
     return voiced;
 }
@@ -929,30 +998,36 @@ void speakActorLine(
     }
     actor.spokenNodeId = node->id;
 
+    // A loose line short-circuits the archive lookup entirely: there is nothing
+    // to extract, the bytes are already a file on disk.
+    const auto looseFound = actor.voice.loosePathByNodeId.find(node->id);
+    const bool haveLoose = looseFound != actor.voice.loosePathByNodeId.end();
     const auto found = actor.voice.pathByNodeId.find(node->id);
-    if (found == actor.voice.pathByNodeId.end()) {
+    if (!haveLoose && found == actor.voice.pathByNodeId.end()) {
         return;  // a line the game never recorded, or a topic node
-    }
-    const auto archives = voiceArchives().find(actor.voice.archiveKey);
-    if (archives == voiceArchives().end()) {
-        return;
     }
     importer::fnv::BsaArchive* holder = nullptr;
     const importer::fnv::BsaFileEntry* entry = nullptr;
-    for (importer::fnv::BsaArchive& archive : archives->second) {
-        if (const importer::fnv::BsaFileEntry* hit = archive.find(found->second)) {
-            holder = &archive;
-            entry = hit;
-            break;
+    if (!haveLoose) {
+        const auto archives = voiceArchives().find(actor.voice.archiveKey);
+        if (archives == voiceArchives().end()) {
+            return;
         }
-    }
-    if (entry == nullptr || holder == nullptr) {
-        return;
+        for (importer::fnv::BsaArchive& archive : archives->second) {
+            if (const importer::fnv::BsaFileEntry* hit = archive.find(found->second)) {
+                holder = &archive;
+                entry = hit;
+                break;
+            }
+        }
+        if (entry == nullptr || holder == nullptr) {
+            return;
+        }
     }
 
     // Cached by leaf name, so a line costs one extract + one Vorbis decode per
     // install rather than one per playback.
-    std::string leaf = found->second;
+    std::string leaf = haveLoose ? looseFound->second.string() : found->second;
     const std::size_t lastSeparator = leaf.find_last_of("\\/");
     if (lastSeparator != std::string::npos) {
         leaf = leaf.substr(lastSeparator + 1u);
@@ -967,7 +1042,18 @@ void speakActorLine(
         std::filesystem::create_directories(cacheDirectory, createError);
         std::vector<std::uint8_t> oggBytes;
         std::string extractError;
-        if (!holder->extract(*entry, oggBytes, extractError) || oggBytes.empty()) {
+        if (haveLoose) {
+            std::ifstream in(looseFound->second, std::ios::binary);
+            if (in) {
+                oggBytes.assign(
+                    std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            if (oggBytes.empty()) {
+                VOX_LOGW("newvegas") << actor.displayName() << " voice read failed for "
+                                     << node->id << ": " << looseFound->second.string();
+                return;
+            }
+        } else if (!holder->extract(*entry, oggBytes, extractError) || oggBytes.empty()) {
             VOX_LOGW("newvegas") << actor.displayName() << " voice extract failed for " << node->id
                                  << ": " << extractError;
             return;

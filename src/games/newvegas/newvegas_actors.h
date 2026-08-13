@@ -75,12 +75,24 @@ struct ActorVoiceIndex {
     // The VTYP EditorID whose folder these lines live under. Actors sharing a
     // voice type share one index -- a town of ten has perhaps four.
     std::string voiceFolder;
+    // Which plugin's voice tree these lines live under. Empty means "the one
+    // the caller passed", which is the base game's. A companion's lines are
+    // under ITS plugin (sound\\voice\\NVWillow.esp\\WillowsVoice\\), so this is
+    // per ACTOR, not per run -- the header note below about the first component
+    // not being a constant is now true within a single load order too.
+    std::string voicePlugin;
     // Which open archive set holds them: "<plugin>\\<folder>", lowercased.
     // Keyed by plugin as well as folder because FemaleAdult01Default exists in
     // both games and means a different set of recordings in each.
     std::string archiveKey;
     // Node id -> virtual path of its .ogg inside the BSA.
     std::unordered_map<std::string, std::string> pathByNodeId;
+    // Node id -> absolute path of its .ogg as a LOOSE file. A mod often ships
+    // its voice as a plain tree rather than an archive -- Willow's 1474 lines
+    // are loose under Sound\\Voice\\NVWillow.esp\\WillowsVoice\\ -- and both the
+    // index and playback used to look only inside .bsa files, so those lines
+    // were invisible and the actor read as having no voice at all.
+    std::unordered_map<std::string, std::filesystem::path> loosePathByNodeId;
     std::string status;
 };
 
@@ -271,6 +283,9 @@ bool loadGoodspringsActors(
 // line for the startup log.
 std::size_t loadActorDialogue(
     const std::filesystem::path& pluginPath,
+    // Optional; non-null reads DIAL/INFO across the whole load order, which is
+    // the only way a companion mod's own lines are reachable.
+    const odai::importer::fnv::FalloutLoadOrder* loadOrder,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail);
 
@@ -295,6 +310,8 @@ std::size_t loadActorDialogue(
 std::size_t loadActorVoices(
     const std::filesystem::path& dataFilesPath,
     const std::string& pluginFileName,
+    // Mod roots, searched for LOOSE voice trees alongside the archives.
+    const std::vector<std::string>& modDirectories,
     std::vector<SkinnedActor>& actors,
     std::string& outDetail);
 

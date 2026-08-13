@@ -2407,12 +2407,16 @@ bool NewVegasApp::initStreaming() {
                 // his base is not asked for a second time.
                 {
                     std::string dialogueDetail;
-                    loadActorDialogue(dataPath / m_streamPlugin, m_actors, dialogueDetail);
+                    loadActorDialogue(
+                        dataPath / m_streamPlugin,
+                        m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder, m_actors,
+                        dialogueDetail);
                     VOX_LOGI("newvegas") << "actor dialogue: " << dialogueDetail;
                     // AFTER the dialogue: an actor with nothing to say needs no
                     // voice index, and skipping those is most of the town.
                     std::string voiceDetail;
-                    loadActorVoices(dataPath, m_streamPlugin, m_actors, voiceDetail);
+                    loadActorVoices(
+                        dataPath, m_streamPlugin, m_modDirectories, m_actors, voiceDetail);
                     VOX_LOGI("newvegas") << "actor voices: " << voiceDetail;
                 }
                 // ODAI_FNV_ACTORS_PARADE lines every built actor up in front of

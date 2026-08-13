@@ -40,6 +40,7 @@
 // the selection is not, and the selection needs quest and faction state.
 
 #include "dialogue/dialogue_types.h"
+#include "import/fnv/plugin_load_order.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -158,6 +159,18 @@ struct SpeakerDialogueRequest {
 // a cell have nothing to say, and that is not an error.
 bool buildSpeakerDialogueTrees(
     const std::filesystem::path& pluginPath,
+    const std::vector<SpeakerDialogueRequest>& speakers,
+    std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
+    std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
+    std::string& outError);
+
+// As above, across a whole load order, every formID rewritten into the order's
+// global space. A companion ships its own DIAL/INFO -- Willow's plugin holds 842
+// topics and 1452 responses -- and none are reachable while dialogue is read
+// from the worldspace's plugin alone. Plugins are walked in order into one set,
+// so a later plugin's response under a topic simply joins the speaker's lines.
+bool buildSpeakerDialogueTreesAcrossOrder(
+    const FalloutLoadOrder& order,
     const std::vector<SpeakerDialogueRequest>& speakers,
     std::unordered_map<std::uint32_t, odai::dialogue::DialogueTree>& outTrees,
     std::unordered_map<std::uint32_t, DialogueImportStats>& outStats,
