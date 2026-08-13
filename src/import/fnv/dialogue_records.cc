@@ -52,7 +52,61 @@ struct RawInfo {
     std::uint32_t topicFormId = 0;
     std::string text;
     std::vector<std::uint32_t> linkedTopics;
+    // Whether this line's conditions hold at the START of a playthrough -- see
+    // passesUnplayedState().
+    bool unplayed = true;
 };
+
+// True unless one of the conditions this reader UNDERSTANDS is false in a world
+// where nothing has happened yet.
+//
+// The engine has no quest system, so it cannot answer most of what a CTDA asks.
+// But it can answer the commonest one correctly at exactly one moment: the start
+// of a playthrough, when every quest variable is still zero. That is also the
+// only moment this viewer ever depicts.
+//
+// Function 79 is GetQuestVariable, param1 a quest formID. Derived by
+// measurement, in the style of kCtdaFunctionGetIsId: across Willow's greetings
+// it accounts for 99 of the condition hits, and its param1 values include
+// 0x1019D71, which appears independently in this plugin as the QSTI of other
+// INFOs and as the QUST record AWillowLikesPlayerQuest. A function whose
+// parameter is a quest is asking about a quest.
+//
+// PERMISSIVE BY DESIGN: a function this does not know returns true rather than
+// false. The point is to rank lines that are certainly wrong below the rest, not
+// to model Fallout's quest state -- being wrong in the strict direction would
+// silence characters who currently speak.
+inline constexpr std::uint32_t kCtdaFunctionGetQuestVariable = 79u;
+
+bool passesUnplayedState(const EsmRecordView& record) {
+    for (const auto& sub : record.subrecords) {
+        if (sub.type != "CTDA" || sub.size < 28u) {
+            continue;
+        }
+        if (readU32(sub.data + 8) != kCtdaFunctionGetQuestVariable) {
+            continue;
+        }
+        float wanted = 0.0f;
+        std::memcpy(&wanted, sub.data + 4, sizeof(wanted));
+        // Top 3 bits of the type byte: 0 ==, 1 !=, 2 >, 3 >=, 4 <, 5 <=.
+        // The left-hand side is the variable's value, which is 0 unplayed.
+        const auto op = static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
+        bool holds = true;
+        switch (op) {
+            case 0u: holds = 0.0f == wanted; break;
+            case 1u: holds = 0.0f != wanted; break;
+            case 2u: holds = 0.0f > wanted; break;
+            case 3u: holds = 0.0f >= wanted; break;
+            case 4u: holds = 0.0f < wanted; break;
+            case 5u: holds = 0.0f <= wanted; break;
+            default: holds = true; break;  // an operator we do not know
+        }
+        if (!holds) {
+            return false;
+        }
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -527,6 +581,7 @@ bool buildSpeakerDialogueTreesImpl(
             RawInfo info;
             info.formId = remap(record.formId);
             info.topicFormId = currentTopic;
+            info.unplayed = passesUnplayedState(record);
             std::uint32_t responses = 0;
             for (const auto& sub : record.subrecords) {
                 if (sub.type == "NAM1") {
@@ -589,10 +644,20 @@ bool buildSpeakerDialogueTreesImpl(
         speakerStats.topicsSeen = topicsSeen;
 
         // Topic -> the speaker's first response under it. First rather than a
-        // list because choosing a topic has to land somewhere definite and
-        // conditions (which would pick between them) are not evaluated -- see
-        // the header.
+        // list because choosing a topic has to land somewhere definite.
+        //
+        // Two passes, preferring a line whose conditions hold at the start of a
+        // playthrough. A topic's responses are ordered late-game first about as
+        // often as not, so "first under the topic" alone answers a question
+        // about Boone before the player has met him. The second pass keeps the
+        // old behaviour for topics where nothing qualifies, so no topic loses
+        // its answer.
         std::unordered_map<std::uint32_t, std::uint32_t> firstInfoForTopic;
+        for (const RawInfo& info : infos) {
+            if (info.unplayed) {
+                firstInfoForTopic.emplace(info.topicFormId, info.formId);
+            }
+        }
         for (const RawInfo& info : infos) {
             firstInfoForTopic.emplace(info.topicFormId, info.formId);
         }
@@ -633,11 +698,38 @@ bool buildSpeakerDialogueTreesImpl(
         // So the test never fired for anyone and every speaker fell through to
         // "first INFO seen". On a companion with 209 topics that meant Willow
         // opened on a line addressed to another NPC entirely.
-        for (const RawInfo& info : infos) {
+        //
+        // Ranked, because a character has many greetings and "the first one in
+        // the file" is a coin flip: Willow has 90, Victor 6. Two signals, and
+        // the order between them was measured rather than assumed.
+        //
+        // WHETHER THE GREETING OPENS A CONVERSATION DOMINATES. A greeting with
+        // TCLT topics is one the player can reply to; one without is a line the
+        // character says as you walk past. Starting on a reply-less greeting
+        // gives a conversation with nothing to say back, which is the worse
+        // failure and the more reliable signal.
+        //
+        // Whether its conditions hold unplayed breaks the tie. On its own it is
+        // NOT enough, and trusting it alone regressed Victor: it demoted his
+        // Goodsprings greeting -- "You need to be careful, it's dangerous out
+        // here!", four replies -- in favour of "don't that beat all, it's my old
+        // friend from Goodsprings", which is what he says much later and has no
+        // replies at all. So some quest variables are plainly not zero at the
+        // start of the game, and passesUnplayedState is a hint, not a truth.
+        const auto isGreeting = [&](const RawInfo& info) {
             const auto edidIt = topicEditorId.find(info.topicFormId);
-            if (edidIt != topicEditorId.end() && toLowerAsciiCopy(edidIt->second) == "greeting") {
+            return edidIt != topicEditorId.end() &&
+                toLowerAsciiCopy(edidIt->second) == "greeting";
+        };
+        int bestScore = -1;
+        for (const RawInfo& info : infos) {
+            if (!isGreeting(info)) {
+                continue;
+            }
+            const int score = (info.linkedTopics.empty() ? 0 : 2) + (info.unplayed ? 1 : 0);
+            if (score > bestScore) {
+                bestScore = score;
                 tree.startNode = nodeIdFor(info.formId);
-                break;
             }
         }
         // No greeting: prefer a real TOPIC over a bark. Types 1-6 are lines the
