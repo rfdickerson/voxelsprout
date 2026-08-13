@@ -1163,10 +1163,14 @@ void updateActorWandering(
     // ODAI_FNV_NOWANDER=1 pins everyone to their authored spot. The control for
     // "is this actor in the wrong place because the wander put it there or
     // because the placement did".
-    static const bool s_disabled = std::getenv("ODAI_FNV_NOWANDER") != nullptr;
-    if (s_disabled || deltaSeconds <= 0.0f) {
-        return;
-    }
+    //
+    // IT MUST NOT ALSO STOP THE GROUND SETTLE BELOW, which is what it used to
+    // do by returning from here: an actor repositioned from outside keeps a
+    // height that came from wherever the PLAYER was standing, so the flag left
+    // a spawned companion hanging in the air. That defeats the flag's own
+    // purpose -- it exists to isolate a placement bug, and instead it
+    // manufactured one. Ground settling is not wandering.
+    static const bool s_wanderDisabled = std::getenv("ODAI_FNV_NOWANDER") != nullptr;
     // How far from the authored spot a townsperson will stray, and how close
     // counts as arrived. The radius is deliberately small -- ~14 m -- because
     // nothing here knows where the walls are: staying near a position the game
@@ -1180,9 +1184,6 @@ void updateActorWandering(
     constexpr float kMaxStepUnits = 400.0f;
 
     for (std::size_t i = 0; i < actors.size(); ++i) {
-        if (static_cast<int>(i) == skipIndex) {
-            continue;
-        }
         SkinnedActor& actor = actors[i];
         if (!actor.placed) {
             continue;
@@ -1199,6 +1200,24 @@ void updateActorWandering(
             if (groundHeightAt(actor.position[0], actor.position[2], actor.position[1], ground)) {
                 actor.position[1] = ground;
             }
+        }
+
+        // Everything past here is the walk itself, and only it is what these
+        // three suppress. Each used to skip the settle above as well.
+        //
+        // skipIndex is the actor being talked to, and it mattered most: a
+        // conversation opens on the first tick, so a companion spawned into one
+        // was excluded from the settle before it ever ran and hung in the air
+        // for the whole conversation. "Someone who walks off mid-sentence is
+        // worse than someone who stands still" -- but standing still means on
+        // the ground.
+        //
+        // A zero timestep is the same case: with no time to move there is
+        // nothing to advance, but the settle has already run, which is what puts
+        // an actor on the ground while a conversation holds the clock still.
+        if (static_cast<int>(i) == skipIndex || s_wanderDisabled || deltaSeconds <= 0.0f) {
+            actor.walking = false;
+            continue;
         }
 
         if (!actor.wanders || actor.talking) {
