@@ -50,6 +50,25 @@ std::unordered_map<std::string, std::vector<importer::fnv::BsaArchive>>& voiceAr
 //
 // Scanning for the field rather than counting underscores is deliberate: quest
 // and topic names contain underscores of their own.
+// A voice filename carries the INFO's formID with its MOD-INDEX BYTE ZEROED:
+// Willow's info_0109F030 is recorded as AWillowD_HELLO_0009F030_1.ogg. The byte
+// is a load-order position, which is not a property of the line and is not
+// stable, so the GECK leaves it out -- and a lookup that keeps it matches
+// nothing while looking exactly like a mod that shipped no audio.
+//
+// A no-op for the base game, whose records are index 00 already, which is why
+// this went unnoticed: every vanilla actor's voice resolved regardless.
+std::string voiceKeyForNodeId(const std::string& nodeId) {
+    constexpr std::size_t kPrefix = 5u;  // "info_"
+    if (nodeId.size() != kPrefix + 8u || nodeId.compare(0, kPrefix, "info_") != 0) {
+        return nodeId;
+    }
+    std::string key = nodeId;
+    key[kPrefix] = '0';
+    key[kPrefix + 1u] = '0';
+    return key;
+}
+
 std::string voiceNodeIdFromLeaf(const std::string& loweredLeaf) {
     std::string formIdHex;
     std::size_t start = 0;
@@ -1000,9 +1019,10 @@ void speakActorLine(
 
     // A loose line short-circuits the archive lookup entirely: there is nothing
     // to extract, the bytes are already a file on disk.
-    const auto looseFound = actor.voice.loosePathByNodeId.find(node->id);
+    const std::string voiceKey = voiceKeyForNodeId(node->id);
+    const auto looseFound = actor.voice.loosePathByNodeId.find(voiceKey);
     const bool haveLoose = looseFound != actor.voice.loosePathByNodeId.end();
-    const auto found = actor.voice.pathByNodeId.find(node->id);
+    const auto found = actor.voice.pathByNodeId.find(voiceKey);
     if (!haveLoose && found == actor.voice.pathByNodeId.end()) {
         return;  // a line the game never recorded, or a topic node
     }
