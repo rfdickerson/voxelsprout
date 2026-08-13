@@ -119,6 +119,9 @@ public:
 private:
     std::filesystem::path m_path;
     std::uint32_t m_archiveFlags = 0;
+    // Which BSA version was opened. Some archive-flag BITS mean different things
+    // across versions, so the flags alone are not enough to read one.
+    std::uint32_t m_version = 0;
     std::uint32_t m_fileFlags = 0;
     std::vector<BsaFileEntry> m_files;
     std::unordered_map<std::string, std::size_t> m_pathIndex;  // lowercase virtualPath -> m_files index

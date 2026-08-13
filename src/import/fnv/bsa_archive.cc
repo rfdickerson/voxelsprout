@@ -27,6 +27,13 @@ constexpr std::uint32_t kFlagHasFileNames = 0x2u;
 constexpr std::uint32_t kFlagCompressedArchive = 0x4u;
 // Each file's data block is prefixed by a BString holding its full virtual
 // path. Set on both retail texture archives (archiveFlags 0x107).
+// Fallout 3 ONWARD. In an Oblivion-era v103 archive this bit is not this flag,
+// and honouring it there desynchronises every single file: the reader skips a
+// length-prefixed name that was never written, so each extraction starts a few
+// bytes late and yields garbage. That does not fail loudly -- a DDS decodes to
+// nothing, a NIF parses to no shapes -- so it reads as "the mod ships broken
+// assets" rather than as a reader bug. Willow's 258 MB v103 archive is where
+// this surfaced: every mesh and texture in it came out unusable.
 constexpr std::uint32_t kFlagEmbedFileNames = 0x100u;
 // Per-file size field: bit 30 toggles this file's compression relative to the
 // archive-wide default set by kFlagCompressedArchive.
@@ -159,6 +166,7 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
 
     m_archiveFlags = header.archiveFlags;
     m_fileFlags = header.fileFlags;
+    m_version = header.version;
     const bool hasFolderNames = (header.archiveFlags & kFlagHasFolderNames) != 0u;
     const bool hasFileNames = (header.archiveFlags & kFlagHasFileNames) != 0u;
     const bool defaultCompressed = (header.archiveFlags & kFlagCompressedArchive) != 0u;
@@ -305,7 +313,7 @@ bool BsaArchive::extract(
     // they come off the remaining budget. Both retail texture archives set
     // this; reading past it is what made every texture extraction garbage.
     std::uint32_t remainingSize = entry.sizeOnDisk;
-    if ((m_archiveFlags & kFlagEmbedFileNames) != 0u) {
+    if (m_version >= kBsaVersionFo3Fnv && (m_archiveFlags & kFlagEmbedFileNames) != 0u) {
         std::uint8_t embeddedNameLength = 0;
         if (!readValue(input, embeddedNameLength)) {
             outError = "Truncated embedded BSA file name: " + entry.virtualPath;
