@@ -2881,12 +2881,22 @@ void NewVegasApp::onTick(float deltaSeconds) {
             *speaker, std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio);
     }
 
-    if (keyDown(m_window, GLFW_KEY_ESCAPE)) {
-        if (speaker != nullptr) {
-            endConversation();  // leave the conversation, not the game
-            return;
-        }
-        glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+    // ESCAPE LEAVES A CONVERSATION AND NOTHING ELSE. It used to quit the game
+    // when no one was speaking, and keyDown is a LEVEL read -- a single press
+    // spans ~10 frames at 60 fps. So closing a dialogue box with Escape ended
+    // the conversation on the first of those frames and then, on the second
+    // frame of the same press, found no speaker and quit. Not an edge case:
+    // pressing Escape to back out of a conversation quit the game every time.
+    //
+    // Edge-latched now, and the quit is gone from here entirely -- backing out
+    // of something must never be the same keystroke as leaving the game. With
+    // no speaker, Escape falls through to the pause menu, which is what the
+    // HUD hint has always claimed it does.
+    const bool escapeDown = keyDown(m_window, GLFW_KEY_ESCAPE);
+    const bool escapePressed = escapeDown && !m_escapeLatch;
+    m_escapeLatch = escapeDown;
+    if (escapePressed && speaker != nullptr) {
+        endConversation();
         return;
     }
 
@@ -2906,11 +2916,17 @@ void NewVegasApp::onTick(float deltaSeconds) {
     }
     m_bracketRightLatch = bracketRight;
 
-    const bool pausePressed = keyDown(m_window, GLFW_KEY_P);
-    if (pausePressed && !m_pauseLatch) {
-        m_dayCyclePaused = !m_dayCyclePaused;
+    // P QUITS. A deliberate, single-purpose key, because the alternative was
+    // Escape doing double duty as "close this" and "leave the game" -- and a key
+    // that both dismisses a panel and exits has no safe way to be pressed.
+    //
+    // P was the day-cycle pause toggle, which is still on the pause menu's
+    // "Day cycle" row; the [ and ] keys still step time directly.
+    const bool quitPressed = keyDown(m_window, GLFW_KEY_P);
+    if (quitPressed && !m_quitKeyLatch) {
+        glfwSetWindowShouldClose(m_window, GLFW_TRUE);
     }
-    m_pauseLatch = pausePressed;
+    m_quitKeyLatch = quitPressed;
 
     // Edge-latched: holding E must not re-trigger on the door you arrive next
     // to, which is always within range of the one you just came through.
@@ -3267,7 +3283,7 @@ void NewVegasApp::drawPipBoyHud() {
     // nothing.
     const char* hint = m_navDriving
         ? "(Start) menu   (LS) move   (A) use"
-        : "Esc menu   [ ] time   P cycle   Tab cursor";
+        : "Esc menu   [ ] time   P quit   Tab cursor";
     m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
 }
 

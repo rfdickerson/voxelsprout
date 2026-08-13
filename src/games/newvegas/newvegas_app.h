@@ -385,6 +385,8 @@ private:
     bool m_bracketLeftLatch = false;
     bool m_bracketRightLatch = false;
     bool m_pauseLatch = false;
+    bool m_quitKeyLatch = false;
+    bool m_escapeLatch = false;
     bool m_tabLatch = false;
     // Ground-clamped FPS movement; F drops back to the old free-fly camera.
     bool m_walkMode = true;
