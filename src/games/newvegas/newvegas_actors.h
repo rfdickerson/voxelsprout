@@ -248,7 +248,7 @@ bool loadGoodspringsActors(
     // placement, race and armour all live in its own plugin.
     const odai::importer::fnv::FalloutLoadOrder* loadOrder,
     const odai::importer::fnv::FalloutAssetSource& assets,
-    const float bethesdaCentre[2],
+    const float bethesdaCentre[3],
     float radius,
     std::uint32_t firstInstanceSlot,
     std::size_t maxActors,

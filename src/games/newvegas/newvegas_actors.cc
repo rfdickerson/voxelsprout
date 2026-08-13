@@ -510,7 +510,7 @@ bool loadGoodspringsActors(
     const std::filesystem::path& pluginPath,
     const importer::fnv::FalloutLoadOrder* loadOrder,
     const importer::fnv::FalloutAssetSource& assets,
-    const float bethesdaCentre[2],
+    const float bethesdaCentre[3],
     float radius,
     std::uint32_t firstInstanceSlot,
     std::size_t maxActors,
@@ -540,6 +540,73 @@ bool loadGoodspringsActors(
         outStats.detail = "scan failed: " + error;
         return false;
     }
+
+    // ODAI_FNV_SPAWN_ACTOR=<EditorID>[,<EditorID>...] places a named actor in
+    // front of the player whether or not the world places it anywhere.
+    //
+    // This is what a companion mod needs. Its NPC is parked in a private
+    // interior and moved into the world by a quest script -- Willow's placement
+    // is in WillowsCell and her 7187-byte script does the rest -- so there is
+    // nothing in the worldspace to find and no door to arrive through. The base
+    // record itself is complete, and the scan already collects every base
+    // wholesale rather than only the ones something places, so building one is
+    // just a matter of asking for it.
+    //
+    // A SYNTHETIC PLACEMENT rather than a separate build path: everything
+    // downstream -- geometry, armour, skeleton, animation, dialogue, voice --
+    // keys off a placement, so injecting one gets all of it for free and cannot
+    // drift from how a placed actor is built.
+    if (const char* spawnEnv = std::getenv("ODAI_FNV_SPAWN_ACTOR")) {
+        std::vector<std::string> wanted;
+        std::string current;
+        for (const char* cursor = spawnEnv;; ++cursor) {
+            if (*cursor == ',' || *cursor == '\0') {
+                if (!current.empty()) {
+                    wanted.push_back(toLowerAscii(current));
+                    current.clear();
+                }
+                if (*cursor == '\0') {
+                    break;
+                }
+                continue;
+            }
+            current.push_back(*cursor);
+        }
+        // Fan them out sideways so several named actors do not occupy one spot.
+        int placed = 0;
+        for (const std::string& name : wanted) {
+            const importer::fnv::FalloutActorBase* match = nullptr;
+            for (const auto& [formId, base] : scan.bases) {
+                if (toLowerAscii(base.editorId) == name) {
+                    match = &base;
+                    break;
+                }
+            }
+            if (match == nullptr) {
+                VOX_LOGW("newvegas") << "spawn actor: no base with EditorID \"" << name
+                                     << "\" in the loaded plugins";
+                continue;
+            }
+            importer::fnv::FalloutActorPlacement placement{};
+            placement.refFormId = 0u;  // synthetic; nothing else addresses it
+            placement.baseFormId = match->formId;
+            placement.position[0] = bethesdaCentre[0] + 160.0f + (static_cast<float>(placed) * 140.0f);
+            placement.position[1] = bethesdaCentre[1] + 160.0f;
+            // Ground height is resolved per actor every frame, so this only has
+            // to be close enough not to start underneath the terrain.
+            placement.position[2] = bethesdaCentre[2] + 40.0f;
+            placement.initiallyDisabled = false;
+            // Front of the list: placements are nearest-first and the slot
+            // budget cuts from the back, so a deliberately requested actor must
+            // not lose its slot to whatever happens to be standing nearby.
+            scan.placements.insert(scan.placements.begin(), placement);
+            VOX_LOGI("newvegas") << "spawn actor: " << match->editorId
+                                 << (match->fullName.empty() ? "" : (" \"" + match->fullName + "\""))
+                                 << " base 0x" << std::hex << match->formId << std::dec
+                                 << (match->isFemale ? " female" : "");
+            ++placed;
+        }
+    }
     outStats.placementsConsidered = scan.placements.size();
 
     // One build per distinct base: Goodsprings places six bighorners, and
@@ -548,6 +615,10 @@ bool loadGoodspringsActors(
     // per-slot -- but the CPU-side assembly is shared.
     struct BuiltBase {
         bool ok = false;
+        // Whichever skeleton actually bound -- the race's own, or the human one
+        // substituted for it. The animation clips must be resolved against the
+        // same rig the vertices were weighted to.
+        std::string skeletonPath;
         importer::fnv::FalloutCharacter character;
         std::vector<odai::importer::ImportedSceneTexture> textures;
         std::vector<odai::importer::ImportedScenePackedDraw> draws;
@@ -582,24 +653,71 @@ bool loadGoodspringsActors(
         }
 
         BuiltBase& built = builtByBase[resolved.resolvedBaseFormId];
+        std::string why;
         if (built.character.vertices.empty() && !built.ok) {
-            std::string why;
+            std::string skeletonPath = resolved.skeletonPath;
             built.ok = buildSkinnedActor(
-                assets, resolved.skeletonPath, resolved.bodyPartPaths, built.character,
+                assets, skeletonPath, resolved.bodyPartPaths, built.character,
                 built.textures, built.draws, why);
+            if (!built.ok) {
+                // A CUSTOM RACE OFTEN DECLARES A SKELETON IT DOES NOT SHIP.
+                // Willow's race names characters\willow race\skeleton.nif and
+                // her 258 MB archive contains 154 meshes and no skeleton at all:
+                // the race is a copy of the human one, and the human skeleton is
+                // what it expects to be rigged against. Every human body part in
+                // the game is weighted to that same skeleton, so substituting it
+                // is not a guess -- it is the only rig those parts can bind to.
+                //
+                // Only after the declared path has actually been tried, so a
+                // race that does ship its own is never overridden by this.
+                constexpr const char* kHumanSkeleton = "characters\\_male\\skeleton.nif";
+                if (skeletonPath != kHumanSkeleton) {
+                    std::string fallbackWhy;
+                    const bool fallbackOk = buildSkinnedActor(
+                        assets, kHumanSkeleton, resolved.bodyPartPaths, built.character,
+                        built.textures, built.draws, fallbackWhy);
+                    if (fallbackOk) {
+                        VOX_LOGI("newvegas")
+                            << "actor "
+                            << (resolved.base != nullptr ? resolved.base->editorId : "<unnamed>")
+                            << ": skeleton " << skeletonPath
+                            << " unavailable, rigged against " << kHumanSkeleton;
+                        skeletonPath = kHumanSkeleton;
+                        built.ok = true;
+                    } else {
+                        why += "; human-skeleton fallback also failed: " + fallbackWhy;
+                    }
+                }
+            }
+            built.skeletonPath = skeletonPath;
             if (built.ok) {
                 std::string clipWhy;
                 built.hasClip = loadActorIdleClip(
-                    assets, resolved.skeletonPath, built.character.skeleton, builtByBase.size(),
+                    assets, built.skeletonPath, built.character.skeleton, builtByBase.size(),
                     built.idleClip, clipWhy);
                 const bool female = resolved.base != nullptr && resolved.base->isFemale;
                 built.hasWalk = loadActorWalkClip(
-                    assets, resolved.skeletonPath, built.character.skeleton, female,
+                    assets, built.skeletonPath, built.character.skeleton, female,
                     built.walkClip, built.walkSpeed, clipWhy);
             }
         }
         if (!built.ok) {
             ++outStats.skippedBuildFailed;
+            // The reason was being collected and thrown away, which made an
+            // unbuildable actor a number with no cause -- and for one the user
+            // deliberately asked to spawn, the cause is the whole message.
+            VOX_LOGW("newvegas")
+                << "actor base 0x" << std::hex << placement.baseFormId << std::dec
+                << " ("
+                << (resolved.base != nullptr && !resolved.base->editorId.empty()
+                        ? resolved.base->editorId
+                        : "<unnamed>")
+                << ") could not be built: " << (why.empty() ? "no reason given" : why)
+                << "\n    skeleton: " << resolved.skeletonPath << "\n    parts ("
+                << resolved.bodyPartPaths.size() << "):";
+            for (const std::string& part : resolved.bodyPartPaths) {
+                VOX_LOGW("newvegas") << "      " << part;
+            }
             continue;
         }
 

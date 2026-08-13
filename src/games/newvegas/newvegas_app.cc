@@ -2387,7 +2387,8 @@ bool NewVegasApp::initStreaming() {
                 const float engineCentre[3] = {m_cameraX, m_cameraY, m_cameraZ};
                 float bethesdaCentre[3] = {};
                 importer::fnv::CellStreamer::engineToFallout(engineCentre, bethesdaCentre);
-                const float centreXY[2] = {bethesdaCentre[0], bethesdaCentre[1]};
+                const float centreXY[3] = {
+                    bethesdaCentre[0], bethesdaCentre[1], bethesdaCentre[2]};
                 ActorPopulationStats actorStats;
                 loadGoodspringsActors(
                     dataPath / m_streamPlugin,
