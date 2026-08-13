@@ -167,6 +167,21 @@ Two traps, both silent:
   dropped straight back to vanilla resolution — full I/O cost, zero visual change. Set it
   to `1024` to actually see the pack. Memory goes as the square (BC1 1024² with mips is
   683 KB against 171 KB at 512), so this is the first knob to turn down on an iGPU.
+
+  **What raising it actually buys is less ALIASING, not more detail — and it is not a
+  vanilla no-op.** Measured on a pinned unmodded Goodsprings frame, 512 → 1024 moves 39.6%
+  of pixels (mean |Δ| 15.8), and local texel contrast *falls*: 11.23 → 8.50 on the
+  Prospector Saloon, 13.48 → 9.77 on a shack and road. Smoother, not sharper. The reading
+  that fits: mip-dropping removes the TOP of the chain, so for a given screen footprint the
+  sampler lands on a relatively more-detailed level and shimmers more; restoring the full
+  chain settles it. Expect the balance to favour 1024 up close, where the extra texels
+  actually resolve.
+
+  Two corrections to the intuition this section used to invite. Vanilla art is a **mix**,
+  not all ≤512 — `NV_WaterTank.dds` is 512 but `NV_ProspectorSaloon.dds` is 1024 — so the
+  ceiling changes an unmodded scene too. And a full-frame sharpness proxy is the wrong
+  instrument here: edge energy reads *higher* at 512 (3106 vs 1908), which is the aliasing
+  being counted as detail. Compare crops on a known 1024-source asset instead.
 - **Cached cells bake their textures in.** The mod set and the ceiling are folded into the
   cell-cache directory name, so installing a pack lands on a fresh cache rather than
   serving vanilla art forever. Nothing is deleted — the old cache directory just stops
