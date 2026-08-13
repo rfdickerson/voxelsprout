@@ -133,6 +133,11 @@ struct FalloutWeatherTables {
     std::unordered_map<std::uint32_t, FalloutClimateRecord> climates;
     // WRLD -> its CNAM climate, so a worldspace can name the weathers it runs.
     std::unordered_map<std::uint32_t, std::uint32_t> climateByWorldspaceFormId;
+    // Lowercased WRLD EditorID -> its formID. Without this the map above can be
+    // read but not ADDRESSED: a caller knows it is streaming "WastelandNV", not
+    // which formID that is, and picking any entry gets the wrong climate the
+    // moment more than one worldspace is loaded.
+    std::unordered_map<std::string, std::uint32_t> worldspaceFormIdByEditorId;
     // Lowercased editor ID -> formID, for both weathers and climates. Naming a
     // weather is how a human picks one; formIDs move when the load order does.
     std::unordered_map<std::string, std::uint32_t> weatherFormIdByEditorId;

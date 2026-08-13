@@ -1157,17 +1157,41 @@ void NewVegasApp::initWeather() {
     }
 
     if (m_activeWeatherFormId == 0u) {
-        // Fall back to the worldspace's own climate: whichever of its weathers
-        // has the highest chance is the closest thing to "what you would
-        // normally see here" without running the mod's selection scripts.
+        // Fall back to the climate of the worldspace WE ARE STREAMING: whichever
+        // of its weathers has the highest chance is the closest thing to "what
+        // you would normally see here" without running the mod's selection
+        // scripts.
+        //
+        // This used to walk climateByWorldspaceFormId and take the first entry
+        // that had any weathers, discarding the worldspace key entirely. With
+        // FalloutNV.esm alone that is survivable -- there is not much to pick
+        // wrongly from. Add a plugin that pulls the DLCs in as masters, which
+        // any "base game + all DLC" patch does, and the first entry in an
+        // unordered_map became Lonesome Road's NVDLC04NukedClimate: the Mojave
+        // rendered under the Divide's irradiated sky, green from horizon to
+        // zenith. The map is keyed by worldspace precisely so it can be asked
+        // about ONE worldspace, and the fix is to ask.
         const importer::fnv::FalloutClimateRecord* bestClimate = nullptr;
-        for (const auto& [worldspaceFormId, climateFormId] :
-             m_weatherTables.climateByWorldspaceFormId) {
-            (void)worldspaceFormId;
-            const auto found = m_weatherTables.climates.find(climateFormId);
-            if (found != m_weatherTables.climates.end() && !found->second.weathers.empty()) {
-                bestClimate = &found->second;
-                break;
+        const auto worldspaceIt = m_weatherTables.worldspaceFormIdByEditorId.find(
+            toLowerAscii(m_streamWorldspace));
+        if (worldspaceIt == m_weatherTables.worldspaceFormIdByEditorId.end()) {
+            VOX_LOGW("newvegas") << "weather: no worldspace record named \"" << m_streamWorldspace
+                                 << "\"; leaving the procedural sky alone";
+        } else {
+            const auto climateIt =
+                m_weatherTables.climateByWorldspaceFormId.find(worldspaceIt->second);
+            if (climateIt == m_weatherTables.climateByWorldspaceFormId.end()) {
+                VOX_LOGW("newvegas") << "weather: worldspace " << m_streamWorldspace
+                                     << " names no climate; leaving the procedural sky alone";
+            } else {
+                const auto found = m_weatherTables.climates.find(climateIt->second);
+                if (found == m_weatherTables.climates.end() || found->second.weathers.empty()) {
+                    VOX_LOGW("newvegas")
+                        << "weather: climate for " << m_streamWorldspace
+                        << " is missing or lists no weathers; leaving the procedural sky alone";
+                } else {
+                    bestClimate = &found->second;
+                }
             }
         }
         if (bestClimate != nullptr) {

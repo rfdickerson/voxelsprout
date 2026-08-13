@@ -197,6 +197,10 @@ bool buildFalloutWeatherTables(
 
             if (record.type == "WRLD") {
                 for (const EsmSubrecordView& sub : record.subrecords) {
+                    if (sub.type == "EDID") {
+                        outTables.worldspaceFormIdByEditorId[toLowerAsciiCopy(
+                            readZeroTerminated(sub))] = formId;
+                    }
                     // On a WRLD, CNAM is the climate -- not the cloud texture it
                     // means on a WTHR. Same four bytes, different record.
                     if (sub.type == "CNAM" && sub.size >= 4u) {
