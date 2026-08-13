@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <map>
+#include <iostream>
 #include <unordered_map>
 #include <vector>
 
@@ -310,6 +312,8 @@ bool buildSpeakerDialogueTreesImpl(
     // the most recent DIAL is enough to know each response's topic -- no group
     // bookkeeping required.
     std::unordered_map<std::uint32_t, std::string> topicPlayerText;
+    std::unordered_map<std::uint32_t, std::string> topicEditorId;
+    std::unordered_map<std::uint32_t, std::uint8_t> topicType;
     std::unordered_map<std::uint32_t, std::vector<RawInfo>> infosBySpeaker;
     std::uint32_t currentTopic = 0;
     std::uint32_t topicsSeen = 0;
@@ -336,6 +340,25 @@ bool buildSpeakerDialogueTreesImpl(
         };
         currentTopic = 0u;  // a topic does not carry across plugins
         EsmReader::Visitor visitor;
+        // A topic's INFOs live in its TOPIC CHILDREN group (type 7), whose label
+        // is the owning DIAL's formID. Taking the topic from the group rather
+        // than from "the last DIAL record seen" is what makes an override
+        // plugin work: a mod that adds lines to a shared topic ships the child
+        // group and NOT the DIAL, so the record-order heuristic attributes every
+        // one of them to whatever topic happened to precede them.
+        //
+        // Willow is exactly that case. Her plugin defines no GREETING topic --
+        // her 84 greeting lines hang under the base game's -- so her greeting
+        // was being filed under an unrelated topic and could never be found.
+        constexpr std::int32_t kTopicChildrenGroup = 7;
+        visitor.onGroupEnter = [&](const EsmGroupView& group) {
+            if (group.groupType == kTopicChildrenGroup && group.rawLabel.size() == 4u) {
+                std::uint32_t topicFormId = 0;
+                std::memcpy(&topicFormId, group.rawLabel.data(), 4u);
+                currentTopic = remap(topicFormId);
+            }
+            return true;
+        };
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "DIAL" || header.type == "INFO";
         };
@@ -346,6 +369,17 @@ bool buildSpeakerDialogueTreesImpl(
                 for (const auto& sub : record.subrecords) {
                     if (sub.type == "FULL") {
                         topicPlayerText[currentTopic] = subrecordString(sub);
+                    } else if (sub.type == "EDID") {
+                        // The EditorID, NOT the player-facing FULL. A greeting
+                        // has no FULL at all -- the player never picks it, the
+                        // game opens on it -- so FULL cannot identify one.
+                        topicEditorId[currentTopic] = subrecordString(sub);
+                    } else if (sub.type == "DATA" && sub.size >= 1u) {
+                        // Byte 0 is the dialogue TYPE: 0 Topic, 1 Conversation,
+                        // 2 Combat, 3 Persuasion, 4 Detection, 5 Service,
+                        // 6 Miscellaneous. Only type 0 is something a player
+                        // can be shown; the rest are barks the game triggers.
+                        topicType[currentTopic] = sub.data[0];
                     }
                 }
                 return;
@@ -500,18 +534,61 @@ bool buildSpeakerDialogueTreesImpl(
             tree.nodes.emplace(node.id, std::move(node));
         }
 
-        // Open on a GREETING, which is what the game does. Falls back to any
-        // node so a speaker whose greeting is gated still yields a usable tree.
+        // Open on a GREETING, which is what the game does.
+        //
+        // Matched on the topic's EDITOR ID. This used to compare the topic's
+        // FULL against "greeting", which a greeting never has: FULL is the line
+        // the PLAYER picks, and nobody picks a greeting -- the game opens on it.
+        // So the test never fired for anyone and every speaker fell through to
+        // "first INFO seen". On a companion with 209 topics that meant Willow
+        // opened on a line addressed to another NPC entirely.
         for (const RawInfo& info : infos) {
-            const auto textIt = topicPlayerText.find(info.topicFormId);
-            if (textIt != topicPlayerText.end() &&
-                toLowerAsciiCopy(textIt->second) == "greeting") {
+            const auto edidIt = topicEditorId.find(info.topicFormId);
+            if (edidIt != topicEditorId.end() && toLowerAsciiCopy(edidIt->second) == "greeting") {
                 tree.startNode = nodeIdFor(info.formId);
                 break;
             }
         }
+        // No greeting: prefer a real TOPIC over a bark. Types 1-6 are lines the
+        // game fires at combat, detection or idle chatter -- "Attack",
+        // "IdleChatter", "HELLO" -- and opening a conversation on one is how a
+        // companion greets you by shouting mid-fight dialogue.
+        if (tree.startNode.empty()) {
+            for (const RawInfo& info : infos) {
+                const auto typeIt = topicType.find(info.topicFormId);
+                if (typeIt != topicType.end() && typeIt->second == 0u) {
+                    tree.startNode = nodeIdFor(info.formId);
+                    break;
+                }
+            }
+        }
+        // Still nothing: a speaker whose every line is a bark still yields a
+        // usable tree rather than none.
         if (tree.startNode.empty()) {
             tree.startNode = nodeIdFor(infos.front().formId);
+        }
+        // ODAI_FNV_DIALOGUE_DEBUG names the topics a speaker's lines hang under.
+        // "which topic did the entry line come from" is otherwise unanswerable
+        // from outside, and it is the only thing that distinguishes a greeting
+        // that was not found from one that does not exist.
+        if (std::getenv("ODAI_FNV_DIALOGUE_DEBUG") != nullptr) {
+            std::map<std::string, std::size_t> byTopic;
+            for (const RawInfo& info : infos) {
+                const auto edidIt = topicEditorId.find(info.topicFormId);
+                char key[32] = {};
+                std::snprintf(key, sizeof(key), "0x%08X", info.topicFormId);
+                byTopic[edidIt != topicEditorId.end() ? edidIt->second : std::string(key)] += 1u;
+            }
+            std::cerr << "[fnv] dialogue " << speakerName << ": " << infos.size()
+                      << " lines over " << byTopic.size() << " topics; start=" << tree.startNode
+                      << "\n";
+            std::size_t shown = 0;
+            for (const auto& [topic, count] : byTopic) {
+                if (shown++ >= 8u) {
+                    break;
+                }
+                std::cerr << "[fnv]     " << topic << " x" << count << "\n";
+            }
         }
         tree.id = speakerName;
         outTrees.emplace(speakerFormId, std::move(tree));
