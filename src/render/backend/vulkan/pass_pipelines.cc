@@ -1215,6 +1215,7 @@ bool RendererBackend::createAoPipelines() {
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
         if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
@@ -1224,6 +1225,10 @@ bool RendererBackend::createAoPipelines() {
         if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticNormalDepthPipelineTwoSided, nullptr);
+            importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
         }
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedWaterNormalDepthPipeline, nullptr);
@@ -1511,6 +1516,32 @@ bool RendererBackend::createAoPipelines() {
         return false;
     }
 
+    // Two-sided variant. The prepass batches are already split on two-sidedness
+    // (frame_draws.cc buckets by it) but had no pipeline to switch to, so thin
+    // DRAW_BOTH geometry -- window glass, foliage cards, awnings -- wrote depth
+    // and normals for its front faces only, and SSAO then saw a different
+    // silhouette than the lit pass did.
+    VkPipelineRasterizationStateCreateInfo importedNormalDepthTwoSidedRasterizer = rasterizer;
+    importedNormalDepthTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    pipelineCreateInfo.pRasterizationState = &importedNormalDepthTwoSidedRasterizer;
+    const VkResult importedNormalDepthTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &importedStaticNormalDepthPipelineTwoSided
+    );
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    if (importedNormalDepthTwoSidedResult != VK_SUCCESS) {
+        logVkFailure(
+            "vkCreateGraphicsPipelines(importedStaticNormalDepthTwoSided)",
+            importedNormalDepthTwoSidedResult);
+        destroyNewPipelines();
+        destroyShaderModules(m_device, shaderModules);
+        return false;
+    }
+
     VkPipelineShaderStageCreateInfo importedWaterNormalDepthStageInfos[2]{};
     importedWaterNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     importedWaterNormalDepthStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1574,6 +1605,9 @@ bool RendererBackend::createAoPipelines() {
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipeline, nullptr);
     }
+    if (m_importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipelineTwoSided, nullptr);
+    }
     if (m_importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedWaterNormalDepthPipeline, nullptr);
     }
@@ -1581,6 +1615,7 @@ bool RendererBackend::createAoPipelines() {
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
+    m_importedStaticNormalDepthPipelineTwoSided = importedStaticNormalDepthPipelineTwoSided;
     m_importedWaterNormalDepthPipeline = importedWaterNormalDepthPipeline;
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
@@ -2505,6 +2540,64 @@ bool RendererBackend::createGraphicsPipeline() {
         // Not fatal: the shadow pass falls back to the full-stride pipeline.
     }
     m_importedStaticShadowCompactPipeline = importedStaticShadowCompactPipeline;
+
+    // Two-sided shadow casters. A thin DRAW_BOTH surface -- a sign, a fence
+    // panel, a foliage card -- has only one wound face, so with back-face
+    // culling on it casts a shadow from one side and nothing from the other,
+    // which reads as the shadow blinking out as the sun crosses it. Both vertex
+    // strides need their own variant because the shadow pass picks between them
+    // per cascade. Neither is fatal to miss: the draw falls back to the
+    // one-sided pipeline, which is exactly today's behaviour.
+    VkPipelineRasterizationStateCreateInfo importedShadowTwoSidedRasterizer = shadowRasterizer;
+    importedShadowTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo importedShadowTwoSidedCreateInfo = importedShadowPipelineCreateInfo;
+    importedShadowTwoSidedCreateInfo.pRasterizationState = &importedShadowTwoSidedRasterizer;
+    VkPipeline importedStaticShadowPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult importedShadowTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &importedShadowTwoSidedCreateInfo,
+        nullptr,
+        &importedStaticShadowPipelineTwoSided
+    );
+    if (importedShadowTwoSidedResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticShadowTwoSided)", importedShadowTwoSidedResult);
+        if (importedStaticShadowPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticShadowPipelineTwoSided, nullptr);
+            importedStaticShadowPipelineTwoSided = VK_NULL_HANDLE;
+        }
+    }
+    if (m_importedStaticShadowPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticShadowPipelineTwoSided, nullptr);
+    }
+    m_importedStaticShadowPipelineTwoSided = importedStaticShadowPipelineTwoSided;
+
+    VkGraphicsPipelineCreateInfo importedShadowCompactTwoSidedCreateInfo =
+        importedShadowCompactPipelineCreateInfo;
+    importedShadowCompactTwoSidedCreateInfo.pRasterizationState = &importedShadowTwoSidedRasterizer;
+    VkPipeline importedStaticShadowCompactPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult importedShadowCompactTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &importedShadowCompactTwoSidedCreateInfo,
+        nullptr,
+        &importedStaticShadowCompactPipelineTwoSided
+    );
+    if (importedShadowCompactTwoSidedResult != VK_SUCCESS) {
+        logVkFailure(
+            "vkCreateGraphicsPipelines(importedStaticShadowCompactTwoSided)",
+            importedShadowCompactTwoSidedResult);
+        if (importedStaticShadowCompactPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticShadowCompactPipelineTwoSided, nullptr);
+            importedStaticShadowCompactPipelineTwoSided = VK_NULL_HANDLE;
+        }
+    }
+    if (m_importedStaticShadowCompactPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticShadowCompactPipelineTwoSided, nullptr);
+    }
+    m_importedStaticShadowCompactPipelineTwoSided = importedStaticShadowCompactPipelineTwoSided;
 
     destroyShaderModules(m_device, importedShadowShaderModules);
     if (importedShadowPipelineResult != VK_SUCCESS) {

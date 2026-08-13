@@ -140,6 +140,13 @@ public:
     // definition for why this is a reset rather than a bypass.
     void setNeutralColorGrading();
     [[nodiscard]] bool isAutoExposureEnabled() const;
+    // Replaces the shaded frame with a single visualization of what the main
+    // pass shaded with -- see DebugView. Off by default and free when off: the
+    // mode rides in an already-spare camera-uniform channel and every consumer
+    // is behind a "!= Off" branch, so an unset view compiles to the same work
+    // the shader always did. Call any time after init().
+    void setDebugView(DebugView view);
+    [[nodiscard]] DebugView debugView() const;
     void setVoxelGiEnabled(bool enabled);
     [[nodiscard]] bool isVoxelGiEnabled() const;
     // App-level opt-out of the sun shaft pass (a 20-tap radial march per pixel at AO

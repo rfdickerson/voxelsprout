@@ -1381,12 +1381,34 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         }
     }
 
+    // Gamebryo properties INHERIT down the scene graph: a NiAlphaProperty or
+    // NiStencilProperty on a NiNode applies to every shape beneath it, not just
+    // to the node itself. Walking only a shape's own property list therefore
+    // misses them entirely, and a missed alpha property is not a subtle error --
+    // the shape renders fully opaque, showing the black that Fallout's DDS files
+    // carry underneath their transparent texels. That is the "black polygons on
+    // the saloon sign" symptom.
+    //
+    // It used to be masked: applyTextureAlphaCutoutFlags inferred a cutout from
+    // texture CONTENT and happened to catch these. That inference is off for
+    // this importer now (ImportedScene::alphaFlagsAuthored, set by cell_builder)
+    // because it also forced alpha test onto authored-opaque shapes sharing a
+    // texture with a real cutout, so nothing covers the gap any more.
+    //
+    // Carried as the accumulated ref list rather than as resolved flags, so the
+    // shape's own resolution loop handles an inherited property with exactly
+    // the same code it handles its own with.
+    std::vector<std::vector<std::int32_t>> inheritedPropertyStack;
+    inheritedPropertyStack.assign(stack.size(), std::vector<std::int32_t>{});
+
     std::vector<bool> visited(numBlocks, false);
     while (!stack.empty()) {
         const std::size_t blockIndex = stack.back();
         const Mat4 parentTransform = transformStack.back();
+        std::vector<std::int32_t> inheritedProperties = std::move(inheritedPropertyStack.back());
         stack.pop_back();
         transformStack.pop_back();
+        inheritedPropertyStack.pop_back();
 
         if (blockIndex >= numBlocks || visited[blockIndex]) {
             continue;  // guards against malformed/cyclic child references
@@ -1398,10 +1420,18 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         const Mat4 worldTransform = multiply(parentTransform, localTransform);
 
         if (isNiNode[blockIndex]) {
+            // What this node contributes to everything below it: whatever it
+            // inherited, plus its own properties.
+            std::vector<std::int32_t> childInherited = inheritedProperties;
+            childInherited.insert(
+                childInherited.end(),
+                nodeFields[blockIndex].properties.begin(),
+                nodeFields[blockIndex].properties.end());
             for (const std::int32_t child : nodeFields[blockIndex].children) {
                 if (child >= 0 && static_cast<std::size_t>(child) < numBlocks) {
                     stack.push_back(static_cast<std::size_t>(child));
                     transformStack.push_back(worldTransform);
+                    inheritedPropertyStack.push_back(childInherited);
                 }
             }
         } else if (isTriShape[blockIndex]) {
@@ -1442,9 +1472,9 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // in the header comment relies on.
             std::string noLightingFallback;
             bool shapeReversedWinding = false;
-            for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
+            const auto applyProperty = [&](std::int32_t propertyRef) {
                 if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
-                    continue;
+                    return;
                 }
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
                 shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
@@ -1464,21 +1494,21 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     }
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
-                    continue;
+                    return;
                 }
                 if (stencilProperties[propertyIndex].valid) {
                     shape.twoSided = shape.twoSided || stencilProperties[propertyIndex].twoSided;
                     shapeReversedWinding =
                         shapeReversedWinding || stencilProperties[propertyIndex].reversedWinding;
                     ++outModel.stencilDrawModeCounts[stencilProperties[propertyIndex].drawMode & 0x3u];
-                    continue;
+                    return;
                 }
                 if (!shape.diffuseTexturePath.empty()) {
-                    continue;
+                    return;
                 }
                 if (!texturingPropertyPaths[propertyIndex].empty()) {
                     shape.diffuseTexturePath = texturingPropertyPaths[propertyIndex];
-                    continue;
+                    return;
                 }
                 // A texture set, when the property has one. Type-validate the
                 // resolved ref: the layout above is read, not guessed, so this
@@ -1489,10 +1519,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
                         shape.diffuseTexturePath = set.textures.front();
                     }
-                    continue;
+                    return;
                 }
                 if (!noLightingTexturePaths[propertyIndex].empty()) {
-                    continue;  // held back; applied after the loop if nothing better won
+                    return;  // held back; applied after the loop if nothing better won
                 }
                 // Record what this actually was. A property that is neither an
                 // alpha property nor something we got a texture out of is
@@ -1507,6 +1537,22 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                         outModel.unresolvedPropertyTypes.push_back(typeName);
                     }
                 }
+            };
+            // The shape's OWN properties first, then the ones inherited from its
+            // ancestors. Order matters and this one is deliberate: the diffuse
+            // texture resolves first-wins, so going own-first means a shape that
+            // resolves a texture today resolves the same texture after this
+            // change, and a parent's texture property can never override a
+            // shape's own. The alpha, stencil and unlit flags accumulate with
+            // ||, so an inherited property can only ever turn one ON for a shape
+            // that had none -- which is the only direction this fix is allowed
+            // to move, since every shape rendering correctly today is a shape
+            // whose own properties already said everything.
+            for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
+                applyProperty(propertyRef);
+            }
+            for (const std::int32_t propertyRef : inheritedProperties) {
+                applyProperty(propertyRef);
             }
             if (shape.diffuseTexturePath.empty() && !noLightingFallback.empty()) {
                 shape.diffuseTexturePath = std::move(noLightingFallback);
@@ -1983,6 +2029,22 @@ bool parseNifSkinnedMesh(
         }
     }
 
+    // Child -> parent, so a shape can collect the properties its ancestors
+    // declare. Unlike the static path this walk is a flat scan over every block
+    // rather than a DFS, so there is no parent on hand to inherit from and one
+    // has to be reconstructed. Same reason as the static path: Gamebryo
+    // properties inherit down the graph, and an alpha property a shape does not
+    // itself carry still applies to it.
+    std::vector<std::int32_t> parentOf(numBlocks, -1);
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        for (const std::int32_t child : nodeFields[i].children) {
+            if (child >= 0 && static_cast<std::size_t>(child) < numBlocks &&
+                parentOf[static_cast<std::size_t>(child)] < 0) {
+                parentOf[static_cast<std::size_t>(child)] = static_cast<std::int32_t>(i);
+            }
+        }
+    }
+
     for (std::size_t blockIndex = 0; blockIndex < numBlocks; ++blockIndex) {
         if (!isTriShape[blockIndex]) {
             continue;
@@ -2032,24 +2094,30 @@ bool parseNifSkinnedMesh(
         shape.uvs = src.uvs;
         shape.triangleIndices = src.triangleIndices;
 
-        for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
+        const auto applySkinnedProperty = [&](std::int32_t propertyRef) {
             if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
-                continue;
+                return;
             }
             const auto propertyIndex = static_cast<std::size_t>(propertyRef);
             shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
             if (alphaProperties[propertyIndex].valid) {
-                shape.alphaTest = alphaProperties[propertyIndex].alphaTest;
-                shape.alphaBlend = alphaProperties[propertyIndex].alphaBlend;
-                shape.alphaThreshold = alphaProperties[propertyIndex].alphaThreshold;
-                continue;
+                // Accumulate with ||, matching the static path. This used to
+                // assign, which made it last-property-wins: a second alpha
+                // property on the same shape silently erased the first one's
+                // answer, and the threshold went with it.
+                if (alphaProperties[propertyIndex].alphaTest && !shape.alphaTest) {
+                    shape.alphaThreshold = alphaProperties[propertyIndex].alphaThreshold;
+                }
+                shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
+                shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
+                return;
             }
             if (stencilProperties[propertyIndex].valid) {
-                shape.twoSided = stencilProperties[propertyIndex].twoSided;
-                continue;
+                shape.twoSided = shape.twoSided || stencilProperties[propertyIndex].twoSided;
+                return;
             }
             if (!shape.diffuseTexturePath.empty()) {
-                continue;
+                return;
             }
             const std::int32_t textureSetRef = shaderTextureSetRefs[propertyIndex];
             if (textureSetRef >= 0 && static_cast<std::size_t>(textureSetRef) < numBlocks) {
@@ -2058,6 +2126,22 @@ bool parseNifSkinnedMesh(
                     shape.diffuseTexturePath = set.textures.front();
                 }
             }
+        };
+        // Own properties first, then each ancestor's in turn walking up to the
+        // root -- same own-before-inherited ordering as the static path, for
+        // the same reason: it cannot change any texture that already resolves.
+        // Bounded by numBlocks rather than by reaching a null parent, so a
+        // malformed file with a cyclic child list terminates instead of hanging.
+        for (const std::int32_t propertyRef : nodeFields[blockIndex].properties) {
+            applySkinnedProperty(propertyRef);
+        }
+        std::int32_t ancestor = parentOf[blockIndex];
+        for (std::size_t step = 0; ancestor >= 0 && step < numBlocks; ++step) {
+            const auto ancestorIndex = static_cast<std::size_t>(ancestor);
+            for (const std::int32_t propertyRef : nodeFields[ancestorIndex].properties) {
+                applySkinnedProperty(propertyRef);
+            }
+            ancestor = parentOf[ancestorIndex];
         }
 
         // Bone names, resolved through the instance's node pointers. A name

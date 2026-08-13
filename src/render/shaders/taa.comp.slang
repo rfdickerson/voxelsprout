@@ -53,7 +53,9 @@ struct TaaUniform
 {
     float4x4 invView;       // view space -> world space
     float4x4 prevViewProj;  // last frame's world -> clip
-    // x = history weight (0..1), y = history valid (0 or 1), zw unused.
+    // x = history weight (0..1), y = history valid (0 or 1),
+    // zw = LAST frame's sub-pixel jitter in NDC, which prevViewProj carries and
+    // the history image does not.
     float4 params;
 };
 
@@ -74,9 +76,35 @@ PushConstants pushConstants;
 // Same reconstruction ssao.comp.slang uses, kept textually close on purpose:
 // the two must agree about what .w means or TAA reprojects a different world
 // than AO shaded.
+// RGB <-> YCoCg. The neighbourhood bound below is built in YCoCg because its
+// luma axis is the one the eye judges an edge on: a box fitted in RGB is a cube
+// straddling all three channels and is far looser than the actual distribution
+// of a local neighbourhood, so it lets stale colour through as ghosting. One
+// axis of chroma slack costs nothing visually and tightens luma a lot.
+float3 rgbToYCoCg(float3 c)
+{
+    return float3(
+        (0.25 * c.r) + (0.5 * c.g) + (0.25 * c.b),
+        (0.5 * c.r) - (0.5 * c.b),
+        (-0.25 * c.r) + (0.5 * c.g) - (0.25 * c.b));
+}
+
+float3 yCoCgToRgb(float3 c)
+{
+    const float t = c.x - c.z;
+    return float3(t + c.y, c.x + c.z, t - c.y);
+}
+
 float3 reconstructViewPosition(float2 uv, float viewDepth)
 {
-    const float2 ndcXY = (uv * 2.0) - 1.0;
+    // Take the sub-pixel jitter back out. The colour and depth in front of us
+    // were rasterized through a jittered projection, so the NDC that a texel
+    // centre corresponds to is offset by exactly that jitter -- and this
+    // function's whole job is to invert the projection. Skipping it reprojects
+    // every pixel about half a pixel wrong, every frame, in a direction that
+    // changes each frame: TAA then fights itself and the image softens instead
+    // of sharpening.
+    const float2 ndcXY = ((uv * 2.0) - 1.0) - camera.tonemapConfig2.zw;
     float projX = camera.proj[0][0];
     float projY = camera.proj[1][1];
     if (abs(projX) < 1e-6) projX = (projX < 0.0) ? -1e-6 : 1e-6;
@@ -113,34 +141,68 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float4 previousClip = mul(taa.prevViewProj, float4(worldPosition, 1.0));
         if (previousClip.w > 0.0)
         {
-            const float2 previousUv = ((previousClip.xy / previousClip.w) * 0.5) + 0.5;
+            // Un-jitter with LAST frame's offset, not this one's: prevViewProj
+            // is the matrix that frame rendered with, so its NDC still carries
+            // that frame's jitter, while the history image it addresses is the
+            // resolved result on the fixed output grid and carries none.
+            const float2 previousNdc = (previousClip.xy / previousClip.w) - taa.params.zw;
+            const float2 previousUv = (previousNdc * 0.5) + 0.5;
             if (all(previousUv >= float2(0.0, 0.0)) && all(previousUv <= float2(1.0, 1.0)))
             {
                 float3 history = historyColorTexture.SampleLevel(previousUv, 0.0).rgb;
 
-                // Neighborhood clamp. min/max rather than clamp() so a NaN in
-                // history resolves toward the current frame instead of
-                // propagating -- IEEE min/max return the non-NaN operand.
-                float3 neighborhoodMin = current;
-                float3 neighborhoodMax = current;
+                // VARIANCE CLIPPING (Salvi 2016) in YCoCg, replacing a min/max
+                // box in RGB. The box is the mean of the 3x3 neighbourhood plus
+                // or minus a multiple of its standard deviation, intersected
+                // with the true min/max so a flat neighbourhood still bounds
+                // tightly.
+                //
+                // This matters more than it used to. A min/max box is the
+                // LOOSEST bound the neighbourhood admits -- one bright texel
+                // opens it wide enough to accept nearly any history -- and the
+                // town now walks. Without per-object velocity a moving actor's
+                // history reprojects to where the BACKGROUND was, and only this
+                // bound stands between that and a smear trailing every settler.
+                // Jitter also raises the stakes: it deliberately makes the
+                // current frame differ sub-pixel each frame, which widens a
+                // min/max box further still.
+                float3 momentSum = float3(0.0, 0.0, 0.0);
+                float3 momentSquaredSum = float3(0.0, 0.0, 0.0);
+                float3 neighborhoodMin = float3(1e30, 1e30, 1e30);
+                float3 neighborhoodMax = float3(-1e30, -1e30, -1e30);
                 [unroll]
                 for (int offsetY = -1; offsetY <= 1; ++offsetY)
                 {
                     [unroll]
                     for (int offsetX = -1; offsetX <= 1; ++offsetX)
                     {
-                        if (offsetX == 0 && offsetY == 0)
-                        {
-                            continue;
-                        }
                         const float2 neighborUv = uv + (float2(offsetX, offsetY) * texelSize);
-                        const float3 neighbor =
-                            currentColorTexture.SampleLevel(neighborUv, 0.0).rgb;
+                        const float3 neighbor = rgbToYCoCg(
+                            currentColorTexture.SampleLevel(neighborUv, 0.0).rgb);
+                        momentSum += neighbor;
+                        momentSquaredSum += neighbor * neighbor;
                         neighborhoodMin = min(neighborhoodMin, neighbor);
                         neighborhoodMax = max(neighborhoodMax, neighbor);
                     }
                 }
-                history = min(max(history, neighborhoodMin), neighborhoodMax);
+                const float3 mean = momentSum / 9.0;
+                // max(0) before the sqrt: the two sums are accumulated in float
+                // and a flat neighbourhood can land the variance a hair below
+                // zero, which would make this NaN and poison the pixel forever
+                // through the history.
+                const float3 sigma =
+                    sqrt(max(float3(0.0, 0.0, 0.0), (momentSquaredSum / 9.0) - (mean * mean)));
+                // 1.25 sigma. Lower ghosts less and flickers more; this is the
+                // usual compromise and is the first number to try if the
+                // walking actors trail.
+                const float3 clipMin = max(mean - (1.25 * sigma), neighborhoodMin);
+                const float3 clipMax = min(mean + (1.25 * sigma), neighborhoodMax);
+                // min/max rather than clamp() so a NaN in history resolves
+                // toward the current frame instead of propagating -- IEEE
+                // min/max return the non-NaN operand.
+                const float3 historyYCoCg =
+                    min(max(rgbToYCoCg(history), clipMin), clipMax);
+                history = yCoCgToRgb(historyYCoCg);
                 result = lerp(current, history, historyWeight);
             }
         }

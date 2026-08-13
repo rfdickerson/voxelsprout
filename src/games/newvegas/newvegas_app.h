@@ -52,8 +52,22 @@ public:
     // Normal exploration FOV, and the narrowed one a conversation eases to.
     // 75 -> 55 is a 1.36x magnification: enough that Victor reads as the
     // subject of the shot, gentle enough not to feel like a cutscene.
-    static constexpr float kDefaultFovDegrees = 75.0f;
-    static constexpr float kConversationFovDegrees = 55.0f;
+    //
+    // These are HORIZONTAL, which is what Gamebryo's own fDefaultFOV means and
+    // where the 75 came from. CameraPose::fovDegrees is VERTICAL, so they are
+    // converted against the live aspect ratio before being handed over -- see
+    // verticalFovDegreesFor. Feeding 75 straight in as a vertical FOV, which is
+    // what this used to do, renders ~107 degrees horizontal at 16:9: a good 32
+    // degrees wider than New Vegas itself, which is why building facades
+    // stretched as the camera passed them.
+    //
+    // Converting rather than hardcoding a vertical number keeps it correct on
+    // ultrawide, where a fixed vertical FOV silently widens instead.
+    static constexpr float kDefaultHorizontalFovDegrees = 75.0f;
+    static constexpr float kConversationHorizontalFovDegrees = 55.0f;
+    // fovY = 2 * atan(tan(fovX / 2) / aspect), aspect = width / height.
+    [[nodiscard]] static float verticalFovDegreesFor(
+        float horizontalFovDegrees, float aspectRatio);
 
     void setScenePath(std::string path) { m_scenePath = std::move(path); }
     // Render this many frames, write a PPM capture, then quit. Lets a visual
@@ -242,7 +256,12 @@ private:
     // constant, because the offset that puts his face above the card is a
     // function of FOV: hold one fixed while the other eases and the framing
     // slides during the zoom.
-    float m_cameraFovDegrees = kDefaultFovDegrees;
+    // The LIVE VERTICAL fov, eased toward whichever horizontal constant above
+    // applies. Vertical because that is what the renderer takes and what the
+    // dialogue framing maths is written against (it works in half-heights).
+    // Seeded at the 16:9 conversion of the default so the very first frame,
+    // before a framebuffer size is known, is already close.
+    float m_cameraFovDegrees = 45.0f;
     // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
     // does not only magnify, it throws the background out — the two arriving
     // together is what makes the shot read as a lens rather than as a crop.

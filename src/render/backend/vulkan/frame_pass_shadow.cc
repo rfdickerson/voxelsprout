@@ -282,12 +282,36 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     buildImportedIndirectBatches(
                         cascadeImportedMeshDraws, includeDraw, indirectBuffer, indirectBase);
                 if (useIndirect) {
+                    // Two-sided casters need cull NONE, matching the main pass.
+                    // The variant has to follow the same compact/full stream
+                    // choice the bind above made, since the two pipelines
+                    // differ in vertex input.
+                    const VkPipeline oneSidedShadowPipeline =
+                        useCompactShadowStream ? m_importedStaticShadowCompactPipeline
+                                               : m_importedStaticShadowPipeline;
+                    const VkPipeline twoSidedShadowPipeline =
+                        useCompactShadowStream ? m_importedStaticShadowCompactPipelineTwoSided
+                                               : m_importedStaticShadowPipelineTwoSided;
+                    VkPipeline boundShadowPipeline = oneSidedShadowPipeline;
                     for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        const VkPipeline wantedPipeline =
+                            (batch.twoSided && twoSidedShadowPipeline != VK_NULL_HANDLE)
+                                ? twoSidedShadowPipeline
+                                : oneSidedShadowPipeline;
+                        if (wantedPipeline != boundShadowPipeline) {
+                            vkCmdBindPipeline(
+                                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                            boundShadowPipeline = wantedPipeline;
+                        }
                         pushAlphaThreshold(batch.alphaThreshold);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                             batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                    if (boundShadowPipeline != oneSidedShadowPipeline) {
+                        vkCmdBindPipeline(
+                            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, oneSidedShadowPipeline);
                     }
                 } else {
                     for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
@@ -324,19 +348,35 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants importedPushConstants{};
-                // Neutral alpha-test threshold. Draws that carry an authored one
-                // overwrite this; leaving it zeroed would mean nothing cuts out.
                 importedPushConstants.materialParams[0] = 0.5f;
                 importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &importedPushConstants
-                );
+                // Per draw, so an actor casts the silhouette its own authored
+                // threshold cuts rather than the one 0.5 happens to cut. The
+                // cascade index has to ride along in the same push, which is
+                // why this is a local helper and not the one the static block
+                // above uses.
+                int lastPushedActorThreshold = -1;
+                const auto pushActorAlphaThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastPushedActorThreshold) {
+                        return;
+                    }
+                    lastPushedActorThreshold = static_cast<int>(threshold);
+                    importedPushConstants.materialParams[0] =
+                        static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &importedPushConstants
+                    );
+                };
                 for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
+                    if (importedDraw.blended) {
+                        continue;  // a blended surface casts no opaque shadow
+                    }
+                    pushActorAlphaThreshold(importedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -360,21 +400,32 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
                 ChunkPushConstants skinnedPushConstants{};
-                // Neutral alpha-test threshold. Draws that carry an authored one
-                // overwrite this; leaving it zeroed would mean nothing cuts out.
                 skinnedPushConstants.materialParams[0] = 0.5f;
                 skinnedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &skinnedPushConstants
-                );
+                // Per draw, as in the actor block above.
+                int lastPushedSkinnedThreshold = -1;
+                const auto pushSkinnedAlphaThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastPushedSkinnedThreshold) {
+                        return;
+                    }
+                    lastPushedSkinnedThreshold = static_cast<int>(threshold);
+                    skinnedPushConstants.materialParams[0] =
+                        static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &skinnedPushConstants
+                    );
+                };
                 VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
                 VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
                 for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                    if (skinnedDraw.blended) {
+                        continue;  // a blended surface casts no opaque shadow
+                    }
                     const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
                     const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
                     if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
@@ -390,6 +441,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                         boundSkinnedIndexBuffer = drawIndexBuffer;
                     }
+                    pushSkinnedAlphaThreshold(skinnedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
                 }

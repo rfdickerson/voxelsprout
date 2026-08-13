@@ -33,6 +33,13 @@ static const uint kImportedMaterialFlagAlphaTest = 1u;
 static const uint kImportedMaterialFlagPbr = 4u;
 static const uint kImportedMaterialFlagVertexColorTint = 8u;
 static const uint kImportedMaterialFlagTerrainLayers = 16u;
+// Bits 5 and 6 never affect shading -- the CPU resolves them into a pipeline
+// choice (blend state, cull mode) before the draw is issued, so nothing below
+// reads them. They are declared here only so the MaterialFlags debug view can
+// show what the importer decided, which is the whole question when a surface
+// renders as a black slab where it should be transparent.
+static const uint kImportedMaterialFlagAlphaBlend = 32u;
+static const uint kImportedMaterialFlagTwoSided = 64u;
 // kImportedSceneMaterialFlagUnlit -- BSShaderNoLightingProperty.
 static const uint kImportedMaterialFlagUnlit = 128u;
 static const uint kImportedMaterialRoughnessShift = 8u;
@@ -738,8 +745,131 @@ float sampleImportedCascadedShadow(float3 worldPosition, float3 normal, float vi
     return lerp(shadow, nextShadow, blendT);
 }
 
+// DebugView in src/render/renderer_types.h; change both together. Off is 0 and
+// LinearDepth (10) belongs to the post pass, so nothing here handles it.
+static const uint kDebugViewOff = 0u;
+static const uint kDebugViewAlbedo = 1u;
+static const uint kDebugViewNormal = 2u;
+static const uint kDebugViewAlpha = 3u;
+static const uint kDebugViewMaterialFlags = 4u;
+static const uint kDebugViewRoughness = 5u;
+static const uint kDebugViewMetallic = 6u;
+static const uint kDebugViewMipLevel = 7u;
+static const uint kDebugViewCascadeIndex = 8u;
+static const uint kDebugViewTextureId = 9u;
+
+// A blue->green->yellow->red ramp for scalar views. Monotonic in luminance as
+// well as in hue, so it stays readable for someone who cannot separate the red
+// and green ends -- the value is legible from brightness alone.
+float3 debugRamp(float t)
+{
+    const float s = saturate(t);
+    const float3 cold = lerp(float3(0.05, 0.10, 0.55), float3(0.10, 0.75, 0.35), saturate(s * 2.0));
+    const float3 warm = lerp(float3(0.95, 0.85, 0.15), float3(0.85, 0.10, 0.10), saturate((s - 0.5) * 2.0));
+    return (s < 0.5) ? cold : warm;
+}
+
+// Every view returns a display-ready colour: the post pass skips exposure,
+// tonemapping and grading whenever a debug view is active, so what is returned
+// here reaches the screen through nothing but the sRGB encode.
+float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewDepth)
+{
+    const bool textured = input.inTextureIndex != kInvalidImportedTextureIndex;
+    // Sampled WITHOUT the alpha-test discard in sampleImportedAlbedo. That
+    // discard is exactly what these views exist to inspect, so running it first
+    // would throw away every texel worth looking at.
+    const float4 raw = textured
+        ? bindlessTextures[input.inTextureIndex].Sample(input.inUv)
+        : float4(input.inColor, 1.0);
+
+    if (view == kDebugViewAlbedo)
+    {
+        return float4(raw.rgb, 1.0);
+    }
+    if (view == kDebugViewNormal)
+    {
+        return float4((normal * 0.5) + 0.5, 1.0);
+    }
+    if (view == kDebugViewAlpha)
+    {
+        // Untextured geometry has no alpha channel to show. Flat magenta rather
+        // than white, so "this surface cannot answer the question" never reads
+        // as "this surface is fully opaque".
+        if (!textured)
+        {
+            return float4(0.6, 0.0, 0.6, 1.0);
+        }
+        return float4(raw.aaa, 1.0);
+    }
+    if (view == kDebugViewMaterialFlags)
+    {
+        float3 color = float3(0.0, 0.0, 0.0);
+        if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u) { color.r += 0.9; }
+        if ((input.inFlags & kImportedMaterialFlagAlphaBlend) != 0u) { color.g += 0.9; }
+        if ((input.inFlags & kImportedMaterialFlagTwoSided) != 0u) { color.b += 0.9; }
+        if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u) { color.rg += 0.5; }
+        // Dark grey, not black: a surface with no material flags at all is the
+        // most important case this view reports, and it must be distinguishable
+        // from the background rather than blending into it.
+        if (all(color == float3(0.0, 0.0, 0.0))) { color = float3(0.12, 0.12, 0.14); }
+        return float4(saturate(color), 1.0);
+    }
+    if (view == kDebugViewRoughness || view == kDebugViewMetallic)
+    {
+        float3 tint = float3(1.0, 1.0, 1.0);
+        float3 emissive = float3(0.0, 0.0, 0.0);
+        const PbrSurface surface = resolveImportedMaterial(input.inFlags, tint, emissive);
+        const float value = (view == kDebugViewRoughness) ? surface.roughness : surface.metallic;
+        return float4(debugRamp(value), 1.0);
+    }
+    if (view == kDebugViewMipLevel)
+    {
+        if (!textured)
+        {
+            return float4(0.6, 0.0, 0.6, 1.0);
+        }
+        // Answers whether a blurry surface is a mip-selection problem or simply
+        // a low-resolution source. Ramped over 8 levels, which covers the whole
+        // chain of a 512-1024px Fallout texture.
+        const float lod = bindlessTextures[input.inTextureIndex].CalculateLevelOfDetail(input.inUv);
+        return float4(debugRamp(lod / 8.0), 1.0);
+    }
+    if (view == kDebugViewCascadeIndex)
+    {
+        const int cascade = chooseShadowCascade(viewDepth);
+        return float4(debugRamp(float(cascade) / 3.0), 1.0);
+    }
+    if (view == kDebugViewTextureId)
+    {
+        if (!textured)
+        {
+            return float4(0.6, 0.0, 0.6, 1.0);
+        }
+        // Hashed rather than ramped: adjacent bindless slots are unrelated
+        // surfaces, so neighbouring values must look different, not similar.
+        const uint h = (input.inTextureIndex * 2654435761u) ^ 0x9e3779b9u;
+        return float4(
+            float((h >> 0u) & 0xffu) / 255.0,
+            float((h >> 8u) & 0xffu) / 255.0,
+            float((h >> 16u) & 0xffu) / 255.0,
+            1.0);
+    }
+    return float4(1.0, 0.0, 1.0, 1.0);
+}
+
 float4 main(FragmentInput input) : SV_Target0
 {
+    // Debug views replace the frame outright and deliberately run before the
+    // unlit early-out and every lighting term below -- an "albedo" view that
+    // still went through the self-lit branch would not be albedo.
+    const uint debugView = uint(camera.tonemapConfig2.y + 0.5);
+    if (debugView != kDebugViewOff)
+    {
+        const float3 debugNormal = normalize(input.inWorldNormal);
+        const float debugViewDepth =
+            max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
+        return debugViewColor(input, debugView, debugNormal, debugViewDepth);
+    }
     const float4 albedoFull = sampleImportedAlbedo(input);
     if (chunkPc.cascadeData.w > 0.5) {
         return float4(saturate(albedoFull.rgb * 1.25), 1.0);

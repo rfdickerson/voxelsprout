@@ -497,6 +497,12 @@ void RendererBackend::renderFrame(
         ImGui::NewFrame();
         buildFrameStatsUi();
         buildDofDebugUi();
+        // These two were written but never called from anywhere in the frame
+        // path, which left the whole shadow/AO and sun/sky/post tuning surface
+        // built and unreachable. Both early-out on m_debugUiVisible exactly as
+        // the two above do, so this costs nothing while the debug UI is closed.
+        buildShadowDebugUi();
+        buildSunDebugUi();
         m_debugUiVisible = m_showFrameStatsPanel;
         ImGui::Render();
     }
@@ -546,6 +552,71 @@ void RendererBackend::renderFrame(
     } else {
         projection = perspectiveVulkan(odai::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
     }
+    // SUB-PIXEL JITTER. Each frame the projection is nudged by a fraction of a
+    // pixel, so consecutive frames sample the scene on different sub-pixel
+    // grids and TAA's history accumulation becomes supersampling rather than
+    // just a temporal average. Without it TAA suppresses texture shimmer (what
+    // it was written for) but cannot refine an EDGE: every frame samples the
+    // same point inside the same pixel, so the edge is the same staircase each
+    // time and averaging identical staircases changes nothing.
+    //
+    // Halton(2,3) rather than random: it is low-discrepancy, so a short window
+    // of frames covers the pixel evenly instead of clumping the way white noise
+    // does. 8 phases, which is what the history weight below converges over.
+    //
+    // Gated on TAA being ON. Jitter with no temporal filter to resolve it is
+    // pure per-frame wobble -- strictly worse than not jittering.
+    // ODAI_TAA_JITTER=0 disables it while keeping TAA, which is the control for
+    // "is this artifact the jitter or the accumulation", and is also what a
+    // screenshot diff wants: jitter makes consecutive frames differ BY DESIGN.
+    // Snapshot last frame's jitter BEFORE this frame's overwrites it, exactly
+    // as prevViewProj is snapshotted below and for the same reason: the two
+    // describe the same past frame, and reading either one late silently makes
+    // it this frame's, which is not an error anything reports -- it just
+    // reprojects half a pixel wrong forever.
+    const std::array<float, 2> previousFrameJitterNdc = m_taaJitterNdc;
+    float jitterNdcX = 0.0f;
+    float jitterNdcY = 0.0f;
+    if (m_taaEnabled && m_taaJitterEnabled && !camera.orthographic) {
+        // Radical inverse in base b -- Halton's definition, written out because
+        // it is three lines and a table would need the same comment anyway.
+        const auto halton = [](std::uint32_t index, std::uint32_t base) {
+            float result = 0.0f;
+            float invBase = 1.0f / static_cast<float>(base);
+            float fraction = invBase;
+            while (index > 0u) {
+                result += static_cast<float>(index % base) * fraction;
+                index /= base;
+                fraction *= invBase;
+            }
+            return result;
+        };
+        constexpr std::uint32_t kJitterPhaseCount = 8u;
+        const std::uint32_t phase = (m_taaJitterPhase % kJitterPhaseCount) + 1u;
+        // Halton is [0,1); centre it so the offsets straddle the pixel centre.
+        const float offsetPixelsX = halton(phase, 2u) - 0.5f;
+        const float offsetPixelsY = halton(phase, 3u) - 0.5f;
+        // Pixels -> NDC. NDC spans 2 units across the render extent, so one
+        // pixel is 2/extent -- and this is the RENDER extent, not the
+        // swapchain's, because that is the grid the scene is rasterized on.
+        const float renderWidth = static_cast<float>(std::max(1u, m_renderExtent.width));
+        const float renderHeight = static_cast<float>(std::max(1u, m_renderExtent.height));
+        jitterNdcX = (offsetPixelsX * 2.0f) / renderWidth;
+        jitterNdcY = (offsetPixelsY * 2.0f) / renderHeight;
+        // clip.w is -view.z here (perspectiveVulkan sets (3,2) = -1), so adding
+        // -jitter to the column that multiplies view.z shifts clip.xy by
+        // jitter*clip.w -- i.e. a constant offset in NDC at every depth, which
+        // is what a sub-pixel sample offset is. Doing it in the matrix rather
+        // than by offsetting UVs keeps depth, normals and colour all rasterized
+        // on the SAME jittered grid, which is what makes them reprojectable
+        // together.
+        projection(0, 2) += -jitterNdcX;
+        projection(1, 2) += -jitterNdcY;
+        ++m_taaJitterPhase;
+    }
+    m_taaJitterNdc[0] = jitterNdcX;
+    m_taaJitterNdc[1] = jitterNdcY;
+
     const odai::math::Matrix4 mvp = projection * view;
     const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
     // TAA reprojection inputs. The column-major copies go to the shader (same
@@ -558,6 +629,8 @@ void RendererBackend::renderFrame(
     }
     const bool taaPrevWasValid = m_taaPrevViewProjValid;
     (void)taaPrevWasValid;
+    // Rolled with prevViewProj: the two describe the same past frame.
+    m_taaPrevJitterNdc = previousFrameJitterNdc;
     m_taaPrevViewProj = mvp;
     m_taaPrevViewProjValid = true;
     const odai::math::Matrix4 viewColumnMajor = transpose(view);
@@ -1197,9 +1270,9 @@ void RendererBackend::renderFrame(
     mvpUniform.tonemapConfig[2] = m_tonemapSettings.saturation;
     mvpUniform.tonemapConfig[3] = m_tonemapSettings.curve;
     mvpUniform.tonemapConfig2[0] = m_tonemapSettings.overbrightDampening;
-    mvpUniform.tonemapConfig2[1] = 0.0f;
-    mvpUniform.tonemapConfig2[2] = 0.0f;
-    mvpUniform.tonemapConfig2[3] = 0.0f;
+    mvpUniform.tonemapConfig2[1] = static_cast<float>(static_cast<std::uint32_t>(m_debugView));
+    mvpUniform.tonemapConfig2[2] = m_taaJitterNdc[0];
+    mvpUniform.tonemapConfig2[3] = m_taaJitterNdc[1];
     mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceR, 0.0f, 4.0f);
     mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceG, 0.0f, 4.0f);
     mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceB, 0.0f, 4.0f);
@@ -2049,6 +2122,64 @@ void RendererBackend::renderFrame(
             importedActorVertexBuffer = m_bufferAllocator.getBuffer(importedActorVertexSliceOpt->buffer);
             importedActorIndexBuffer = m_bufferAllocator.getBuffer(importedActorIndexSliceOpt->buffer);
             importedActorMeshDraws.reserve(importedActors->draws.size());
+            // Per-draw material state, derived exactly as the static scene path
+            // does it in chunk_upload.cc: the authored alpha-test threshold off
+            // the packed draw, and blend/two-sidedness off the draw's first
+            // vertex (they are per-vertex flags but uniform across a draw,
+            // because a draw is one NIF shape's triangles).
+            //
+            // This used to fill in firstIndex and indexCount alone and leave
+            // everything else at its default, which meant every actor was
+            // alpha-tested at 0.5 whatever its NIF said, no actor part was ever
+            // two-sided, and an alpha-BLENDED part rendered through the opaque
+            // pipeline -- showing the black that sits under its transparent
+            // texels instead of the background.
+            auto actorDrawFlags = [&](const odai::importer::ImportedScenePackedDraw& srcDraw) {
+                if (srcDraw.firstIndex >= importedActors->indices.size()) {
+                    return 0u;
+                }
+                const std::uint32_t vertexIndex = importedActors->indices[srcDraw.firstIndex];
+                if (vertexIndex >= importedActors->vertices.size()) {
+                    return 0u;
+                }
+                return importedActors->vertices[vertexIndex].flags;
+            };
+            // AABB centre over the draw's own vertices, for the back-to-front
+            // blended sort. Computed only for blended draws, for the same
+            // reason the static path does: it exists purely to sort them.
+            auto actorDrawCenter = [&](const odai::importer::ImportedScenePackedDraw& srcDraw,
+                                       float (&outCenter)[3]) {
+                float boundsMin[3] = {
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max()};
+                float boundsMax[3] = {
+                    std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::lowest()};
+                const std::size_t lastIndex = std::min<std::size_t>(
+                    static_cast<std::size_t>(srcDraw.firstIndex) + srcDraw.indexCount,
+                    importedActors->indices.size());
+                bool sawVertex = false;
+                for (std::size_t i = srcDraw.firstIndex; i < lastIndex; ++i) {
+                    const std::uint32_t vertexIndex = importedActors->indices[i];
+                    if (vertexIndex >= importedActors->vertices.size()) {
+                        continue;
+                    }
+                    const auto& position = importedActors->vertices[vertexIndex].position;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        boundsMin[axis] = std::min(boundsMin[axis], position[axis]);
+                        boundsMax[axis] = std::max(boundsMax[axis], position[axis]);
+                    }
+                    sawVertex = true;
+                }
+                if (!sawVertex) {
+                    return;
+                }
+                for (int axis = 0; axis < 3; ++axis) {
+                    outCenter[axis] = (boundsMin[axis] + boundsMax[axis]) * 0.5f;
+                }
+            };
             for (const odai::importer::ImportedScenePackedDraw& srcDraw : importedActors->draws) {
                 if (srcDraw.indexCount == 0u ||
                     srcDraw.firstIndex >= importedActors->indices.size()) {
@@ -2059,6 +2190,15 @@ void RendererBackend::renderFrame(
                 draw.indexCount = std::min<std::uint32_t>(
                     srcDraw.indexCount,
                     static_cast<std::uint32_t>(importedActors->indices.size() - srcDraw.firstIndex));
+                const std::uint32_t flags = actorDrawFlags(srcDraw);
+                draw.alphaThreshold = srcDraw.alphaThreshold;
+                draw.blended =
+                    (flags & odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
+                draw.twoSided =
+                    (flags & odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
+                if (draw.blended) {
+                    actorDrawCenter(srcDraw, draw.center);
+                }
                 importedActorMeshDraws.push_back(draw);
             }
         }
@@ -2276,20 +2416,24 @@ void RendererBackend::renderFrame(
     // own triangles overlap still composites in index order. That is the
     // standard limitation of a sorted-draw transparency pass and is not worth
     // an OIT scheme for the amount of glass Fallout places.
-    m_importedBlendedDrawOrder.clear();
-    for (std::size_t drawIndex = 0; drawIndex < importedMeshDrawsForFrame.size(); ++drawIndex) {
-        if (importedMeshDrawsForFrame[drawIndex].blended) {
-            m_importedBlendedDrawOrder.push_back(static_cast<std::uint32_t>(drawIndex));
+    const odai::math::Vector3 blendSortEye = eye;
+    auto buildBlendedDrawOrder = [&](std::span<const ImportedMeshDraw> draws,
+                                     std::vector<std::uint32_t>& outOrder) {
+        outOrder.clear();
+        for (std::size_t drawIndex = 0; drawIndex < draws.size(); ++drawIndex) {
+            if (draws[drawIndex].blended) {
+                outOrder.push_back(static_cast<std::uint32_t>(drawIndex));
+            }
         }
-    }
-    if (m_importedBlendedDrawOrder.size() > 1u) {
-        const odai::math::Vector3 blendSortEye = eye;
+        if (outOrder.size() <= 1u) {
+            return;
+        }
         std::sort(
-            m_importedBlendedDrawOrder.begin(),
-            m_importedBlendedDrawOrder.end(),
+            outOrder.begin(),
+            outOrder.end(),
             [&](std::uint32_t lhs, std::uint32_t rhs) {
                 auto distanceSquared = [&](std::uint32_t index) {
-                    const float* center = importedMeshDrawsForFrame[index].center;
+                    const float* center = draws[index].center;
                     const float dx = center[0] - blendSortEye.x;
                     const float dy = center[1] - blendSortEye.y;
                     const float dz = center[2] - blendSortEye.z;
@@ -2297,7 +2441,14 @@ void RendererBackend::renderFrame(
                 };
                 return distanceSquared(lhs) > distanceSquared(rhs);
             });
-    }
+    };
+    buildBlendedDrawOrder(importedMeshDrawsForFrame, m_importedBlendedDrawOrder);
+    // Actors get the same treatment. They are a separate vertex/index buffer and
+    // a separate draw list, so they need their own order -- one list cannot
+    // index into two buffers.
+    buildBlendedDrawOrder(
+        std::span<const ImportedMeshDraw>(importedActorMeshDraws.data(), importedActorMeshDraws.size()),
+        m_importedActorBlendedDrawOrder);
 
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
@@ -2738,6 +2889,8 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedActorIndexOffset =
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     mainPassInputs.importedActorMeshDraws = importedActorMeshDraws;
+    mainPassInputs.importedActorBlendedDrawOrder = std::span<const std::uint32_t>(
+        m_importedActorBlendedDrawOrder.data(), m_importedActorBlendedDrawOrder.size());
     mainPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;

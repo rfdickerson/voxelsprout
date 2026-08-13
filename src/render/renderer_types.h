@@ -76,6 +76,47 @@ enum class AoMode : std::uint8_t {
     Gtao = 3,
 };
 
+// Single-channel visualizations of what the main pass actually shaded with,
+// for answering "is this surface wrong because of the geometry, the texture,
+// or the material flags" without guessing. One global mode rather than a set
+// of booleans: they are mutually exclusive by construction (each one replaces
+// the frame's colour entirely), and one uniform channel is cheaper to plumb
+// than one per view.
+//
+// MaterialFlags is the one that earns its keep. Alpha handling in this engine
+// is decided entirely by flags the importer sets -- the shader cannot tell an
+// opacity mask from a specular mask by looking at a texture -- so a surface
+// that renders as a black slab where it should be transparent is either
+// "the flag never got set" or "the flag is set and the alpha is wrong", and
+// nothing on screen distinguishes those two until you false-colour the flags.
+//
+// Alpha deliberately bypasses the alpha-test discard: discarding first would
+// throw away exactly the texels this view exists to look at.
+//
+// These are read by imported_static.frag.slang, which for a Fallout scene
+// covers the terrain and every static and actor -- but not the sky or water,
+// which have their own shaders and pass through unchanged.
+enum class DebugView : std::uint8_t {
+    Off = 0,
+    Albedo = 1,        // sampled base colour, unlit
+    Normal = 2,        // shading normal, remapped to 0..1
+    Alpha = 3,         // sampled alpha as greyscale, discard bypassed
+    MaterialFlags = 4, // red=alphaTest green=alphaBlend blue=twoSided yellow=unlit
+    Roughness = 5,
+    Metallic = 6,
+    MipLevel = 7,      // false-coloured texture LOD
+    CascadeIndex = 8,  // false-coloured shadow cascade selection
+    TextureId = 9,     // bindless slot hashed to a colour
+    LinearDepth = 10,  // post-pass; every other view is main-pass
+};
+
+// True for views whose value is already a display-ready colour and must not be
+// run through exposure, tonemapping or grading on the way to the screen.
+// LinearDepth is produced by the post pass itself and so is not in this set.
+inline constexpr bool debugViewBypassesTonemap(DebugView view) {
+    return view != DebugView::Off && view != DebugView::LinearDepth;
+}
+
 enum class VoxelGiSurfaceMode : std::uint8_t {
     Legacy = 0,
     RtSurface = 1,

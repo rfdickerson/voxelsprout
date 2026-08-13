@@ -311,7 +311,10 @@ void RendererBackend::buildFrameStatsUi() {
     constexpr ImGuiWindowFlags kPanelFlags =
         ImGuiWindowFlags_AlwaysAutoResize |
         ImGuiWindowFlags_NoSavedSettings;
-    if (!ImGui::Begin("Strategy Map", &m_showFrameStatsPanel, kPanelFlags)) {
+    // Named for what the panel is, not for the one app that first used it: every
+    // GameApp game can open it now, and "Strategy Map" over the Mojave was
+    // simply wrong.
+    if (!ImGui::Begin("Renderer", &m_showFrameStatsPanel, kPanelFlags)) {
         ImGui::End();
         return;
     }
@@ -377,6 +380,29 @@ void RendererBackend::buildFrameStatsUi() {
         } else {
             ImGui::TextDisabled("Display timing unavailable");
             m_enableDisplayTiming = false;
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Render Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Order matches DebugView's enumerators in renderer_types.h.
+        static const char* kDebugViewNames[] = {
+            "Off", "Albedo", "Normal", "Alpha", "Material Flags",
+            "Roughness", "Metallic", "Mip Level", "Cascade Index",
+            "Texture ID", "Linear Depth"};
+        int debugView = static_cast<int>(m_debugView);
+        if (ImGui::Combo("View", &debugView, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames))) {
+            m_debugView = static_cast<DebugView>(debugView);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Replaces the frame with one channel of what the main pass shaded with.\n"
+                "Covers imported statics, terrain and actors; sky and water are unchanged.\n\n"
+                "Alpha: sampled alpha, with the alpha-test discard bypassed\n"
+                "Material Flags: red=alphaTest green=alphaBlend blue=twoSided yellow=unlit,\n"
+                "  dark grey = no material flags at all");
+        }
+        if (m_debugView == DebugView::MaterialFlags) {
+            ImGui::TextDisabled("dark grey = no flags | R test | G blend | B 2-sided | Y unlit");
         }
     }
 

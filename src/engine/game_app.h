@@ -198,6 +198,10 @@ private:
     GameFrameProfiler m_frameProfiler;
     bool m_perfOverlayVisible = false;
     bool m_perfOverlayKeyPrev = false;
+    // F4's edge-trigger state. The visibility itself lives on the renderer
+    // (Renderer::isDebugUiVisible), not here, so nothing can drift out of sync
+    // with it.
+    bool m_rendererDebugUiKeyPrev = false;
     bool m_cursorVisible = true;
 };
 

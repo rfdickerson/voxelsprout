@@ -593,6 +593,19 @@ void RendererBackend::updateFrameDescriptorSets(
         // low enough that the clamp can pull a stale region back quickly.
         uniformData.params[0] = 0.88f;
         uniformData.params[1] = (m_taaHistoryValid && m_taaPrevViewProjValid) ? 1.0f : 0.0f;
+        // LAST frame's jitter, which the shader takes back out of the
+        // reprojected UV. prevViewProj is the matrix that frame actually
+        // rendered with, so it carries that frame's jitter -- but the history
+        // TEXTURE is the resolved image on the fixed output grid, which carries
+        // none. Sampling it at a UV that still has the jitter in it lands
+        // ~half a pixel off, every frame, in a direction that changes every
+        // frame; the bilinear resample that results compounds into a blur that
+        // looks exactly like a soft mip and gets worse the longer the camera
+        // holds still. Measured before this correction: jitter made a static
+        // 0.6-scale frame visibly softer than no jitter at all, which is the
+        // opposite of what jitter is for.
+        uniformData.params[2] = m_taaPrevJitterNdc[0];
+        uniformData.params[3] = m_taaPrevJitterNdc[1];
         const std::optional<FrameArenaSlice> uniformSlice = m_frameArena.allocateUpload(
             sizeof(TaaUniformData), 256u, FrameArenaUploadKind::Unknown);
         if (uniformSlice.has_value() && uniformSlice->mapped != nullptr) {

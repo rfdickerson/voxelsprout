@@ -225,6 +225,17 @@ void GameApp::run() {
             }
             m_perfOverlayKeyPrev = overlayKey;
 
+            // F4 opens the renderer's own ImGui panels (frame stats, shadows/AO,
+            // sun/sky/post, render debug views). F3 above is this engine's CPU
+            // timing overlay and is a different thing; both are edge-triggered
+            // for the same reason. ImGui installs its own GLFW callbacks at
+            // device init, so no input routing is needed here.
+            const bool rendererUiKey = glfwGetKey(m_window, GLFW_KEY_F4) == GLFW_PRESS;
+            if (rendererUiKey && !m_rendererDebugUiKeyPrev) {
+                m_renderer.setDebugUiVisible(!m_renderer.isDebugUiVisible());
+            }
+            m_rendererDebugUiKeyPrev = rendererUiKey;
+
             m_uiContext.setViewport({static_cast<float>(fbW), static_cast<float>(fbH)});
         }
 

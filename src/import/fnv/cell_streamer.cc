@@ -61,7 +61,13 @@ std::string cellAxisToken(std::int32_t value) {
 // vertices -- the meshes seen floating in the sky. Cached cells hold those
 // wrong world-space positions baked in, so they cannot be repaired at load and
 // must miss.
-constexpr int kCellBuildVersion = 11;
+// 12: NIF properties now inherit down the scene graph (nif_scene.cc), so a
+// shape whose NiAlphaProperty or NiStencilProperty sits on a parent NiNode
+// finally imports with an alpha mode instead of as fully opaque. Alpha test,
+// blend and two-sidedness are baked into a cached cell's packed vertex flags,
+// so a cell built before this fix carries the wrong ones and cannot be repaired
+// at load -- it has to miss.
+constexpr int kCellBuildVersion = 12;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

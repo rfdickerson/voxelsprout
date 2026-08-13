@@ -1029,6 +1029,25 @@ void appendAvObjectPrefix(
     appendPod(out, static_cast<std::int32_t>(-1));  // collisionRef
 }
 
+// Same prefix, with one property ref attached. Gamebryo properties inherit down
+// the scene graph, so which block carries the ref is the whole point of the
+// fixture below.
+void appendAvObjectPrefixWithProperty(
+    std::vector<std::uint8_t>& out, const std::array<float, 3>& translation,
+    const std::array<float, 9>& rotation, float scale, std::int32_t propertyRef
+) {
+    appendPod(out, static_cast<std::int32_t>(-1));  // nameRef
+    appendPod(out, static_cast<std::uint32_t>(0));  // numExtraData
+    appendPod(out, static_cast<std::int32_t>(-1));  // controllerRef
+    appendPod(out, static_cast<std::uint32_t>(0));  // flags
+    for (float v : translation) appendPod(out, v);
+    for (float v : rotation) appendPod(out, v);
+    appendPod(out, scale);
+    appendPod(out, static_cast<std::uint32_t>(1));  // numProperties
+    appendPod(out, propertyRef);
+    appendPod(out, static_cast<std::int32_t>(-1));  // collisionRef
+}
+
 void testNifParserExtractsTransformedGeometry() {
     const std::array<float, 3> nodeTranslation{10.0f, 20.0f, 30.0f};
     const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
@@ -1377,6 +1396,136 @@ void testPluginHeaderRejectsOversizedRecord() {
 // A child count that cannot fit in the block must be rejected before it is
 // used to size anything: unbounded, a desynchronized 0xFFFFFFFF here asks for a
 // ~17 GB allocation on nothing worse than a malformed mod asset.
+// Gamebryo properties inherit down the scene graph. A NiAlphaProperty on a
+// parent NiNode applies to every shape beneath it, and the reader used to walk
+// only a shape's own property list -- so those shapes imported with no alpha
+// mode at all and rendered fully opaque, showing the black that sits under a
+// Fallout texture's transparent texels.
+//
+// Five blocks: root NiNode -> middle NiNode (carrying the alpha property ref)
+// -> NiTriShape -> NiTriShapeData, plus the NiAlphaProperty itself.
+void testNifParserInheritsPropertiesFromParentNodes() {
+    const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+    std::vector<std::uint8_t> rootBlock;
+    appendAvObjectPrefix(rootBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(rootBlock, static_cast<std::uint32_t>(1));
+    appendPod(rootBlock, static_cast<std::int32_t>(1));
+    appendPod(rootBlock, static_cast<std::uint32_t>(0));
+
+    // The middle node owns the alpha property (block 4); the shape below it
+    // declares none of its own.
+    std::vector<std::uint8_t> middleBlock;
+    appendAvObjectPrefixWithProperty(
+        middleBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f, 4);
+    appendPod(middleBlock, static_cast<std::uint32_t>(1));
+    appendPod(middleBlock, static_cast<std::int32_t>(2));
+    appendPod(middleBlock, static_cast<std::uint32_t>(0));
+
+    std::vector<std::uint8_t> triShapeBlock;
+    appendAvObjectPrefix(triShapeBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(triShapeBlock, static_cast<std::int32_t>(3));
+
+    std::vector<std::uint8_t> dataBlock;
+    appendPod(dataBlock, static_cast<std::int32_t>(0));
+    appendPod(dataBlock, static_cast<std::uint16_t>(3));
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));
+    appendPod(dataBlock, static_cast<std::uint8_t>(1));
+    for (int v = 0; v < 3; ++v) {
+        appendPod(dataBlock, 0.0f);
+        appendPod(dataBlock, 0.0f);
+        appendPod(dataBlock, 0.0f);
+    }
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));
+    appendPod(dataBlock, static_cast<std::int32_t>(-1));
+    appendPod(dataBlock, static_cast<std::uint16_t>(1));
+    appendPod(dataBlock, static_cast<std::uint32_t>(3));
+    appendPod(dataBlock, static_cast<std::uint8_t>(1));
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));
+    appendPod(dataBlock, static_cast<std::uint16_t>(1));
+    appendPod(dataBlock, static_cast<std::uint16_t>(2));
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));
+
+    // NiAlphaProperty: NiObjectNET prefix, then 16-bit flags and a threshold
+    // byte. 0x12ed is blend=1 test=1 -- the combination retail Goodsprings
+    // ships on 351 shapes -- and 100 is its most common threshold.
+    std::vector<std::uint8_t> alphaBlock;
+    appendPod(alphaBlock, static_cast<std::int32_t>(-1));   // nameRef
+    appendPod(alphaBlock, static_cast<std::uint32_t>(0));   // numExtraData
+    appendPod(alphaBlock, static_cast<std::int32_t>(-1));   // controllerRef
+    appendPod(alphaBlock, static_cast<std::uint16_t>(0x12edu));
+    appendPod(alphaBlock, static_cast<std::uint8_t>(100));  // threshold
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(11));
+    appendPod(fileBytes, static_cast<std::uint32_t>(5));   // numBlocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(34));  // userVersion2
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(4));   // numBlockTypes
+    appendSizedString32(fileBytes, "NiNode");
+    appendSizedString32(fileBytes, "NiTriShape");
+    appendSizedString32(fileBytes, "NiTriShapeData");
+    appendSizedString32(fileBytes, "NiAlphaProperty");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));  // block 0 -> NiNode
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));  // block 1 -> NiNode
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));  // block 2 -> NiTriShape
+    appendPod(fileBytes, static_cast<std::uint16_t>(2));  // block 3 -> NiTriShapeData
+    appendPod(fileBytes, static_cast<std::uint16_t>(3));  // block 4 -> NiAlphaProperty
+    appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(middleBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(triShapeBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(dataBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(alphaBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // numStrings
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // maxStringLength
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // numGroups
+
+    fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+    fileBytes.insert(fileBytes.end(), middleBlock.begin(), middleBlock.end());
+    fileBytes.insert(fileBytes.end(), triShapeBlock.begin(), triShapeBlock.end());
+    fileBytes.insert(fileBytes.end(), dataBlock.begin(), dataBlock.end());
+    fileBytes.insert(fileBytes.end(), alphaBlock.begin(), alphaBlock.end());
+    appendPod(fileBytes, static_cast<std::uint32_t>(1));  // Num Roots
+    appendPod(fileBytes, static_cast<std::int32_t>(0));
+
+    odai::importer::fnv::NifModel model;
+    std::string error;
+    expectTrue(
+        odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+        "A NIF whose alpha property sits on a parent node still parses");
+    expectTrue(model.shapes.size() == 1, "One shape comes out of the fixture");
+    if (model.shapes.size() == 1) {
+        const odai::importer::fnv::NifShape& shape = model.shapes.front();
+        expectTrue(
+            shape.alphaTest,
+            "An alpha property on a PARENT node applies to the shape beneath it");
+        expectTrue(
+            shape.alphaThreshold == 100,
+            "The inherited property's authored threshold comes with it, not the default 128");
+        // 0x12ed sets both bits, and blend+test means cutout in this reader
+        // (see readNiAlphaProperty): the test defines the silhouette and the
+        // diffuse alpha is a specular mask, not an opacity ramp.
+        expectTrue(
+            !shape.alphaBlend,
+            "blend+test still resolves to cutout when inherited, exactly as when owned");
+    }
+}
+
 void testNifParserRejectsImplausibleChildCount() {
     const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
     std::vector<std::uint8_t> rootBlock;
@@ -3214,6 +3363,7 @@ int main() {
     testFalloutRecordExtraction();
     testNifParserExtractsTransformedGeometry();
     testNifParserDoesNotReparentSubtreesToTheOrigin();
+    testNifParserInheritsPropertiesFromParentNodes();
     testNifParserRejectsImplausibleChildCount();
     testPluginHeaderRejectsOversizedRecord();
     testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();

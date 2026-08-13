@@ -62,7 +62,12 @@ float3 decodeViewNormal(float3 encodedNormal)
 
 float3 reconstructViewPosition(float2 uv, float viewDepth)
 {
-    const float2 ndcXY = (uv * 2.0) - 1.0;
+    // Minus this frame's TAA jitter: the normal-depth buffer this reconstructs
+    // from was rasterized through the jittered projection, so a texel centre is
+    // no longer at uv*2-1. Sub-pixel, and AO is a low-frequency term, but the
+    // AO march and TAA's reprojection must agree about where a texel IS or the
+    // two disagree about the same surface.
+    const float2 ndcXY = ((uv * 2.0) - 1.0) - camera.tonemapConfig2.zw;
     float projX = camera.proj[0][0];
     float projY = camera.proj[1][1];
     if (abs(projX) < 1e-6) projX = (projX < 0.0) ? -1e-6 : 1e-6;

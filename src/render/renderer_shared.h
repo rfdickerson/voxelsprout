@@ -184,7 +184,13 @@ struct alignas(16) CameraUniform {
     // [0] = mode: 0 = the ACES fit, 1 = the ENB/Enhanced Shaders curve
     // [1] = contrast, [2] = saturation, [3] = curve knee (ENB's "ToneMapping Curve")
     float tonemapConfig[4];
-    // [0] = overbright dampening (ENB's "Overbright Dampening"), [1..3] spare.
+    // [0] = overbright dampening (ENB's "Overbright Dampening")
+    // [1] = DebugView (renderer_types.h), 0 = off. Carried as a float because
+    //       the whole block is floats; the shader rounds it back to an index.
+    // [2..3] = this frame's TAA sub-pixel jitter in NDC units, 0 when TAA or
+    //       jitter is off. Anything mapping a UV back to a view position must
+    //       subtract it: a jittered projection moves the NDC of a texel centre
+    //       off the usual uv*2-1.
     float tonemapConfig2[4];
 };
 

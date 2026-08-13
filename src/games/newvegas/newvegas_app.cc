@@ -64,6 +64,17 @@ bool keyDown(GLFWwindow* window, int key) {
 
 }  // namespace
 
+float NewVegasApp::verticalFovDegreesFor(float horizontalFovDegrees, float aspectRatio) {
+    // Guard the degenerate frame: a zero or negative aspect would otherwise
+    // divide the tangent into infinity and hand the projection a NaN, which
+    // renders as an empty screen rather than as an error.
+    const float safeAspect = (aspectRatio > 0.0001f) ? aspectRatio : (16.0f / 9.0f);
+    const float clampedHorizontal = std::clamp(horizontalFovDegrees, 1.0f, 179.0f);
+    const float halfHorizontalRadians = (clampedHorizontal * 0.5f) * (kPi / 180.0f);
+    const float halfVerticalRadians = std::atan(std::tan(halfHorizontalRadians) / safeAspect);
+    return halfVerticalRadians * 2.0f * (180.0f / kPi);
+}
+
 void NewVegasApp::buildGroundHeightField(const importer::ImportedScene& scene) {
     m_groundHeights.clear();
     if (scene.meshes.empty() || scene.meshes.front().name != "terrain") {
@@ -588,10 +599,19 @@ bool NewVegasApp::onInit() {
     // Volumetric sun shafts. sun_shafts.comp.slang is a real single-scattering
     // raymarch -- height-falloff density, Henyey-Greenstein phase, shadow-map
     // visibility sampled per step -- so this is the atmosphere pass, not a
-    // radial blur. ODAI_FNV_SHAFTS=0 turns it back off.
+    // radial blur.
+    //
+    // OFF by default, because it is currently paying for nothing: skyConfig4's
+    // density/falloff/scatter are near zero for this game, so the effect is
+    // invisible while the pass costs 4.7 ms of a 37.9 ms frame at 2560x1440 on
+    // the LNL iGPU -- measured by toggling it, not by the GPU timer, which
+    // attributes only ~3 ms to the dispatch itself. ODAI_FNV_SHAFTS=1 turns it
+    // back on, which is what to do FIRST when tuning those density values: the
+    // pass is worth its cost only once they are non-trivial, and this default
+    // should flip back the moment they are.
     const bool sunShaftsRequested = [] {
         const char* env = std::getenv("ODAI_FNV_SHAFTS");
-        return env == nullptr || env[0] != '0';
+        return env != nullptr && env[0] != '0';
     }();
     m_renderer.setSunShaftsEnabled(sunShaftsRequested);
     // Temporal AA. This is what stops textured surfaces shimmering in motion
@@ -629,6 +649,31 @@ bool NewVegasApp::onInit() {
     }
     m_renderer.setSsaoEnabled(aoMode != render::AoMode::Off);
     m_renderer.setAmbientOcclusionMode(aoMode);
+    // ODAI_FNV_DEBUGVIEW selects a whole-frame debug visualization by name (see
+    // DebugView in renderer_types.h). It exists because a --screenshot run
+    // cannot operate the ImGui combo -- F4 is the interactive way in, and this
+    // is the only way to photograph a debug view from a script, which is what
+    // makes an alpha or material-flags capture attributable in a bug report.
+    if (const char* debugViewEnv = std::getenv("ODAI_FNV_DEBUGVIEW")) {
+        const std::string requested = debugViewEnv;
+        render::DebugView view = render::DebugView::Off;
+        if (requested == "albedo") { view = render::DebugView::Albedo; }
+        else if (requested == "normal") { view = render::DebugView::Normal; }
+        else if (requested == "alpha") { view = render::DebugView::Alpha; }
+        else if (requested == "flags") { view = render::DebugView::MaterialFlags; }
+        else if (requested == "roughness") { view = render::DebugView::Roughness; }
+        else if (requested == "metallic") { view = render::DebugView::Metallic; }
+        else if (requested == "mip") { view = render::DebugView::MipLevel; }
+        else if (requested == "cascade") { view = render::DebugView::CascadeIndex; }
+        else if (requested == "texid") { view = render::DebugView::TextureId; }
+        else if (requested == "depth") { view = render::DebugView::LinearDepth; }
+        else if (requested != "off") {
+            VOX_LOGW("newvegas")
+                << "ODAI_FNV_DEBUGVIEW=" << requested << " is not a view name; ignoring. "
+                << "Valid: albedo normal alpha flags roughness metallic mip cascade texid depth\n";
+        }
+        m_renderer.setDebugView(view);
+    }
     // Sweepable, because "too subtle" is a measurable claim: the A/B against
     // AO-off below is what says whether a value actually changed the image.
     //
@@ -1838,7 +1883,21 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     // conversation widens back rather than snapping.
     {
         constexpr float kFovTauSeconds = 0.22f;
-        const float targetFov = inConversation ? kConversationFovDegrees : kDefaultFovDegrees;
+        // The constants are horizontal; the eased value is vertical. Converting
+        // the TARGET each frame (rather than easing in horizontal and
+        // converting after) also means a window resize retargets smoothly
+        // instead of stepping.
+        int fovFramebufferWidth = 0;
+        int fovFramebufferHeight = 0;
+        framebufferSize(fovFramebufferWidth, fovFramebufferHeight);
+        const float aspectRatio =
+            (fovFramebufferWidth > 0 && fovFramebufferHeight > 0)
+                ? (static_cast<float>(fovFramebufferWidth) /
+                   static_cast<float>(fovFramebufferHeight))
+                : (16.0f / 9.0f);
+        const float targetFov = verticalFovDegreesFor(
+            inConversation ? kConversationHorizontalFovDegrees : kDefaultHorizontalFovDegrees,
+            aspectRatio);
         const float blend = 1.0f - std::exp(-deltaSeconds / kFovTauSeconds);
         m_cameraFovDegrees += (targetFov - m_cameraFovDegrees) * blend;
     }

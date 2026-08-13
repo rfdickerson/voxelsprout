@@ -321,6 +321,11 @@ public:
     // levels do not happen to match that fixed exposure renders uniformly too
     // dark or too bright with no way for the app to say otherwise.
     void setAutoExposureEnabled(bool enabled) { m_skyDebugSettings.autoExposureEnabled = enabled; }
+    // Whole-frame debug visualization. See DebugView in renderer_types.h for
+    // what each mode shows and why they are one enum rather than a set of
+    // toggles. Published to the shaders through CameraUniform::tonemapConfig2.y.
+    void setDebugView(DebugView view) { m_debugView = view; }
+    [[nodiscard]] DebugView debugView() const { return m_debugView; }
     // Collapses the post colour grade to identity: no saturation, vibrance,
     // contrast or white-balance push. The grading chain in tone_map.frag.slang
     // is applied unconditionally with no enable gate, so "off" has to mean
@@ -1339,6 +1344,9 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        // The same back-to-front order as importedBlendedDrawOrder above, but
+        // indexing importedActorMeshDraws.
+        std::span<const std::uint32_t> importedActorBlendedDrawOrder;
         // GPU-skinned actors (Dragon Age touchstone; see skinning_resources.cc).
         // Up to kMaxSkinnedInstances independent instance slots, each with its
         // own vertex/index buffer -- draws carry their own
@@ -1442,6 +1450,16 @@ private:
     // swapchain extent is (re)established.
     VkExtent2D m_renderExtent{};
     VkExtent2D m_aoExtent{};
+    // Resolution of the AO estimator's own output, m_aoExtent / m_aoDownscale.
+    // Only the raw target shrinks: the blur pass upsamples back to m_aoExtent,
+    // so nothing downstream knows this happened.
+    VkExtent2D m_ssaoRawExtent{};
+    // 1 reproduces the pre-2026-08 behaviour (estimator at m_aoExtent, i.e. half
+    // the render extent). 2 is the default and runs it at a quarter, which is
+    // where the cost actually is -- the horizon march is per output texel.
+    // ODAI_AO_DOWNSCALE overrides it; read once at init because the AO targets
+    // are sized from it and changing it means recreating them.
+    std::uint32_t m_aoDownscale = 2u;
     VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_normalDepthFormat = VK_FORMAT_UNDEFINED;
@@ -1505,6 +1523,40 @@ private:
     // NOT FrameArena transients: the arena reclaims per frame, and history is
     // the one image in this renderer that must survive into the next one.
     bool m_taaEnabled = false;
+    // Sub-pixel projection jitter, the half of TAA that refines edges rather
+    // than just averaging texture shimmer. Only meaningful while m_taaEnabled.
+    //
+    // OFF until this pass grows a reconstruction filter, because on its own it
+    // is a net LOSS and the measurement is unambiguous: at a 0.6 render scale
+    // on a static Goodsprings frame, edge energy goes 377 -> 101 with jitter
+    // on, and the crops show real detail gone (tank rust, truss timbers), not
+    // aliasing removed.
+    //
+    // The reason is structural, not a bug in the jitter: accumulating jittered
+    // samples through a flat `lerp(current, history, 0.88)` averages samples
+    // spread over +/-0.5 px with EQUAL weight, which is a one-pixel box blur by
+    // construction. Two things were tried and neither is the cause -- taking
+    // the jitter back out of the view reconstruction, and rolling the previous
+    // frame's jitter with prevViewProj so the history is addressed on its own
+    // grid. Both are correct and both are kept; the image did not move (101 ->
+    // 101), which is what says the accumulation itself is the problem.
+    //
+    // What it needs, in the order it matters: weight the current sample by its
+    // sub-pixel distance from the pixel centre (tent / Blackman-Harris) instead
+    // of a constant, and sample the history with Catmull-Rom rather than
+    // bilinear so a reprojected resample does not soften each frame. Those are
+    // also exactly the pieces a temporal UPSAMPLE needs, so they are the first
+    // half of TAAU rather than a detour from it.
+    bool m_taaJitterEnabled = false;
+    std::uint32_t m_taaJitterPhase = 0u;
+    // This frame's jitter in NDC units. Published to the shaders so anything
+    // that maps a UV back to a view position can take it out again -- with a
+    // jittered projection the centre of a texel is no longer at ndc = uv*2-1.
+    std::array<float, 2> m_taaJitterNdc{0.0f, 0.0f};
+    // The previous frame's, paired with m_taaPrevViewProj: that matrix carries
+    // last frame's jitter, and the history image does not, so the shader has to
+    // subtract this to land on the history's own grid.
+    std::array<float, 2> m_taaPrevJitterNdc{0.0f, 0.0f};
     VkDescriptorSetLayout m_taaDescriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_taaPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_taaPipeline = VK_NULL_HANDLE;
@@ -1740,6 +1792,13 @@ private:
     // draws, which have no compact stream of their own.
     VkPipeline& m_importedStaticShadowCompactPipeline =
         m_pipelineManager.importedStaticShadowCompactPipeline;
+    // Cull-NONE variants of the three above, for DRAW_BOTH geometry.
+    VkPipeline& m_importedStaticNormalDepthPipelineTwoSided =
+        m_pipelineManager.importedStaticNormalDepthPipelineTwoSided;
+    VkPipeline& m_importedStaticShadowPipelineTwoSided =
+        m_pipelineManager.importedStaticShadowPipelineTwoSided;
+    VkPipeline& m_importedStaticShadowCompactPipelineTwoSided =
+        m_pipelineManager.importedStaticShadowCompactPipelineTwoSided;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
@@ -1903,6 +1962,10 @@ private:
     // Reused every frame so the back-to-front sort of blended imported draws
     // does not allocate in the render loop.
     std::vector<std::uint32_t> m_importedBlendedDrawOrder;
+    // Actors live in their own vertex/index buffer and their own draw list, so
+    // their blended replay needs its own sorted order rather than sharing the
+    // static scene's -- one index list cannot address two buffers.
+    std::vector<std::uint32_t> m_importedActorBlendedDrawOrder;
     uint32_t m_importedStaticDrawCount = 0;
     uint32_t m_importedWaterIndexCount = 0;
     uint32_t m_skyCloudIndexCount = 0;
@@ -1985,6 +2048,7 @@ private:
     // ignored it forever after, which made every subsequent per-frame FOV an
     // app set a silent no-op.
     bool m_debugCameraFovOverride = false;
+    DebugView m_debugView = DebugView::Off;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
     bool m_shadowCascadeSplitsLogged = false;

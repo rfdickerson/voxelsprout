@@ -168,6 +168,14 @@ bool Renderer::isAutoExposureEnabled() const {
     return m_backend->isAutoExposureEnabled();
 }
 
+void Renderer::setDebugView(DebugView view) {
+    m_backend->setDebugView(view);
+}
+
+DebugView Renderer::debugView() const {
+    return m_backend->debugView();
+}
+
 void Renderer::setVoxelGiEnabled(bool enabled) {
     m_backend->setVoxelGiEnabled(enabled);
 }

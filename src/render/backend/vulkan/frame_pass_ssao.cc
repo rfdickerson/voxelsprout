@@ -41,6 +41,17 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         );
     };
 
+    // The blur/upsample writes m_aoExtent; the estimator writes the smaller
+    // m_ssaoRawExtent. These were one number when both passes ran at the same
+    // resolution, and conflating them again would either march at full AO
+    // resolution (no saving) or leave the top-left quarter of the blur target
+    // written and the rest stale.
+    const VkExtent2D rawExtent = {
+        std::max(1u, m_ssaoRawExtent.width),
+        std::max(1u, m_ssaoRawExtent.height)
+    };
+    const uint32_t rawDispatchX = (rawExtent.width + (kSsaoComputeWorkgroupSize - 1u)) / kSsaoComputeWorkgroupSize;
+    const uint32_t rawDispatchY = (rawExtent.height + (kSsaoComputeWorkgroupSize - 1u)) / kSsaoComputeWorkgroupSize;
     const uint32_t dispatchX = (aoExtent.width + (kSsaoComputeWorkgroupSize - 1u)) / kSsaoComputeWorkgroupSize;
     const uint32_t dispatchY = (aoExtent.height + (kSsaoComputeWorkgroupSize - 1u)) / kSsaoComputeWorkgroupSize;
 
@@ -89,8 +100,8 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         );
 
         SsaoComputePushConstants ssaoPushConstants{};
-        ssaoPushConstants.width = std::max(1u, aoExtent.width);
-        ssaoPushConstants.height = std::max(1u, aoExtent.height);
+        ssaoPushConstants.width = rawExtent.width;
+        ssaoPushConstants.height = rawExtent.height;
         ssaoPushConstants.fineRadiusScale = m_shadowDebugSettings.ssaoFineRadiusScale;
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, aoPipeline);
@@ -105,7 +116,7 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
             sizeof(SsaoComputePushConstants),
             &ssaoPushConstants
         );
-        vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1u);
+        vkCmdDispatch(commandBuffer, rawDispatchX, rawDispatchY, 1u);
 
         transitionImageLayout(
             commandBuffer,

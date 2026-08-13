@@ -1891,6 +1891,15 @@ bool RendererBackend::createSwapchain() {
                                << m_swapchainExtent.height;
         }
     }
+    // Read here rather than at AO-target creation because it sizes those targets
+    // and this runs before them on every swapchain (re)build. 1 = estimator at
+    // the AO extent (what it did before), 2 = at a quarter of the render extent.
+    if (const char* aoDownscaleEnv = std::getenv("ODAI_AO_DOWNSCALE")) {
+        m_aoDownscale = static_cast<uint32_t>(std::clamp(std::atoi(aoDownscaleEnv), 1, 4));
+    }
+    if (const char* jitterEnv = std::getenv("ODAI_TAA_JITTER")) {
+        m_taaJitterEnabled = jitterEnv[0] != '0';
+    }
 
     m_swapchainImageViews.resize(imageCount, VK_NULL_HANDLE);
     for (uint32_t i = 0; i < imageCount; ++i) {

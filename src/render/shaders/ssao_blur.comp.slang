@@ -34,10 +34,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const float2 uv = (float2(dispatchThreadId.xy) + 0.5) / float2(float(pushConstants.width), float(pushConstants.height));
 
+    // The estimator's resolution, which is independent of this pass's -- see the
+    // upsample below. Queried rather than pushed so the two cannot disagree.
     uint rawW = 0;
     uint rawH = 0;
     ssaoRawTexture.GetDimensions(rawW, rawH);
-    const float2 texelSize = 1.0 / float2(float(rawW), float(rawH));
 
     const float4 centerNd = normalDepthTexture.SampleLevel(uv, 0.0);
     const float3 centerNormal = decodeViewNormal(centerNd.xyz);
@@ -48,50 +49,89 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    const float centerAo = ssaoRawTexture.SampleLevel(uv, 0.0).x;
+    // JOINT BILATERAL UPSAMPLE, not just a blur. The estimator runs at
+    // ssaoRawTexture's resolution, which is a fraction of this pass's, so every
+    // tap has to land on a raw TEXEL CENTRE and be weighted by the full-res
+    // geometry at that same point.
+    //
+    // Sampling the raw texture at an arbitrary uv instead -- which is what this
+    // did when both passes shared a resolution -- makes the hardware bilinearly
+    // blend up to four raw texels BEFORE the bilateral weights can reject any of
+    // them. At 1:1 that is harmless; at 2x upsample it drags occlusion across
+    // every depth discontinuity and haloes the silhouette of every object.
+    const float2 rawSize = float2(float(rawW), float(rawH));
+    const float2 rawCoordF = (uv * rawSize) - 0.5;
+    const int2 baseCoord = int2(floor(rawCoordF));
 
-    float weightedAo = centerAo;
-    float weightSum = 1.0;
+    float weightedAo = 0.0;
+    float weightSum = 0.0;
+
+    // The 2x2 raw texels this output pixel sits between, then the axis cross out
+    // to kSsaoBlurRadius from them. Diagonals past the 2x2 are deliberately left
+    // out for the same reason as before: at this radius the bilateral weighting
+    // already rejects cross-edge contamination, and they cost taps.
+    for (int dy = 0; dy <= 1; ++dy)
+    {
+        for (int dx = 0; dx <= 1; ++dx)
+        {
+            const int2 c = baseCoord + int2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= int(rawW) || c.y >= int(rawH)) continue;
+
+            // Centre of that raw texel, in this pass's uv space. Sampling the raw
+            // texture here hits the texel exactly, so no interpolation happens.
+            const float2 suv = (float2(c) + 0.5) / rawSize;
+            const float4 sampleNd = normalDepthTexture.SampleLevel(suv, 0.0);
+            const float sampleDepth = sampleNd.w;
+            if (sampleDepth <= 0.0001) continue;
+
+            // Bilinear footprint weight, so the upsample still interpolates
+            // smoothly where the geometry agrees.
+            const float2 f = rawCoordF - float2(baseCoord);
+            const float bilinear =
+                (dx == 0 ? (1.0 - f.x) : f.x) * (dy == 0 ? (1.0 - f.y) : f.y);
+
+            const float3 sampleNormal = decodeViewNormal(sampleNd.xyz);
+            const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);
+            const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 4.0);
+            const float weight = max(bilinear, 1e-3) * normalWeight * depthWeight;
+
+            weightedAo += ssaoRawTexture.SampleLevel(suv, 0.0).x * weight;
+            weightSum += weight;
+        }
+    }
 
     for (int i = 1; i <= kSsaoBlurRadius; ++i)
     {
         const float fi = float(i);
         const float spatialWeight = exp(-(fi * fi) / (2.0 * kSsaoBlurSigma * kSsaoBlurSigma));
 
-        const float2 offsetX = float2(texelSize.x * fi, 0.0);
-        const float2 offsetY = float2(0.0, texelSize.y * fi);
-
-        // Axis-only cross (no diagonals): the bilateral normal/depth weighting already
-        // rejects cross-edge contamination at this radius, so the diagonal taps added
-        // little beyond what the cross already captures. Dropping them takes the pass
-        // from 49 taps (6-ring cross+diagonal) to 17 (4-ring cross), the bulk of the
-        // per-frame SSAO blur cost, without a visible quality loss on flat low-poly faces.
-        const float2 sampleUvs[4] = {
-            uv + offsetX,
-            uv - offsetX,
-            uv + offsetY,
-            uv - offsetY
+        const int2 offsets[4] = {
+            int2(i, 0), int2(-i, 0), int2(0, i), int2(0, -i)
         };
 
         for (int j = 0; j < 4; ++j)
         {
-            const float2 suv = sampleUvs[j];
-            if (suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0) continue;
+            const int2 c = baseCoord + offsets[j];
+            if (c.x < 0 || c.y < 0 || c.x >= int(rawW) || c.y >= int(rawH)) continue;
 
+            const float2 suv = (float2(c) + 0.5) / rawSize;
             const float4 sampleNd = normalDepthTexture.SampleLevel(suv, 0.0);
-            const float3 sampleNormal = decodeViewNormal(sampleNd.xyz);
             const float sampleDepth = sampleNd.w;
             if (sampleDepth <= 0.0001) continue;
-            const float sampleAo = ssaoRawTexture.SampleLevel(suv, 0.0).x;
 
+            const float3 sampleNormal = decodeViewNormal(sampleNd.xyz);
             const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);
             const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 4.0);
             const float weight = spatialWeight * normalWeight * depthWeight;
 
-            weightedAo += sampleAo * weight;
+            weightedAo += ssaoRawTexture.SampleLevel(suv, 0.0).x * weight;
             weightSum += weight;
         }
     }
 
-    ssaoBlurTexture[dispatchThreadId.xy] = clamp(weightedAo / max(weightSum, 1e-4), 0.0, 1.0);
+    // Every tap can be rejected at once -- a lone foreground sliver whose raw
+    // neighbours all sit on the background. Unoccluded is the right answer there:
+    // it is what an AO-off frame shows, so the failure darkens nothing.
+    ssaoBlurTexture[dispatchThreadId.xy] =
+        (weightSum > 1e-4) ? clamp(weightedAo / weightSum, 0.0, 1.0) : 1.0;
 }

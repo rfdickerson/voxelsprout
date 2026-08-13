@@ -14,6 +14,13 @@ Sampler2D<float4> ssaoTexture;
 [[vk::binding(10, 0)]]
 Sampler2D<float4> sunShaftTexture;
 
+// DebugView in src/render/renderer_types.h; change both together. Only the two
+// this pass acts on are named here -- every other mode is handled in
+// imported_static.frag.slang and reaches here as "not Off", which is all the
+// tonemap bypass needs to know.
+static const uint kDebugViewOff = 0u;
+static const uint kDebugViewLinearDepth = 10u;
+
 float3 acesFilmTonemap(float3 color)
 {
     const float a = 2.51;
@@ -597,6 +604,27 @@ float4 main(FragmentInput input) : SV_Target0
         toneMapped = applySaturation(toneMapped, 1.0);
         const float3 ldrSrgb = pow(clamp(toneMapped, 0.0, 1.0), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
         return float4(ldrSrgb, 1.0);
+    }
+
+    // DebugView in src/render/renderer_types.h. Every mode but LinearDepth is
+    // produced by the main pass and has already written a display-ready colour
+    // into hdrSceneColor, so the whole exposure/tonemap/grading chain below has
+    // to be skipped -- an albedo view shown through ACES and auto-exposure is
+    // not albedo. Only the sRGB encode is kept, because the swapchain is UNORM
+    // and something has to do it.
+    const uint debugView = uint(camera.tonemapConfig2.y + 0.5);
+    if (debugView == kDebugViewLinearDepth)
+    {
+        // Ramped over the far shadow cascade, which is the scene's own sense of
+        // "far" rather than an arbitrary constant.
+        const float far = max(camera.shadowCascadeSplits.w, 1.0);
+        const float t = saturate(viewDepth / far) * geometryMask;
+        return float4(pow(float3(t, t, t), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)), 1.0);
+    }
+    if (debugView != kDebugViewOff)
+    {
+        return float4(
+            pow(saturate(hdrColor), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)), 1.0);
     }
 
     if (ssaoMode > 2.5)

@@ -294,6 +294,41 @@ of the whole actor path, and four things about it were each a bug first:
   screens the game swaps at runtime, plus alpha-blended glare quads the opaque skinned path
   renders as solid slabs. Drawing the list literally gives Victor colour bars for a face.
 
+**A STRAY `NiAlphaProperty` IS NOT TRANSPARENCY.** Fallout marks surfaces blend=1/test=0
+that have nothing to blend: Goodsprings' water tank (`nv_watertank.nif`) is three shapes and
+two of them — the tank body and the concrete pad under it — are authored blended while their
+textures are **97% fully opaque**. Drawn through the blended pipeline that reads as a
+see-through tank, and the look is the smaller half of it: a blended draw writes no depth, is
+skipped by the shadow pass and by the normal-depth prepass, so the tank also casts no shadow
+and contributes nothing to AO. `demoteFalseAlphaBlendFlags` (`imported_scene.cc`) re-reads the
+same alpha histogram the cutout classifier builds and demotes three ways — no transparent
+texels at all → **opaque**; bimodal (transparent + opaque, thin rim) → **alpha test**; a real
+mid-range gradient → **left alone**, which is what keeps glass and dust sheets working. It only
+ever takes work away from the blended pass, which is what makes it safe where the old
+content-based guess was not (that one *forced* alpha test onto opaque geometry sharing a
+cutout's texture). Measured on Goodsprings: blended pixels fall 76%. It runs on **load** as
+well as on build, so cached cells are corrected without a `kCellBuildVersion` bump.
+
+**GAMEBRYO PROPERTIES INHERIT DOWN THE SCENE GRAPH.** A `NiAlphaProperty` or
+`NiStencilProperty` on a parent `NiNode` applies to every shape beneath it, so a reader
+that walks only a shape's own property list imports those shapes with no alpha mode at
+all — and an unflagged shape renders fully opaque, showing the black that sits under a
+Fallout texture's transparent texels. `nif_scene.cc` resolves a shape's **own** properties
+first and its ancestors' second: the diffuse texture is first-wins so own-first cannot
+change any texture that already resolved, while alpha/stencil/unlit accumulate with `||`
+so an inherited property can only ever turn one **on**. The static path carries the
+accumulated ref list down its DFS; the skinned path is a flat block scan with no parent on
+hand, so it reconstructs a child→parent map and walks up. Pinned by
+`testNifParserInheritsPropertiesFromParentNodes`.
+
+This was masked until recently: `applyTextureAlphaCutoutFlags` inferred a cutout from
+texture CONTENT and happened to catch these. That inference is off for this importer now
+(`ImportedScene::alphaFlagsAuthored`), so nothing covers the gap any more. Note the fix is
+**baked into cached cells** — alpha/blend/two-sided live in the packed vertex flags — which
+is why `kCellBuildVersion` (`cell_streamer.cc`) had to go to 12. Any change to what the NIF
+reader decides about a material needs that bump, or every existing install keeps serving
+pre-fix geometry forever and the fix appears to do nothing.
+
 **Any new scan of a plugin MUST set `EsmReader::Visitor::onRecordHeader`.** Leaving it null
 materializes every record in the file to hand to `onRecord`, which means inflating
 FalloutNV.esm's 29363 compressed LAND records to go looking for a creature. Measured: two
@@ -435,6 +470,63 @@ colour with the UI still correct on top of it**. Flat frame + intact UI means th
 the geometry. Any value here must now render identically to unset.
 
 Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+
+**AO resolution and sun shafts are the two biggest costs after the main pass.** Measured on
+the LNL iGPU at a 2560x1440 swapchain, native render scale: frame 37.9 ms, of which the AO
+estimator is 6.0 and sun shafts 3.0 by the GPU timer but **10.2 and 4.7 by toggling them**.
+Two defaults changed as a result:
+
+- `ODAI_AO_DOWNSCALE` (default **2**) runs the AO estimator at a quarter of the render
+  extent rather than the half it used to (`m_aoExtent` was already half). Only the *raw*
+  target shrinks; `ssao_blur.comp.slang` is now a **joint bilateral upsample** back to
+  `m_aoExtent`, so no consumer knows. Taps snap to raw texel centres and are weighted by
+  full-res normal/depth — sampling the raw at an arbitrary UV instead lets the hardware
+  blend across a depth discontinuity *before* the bilateral weights can reject it, which
+  haloes every silhouette at 2x. Measured: AO 6.04 → 1.66 ms, for a 0.4% mean brightness
+  change (run-to-run noise with `ODAI_FNV_NOWANDER=1` is 0.05%). `=1` restores the old
+  resolution. Read once at swapchain build, since it sizes the targets.
+- **Sun shafts now default OFF** for the FNV viewer. `skyConfig4`'s density/falloff/scatter
+  are near zero for this game, so the pass was invisible and cost 4.7 ms. `ODAI_FNV_SHAFTS=1`
+  turns it back on — do that *first* when tuning those densities, and flip the default back
+  the moment they are non-trivial.
+
+Together: 37.9 → 28.5 ms (26.4 → 35.1 fps) at native 1440p with no visible change.
+
+**F4 opens the renderer's own ImGui panels** in any `GameApp` game — frame stats,
+shadows/AO, sun/sky/post (the whole exposure/bloom/grading chain), and the render
+debug views below. Distinct from F3, which is this engine's CPU timing overlay.
+`buildShadowDebugUi`/`buildSunDebugUi` were written but had **no call site** in the
+frame path, and no `GameApp` game ever called `setDebugUiVisible`, so that entire
+tuning surface existed and was unreachable.
+
+### Render debug views
+
+`render::DebugView` (`renderer_types.h`) replaces the frame with one channel of
+what the main pass shaded with: albedo, normal, **alpha**, **material flags**,
+roughness, metallic, mip level, cascade index, texture ID, linear depth. Set from
+the F4 panel, or `ODAI_FNV_DEBUGVIEW=<albedo|normal|alpha|flags|roughness|metallic|mip|cascade|texid|depth>`
+— a `--screenshot` run cannot operate ImGui, so the env var is the only way to
+photograph one from a script.
+
+It rides in `CameraUniform::tonemapConfig2.y` (a documented spare channel) and
+`tone_map.frag.slang` bypasses exposure/tonemap/grading whenever one is active,
+so what the shader returns reaches the screen through nothing but the sRGB encode.
+Coverage is `imported_static.frag.slang` — which for a Fallout scene is the
+terrain, every static and every actor, but not sky or water.
+
+Two are load-bearing for diagnosing transparency, and neither works alone:
+
+- **Alpha** deliberately **bypasses the alpha-test discard**. Discarding first
+  throws away exactly the texels the view exists to inspect.
+- **Material flags** false-colours what the importer decided: red alphaTest,
+  green alphaBlend, blue twoSided, yellow unlit, **dark grey = no flags at all**.
+  This is the one that answers the question, because a low alpha value is not by
+  itself a defect — Fallout uses diffuse alpha as a **specular mask** on opaque
+  surfaces, so black alpha on an unflagged surface is correct and expected. The
+  defect signature is unflagged **and** near-zero alpha over a large area; that
+  renders as a solid slab of the RGB sitting under transparent texels, which for
+  these textures is black. Measured across the whole Goodsprings flythrough that
+  signature peaks at 0.01% of unflagged samples, i.e. it is not currently present.
 
 `ODAI_CITY_SCREENSHOT=<path>` (plus `ODAI_CITY_SCREENSHOT_FRAMES`) renders N frames, writes a
 PPM and quits — the same headless-verification hook `odai_game_newvegas --screenshot` has, and

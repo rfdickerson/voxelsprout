@@ -39,6 +39,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const std::span<const std::uint32_t> importedActorBlendedDrawOrder =
+        inputs.importedActorBlendedDrawOrder;
     const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
     const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const bool useRtMainShadows =
@@ -432,21 +434,72 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
-        // Neutral alpha-test threshold. Draws that carry an authored one
-        // overwrite this; leaving it zeroed would mean nothing cuts out.
-        importedPushConstants.materialParams[0] = 0.5f;
         importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &importedPushConstants
-        );
-        for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
+        // Per-draw, exactly as the static block above does it. This used to push
+        // a single hardcoded 0.5 for every actor in the scene with a comment
+        // claiming the draws below overwrote it -- nothing did, so an actor's
+        // authored NiAlphaProperty threshold never reached the shader.
+        auto pushActorState = [&](std::uint8_t alphaThreshold) {
+            importedPushConstants.materialParams[0] =
+                static_cast<float>(alphaThreshold) / 255.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &importedPushConstants
+            );
+        };
+        const VkPipeline actorOpaqueDefaultPipeline =
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline;
+        VkPipeline boundActorPipeline = actorOpaqueDefaultPipeline;
+        for (std::size_t drawIndex = 0; drawIndex < importedActorMeshDraws.size(); ++drawIndex) {
+            const ImportedMeshDraw& importedDraw = importedActorMeshDraws[drawIndex];
+            // Blended actor parts are replayed sorted, after the opaque ones.
+            if (importedDraw.blended) {
+                continue;
+            }
+            const VkPipeline wantedPipeline =
+                (importedDraw.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                    ? m_importedStaticPipelineTwoSided
+                    : actorOpaqueDefaultPipeline;
+            if (wantedPipeline != boundActorPipeline) {
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                boundActorPipeline = wantedPipeline;
+            }
+            pushActorState(importedDraw.alphaThreshold);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(
+                commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                importedDraw.vertexOffset, 0);
+        }
+        // Blended tail, farthest first -- the same treatment the static scene
+        // gets. Without it an actor's alpha-blended parts (hair cards, eye
+        // lashes, the glare quads on Victor's face screen) went through the
+        // opaque pipeline and rendered as solid slabs of whatever colour sits
+        // under their transparent texels, which for a Fallout texture is black.
+        VkPipeline boundActorBlendedPipeline = VK_NULL_HANDLE;
+        for (const std::uint32_t drawIndex : importedActorBlendedDrawOrder) {
+            if (drawIndex >= importedActorMeshDraws.size()) {
+                continue;
+            }
+            const ImportedMeshDraw& importedDraw = importedActorMeshDraws[drawIndex];
+            const VkPipeline wantedPipeline =
+                (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
+                    ? m_importedStaticPipelineBlendedTwoSided
+                    : m_importedStaticPipelineBlended;
+            if (wantedPipeline != VK_NULL_HANDLE && wantedPipeline != boundActorBlendedPipeline) {
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                boundActorBlendedPipeline = wantedPipeline;
+            }
+            pushActorState(importedDraw.alphaThreshold);
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(
                 commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -470,41 +523,88 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         bindGraphicsDescriptorBuffers(commandBuffer);
         ChunkPushConstants skinnedPushConstants{};
-        // Neutral alpha-test threshold. Draws that carry an authored one
-        // overwrite this; leaving it zeroed would mean nothing cuts out.
-        skinnedPushConstants.materialParams[0] = 0.5f;
         skinnedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         skinnedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         skinnedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &skinnedPushConstants
-        );
+        // Per draw, for the same reason as the actor block above. Skinned draws
+        // are not sorted into a blended tail: the skinning path produces one
+        // instance slot per actor and its parts are already filtered of the
+        // alpha-blended glare quads (see FalloutCharacter part selection), so
+        // there is nothing here to sort. Two-sidedness still applies -- a
+        // dust-mask or a coat flap is authored DRAW_BOTH like any other thin
+        // surface.
+        auto pushSkinnedState = [&](std::uint8_t alphaThreshold) {
+            skinnedPushConstants.materialParams[0] =
+                static_cast<float>(alphaThreshold) / 255.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &skinnedPushConstants
+            );
+        };
+        const VkPipeline skinnedDefaultPipeline =
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline;
+        VkPipeline boundSkinnedPipeline = skinnedDefaultPipeline;
         VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
-        for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
-            const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
-            const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
-            if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
-                continue;
+        // Two passes over the same list: opaque parts, then blended ones after
+        // them so they composite over what they cover. Not distance-sorted, and
+        // deliberately so -- these are the parts of ONE actor, already in the
+        // NIF's own part order, and there is no camera-dependent answer to
+        // "which of a character's own hair cards is in front" that a per-draw
+        // AABB centre would get right anyway.
+        const auto drawSkinned = [&](bool wantBlended) {
+            for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                if (skinnedDraw.blended != wantBlended) {
+                    continue;
+                }
+                const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
+                const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
+                if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
+                    continue;
+                }
+                if (drawVertexBuffer != boundSkinnedVertexBuffer) {
+                    const VkBuffer skinnedVertexBuffers[1] = {drawVertexBuffer};
+                    const VkDeviceSize skinnedVertexOffsets[1] = {0};
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+                    boundSkinnedVertexBuffer = drawVertexBuffer;
+                }
+                if (drawIndexBuffer != boundSkinnedIndexBuffer) {
+                    vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                    boundSkinnedIndexBuffer = drawIndexBuffer;
+                }
+                VkPipeline wantedPipeline = VK_NULL_HANDLE;
+                if (wantBlended) {
+                    wantedPipeline =
+                        (skinnedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticPipelineBlendedTwoSided
+                            : m_importedStaticPipelineBlended;
+                    if (wantedPipeline == VK_NULL_HANDLE) {
+                        wantedPipeline = skinnedDefaultPipeline;
+                    }
+                } else {
+                    wantedPipeline =
+                        (skinnedDraw.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticPipelineTwoSided
+                            : skinnedDefaultPipeline;
+                }
+                if (wantedPipeline != boundSkinnedPipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundSkinnedPipeline = wantedPipeline;
+                }
+                pushSkinnedState(skinnedDraw.alphaThreshold);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }
-            if (drawVertexBuffer != boundSkinnedVertexBuffer) {
-                const VkBuffer skinnedVertexBuffers[1] = {drawVertexBuffer};
-                const VkDeviceSize skinnedVertexOffsets[1] = {0};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
-                boundSkinnedVertexBuffer = drawVertexBuffer;
-            }
-            if (drawIndexBuffer != boundSkinnedIndexBuffer) {
-                vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                boundSkinnedIndexBuffer = drawIndexBuffer;
-            }
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
-        }
+        };
+        drawSkinned(false);
+        drawSkinned(true);
     }
 
     // (removed) pipe / belt / transport instanced main-pass draws — legacy factory-sim

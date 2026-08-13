@@ -462,6 +462,23 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         meshDraw.indexBufferHandle = slot.indexBufferHandle;
         meshDraw.firstIndex = draw.firstIndex;
         meshDraw.indexCount = draw.indexCount;
+        // Authored material state, carried through the same way the static and
+        // actor paths do it: the threshold off the packed draw, blend and
+        // two-sidedness off the draw's first vertex (per-vertex flags, but
+        // uniform across a draw because a draw is one NIF shape). Without this
+        // every skinned part alpha-tested at the default 0.5 and none was ever
+        // two-sided.
+        meshDraw.alphaThreshold = draw.alphaThreshold;
+        if (draw.firstIndex < meshTemplate.indices.size()) {
+            const std::uint32_t vertexIndex = meshTemplate.indices[draw.firstIndex];
+            if (vertexIndex < meshTemplate.vertices.size()) {
+                const std::uint32_t flags = meshTemplate.vertices[vertexIndex].flags;
+                meshDraw.blended =
+                    (flags & odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
+                meshDraw.twoSided =
+                    (flags & odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
+            }
+        }
         slot.meshDraws.push_back(meshDraw);
     }
 

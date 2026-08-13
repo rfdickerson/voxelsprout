@@ -156,6 +156,33 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     // (the strategy map's settlements/units/grid); the prior game's magica normal-depth
     // draws remain removed.
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
+        // The normal-depth shader alpha-tests too, so it needs the same
+        // authored threshold the main pass uses -- otherwise SSAO sees a
+        // different silhouette than the lit pass does.
+        //
+        // Hoisted to cover the static, actor and skinned blocks below. It used
+        // to live inside the static block, which left the actor and skinned
+        // draws testing against whatever threshold the last static draw had
+        // pushed. Push constants survive a pipeline bind within one layout, so
+        // the redundant-push filter stays valid across all three.
+        ChunkPushConstants importedPrepassPushConstants{};
+        importedPrepassPushConstants.materialParams[0] = 0.5f;
+        int lastPushedThreshold = -1;
+        const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+            if (static_cast<int>(threshold) == lastPushedThreshold) {
+                return;
+            }
+            lastPushedThreshold = static_cast<int>(threshold);
+            importedPrepassPushConstants.materialParams[0] =
+                static_cast<float>(threshold) / 255.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &importedPrepassPushConstants);
+        };
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
             importedVertexBuffer != VK_NULL_HANDLE &&
             importedIndexBuffer != VK_NULL_HANDLE &&
@@ -168,27 +195,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            // The normal-depth shader alpha-tests too, so it needs the same
-            // authored threshold the main pass uses -- otherwise SSAO sees a
-            // different silhouette than the lit pass does.
-            ChunkPushConstants importedPrepassPushConstants{};
-            importedPrepassPushConstants.materialParams[0] = 0.5f;
-            int lastPushedThreshold = -1;
-            const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
-                if (static_cast<int>(threshold) == lastPushedThreshold) {
-                    return;
-                }
-                lastPushedThreshold = static_cast<int>(threshold);
-                importedPrepassPushConstants.materialParams[0] =
-                    static_cast<float>(threshold) / 255.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &importedPrepassPushConstants);
-            };
             // Same indirect batching as the main pass: one call per distinct
             // alpha-test threshold instead of one per draw.
             const auto includeDraw = [&](std::size_t drawIndex) {
@@ -203,12 +209,35 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 buildImportedIndirectBatches(
                     importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
             if (useIndirect) {
+                // Batches are already grouped by two-sidedness (frame_draws.cc
+                // buckets on it), so this is at most one extra bind -- and
+                // until now the split existed here with nothing to switch to,
+                // making it pure overhead.
+                VkPipeline boundPrepassPipeline = m_importedStaticNormalDepthPipeline;
                 for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    const VkPipeline wantedPipeline =
+                        (batch.twoSided &&
+                         m_importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticNormalDepthPipelineTwoSided
+                            : m_importedStaticNormalDepthPipeline;
+                    if (wantedPipeline != boundPrepassPipeline) {
+                        vkCmdBindPipeline(
+                            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrepassPipeline = wantedPipeline;
+                    }
                     pushAlphaThreshold(batch.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                         batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                }
+                // The actor block below binds its own pipeline, but the skinned
+                // block after it does not -- leave the one-sided pipeline bound.
+                if (boundPrepassPipeline != m_importedStaticNormalDepthPipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_importedStaticNormalDepthPipeline);
                 }
             } else {
                 for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
@@ -239,6 +268,14 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
             for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
+                if (importedDraw.blended) {
+                    continue;  // no depth/normal contribution from blended surfaces
+                }
+                // Per draw. This block pushed nothing at all before, so an
+                // actor's alpha test ran against whatever threshold the static
+                // block above happened to leave in the push range -- which is
+                // the last static draw's, not the actor's.
+                pushAlphaThreshold(importedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -258,6 +295,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
             VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
             for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                if (skinnedDraw.blended) {
+                    continue;  // no depth/normal contribution from blended surfaces
+                }
                 const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
                 const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
                 if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
@@ -273,6 +313,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                     boundSkinnedIndexBuffer = drawIndexBuffer;
                 }
+                pushAlphaThreshold(skinnedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }

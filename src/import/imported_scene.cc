@@ -241,7 +241,13 @@ void bc3AlphaBlockBands(const std::uint8_t* block, AlphaBandCounts& bands) {
     }
 }
 
-bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
+// Fills `bands` with the texture's alpha histogram. False means the format
+// carries no readable colour alpha (BC4/BC5) or the blob is short -- callers
+// must then fall back to whatever the source authored rather than guess.
+//
+// Split out of textureUsesAlphaCutout so demoteFalseAlphaBlendFlags can ask a
+// different question of the same histogram instead of re-deriving it.
+bool collectTextureAlphaBands(const ImportedSceneTexture& texture, AlphaBandCounts& bands) {
     if (texture.width == 0u || texture.height == 0u) {
         return false;
     }
@@ -255,11 +261,10 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             if (texture.rgba8.size() < baseByteCount) {
                 return false;
             }
-            AlphaBandCounts bands;
             for (std::size_t pixelIndex = 0; pixelIndex < basePixelCount; ++pixelIndex) {
                 bands.add(texture.rgba8[(pixelIndex * 4u) + 3u]);
             }
-            return bands.looksLikeCutout();
+            return true;
         }
         case TextureFormat::BC1: {
             if (texture.rgba8.size() < baseBlockCount * 8u) {
@@ -274,11 +279,10 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             // and every one of those texels was then discarded. That is the
             // ragged holes in Goodsprings' buildings: they cluster in the dark
             // regions because that is where the encoder chose 3-colour mode.
-            AlphaBandCounts bands;
             for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
                 bc1BlockBands(texture.rgba8.data() + (blockIndex * 8u), bands);
             }
-            return bands.looksLikeCutout();
+            return true;
         }
         case TextureFormat::BC2: {
             // BC2 stores 16 explicit 4-bit alpha values in the first 8 bytes
@@ -286,7 +290,6 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
             if (texture.rgba8.size() < baseBlockCount * 16u) {
                 return false;
             }
-            AlphaBandCounts bands;
             for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
                 const std::uint8_t* alphaBytes = texture.rgba8.data() + (blockIndex * 16u);
                 for (std::size_t byteIndex = 0; byteIndex < 8u; ++byteIndex) {
@@ -299,23 +302,27 @@ bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
                     }
                 }
             }
-            return bands.looksLikeCutout();
+            return true;
         }
         case TextureFormat::BC3: {
             if (texture.rgba8.size() < baseBlockCount * 16u) {
                 return false;
             }
-            AlphaBandCounts bands;
             for (std::size_t blockIndex = 0; blockIndex < baseBlockCount; ++blockIndex) {
                 bc3AlphaBlockBands(texture.rgba8.data() + (blockIndex * 16u), bands);
             }
-            return bands.looksLikeCutout();
+            return true;
         }
         // BC4/BC5 carry no color alpha; BC7 alpha needs a full per-mode decode,
         // so a BC7 cook that wants cutout must set the part flag explicitly.
         default:
             return false;
     }
+}
+
+bool textureUsesAlphaCutout(const ImportedSceneTexture& texture) {
+    AlphaBandCounts bands;
+    return collectTextureAlphaBands(texture, bands) && bands.looksLikeCutout();
 }
 
 std::vector<bool> buildTextureAlphaCutoutMask(const std::vector<ImportedSceneTexture>& textures) {
@@ -345,6 +352,104 @@ bool textureIndexUsesAlphaCutout(const std::vector<bool>& mask, std::uint32_t te
 // So alphaBlend vetoes the guess. It does NOT veto alphaTest set by the
 // importer itself: NiAlphaProperty can legitimately set both bits, and that
 // surface still wants its own threshold applied.
+// The other direction: a surface the SOURCE marked alpha-blended whose texture
+// holds no gradient to blend. Only ever demotes, never promotes.
+//
+// Fallout ships stray NiAlphaProperties. Goodsprings' water tank
+// (nv_watertank.nif) is three shapes, and two of them -- the tank body and the
+// concrete pad it stands on -- are authored blend=1/test=0 while their textures
+// are 97% fully opaque. Drawn through the blended pipeline that reads as a
+// faintly see-through tank, and worse than the look: the blended pass writes no
+// depth and is skipped by the shadow and normal-depth passes, so the tank also
+// casts no shadow and contributes nothing to AO.
+//
+// Three-way on the same alpha histogram the cutout classifier already builds:
+//
+//   no transparent texels at all  -> the blend is a no-op, make it OPAQUE
+//   bimodal (transparent + opaque, thin rim) -> it is a cutout, make it TESTED
+//   anything with a real mid-range gradient  -> genuine transparency, keep it
+//
+// The last branch is what keeps glass and dust sheets working, and it is why
+// this is safe where the old content guess was not: that one FORCED alpha test
+// onto opaque geometry sharing a cutout's texture (554 of 557 blended draws on
+// this same map). This only ever takes work away from the blended pass, and a
+// flat-alpha pane -- low=0, mid=100% -- matches neither demotion branch.
+enum class BlendDemotion { Keep, ToAlphaTest, ToOpaque };
+
+BlendDemotion classifyAuthoredBlend(const ImportedSceneTexture& texture) {
+    AlphaBandCounts bands;
+    if (!collectTextureAlphaBands(texture, bands)) {
+        return BlendDemotion::Keep;  // format we cannot read -- trust the author
+    }
+    const std::size_t total = bands.low + bands.mid + bands.high;
+    if (total == 0u) {
+        return BlendDemotion::Keep;
+    }
+    const double lowFraction = static_cast<double>(bands.low) / static_cast<double>(total);
+    const double midFraction = static_cast<double>(bands.mid) / static_cast<double>(total);
+    // Nothing meaningfully transparent and no gradient: blending this composites
+    // the surface over the background at ~1.0 and is pure cost.
+    if (lowFraction < 0.001 && midFraction < 0.02) {
+        return BlendDemotion::ToOpaque;
+    }
+    if (bands.looksLikeCutout()) {
+        return BlendDemotion::ToAlphaTest;
+    }
+    return BlendDemotion::Keep;
+}
+
+void demoteFalseAlphaBlendFlags(ImportedScene& scene) {
+    // Only for importers that state the mode per shape. Where the mode was
+    // itself inferred there is nothing authored to disagree with.
+    if (!scene.alphaFlagsAuthored || scene.textures.empty()) {
+        return;
+    }
+    std::vector<BlendDemotion> perTexture(scene.textures.size(), BlendDemotion::Keep);
+    for (std::size_t i = 0; i < scene.textures.size(); ++i) {
+        perTexture[i] = classifyAuthoredBlend(scene.textures[i]);
+    }
+    const auto verdictFor = [&](std::uint32_t textureIndex) {
+        return textureIndex < perTexture.size() ? perTexture[textureIndex] : BlendDemotion::Keep;
+    };
+    for (ImportedSceneMesh& mesh : scene.meshes) {
+        for (ImportedSceneMeshPart& part : mesh.parts) {
+            if (!part.alphaBlend) {
+                continue;
+            }
+            switch (verdictFor(part.textureIndex)) {
+                case BlendDemotion::ToOpaque:
+                    part.alphaBlend = false;
+                    break;
+                case BlendDemotion::ToAlphaTest:
+                    part.alphaBlend = false;
+                    part.alphaTest = true;
+                    break;
+                case BlendDemotion::Keep:
+                    break;
+            }
+        }
+    }
+    // Runs on load as well as on build, so a cell coming back from the disk
+    // cache is corrected the same way -- the flags are packed into the vertex
+    // there, which is the only copy that survives.
+    for (ImportedScenePackedVertex& vertex : scene.packedVertices) {
+        if ((vertex.flags & kImportedSceneMaterialFlagAlphaBlend) == 0u) {
+            continue;
+        }
+        switch (verdictFor(vertex.textureIndex)) {
+            case BlendDemotion::ToOpaque:
+                vertex.flags &= ~kImportedSceneMaterialFlagAlphaBlend;
+                break;
+            case BlendDemotion::ToAlphaTest:
+                vertex.flags &= ~kImportedSceneMaterialFlagAlphaBlend;
+                vertex.flags |= kImportedSceneMaterialFlagAlphaTest;
+                break;
+            case BlendDemotion::Keep:
+                break;
+        }
+    }
+}
+
 void applyTextureAlphaCutoutFlags(ImportedScene& scene) {
     // A scene whose importer authored the alpha mode per shape (FNV NIFs)
     // never gets the content guess: a texture can be a real cutout for one
@@ -723,6 +828,11 @@ std::array<float, 3> normalizeVector(std::array<float, 3> value) {
 
 void buildImportedScenePackedRenderData(ImportedScene& scene) {
     applyTextureAlphaCutoutFlags(scene);
+    // Paired with the call above: that one infers a mode where none was
+    // authored, this one corrects one that was authored wrong. Exactly one
+    // of the two does anything for any given scene (they test
+    // alphaFlagsAuthored in opposite senses).
+    demoteFalseAlphaBlendFlags(scene);
     scene.packedVertices.clear();
     scene.packedIndices.clear();
     scene.packedDraws.clear();
@@ -1594,6 +1704,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     }
 
     applyTextureAlphaCutoutFlags(scene);
+    // Paired with the call above: that one infers a mode where none was
+    // authored, this one corrects one that was authored wrong. Exactly one
+    // of the two does anything for any given scene (they test
+    // alphaFlagsAuthored in opposite senses).
+    demoteFalseAlphaBlendFlags(scene);
     outScene = std::move(scene);
     return true;
 }
@@ -1840,6 +1955,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     }
 
     applyTextureAlphaCutoutFlags(scene);
+    // Paired with the call above: that one infers a mode where none was
+    // authored, this one corrects one that was authored wrong. Exactly one
+    // of the two does anything for any given scene (they test
+    // alphaFlagsAuthored in opposite senses).
+    demoteFalseAlphaBlendFlags(scene);
     outScene = std::move(scene);
     return true;
 }
