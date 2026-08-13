@@ -1,5 +1,6 @@
 #include "import/fnv/character_builder.h"
 
+#include <cctype>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -252,6 +253,53 @@ bool buildFalloutAnimationClip(
         }
         outClip.tracks.push_back(std::move(track));
         ++outStats.boundTracks;
+    }
+
+    // THE ACCUMULATION ROOT'S TRANSLATION IS ROOT MOTION, NOT POSE.
+    //
+    // Gamebryo names one node in a NiControllerSequence as its accumulation
+    // root -- "Bip01 NonAccum" on every Bethesda human rig -- and the engine
+    // consumes that node's translation to MOVE THE CHARACTER, never to pose it.
+    // Applied to the pose it is counted twice, because the skeleton's own
+    // "Bip01" parent already carries the character's pelvis height.
+    //
+    // Measured, and it was not subtle: every human in Goodsprings stood 66.5
+    // units -- most of a metre -- above the ground, because NonAccum binds at
+    // (0,0,0) and every idle sets it to (0.2, 66.331, 0.27). Bind pose put them
+    // on the ground correctly, which is what made it look like an animation
+    // problem rather than a placement one. Creatures were unaffected throughout:
+    // a bighorner's accumulation root is (0, 0.000001, 0), which is why this
+    // survived so long -- Victor, the one actor anybody had studied, is a robot.
+    //
+    // Made RELATIVE to the first key rather than deleted, so the vertical bob a
+    // clip authors around that offset survives; the horizontal channel is
+    // flattened outright, because the wander code is what moves an actor here
+    // and leaving it in would slide the body out from under its own placement.
+    for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+        const std::string& name = skeleton.bones[i].name;
+        constexpr const char* kAccumSuffix = "nonaccum";
+        constexpr std::size_t kAccumLength = 8u;
+        if (name.size() < kAccumLength) {
+            continue;
+        }
+        std::string tail = name.substr(name.size() - kAccumLength);
+        std::transform(tail.begin(), tail.end(), tail.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (tail != kAccumSuffix) {
+            continue;
+        }
+        for (anim::BoneTrack& track : outClip.tracks) {
+            if (track.boneIndex != static_cast<int>(i) || track.translationKeys.empty()) {
+                continue;
+            }
+            const odai::math::Vector3 origin = track.translationKeys.front().value;
+            for (anim::Vector3Key& key : track.translationKeys) {
+                key.value.x = 0.0f;
+                key.value.y -= origin.y;
+                key.value.z = 0.0f;
+            }
+        }
     }
     return !outClip.tracks.empty() && outClip.duration > 0.0f;
 }
