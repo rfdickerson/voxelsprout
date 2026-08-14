@@ -47,6 +47,14 @@ namespace odai::games::newvegas {
 
 // Victor, the Goodsprings Securitron: placed, talked to with E, and speaking
 // his own imported dialogue. See newvegas_victor.h.
+
+// Loads flythrough waypoints from a text file, returning how many were read (0
+// on failure). Free rather than a member because the waypoint list is tour
+// DATA, not app state, and because framing a flythrough is iterative -- a
+// rebuild per waypoint guess makes that loop useless. It is also what lets one
+// binary tour three different games.
+int loadTourFile(const std::string& path);
+
 class NewVegasApp : public engine::GameApp {
 public:
     // Normal exploration FOV, and the narrowed one a conversation eases to.
@@ -110,6 +118,11 @@ public:
     // Force a specific weather by editor ID (e.g. "WEAVarNV01"). Empty picks
     // one from the worldspace's climate.
     void setWeather(std::string editorId) { m_requestedWeatherEditorId = std::move(editorId); }
+    void setUpscalerSettings(const render::UpscalerSettings& settings) { m_upscalerSettings = settings; }
+    [[nodiscard]] render::UpscalerSettings upscalerSettings() const { return m_upscalerSettings; }
+    // GameApp consumes this before renderer init, which is the only point at
+    // which the quality preset can still choose the render resolution.
+    render::UpscalerSettings requestedUpscalerSettings() const override { return m_upscalerSettings; }
     void setStreamWorldspace(std::string worldspace) { m_streamWorldspace = std::move(worldspace); }
     // Spawn on the doorstep of this interior cell. Empty means "centre of the
     // worldspace" instead.
@@ -178,6 +191,19 @@ private:
     // Pushes the active weather's colours for the current hour at the renderer.
     // Called from applyTimeOfDay, so moving time also moves the sky.
     void applyWeather();
+    // Makes `weatherFormId` the active weather and re-does everything that
+    // depends on it: cloud layers, sky gradient, fog, audio, tonemap.
+    void selectWeather(std::uint32_t weatherFormId);
+    // Fills m_weatherChoices, once. Prefers the weathers this worldspace's
+    // climate actually runs -- with Nevada Skies loaded that IS the mod's
+    // weather set, and it is a far more useful list than every WTHR in the load
+    // order. Falls back to all of them when the climate names fewer than two.
+    void buildWeatherChoices();
+    // Opens the picker scrolled to the weather currently in effect.
+    void openWeatherPicker();
+    // The weather sub-page of the pause menu. Returns true when it drew, which
+    // is what tells drawPauseMenu to skip the menu proper.
+    bool drawWeatherPicker(const ui::UiRect& panelArea, float scale);
     // Rain/wind loops and a music bed, pulled from the installed game's own
     // audio. No-op when the weather is dry or the assets are missing.
     void initWeatherAudio();
@@ -188,6 +214,10 @@ private:
     void pollNavInput(float deltaSeconds);
     // Checks the regions covering the camera and toasts any not seen before.
     void updateRegionDiscovery();
+    // Fills the renderer's stats panel with this game's own readouts --
+    // streaming residency and timings, camera, weather. No-op while the panel
+    // is closed.
+    void updateDebugStats();
     void drawPipBoyHud();
     // The pause menu. Controller-navigable; returns nothing because every entry
     // acts on app state directly.
@@ -287,6 +317,18 @@ private:
     // Scripted tour and frame-sequence recording. See the setters.
     float m_flythroughSeconds = 0.0f;
     float m_flythroughTime = 0.0f;
+    // Tour actor tracking: the actor the aim latched onto, and the smoothed aim
+    // point. Both exist so the last stretch of the flythrough does not inherit
+    // the per-frame ground-settle steps in an actor's position.
+    int m_tourTrackedActor = -1;
+    float m_tourAim[3] = {0.0f, 0.0f, 0.0f};
+    bool m_tourAimValid = false;
+    // Critically damped angle filter state for the tour camera. The velocities
+    // are what make it C1; without them it is a plain exponential and arrives
+    // at every turn with a corner.
+    float m_tourYawVelocity = 0.0f;
+    float m_tourPitchVelocity = 0.0f;
+    bool m_tourAnglesValid = false;
     std::string m_captureDirectory;
     int m_captureFrames = 0;
     int m_captureWritten = 0;
@@ -373,6 +415,9 @@ private:
     float m_timeOfDayHours = 9.5f;
     // Weather, from WTHR records across the load order. Empty tables mean the
     // procedural sky, which is what an unmodded run gets.
+    // Upscaler request. What actually runs may differ -- see
+    // Renderer::upscalerStatus() and the note at the parse site.
+    render::UpscalerSettings m_upscalerSettings{};
     importer::fnv::FalloutWeatherTables m_weatherTables;
     std::vector<std::string> m_extraPlugins;  // beyond m_streamPlugin, in load order
     std::string m_requestedWeatherEditorId;
@@ -440,6 +485,15 @@ private:
     ui::UiNavStickMapper m_navStick;
     ui::NavFocusRing m_menuFocus;
     bool m_menuOpen = false;
+    // Weather picker, a sub-page of the pause menu. Choices are remapped
+    // formIDs into m_weatherTables, built once on first open.
+    ui::NavFocusRing m_weatherFocus;
+    bool m_weatherPickerOpen = false;
+    std::vector<std::uint32_t> m_weatherChoices;
+    // First row of the visible window into m_weatherChoices. The list is far
+    // longer than the panel (473 weathers with Nevada Skies installed), so it
+    // scrolls rather than being drawn in full.
+    int m_weatherScrollTop = 0;
     // True once a controller (or the d-pad keys) last drove the UI, false once
     // the mouse moves. Drives whether the focus highlight is drawn at all --
     // an always-on highlight looks broken with a mouse, and a never-on one

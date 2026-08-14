@@ -14,11 +14,50 @@ namespace {
 
 constexpr std::size_t kColorCount = static_cast<std::size_t>(FalloutWeatherColor::Count);
 constexpr std::size_t kSlotCount = static_cast<std::size_t>(FalloutWeatherTimeSlot::Count);
-// 10 color channels x 6 time slots x RGBA.
-constexpr std::size_t kNam0Size = kColorCount * kSlotCount * 4u;
 constexpr std::size_t kCloudLayerCount = FalloutWeatherRecord::kCloudLayerCount;
-// 4 cloud layers x 6 time slots x RGBA.
-constexpr std::size_t kPnamSize = kCloudLayerCount * kSlotCount * 4u;
+
+// Fallout 3 authors FOUR time slots, not six -- so its NAM0 is 160 bytes and
+// its PNAM 64, and a `size >= 240` guard silently rejects the whole record.
+// The failure is not a parse error, it is an all-zero colour table: every
+// Fallout 3 weather rendered a pure black sky at noon while the terrain looked
+// correct, which is the same display-referred symptom a genuinely dark weather
+// produces. Read whichever layout the bytes are, and fill New Vegas's two extra
+// slots from the neighbours Fallout 3 does author.
+//
+// The first four slots are the same channels in the same order in both games,
+// which is what makes the widening a copy rather than an interpolation.
+std::size_t weatherSlotsInSubrecord(std::uint32_t size, std::size_t rowCount) {
+    if (rowCount == 0u) {
+        return 0u;
+    }
+    if (size >= rowCount * kSlotCount * 4u) {
+        return kSlotCount;  // New Vegas
+    }
+    if (size >= rowCount * 4u * 4u) {
+        return 4u;  // Fallout 3
+    }
+    return 0u;
+}
+
+// Reads one row of RGBA colours out of a NAM0/PNAM-shaped block and widens a
+// four-slot row to six. Noon takes Day and Midnight takes Night: those are the
+// slots New Vegas added, and the value either side of them is the one Fallout 3
+// was showing at that hour anyway.
+void readWeatherColorRow(const std::uint8_t* data,
+                         std::size_t row,
+                         std::size_t fileSlots,
+                         FalloutColorRgb* out) {
+    for (std::size_t slot = 0; slot < fileSlots; ++slot) {
+        const std::size_t offset = ((row * fileSlots) + slot) * 4u;
+        out[slot] = FalloutColorRgb{data[offset], data[offset + 1u], data[offset + 2u]};
+    }
+    if (fileSlots == 4u) {
+        out[static_cast<std::size_t>(FalloutWeatherTimeSlot::Noon)] =
+            out[static_cast<std::size_t>(FalloutWeatherTimeSlot::Day)];
+        out[static_cast<std::size_t>(FalloutWeatherTimeSlot::Midnight)] =
+            out[static_cast<std::size_t>(FalloutWeatherTimeSlot::Night)];
+    }
+}
 
 std::string toLowerAsciiCopy(std::string text) {
     for (char& c : text) {
@@ -118,21 +157,19 @@ bool buildFalloutWeatherTables(
                         weather.cloudTextures[2] = readZeroTerminated(sub);
                     } else if (sub.type == "BNAM") {
                         weather.cloudTextures[3] = readZeroTerminated(sub);
-                    } else if (sub.type == "PNAM" && sub.size >= kPnamSize) {
-                        for (std::size_t layer = 0; layer < kCloudLayerCount; ++layer) {
-                            for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
-                                const std::size_t offset = ((layer * kSlotCount) + slot) * 4u;
-                                weather.cloudColors[layer][slot] = FalloutColorRgb{
-                                    sub.data[offset], sub.data[offset + 1u], sub.data[offset + 2u]};
-                            }
+                    } else if (sub.type == "PNAM") {
+                        const std::size_t slots =
+                            weatherSlotsInSubrecord(sub.size, kCloudLayerCount);
+                        for (std::size_t layer = 0; slots != 0u && layer < kCloudLayerCount;
+                             ++layer) {
+                            readWeatherColorRow(sub.data, layer, slots,
+                                                weather.cloudColors[layer]);
                         }
-                    } else if (sub.type == "NAM0" && sub.size >= kNam0Size) {
-                        for (std::size_t color = 0; color < kColorCount; ++color) {
-                            for (std::size_t slot = 0; slot < kSlotCount; ++slot) {
-                                const std::size_t offset = ((color * kSlotCount) + slot) * 4u;
-                                weather.colors[color][slot] = FalloutColorRgb{
-                                    sub.data[offset], sub.data[offset + 1u], sub.data[offset + 2u]};
-                            }
+                    } else if (sub.type == "NAM0") {
+                        const std::size_t slots = weatherSlotsInSubrecord(sub.size, kColorCount);
+                        for (std::size_t color = 0; slots != 0u && color < kColorCount; ++color) {
+                            readWeatherColorRow(sub.data, color, slots,
+                                                weather.colors[color]);
                         }
                     } else if (sub.type == "FNAM" && sub.size >= 24u) {
                         weather.fogDayNear = readFloat(sub.data);

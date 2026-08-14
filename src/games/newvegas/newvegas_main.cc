@@ -1,5 +1,7 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "render/upscale/upscale_policy.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -42,6 +44,26 @@ int main(int argc, char** argv) {
             // An extra plugin loaded after --plugin; masters resolve on their
             // own, so "--plugin-add NevadaSkies.esp" is enough.
             app.addPlugin(argv[++i]);
+        } else if (std::strcmp(argv[i], "--upscaler") == 0 && i + 1 < argc) {
+            // off | temporal | xess | fsr | dlss. Unavailable backends report
+            // why and fall back rather than failing to launch.
+            odai::render::UpscalerSettings upscaler = app.upscalerSettings();
+            if (odai::render::parseUpscalerBackend(argv[++i], upscaler.backend)) {
+                app.setUpscalerSettings(upscaler);
+            } else {
+                std::cout << "unknown --upscaler backend: " << argv[i]
+                          << " (off|temporal|xess|fsr|dlss)\n";
+                return 1;
+            }
+        } else if (std::strcmp(argv[i], "--upscaler-quality") == 0 && i + 1 < argc) {
+            odai::render::UpscalerSettings upscaler = app.upscalerSettings();
+            if (odai::render::parseUpscalerQuality(argv[++i], upscaler.quality)) {
+                app.setUpscalerSettings(upscaler);
+            } else {
+                std::cout << "unknown --upscaler-quality: " << argv[i]
+                          << " (ultraquality|quality|balanced|performance|ultraperformance)\n";
+                return 1;
+            }
         } else if (std::strcmp(argv[i], "--weather") == 0 && i + 1 < argc) {
             app.setWeather(argv[++i]);
         } else if (std::strcmp(argv[i], "--mod") == 0 && i + 1 < argc) {
@@ -85,6 +107,15 @@ int main(int argc, char** argv) {
                 }
             }
             app.setScreenshotRequest(path, warmupFrames);
+        } else if (std::strcmp(argv[i], "--tour-file") == 0 && i + 1 < argc) {
+            const std::string path = argv[++i];
+            const int loaded = odai::games::newvegas::loadTourFile(path);
+            if (loaded == 0) {
+                std::cout << "could not read a tour from " << path
+                          << " (need at least 4 lines of 'px py pz lx ly lz')\n";
+                return 1;
+            }
+            std::cout << "tour: " << loaded << " waypoints from " << path << "\n";
         } else if (std::strcmp(argv[i], "--flythrough") == 0) {
             // Scripted tour of Goodsprings. Optional length in seconds.
             float seconds = 40.0f;

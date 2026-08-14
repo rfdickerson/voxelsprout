@@ -216,12 +216,33 @@ worldspace's climate picks its highest-chance entry. WTHR's NAM0 is **10 color c
 time-of-day slots × RGBA** — New Vegas added noon and midnight to Fallout 3's four, which is
 why the record carries six `\x00IAD`–`\x05IAD` adapters and NAM0 is 240 bytes, not 160.
 
+**Which meant Fallout 3 had NO SKY AT ALL and nothing said so.** The reader guarded on
+`sub.size >= 240` (and PNAM on `>= 96`), so every one of Fallout 3's weathers failed the
+guard and kept its default all-zero colour table: `sky linear rgb: upper(0,0,0)
+horizon(0,0,0) fog(0,0,0)` at noon, rendering a black-to-grey void over correctly lit
+terrain. That is indistinguishable on screen from a genuinely dark authored weather, which
+is why it survived — the log line is the tell, not the frame. `weatherSlotsInSubrecord`
+now picks the layout from the byte count and widens four slots to six (Noon ← Day,
+Midnight ← Night; the first four channels are identical in both games).
+
 Colors reach the sky through `Renderer::setWeatherSky(WeatherSkyParams)`. They **blend over**
 the procedural Rayleigh/Mie sky rather than replacing it: `weight` 0 is the default and
 renders byte-identically to before, which is what keeps every other game unaffected. WTHR
 authors three vertical stops (Horizon at the skyline, SkyLower just above it, SkyUpper at the
 zenith); collapsing that into a two-end gradient loses the narrow near-ground band that gives
 these skies their look.
+
+**`fogFarDistance` is the one field that is honoured at weight 0.** Both atmospheres — the
+aerial perspective in `imported_static.frag.slang` and the volumetric height fog whose
+density `frame_run.cc` derives — take the distance from the record without consulting the
+weight, while the *colours* still lerp by it. That split exists so a caller can say "leave
+my sky procedural, but this is how far you can see". Every Oblivion worldspace needs it:
+they name no climate, so nothing publishes colours, and the 15000-unit fallback (~214 m, a
+dust-storm value) put Anvil behind a wall of milk. `ODAI_FNV_FOGFAR` (default 160000) sets
+what the no-weather path publishes. Measured on the Anvil tour: frame contrast (stddev of
+luma) 14.0 → 22.6. Getting the two gates to *disagree* is the trap — the volumetric one
+still checked `weight > 0`, so the two atmospheres calibrated themselves against distances
+2.7x apart.
 
 **Cloud layers** render from the same records. A weather's four layers (DNAM/CNAM/ANAM/BNAM,
 tinted per time of day by PNAM) are uploaded through the imported-texture slot table and
@@ -464,6 +485,35 @@ alone fails for someone. Replies are driven by `UiNavInput`, so a gamepad works 
 the arrow keys, with the number keys kept as the keyboard fast path. Anything else that draws
 large centred type (the location-discovery banner) must be held while it is up.
 
+## The flythrough camera, and `--tour-file`
+
+`--flythrough <seconds> --capture-seq <dir> <fps> <seconds>` flies a spline path and writes
+numbered PPMs. The path is a **centripetal** Catmull-Rom (Barry–Goldman, α=0.5) with an
+arc-length table, so speed is even along it rather than surging through tight corners.
+`--tour-file <path>` replaces the built-in Goodsprings path with a text file of
+`px py pz  lx ly lz` rows (`#` comments; y is height; at least four rows, because
+Catmull-Rom needs four control points). That is what makes a location reachable without a
+rebuild, which matters because every framing decision here is one round trip through a
+render.
+
+**An authored tour suppresses the actor hand-off, and it must.** Past 70% of the built-in
+tour the camera latches onto the nearest wandering townsperson and eases its aim onto them —
+a deliberate flourish, written for Goodsprings, where the tour ends among the residents.
+Applied to a tour file it silently overrides the authored `lookAt`: in Megaton a pan across
+the shanties became a top-down stare at one settler on the crater floor, and the symptom
+reads as "my waypoints are being ignored" rather than as anything to do with actors.
+`tourIsAuthored()` gates it.
+
+Two more traps a capture run hits, neither of which fails loudly:
+
+- **`ODAI_WINDOW_SIZE` is a request, not a contract.** The captures for the three-game
+  showcase came out 2133x1200 with `1280x720` asked for. Check the PPM header before
+  assuming a frame's size — an overlay composited at the wrong scale lands in a corner and
+  looks like a working pipeline at first glance.
+- **The first second or two of any capture is still streaming.** Goodsprings' frame 0 is an
+  empty grey plane and the Capital Wasteland needed ~300 frames to fill in. Render more
+  than needed and drop the head.
+
 Diagnostics: `ODAI_FNV_VICTOR_TALK=1` opens the conversation on the first tick so a
 `--screenshot` run can exercise it, `ODAI_FNV_DIALOGUE_SELECT=<n>` starts on the nth reply
 (a screenshot run cannot press a key, so this is the only way to photograph the highlight
@@ -515,6 +565,23 @@ frame path, and no `GameApp` game ever called `setDebugUiVisible`, so that entir
 tuning surface existed and was unreachable.
 
 ### Render debug views
+
+**`shadow` and `directratio` answer "why does this look flat", and the answer is usually
+not the renderer.** `shadow` is the cascaded visibility term; `directratio` is
+`direct / (direct + ambient)`, i.e. how much of a surface's lighting a shadow is even able
+to remove. Measured on Goodsprings that ratio is **0.81** -- the sun/ambient balance is
+fine, and a flat-looking frame is almost always the VIEW: the default spawn faces roughly
+down-sun, where every cast shadow hides behind its caster. Swinging `ODAI_FNV_YAW` across
+the sun takes the shadowed fraction of the frame from 3% to 51%. Check that before
+touching shadow code -- the sun's azimuth is `90 + (hour/24)*360` and its elevation is
+`cos(hour/24 * 2pi) * 75`, negative being above the horizon.
+
+Both are computed mid-shading rather than in `debugViewColor()`, because their inputs do
+not exist until the sun and ambient terms have been evaluated -- so they are exempted from
+the early-out at the top of `main()`. A new view that forgets that exemption falls into
+`debugViewColor()`, which does not know it, and renders as some other view instead. Also
+worth knowing: `ODAI_SHADOW_DUMP=<path.pgm>` writes the atlas, and it is **16-bit** --
+reading it as 8-bit collapses the depth range and makes a perfectly good atlas look empty.
 
 `render::DebugView` (`renderer_types.h`) replaces the frame with one channel of
 what the main pass shaded with: albedo, normal, **alpha**, **material flags**,
@@ -614,6 +681,74 @@ The seam between `src/ui/` and the renderer is `Renderer::setUiDrawData(const ui
 - **`render/renderer.h`** — narrow public facade. Call `upload*` to push world data, `setUiDrawData` for UI, `renderFrame` to record and submit.
 - **`render/backend/vulkan/renderer_backend.h`** — the actual Vulkan state machine. Owns instance, device, swapchain, command pools, pipelines, descriptor sets, and `FrameArena`. All per-pass recording happens in files named `frame_*.cc`.
 - **`render/frame_graph.{h,cc}`** + **`frame_graph_runtime.cc`** — declarative pass dependency graph. It resolves execution order and validates it; **barriers are hand-written per pass by design**, never inferred.
+
+**THE FRAME LAYS DEPTH ONCE, AND THE PREPASS IS WHERE.** It used to lay it twice: the
+normal-depth prepass rendered the visible set at *half* resolution into its own depth image
+and threw it away (`storeOp DONT_CARE`), so the main pass — whose forward shader alpha-tests,
+and therefore cannot get early-Z out of its own depth writes — rasterized the same set a
+second time, depth-only, to lay depth it could then test against. Measured on Goodsprings:
+2.7 ms for the prepass and 2.7 ms for the prewrite inside main's 8.5.
+
+`useMergedDepthPrepass()` (`swapchain_targets.cc`) collapses them. The prepass now runs at
+**full render extent** and writes the real `m_depthImages`, main does `loadOp = LOAD` with
+`depthWriteEnable = FALSE`, and the prewrite is gone. Measured **18.2 → 15.8 ms** and
+**24.8 → 21.2 ms** on two interleaved passes of the same walk. Four things about it are
+load-bearing:
+
+- **It is nearly free to make the prepass bigger** because it is vertex-bound, not
+  fill-bound — it measured the same at native and at 44% of the pixels. That is the fact the
+  whole merge rests on.
+- **`m_normalDepthExtent` follows the prepass**, so normal-depth is now full resolution
+  (a render pass cannot have a colour attachment smaller than its render area). Every
+  consumer samples it by normalized UV, so nothing downstream changed — but the AO estimator
+  now gets a finer input, which is why a before/after diff is a low-amplitude wash over lit
+  surfaces rather than byte-identical.
+- **`ao.depth` is no longer created**, and `m_colorSampleCount != 1` keeps the old
+  two-rasterization structure: the normal-depth pipelines are `VK_SAMPLE_COUNT_1_BIT` and
+  cannot write a multisampled depth buffer. `ODAI_MERGED_PREPASS=0` forces the old path for
+  A/B; both are valid Vulkan.
+- **The debug views cannot A/B this.** `imported_static.frag` returns `debugViewColor` *before*
+  its alpha-test discard while the prepass still applies one, so an albedo/normal/depth view
+  shows cutout vegetation as solid billboard quads under the old path and correctly cut out
+  under the merged one. That is the instrument, not the geometry. Compare lit frames.
+
+Related: at one sample there is no resolve, and the main pass now renders straight into
+`hdrResolve`. It used to point at a 1-sample `m_msaaColorImages` and set
+`resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT` regardless — a full-resolution copy into an
+identical image every frame, and a spec violation
+(`VUID-VkRenderingAttachmentInfo-imageView-06861`). Worth only ~0.2–0.7 ms on this iGPU
+(lossless colour compression makes the copy cheap) but it returns three swapchain images'
+worth of R16G16B16A16 VRAM.
+
+**`ImportedMeshVertex` is 48 bytes, and vertex WIDTH is not what these passes cost.**
+Position and UV stay full float on purpose — position feeds the clip transform the merged
+prepass and main must agree on bit-exactly, and UV drives an alpha test whose cutout both
+must reproduce. Normal is octahedral snorm16x2, colour is **sRGB-encoded** unorm8x4 (linear
+quantization spends all 256 steps on highlights and bands the darks; all 256 sRGB source
+bytes round-trip exactly), and the four terrain-layer slots are u16 read as one
+`R16G16B16A16_UINT` fetch. Encoders are in `src/import/imported_scene.h` — deliberately
+outside `src/render/` so a Vulkan-free test can reach them — mirrored by
+`shaders/imported_vertex_pack.slang` and pinned by `testImportedVertexPacking`.
+
+Measure before extending this. `ODAI_FAT_SHADOW_STREAM=1` puts the shadow pass on the main
+stream instead of its 28-byte compact one, over identical geometry with both pipelines
+already built, which makes it the cheapest vertex-width experiment in the tree. Cutting
+72 → 28 moved it 0.36/0.13 ms; cutting 72 → 48 moved the same gap only 0.36 → 0.32 and
+0.13 → 0.11, i.e. **the 24 bytes are worth 0.02–0.04 ms.** These passes are bound by
+geometry submission and primitive throughput, not attribute fetch. The 48-byte format is a
+**memory** win (a third of geometry vertex storage) that happens to cost nothing.
+
+Two traps this exposed. `skinning.comp.slang` writes this struct through a StructuredBuffer,
+so its `SkinnedVertexOut` must match to the last byte — verify with
+`spirv-dis src/render/shaders/skinning.comp.slang.spv | grep OpMemberDecorate` and check
+ArrayStride is 48; sub-32-bit members there would need `VK_KHR_8bit_storage`, which is why
+the narrowed fields are `uint` and packed by hand. And the octahedral worst case is **0.034
+degrees at the fold diagonals just below the equator**, not at the poles — a random-sample
+estimate understates it tenfold, which is how the test's first threshold came out wrong.
+
+GPU timestamps now cover the **depth prewrite, the skinned-velocity pass and TAA/upscale**
+(`kGpuTimestampQuery*`). Before that, ~2 ms of every frame ran between main's end timestamp
+and post's start with no query over it, which is where the temporal chain was hiding.
 - **`descriptors.cc`** — bindless texture table, plus a classic-descriptor-set fallback path so headless CI renders on lavapipe.
 - **`docs/FrameArena.md`** — per-frame transient GPU memory (host-visible upload arena + device-local scratch arena; reclaimed after the timeline fence).
 

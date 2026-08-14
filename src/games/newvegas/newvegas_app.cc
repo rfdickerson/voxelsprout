@@ -1,5 +1,7 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "render/upscale/upscale_policy.h"
+
 #include "import/fnv/dialogue_records.h"
 
 #include "import/dds.h"
@@ -7,6 +9,7 @@
 #include "import/fnv/bsa_archive.h"
 
 #include <fstream>
+#include <sstream>
 #include <random>
 #include <chrono>
 
@@ -645,6 +648,10 @@ bool NewVegasApp::onInit() {
             aoMode = render::AoMode::Ssao;
         } else if (requested == "hbao") {
             aoMode = render::AoMode::Hbao;
+        } else if (requested == "gtao") {
+            aoMode = render::AoMode::Gtao;
+        } else if (requested == "xegtao") {
+            aoMode = render::AoMode::Xegtao;
         }
     }
     m_renderer.setSsaoEnabled(aoMode != render::AoMode::Off);
@@ -667,6 +674,8 @@ bool NewVegasApp::onInit() {
         else if (requested == "cascade") { view = render::DebugView::CascadeIndex; }
         else if (requested == "texid") { view = render::DebugView::TextureId; }
         else if (requested == "depth") { view = render::DebugView::LinearDepth; }
+        else if (requested == "shadow") { view = render::DebugView::Shadow; }
+        else if (requested == "directratio") { view = render::DebugView::DirectRatio; }
         else if (requested != "off") {
             VOX_LOGW("newvegas")
                 << "ODAI_FNV_DEBUGVIEW=" << requested << " is not a view name; ignoring. "
@@ -807,7 +816,12 @@ bool NewVegasApp::onInit() {
         // holds while the menu is up), so the demo cannot show both either.
         const std::string demoMode = std::getenv("ODAI_FNV_UI_DEMO");
         m_navDriving = true;  // show the focus highlight and the controller labels
-        m_menuOpen = (demoMode == "menu");
+        // "weather" opens the picker sub-page. It needs its own value because it
+        // is two keypresses deep and a screenshot run cannot press either.
+        m_menuOpen = (demoMode == "menu" || demoMode == "weather");
+        if (demoMode == "weather") {
+            openWeatherPicker();
+        }
         if (!m_menuOpen) {
             m_banner.push("Goodsprings", "Location discovered", "region:Goodsprings");
         }
@@ -1106,15 +1120,25 @@ void NewVegasApp::initWeather() {
     if (m_streamDirectory.empty()) {
         return;  // a cooked scene has no plugin to read weather from
     }
-    // Nothing to gain from reading 473 weather records when none of them can be
-    // selected and the procedural sky is what will render anyway.
-    if (m_extraPlugins.empty() && m_requestedWeatherEditorId.empty()) {
-        return;
-    }
+    // This used to skip the read entirely unless a weather mod or an explicit
+    // --weather gave it something to select. The pause menu's weather picker is
+    // what made that premise false: vanilla's own records ARE selectable now, so
+    // gating on a mod being present left the picker permanently empty on a stock
+    // install. The read is a top-level group-header walk (see
+    // buildFalloutWeatherTables) rather than a scan of the file, so paying it
+    // unconditionally is close to free: measured at 0.49 ms for vanilla's 63
+    // WTHR and 31 CLMT, against a ~2.0 s startup. The log line below carries the
+    // number so a regression here cannot hide.
 
     std::vector<std::string> requested;
     requested.push_back(m_streamPlugin);
     requested.insert(requested.end(), m_extraPlugins.begin(), m_extraPlugins.end());
+
+    // Timed because this now runs on every launch rather than only when a
+    // weather mod is loaded, and because a plugin scan that forgets to filter on
+    // the record header is the classic way to add seconds to startup here
+    // without anything looking wrong. See CLAUDE.md on onRecordHeader.
+    const core::Stopwatch weatherTimer;
 
     importer::fnv::FalloutLoadOrder order;
     // Mod directories are searched for the plugin too, so a mod that ships an
@@ -1141,7 +1165,8 @@ void NewVegasApp::initWeather() {
     }
     VOX_LOGI("newvegas") << "load order: " << loadOrderText;
     VOX_LOGI("newvegas") << "weather: " << m_weatherTables.weathers.size() << " WTHR, "
-                         << m_weatherTables.climates.size() << " CLMT";
+                         << m_weatherTables.climates.size() << " CLMT in "
+                         << weatherTimer.elapsedMs() << " ms";
 
     if (!m_requestedWeatherEditorId.empty()) {
         const importer::fnv::FalloutWeatherRecord* weather =
@@ -1205,6 +1230,22 @@ void NewVegasApp::initWeather() {
                                  << (weather != nullptr ? weather->editorId : "<unresolved>");
         }
     }
+
+    // Everything from here -- clouds, sky colours, audio, tonemap -- is the same
+    // work a runtime weather change does, so it is one call rather than a copy.
+    selectWeather(m_activeWeatherFormId);
+}
+
+// Everything that has to happen when the active weather changes: cloud layers
+// re-uploaded, sky colours re-decoded, audio re-picked.
+//
+// Split out of initWeather so the pause menu can change weather at runtime.
+// Doing it by hand at the call site was never going to stay correct -- setting
+// m_activeWeatherFormId alone leaves the previous weather's cloud textures on
+// the GPU and its rain still playing, which reads as "the picker only half
+// works" rather than as a missing call.
+void NewVegasApp::selectWeather(std::uint32_t weatherFormId) {
+    m_activeWeatherFormId = weatherFormId;
 
     // Cloud layers. These come out of the mod's own BSA, which the streamer's
     // asset source already indexes -- reusing it means no second search path and
@@ -1508,7 +1549,21 @@ void NewVegasApp::applyWeather() {
     const importer::fnv::FalloutWeatherRecord* weather =
         m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
     if (weather == nullptr) {
-        return;  // leave the procedural sky alone
+        // No climate names a weather -- every Oblivion worldspace, and any FNV
+        // one before the first weather resolves. The sky is left procedural, but
+        // the aerial-perspective distance still has to be published or the
+        // shader falls back to 15000 units (~214 m) and a city vista renders
+        // behind a wall of milk. Weight stays 0, so only the distance is taken.
+        static const float s_fogFar = []() {
+            const char* env = std::getenv("ODAI_FNV_FOGFAR");
+            const float value = env != nullptr ? static_cast<float>(std::atof(env)) : 160000.0f;
+            return value > 1.0f ? value : 160000.0f;
+        }();
+        render::WeatherSkyParams clear;
+        clear.weight = 0.0f;
+        clear.fogFarDistance = s_fogFar;
+        m_renderer.setWeatherSky(clear);
+        return;
     }
 
     // WTHR colours are authored as sRGB bytes for a renderer that displayed them
@@ -1648,6 +1703,15 @@ struct FlyWaypoint {
     float lookAt[3];
 };
 
+// A tour loaded from disk, when --tour-file names one. Empty means the built-in
+// Goodsprings list below.
+//
+// A file rather than more hardcoded arrays because framing a flythrough is
+// iterative -- every waypoint is a guess until you watch it -- and a rebuild per
+// guess makes that loop useless. It is also what lets one binary tour three
+// different games.
+std::vector<FlyWaypoint> g_runtimeTour;
+
 constexpr FlyWaypoint kGoodspringsTour[] = {
     // High and south, the whole town in frame.
     {{-70600.0f, 10600.0f, -10200.0f}, {-70600.0f, 8700.0f, -4400.0f}},
@@ -1680,40 +1744,232 @@ constexpr FlyWaypoint kGoodspringsTour[] = {
 // it lands on a person. See updateFlythrough.
 constexpr float kTourActorTrackStart = 0.72f;
 constexpr float kTourActorTrackFull = 0.86f;
-constexpr int kGoodspringsTourCount =
+constexpr int kBuiltinTourCount =
     static_cast<int>(sizeof(kGoodspringsTour) / sizeof(kGoodspringsTour[0]));
 
-// Catmull-Rom through four control points. Passes through p1 and p2, which is
-// what a hand-authored waypoint list wants: a Bezier would treat them as pulls
-// and the camera would never reach the spot it was told to fly to.
-float catmullRom(float p0, float p1, float p2, float p3, float t) {
-    const float t2 = t * t;
-    const float t3 = t2 * t;
-    return 0.5f * ((2.0f * p1) + ((-p0 + p2) * t) + (((2.0f * p0) - (5.0f * p1) + (4.0f * p2) - p3) * t2) +
-                   ((-p0 + (3.0f * p1) - (3.0f * p2) + p3) * t3));
+// True once --tour-file has replaced the built-in path. The camera treats an
+// authored tour as authoritative: the actor hand-off below is a flourish
+// written for Goodsprings, where the tour ends among the townspeople on
+// purpose, and it silently overrides whatever a tour file aimed at. In Megaton
+// that meant a pan across the shanties turned into a top-down stare at a
+// settler standing on the crater floor.
+bool tourIsAuthored() {
+    return !g_runtimeTour.empty();
 }
 
-void sampleTour(float u, float outPosition[3], float outLookAt[3]) {
-    const float span = static_cast<float>(kGoodspringsTourCount - 1);
-    const float scaled = std::clamp(u, 0.0f, 1.0f) * span;
-    const int segment = std::min(static_cast<int>(scaled), kGoodspringsTourCount - 2);
-    const float t = scaled - static_cast<float>(segment);
-    // Duplicate the ends rather than wrapping: this is a path, not a loop, and
-    // wrapping would curve the first segment toward the last landmark.
-    const auto at = [](int index) -> const FlyWaypoint& {
-        return kGoodspringsTour[std::clamp(index, 0, kGoodspringsTourCount - 1)];
+int tourCount() {
+    return g_runtimeTour.empty() ? kBuiltinTourCount
+                                 : static_cast<int>(g_runtimeTour.size());
+}
+
+// Critically damped smoothing toward a target, with a ceiling on rate of
+// change. The standard spring-damper solution with the exponential replaced by
+// its Pade approximation, so it is stable at any timestep -- an explicit spring
+// integrated with a 40 ms frame overshoots and rings.
+//
+// `smoothSeconds` is roughly how long it takes to cover the distance, not a
+// half-life. `velocity` is carried by the caller because that state is what
+// makes it critically damped rather than exponential.
+float smoothDampAngle(float current, float target, float& velocity, float smoothSeconds,
+                      float maxRatePerSecond, float deltaSeconds) {
+    if (deltaSeconds <= 0.0f) {
+        return current;
+    }
+    const float omega = 2.0f / std::max(smoothSeconds, 1e-4f);
+    const float x = omega * deltaSeconds;
+    const float decay = 1.0f / (1.0f + x + (0.48f * x * x) + (0.235f * x * x * x));
+    // Clamping the DISTANCE rather than the step is what makes the rate ceiling
+    // behave: the filter then eases toward a target it is allowed to reach,
+    // instead of being clipped every frame and arriving with a corner.
+    const float maxDistance = maxRatePerSecond * smoothSeconds;
+    const float change = std::clamp(current - target, -maxDistance, maxDistance);
+    const float clampedTarget = current - change;
+    const float temp = (velocity + (omega * change)) * deltaSeconds;
+    velocity = (velocity - (omega * temp)) * decay;
+    float result = clampedTarget + ((change + temp) * decay);
+    // Do not overshoot past the target from the wrong side.
+    if (((target - current) > 0.0f) == (result > target)) {
+        result = target;
+        velocity = (result - target) / deltaSeconds;
+    }
+    return result;
+}
+
+// Duplicate the ends rather than wrapping: this is a path, not a loop, and
+// wrapping would curve the first segment toward the last landmark.
+const FlyWaypoint& tourWaypoint(int index) {
+    const int clamped = std::clamp(index, 0, tourCount() - 1);
+    return g_runtimeTour.empty() ? kGoodspringsTour[clamped] : g_runtimeTour[clamped];
+}
+
+// CENTRIPETAL Catmull-Rom (Barry-Goldman form, alpha = 0.5), not the uniform
+// one this used to use.
+//
+// Uniform Catmull-Rom takes the tangent at p1 as (p2 - p0)/2 regardless of how
+// far apart those points actually are. These waypoints are not evenly spaced --
+// the legs run from ~1500 to ~3400 units -- so the curve arrives at a knot with
+// one speed and leaves it with another, and every waypoint is a visible kink.
+// Uneven spacing also lets the uniform form overshoot and, at a tight corner,
+// cusp: the camera briefly reverses. Parameterizing the knots by sqrt(chord
+// length) is the standard fix and is guaranteed cusp- and self-intersection-free.
+//
+// Knot spacings are clamped away from zero because the ends are duplicated, so
+// the first and last spans have zero chord length and would divide by it.
+void centripetalKnots(const float p0[3], const float p1[3], const float p2[3],
+                      const float p3[3], float outKnots[4]) {
+    const auto span = [](const float a[3], const float b[3]) {
+        const float dx = b[0] - a[0];
+        const float dy = b[1] - a[1];
+        const float dz = b[2] - a[2];
+        return std::max(std::sqrt(std::sqrt((dx * dx) + (dy * dy) + (dz * dz))), 1e-4f);
     };
+    outKnots[0] = 0.0f;
+    outKnots[1] = outKnots[0] + span(p0, p1);
+    outKnots[2] = outKnots[1] + span(p1, p2);
+    outKnots[3] = outKnots[2] + span(p2, p3);
+}
+
+// One de-Boor-style pyramid step: linear blend of a and b over [ta, tb] at t.
+void knotLerp(const float a[3], const float b[3], float ta, float tb, float t, float out[3]) {
+    const float denominator = (tb - ta);
+    const float w = (std::abs(denominator) < 1e-6f) ? 0.0f : ((t - ta) / denominator);
     for (int axis = 0; axis < 3; ++axis) {
-        outPosition[axis] = catmullRom(
-            at(segment - 1).position[axis], at(segment).position[axis],
-            at(segment + 1).position[axis], at(segment + 2).position[axis], t);
-        outLookAt[axis] = catmullRom(
-            at(segment - 1).lookAt[axis], at(segment).lookAt[axis],
-            at(segment + 1).lookAt[axis], at(segment + 2).lookAt[axis], t);
+        out[axis] = a[axis] + ((b[axis] - a[axis]) * w);
     }
 }
 
+// Evaluate the curve through p1..p2 at local parameter s in [0,1], using a knot
+// vector supplied by the caller. The look-at spline is deliberately evaluated
+// against the POSITION knots rather than its own: the two must stay paired
+// frame for frame, and a look-at sequence has repeated entries (waypoints 5 and
+// 6 share one) whose own centripetal knots would advance at a different rate.
+void evaluateCentripetal(const float p0[3], const float p1[3], const float p2[3],
+                         const float p3[3], const float knots[4], float s, float out[3]) {
+    const float t = knots[1] + ((knots[2] - knots[1]) * s);
+    float a1[3];
+    float a2[3];
+    float a3[3];
+    knotLerp(p0, p1, knots[0], knots[1], t, a1);
+    knotLerp(p1, p2, knots[1], knots[2], t, a2);
+    knotLerp(p2, p3, knots[2], knots[3], t, a3);
+    float b1[3];
+    float b2[3];
+    knotLerp(a1, a2, knots[0], knots[2], t, b1);
+    knotLerp(a2, a3, knots[1], knots[3], t, b2);
+    knotLerp(b1, b2, knots[1], knots[2], t, out);
+}
+
+// Sample at a parameter measured in SEGMENTS, i.e. u in [0,1] spans the whole
+// waypoint list with each leg getting an equal slice of u regardless of length.
+void sampleTourByParameter(float u, float outPosition[3], float outLookAt[3]) {
+    const float span = static_cast<float>(tourCount() - 1);
+    const float scaled = std::clamp(u, 0.0f, 1.0f) * span;
+    const int segment = std::min(static_cast<int>(scaled), tourCount() - 2);
+    const float s = scaled - static_cast<float>(segment);
+    const FlyWaypoint& w0 = tourWaypoint(segment - 1);
+    const FlyWaypoint& w1 = tourWaypoint(segment);
+    const FlyWaypoint& w2 = tourWaypoint(segment + 1);
+    const FlyWaypoint& w3 = tourWaypoint(segment + 2);
+    float knots[4];
+    centripetalKnots(w0.position, w1.position, w2.position, w3.position, knots);
+    evaluateCentripetal(w0.position, w1.position, w2.position, w3.position, knots, s, outPosition);
+    evaluateCentripetal(w0.lookAt, w1.lookAt, w2.lookAt, w3.lookAt, knots, s, outLookAt);
+}
+
+// Arc-length reparameterization.
+//
+// Equal u per leg means equal TIME per leg, and the legs differ in length by
+// better than 2x -- so the camera visibly speeds up over the long run to Doc
+// Mitchell's and crawls across the short hops at the east end. Constant ground
+// speed is what reads as a smooth dolly, so the eased parameter below is a
+// distance along the path and this table converts it back to a curve parameter.
+constexpr int kTourArcSamples = 1024;
+
+const std::vector<float>& tourArcLengths() {
+    static const std::vector<float> table = []() {
+        std::vector<float> lengths(kTourArcSamples + 1, 0.0f);
+        float previous[3] = {};
+        float ignoredLookAt[3] = {};
+        sampleTourByParameter(0.0f, previous, ignoredLookAt);
+        for (int i = 1; i <= kTourArcSamples; ++i) {
+            float current[3] = {};
+            sampleTourByParameter(static_cast<float>(i) / static_cast<float>(kTourArcSamples),
+                                  current, ignoredLookAt);
+            const float dx = current[0] - previous[0];
+            const float dy = current[1] - previous[1];
+            const float dz = current[2] - previous[2];
+            lengths[i] = lengths[i - 1] + std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
+            previous[0] = current[0];
+            previous[1] = current[1];
+            previous[2] = current[2];
+        }
+        const float total = lengths.back();
+        if (total > 1e-3f) {
+            for (float& entry : lengths) {
+                entry /= total;
+            }
+        }
+        return lengths;
+    }();
+    return table;
+}
+
+// distance in [0,1] along the path -> curve parameter in [0,1].
+float tourParameterAtDistance(float distance) {
+    const std::vector<float>& lengths = tourArcLengths();
+    const float target = std::clamp(distance, 0.0f, 1.0f);
+    const auto upper = std::upper_bound(lengths.begin(), lengths.end(), target);
+    if (upper == lengths.begin()) {
+        return 0.0f;
+    }
+    if (upper == lengths.end()) {
+        return 1.0f;
+    }
+    const auto lower = upper - 1;
+    const float lowerValue = *lower;
+    const float upperValue = *upper;
+    const float denominator = upperValue - lowerValue;
+    const float fraction = (denominator > 1e-9f) ? ((target - lowerValue) / denominator) : 0.0f;
+    const float index = static_cast<float>(lower - lengths.begin()) + fraction;
+    return index / static_cast<float>(kTourArcSamples);
+}
+
+void sampleTour(float distance, float outPosition[3], float outLookAt[3]) {
+    sampleTourByParameter(tourParameterAtDistance(distance), outPosition, outLookAt);
+}
+
 }  // namespace
+
+// "px py pz  lx ly lz" per line; '#' comments and blank lines ignored. Returns
+// how many waypoints were loaded so a typo in the path is not silently a
+// built-in Goodsprings tour of a Fallout 3 worldspace.
+int loadTourFile(const std::string& path) {
+    std::ifstream input(path);
+    if (!input) {
+        return 0;
+    }
+    std::vector<FlyWaypoint> loaded;
+    std::string line;
+    while (std::getline(input, line)) {
+        const std::size_t hash = line.find('#');
+        if (hash != std::string::npos) {
+            line.resize(hash);
+        }
+        FlyWaypoint waypoint{};
+        std::istringstream stream(line);
+        if (stream >> waypoint.position[0] >> waypoint.position[1] >> waypoint.position[2] >>
+            waypoint.lookAt[0] >> waypoint.lookAt[1] >> waypoint.lookAt[2]) {
+            loaded.push_back(waypoint);
+        }
+    }
+    // Catmull-Rom needs four control points; fewer than four cannot describe a
+    // curve and would index past the ends.
+    if (loaded.size() < 4u) {
+        return 0;
+    }
+    g_runtimeTour = std::move(loaded);
+    return static_cast<int>(g_runtimeTour.size());
+}
 
 bool NewVegasApp::updateFlythrough(float deltaSeconds) {
     m_flythroughTime += deltaSeconds;
@@ -1725,6 +1981,15 @@ bool NewVegasApp::updateFlythrough(float deltaSeconds) {
     // at nearly double speed while the first and last waypoints get a third of
     // the running time each. This is the integral of a speed profile that ramps
     // up over the first `kEase` of the run, holds, and ramps back down.
+    //
+    // THE RAMP-DOWN BRANCH WAS DIVIDING THE WRONG NUMERATOR. The profile's area
+    // up to `raw` is `total - remaining^2 / (2 * kEase)`, and it was written as
+    // `1 - remaining^2 / (2 * kEase)` -- larger by exactly kEase. So at
+    // raw = 1 - kEase the eased parameter jumped from 0.962 straight to 1.0 and
+    // the std::min pinned it there: the camera SNAPPED forward over the last
+    // stretch of path and then sat frozen for the final 7% of the run, while
+    // the actor tracking below went on swinging the aim around. That is the
+    // "smooth until the end, then jittery" this had.
     constexpr float kEase = 0.07f;
     const float total = 1.0f - kEase;  // area under that profile
     float eased = raw;
@@ -1732,11 +1997,11 @@ bool NewVegasApp::updateFlythrough(float deltaSeconds) {
         eased = ((raw * raw) / (2.0f * kEase)) / total;
     } else if (raw > 1.0f - kEase) {
         const float remaining = 1.0f - raw;
-        eased = (1.0f - ((remaining * remaining) / (2.0f * kEase))) / total;
-        eased = std::min(eased, 1.0f);
+        eased = (total - ((remaining * remaining) / (2.0f * kEase))) / total;
     } else {
         eased = ((kEase * 0.5f) + (raw - kEase)) / total;
     }
+    eased = std::clamp(eased, 0.0f, 1.0f);
 
     float position[3] = {};
     float lookAt[3] = {};
@@ -1748,35 +2013,76 @@ bool NewVegasApp::updateFlythrough(float deltaSeconds) {
     // Hand the aim over to a real inhabitant for the last stretch. Nearest
     // walker to the camera, aimed at the chest rather than the feet, blended in
     // so the camera drifts onto them instead of snapping.
-    if (eased > kTourActorTrackStart) {
-        const SkinnedActor* best = nullptr;
-        float bestDistanceSq = 4000.0f * 4000.0f;
-        for (const SkinnedActor& actor : m_actors) {
-            if (!actor.placed || !actor.wanders) {
-                continue;
-            }
-            const float dx = actor.position[0] - m_cameraX;
-            const float dz = actor.position[2] - m_cameraZ;
-            const float distanceSq = (dx * dx) + (dz * dz);
-            // Not the one under the camera's nose: at a few hundred units an
-            // actor fills the frame and the town behind them is gone.
-            if (distanceSq < 300.0f * 300.0f || distanceSq >= bestDistanceSq) {
-                continue;
-            }
-            bestDistanceSq = distanceSq;
-            best = &actor;
+    if (eased > kTourActorTrackStart && !tourIsAuthored()) {
+        // LATCHED, not re-chosen every frame. Picking the nearest actor afresh
+        // each frame makes the aim jump the moment two of them swap places in
+        // the ordering, and again whenever one crosses the near or far cutoff --
+        // the target teleports across the width of the town between one frame
+        // and the next. Once someone is chosen the tour stays with them, which
+        // is also what a real camera operator would do.
+        if (m_tourTrackedActor >= 0 &&
+            (static_cast<std::size_t>(m_tourTrackedActor) >= m_actors.size() ||
+             !m_actors[static_cast<std::size_t>(m_tourTrackedActor)].placed)) {
+            m_tourTrackedActor = -1;
         }
-        if (best != nullptr) {
+        if (m_tourTrackedActor < 0) {
+            float bestDistanceSq = 4000.0f * 4000.0f;
+            for (std::size_t i = 0; i < m_actors.size(); ++i) {
+                const SkinnedActor& actor = m_actors[i];
+                if (!actor.placed || !actor.wanders) {
+                    continue;
+                }
+                const float dx = actor.position[0] - m_cameraX;
+                const float dz = actor.position[2] - m_cameraZ;
+                const float distanceSq = (dx * dx) + (dz * dz);
+                // Not the one under the camera's nose: at a few hundred units an
+                // actor fills the frame and the town behind them is gone.
+                //
+                // 1200, not the 300 this had. The tour flies ~500 units above
+                // the townspeople, so 300 units of GROUND distance is a 59
+                // degree downward aim -- and since the camera is still moving
+                // toward them, it then passes very nearly overhead. Aiming
+                // through the nadir makes yaw ill-conditioned: the measured
+                // trace swung 140 degrees of yaw in 0.3 s at raw 0.79 while the
+                // target itself barely moved. 1200 units keeps the aim under
+                // ~23 degrees down and the pass off to one side.
+                if (distanceSq < 1200.0f * 1200.0f || distanceSq >= bestDistanceSq) {
+                    continue;
+                }
+                bestDistanceSq = distanceSq;
+                m_tourTrackedActor = static_cast<int>(i);
+            }
+        }
+        if (m_tourTrackedActor >= 0) {
+            const SkinnedActor& tracked = m_actors[static_cast<std::size_t>(m_tourTrackedActor)];
             const float weight = std::clamp(
                 (eased - kTourActorTrackStart) / (kTourActorTrackFull - kTourActorTrackStart),
                 0.0f, 1.0f);
             const float smooth = weight * weight * (3.0f - (2.0f * weight));
             const float target[3] = {
-                best->position[0],
-                best->position[1] + conversationFaceHeight(*best),
-                best->position[2]};
+                tracked.position[0],
+                tracked.position[1] + conversationFaceHeight(tracked),
+                tracked.position[2]};
+            // Low-pass the aim point before it reaches the camera.
+            //
+            // An actor is re-settled onto the terrain EVERY frame (see
+            // updateActorWandering) and slid out of walls on top of that, so
+            // their position carries per-frame steps that a fixed look-at
+            // never had. Pointing straight at it hands that noise to the
+            // camera's pitch and yaw, which is the shake at the end of the
+            // tour. Time-constant form so it behaves the same at any frame rate.
+            constexpr float kAimTimeConstantSeconds = 0.35f;
+            const float alpha =
+                1.0f - std::exp(-std::max(deltaSeconds, 0.0f) / kAimTimeConstantSeconds);
+            if (!m_tourAimValid) {
+                m_tourAim[0] = target[0];
+                m_tourAim[1] = target[1];
+                m_tourAim[2] = target[2];
+                m_tourAimValid = true;
+            }
             for (int axis = 0; axis < 3; ++axis) {
-                lookAt[axis] += (target[axis] - lookAt[axis]) * smooth;
+                m_tourAim[axis] += (target[axis] - m_tourAim[axis]) * alpha;
+                lookAt[axis] += (m_tourAim[axis] - lookAt[axis]) * smooth;
             }
         }
     }
@@ -1786,9 +2092,70 @@ bool NewVegasApp::updateFlythrough(float deltaSeconds) {
     const float dz = lookAt[2] - m_cameraZ;
     const float horizontal = std::sqrt((dx * dx) + (dz * dz));
     if (horizontal > 1e-3f) {
-        m_yawDegrees = std::atan2(dz, dx) * (180.0f / kPi);
-        m_pitchDegrees = std::clamp(
+        const float desiredYaw = std::atan2(dz, dx) * (180.0f / kPi);
+        const float desiredPitch = std::clamp(
             std::atan2(dy, horizontal) * (180.0f / kPi), -kPitchLimitDegrees, kPitchLimitDegrees);
+
+        // Snapping the camera onto the aim direction makes the ANGLES only as
+        // smooth as the geometry that produced them, and near the nadir that is
+        // not smooth at all: a look-at a few hundred units away and several
+        // hundred below turns yaw into a badly conditioned function of the
+        // target's horizontal position. Smoothing the aim POINT does not help
+        // there, because the point is barely moving -- the angle is what
+        // explodes.
+        //
+        // So the last step of the tour camera is a critically damped filter on
+        // the angles themselves, with a hard ceiling on turn rate. Critically
+        // damped rather than exponential because it is C1: it eases out of a
+        // turn instead of arriving with a corner in angular velocity. The rate
+        // ceiling is what bounds a whip if the geometry ever goes bad again --
+        // the camera lags the target for a moment and catches up, which reads
+        // as a camera operator, not as a glitch.
+        constexpr float kAngleSmoothSeconds = 0.25f;
+        constexpr float kMaxYawRateDegreesPerSecond = 90.0f;
+        constexpr float kMaxPitchRateDegreesPerSecond = 60.0f;
+        if (!m_tourAnglesValid) {
+            m_yawDegrees = desiredYaw;
+            m_pitchDegrees = desiredPitch;
+            m_tourYawVelocity = 0.0f;
+            m_tourPitchVelocity = 0.0f;
+            m_tourAnglesValid = true;
+        } else {
+            // Shortest arc: the tour crosses +/-180 and chasing the long way
+            // round would be a full spin.
+            float yawTarget = desiredYaw;
+            while (yawTarget - m_yawDegrees > 180.0f) {
+                yawTarget -= 360.0f;
+            }
+            while (yawTarget - m_yawDegrees < -180.0f) {
+                yawTarget += 360.0f;
+            }
+            m_yawDegrees = smoothDampAngle(
+                m_yawDegrees, yawTarget, m_tourYawVelocity, kAngleSmoothSeconds,
+                kMaxYawRateDegreesPerSecond, deltaSeconds);
+            m_pitchDegrees = std::clamp(
+                smoothDampAngle(m_pitchDegrees, desiredPitch, m_tourPitchVelocity,
+                                kAngleSmoothSeconds, kMaxPitchRateDegreesPerSecond, deltaSeconds),
+                -kPitchLimitDegrees, kPitchLimitDegrees);
+        }
+    }
+
+    // ODAI_FNV_TOUR_TRACE=<path> writes one CSV row per tour frame.
+    //
+    // "Is the camera smooth" cannot be answered from a screenshot and is only
+    // half-answerable by watching -- a kink at a waypoint and a shake in the
+    // aim look alike at speed and have different causes. The trace makes both
+    // measurable: differentiate position for speed, and yaw/pitch twice for the
+    // angular jerk that reads as jitter.
+    if (const char* tracePath = std::getenv("ODAI_FNV_TOUR_TRACE")) {
+        static std::ofstream s_trace(tracePath);
+        static bool s_header = false;
+        if (!s_header) {
+            s_trace << "raw,eased,x,y,z,yaw,pitch\n";
+            s_header = true;
+        }
+        s_trace << raw << ',' << eased << ',' << m_cameraX << ',' << m_cameraY << ','
+                << m_cameraZ << ',' << m_yawDegrees << ',' << m_pitchDegrees << '\n';
     }
     return raw < 1.0f;
 }
@@ -3172,10 +3539,19 @@ void NewVegasApp::pollNavInput(float deltaSeconds) {
     // one press -- two modal states toggled by one key, which reads as the menu
     // appearing for no reason.
     if (m_nav.pressed(ui::UiNavAction::Menu) && m_talkingActor < 0) {
-        m_menuOpen = !m_menuOpen;
-        // Releasing the mouse with the menu up is what makes it usable on PC;
-        // on a controller it costs nothing.
-        setMouseCaptured(!m_menuOpen);
+        // The weather picker is a sub-page of the menu, so Escape backs out of
+        // it one level rather than closing everything. Closing straight to the
+        // world would make the picker feel like a separate mode the player had
+        // fallen into, and there would be no way to change your mind about one
+        // weather without leaving the menu entirely.
+        if (m_menuOpen && m_weatherPickerOpen) {
+            m_weatherPickerOpen = false;
+        } else {
+            m_menuOpen = !m_menuOpen;
+            // Releasing the mouse with the menu up is what makes it usable on
+            // PC; on a controller it costs nothing.
+            setMouseCaptured(!m_menuOpen);
+        }
     }
 }
 
@@ -3337,11 +3713,195 @@ void NewVegasApp::drawPipBoyHud() {
     m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
 }
 
+void NewVegasApp::buildWeatherChoices() {
+    if (!m_weatherChoices.empty()) {
+        return;
+    }
+    // Every weather the load order defines, not just the ones this worldspace's
+    // climate runs. Scoping to the climate was the first attempt and it is too
+    // narrow to be useful: NVDefaultClimate names exactly TWO, so the picker
+    // offered clear-day and clear-night out of the 63 vanilla ships. The point
+    // of the picker is looking at skies, and the list scrolls and pages, so
+    // there is nothing to be gained by hiding most of them.
+    m_weatherChoices.reserve(m_weatherTables.weathers.size());
+    for (const auto& [formId, record] : m_weatherTables.weathers) {
+        m_weatherChoices.push_back(formId);
+    }
+    // By name, because the player is reading names. formID order is load-order
+    // order, which shuffles when a plugin is added and is meaningless on screen.
+    std::sort(
+        m_weatherChoices.begin(), m_weatherChoices.end(),
+        [this](std::uint32_t a, std::uint32_t b) {
+            const auto* ra = m_weatherTables.findWeather(a);
+            const auto* rb = m_weatherTables.findWeather(b);
+            const std::string& na = ra != nullptr ? ra->editorId : std::string{};
+            const std::string& nb = rb != nullptr ? rb->editorId : std::string{};
+            return na < nb;
+        });
+    m_weatherChoices.erase(
+        std::unique(m_weatherChoices.begin(), m_weatherChoices.end()), m_weatherChoices.end());
+    VOX_LOGI("newvegas") << "weather picker: " << m_weatherChoices.size() << " choices";
+}
+
+void NewVegasApp::openWeatherPicker() {
+    m_weatherPickerOpen = true;
+    buildWeatherChoices();
+    // Open ON the active weather rather than at the top. The list is sorted by
+    // name, so row 1 is alphabetical happenstance -- with vanilla's 63 that is a
+    // Pitt DLC weather, nowhere near whatever is currently over the Mojave --
+    // and scrolling back to where you already were is the first thing the player
+    // would otherwise have to do.
+    const auto found =
+        std::find(m_weatherChoices.begin(), m_weatherChoices.end(), m_activeWeatherFormId);
+    const int activeIndex = (found != m_weatherChoices.end())
+        ? static_cast<int>(found - m_weatherChoices.begin())
+        : 0;
+    // A few rows of context above it rather than pinned to the top edge.
+    m_weatherScrollTop = std::max(0, activeIndex - 4);
+    m_weatherFocus.setFocus(std::min(activeIndex, 4));
+}
+
+bool NewVegasApp::drawWeatherPicker(const ui::UiRect& panelArea, float scale) {
+    buildWeatherChoices();
+    if (m_weatherChoices.empty()) {
+        m_weatherPickerOpen = false;
+        return false;
+    }
+
+    const int choiceCount = static_cast<int>(m_weatherChoices.size());
+    // A fixed window of rows, sized to what fits comfortably rather than to the
+    // list -- the list can be 473 long.
+    constexpr int kVisibleRows = 10;
+    const int visibleRows = std::min(kVisibleRows, choiceCount);
+    const float lineHeight = m_uiFont.lineHeightPx();
+    const float rowHeight = lineHeight + (10.0f * scale);
+    const float headerBand = lineHeight + (28.0f * scale);
+    const float footerBand = lineHeight + (22.0f * scale);
+
+    float contentWidth = m_uiFont.measureText("WEATHER");
+    for (int i = 0; i < choiceCount; ++i) {
+        const auto* record = m_weatherTables.findWeather(m_weatherChoices[i]);
+        if (record != nullptr) {
+            contentWidth = std::max(contentWidth, m_uiFont.measureText(record->editorId.c_str()));
+        }
+    }
+    const float panelWidth = std::max(560.0f * scale, contentWidth + (96.0f * scale));
+    const float panelHeight =
+        headerBand + (rowHeight * static_cast<float>(visibleRows)) + footerBand;
+    ui::UiRect panel{};
+    panel.minX = ((panelArea.minX + panelArea.maxX) - panelWidth) * 0.5f;
+    panel.maxX = panel.minX + panelWidth;
+    panel.minY = ((panelArea.minY + panelArea.maxY) - panelHeight) * 0.5f;
+    panel.maxY = panel.minY + panelHeight;
+    m_uiDrawList.addRoundRectFilled(panel, kPipPanelSolid, 4.0f * scale);
+    m_uiDrawList.addRoundRect(panel, kPipGreen, 4.0f * scale, 1.5f * scale);
+
+    char header[64];
+    std::snprintf(header, sizeof(header), "WEATHER  (%d)", choiceCount);
+    m_uiDrawList.addText(
+        m_uiFont, header,
+        ui::UiVec2{panel.minX + (24.0f * scale), panel.minY + (14.0f * scale)}, kPipGreen);
+
+    // The focus ring holds only the VISIBLE rows, so navigating off either end
+    // has to scroll the window rather than move focus. Registering all 473 would
+    // let focus land on a row that is not drawn, and the highlight would simply
+    // vanish.
+    m_weatherFocus.beginFrame();
+    std::vector<ui::UiRect> rows(static_cast<std::size_t>(visibleRows));
+    for (int i = 0; i < visibleRows; ++i) {
+        ui::UiRect row{};
+        row.minX = panel.minX + (16.0f * scale);
+        row.maxX = panel.maxX - (16.0f * scale);
+        row.minY = panel.minY + headerBand + (static_cast<float>(i) * rowHeight);
+        row.maxY = row.minY + rowHeight - (3.0f * scale);
+        rows[static_cast<std::size_t>(i)] = row;
+        m_weatherFocus.addItem(row);
+    }
+    if (!m_navDriving) {
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        glfwGetCursorPos(m_window, &cursorX, &cursorY);
+        m_weatherFocus.focusHovered(
+            ui::UiVec2{static_cast<float>(cursorX), static_cast<float>(cursorY)});
+    }
+
+    // Scroll BEFORE navigating, so a press at the edge of the window moves the
+    // list by one instead of being swallowed by the focus ring's own clamp.
+    const int maxScroll = std::max(0, choiceCount - visibleRows);
+    const int focusedRow = std::max(0, m_weatherFocus.focused());
+    if (m_nav.pressed(ui::UiNavAction::Down) && focusedRow == visibleRows - 1 &&
+        m_weatherScrollTop < maxScroll) {
+        ++m_weatherScrollTop;
+    } else if (m_nav.pressed(ui::UiNavAction::Up) && focusedRow == 0 && m_weatherScrollTop > 0) {
+        --m_weatherScrollTop;
+    } else {
+        m_weatherFocus.applyNavigation(m_nav);
+    }
+    // Shoulder buttons page. 473 entries one row at a time is a minute of
+    // holding a stick; this makes the far end of the list reachable.
+    if (m_nav.pressed(ui::UiNavAction::NextTab)) {
+        m_weatherScrollTop = std::min(maxScroll, m_weatherScrollTop + visibleRows);
+    }
+    if (m_nav.pressed(ui::UiNavAction::PrevTab)) {
+        m_weatherScrollTop = std::max(0, m_weatherScrollTop - visibleRows);
+    }
+    m_weatherScrollTop = std::clamp(m_weatherScrollTop, 0, maxScroll);
+
+    for (int i = 0; i < visibleRows; ++i) {
+        const int choiceIndex = m_weatherScrollTop + i;
+        if (choiceIndex >= choiceCount) {
+            break;
+        }
+        const std::uint32_t formId = m_weatherChoices[static_cast<std::size_t>(choiceIndex)];
+        const auto* record = m_weatherTables.findWeather(formId);
+        const bool focused = m_weatherFocus.isFocused(i);
+        const bool isActive = (formId == m_activeWeatherFormId);
+        if (focused) {
+            m_uiDrawList.addRoundRectFilled(
+                rows[static_cast<std::size_t>(i)], ui::UiColor{0.16f, 0.42f, 0.20f, 0.85f},
+                3.0f * scale);
+        }
+        // The active weather is marked as well as highlighted: focus and
+        // "currently applied" are different things, and on this palette a single
+        // green cue for both is unreadable.
+        const std::string label =
+            std::string{isActive ? "> " : "  "} + (record != nullptr ? record->editorId : "<?>");
+        m_uiDrawList.addText(
+            m_uiFont, label.c_str(),
+            ui::UiVec2{
+                rows[static_cast<std::size_t>(i)].minX + (16.0f * scale),
+                rows[static_cast<std::size_t>(i)].minY + (5.0f * scale)},
+            focused ? kPipGreen : kPipGreenDim);
+    }
+
+    if (m_nav.pressed(ui::UiNavAction::Accept)) {
+        const int choiceIndex = m_weatherScrollTop + focusedRow;
+        if (choiceIndex >= 0 && choiceIndex < choiceCount) {
+            selectWeather(m_weatherChoices[static_cast<std::size_t>(choiceIndex)]);
+        }
+    }
+
+    char footer[96];
+    std::snprintf(
+        footer, sizeof(footer), "%s    %d-%d of %d",
+        m_navDriving ? "(A) apply   (LB/RB) page   (B) back"
+                     : "Enter apply   Q/E page   Esc back",
+        m_weatherScrollTop + 1, std::min(choiceCount, m_weatherScrollTop + visibleRows),
+        choiceCount);
+    m_uiDrawList.addText(
+        m_uiFont, footer,
+        ui::UiVec2{panel.minX + (24.0f * scale), panel.maxY - footerBand + (12.0f * scale)},
+        kPipGreenDim);
+    return true;
+}
+
 void NewVegasApp::drawPauseMenu() {
     if (!m_menuOpen) {
         // Keep the ring empty so a stale focus index cannot survive a close and
         // reopen and act on the wrong entry.
         m_menuFocus.beginFrame();
+        m_weatherFocus.beginFrame();
+        m_weatherPickerOpen = false;
         return;
     }
     const float scale = contentScale();
@@ -3353,6 +3913,16 @@ void NewVegasApp::drawPauseMenu() {
     ui::UiRect full{0.0f, 0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
     m_uiDrawList.addRectFilled(full, ui::UiColor{0.0f, 0.02f, 0.0f, 0.55f});
 
+    // The picker REPLACES the menu rather than layering over it: two focus rings
+    // reading the same nav input would both move, and backing out would land on
+    // whichever row the hidden one had drifted to.
+    if (m_weatherPickerOpen) {
+        m_menuFocus.beginFrame();
+        if (drawWeatherPicker(full, scale)) {
+            return;
+        }
+    }
+
     struct Entry {
         const char* label;
         const char* value;
@@ -3361,9 +3931,14 @@ void NewVegasApp::drawPauseMenu() {
     std::snprintf(timeValue, sizeof(timeValue), "%s", m_dayCyclePaused ? "Paused" : "Running");
     char regionValue[32];
     std::snprintf(regionValue, sizeof(regionValue), "%zu", m_discoveredRegions.size());
+    const importer::fnv::FalloutWeatherRecord* activeWeather =
+        m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
+    const std::string weatherValue =
+        activeWeather != nullptr ? activeWeather->editorId : std::string{"<none>"};
     const Entry entries[] = {
         {m_walkMode ? "Movement: On Foot" : "Movement: Fly", ""},
         {"Day cycle", timeValue},
+        {"Weather", weatherValue.c_str()},
         {"Regions discovered", regionValue},
         {"Resume", ""},
     };
@@ -3448,8 +4023,9 @@ void NewVegasApp::drawPauseMenu() {
         switch (m_menuFocus.focused()) {
             case 0: m_walkMode = !m_walkMode; break;
             case 1: m_dayCyclePaused = !m_dayCyclePaused; break;
-            case 2: break;  // a readout, not an action
-            case 3: m_menuOpen = false; setMouseCaptured(true); break;
+            case 2: openWeatherPicker(); break;
+            case 3: break;  // a readout, not an action
+            case 4: m_menuOpen = false; setMouseCaptured(true); break;
             default: break;
         }
     }
@@ -3707,6 +4283,70 @@ void NewVegasApp::drawHud() {
     }
 }
 
+void NewVegasApp::updateDebugStats() {
+    // Gated on the panel actually being up: this formats a couple of dozen
+    // strings and it would otherwise do that every frame for nobody.
+    if (!m_renderer.isDebugUiVisible()) {
+        return;
+    }
+    auto number = [](auto value, int decimals = 0) {
+        char text[48];
+        if (decimals > 0) {
+            std::snprintf(text, sizeof(text), "%.*f", decimals, static_cast<double>(value));
+        } else {
+            std::snprintf(text, sizeof(text), "%lld", static_cast<long long>(value));
+        }
+        return std::string{text};
+    };
+
+    std::vector<render::DebugStatGroup> groups;
+
+    if (m_streamer != nullptr) {
+        const importer::fnv::CellStreamerStats stats = m_streamer->stats();
+        render::DebugStatGroup streaming{"Cell Streaming", {}};
+        streaming.rows.push_back({"Resident cells", number(stats.residentChunks)});
+        streaming.rows.push_back({"Loading", number(stats.residency.loadingCount)});
+        streaming.rows.push_back({"Loaded / evicted",
+            number(stats.scenesLoaded) + " / " + number(stats.residency.evictions)});
+        // Wasted loads are the honest cost of prediction: a cell read to
+        // completion and then thrown away because the player turned. A number
+        // that climbs with distance travelled means the lead time is too long.
+        streaming.rows.push_back({"Wasted / unavailable",
+            number(stats.residency.wastedLoads) + " / " + number(stats.residency.unavailableCells)});
+        streaming.rows.push_back({"Failed loads", number(stats.loadFailures)});
+        streaming.rows.push_back({"Empty cells", number(stats.emptyScenes)});
+        streaming.rows.push_back({"", ""});
+        // Apply is main-thread time; build is worker time. Only the first is
+        // felt as a hitch, which is why they are reported separately.
+        streaming.rows.push_back({"Apply ms (last / worst)",
+            number(stats.lastApplyMs, 2) + " / " + number(stats.worstApplyMs, 2)});
+        streaming.rows.push_back({"Build ms (last / worst)",
+            number(stats.lastBuildMs, 2) + " / " + number(stats.worstBuildMs, 2)});
+        streaming.rows.push_back({"Cell cache hit / miss",
+            number(stats.cacheHits) + " / " + number(stats.cacheMisses)});
+        streaming.rows.push_back({"Cache load ms", number(stats.lastCacheLoadMs, 2)});
+        if (stats.cacheWriteFailures > 0) {
+            streaming.rows.push_back({"Cache write failures", number(stats.cacheWriteFailures)});
+        }
+        groups.push_back(std::move(streaming));
+    }
+
+    render::DebugStatGroup world{"World", {}};
+    world.rows.push_back({"Camera",
+        number(m_cameraX, 0) + ", " + number(m_cameraY, 0) + ", " + number(m_cameraZ, 0)});
+    world.rows.push_back({"Cell",
+        number(std::floor(m_cameraX / 4096.0f)) + ", " + number(std::floor(m_cameraZ / 4096.0f))});
+    world.rows.push_back({"Hour", number(m_timeOfDayHours, 2)});
+    const importer::fnv::FalloutWeatherRecord* weather =
+        m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
+    world.rows.push_back({"Weather", weather != nullptr ? weather->editorId : "<none>"});
+    world.rows.push_back({"Actors", number(m_actors.size())});
+    world.rows.push_back({"Regions discovered", number(m_discoveredRegions.size())});
+    groups.push_back(std::move(world));
+
+    m_renderer.setDebugStatGroups(std::move(groups));
+}
+
 void NewVegasApp::onRender(float /*deltaSeconds*/) {
     // Before beginFrameDraw: the backend consumes the pending pose while
     // recording this frame, so setting it afterwards would always be a frame
@@ -3714,6 +4354,7 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
     if (m_characterMode) {
         updateCharacterPose();
     }
+    updateDebugStats();
     beginFrameDraw();
     drawHud();
 
