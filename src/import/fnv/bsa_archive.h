@@ -1,9 +1,16 @@
 #pragma once
 
-// Reader for Bethesda BSA archives version 104 (Fallout 3 / Fallout: New
-// Vegas / original Skyrim) and version 103 (Oblivion). Big-endian ("Xbox360")
-// archives and the Skyrim Special Edition v105 embedded-file-name extension
-// are not supported — New Vegas never produced either.
+// Reader for Bethesda BSA archives: version 103 (Oblivion), 104 (Fallout 3 /
+// New Vegas / Skyrim LE), 105 (Skyrim Special Edition) and the Morrowind
+// archive, which has no version number at all. Big-endian ("Xbox360") archives
+// are not supported.
+//
+// MORROWIND'S ARCHIVE IS NOT A VERSION OF THIS FORMAT, it is a different one
+// wearing the same file extension. It has no "BSA\0" magic -- the file opens
+// with the literal value 0x100 -- no folders, no archive flags, and no
+// compression of any kind. What it does have is the same thing every other
+// version has once indexed: a list of (virtual path, offset, size), which is
+// why it lives behind this class rather than beside it. See openMorrowind().
 //
 // v103 and v104 share every structure below. The only behavioural difference
 // is kEmbedFileNames (0x100): Oblivion sets the bit on retail archives but
@@ -70,7 +77,9 @@ struct BsaFileEntry {
 // Reads only the 36-byte header and reports the archive's content flags (a
 // mask of BsaContentFlags). Lets a caller decide whether an archive is worth
 // opening before paying to index every file in it. Returns false if the file
-// is not a readable v103/v104 BSA.
+// is not a readable BSA of any supported generation. A Morrowind archive
+// declares no content flags, so it reports every flag set: its contents are
+// unknown until indexed, and claiming "no meshes here" would skip it entirely.
 bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFileFlags);
 
 class BsaArchive {
@@ -122,6 +131,11 @@ public:
     const std::string& lastError() const { return m_lastError; }
 
 private:
+    // Indexes the Morrowind layout. Split out rather than branched inline
+    // because the two share no structure at all -- no folders, no flags, no
+    // compression -- and only converge again at m_files.
+    bool openMorrowind(const std::filesystem::path& path, std::string_view folderPrefixFilter);
+
     std::filesystem::path m_path;
     std::uint32_t m_archiveFlags = 0;
     // Which BSA version was opened. Some archive-flag BITS mean different things

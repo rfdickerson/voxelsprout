@@ -39,6 +39,17 @@ namespace odai::importer::fnv {
 enum class EsmPluginFormat {
     kFallout3,  // 24-byte record and GRUP headers: Fallout 3, New Vegas, Skyrim
     kOblivion,  // 20-byte record and GRUP headers: Oblivion and the TES4-era DLC
+    // 16-byte record headers: Morrowind. NOT just a narrower header --
+    //   TES3: type, dataSize, header(unused), flags
+    //   TES4: type, dataSize, flags,          formId
+    // so the flags move and THE FORMID DOES NOT EXIST. Morrowind keys records
+    // by a string id instead, which is why every formId this walker reports for
+    // a TES3 plugin is 0 and callers have to identify records by name.
+    //
+    // There is also no GRUP tree at all: records are a flat list. That needs no
+    // code, because no TES3 record is named "GRUP" and the group branch simply
+    // never fires.
+    kMorrowind,
 };
 
 std::size_t esmRecordHeaderSize(EsmPluginFormat format);
@@ -59,8 +70,11 @@ std::size_t esmGroupHeaderSize(EsmPluginFormat format);
 // Oblivion writes 1.0, Fallout 3 writes 0.94 and New Vegas 1.34, so 1.0 is not
 // a boundary between them.
 //
-// Returns kFallout3 for anything it cannot positively identify as TES4-era, so
-// every pre-existing caller keeps the behaviour it had before this existed.
+// Morrowind is identified by its own magic instead: a TES3 plugin opens with
+// the literal record type "TES3", which no later generation writes.
+//
+// Returns kFallout3 for anything it cannot positively identify, so every
+// pre-existing caller keeps the behaviour it had before this existed.
 EsmPluginFormat detectEsmPluginFormat(const std::uint8_t* bytes, std::size_t size);
 
 struct EsmSubrecordView {

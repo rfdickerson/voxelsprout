@@ -748,6 +748,99 @@ void testLz4FrameDecoding() {
         "A match offset pointing before the output start is rejected, not read");
 }
 
+// TES3 is a THIRD container layout, and two of its differences are silent.
+//
+// The header is 16 bytes rather than 24, which is the obvious one. The two that
+// are not: the flags word sits where TES4 puts the formId (and TES3 has no
+// formId at all), and SUBRECORD SIZES ARE 32-BIT, which also makes the
+// subrecord header 8 bytes rather than 6. Reading a TES3 subrecord as a uint16
+// takes the low half of its size and then reads the high half as the next
+// subrecord's type -- so it does not fail on the first record, it fails on the
+// first one whose payload is not a multiple of 65536.
+void testEsmReaderWalksMorrowindHeaders() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const auto tes3Subrecord = [](const char* type, const std::string& payload) {
+        std::vector<std::uint8_t> out(type, type + 4);
+        appendPod(out, static_cast<std::uint32_t>(payload.size()));
+        out.insert(out.end(), payload.begin(), payload.end());
+        return out;
+    };
+    const auto tes3Record = [](const char* type, const std::vector<std::uint8_t>& body) {
+        std::vector<std::uint8_t> out(type, type + 4);
+        appendPod(out, static_cast<std::uint32_t>(body.size()));
+        appendPod(out, static_cast<std::uint32_t>(0));           // unused header word
+        appendPod(out, static_cast<std::uint32_t>(0x00000400u));  // flags: Persistent
+        out.insert(out.end(), body.begin(), body.end());
+        return out;
+    };
+
+    std::vector<std::uint8_t> fileBytes;
+    {   // TES3 header record, which is what the sniff keys on.
+        std::vector<std::uint8_t> body;
+        const auto hedr = tes3Subrecord("HEDR", std::string(300, '\0'));
+        body.insert(body.end(), hedr.begin(), hedr.end());
+        const auto record = tes3Record("TES3", body);
+        fileBytes.insert(fileBytes.end(), record.begin(), record.end());
+    }
+    {   // A STAT whose MODL payload is deliberately not a round number.
+        std::vector<std::uint8_t> body;
+        const auto name = tes3Subrecord("NAME", std::string("ex_common_house_01"));
+        const auto modl = tes3Subrecord("MODL", std::string("x\\ex_common_house_01.nif"));
+        body.insert(body.end(), name.begin(), name.end());
+        body.insert(body.end(), modl.begin(), modl.end());
+        const auto record = tes3Record("STAT", body);
+        fileBytes.insert(fileBytes.end(), record.begin(), record.end());
+    }
+
+    expectTrue(
+        detectEsmPluginFormat(fileBytes.data(), fileBytes.size()) == EsmPluginFormat::kMorrowind,
+        "A plugin opening with TES3 is sniffed as Morrowind");
+    expectTrue(esmRecordHeaderSize(EsmPluginFormat::kMorrowind) == 16u,
+               "A TES3 record header is 16 bytes");
+
+    const fs::path path = fs::temp_directory_path() / "odai_tes3_walk.esm";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(fileBytes.data()),
+                  static_cast<std::streamsize>(fileBytes.size()));
+    }
+    EsmReader reader;
+    expectTrue(reader.open(path), "A TES3 plugin opens");
+
+    std::vector<std::string> types;
+    std::string modelPath;
+    std::uint32_t statFlags = 0xFFFFFFFFu;
+    std::uint32_t statFormId = 0xFFFFFFFFu;
+    EsmReader::Visitor visitor{};
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        types.push_back(record.type);
+        if (record.type != "STAT") {
+            return;
+        }
+        statFlags = record.flags;
+        statFormId = record.formId;
+        for (const EsmSubrecordView& sub : record.subrecords) {
+            if (sub.type == "MODL") {
+                modelPath.assign(reinterpret_cast<const char*>(sub.data), sub.size);
+            }
+        }
+    };
+    expectTrue(reader.walk(visitor), "A TES3 plugin walks without desynchronizing");
+    expectTrue(types.size() == 2u && types[0] == "TES3" && types[1] == "STAT",
+               "Both TES3 records are visited, in order");
+    expectTrue(modelPath == "x\\ex_common_house_01.nif",
+               "A 32-bit subrecord size is read as a size and not as half a size");
+    // The flags live where TES4 puts the formId; reading the TES4 offset would
+    // report 0 here and put the flags in formId.
+    expectTrue(statFlags == 0x00000400u, "TES3 record flags are read from offset 12");
+    expectTrue(statFormId == 0u, "A TES3 record reports no formId rather than stray bytes");
+
+    std::error_code removeError;
+    fs::remove(path, removeError);
+}
+
 void testCellWaterPatch() {
     using namespace odai::importer::fnv;
     using odai::importer::ImportedScene;
@@ -3930,6 +4023,7 @@ int main() {
     testOblivionLandTextureIconPath();
     testCellWaterPatch();
     testLz4FrameDecoding();
+    testEsmReaderWalksMorrowindHeaders();
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();

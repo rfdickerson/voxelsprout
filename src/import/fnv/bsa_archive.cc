@@ -15,6 +15,10 @@ namespace odai::importer::fnv {
 namespace {
 
 constexpr std::uint32_t kBsaMagic = 0x00415342u;  // "BSA\0"
+// Morrowind, which predates the magic. The first word of the file is this
+// value and nothing else identifies it, so it has to be recognized before the
+// magic check rather than after it.
+constexpr std::uint32_t kMorrowindArchiveVersion = 0x00000100u;
 constexpr std::uint32_t kBsaVersionFo3Fnv = 104u;
 // Oblivion-era BSA (TES4), and two separate reasons to read one.
 //
@@ -193,6 +197,125 @@ bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFi
     return true;
 }
 
+// Morrowind's archive, which is a different format that happens to share the
+// .bsa extension. Layout, all little-endian, verified against Morrowind.bsa
+// (11090 files) and Tribunal/Bloodmoon:
+//
+//   uint32 version = 0x100
+//   uint32 hashTableOffset   -- from the END of this 12-byte header
+//   uint32 fileCount
+//   fileCount x { uint32 size, uint32 offset }   -- offset is from dataStart
+//   fileCount x   uint32 nameOffset              -- into the name block
+//   name block: NUL-terminated names, in no particular order
+//   fileCount x { uint64 hash }
+//   file data
+//
+// dataStart = 12 + hashTableOffset + fileCount * 8. The self-check that pins
+// this is that the furthest-reaching file must end EXACTLY at the end of the
+// archive, which it does for all three retail files -- an off-by-one in the
+// base offset shifts every extraction and shows up as garbage rather than as
+// a failure, so it is worth asserting rather than assuming.
+//
+// Nothing here is compressed, there are no folders, and there are no content
+// flags. The name is the whole path, so the folder filter matches against it
+// directly.
+bool BsaArchive::openMorrowind(
+    const std::filesystem::path& path, std::string_view folderPrefixFilter) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        m_lastError = "Failed to open Morrowind archive: " + path.string();
+        return false;
+    }
+    std::uint32_t version = 0;
+    std::uint32_t hashTableOffset = 0;
+    std::uint32_t fileCount = 0;
+    if (!readValue(input, version) || !readValue(input, hashTableOffset) ||
+        !readValue(input, fileCount)) {
+        m_lastError = "Truncated Morrowind archive header: " + path.string();
+        return false;
+    }
+    m_version = kMorrowindArchiveVersion;
+    m_archiveFlags = 0;
+    // No content flags exist in this format. Reporting "everything" rather than
+    // zero, because a caller uses these to SKIP archives and zero would skip
+    // the only archives Morrowind has.
+    m_fileFlags = kBsaContentMeshes | kBsaContentTextures | kBsaContentMenus |
+                  kBsaContentSounds | kBsaContentVoices | kBsaContentShaders |
+                  kBsaContentTrees | kBsaContentFonts | kBsaContentMisc;
+
+    constexpr std::uint32_t kHeaderSize = 12u;
+    constexpr std::uint32_t kSizeOffsetPairBytes = 8u;
+    constexpr std::uint32_t kNameOffsetBytes = 4u;
+    constexpr std::uint32_t kHashBytes = 8u;
+    if (fileCount == 0u) {
+        return true;  // an empty archive is legal and indexes to nothing
+    }
+    if (hashTableOffset < fileCount * (kSizeOffsetPairBytes + kNameOffsetBytes)) {
+        m_lastError = "Morrowind archive hash offset overlaps its own tables: " + path.string();
+        return false;
+    }
+
+    std::vector<std::uint32_t> sizes(fileCount);
+    std::vector<std::uint32_t> offsets(fileCount);
+    for (std::uint32_t i = 0; i < fileCount; ++i) {
+        if (!readValue(input, sizes[i]) || !readValue(input, offsets[i])) {
+            m_lastError = "Truncated Morrowind archive file table: " + path.string();
+            return false;
+        }
+    }
+    std::vector<std::uint32_t> nameOffsets(fileCount);
+    for (std::uint32_t i = 0; i < fileCount; ++i) {
+        if (!readValue(input, nameOffsets[i])) {
+            m_lastError = "Truncated Morrowind archive name-offset table: " + path.string();
+            return false;
+        }
+    }
+
+    const std::uint64_t nameBlockStart =
+        static_cast<std::uint64_t>(kHeaderSize) + fileCount * (kSizeOffsetPairBytes + kNameOffsetBytes);
+    const std::uint64_t hashTableStart = static_cast<std::uint64_t>(kHeaderSize) + hashTableOffset;
+    const std::uint64_t nameBlockBytes = hashTableStart - nameBlockStart;
+    std::vector<char> nameBlock(static_cast<std::size_t>(nameBlockBytes));
+    input.seekg(static_cast<std::streamoff>(nameBlockStart), std::ios::beg);
+    if (nameBlockBytes != 0u &&
+        !input.read(nameBlock.data(), static_cast<std::streamsize>(nameBlockBytes))) {
+        m_lastError = "Truncated Morrowind archive name block: " + path.string();
+        return false;
+    }
+    // Names are indexed, not sequential, so the whole block is read once and
+    // sliced rather than streamed -- unlike every later BSA, where the name
+    // order matches the file order and a filtered-out name still has to be
+    // stepped past.
+    const std::uint64_t dataStart = hashTableStart + static_cast<std::uint64_t>(fileCount) * kHashBytes;
+
+    const std::string loweredFolderPrefix = toLowerAscii(std::string(folderPrefixFilter));
+    m_files.reserve(fileCount);
+    for (std::uint32_t i = 0; i < fileCount; ++i) {
+        if (nameOffsets[i] >= nameBlockBytes) {
+            m_lastError = "Morrowind archive name offset runs past the name block: " + path.string();
+            return false;
+        }
+        const char* nameStart = nameBlock.data() + nameOffsets[i];
+        const std::size_t maxLength = static_cast<std::size_t>(nameBlockBytes - nameOffsets[i]);
+        const std::size_t nameLength = ::strnlen(nameStart, maxLength);
+        std::string virtualPath =
+            toLowerAscii(normalizeSeparators(std::string(nameStart, nameLength)));
+        if (!loweredFolderPrefix.empty() &&
+            virtualPath.compare(0, loweredFolderPrefix.size(), loweredFolderPrefix) != 0) {
+            continue;
+        }
+        const std::uint64_t absoluteOffset = dataStart + offsets[i];
+        BsaFileEntry entry{};
+        entry.virtualPath = std::move(virtualPath);
+        entry.dataOffset = static_cast<std::uint32_t>(absoluteOffset);
+        entry.sizeOnDisk = sizes[i];
+        entry.compressed = false;
+        m_pathIndex.emplace(entry.virtualPath, m_files.size());
+        m_files.push_back(std::move(entry));
+    }
+    return true;
+}
+
 bool BsaArchive::open(const std::filesystem::path& path, std::string_view folderPrefixFilter) {
     m_lastError.clear();
     m_files.clear();
@@ -207,7 +330,18 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
     }
 
     BsaHeader header{};
-    if (!readValue(input, header) || header.magic != kBsaMagic) {
+    if (!readValue(input, header)) {
+        m_lastError = "Truncated BSA header: " + path.string();
+        return false;
+    }
+    // Morrowind's archive has no magic to check -- its first word IS the
+    // version, and it is 0x100. Dispatched before the magic test because
+    // "bad magic" is the wrong thing to say about a file that never had any.
+    if (header.magic == kMorrowindArchiveVersion) {
+        input.close();
+        return openMorrowind(path, folderPrefixFilter);
+    }
+    if (header.magic != kBsaMagic) {
         m_lastError = "Not a BSA archive (bad magic): " + path.string();
         return false;
     }
