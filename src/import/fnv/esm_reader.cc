@@ -22,9 +22,11 @@ namespace odai::importer::fnv {
 namespace {
 
 constexpr std::uint32_t kRecordFlagCompressed = 0x00040000u;
-constexpr std::size_t kGroupHeaderSize = 24u;
-constexpr std::size_t kRecordHeaderSize = 24u;
-constexpr std::size_t kSubrecordHeaderSize = 6u;  // 4-char type + uint16 size
+// Both container headers grew by the same 4 bytes between the two generations,
+// so one pair of constants covers records and groups alike.
+constexpr std::size_t kTes4ContainerHeaderSize = 20u;    // Oblivion
+constexpr std::size_t kFallout3ContainerHeaderSize = 24u;  // FO3 / FNV / Skyrim
+constexpr std::size_t kSubrecordHeaderSize = 6u;  // 4-char type + uint16 size — unchanged
 
 bool typeIs(const std::uint8_t* bytes, const char* fourCc) {
     return std::memcmp(bytes, fourCc, 4) == 0;
@@ -134,6 +136,30 @@ bool inflateRecordBody(
 
 }  // namespace
 
+std::size_t esmRecordHeaderSize(EsmPluginFormat format) {
+    return format == EsmPluginFormat::kOblivion ? kTes4ContainerHeaderSize
+                                                : kFallout3ContainerHeaderSize;
+}
+
+std::size_t esmGroupHeaderSize(EsmPluginFormat format) {
+    return esmRecordHeaderSize(format);
+}
+
+EsmPluginFormat detectEsmPluginFormat(const std::uint8_t* bytes, std::size_t size) {
+    // Needs the whole Fallout-era header plus the four bytes a subrecord type
+    // occupies past it, or there is nothing to compare and the default stands.
+    if (bytes == nullptr || size < kFallout3ContainerHeaderSize + 4u) {
+        return EsmPluginFormat::kFallout3;
+    }
+    if (!typeIs(bytes, "TES4")) {
+        return EsmPluginFormat::kFallout3;
+    }
+    if (typeIs(bytes + kTes4ContainerHeaderSize, "HEDR")) {
+        return EsmPluginFormat::kOblivion;
+    }
+    return EsmPluginFormat::kFallout3;
+}
+
 EsmReader::~EsmReader() {
     close();
 }
@@ -159,6 +185,7 @@ EsmReader& EsmReader::operator=(EsmReader&& other) noexcept {
         : m_ownedBytes.data();
     m_lastError = std::move(other.m_lastError);
     m_toleratedChecksumFailures = other.m_toleratedChecksumFailures;
+    m_pluginFormat = other.m_pluginFormat;
 
     other.m_mappingAddress = nullptr;
     other.m_mappingHandles[0] = 0;
@@ -192,6 +219,12 @@ void EsmReader::close() {
     m_ownedBytes.shrink_to_fit();
     m_data = nullptr;
     m_size = 0;
+    m_pluginFormat = EsmPluginFormat::kFallout3;
+}
+
+bool EsmReader::finishOpen() {
+    m_pluginFormat = detectEsmPluginFormat(m_data, m_size);
+    return true;
 }
 
 bool EsmReader::open(const std::filesystem::path& path) {
@@ -221,7 +254,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
                 m_mappingHandles[1] = reinterpret_cast<std::uint64_t>(mapping);
                 m_data = static_cast<const std::uint8_t*>(view);
                 m_size = fileSize;
-                return true;
+                return finishOpen();
             }
             ::CloseHandle(mapping);
         }
@@ -239,7 +272,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
             m_mappingHandles[0] = static_cast<std::uint64_t>(fd) + 1u;
             m_data = static_cast<const std::uint8_t*>(view);
             m_size = fileSize;
-            return true;
+            return finishOpen();
         }
         ::close(fd);
     }
@@ -260,7 +293,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
     }
     m_data = m_ownedBytes.data();
     m_size = fileSize;
-    return true;
+    return finishOpen();
 }
 
 bool EsmReader::walk(const Visitor& visitor) {
@@ -305,6 +338,11 @@ bool EsmReader::walkRange(
     // reallocate for every one in a large plugin.
     std::vector<std::uint8_t> decompressScratch;
 
+    // Hoisted out of the loop: the format is fixed for the whole file, and the
+    // walk consults these on every single record and group.
+    const std::size_t groupHeaderSize = esmGroupHeaderSize(m_pluginFormat);
+    const std::size_t recordHeaderSize = esmRecordHeaderSize(m_pluginFormat);
+
     while (!stack.empty()) {
         if (stack.back().pos >= stack.back().end) {
             Frame finished = std::move(stack.back());
@@ -322,13 +360,13 @@ bool EsmReader::walkRange(
         }
 
         if (typeIs(m_data + frame.pos, "GRUP")) {
-            if (frame.pos + kGroupHeaderSize > frame.end) {
+            if (frame.pos + groupHeaderSize > frame.end) {
                 m_lastError = "Truncated GRUP header";
                 return false;
             }
             const std::uint8_t* header = m_data + frame.pos;
             const std::uint32_t groupSize = readU32(header + 4);
-            if (groupSize < kGroupHeaderSize || frame.pos + groupSize > frame.end) {
+            if (groupSize < groupHeaderSize || frame.pos + groupSize > frame.end) {
                 m_lastError = "Malformed GRUP size";
                 return false;
             }
@@ -339,7 +377,7 @@ bool EsmReader::walkRange(
             group.fileOffset = static_cast<std::uint64_t>(frame.pos);
             group.groupSize = groupSize;
 
-            const std::size_t contentStart = frame.pos + kGroupHeaderSize;
+            const std::size_t contentStart = frame.pos + groupHeaderSize;
             const std::size_t contentEnd = frame.pos + groupSize;
             frame.pos = contentEnd;  // resume parent after this group once popped
 
@@ -353,7 +391,7 @@ bool EsmReader::walkRange(
         }
 
         // Regular record.
-        if (frame.pos + kRecordHeaderSize > frame.end) {
+        if (frame.pos + recordHeaderSize > frame.end) {
             m_lastError = "Truncated record header";
             return false;
         }
@@ -361,7 +399,7 @@ bool EsmReader::walkRange(
         const std::uint32_t dataSize = readU32(header + 4);
         const std::uint32_t flags = readU32(header + 8);
         const std::uint32_t formId = readU32(header + 12);
-        const std::size_t dataStart = frame.pos + kRecordHeaderSize;
+        const std::size_t dataStart = frame.pos + recordHeaderSize;
         const std::size_t dataEnd = dataStart + dataSize;
         if (dataEnd > frame.end) {
             m_lastError = "Truncated record data";

@@ -112,10 +112,18 @@ struct TestFileRecord {
 //     texture archives use), every data block opens with a BString holding
 //     the file's full virtual path, and those bytes count toward the file
 //     record's size.
+//
+// `version` selects the header version only; every structure this fixture
+// writes is shared between v103 (Oblivion) and v104 (FO3/FNV). Pass 103 with
+// `declareEmbeddedNames` to reproduce the retail Oblivion shape: the
+// kEmbedFileNames bit set in archiveFlags while no data block actually carries
+// an embedded name.
 std::vector<std::uint8_t> buildSyntheticBsa(
     const std::string& uncompressedContent,
     const std::string& compressedContent,
-    bool embedFileNames = false
+    bool embedFileNames = false,
+    std::uint32_t version = 104u,
+    bool declareEmbeddedNames = false
 ) {
     constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
     constexpr std::uint32_t kFlagHasFileNames = 0x2u;
@@ -142,10 +150,10 @@ std::vector<std::uint8_t> buildSyntheticBsa(
 
     TestBsaHeader header{};
     header.magic = 0x00415342u;
-    header.version = 104u;
+    header.version = version;
     header.folderRecordOffset = sizeof(TestBsaHeader);
     header.archiveFlags = kFlagHasFolderNames | kFlagHasFileNames | kFlagCompressedArchive |
-        (embedFileNames ? kFlagEmbedFileNames : 0u);
+        ((embedFileNames || declareEmbeddedNames) ? kFlagEmbedFileNames : 0u);
     header.folderCount = 2u;
     header.fileCount = 2u;
     header.totalFolderNameLength = static_cast<std::uint32_t>(folderA.size() + folderB.size() + 2u);
@@ -265,34 +273,72 @@ std::vector<std::uint8_t> buildOversizedSubrecord(const char* type, const std::v
     return out;
 }
 
+// `format` selects the container-header generation. It defaults to kFallout3 so
+// every fixture written before Oblivion support keeps producing the exact bytes
+// it produced then; only the tests that specifically exercise the 20-byte
+// layout pass anything else.
+using odai::importer::fnv::EsmPluginFormat;
+
 std::vector<std::uint8_t> buildRecord(
-    const char* type, std::uint32_t formId, std::uint32_t flags, const std::vector<std::uint8_t>& data
+    const char* type,
+    std::uint32_t formId,
+    std::uint32_t flags,
+    const std::vector<std::uint8_t>& data,
+    EsmPluginFormat format = EsmPluginFormat::kFallout3
 ) {
     std::vector<std::uint8_t> out;
     appendFourCc(out, type);
     appendPod(out, static_cast<std::uint32_t>(data.size()));
     appendPod(out, flags);
     appendPod(out, formId);
-    appendPod(out, static_cast<std::uint32_t>(0));
-    appendPod(out, static_cast<std::uint16_t>(0));
-    appendPod(out, static_cast<std::uint16_t>(0));
+    appendPod(out, static_cast<std::uint32_t>(0));  // versionControlInfo
+    if (format == EsmPluginFormat::kFallout3) {
+        appendPod(out, static_cast<std::uint16_t>(0));  // formVersion — FO3 and later only
+        appendPod(out, static_cast<std::uint16_t>(0));  // unknown
+    }
     out.insert(out.end(), data.begin(), data.end());
     return out;
 }
 
 std::vector<std::uint8_t> buildGroup(
-    const char rawLabel[4], std::int32_t groupType, const std::vector<std::uint8_t>& content
+    const char rawLabel[4],
+    std::int32_t groupType,
+    const std::vector<std::uint8_t>& content,
+    EsmPluginFormat format = EsmPluginFormat::kFallout3
 ) {
+    const std::size_t headerSize = odai::importer::fnv::esmGroupHeaderSize(format);
     std::vector<std::uint8_t> out;
     appendFourCc(out, "GRUP");
-    appendPod(out, static_cast<std::uint32_t>(24u + content.size()));
+    appendPod(out, static_cast<std::uint32_t>(headerSize + content.size()));
     appendBytes(out, rawLabel, 4u);
     appendPod(out, groupType);
-    appendPod(out, static_cast<std::uint16_t>(0));
-    appendPod(out, static_cast<std::uint16_t>(0));
-    appendPod(out, static_cast<std::uint32_t>(0));
+    appendPod(out, static_cast<std::uint16_t>(0));  // stamp
+    appendPod(out, static_cast<std::uint16_t>(0));  // unknown
+    if (format == EsmPluginFormat::kFallout3) {
+        appendPod(out, static_cast<std::uint32_t>(0));  // versionControlInfo
+    }
     out.insert(out.end(), content.begin(), content.end());
     return out;
+}
+
+// A plugin's opening TES4 record, which is the ONLY thing EsmReader sniffs to
+// decide the header generation for the rest of the file. HEDR must be first —
+// that is exactly what the sniff keys on.
+std::vector<std::uint8_t> buildTes4Record(
+    const std::vector<std::string>& masters, EsmPluginFormat format
+) {
+    std::vector<std::uint8_t> hedr;
+    appendPod(hedr, 1.0f);                          // version
+    appendPod(hedr, static_cast<std::uint32_t>(0));  // record count
+    appendPod(hedr, static_cast<std::uint32_t>(1));  // next object id
+    std::vector<std::uint8_t> body = buildSubrecord("HEDR", hedr);
+    for (const std::string& master : masters) {
+        const auto mast = buildSubrecord("MAST", stringPayload(master));
+        body.insert(body.end(), mast.begin(), mast.end());
+        const auto data = buildSubrecord("DATA", std::vector<std::uint8_t>(8, 0u));
+        body.insert(body.end(), data.begin(), data.end());
+    }
+    return buildRecord("TES4", 0u, 0u, body, format);
 }
 
 std::vector<std::uint8_t> zlibCompress(const std::vector<std::uint8_t>& data) {
@@ -495,6 +541,168 @@ std::vector<std::uint8_t> buildVclrPayload() {
 }
 
 void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmPath);
+
+// Oblivion's record and GRUP headers are 20 bytes; Fallout 3 grew both by four
+// (formVersion + unknown on a record, versionControlInfo on a group). Nothing
+// else about the container format changed, and this test is what pins that
+// claim: it builds the SAME logical tree in both layouts and asserts the walks
+// are indistinguishable.
+//
+// Written this way on purpose. Asserting record counts for the Oblivion layout
+// alone would pass just as well if the 24-byte path had quietly broken, and the
+// whole risk of this change is a regression on the Fallout side.
+void testEsmReaderWalksBothHeaderGenerations() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    struct CapturedRecord {
+        std::string type;
+        std::uint32_t formId = 0;
+        std::vector<std::pair<std::string, std::vector<std::uint8_t>>> subrecords;
+    };
+    struct Walked {
+        std::vector<CapturedRecord> records;
+        std::vector<std::pair<std::string, std::int32_t>> groupEnters;
+        EsmPluginFormat format = EsmPluginFormat::kFallout3;
+    };
+
+    const auto walkFixture = [](EsmPluginFormat format, const char* fileName) {
+        // A TES4 header (which is what the sniff reads), then a STAT group, then
+        // a worldspace-shaped nesting so a group inside a group is exercised too.
+        const auto statSubrecords = [] {
+            std::vector<std::uint8_t> out;
+            const auto edid = buildSubrecord("EDID", stringPayload("Rock01"));
+            const auto modl = buildSubrecord("MODL", stringPayload("x\\rock01.nif"));
+            out.insert(out.end(), edid.begin(), edid.end());
+            out.insert(out.end(), modl.begin(), modl.end());
+            return out;
+        }();
+
+        std::vector<std::uint8_t> fileBytes = buildTes4Record({}, format);
+        const auto statRecord = buildRecord("STAT", 0x00000010u, 0u, statSubrecords, format);
+        const auto statGroup = buildGroup("STAT", 0, statRecord, format);
+        fileBytes.insert(fileBytes.end(), statGroup.begin(), statGroup.end());
+
+        const auto cellRecord = buildRecord(
+            "CELL", 0x00000020u, 0u, buildSubrecord("EDID", stringPayload("TestCell")), format);
+        const std::uint32_t parentFormId = 0x00000020u;
+        char nestedLabel[4];
+        std::memcpy(nestedLabel, &parentFormId, 4);
+        const auto refrRecord = buildRecord(
+            "REFR", 0x00000021u, 0u, buildSubrecord("NAME", std::vector<std::uint8_t>(4, 0x10u)), format);
+        const auto childrenGroup = buildGroup(nestedLabel, 6, refrRecord, format);
+        std::vector<std::uint8_t> cellContent = cellRecord;
+        cellContent.insert(cellContent.end(), childrenGroup.begin(), childrenGroup.end());
+        const auto cellGroup = buildGroup("CELL", 0, cellContent, format);
+        fileBytes.insert(fileBytes.end(), cellGroup.begin(), cellGroup.end());
+
+        const fs::path esmPath = fs::temp_directory_path() / fileName;
+        {
+            std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(fileBytes.data()),
+                      static_cast<std::streamsize>(fileBytes.size()));
+        }
+
+        EsmReader reader;
+        Walked walked{};
+        expectTrue(reader.open(esmPath), "Two-generation ESM fixture opens");
+        walked.format = reader.pluginFormat();
+        EsmReader::Visitor visitor{};
+        visitor.onGroupEnter = [&](const EsmGroupView& group) {
+            walked.groupEnters.emplace_back(group.rawLabel, group.groupType);
+            return true;
+        };
+        visitor.onRecord = [&](const EsmRecordView& record) {
+            CapturedRecord captured{};
+            captured.type = record.type;
+            captured.formId = record.formId;
+            for (const auto& sub : record.subrecords) {
+                captured.subrecords.emplace_back(
+                    sub.type, std::vector<std::uint8_t>(sub.data, sub.data + sub.size));
+            }
+            walked.records.push_back(std::move(captured));
+        };
+        expectTrue(reader.walk(visitor), "Two-generation ESM fixture walks without error");
+        fs::remove(esmPath);
+        return walked;
+    };
+
+    const Walked fallout = walkFixture(EsmPluginFormat::kFallout3, "odai_fnv_hdr24.esm");
+    const Walked oblivion = walkFixture(EsmPluginFormat::kOblivion, "odai_fnv_hdr20.esm");
+
+    expectTrue(fallout.format == EsmPluginFormat::kFallout3,
+               "A 24-byte-header plugin is detected as kFallout3");
+    expectTrue(oblivion.format == EsmPluginFormat::kOblivion,
+               "A 20-byte-header plugin is detected as kOblivion");
+
+    // TES4, STAT, CELL, REFR.
+    expectTrue(fallout.records.size() == 4u, "24-byte walk visits all four records");
+    expectTrue(oblivion.records.size() == 4u, "20-byte walk visits all four records");
+    expectTrue(fallout.groupEnters.size() == 3u, "24-byte walk enters all three groups");
+    expectTrue(oblivion.groupEnters.size() == 3u, "20-byte walk enters all three groups");
+
+    bool sameRecords = fallout.records.size() == oblivion.records.size();
+    for (std::size_t i = 0; sameRecords && i < fallout.records.size(); ++i) {
+        sameRecords = fallout.records[i].type == oblivion.records[i].type &&
+                      fallout.records[i].formId == oblivion.records[i].formId &&
+                      fallout.records[i].subrecords == oblivion.records[i].subrecords;
+    }
+    expectTrue(sameRecords, "Both header generations yield identical records and subrecord bytes");
+    expectTrue(fallout.groupEnters == oblivion.groupEnters,
+               "Both header generations yield identical group labels and types");
+
+    // The sniff must not fire on a file that does not open with a TES4 record —
+    // several fixtures in this suite start straight at a GRUP, and they have to
+    // keep walking as Fallout plugins.
+    const std::vector<std::uint8_t> notAPlugin = buildGroup("STAT", 0, {});
+    expectTrue(detectEsmPluginFormat(notAPlugin.data(), notAPlugin.size()) == EsmPluginFormat::kFallout3,
+               "A file not opening with TES4 defaults to the Fallout layout");
+    expectTrue(detectEsmPluginFormat(nullptr, 0u) == EsmPluginFormat::kFallout3,
+               "An empty buffer defaults to the Fallout layout");
+}
+
+// Oblivion's LTEX names its diffuse directly in ICON, relative to
+// "textures\landscape\"; Fallout's points at a TXST through TNAM. Both have to
+// land in diffuseTexturePath, and the ICON path must not be clobbered by the
+// post-walk TXST resolution.
+void testOblivionLandTextureIconPath() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr auto kFormat = EsmPluginFormat::kOblivion;
+    std::vector<std::uint8_t> fileBytes = buildTes4Record({}, kFormat);
+
+    std::vector<std::uint8_t> ltexSubrecords = buildSubrecord("EDID", stringPayload("TestMoss01"));
+    const auto icon = buildSubrecord("ICON", stringPayload("Dementia\\DementiaMoss01.dds"));
+    ltexSubrecords.insert(ltexSubrecords.end(), icon.begin(), icon.end());
+    constexpr std::uint32_t kLandTextureFormId = 0x00000123u;
+    const auto ltexRecord = buildRecord("LTEX", kLandTextureFormId, 0u, ltexSubrecords, kFormat);
+    const auto ltexGroup = buildGroup("LTEX", 0, ltexRecord, kFormat);
+    fileBytes.insert(fileBytes.end(), ltexGroup.begin(), ltexGroup.end());
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_oblivion_ltex.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(fileBytes.data()),
+                  static_cast<std::streamsize>(fileBytes.size()));
+    }
+
+    FalloutSceneData scene;
+    std::string error;
+    expectTrue(extractFalloutScene(esmPath, scene, error),
+               ("Oblivion LTEX fixture extracts: " + error).c_str());
+    expectTrue(scene.landTextures.size() == 1u, "The Oblivion LTEX is extracted");
+    expectTrue(scene.landTextures.size() == 1u &&
+                   scene.landTextures[0].formId == kLandTextureFormId,
+               "The Oblivion LTEX keeps its formID");
+    expectTrue(scene.landTextures.size() == 1u &&
+                   scene.landTextures[0].diffuseTexturePath == "landscape\\Dementia\\DementiaMoss01.dds",
+               "ICON becomes a landscape-relative diffuse path");
+    expectTrue(scene.landTextures.size() == 1u && scene.landTextures[0].textureSetFormId == 0u,
+               "An Oblivion LTEX names no TXST");
+
+    fs::remove(esmPath);
+}
 
 void testFalloutRecordExtraction() {
     namespace fs = std::filesystem;
@@ -1393,6 +1601,44 @@ void testPluginHeaderRejectsOversizedRecord() {
     std::filesystem::remove(path, removeError);
 }
 
+// readFalloutPluginHeader parses the TES4 record itself rather than going
+// through EsmReader, so it needs the same 20-vs-24-byte handling. Getting it
+// wrong on an Oblivion plugin does not fail: the body walk starts four bytes
+// into HEDR, runs one subrecord out of phase, and reports a mod that declares
+// masters as having none — which resolves its formIDs against the wrong
+// plugins rather than erroring.
+//
+// Run over both generations for the same reason the walker test is: the risk
+// here is a regression on the Fallout side, which a one-sided assertion misses.
+void testPluginHeaderReadsBothGenerations() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const auto check = [](EsmPluginFormat format, const char* fileName, const char* label) {
+        const std::vector<std::string> masters = {"Oblivion.esm", "Knights.esp"};
+        const std::vector<std::uint8_t> bytes = buildTes4Record(masters, format);
+        const fs::path path = fs::temp_directory_path() / fileName;
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+        }
+        FalloutPluginHeader header;
+        std::string error;
+        const bool ok = readFalloutPluginHeader(path, header, error);
+        expectTrue(ok, (std::string("Plugin header reads ") + label).c_str());
+        expectTrue(header.masters.size() == 2u,
+                   (std::string("Both masters are found ") + label).c_str());
+        expectTrue(header.masters.size() == 2u && header.masters[0] == "Oblivion.esm" &&
+                       header.masters[1] == "Knights.esp",
+                   (std::string("Masters keep their order and spelling ") + label).c_str());
+        fs::remove(path);
+    };
+
+    check(EsmPluginFormat::kFallout3, "odai_hdr24_plugin.esm", "[24-byte header]");
+    check(EsmPluginFormat::kOblivion, "odai_hdr20_plugin.esm", "[20-byte header]");
+}
+
 // A child count that cannot fit in the block must be rejected before it is
 // used to size anything: unbounded, a desynchronized 0xFFFFFFFF here asks for a
 // ~17 GB allocation on nothing worse than a malformed mod asset.
@@ -1740,6 +1986,52 @@ void testBsaArchiveReadsFoldersAndFiles(bool embedFileNames) {
     expectTrue(
         std::string(textureBytes.begin(), textureBytes.end()) == compressedContent,
         "Inflated entry bytes match the original content" + label);
+
+    fs::remove(archivePath);
+}
+
+// Oblivion ships BSA v103. Its structures are byte-identical to v104, so the
+// only thing worth pinning is the one difference: v103 sets kEmbedFileNames
+// (0x100) in archiveFlags — "Oblivion - Meshes.bsa" is 0x787 — while writing
+// no embedded name in any data block. The fixture reproduces exactly that
+// contradiction, which the v104 reader would resolve by eating the first
+// 1 + N payload bytes and failing every inflate with "incorrect header check".
+void testBsaArchiveReadsOblivionV103() {
+    namespace fs = std::filesystem;
+    const std::string uncompressedContent = "NIF-DATA-PLACEHOLDER";
+    const std::string compressedContent(4096, 'T');
+
+    const std::vector<std::uint8_t> archiveBytes = buildSyntheticBsa(
+        uncompressedContent, compressedContent,
+        /*embedFileNames=*/false, /*version=*/103u, /*declareEmbeddedNames=*/true);
+    const fs::path archivePath = fs::temp_directory_path() / "odai_oblivion_test.bsa";
+    {
+        std::ofstream out(archivePath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(archiveBytes.data()),
+                  static_cast<std::streamsize>(archiveBytes.size()));
+    }
+
+    std::uint32_t peekedFlags = 0;
+    expectTrue(odai::importer::fnv::peekBsaContentFlags(archivePath, peekedFlags),
+               "peekBsaContentFlags accepts a v103 archive");
+
+    odai::importer::fnv::BsaArchive archive;
+    expectTrue(archive.open(archivePath), "v103 BSA archive opens");
+    expectTrue(archive.files().size() == 2u, "v103 BSA exposes both files");
+
+    const auto* meshEntry = archive.find("meshes\\x\\ex_wall_01.nif");
+    std::vector<std::uint8_t> meshBytes;
+    expectTrue(meshEntry != nullptr && archive.extract(*meshEntry, meshBytes),
+               "v103 uncompressed entry extracts");
+    expectTrue(std::string(meshBytes.begin(), meshBytes.end()) == uncompressedContent,
+               "v103 uncompressed bytes are not shortened by a phantom embedded name");
+
+    const auto* textureEntry = archive.find("textures\\x\\tx_wall_01.dds");
+    std::vector<std::uint8_t> textureBytes;
+    expectTrue(textureEntry != nullptr && archive.extract(*textureEntry, textureBytes),
+               "v103 compressed entry inflates");
+    expectTrue(std::string(textureBytes.begin(), textureBytes.end()) == compressedContent,
+               "v103 inflated bytes match the original content");
 
     fs::remove(archivePath);
 }
@@ -3357,7 +3649,10 @@ void testActorRaceAndWardrobeAssembly() {
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
+    testBsaArchiveReadsOblivionV103();
     testEsmReaderWalksGroupsRecordsAndSubrecords();
+    testEsmReaderWalksBothHeaderGenerations();
+    testOblivionLandTextureIconPath();
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
@@ -3366,6 +3661,7 @@ int main() {
     testNifParserInheritsPropertiesFromParentNodes();
     testNifParserRejectsImplausibleChildCount();
     testPluginHeaderRejectsOversizedRecord();
+    testPluginHeaderReadsBothGenerations();
     testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
     testModDirectoryOverridesArchives();
     testPluginLoadOrderRemapsFormIds();

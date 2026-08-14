@@ -1,22 +1,25 @@
 #pragma once
 
-// Generic reader for Bethesda "Fallout"-style ESM/ESP plugin files (Fallout 3
-// / Fallout: New Vegas record layout — a 24-byte record header, unlike
-// Morrowind's 16-byte TES3 header or Oblivion/Skyrim's 20-byte TES4 header).
-// This module only understands the generic GRUP/record/subrecord container
-// format; it has no idea what a CELL or STAT record means. See
+// Generic reader for Bethesda TES4-family ESM/ESP plugin files: Oblivion
+// (20-byte record header) and Fallout 3 / Fallout: New Vegas / Skyrim
+// (24-byte). Morrowind's 16-byte TES3 header is a different format and is not
+// supported. This module only understands the generic GRUP/record/subrecord
+// container format; it has no idea what a CELL or STAT record means. See
 // fallout_records.h for typed extraction built on top of this walker.
 //
 // Format reference (all fields little-endian):
-//   GRUP header (24 bytes): "GRUP", groupSize (includes this header), label
-//     (4 bytes, meaning depends on groupType), groupType (int32), stamp
-//     (uint16), unknown (uint16), versionControlInfo (uint32).
-//   Record header (24 bytes): 4-char type, dataSize (excludes this header),
-//     flags (bit 0x00040000 = compressed), formID, versionControlInfo,
-//     formVersion (uint16), unknown (uint16).
+//   GRUP header: "GRUP", groupSize (includes this header), label (4 bytes,
+//     meaning depends on groupType), groupType (int32), stamp (uint16),
+//     unknown (uint16) — 20 bytes so far, which is the whole header on
+//     Oblivion — then versionControlInfo (uint32) on Fallout 3 and later.
+//   Record header: 4-char type, dataSize (excludes this header), flags
+//     (bit 0x00040000 = compressed), formID, versionControlInfo — 20 bytes,
+//     the whole header on Oblivion — then formVersion (uint16) + unknown
+//     (uint16) on Fallout 3 and later.
 //   Record data: a sequence of subrecords, each a 4-char type + uint16 size
 //     + that many bytes of data. When compressed (flags bit set), the record
 //     data is [uint32 decompressedSize][zlib deflate stream] instead.
+//     Identical in both generations — only the two container headers grew.
 //   Oversized subrecord: an "XXXX" subrecord holds a uint32 giving the real
 //     size of the subrecord immediately following it (whose own 2-byte size
 //     field is then ignored) — used when a subrecord exceeds 65535 bytes.
@@ -29,6 +32,36 @@
 #include <vector>
 
 namespace odai::importer::fnv {
+
+// Which generation's container headers a plugin uses. Nothing else about the
+// walk depends on the game, so this is deliberately named after the layout
+// break rather than after a title.
+enum class EsmPluginFormat {
+    kFallout3,  // 24-byte record and GRUP headers: Fallout 3, New Vegas, Skyrim
+    kOblivion,  // 20-byte record and GRUP headers: Oblivion and the TES4-era DLC
+};
+
+std::size_t esmRecordHeaderSize(EsmPluginFormat format);
+std::size_t esmGroupHeaderSize(EsmPluginFormat format);
+
+// Sniffs the header generation from a plugin's opening TES4 record, given at
+// least its first 28 bytes.
+//
+// The discriminator is where "HEDR" lands: Fallout 3 inserted a 4-byte
+// formVersion/unknown field after the record's versionControlInfo, so a
+// TES4-era plugin's first subrecord starts at offset 20 and a Fallout-era
+// one's at 24. Measured across all 21 retail plugins in both installs —
+// Oblivion.esm plus its ten DLC .esp, FalloutNV.esm plus its nine — with no
+// ambiguity: offset 24 in an Oblivion plugin holds HEDR's *size* (12), which
+// can never spell "HEDR".
+//
+// The HEDR version float does NOT discriminate and must not be used for this:
+// Oblivion writes 1.0, Fallout 3 writes 0.94 and New Vegas 1.34, so 1.0 is not
+// a boundary between them.
+//
+// Returns kFallout3 for anything it cannot positively identify as TES4-era, so
+// every pre-existing caller keeps the behaviour it had before this existed.
+EsmPluginFormat detectEsmPluginFormat(const std::uint8_t* bytes, std::size_t size);
 
 struct EsmSubrecordView {
     std::string type;  // 4-char subrecord type, e.g. "EDID"
@@ -58,8 +91,8 @@ struct EsmRecordView {
 struct EsmGroupView {
     std::string rawLabel;
     std::int32_t groupType = 0;
-    // Byte offset of this GRUP's own 24-byte header, and its declared size
-    // (which includes that header). Together they bound the group exactly, which
+    // Byte offset of this GRUP's own header, and its declared size (which
+    // includes that header). Together they bound the group exactly, which
     // is what lets a caller record a cell's children group during one full pass
     // and later re-walk just that range with walkRange() -- the basis of
     // streaming a single cell without re-reading the plugin.
@@ -67,15 +100,15 @@ struct EsmGroupView {
     std::uint32_t groupSize = 0;
 };
 
-// The cheap half of a record: everything readable from its 24-byte header,
-// with no decompression and no subrecord parsing. `type` points into the
-// reader's own file buffer and is valid only for the duration of the
-// onRecordHeader callback.
+// The cheap half of a record: everything readable from its header, with no
+// decompression and no subrecord parsing. `type` points into the reader's own
+// file buffer and is valid only for the duration of the onRecordHeader
+// callback.
 struct EsmRecordHeaderView {
     std::string_view type;
     std::uint32_t formId = 0;
     std::uint32_t flags = 0;
-    // Byte offset of this record's own 24-byte header.
+    // Byte offset of this record's own header.
     std::uint64_t fileOffset = 0;
 };
 
@@ -95,6 +128,10 @@ public:
     // walk skips. Falls back to a plain read if the mapping fails.
     bool open(const std::filesystem::path& path);
     const std::string& lastError() const { return m_lastError; }
+
+    // Sniffed by open() from the plugin's own TES4 record. An empty or
+    // unopened reader reports kFallout3.
+    EsmPluginFormat pluginFormat() const { return m_pluginFormat; }
 
     struct Visitor {
         // Called on entering a GRUP. Return false to skip the group's
@@ -137,6 +174,12 @@ private:
     // Releases the mapping (if any) and drops back to an empty reader.
     void close();
 
+    // Common tail of open()'s three acquisition paths (Win32 mapping, POSIX
+    // mapping, whole-file read): sniffs the header generation now that m_data
+    // is live. One place, so the mapped and read paths cannot disagree about
+    // the same file. Always returns true.
+    bool finishOpen();
+
     // The plugin bytes, however they got here. When the file is mapped,
     // m_data points into the mapping and m_ownedBytes is empty; on the
     // fallback path m_data points at m_ownedBytes. Either way the buffer is
@@ -150,6 +193,10 @@ private:
 
     std::string m_lastError;
     std::uint32_t m_toleratedChecksumFailures = 0;
+    // Sniffed once in open(), never re-derived per record: the two container
+    // header sizes are a property of the file, and a per-record guess would be
+    // both slower and able to disagree with itself mid-walk.
+    EsmPluginFormat m_pluginFormat = EsmPluginFormat::kFallout3;
 };
 
 }  // namespace odai::importer::fnv

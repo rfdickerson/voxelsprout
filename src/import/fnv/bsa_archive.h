@@ -1,9 +1,14 @@
 #pragma once
 
 // Reader for Bethesda BSA archives version 104 (Fallout 3 / Fallout: New
-// Vegas / original Skyrim). Big-endian ("Xbox360") archives and the Skyrim
-// Special Edition v105 embedded-file-name extension are not supported —
-// New Vegas never produced either.
+// Vegas / original Skyrim) and version 103 (Oblivion). Big-endian ("Xbox360")
+// archives and the Skyrim Special Edition v105 embedded-file-name extension
+// are not supported — New Vegas never produced either.
+//
+// v103 and v104 share every structure below. The only behavioural difference
+// is kEmbedFileNames (0x100): Oblivion sets the bit on retail archives but
+// never writes an embedded name, so the reader clears it on v103. See the
+// constant's comment in bsa_archive.cc for what happens if it does not.
 //
 // Format reference (BSA v103/v104, all fields little-endian):
 //   Header (36 bytes): "BSA\0", version, folderRecordOffset, archiveFlags,
@@ -65,7 +70,7 @@ struct BsaFileEntry {
 // Reads only the 36-byte header and reports the archive's content flags (a
 // mask of BsaContentFlags). Lets a caller decide whether an archive is worth
 // opening before paying to index every file in it. Returns false if the file
-// is not a readable v104 BSA.
+// is not a readable v103/v104 BSA.
 bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFileFlags);
 
 class BsaArchive {

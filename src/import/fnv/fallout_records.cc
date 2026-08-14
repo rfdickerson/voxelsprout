@@ -442,6 +442,23 @@ void parseTextureSetRecord(const EsmRecordView& record, std::unordered_map<std::
     }
 }
 
+// Oblivion's LTEX names its texture DIRECTLY in ICON, with no TXST in between:
+// the TNAM -> TXST -> TX00 indirection is a Fallout 3-era addition. Reading
+// only TNAM on an Oblivion plugin resolves no land textures at all and the
+// whole terrain shades untextured -- silently, because an LTEX with no path is
+// not an error anywhere downstream.
+//
+// ICON is relative to "textures\landscape\", not to "textures\", so the prefix
+// has to be added here: normalizeTexturePath() only prepends "textures\" and
+// would produce "textures\Dementia\DementiaMoss01.dds", which resolves to
+// nothing. Measured over all 229 LTEX records in Oblivion.esm: 226 resolve
+// under textures\landscape\, 0 under textures\ directly, and the 3 that resolve
+// nowhere name assets the game does not ship (CHRock01.dds and two others).
+//
+// Fallout plugins carry no ICON on an LTEX, so this branch never fires for
+// them and their TNAM path is untouched.
+constexpr std::string_view kOblivionLandTextureFolder = "landscape\\";
+
 void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
     FalloutLandTextureRecord landTexture{};
     landTexture.formId = record.formId;
@@ -450,6 +467,9 @@ void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outSc
             landTexture.editorId = subrecordString(sub);
         } else if (sub.type == "TNAM" && sub.size >= 4u) {
             landTexture.textureSetFormId = readU32(sub.data);
+        } else if (sub.type == "ICON" && sub.size > 0u) {
+            landTexture.diffuseTexturePath =
+                std::string(kOblivionLandTextureFolder) + subrecordString(sub);
         }
     }
     outScene.landTextures.push_back(std::move(landTexture));
@@ -1033,7 +1053,12 @@ bool extractFalloutScene(
         return false;
     }
 
+    // Only fills a path that is still empty, so an Oblivion LTEX's own ICON is
+    // not clobbered by a coincidental TXST match on formID 0.
     for (FalloutLandTextureRecord& landTexture : outScene.landTextures) {
+        if (!landTexture.diffuseTexturePath.empty()) {
+            continue;
+        }
         const auto it = textureSetPaths.find(landTexture.textureSetFormId);
         if (it != textureSetPaths.end()) {
             landTexture.diffuseTexturePath = it->second;

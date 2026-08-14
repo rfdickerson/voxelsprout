@@ -402,14 +402,17 @@ struct FalloutCellRecord {
 };
 
 // A landscape texture. LAND's BTXT/ATXT subrecords name one of these by
-// formID; it in turn points (TNAM) at a texture set whose first slot is the
-// diffuse map. So the full chain from a terrain quadrant to a .dds is
-// LAND.BTXT -> LTEX -> LTEX.TNAM -> TXST -> TXST.TX00.
+// formID. How it reaches a .dds from there depends on the generation:
+//   Fallout 3 / New Vegas: LAND.BTXT -> LTEX -> LTEX.TNAM -> TXST -> TXST.TX00
+//   Oblivion:              LAND.BTXT -> LTEX -> LTEX.ICON  (a path, no TXST)
+// Both land in diffuseTexturePath, so nothing downstream has to know which.
 struct FalloutLandTextureRecord {
     std::uint32_t formId = 0;
     std::string editorId;
-    std::uint32_t textureSetFormId = 0;  // TNAM -> TXST
-    std::string diffuseTexturePath;      // resolved from that TXST's TX00
+    std::uint32_t textureSetFormId = 0;  // TNAM -> TXST; 0 on Oblivion
+    // From that TXST's TX00, or from Oblivion's own ICON with the
+    // "landscape\" folder it is relative to already prepended.
+    std::string diffuseTexturePath;
 };
 
 struct FalloutWorldspaceRecord {

@@ -1,5 +1,7 @@
 #include "import/fnv/plugin_load_order.h"
 
+#include "import/fnv/esm_reader.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -12,9 +14,12 @@ namespace odai::importer::fnv {
 namespace {
 
 constexpr std::uint32_t kTes4MasterFlag = 0x00000001u;
-// A record header is 24 bytes: type[4], dataSize[4], flags[4], formId[4],
-// versionControlInfo[4], formVersion[2], unknown[2].
-constexpr std::size_t kRecordHeaderSize = 24u;
+// The largest record header of any supported generation: type[4], dataSize[4],
+// flags[4], formId[4], versionControlInfo[4], formVersion[2], unknown[2]. Read
+// this many bytes to sniff the file, then rewind to the header size the sniff
+// reports — Oblivion's is 20, and reading 24 would swallow the first four bytes
+// of HEDR and silently find no masters.
+constexpr std::size_t kMaxRecordHeaderSize = 24u;
 
 std::string toLowerAsciiCopy(std::string text) {
     for (char& c : text) {
@@ -93,11 +98,20 @@ bool readFalloutPluginHeader(
         return false;
     }
 
-    std::uint8_t header[kRecordHeaderSize];
-    if (!input.read(reinterpret_cast<char*>(header), kRecordHeaderSize)) {
+    // Read the widest header plus the four bytes the first subrecord type
+    // occupies past it, which is what detectEsmPluginFormat compares. A short
+    // read is tolerated down to the widest header: a file with fewer bytes than
+    // that past its header has no subrecords to find, and failing it here would
+    // reject plugins this function used to accept.
+    std::uint8_t header[kMaxRecordHeaderSize + 4u] = {};
+    input.read(reinterpret_cast<char*>(header), static_cast<std::streamsize>(sizeof(header)));
+    const auto headerBytesRead = static_cast<std::size_t>(input.gcount());
+    if (headerBytesRead < kMaxRecordHeaderSize) {
         outError = "truncated before the TES4 header: " + path.string();
         return false;
     }
+    // A short read sets eofbit/failbit, and the seekg below needs a clear stream.
+    input.clear();
     if (std::memcmp(header, "TES4", 4) != 0) {
         outError = "not a Fallout plugin (no TES4 record): " + path.string();
         return false;
@@ -106,6 +120,15 @@ bool readFalloutPluginHeader(
     const std::uint32_t dataSize = readU32(header + 4);
     const std::uint32_t flags = readU32(header + 8);
     outHeader.isMaster = (flags & kTes4MasterFlag) != 0u;
+
+    // Seek to where the record body actually starts, because the read above
+    // deliberately overshot. Oblivion's header is 20 bytes, so continuing
+    // sequentially from 24 would swallow the first four bytes of HEDR and walk
+    // the body one subrecord out of phase — which finds no MAST at all and so
+    // reports a mod with masters as having none.
+    const std::size_t headerSize =
+        esmRecordHeaderSize(detectEsmPluginFormat(header, headerBytesRead));
+    input.seekg(static_cast<std::streamoff>(headerSize), std::ios::beg);
 
     // Bound the declared size against the file BEFORE sizing anything from it.
     // --plugin-add takes an arbitrary user-named path, so a truncated download

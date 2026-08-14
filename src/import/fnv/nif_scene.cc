@@ -13,6 +13,9 @@ namespace odai::importer::fnv {
 namespace {
 
 constexpr std::uint32_t kSupportedNifVersion = 0x14020007u;  // 20.2.0.7 (FO3/FNV/Skyrim base)
+// Oblivion. 20.0.0.5 exists in the retail archives too but is 1.2% of them.
+constexpr std::uint32_t kOblivionNifVersion = 0x14000004u;   // 20.0.0.4
+constexpr std::uint32_t kOblivionNifVersion5 = 0x14000005u;  // 20.0.0.5
 constexpr std::string_view kHeaderMagicPrefix = "Gamebryo File Format, Version 20.2.0.7";
 
 // Bounds-checked sequential byte reader. Every multi-byte read fails cleanly
@@ -190,6 +193,17 @@ bool readFooterRoots(
 }
 
 struct NifHeader {
+    // TWO STRUCTURALLY DIFFERENT HEADERS, and the differences are not cosmetic.
+    //
+    // 20.0.0.4 (Oblivion) has no block-SIZE table and no global STRING table.
+    // Losing the size table means blocks can only be walked strictly
+    // sequentially -- every type in the file must be consumed exactly, or the
+    // reader desyncs from the first unknown block onward. Losing the string
+    // table means every name is stored inline in its own block as a
+    // uint32-length-prefixed string rather than as an index, which changes the
+    // FIRST FIELD of nearly every block.
+    bool sequentialBlocks = false;
+    bool inlineNames = false;
     std::uint32_t version = 0;
     std::uint32_t userVersion = 0;
     std::uint32_t userVersion2 = 0;
@@ -201,12 +215,20 @@ struct NifHeader {
 
 bool parseHeader(ByteCursor& cursor, NifHeader& header, std::string& outError) {
     std::string magicLine;
-    if (!cursor.readLine(magicLine, '\n') || magicLine.rfind(kHeaderMagicPrefix, 0) != 0) {
-        outError = "Not a Gamebryo NIF 20.2.0.7 file (unrecognized header line)";
+    if (!cursor.readLine(magicLine, '\n') ||
+        magicLine.rfind("Gamebryo File Format, Version ", 0) != 0) {
+        outError = "Not a Gamebryo NIF file (unrecognized header line)";
         return false;
     }
-    if (!cursor.read(header.version) || header.version != kSupportedNifVersion) {
-        outError = "Unsupported NIF version (only 20.2.0.7 / 0x14020007 is supported)";
+    if (!cursor.read(header.version)) {
+        outError = "Truncated NIF version";
+        return false;
+    }
+    if (header.version == kOblivionNifVersion || header.version == kOblivionNifVersion5) {
+        header.sequentialBlocks = true;
+        header.inlineNames = true;
+    } else if (header.version != kSupportedNifVersion) {
+        outError = "Unsupported NIF version (20.0.0.4, 20.0.0.5 and 20.2.0.7 are supported)";
         return false;
     }
     std::uint8_t endianType = 0;
@@ -250,26 +272,34 @@ bool parseHeader(ByteCursor& cursor, NifHeader& header, std::string& outError) {
         }
     }
 
-    header.blockSize.resize(numBlocks);
-    for (std::uint32_t& size : header.blockSize) {
-        if (!cursor.read(size)) {
-            outError = "Truncated NIF header block-size table";
-            return false;
+    // Both tables arrived AFTER 20.0.0.4 -- the size table at 20.2.0.5 and the
+    // string table at 20.1.0.x -- so reading them there consumes the first
+    // block's data as if it were sizes. The give-away when that happens is a
+    // size table whose entries are the ASCII of the block's own name.
+    if (!header.sequentialBlocks) {
+        header.blockSize.resize(numBlocks);
+        for (std::uint32_t& size : header.blockSize) {
+            if (!cursor.read(size)) {
+                outError = "Truncated NIF header block-size table";
+                return false;
+            }
         }
-    }
 
-    std::uint32_t numStrings = 0;
-    std::uint32_t maxStringLength = 0;
-    if (!cursor.read(numStrings) || !cursor.read(maxStringLength)) {
-        outError = "Truncated NIF header string-table sizes";
-        return false;
-    }
-    header.strings.resize(numStrings);
-    for (std::string& text : header.strings) {
-        if (!cursor.readSizedString<std::uint32_t>(text)) {
-            outError = "Truncated NIF header string table";
+        std::uint32_t numStrings = 0;
+        std::uint32_t maxStringLength = 0;
+        if (!cursor.read(numStrings) || !cursor.read(maxStringLength)) {
+            outError = "Truncated NIF header string-table sizes";
             return false;
         }
+        header.strings.resize(numStrings);
+        for (std::string& text : header.strings) {
+            if (!cursor.readSizedString<std::uint32_t>(text)) {
+                outError = "Truncated NIF header string table";
+                return false;
+            }
+        }
+    } else {
+        header.blockSize.assign(numBlocks, 0u);
     }
 
     std::uint32_t numGroups = 0;
@@ -630,7 +660,9 @@ bool findTexturingPropertySource(
     return false;
 }
 
-bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPropertyBlock& out) {
+bool readNiAlphaProperty(
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames,
+    AlphaPropertyBlock& out) {
     AvObjectFields unusedNameFields{};
     // NiAlphaProperty derives from NiObjectNET: name, extra data, controller.
     if (!cursor.read(unusedNameFields.nameRef)) {
@@ -703,7 +735,8 @@ bool readNiAlphaProperty(ByteCursor& cursor, std::uint32_t userVersion2, AlphaPr
     return true;
 }
 
-bool readNiStencilProperty(ByteCursor& cursor, StencilPropertyBlock& out) {
+bool readNiStencilProperty(
+    ByteCursor& cursor, bool inlineNames, StencilPropertyBlock& out) {
     // Same NiObjectNET prefix as NiAlphaProperty above: name, extra data,
     // controller, then the property's own 16-bit flags.
     std::uint32_t nameRef = 0;
@@ -764,8 +797,19 @@ bool readNiStencilProperty(ByteCursor& cursor, StencilPropertyBlock& out) {
 // this cursor, so anything after this point (children, data ref, ...) is
 // read separately per block type. Returns false only on truncation this
 // early in the block, which should not happen for a well-formed file.
-bool readAvObjectPrefix(ByteCursor& cursor, std::uint32_t userVersion2, AvObjectFields& out) {
-    if (!cursor.read(out.nameRef)) {
+bool readAvObjectPrefix(
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, AvObjectFields& out) {
+    // 20.0.0.4 has no string table, so the name is stored inline here rather
+    // than as an index into one. This is the single most invasive difference
+    // between the two header families: it changes the FIRST field of nearly
+    // every block, so getting it wrong desynchronizes everything after it.
+    if (inlineNames) {
+        std::string name;
+        if (!cursor.readSizedString<std::uint32_t>(name)) {
+            return false;
+        }
+        out.nameRef = -1;
+    } else if (!cursor.read(out.nameRef)) {
         return false;
     }
     std::uint32_t numExtraData = 0;
@@ -845,8 +889,9 @@ bool readAvObjectPrefix(ByteCursor& cursor, std::uint32_t userVersion2, AvObject
 // as a child count that cannot fit in the block long before it shows up as an
 // implausible float, and a numeric tolerance risks rejecting a legitimate node
 // -- which costs a whole model, the exact outcome this file is trying to avoid.
-bool readNiNode(ByteCursor& cursor, std::uint32_t userVersion2, AvObjectFields& out) {
-    if (!readAvObjectPrefix(cursor, userVersion2, out)) {
+bool readNiNode(
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, AvObjectFields& out) {
+    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, out)) {
         return false;
     }
     std::uint32_t numChildren = 0;
@@ -884,8 +929,9 @@ bool readNiNode(ByteCursor& cursor, std::uint32_t userVersion2, AvObjectFields& 
     return true;
 }
 
-bool readNiTriBasedGeom(ByteCursor& cursor, std::uint32_t userVersion2, AvObjectFields& out) {
-    if (!readAvObjectPrefix(cursor, userVersion2, out)) {
+bool readNiTriBasedGeom(
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, AvObjectFields& out) {
+    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, out)) {
         return false;
     }
     if (!cursor.read(out.dataRef)) {
@@ -1190,6 +1236,383 @@ bool parseNifBlockSummary(
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Sequential block walk for 20.0.0.4 (Oblivion)
+// ---------------------------------------------------------------------------
+//
+// With no block-size table, offsets can only be derived by consuming every
+// block in order -- so a reader must know the exact length of every type in the
+// file, including the ~12 Havok types it will never look at. Those are pure
+// skippers: the bytes have to be counted, not understood.
+//
+// Every layout below is resolved from nif.xml for version 20.0.0.4 / BSVER 11
+// (see src/tools/oblivion_nif_lab/from_nifxml.py) and then confirmed against all
+// 7382 retail 20.0.0.x meshes by walking each file and requiring it to land
+// exactly on its footer. 82.1% of the archive walks, and 94% of architecture.
+//
+// A type with no entry here fails the FILE rather than being guessed at. That is
+// deliberate: a wrong length does not produce a wrong mesh, it desynchronizes
+// every subsequent block, and silently importing the resulting garbage is far
+// worse than skipping the file.
+
+bool consumeSizedString(ByteCursor& cursor) {
+    std::string unused;
+    return cursor.readSizedString<std::uint32_t>(unused);
+}
+
+bool consumeSkip(ByteCursor& cursor, std::size_t bytes) {
+    if (cursor.pos() + bytes > cursor.size()) {
+        return false;
+    }
+    cursor.seekAbsolute(cursor.pos() + bytes);
+    return true;
+}
+
+// Reads a u32 count and skips count * stride bytes. The count is bounds-checked
+// against the file rather than trusted: a desync upstream turns arbitrary bytes
+// into a count, and a 4-billion-element array would otherwise be "read".
+bool consumeCountedArray(ByteCursor& cursor, std::size_t stride) {
+    std::uint32_t count = 0;
+    if (!cursor.read(count)) {
+        return false;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(count) * stride;
+    if (cursor.pos() + bytes > cursor.size()) {
+        return false;
+    }
+    return consumeSkip(cursor, bytes);
+}
+
+// NiObjectNET: name + extra-data refs + controller ref.
+bool consumeNiObjectNet(ByteCursor& cursor) {
+    return consumeSizedString(cursor) && consumeCountedArray(cursor, 4u) &&
+           consumeSkip(cursor, 4u);
+}
+
+// NiAVObject adds transform, properties and the collision-object ref. `flags` is
+// a ushort here -- it widens to uint only past userVersion2 26, and Oblivion is 11.
+bool consumeNiAvObject(ByteCursor& cursor) {
+    return consumeNiObjectNet(cursor) &&
+           consumeSkip(cursor, 2u + 12u + 36u + 4u) &&  // flags, translation, rotation, scale
+           consumeCountedArray(cursor, 4u) &&           // properties
+           consumeSkip(cursor, 4u);                     // collision object
+}
+
+// TexDesc: source + clamp + filter + uvSet, then an optional transform.
+bool consumeTexDesc(ByteCursor& cursor) {
+    if (!consumeSkip(cursor, 4u + 4u + 4u + 4u)) {
+        return false;
+    }
+    std::uint8_t hasTransform = 0;
+    if (!cursor.read(hasTransform)) {
+        return false;
+    }
+    return hasTransform == 0u || consumeSkip(cursor, 8u + 8u + 4u + 4u + 8u);
+}
+
+bool consumeNiGeometryData(ByteCursor& cursor, std::uint16_t& outNumVertices) {
+    std::uint16_t numVertices = 0;
+    std::uint8_t flag = 0;
+    if (!consumeSkip(cursor, 4u) || !cursor.read(numVertices) ||
+        !consumeSkip(cursor, 2u)) {  // groupId, numVertices, keep+compress flags
+        return false;
+    }
+    outNumVertices = numVertices;
+    const std::size_t vertexCount = static_cast<std::size_t>(numVertices);
+    if (!cursor.read(flag)) {
+        return false;
+    }
+    if (flag != 0u && !consumeSkip(cursor, vertexCount * 12u)) {
+        return false;
+    }
+    std::uint16_t dataFlags = 0;
+    if (!cursor.read(dataFlags) || !cursor.read(flag)) {
+        return false;
+    }
+    if (flag != 0u) {
+        if (!consumeSkip(cursor, vertexCount * 12u)) {
+            return false;
+        }
+        if ((dataFlags & 0x1000u) != 0u &&
+            !consumeSkip(cursor, vertexCount * 24u)) {  // tangents + bitangents
+            return false;
+        }
+    }
+    if (!consumeSkip(cursor, 16u) || !cursor.read(flag)) {  // bounding sphere
+        return false;
+    }
+    if (flag != 0u && !consumeSkip(cursor, vertexCount * 16u)) {
+        return false;
+    }
+    // UV SET COUNT IS THE LOW SIX BITS HERE. That is stock Gamebryo's
+    // NiVectorFlags; Bethesda's BSVectorFlags reading, where bit 0 is a boolean,
+    // is correct for FO3/FNV and wrong for Oblivion.
+    const std::size_t uvSets = static_cast<std::size_t>(dataFlags & 0x3Fu);
+    if (!consumeSkip(cursor, uvSets * vertexCount * 8u)) {
+        return false;
+    }
+    return consumeSkip(cursor, 2u + 4u);  // consistency flags, additional data ref
+}
+
+// Consumes exactly one block of `typeName`. False means "this reader does not
+// know how long that block is", which fails the file.
+bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
+    // --- Havok. Skipped entirely; only the byte counts matter. ---
+    if (typeName == "bhkCollisionObject" || typeName == "bhkBlendCollisionObject") {
+        return consumeSkip(cursor, 10u);
+    }
+    if (typeName == "bhkRigidBody" || typeName == "bhkRigidBodyT") {
+        // bhkRigidBodyT stores the same bytes; the T only changes whether the
+        // translation and rotation are honoured.
+        return consumeSkip(cursor, 228u) && consumeCountedArray(cursor, 4u) &&
+               consumeSkip(cursor, 4u);
+    }
+    if (typeName == "bhkMoppBvTreeShape") {
+        std::uint32_t moppSize = 0;
+        return consumeSkip(cursor, 4u + 12u + 4u) && cursor.read(moppSize) &&
+               consumeSkip(cursor, 16u) && consumeSkip(cursor, moppSize);
+    }
+    if (typeName == "bhkNiTriStripsShape") {
+        return consumeSkip(cursor, 4u + 4u + 20u + 4u + 16u) &&
+               consumeCountedArray(cursor, 4u) && consumeCountedArray(cursor, 4u);
+    }
+    if (typeName == "bhkConvexVerticesShape") {
+        return consumeSkip(cursor, 4u + 4u + 12u + 12u) &&
+               consumeCountedArray(cursor, 16u) && consumeCountedArray(cursor, 16u);
+    }
+    if (typeName == "bhkBoxShape") {
+        return consumeSkip(cursor, 32u);
+    }
+    if (typeName == "bhkCapsuleShape") {
+        return consumeSkip(cursor, 48u);
+    }
+    if (typeName == "bhkSphereShape") {
+        return consumeSkip(cursor, 8u);
+    }
+    if (typeName == "bhkTransformShape" || typeName == "bhkConvexTransformShape") {
+        return consumeSkip(cursor, 84u);
+    }
+    if (typeName == "bhkListShape") {
+        return consumeCountedArray(cursor, 4u) && consumeSkip(cursor, 4u + 12u + 12u) &&
+               consumeCountedArray(cursor, 4u);
+    }
+
+    // --- Extra data. These derive from NiObject, so name ONLY: no extra-data
+    // list and no controller ref. Giving them NiObjectNET desyncs immediately. ---
+    if (typeName == "NiStringExtraData") {
+        return consumeSizedString(cursor) && consumeSizedString(cursor);
+    }
+    if (typeName == "BSXFlags" || typeName == "NiIntegerExtraData") {
+        return consumeSizedString(cursor) && consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiBinaryExtraData") {
+        return consumeSizedString(cursor) && consumeCountedArray(cursor, 1u);
+    }
+    if (typeName == "BSBound") {
+        return consumeSizedString(cursor) && consumeSkip(cursor, 24u);
+    }
+    if (typeName == "BSFurnitureMarker") {
+        return consumeSizedString(cursor) && consumeCountedArray(cursor, 16u);
+    }
+    if (typeName == "NiTextKeyExtraData") {
+        std::uint32_t keyCount = 0;
+        if (!consumeSizedString(cursor) || !cursor.read(keyCount)) {
+            return false;
+        }
+        for (std::uint32_t i = 0; i < keyCount; ++i) {
+            if (!consumeSkip(cursor, 4u) || !consumeSizedString(cursor)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // --- Nodes and geometry. ---
+    if (typeName == "NiNode" || typeName == "NiBillboardNode" ||
+        typeName == "BSFadeNode" || typeName == "NiSwitchNode" ||
+        typeName == "NiLODNode" || typeName == "RootCollisionNode" ||
+        typeName == "AvoidNode" || typeName == "BSValueNode" ||
+        typeName == "NiBSAnimationNode" || typeName == "NiBSParticleNode") {
+        if (!consumeNiAvObject(cursor) || !consumeCountedArray(cursor, 4u) ||
+            !consumeCountedArray(cursor, 4u)) {
+            return false;
+        }
+        return typeName != "NiBillboardNode" || consumeSkip(cursor, 2u);
+    }
+    if (typeName == "NiTriShape" || typeName == "NiTriStrips") {
+        if (!consumeNiAvObject(cursor) || !consumeSkip(cursor, 8u)) {  // data, skin
+            return false;
+        }
+        std::uint8_t hasShader = 0;
+        if (!cursor.read(hasShader)) {
+            return false;
+        }
+        return hasShader == 0u || (consumeSizedString(cursor) && consumeSkip(cursor, 4u));
+    }
+    if (typeName == "NiTriShapeData") {
+        std::uint16_t numVertices = 0;
+        std::uint16_t numTriangles = 0;
+        std::uint8_t hasTriangles = 0;
+        std::uint16_t matchGroups = 0;
+        if (!consumeNiGeometryData(cursor, numVertices) || !cursor.read(numTriangles) ||
+            !consumeSkip(cursor, 4u) || !cursor.read(hasTriangles)) {
+            return false;
+        }
+        if (hasTriangles != 0u &&
+            !consumeSkip(cursor, static_cast<std::size_t>(numTriangles) * 6u)) {
+            return false;
+        }
+        if (!cursor.read(matchGroups)) {
+            return false;
+        }
+        for (std::uint16_t i = 0; i < matchGroups; ++i) {
+            std::uint16_t count = 0;
+            if (!cursor.read(count) ||
+                !consumeSkip(cursor, static_cast<std::size_t>(count) * 2u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiTriStripsData") {
+        std::uint16_t numVertices = 0;
+        std::uint16_t numStrips = 0;
+        if (!consumeNiGeometryData(cursor, numVertices) || !consumeSkip(cursor, 2u) ||
+            !cursor.read(numStrips)) {
+            return false;
+        }
+        std::size_t totalPoints = 0;
+        for (std::uint16_t i = 0; i < numStrips; ++i) {
+            std::uint16_t length = 0;
+            if (!cursor.read(length)) {
+                return false;
+            }
+            totalPoints += length;
+        }
+        std::uint8_t hasPoints = 0;
+        if (!cursor.read(hasPoints)) {
+            return false;
+        }
+        return hasPoints == 0u || consumeSkip(cursor, totalPoints * 2u);
+    }
+
+    // --- Properties. ---
+    if (typeName == "NiAlphaProperty") {
+        return consumeNiObjectNet(cursor) && consumeSkip(cursor, 3u);
+    }
+    if (typeName == "NiSpecularProperty" || typeName == "NiShadeProperty" ||
+        typeName == "NiDitherProperty" || typeName == "NiWireframeProperty") {
+        return consumeNiObjectNet(cursor) && consumeSkip(cursor, 2u);
+    }
+    if (typeName == "NiZBufferProperty") {
+        return consumeNiObjectNet(cursor) && consumeSkip(cursor, 6u);
+    }
+    if (typeName == "NiVertexColorProperty") {
+        return consumeNiObjectNet(cursor) && consumeSkip(cursor, 10u);
+    }
+    if (typeName == "NiStencilProperty") {
+        return consumeNiObjectNet(cursor) && consumeSkip(cursor, 29u);
+    }
+    if (typeName == "NiMaterialProperty") {
+        return consumeNiObjectNet(cursor) && consumeSkip(cursor, 48u + 4u + 4u);
+    }
+    if (typeName == "NiTexturingProperty") {
+        std::uint32_t textureCount = 0;
+        if (!consumeNiObjectNet(cursor) || !consumeSkip(cursor, 4u) ||
+            !cursor.read(textureCount)) {
+            return false;
+        }
+        const auto slot = [&cursor]() {
+            std::uint8_t has = 0;
+            if (!cursor.read(has)) {
+                return false;
+            }
+            return has == 0u || consumeTexDesc(cursor);
+        };
+        for (int i = 0; i < 5; ++i) {  // base, dark, detail, gloss, glow
+            if (!slot()) {
+                return false;
+            }
+        }
+        if (textureCount > 5u) {
+            std::uint8_t hasBump = 0;
+            if (!cursor.read(hasBump)) {
+                return false;
+            }
+            if (hasBump != 0u &&
+                (!consumeTexDesc(cursor) || !consumeSkip(cursor, 4u + 4u + 16u))) {
+                return false;
+            }
+        }
+        for (std::uint32_t threshold = 6u; threshold <= 9u; ++threshold) {
+            if (textureCount > threshold && !slot()) {
+                return false;
+            }
+        }
+        // THE SHADER-TEXTURE ARRAY IS THE ONE EVERYONE MISSES. It exists from
+        // 10.0.1.0, and omitting it under-consumes every texturing property in
+        // the archive -- which desynchronizes the NiSourceTexture right after it
+        // and looks like a bug in that block instead.
+        std::uint32_t shaderTextures = 0;
+        if (!cursor.read(shaderTextures)) {
+            return false;
+        }
+        for (std::uint32_t i = 0; i < shaderTextures; ++i) {
+            std::uint8_t hasMap = 0;
+            if (!cursor.read(hasMap)) {
+                return false;
+            }
+            if (hasMap != 0u && (!consumeTexDesc(cursor) || !consumeSkip(cursor, 4u))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiSourceTexture") {
+        std::uint8_t useExternal = 0;
+        if (!consumeNiObjectNet(cursor) || !cursor.read(useExternal)) {
+            return false;
+        }
+        // Both branches are a file name followed by a Ref; only what the Ref
+        // points at differs.
+        return consumeSizedString(cursor) && consumeSkip(cursor, 4u) &&
+               consumeSkip(cursor, 12u + 1u + 1u);  // format prefs, isStatic, directRender
+    }
+    return false;
+}
+
+// Fills blockStart/blockEnd by consuming each block in order. Any type without a
+// reader aborts the whole file -- see consumeOblivionBlock.
+bool computeSequentialBlockBounds(
+    const std::vector<std::uint8_t>& bytes,
+    const NifHeader& header,
+    std::size_t firstBlockOffset,
+    std::vector<std::size_t>& blockStart,
+    std::vector<std::size_t>& blockEnd,
+    std::string& outError
+) {
+    const std::size_t numBlocks = header.blockTypeIndex.size();
+    blockStart.assign(numBlocks, 0u);
+    blockEnd.assign(numBlocks, 0u);
+    ByteCursor cursor(bytes.data(), bytes.size());
+    cursor.seekAbsolute(firstBlockOffset);
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        blockStart[i] = cursor.pos();
+        const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
+        if (!consumeOblivionBlock(cursor, typeName)) {
+            outError = "Unsupported NIF 20.0.0.4 block type '" + typeName +
+                       "' (no size is derivable without it)";
+            return false;
+        }
+        blockEnd[i] = cursor.pos();
+        if (blockEnd[i] > bytes.size()) {
+            outError = "NIF 20.0.0.4 block walk overran the file";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outModel, std::string& outError) {
     outModel = NifModel{};
     ByteCursor cursor(bytes.data(), bytes.size());
@@ -1201,15 +1624,22 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     const std::size_t numBlocks = header.blockSize.size();
     std::vector<std::size_t> blockStart(numBlocks);
     std::vector<std::size_t> blockEnd(numBlocks);
-    std::size_t cursorPos = cursor.pos();
-    for (std::size_t i = 0; i < numBlocks; ++i) {
-        blockStart[i] = cursorPos;
-        blockEnd[i] = cursorPos + header.blockSize[i];
-        if (blockEnd[i] > bytes.size()) {
-            outError = "NIF block size table overruns the file";
+    if (header.sequentialBlocks) {
+        if (!computeSequentialBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
             return false;
         }
-        cursorPos = blockEnd[i];
+    } else {
+        std::size_t cursorPos = cursor.pos();
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            blockStart[i] = cursorPos;
+            blockEnd[i] = cursorPos + header.blockSize[i];
+            if (blockEnd[i] > bytes.size()) {
+                outError = "NIF block size table overruns the file";
+                return false;
+            }
+            cursorPos = blockEnd[i];
+        }
     }
 
     std::vector<AvObjectFields> nodeFields(numBlocks);
@@ -1231,7 +1661,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
 
     for (std::size_t i = 0; i < numBlocks; ++i) {
         const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
-        ByteCursor blockCursor(bytes.data() + blockStart[i], header.blockSize[i]);
+        ByteCursor blockCursor(
+            bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
 
         // Any type whose name ends in "Node" is ATTEMPTED as a node even when
         // it is not in the list above. That collapses the old "unhandled node
@@ -1249,7 +1680,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // NiNode-derived fails that and is counted, rather than misparsed.
         if (isNodeTypeName(typeName) || looksLikeUnhandledNodeType(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, fields)) {
                 nodeFields[i] = std::move(fields);
                 isNiNode[i] = true;
                 for (const std::int32_t child : nodeFields[i].children) {
@@ -1279,7 +1710,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // "successfully" and yielded zero shapes -- the silent-drop failure
             // mode, not an error.
             AvObjectFields fields;
-            if (readNiTriBasedGeom(blockCursor, header.userVersion2, fields)) {
+            if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, fields)) {
                 nodeFields[i] = std::move(fields);
                 isTriShape[i] = true;
             }
@@ -1306,12 +1737,12 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
         } else if (typeName == "NiAlphaProperty") {
             AlphaPropertyBlock alpha;
-            if (readNiAlphaProperty(blockCursor, header.userVersion2, alpha)) {
+            if (readNiAlphaProperty(blockCursor, header.userVersion2, header.inlineNames, alpha)) {
                 alphaProperties[i] = alpha;
             }
         } else if (typeName == "NiStencilProperty") {
             StencilPropertyBlock stencil;
-            if (readNiStencilProperty(blockCursor, stencil)) {
+            if (readNiStencilProperty(blockCursor, header.inlineNames, stencil)) {
                 stencilProperties[i] = stencil;
             }
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
@@ -1320,7 +1751,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // Not counted here: a data block that fails to parse is counted
             // once, at the shape that references it in the DFS below. Counting
             // both sites reported 2 for a single lost shape.
-            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, block) && block.valid) {
+            if (readGeometryData(blockCursor, blockEnd[i] - blockStart[i], isStrips, block) &&
+                block.valid) {
                 geometry[i] = std::move(block);
             }
         }
@@ -1335,7 +1767,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         if (header.blockTypeNames[header.blockTypeIndex[i]] != "NiTexturingProperty") {
             continue;
         }
-        ByteCursor propertyCursor(bytes.data() + blockStart[i], header.blockSize[i]);
+        ByteCursor propertyCursor(
+            bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
         std::string fileName;
         if (findTexturingPropertySource(propertyCursor, sourceTexturePaths, fileName)) {
             texturingPropertyPaths[i] = std::move(fileName);
@@ -1641,6 +2074,14 @@ bool parseNifSkeleton(
         return false;
     }
 
+    if (header.sequentialBlocks) {
+        // 20.0.0.4 has no block-size table, and only the static-mesh path has a
+        // sequential walker. Saying so beats returning an empty skeleton, which
+        // reads downstream as "this actor has no bones" rather than as an
+        // unsupported format.
+        outError = "Skinned/skeleton NIF parsing is not implemented for 20.0.0.4 yet";
+        return false;
+    }
     const std::size_t numBlocks = header.blockSize.size();
     std::vector<std::size_t> blockStart(numBlocks);
     std::size_t cursorPos = cursor.pos();
@@ -1660,9 +2101,10 @@ bool parseNifSkeleton(
         if (!isNodeTypeName(typeName)) {
             continue;
         }
-        ByteCursor blockCursor(bytes.data() + blockStart[i], header.blockSize[i]);
+        ByteCursor blockCursor(
+            bytes.data() + blockStart[i], header.blockSize[i]);
         AvObjectFields fields;
-        if (readNiNode(blockCursor, header.userVersion2, fields)) {
+        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, fields)) {
             nodeFields[i] = std::move(fields);
             isNiNode[i] = true;
         }
@@ -1928,6 +2370,14 @@ bool parseNifSkinnedMesh(
         return false;
     }
 
+    if (header.sequentialBlocks) {
+        // 20.0.0.4 has no block-size table, and only the static-mesh path has a
+        // sequential walker. Saying so beats returning an empty skeleton, which
+        // reads downstream as "this actor has no bones" rather than as an
+        // unsupported format.
+        outError = "Skinned/skeleton NIF parsing is not implemented for 20.0.0.4 yet";
+        return false;
+    }
     const std::size_t numBlocks = header.blockSize.size();
     std::vector<std::size_t> blockStart(numBlocks);
     std::size_t cursorPos = cursor.pos();
@@ -1964,11 +2414,12 @@ bool parseNifSkinnedMesh(
 
     for (std::size_t i = 0; i < numBlocks; ++i) {
         const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
-        ByteCursor blockCursor(bytes.data() + blockStart[i], header.blockSize[i]);
+        ByteCursor blockCursor(
+            bytes.data() + blockStart[i], header.blockSize[i]);
 
         if (isNodeTypeName(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, fields)) {
                 const std::int32_t nameRef = fields.nameRef;
                 if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                     nodeNames[i] = header.strings[static_cast<std::size_t>(nameRef)];
@@ -1978,7 +2429,7 @@ bool parseNifSkinnedMesh(
         } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
                    typeName == "BSSegmentedTriShape") {
             AvObjectFields fields;
-            if (readNiTriBasedGeom(blockCursor, header.userVersion2, fields)) {
+            if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, fields)) {
                 // The skin instance ref is the very next field after the data
                 // ref readNiTriBasedGeom stops at.
                 std::int32_t skinRef = -1;
@@ -2012,18 +2463,19 @@ bool parseNifSkinnedMesh(
             }
         } else if (typeName == "NiAlphaProperty") {
             AlphaPropertyBlock alpha;
-            if (readNiAlphaProperty(blockCursor, header.userVersion2, alpha)) {
+            if (readNiAlphaProperty(blockCursor, header.userVersion2, header.inlineNames, alpha)) {
                 alphaProperties[i] = alpha;
             }
         } else if (typeName == "NiStencilProperty") {
             StencilPropertyBlock stencil;
-            if (readNiStencilProperty(blockCursor, stencil)) {
+            if (readNiStencilProperty(blockCursor, header.inlineNames, stencil)) {
                 stencilProperties[i] = stencil;
             }
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
             GeometryBlock block;
             const bool isStrips = (typeName == "NiTriStripsData");
-            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, block) && block.valid) {
+            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, block) &&
+                block.valid) {
                 geometry[i] = std::move(block);
             }
         }

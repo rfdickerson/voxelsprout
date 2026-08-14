@@ -14,12 +14,20 @@ namespace {
 
 constexpr std::uint32_t kBsaMagic = 0x00415342u;  // "BSA\0"
 constexpr std::uint32_t kBsaVersionFo3Fnv = 104u;
-// Oblivion-era BSA. Plenty of New Vegas mods still ship one -- Willow's 258 MB
-// archive is v103 -- and the game reads them, because the folder and file record
-// layouts are identical to v104. The version differences are in which archive
-// FLAGS are defined, and this reader only consults the two (folder names, file
-// names) that both versions share. Rejecting it cost every mesh, texture and
-// voice line the mod ships.
+// Oblivion-era BSA (TES4), and two separate reasons to read one.
+//
+// Plenty of New Vegas mods still ship v103 -- Willow's 258 MB archive is one --
+// and the game reads them. Rejecting it cost every mesh, texture and voice line
+// those mods ship. Oblivion itself is the other.
+//
+// Every structure this reader touches is byte-identical to v104: the 36-byte
+// header, 16-byte folder records, 16-byte file records, the totalFileNameLength
+// bias on folder offsets, the NUL-terminated name block, and zlib payloads
+// behind a uint32 original-size prefix. Verified by parsing all 17 retail
+// Oblivion archives with the v104 layout -- 20182 entries index out of
+// "Oblivion - Meshes.bsa" with correct paths, and 40 of 40 sampled files
+// inflate to their declared size. The version differences are in which archive
+// FLAGS are defined, and the ONE that matters here is kFlagEmbedFileNames below.
 constexpr std::uint32_t kBsaVersionOblivion = 103u;
 
 constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
@@ -27,13 +35,18 @@ constexpr std::uint32_t kFlagHasFileNames = 0x2u;
 constexpr std::uint32_t kFlagCompressedArchive = 0x4u;
 // Each file's data block is prefixed by a BString holding its full virtual
 // path. Set on both retail texture archives (archiveFlags 0x107).
-// Fallout 3 ONWARD. In an Oblivion-era v103 archive this bit is not this flag,
-// and honouring it there desynchronises every single file: the reader skips a
-// length-prefixed name that was never written, so each extraction starts a few
-// bytes late and yields garbage. That does not fail loudly -- a DDS decodes to
-// nothing, a NIF parses to no shapes -- so it reads as "the mod ships broken
-// assets" rather than as a reader bug. Willow's 258 MB v103 archive is where
-// this surfaced: every mesh and texture in it came out unusable.
+//
+// FALLOUT 3 ONWARD. THIS BIT IS MEANINGLESS IN v103 AND MUST BE IGNORED THERE.
+// Oblivion sets it anyway -- "Oblivion - Meshes.bsa" is 0x787 and "Oblivion -
+// Textures - Compressed.bsa" is 0x707, both with the bit on -- but no v103 data
+// block carries an embedded name. Honouring it eats the first 1+N bytes of the
+// payload, so each extraction starts a few bytes late: a compressed archive
+// fails outright with "incorrect header check", and an uncompressed one yields
+// garbage that does NOT fail loudly -- a DDS decodes to nothing, a NIF parses to
+// no shapes -- so it reads as "the mod ships broken assets" rather than as a
+// reader bug. Measured both ways: on all five sampled files of Willow's v103
+// archive, and on all 40 sampled Oblivion files, before the version guard
+// existed. Embedded names arrived with Fallout 3's v104.
 constexpr std::uint32_t kFlagEmbedFileNames = 0x100u;
 // Per-file size field: bit 30 toggles this file's compression relative to the
 // archive-wide default set by kFlagCompressedArchive.
@@ -160,11 +173,19 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
     }
     if (header.version != kBsaVersionFo3Fnv && header.version != kBsaVersionOblivion) {
         m_lastError = "Unsupported BSA version " + std::to_string(header.version) +
-            " (only v103 and v104 archives are supported): " + path.string();
+            " (only Oblivion v103 and Fallout 3 / New Vegas v104 archives are supported): " +
+            path.string();
         return false;
     }
 
+    // Mask the embed-file-names bit out of the flags this object keeps, rather
+    // than testing the version again down in extract(). Nothing else in the
+    // reader branches on the version, so this keeps the v103 difference in one
+    // place and leaves extract() reading exactly the code path it always did.
     m_archiveFlags = header.archiveFlags;
+    if (header.version == kBsaVersionOblivion) {
+        m_archiveFlags &= ~kFlagEmbedFileNames;
+    }
     m_fileFlags = header.fileFlags;
     m_version = header.version;
     const bool hasFolderNames = (header.archiveFlags & kFlagHasFolderNames) != 0u;
