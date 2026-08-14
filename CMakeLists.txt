@@ -751,6 +751,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
         src/render/frame_graph.cc
         src/render/renderer.cc
+        src/render/video_writer.cc
         src/world/magica_voxel.cc
         src/world/world.cc
         src/world/chunk_grid_worldgen.cc
@@ -964,6 +965,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1016,6 +1018,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1073,6 +1076,7 @@ if(ODAI_BUILD_APP)
             src/procgen/civic_generator.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1126,6 +1130,7 @@ if(ODAI_BUILD_APP)
             src/procgen/humanoid_generator.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1195,6 +1200,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1245,6 +1251,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1291,6 +1298,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1339,6 +1347,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1386,6 +1395,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1433,6 +1443,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1479,6 +1490,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1526,6 +1538,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc
@@ -1573,6 +1586,7 @@ if(ODAI_BUILD_APP)
             src/import/imported_scene_query.cc
             src/render/frame_graph.cc
             src/render/renderer.cc
+            src/render/video_writer.cc
             src/world/world.cc
             src/world/chunk_grid_worldgen.cc
             src/world/chunk_mesher.cc

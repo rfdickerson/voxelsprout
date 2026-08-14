@@ -2437,6 +2437,7 @@ void RendererBackend::shutdown() {
         destroyAutoExposureResources();
         destroySunShaftResources();
         destroyTaaComputeResources();
+        destroyFrameCaptureResources();
         destroySkinnedVelocityResources();
         destroyXeGtaoResources();
         destroySsaoComputeResources();

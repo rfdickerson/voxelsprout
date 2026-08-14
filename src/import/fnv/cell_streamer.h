@@ -191,6 +191,14 @@ public:
     // terrain heights. Returns false when no cells are available.
     bool suggestedSpawnEngineSpace(float outPosition[3]) const;
 
+    // True when no cell build is in flight and none is waiting to be applied.
+    // A capture uses this to know the world has stopped arriving. Counting warm-up
+    // FRAMES is the obvious proxy and a bad one: how much streaming fits in a
+    // fixed frame count depends entirely on how fast the renderer happens to be,
+    // so speeding up capture silently shortened the warm-up and started recording
+    // half-loaded towns.
+    bool isStreamingIdle() const;
+
     // Everything a room needs that is not its geometry: how it is lit, and
     // somewhere inside it to stand.
     struct InteriorScene {

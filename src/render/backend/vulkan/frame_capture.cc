@@ -18,6 +18,7 @@
 #include "core/log.h"
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <vector>
 
@@ -51,7 +52,53 @@ bool channelOrderForFormat(VkFormat format, int& outRedByte, int& outGreenByte, 
 
 }  // namespace
 
+void RendererBackend::destroyFrameCaptureResources() {
+    if (m_device == VK_NULL_HANDLE) {
+        return;
+    }
+    if (m_captureCommandPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(m_device, m_captureCommandPool, nullptr);
+        m_captureCommandPool = VK_NULL_HANDLE;
+        m_captureCommandBuffer = VK_NULL_HANDLE;
+    }
+    if (m_captureMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(m_device, m_captureMemory, nullptr);
+        m_captureMemory = VK_NULL_HANDLE;
+    }
+    if (m_captureBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(m_device, m_captureBuffer, nullptr);
+        m_captureBuffer = VK_NULL_HANDLE;
+    }
+    m_captureBufferBytes = 0;
+}
+
 bool RendererBackend::captureLastFrameToFile(const std::string& outputPath) {
+    std::vector<std::uint8_t> rgb;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (!captureLastFrameRgb(rgb, width, height)) {
+        return false;
+    }
+    std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+    bool wrote = false;
+    if (output) {
+        output << "P6\n" << width << " " << height << "\n255\n";
+        output.write(reinterpret_cast<const char*>(rgb.data()),
+                     static_cast<std::streamsize>(rgb.size()));
+        wrote = output.good();
+    }
+    if (wrote) {
+        VOX_LOGI("render") << "frame capture written: " << outputPath << " (" << width << "x"
+                           << height << ")";
+    } else {
+        VOX_LOGE("render") << "frame capture failed to write " << outputPath;
+    }
+    return wrote;
+}
+
+bool RendererBackend::captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
+                                          std::uint32_t& outWidth,
+                                          std::uint32_t& outHeight) {
     if (m_device == VK_NULL_HANDLE || m_swapchainImages.empty()) {
         VOX_LOGE("render") << "frame capture: renderer not initialized";
         return false;
@@ -74,85 +121,103 @@ bool RendererBackend::captureLastFrameToFile(const std::string& outputPath) {
     const uint32_t height = m_swapchainExtent.height;
     const VkDeviceSize imageBytes = static_cast<VkDeviceSize>(width) * height * 4u;
 
-    // Everything below is one-shot and torn down before returning. A capture
-    // happens once per run at most, so holding no persistent state is worth
-    // more than avoiding the allocation.
-    vkDeviceWaitIdle(m_device);
+    // Build the readback resources once and keep them. A video capture calls
+    // this every frame, and creating a buffer, an allocation and a command pool
+    // per call -- plus a full-device wait -- dominated the frame time by more
+    // than an order of magnitude over the render itself.
+    if (m_captureBufferBytes != imageBytes) {
+        destroyFrameCaptureResources();
 
-    VkBuffer readbackBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory readbackMemory = VK_NULL_HANDLE;
-    VkBufferCreateInfo bufferCreateInfo{};
-    bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bufferCreateInfo.size = imageBytes;
-    bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(m_device, &bufferCreateInfo, nullptr, &readbackBuffer) != VK_SUCCESS) {
-        VOX_LOGE("render") << "frame capture: readback buffer creation failed";
-        return false;
-    }
-
-    VkMemoryRequirements memoryRequirements{};
-    vkGetBufferMemoryRequirements(m_device, readbackBuffer, &memoryRequirements);
-    VkPhysicalDeviceMemoryProperties memoryProperties{};
-    vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
-    uint32_t memoryTypeIndex = UINT32_MAX;
-    const VkMemoryPropertyFlags wanted =
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
-        if ((memoryRequirements.memoryTypeBits & (1u << i)) != 0u &&
-            (memoryProperties.memoryTypes[i].propertyFlags & wanted) == wanted) {
-            memoryTypeIndex = i;
-            break;
+        VkBufferCreateInfo bufferCreateInfo{};
+        bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferCreateInfo.size = imageBytes;
+        bufferCreateInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(m_device, &bufferCreateInfo, nullptr, &m_captureBuffer) != VK_SUCCESS) {
+            VOX_LOGE("render") << "frame capture: readback buffer creation failed";
+            return false;
         }
-    }
-    if (memoryTypeIndex == UINT32_MAX) {
-        VOX_LOGE("render") << "frame capture: no host-visible memory type";
-        vkDestroyBuffer(m_device, readbackBuffer, nullptr);
-        return false;
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetBufferMemoryRequirements(m_device, m_captureBuffer, &memoryRequirements);
+        VkPhysicalDeviceMemoryProperties memoryProperties{};
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
+        uint32_t memoryTypeIndex = UINT32_MAX;
+        const VkMemoryPropertyFlags required =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        // HOST_CACHED first. Plain HOST_VISIBLE|HOST_COHERENT is typically
+        // write-combined, which is fine to write and dreadful to READ -- and a
+        // readback does nothing but read. Measured on the LNL iGPU at
+        // 2560x1440, the swizzle loop below pulling bytes straight out of an
+        // uncached mapping cost ~1.1 s per frame, roughly 40x the render it was
+        // capturing. Uncached memory does not show up as GPU time or as I/O; it
+        // shows up as userspace CPU time, which is what made it look like the
+        // encoder's fault.
+        for (uint32_t pass = 0; pass < 2u && memoryTypeIndex == UINT32_MAX; ++pass) {
+            const VkMemoryPropertyFlags wanted =
+                (pass == 0u) ? (required | VK_MEMORY_PROPERTY_HOST_CACHED_BIT) : required;
+            for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+                if ((memoryRequirements.memoryTypeBits & (1u << i)) != 0u &&
+                    (memoryProperties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+                    memoryTypeIndex = i;
+                    break;
+                }
+            }
+        }
+        if (memoryTypeIndex == UINT32_MAX) {
+            VOX_LOGE("render") << "frame capture: no host-visible memory type";
+            destroyFrameCaptureResources();
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &m_captureMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(m_device, m_captureBuffer, m_captureMemory, 0) != VK_SUCCESS) {
+            VOX_LOGE("render") << "frame capture: readback memory allocation failed";
+            destroyFrameCaptureResources();
+            return false;
+        }
+
+        VkCommandPoolCreateInfo poolCreateInfo{};
+        poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+        bool built =
+            vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &m_captureCommandPool) ==
+            VK_SUCCESS;
+        if (built) {
+            VkCommandBufferAllocateInfo commandAllocateInfo{};
+            commandAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            commandAllocateInfo.commandPool = m_captureCommandPool;
+            commandAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            commandAllocateInfo.commandBufferCount = 1;
+            built = vkAllocateCommandBuffers(m_device, &commandAllocateInfo,
+                                             &m_captureCommandBuffer) == VK_SUCCESS;
+        }
+        if (!built) {
+            VOX_LOGE("render") << "frame capture: command buffer setup failed";
+            destroyFrameCaptureResources();
+            return false;
+        }
+        m_captureBufferBytes = imageBytes;
     }
 
-    VkMemoryAllocateInfo allocateInfo{};
-    allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocateInfo.allocationSize = memoryRequirements.size;
-    allocateInfo.memoryTypeIndex = memoryTypeIndex;
-    if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &readbackMemory) != VK_SUCCESS ||
-        vkBindBufferMemory(m_device, readbackBuffer, readbackMemory, 0) != VK_SUCCESS) {
-        VOX_LOGE("render") << "frame capture: readback memory allocation failed";
-        if (readbackMemory != VK_NULL_HANDLE) {
-            vkFreeMemory(m_device, readbackMemory, nullptr);
-        }
-        vkDestroyBuffer(m_device, readbackBuffer, nullptr);
-        return false;
-    }
+    VkBuffer readbackBuffer = m_captureBuffer;
+    VkDeviceMemory readbackMemory = m_captureMemory;
+    VkCommandBuffer commandBuffer = m_captureCommandBuffer;
 
-    VkCommandPool commandPool = VK_NULL_HANDLE;
-    VkCommandPoolCreateInfo poolCreateInfo{};
-    poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    poolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
-    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-    bool ok = vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &commandPool) == VK_SUCCESS;
-    if (ok) {
-        VkCommandBufferAllocateInfo commandAllocateInfo{};
-        commandAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        commandAllocateInfo.commandPool = commandPool;
-        commandAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        commandAllocateInfo.commandBufferCount = 1;
-        ok = vkAllocateCommandBuffers(m_device, &commandAllocateInfo, &commandBuffer) == VK_SUCCESS;
-    }
-    if (ok) {
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        ok = vkBeginCommandBuffer(commandBuffer, &beginInfo) == VK_SUCCESS;
-    }
-    if (!ok) {
-        VOX_LOGE("render") << "frame capture: command buffer setup failed";
-        if (commandPool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(m_device, commandPool, nullptr);
-        }
-        vkFreeMemory(m_device, readbackMemory, nullptr);
-        vkDestroyBuffer(m_device, readbackBuffer, nullptr);
+    // The frame being read is the one already presented, so waiting on the
+    // graphics queue after the copy below is enough -- the old full-device wait
+    // here was belt-and-braces and cost more than everything else combined.
+    vkResetCommandBuffer(commandBuffer, 0);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "frame capture: vkBeginCommandBuffer failed";
         return false;
     }
 
@@ -228,40 +293,39 @@ bool RendererBackend::captureLastFrameToFile(const std::string& outputPath) {
         submitted = vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS;
     }
 
-    bool wrote = false;
+    bool read = false;
     if (submitted) {
         void* mapped = nullptr;
         if (vkMapMemory(m_device, readbackMemory, 0, imageBytes, 0, &mapped) == VK_SUCCESS &&
             mapped != nullptr) {
-            const auto* pixels = static_cast<const std::uint8_t*>(mapped);
-            std::vector<std::uint8_t> rgb(static_cast<std::size_t>(width) * height * 3u);
-            for (std::size_t i = 0; i < static_cast<std::size_t>(width) * height; ++i) {
-                rgb[(i * 3u) + 0] = pixels[(i * 4u) + static_cast<std::size_t>(redByte)];
-                rgb[(i * 3u) + 1] = pixels[(i * 4u) + static_cast<std::size_t>(greenByte)];
-                rgb[(i * 3u) + 2] = pixels[(i * 4u) + static_cast<std::size_t>(blueByte)];
-            }
+            // ONE bulk read out of the mapping, then swizzle from the copy.
+            // Even on a HOST_CACHED heap this is worth it, and where the driver
+            // only offers write-combined memory it is the difference between a
+            // capture that keeps up and one that costs a second a frame:
+            // memcpy issues wide sequential loads that a write-combining
+            // mapping handles well, while the three strided byte reads per
+            // pixel below do not.
+            m_captureStaging.resize(static_cast<std::size_t>(imageBytes));
+            std::memcpy(m_captureStaging.data(), mapped, static_cast<std::size_t>(imageBytes));
             vkUnmapMemory(m_device, readbackMemory);
 
-            std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
-            if (output) {
-                output << "P6\n" << width << " " << height << "\n255\n";
-                output.write(reinterpret_cast<const char*>(rgb.data()),
-                             static_cast<std::streamsize>(rgb.size()));
-                wrote = output.good();
+            const std::uint8_t* pixels = m_captureStaging.data();
+            const std::size_t pixelCount = static_cast<std::size_t>(width) * height;
+            outRgb.resize(pixelCount * 3u);
+            for (std::size_t i = 0; i < pixelCount; ++i) {
+                outRgb[(i * 3u) + 0] = pixels[(i * 4u) + static_cast<std::size_t>(redByte)];
+                outRgb[(i * 3u) + 1] = pixels[(i * 4u) + static_cast<std::size_t>(greenByte)];
+                outRgb[(i * 3u) + 2] = pixels[(i * 4u) + static_cast<std::size_t>(blueByte)];
             }
+            outWidth = width;
+            outHeight = height;
+            read = true;
         }
     }
-
-    vkDestroyCommandPool(m_device, commandPool, nullptr);
-    vkFreeMemory(m_device, readbackMemory, nullptr);
-    vkDestroyBuffer(m_device, readbackBuffer, nullptr);
-
-    if (wrote) {
-        VOX_LOGI("render") << "frame capture written: " << outputPath << " (" << width << "x" << height << ")";
-    } else {
-        VOX_LOGE("render") << "frame capture failed to write " << outputPath;
+    if (!read) {
+        VOX_LOGE("render") << "frame capture: readback failed";
     }
-    return wrote;
+    return read;
 }
 
 }  // namespace odai::render

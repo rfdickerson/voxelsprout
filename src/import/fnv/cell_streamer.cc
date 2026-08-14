@@ -760,6 +760,14 @@ void CellStreamer::falloutToEngine(const float falloutPosition[3], float outEngi
     outEngine[2] = -falloutPosition[1];
 }
 
+bool CellStreamer::isStreamingIdle() const {
+    if (!m_pending) {
+        return true;
+    }
+    std::lock_guard<std::mutex> lock(m_pending->mutex);
+    return m_pending->inFlight == 0u && m_pending->completed.empty();
+}
+
 bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
     if (m_availableCells.empty()) {
         return false;

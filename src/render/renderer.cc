@@ -156,6 +156,12 @@ bool Renderer::captureFrameToFile(const std::string& outputPath) {
     return m_backend->captureLastFrameToFile(outputPath);
 }
 
+bool Renderer::captureFrameRgb(std::vector<std::uint8_t>& outRgb,
+                               std::uint32_t& outWidth,
+                               std::uint32_t& outHeight) {
+    return m_backend->captureLastFrameRgb(outRgb, outWidth, outHeight);
+}
+
 void Renderer::setNeutralColorGrading() {
     m_backend->setNeutralColorGrading();
 }

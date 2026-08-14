@@ -4347,6 +4347,20 @@ void NewVegasApp::updateDebugStats() {
     m_renderer.setDebugStatGroups(std::move(groups));
 }
 
+bool NewVegasApp::captureWarmupComplete() const {
+    if (m_framesRendered <= m_captureWarmupFrames) {
+        return false;
+    }
+    if (m_framesRendered >= m_captureWarmupFrameCeiling) {
+        return true;
+    }
+    // Streaming is wall-clock work on other threads, so a frame count cannot
+    // stand in for it. This mattered the moment frame capture got 28x faster:
+    // the same 60 warm-up frames went from over a minute of wall time to about
+    // a second, and the opening of every capture became a half-built town.
+    return m_streamer == nullptr || m_streamer->isStreamingIdle();
+}
+
 void NewVegasApp::onRender(float /*deltaSeconds*/) {
     // Before beginFrameDraw: the backend consumes the pending pose while
     // recording this frame, so setting it afterwards would always be a frame
@@ -4381,12 +4395,52 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
         }
     }
 
-    // Frame-sequence recording. One PPM per frame, numbered, for ffmpeg to
-    // stitch afterwards -- there is no video encoder in this tree and a
-    // recording is not worth linking one in for.
+    // Frame-sequence recording, straight into an encoder. Same cadence and same
+    // warm-up as the stills path below, but the frames never land on disk.
+    if (!m_captureVideoPath.empty() && m_captureWritten < m_captureFrames) {
+        ++m_framesRendered;
+        if (captureWarmupComplete()) {
+            std::uint32_t width = 0;
+            std::uint32_t height = 0;
+            bool ok = m_renderer.captureFrameRgb(m_captureRgb, width, height);
+            if (ok && !m_captureVideo.isOpen()) {
+                // Opened on the FIRST captured frame rather than up front,
+                // because the swapchain extent is what it is: ODAI_WINDOW_SIZE
+                // is a request the window manager is free to ignore, and ffmpeg
+                // needs the real number baked into its input description.
+                ok = m_captureVideo.open(m_captureVideoPath, width, height,
+                                         static_cast<int>(m_captureVideoFps + 0.5f));
+            }
+            if (ok) {
+                ok = m_captureVideo.writeFrame(m_captureRgb);
+            }
+            if (!ok) {
+                VOX_LOGE("newvegas") << "video capture failed at frame " << m_captureWritten;
+                m_captureVideo.close();
+                glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+                return;
+            }
+            ++m_captureWritten;
+            if ((m_captureWritten % 120) == 0) {
+                VOX_LOGI("newvegas")
+                    << "captured " << m_captureWritten << "/" << m_captureFrames << " frames";
+            }
+            if (m_captureWritten >= m_captureFrames) {
+                // Closed HERE, not in the destructor: pclose is where a failed
+                // encode reports itself, and an hour of rendering should not
+                // discover that during teardown.
+                m_captureVideo.close();
+                glfwSetWindowShouldClose(m_window, GLFW_TRUE);
+            }
+        }
+    }
+
+    // The older stills path. One PPM per frame, numbered, for ffmpeg to stitch
+    // afterwards. Kept because a still sequence is what a frame-by-frame
+    // comparison wants -- but for a recording, prefer --capture-video above.
     if (!m_captureDirectory.empty() && m_captureWritten < m_captureFrames) {
         ++m_framesRendered;
-        if (m_framesRendered > m_captureWarmupFrames) {
+        if (captureWarmupComplete()) {
             char leaf[32] = {};
             std::snprintf(leaf, sizeof(leaf), "/frame_%05d.ppm", m_captureWritten);
             if (!m_renderer.captureFrameToFile(m_captureDirectory + leaf)) {

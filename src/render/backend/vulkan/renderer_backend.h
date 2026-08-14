@@ -382,11 +382,17 @@ public:
     // to spend on an integrated GPU at a large window size -- 1x is a straight
     // ~2x cut to main-pass cost.
     void setRequestedMsaaSamples(uint32_t samples) { m_requestedMsaaSamples = samples; }
-    // Writes the last presented swapchain image to a binary PPM. Diagnostic
-    // only, and one-shot: everything it allocates is torn down before it
-    // returns. See frame_capture.cc for why this exists rather than relying on
-    // an external screenshot tool.
+    // Writes the last presented swapchain image to a binary PPM. See
+    // frame_capture.cc for why this exists rather than relying on an external
+    // screenshot tool.
     bool captureLastFrameToFile(const std::string& outputPath);
+    // The same readback, handed back as tightly packed RGB instead of written
+    // to a file -- what a video capture wants, so a sequence never touches the
+    // disk as stills. `outRgb` is resized to width*height*3.
+    bool captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
+                             std::uint32_t& outWidth,
+                             std::uint32_t& outHeight);
+    void destroyFrameCaptureResources();
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -1550,6 +1556,22 @@ private:
     // Swapchain index of the most recent successful present, so a capture knows
     // which image actually holds the frame the user is looking at.
     uint32_t m_lastPresentedImageIndex = UINT32_MAX;
+
+    // Frame-capture readback, kept alive between captures. This used to be
+    // one-shot -- a buffer, an allocation, a command pool and a
+    // vkDeviceWaitIdle per call -- which is fine for the single screenshot it
+    // was written for and ruinous for a video: a 360-frame capture spent about
+    // 1.3 s per frame in setup and teardown while the frame itself rendered in
+    // tens of milliseconds. Reused across captures and torn down at shutdown.
+    // Rebuilt whenever the swapchain extent changes.
+    VkBuffer m_captureBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_captureMemory = VK_NULL_HANDLE;
+    VkCommandPool m_captureCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer m_captureCommandBuffer = VK_NULL_HANDLE;
+    VkDeviceSize m_captureBufferBytes = 0;
+    // Cached-side copy of the mapping, so the channel swizzle reads normal
+    // memory rather than the device mapping. Held so it is allocated once.
+    std::vector<std::uint8_t> m_captureStaging;
     VkExtent2D m_swapchainExtent{};
     // Internal 3D rendering resolution. Every scene-resolution target (depth,
     // MSAA color, HDR resolve, TAA history, water refraction, and the half-res

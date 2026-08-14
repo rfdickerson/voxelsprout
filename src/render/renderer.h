@@ -169,6 +169,13 @@ public:
     // presented yet. See frame_capture.cc for why this lives in the engine
     // instead of relying on an external screenshot tool.
     bool captureFrameToFile(const std::string& outputPath);
+    // The same readback as tightly packed RGB, for streaming a sequence into an
+    // encoder rather than to disk (see render/video_writer.h). Unlike the file
+    // form, this is meant to be called every frame: the readback resources are
+    // built once and reused.
+    bool captureFrameRgb(std::vector<std::uint8_t>& outRgb,
+                         std::uint32_t& outWidth,
+                         std::uint32_t& outHeight);
     void setGameplayUiState(const GameplayUiState& state);
     // Hand the renderer the UI geometry to draw over the scene this frame.
     void setUiDrawData(const odai::ui::UiDrawData& drawData);

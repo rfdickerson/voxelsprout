@@ -1,6 +1,7 @@
 #pragma once
 
 #include "games/newvegas/newvegas_actors.h"
+#include "render/video_writer.h"
 #include "games/newvegas/newvegas_victor.h"
 
 // Free-roam viewer for cooked Fallout: New Vegas content.
@@ -102,6 +103,17 @@ public:
         m_captureDirectory = std::move(directory);
         m_captureFrames = frames;
         m_captureFixedDt = (fps > 0.0f) ? (1.0f / fps) : (1.0f / 30.0f);
+    }
+
+    // The same capture, encoded on the fly instead of written out as stills.
+    // Prefer this: at the sizes the swapchain actually opens a PPM is ~7.7 MB,
+    // and three locations at 60 fps is over 30 GB of files that exist only to
+    // be read once and deleted.
+    void setCaptureVideo(std::string outputPath, int frames, float fps) {
+        m_captureVideoPath = std::move(outputPath);
+        m_captureFrames = frames;
+        m_captureVideoFps = (fps > 0.0f) ? fps : 30.0f;
+        m_captureFixedDt = 1.0f / m_captureVideoFps;
     }
 
     // Stream directly from the game's own data directory (the one holding
@@ -330,6 +342,10 @@ private:
     float m_tourPitchVelocity = 0.0f;
     bool m_tourAnglesValid = false;
     std::string m_captureDirectory;
+    std::string m_captureVideoPath;
+    render::VideoWriter m_captureVideo;
+    std::vector<std::uint8_t> m_captureRgb;
+    float m_captureVideoFps = 30.0f;
     int m_captureFrames = 0;
     int m_captureWritten = 0;
     float m_captureFixedDt = 0.0f;
@@ -337,6 +353,15 @@ private:
     // TAA all need a few: recording from frame 0 opens on a half-loaded town
     // under a mid-adaptation exposure.
     int m_captureWarmupFrames = 60;
+    // Ceiling on waiting for streaming to settle. A worldspace whose residency
+    // set never stops churning must not stall the capture forever -- record a
+    // slightly unfinished frame rather than nothing at all.
+    int m_captureWarmupFrameCeiling = 900;
+    // Frames rendered but not kept: at least m_captureWarmupFrames AND, while
+    // streaming, until the streamer goes idle. Both, because auto-exposure and
+    // TAA need frames while cell loading needs wall time, and neither is a
+    // proxy for the other.
+    bool captureWarmupComplete() const;
 
     // Terrain height lattice: row-major, m_groundCols * m_groundRows samples at
     // kGroundGridSpacing, with m_groundOriginX/Z the world position of sample 0.

@@ -138,15 +138,36 @@ int main(int argc, char** argv) {
                 fps = 30.0f;
             }
             app.setCaptureSequence(directory, static_cast<int>(fps * seconds), fps);
+        } else if (std::strcmp(argv[i], "--capture-video") == 0 && i + 1 < argc) {
+            // <out.mp4> [fps] [seconds]. Frames are piped to ffmpeg as they are
+            // rendered; nothing lands on disk but the finished file.
+            const std::string outputPath = argv[++i];
+            float fps = 60.0f;
+            float seconds = 40.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                fps = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                seconds = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (fps < 1.0f) {
+                fps = 60.0f;
+            }
+            app.setCaptureVideo(outputPath, static_cast<int>(fps * seconds), fps);
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::cout << "odai_game_newvegas [--scene <path.bin>]\n"
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
                       << "odai_game_newvegas --screenshot <out.ppm> [frames]\n"
                       << "  Render `frames` frames (default 8), write a PPM, and quit.\n"
                       << "  Cook a scene first with odai_newvegas_cooker.\n"
+                      << "odai_game_newvegas --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
+                      << "  Fly the tour and encode it directly, then quit. Needs ffmpeg on PATH;\n"
+                      << "  $ODAI_CAPTURE_ENCODER overrides the auto-detected H.264 encoder.\n"
                       << "odai_game_newvegas --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
-                      << "  Fly the Goodsprings tour and write numbered PPMs, then quit.\n"
-                      << "  Stitch them with: ffmpeg -framerate <fps> -i <dir>/frame_%05d.ppm out.mp4\n"
+                      << "  The same, as numbered PPMs. Prefer --capture-video: a still sequence\n"
+                      << "  at this resolution is gigabytes.\n"
+                      << "odai_game_newvegas --tour-file <path>\n"
+                      << "  Replace the built-in Goodsprings path with rows of `px py pz  lx ly lz`.\n"
                       << "odai_game_newvegas --character [<skeleton.nif> <part.nif>...]\n"
                       << "  Stand one GPU-skinned character in bind pose, no world.\n"
                       << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n"

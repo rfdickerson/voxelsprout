@@ -833,3 +833,35 @@ Nine subagents, each carrying a distinct lens grounded in this codebase rather t
 | OpenMW source (Windows) | `C:\Users\rfdic\OneDrive\Documents\GitHub\openmw` |
 | Build dir (Windows) | `cmake-build-release` |
 | Build dir (Linux) | `cmake-build-linux` |
+
+### Capturing a recording
+
+`--capture-video <out.mp4> [fps] [seconds]` encodes as it renders, piping raw rgb24 into an
+ffmpeg child process. Prefer it over `--capture-seq`: the swapchain follows the window and
+routinely opens at 4K here, where one PPM is 24 MB — three 60 fps legs as stills is over
+100 GB and the earlier 30 fps attempt exhausted the disk quota mid-run, which then took the
+shell down with it. `$ODAI_CAPTURE_ENCODER` overrides the auto-detected H.264 encoder;
+detection exists because a distribution ffmpeg without libx264 is common (Fedora's is one)
+and finding out when the child dies wastes the whole render.
+
+**READING A HOST_COHERENT MAPPING BYTE BY BYTE COST 40x THE FRAME IT WAS CAPTURING.** The
+readback picked plain `HOST_VISIBLE | HOST_COHERENT` memory, which is typically
+write-combined — fine to write, dreadful to read — and the BGRA→RGB swizzle then pulled three
+strided bytes per pixel straight out of it. Measured at 2560x1440: **1.13 s per frame**, against
+a scene that renders in tens of milliseconds. It is invisible to every instrument you would
+reach for: not GPU time, not I/O, just userspace CPU, which is why it read as the encoder's
+fault. The stills path measured *identically* (1.13 s/frame), which is what finally located it.
+Two fixes together took it to **2.4 s for 60 frames, a 28x speedup**: prefer `HOST_CACHED`
+memory when the driver offers it, and `memcpy` the mapping into a staging vector once before
+swizzling from the copy. The readback buffer, command pool and command buffer are also built
+once and reused now rather than per frame.
+
+**A frame-count warm-up is not a streaming warm-up.** `m_captureWarmupFrames` (60) is there for
+auto-exposure and TAA, and it silently doubled as "wait for cells to arrive" — which held only
+because capture was slow. The moment it got 28x faster those same 60 frames went from over a
+minute of wall time to about a second, and captures began opening on half-built towns.
+`captureWarmupComplete()` now requires the frame count **and** `CellStreamer::isStreamingIdle()`,
+with a hard ceiling so a worldspace that never settles cannot stall a capture forever.
+
+`assets/tours/` holds the authored paths for the three-game showcase (Megaton, Anvil);
+Goodsprings uses the built-in tour. See `--tour-file` above.
