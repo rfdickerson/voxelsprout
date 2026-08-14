@@ -840,9 +840,11 @@ Nine subagents, each carrying a distinct lens grounded in this codebase rather t
 ffmpeg child process. Prefer it over `--capture-seq`: the swapchain follows the window and
 routinely opens at 4K here, where one PPM is 24 MB — three 60 fps legs as stills is over
 100 GB and the earlier 30 fps attempt exhausted the disk quota mid-run, which then took the
-shell down with it. `$ODAI_CAPTURE_ENCODER` overrides the auto-detected H.264 encoder;
-detection exists because a distribution ffmpeg without libx264 is common (Fedora's is one)
-and finding out when the child dies wastes the whole render.
+shell down with it. The encoder is **openh264**, which ships with every ffmpeg build here and needs no
+licensing dance -- libx264 is absent from a lot of distribution ffmpegs (Fedora's included).
+It is bitrate-controlled and silently ignores `-crf`, so pass `-b:v`; a CRF here is not an
+error, it is a soft-looking capture with nothing to point at. `$ODAI_CAPTURE_ENCODER`
+overrides.
 
 **READING A HOST_COHERENT MAPPING BYTE BY BYTE COST 40x THE FRAME IT WAS CAPTURING.** The
 readback picked plain `HOST_VISIBLE | HOST_COHERENT` memory, which is typically

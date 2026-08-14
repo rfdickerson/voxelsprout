@@ -52,11 +52,9 @@ private:
     std::uint64_t m_framesWritten = 0;
 };
 
-// The H.264 encoder to ask ffmpeg for, resolved once against what this ffmpeg
-// build actually has. libx264 is the usual answer and is what most builds ship,
-// but a distribution ffmpeg without it is common enough to matter -- Fedora's
-// is one -- and discovering that only when the child process dies wastes the
-// whole render. $ODAI_CAPTURE_ENCODER overrides.
+// The H.264 encoder to ask ffmpeg for: openh264, which ships with every ffmpeg
+// build here and needs no licensing dance, unlike libx264 -- which a
+// distribution ffmpeg often omits entirely. $ODAI_CAPTURE_ENCODER overrides.
 const std::string& preferredVideoEncoder();
 
 }  // namespace odai::render
