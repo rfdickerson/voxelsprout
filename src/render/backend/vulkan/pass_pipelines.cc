@@ -428,6 +428,8 @@ bool RendererBackend::createPipePipeline() {
     constexpr const char* kImportedStaticVertexShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
     constexpr const char* kImportedStaticFragmentShaderPath = "../src/render/shaders/imported_static.frag.slang.spv";
     constexpr const char* kImportedStaticRtFragmentShaderPath = "../src/render/shaders/imported_static_rt.frag.slang.spv";
+    constexpr const char* kImportedStaticDepthOnlyFragmentShaderPath =
+        "../src/render/shaders/imported_static_depthonly.frag.slang.spv";
     constexpr const char* kImportedWaterVertexShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
     constexpr const char* kImportedWaterFragmentShaderPath = "../src/render/shaders/imported_water.frag.slang.spv";
     constexpr const char* kImportedWaterRtFragmentShaderPath = "../src/render/shaders/imported_water_rt.frag.slang.spv";
@@ -619,6 +621,19 @@ bool RendererBackend::createPipePipeline() {
         return false;
     }
 
+    // Loaded separately and treated as optional: if the shader is missing (no
+    // slangc on PATH when the tree was built) the prewrite pipelines stay null
+    // and the main pass simply runs as it did before, rejecting only against its
+    // own depth writes. Slower, still correct.
+    std::array<VkShaderModule, 1> importedDepthOnlyShaderModules = {VK_NULL_HANDLE};
+    const std::array<ShaderModuleLoadSpec, 1> importedDepthOnlyLoadSpecs = {{
+        {kImportedStaticDepthOnlyFragmentShaderPath, "imported_static_depthonly.frag"},
+    }};
+    const bool hasImportedDepthOnlyVariant =
+        std::filesystem::exists(kImportedStaticDepthOnlyFragmentShaderPath) &&
+        createShaderModulesFromFiles(
+            m_device, importedDepthOnlyLoadSpecs, importedDepthOnlyShaderModules);
+
     VkPipelineShaderStageCreateInfo importedVertexShaderStage{};
     importedVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     importedVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -647,22 +662,35 @@ bool RendererBackend::createPipePipeline() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    // Locations 6-10: terrain layer blend (Fallout ATXT/VTXT). Four bindless
-    // slots plus one packed weight word; inert unless the vertex carries
-    // kImportedSceneMaterialFlagTerrainLayers.
-    VkVertexInputAttributeDescription importedAttributes[11]{};
+    // Eight attributes over 48 bytes. Three are unpacked by the vertex FETCH
+    // rather than in the shader: R16G16_SNORM, R8G8B8A8_UNORM and
+    // R16G16B16A16_UINT are all in Vulkan's mandatory vertex-buffer format set,
+    // so the narrowing costs no shader instructions and needs no capability
+    // check.
+    //
+    // Location 6 is the entire terrain-layer slot quad in ONE fetch -- four u16
+    // bindless slots that used to be four separate R32_UINT attributes. That
+    // relies on the two packed words being adjacent, which the static_assert
+    // below pins.
+    static_assert(
+        offsetof(ImportedMeshVertex, packedLayerTexture23) ==
+            offsetof(ImportedMeshVertex, packedLayerTexture01) + sizeof(std::uint32_t),
+        "location 6 reads both layer words as one R16G16B16A16_UINT fetch");
+    VkVertexInputAttributeDescription importedAttributes[8]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     importedAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
     importedAttributes[1].location = 1;
     importedAttributes[1].binding = 0;
-    importedAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedAttributes[1].format = VK_FORMAT_R16G16_SNORM;
+    importedAttributes[1].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedNormal));
     importedAttributes[2].location = 2;
     importedAttributes[2].binding = 0;
-    importedAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedAttributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+    importedAttributes[2].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedColor));
     importedAttributes[3].location = 3;
     importedAttributes[3].binding = 0;
     importedAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
@@ -675,23 +703,21 @@ bool RendererBackend::createPipePipeline() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
-    for (uint32_t layer = 0; layer < 4; ++layer) {
-        importedAttributes[6 + layer].location = 6 + layer;
-        importedAttributes[6 + layer].binding = 0;
-        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
-        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
-            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
-    }
-    importedAttributes[10].location = 10;
-    importedAttributes[10].binding = 0;
-    importedAttributes[10].format = VK_FORMAT_R32_UINT;
-    importedAttributes[10].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
+    importedAttributes[6].location = 6;
+    importedAttributes[6].binding = 0;
+    importedAttributes[6].format = VK_FORMAT_R16G16B16A16_UINT;
+    importedAttributes[6].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedLayerTexture01));
+    importedAttributes[7].location = 7;
+    importedAttributes[7].binding = 0;
+    importedAttributes[7].format = VK_FORMAT_R32_UINT;
+    importedAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 11;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     VkGraphicsPipelineCreateInfo importedPipelineCreateInfo = pipelineCreateInfo;
@@ -708,6 +734,86 @@ bool RendererBackend::createPipePipeline() {
         ? VK_CULL_MODE_NONE
         : VK_CULL_MODE_BACK_BIT;
     importedPipelineCreateInfo.pRasterizationState = &importedRasterizer;
+
+    // ODAI_MAIN_DEPTH_WRITE=0 drops depth writes from the opaque imported pass.
+    //
+    // Diagnostic for one specific question: is main paying for overdraw? The
+    // fragment shader discards (alpha test), and a discarding shader that ALSO
+    // writes depth cannot have its depth write hoisted before the shader runs,
+    // which on some drivers takes the early-Z test down with it. With the
+    // normal-depth prepass having already laid exact depth, main does not need
+    // to write it -- GREATER_OR_EQUAL against the prepass result still passes
+    // the frontmost surface and rejects everything behind it.
+    //
+    // Only meaningful with AO on, because that is what makes the prepass run.
+    VkPipelineDepthStencilStateCreateInfo importedDepthStencil = depthStencil;
+    static const bool s_mainDepthWrite = []() {
+        const char* env = std::getenv("ODAI_MAIN_DEPTH_WRITE");
+        return env == nullptr || (env[0] != '0');
+    }();
+    // Under the merged depth prepass main must NOT write depth. That is not a
+    // micro-optimization: a fragment shader that discards (this one alpha-tests)
+    // and also writes depth cannot have its depth write hoisted ahead of the
+    // shader, which on several drivers disables early-Z for the whole draw --
+    // the exact rejection the prepass exists to provide. Testing GREATER_OR_EQUAL
+    // against depth the prepass already laid gives the same visible result.
+    importedDepthStencil.depthWriteEnable =
+        (useMergedDepthPrepass() || !s_mainDepthWrite) ? VK_FALSE : VK_TRUE;
+    importedPipelineCreateInfo.pDepthStencilState = &importedDepthStencil;
+
+    // Depth-only prewrite pipelines. Same create info as the shading pipeline --
+    // crucially the same vertex shader and vertex input, so the depth written
+    // here is bit-identical to the depth the shading pass computes -- with the
+    // fragment shader swapped for the alpha-test-only one and colour writes
+    // masked off entirely.
+    if (hasImportedDepthOnlyVariant) {
+        VkPipelineShaderStageCreateInfo depthOnlyFragmentStage = importedFragmentShaderStage;
+        depthOnlyFragmentStage.module = importedDepthOnlyShaderModules[0];
+        const std::array<VkPipelineShaderStageCreateInfo, 2> depthOnlyStages = {
+            importedVertexShaderStage,
+            depthOnlyFragmentStage
+        };
+        VkPipelineColorBlendAttachmentState depthOnlyBlendAttachment{};
+        depthOnlyBlendAttachment.colorWriteMask = 0;
+        VkPipelineColorBlendStateCreateInfo depthOnlyColorBlending{};
+        depthOnlyColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        depthOnlyColorBlending.attachmentCount = 1;
+        depthOnlyColorBlending.pAttachments = &depthOnlyBlendAttachment;
+        // Depth writes are the whole point here, regardless of what the
+        // ODAI_MAIN_DEPTH_WRITE diagnostic did to the shading pipeline.
+        VkPipelineDepthStencilStateCreateInfo depthOnlyDepthStencil = depthStencil;
+        depthOnlyDepthStencil.depthTestEnable = VK_TRUE;
+        depthOnlyDepthStencil.depthWriteEnable = VK_TRUE;
+
+        VkGraphicsPipelineCreateInfo depthOnlyCreateInfo = importedPipelineCreateInfo;
+        depthOnlyCreateInfo.stageCount = static_cast<uint32_t>(depthOnlyStages.size());
+        depthOnlyCreateInfo.pStages = depthOnlyStages.data();
+        depthOnlyCreateInfo.pColorBlendState = &depthOnlyColorBlending;
+        depthOnlyCreateInfo.pDepthStencilState = &depthOnlyDepthStencil;
+
+        VkPipeline depthPrewritePipeline = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(
+                m_device, m_pipelineCache, 1, &depthOnlyCreateInfo, nullptr,
+                &depthPrewritePipeline) == VK_SUCCESS) {
+            m_importedStaticDepthPrewritePipeline = depthPrewritePipeline;
+        } else {
+            VOX_LOGW("render") << "imported depth prewrite pipeline creation failed; "
+                                  "main pass will rely on its own depth writes";
+        }
+
+        VkPipelineRasterizationStateCreateInfo depthOnlyTwoSidedRasterizer = importedRasterizer;
+        depthOnlyTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+        VkGraphicsPipelineCreateInfo depthOnlyTwoSidedCreateInfo = depthOnlyCreateInfo;
+        depthOnlyTwoSidedCreateInfo.pRasterizationState = &depthOnlyTwoSidedRasterizer;
+        VkPipeline depthPrewritePipelineTwoSided = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(
+                m_device, m_pipelineCache, 1, &depthOnlyTwoSidedCreateInfo, nullptr,
+                &depthPrewritePipelineTwoSided) == VK_SUCCESS) {
+            m_importedStaticDepthPrewritePipelineTwoSided = depthPrewritePipelineTwoSided;
+        }
+        vkDestroyShaderModule(m_device, importedDepthOnlyShaderModules[0], nullptr);
+        VOX_LOGI("render") << "imported depth prewrite pipelines ready";
+    }
 
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     const VkResult importedPipelineResult = vkCreateGraphicsPipelines(
@@ -1451,22 +1557,35 @@ bool RendererBackend::createAoPipelines() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    // Locations 6-10: terrain layer blend (Fallout ATXT/VTXT). Four bindless
-    // slots plus one packed weight word; inert unless the vertex carries
-    // kImportedSceneMaterialFlagTerrainLayers.
-    VkVertexInputAttributeDescription importedAttributes[11]{};
+    // Eight attributes over 48 bytes. Three are unpacked by the vertex FETCH
+    // rather than in the shader: R16G16_SNORM, R8G8B8A8_UNORM and
+    // R16G16B16A16_UINT are all in Vulkan's mandatory vertex-buffer format set,
+    // so the narrowing costs no shader instructions and needs no capability
+    // check.
+    //
+    // Location 6 is the entire terrain-layer slot quad in ONE fetch -- four u16
+    // bindless slots that used to be four separate R32_UINT attributes. That
+    // relies on the two packed words being adjacent, which the static_assert
+    // below pins.
+    static_assert(
+        offsetof(ImportedMeshVertex, packedLayerTexture23) ==
+            offsetof(ImportedMeshVertex, packedLayerTexture01) + sizeof(std::uint32_t),
+        "location 6 reads both layer words as one R16G16B16A16_UINT fetch");
+    VkVertexInputAttributeDescription importedAttributes[8]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     importedAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
     importedAttributes[1].location = 1;
     importedAttributes[1].binding = 0;
-    importedAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedAttributes[1].format = VK_FORMAT_R16G16_SNORM;
+    importedAttributes[1].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedNormal));
     importedAttributes[2].location = 2;
     importedAttributes[2].binding = 0;
-    importedAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedAttributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+    importedAttributes[2].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedColor));
     importedAttributes[3].location = 3;
     importedAttributes[3].binding = 0;
     importedAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
@@ -1479,23 +1598,21 @@ bool RendererBackend::createAoPipelines() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
-    for (uint32_t layer = 0; layer < 4; ++layer) {
-        importedAttributes[6 + layer].location = 6 + layer;
-        importedAttributes[6 + layer].binding = 0;
-        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
-        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
-            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
-    }
-    importedAttributes[10].location = 10;
-    importedAttributes[10].binding = 0;
-    importedAttributes[10].format = VK_FORMAT_R32_UINT;
-    importedAttributes[10].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
+    importedAttributes[6].location = 6;
+    importedAttributes[6].binding = 0;
+    importedAttributes[6].format = VK_FORMAT_R16G16B16A16_UINT;
+    importedAttributes[6].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedLayerTexture01));
+    importedAttributes[7].location = 7;
+    importedAttributes[7].binding = 0;
+    importedAttributes[7].format = VK_FORMAT_R32_UINT;
+    importedAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 11;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;

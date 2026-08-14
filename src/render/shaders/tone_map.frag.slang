@@ -13,6 +13,20 @@ Sampler2D<float4> normalDepthTexture;
 Sampler2D<float4> ssaoTexture;
 [[vk::binding(10, 0)]]
 Sampler2D<float4> sunShaftTexture;
+// SEPARATE FROM hdrSceneColor, and the reason is the bloom chain below.
+//
+// Bloom is gathered by sampling MIPS 0-5 of one texture. hdrSceneColor is the
+// scene input, and once a temporal upscaler exists that is a single-mip image at
+// output resolution -- every "mip" fetch then returns mip0, so bloom becomes six
+// copies of the full-resolution scene added on top of itself. Measured as a
+// uniform 1.27x brightening of the whole frame, which reads as a washed-out
+// image rather than as anything bloom-shaped.
+//
+// This binding always points at the mip-chained render-resolution HDR target,
+// whether or not an upscaler ran. When none did, both bindings are the same
+// image and the result is byte-identical to before.
+[[vk::binding(14, 0)]]
+Sampler2D<float4> bloomSourceColor;
 
 // DebugView in src/render/renderer_types.h; change both together. Only the two
 // this pass acts on are named here -- every other mode is handled in
@@ -298,12 +312,12 @@ float3 sampleMipChainBloom(float2 uv, float exposureScale)
 {
     const float bloomThreshold = max(camera.skyConfig3.x / max(exposureScale, 1e-4), 0.0);
     const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
-    const float3 bloomMip0 = extractBloom(hdrSceneColor.SampleLevel(uv, 0.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip1 = extractBloom(hdrSceneColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip2 = extractBloom(hdrSceneColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip3 = extractBloom(hdrSceneColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip4 = extractBloom(hdrSceneColor.SampleLevel(uv, 4.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip5 = extractBloom(hdrSceneColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip0 = extractBloom(bloomSourceColor.SampleLevel(uv, 0.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip1 = extractBloom(bloomSourceColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip2 = extractBloom(bloomSourceColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip3 = extractBloom(bloomSourceColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip4 = extractBloom(bloomSourceColor.SampleLevel(uv, 4.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip5 = extractBloom(bloomSourceColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
 
     float3 bloom =
         (bloomMip0 * 0.20) +

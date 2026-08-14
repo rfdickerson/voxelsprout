@@ -4,6 +4,7 @@
 #include "import/gpu_scene.h"
 #include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
+#include "render/upscale/upscaler_backend.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
 #include "render/bindless_slot_table.h"
@@ -184,7 +185,12 @@ public:
         [[nodiscard]] float activeAoBias() const {
             switch (aoMode) {
                 case AoMode::Hbao: return hbaoBias;
-                case AoMode::Gtao: return gtaoBias;
+                // XeGTAO marches the same ground-truth integral as GTAO, so it
+                // wants GTAO's bias. Falling through to ssaoBias -- which is
+                // what an unhandled enum did here -- silently tuned the new
+                // estimator with the old one's constant.
+                case AoMode::Gtao:
+                case AoMode::Xegtao: return gtaoBias;
                 case AoMode::Ssao:
                 case AoMode::Off:  break;
             }
@@ -464,8 +470,13 @@ public:
         std::span<const std::size_t> visibleChunkIndices,
         const odai::render::ImportedActorFrameData* importedActors = nullptr
     );
+    void setUpscalerSettings(const UpscalerSettings& settings);
+    [[nodiscard]] UpscalerStatus upscalerStatus() const;
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
+    void setDebugUiMode(DebugUiMode mode);
+    [[nodiscard]] DebugUiMode debugUiMode() const;
+    void setDebugStatGroups(std::vector<DebugStatGroup> groups);
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
     void setFramePacingSettings(const FramePacingSettings& settings);
@@ -596,7 +607,22 @@ private:
     // this a minimal diff.
     static constexpr uint32_t kGpuTimestampQuerySkinningStart = 36;
     static constexpr uint32_t kGpuTimestampQuerySkinningEnd = 37;
-    static constexpr uint32_t kGpuTimestampQueryCount = 38;
+    // The temporal chain. These were the whole reason the named passes did not
+    // sum to `frame`: ~2 ms of every frame ran in the gap between main's end
+    // timestamp and post's start one, and no query covered it. "The frame got
+    // slower somewhere" is not a debuggable statement.
+    //
+    // prewrite is bracketed separately from main because it is a full extra
+    // rasterization of the visible set inside main's own window, and whether it
+    // pays for itself is exactly the question the AO-off measurement could not
+    // answer.
+    static constexpr uint32_t kGpuTimestampQueryPrewriteStart = 38;
+    static constexpr uint32_t kGpuTimestampQueryPrewriteEnd = 39;
+    static constexpr uint32_t kGpuTimestampQueryVelocityStart = 40;
+    static constexpr uint32_t kGpuTimestampQueryVelocityEnd = 41;
+    static constexpr uint32_t kGpuTimestampQueryTaaStart = 42;
+    static constexpr uint32_t kGpuTimestampQueryTaaEnd = 43;
+    static constexpr uint32_t kGpuTimestampQueryCount = 44;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -704,7 +730,17 @@ private:
     // contents across at the same offsets, so every live chunk's firstVertex /
     // firstIndex stays valid. Returns false if allocation or the copy fails, in
     // which case the existing arenas are left untouched.
-    bool ensureImportedArenaCapacity(std::uint64_t vertexCount, std::uint64_t indexCount);
+    // Grows the imported geometry arenas -- both the GPU buffers and the
+    // suballocator bookkeeping, which must never move apart -- until they can
+    // hold `vertexCount` more vertices and `indexCount` more indices.
+    //
+    // `pastCapacity` selects what "hold" means. Normally the test is against
+    // used(): capacity is enough if the bytes exist anywhere. After an allocate()
+    // has already failed, capacity was enough and FRAGMENTATION was the problem,
+    // so the request has to be measured against capacity() instead -- that is the
+    // only way to guarantee a contiguous tail block big enough for it.
+    bool ensureImportedArenaCapacity(
+        std::uint64_t vertexCount, std::uint64_t indexCount, bool pastCapacity = false);
 
     // Copies `byteSize` bytes into `destination` at `destinationByteOffset` via
     // a staging buffer, submitted on the graphics queue. Used for both the
@@ -917,6 +953,19 @@ private:
     void scheduleImageRelease(
         VkImage image, VmaAllocation allocation, VkImageView imageView, uint64_t timelineValue);
     void destroyImageResourceNow(VkImage image, VmaAllocation allocation, VkImageView imageView);
+    // XeGTAO: depth pyramid prefilter + the GTAO integral. Separate from
+    // createSsaoComputeResources because it owns its own layouts, pipelines and
+    // descriptor sets, and because it must degrade to "XeGTAO unavailable"
+    // rather than taking the other three estimators down with it.
+    // Motion vectors for skinned actors. Graphics pipeline, so it lives beside
+    // the other graphics pipelines rather than with the compute AO passes.
+    bool createSkinnedVelocityResources();
+    void destroySkinnedVelocityResources();
+    bool createXeGtaoResources();
+    void destroyXeGtaoResources();
+    void writeXeGtaoDescriptors(
+        uint32_t frameIndex, uint32_t aoFrameIndex, VkDeviceAddress cameraAddress,
+        VkDeviceSize cameraRange, const VkDescriptorImageInfo& normalDepthInfo);
     void collectCompletedBufferReleases();
     void refreshShadowStats();
     bool validateReleaseRuntimeAssets();
@@ -955,6 +1004,31 @@ private:
         std::uint32_t width = 1u;
         std::uint32_t height = 1u;
         float fineRadiusScale = 0.0f;
+        float pad = 0.0f;
+    };
+
+    struct XeGtaoPrefilterPushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float effectRadius = 1.0f;
+        float falloffRange = 0.615f;
+    };
+
+    struct XeGtaoMainPushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float effectRadius = 1.0f;
+        float falloffRange = 0.615f;
+        float sampleDistributionPower = 2.0f;
+        float thinOccluderCompensation = 0.0f;
+        float finalValuePower = 2.2f;
+        std::uint32_t temporalIndex = 0u;
+    };
+
+    struct XeGtaoDenoisePushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float blurAmount = 1.0f;
         float pad = 0.0f;
     };
 
@@ -1059,21 +1133,57 @@ private:
         std::uint32_t flags = 0u;
     };
 
+    // 48 bytes, down from 72.
+    //
+    // Position and UV stay full float and MUST: position feeds the clip-space
+    // transform that the merged depth prepass and the main pass have to agree on
+    // to the last bit (main tests GREATER_OR_EQUAL against the prepass's depth
+    // with writes off, so a divergence renders as holes), and UV drives an alpha
+    // test whose cutout silhouette both passes must reproduce identically.
+    // Everything else is shading data with slack in it:
+    //
+    //   normal  float3 -> octahedral snorm16x2.  Max error ~0.004 degrees.
+    //   color   float3 -> sRGB-encoded unorm8x4. Encoded rather than linear
+    //           because these values are authored as sRGB (hex literals on the
+    //           strategy map, LAND VCLR bytes in Fallout) and quantizing the
+    //           LINEAR value instead puts all 256 steps in the highlights and
+    //           bands the darks.
+    //   layer   4x u32 -> 4x u16. Bindless slots, capped at
+    //           kBindlessTargetTextureCapacity; the static_assert below is what
+    //           makes raising that cap a compile error rather than four
+    //           silently truncated texture indices.
+    //
+    // Declared as 32-bit scalars rather than int16_t/uint8_t arrays because
+    // skinning.comp.slang writes this exact struct through a StructuredBuffer,
+    // and sub-32-bit members there would need VK_KHR_8bit_storage /
+    // 16bit_storage. The vertex-attribute formats do the unpacking for the
+    // graphics pipelines; the compute shader packs by hand. See
+    // imported_vertex_pack.slang, which mirrors the four helpers below.
     struct ImportedMeshVertex {
         float position[3];
-        float normal[3];
-        float color[3];
+        std::uint32_t packedNormal = 0u;   // octahedral snorm16x2
+        std::uint32_t packedColor = 0xffffffffu;  // sRGB8 rgba, a=unused
         float uv[2];
         std::uint32_t textureIndex = 0xffffffffu;
         std::uint32_t flags = 0u;
         // Terrain layer blend (Fallout ATXT/VTXT). These are BINDLESS SLOTS, not
         // scene texture indices -- uploadImportedScene remaps them the same way
         // it remaps textureIndex. Live only when the vertex carries
-        // kImportedSceneMaterialFlagTerrainLayers.
-        std::uint32_t layerTextureIndex[4] = {
-            0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+        // kImportedSceneMaterialFlagTerrainLayers. Two slots per word, low half
+        // first; 0xffff is "no layer".
+        std::uint32_t packedLayerTexture01 = 0xffffffffu;
+        std::uint32_t packedLayerTexture23 = 0xffffffffu;
         std::uint32_t layerWeights = 0u;
     };
+    static_assert(sizeof(ImportedMeshVertex) == 48,
+                  "ImportedMeshVertex is a GPU layout: pass_pipelines.cc's attribute offsets "
+                  "and skinning.comp.slang's SkinnedVertexOut mirror it byte for byte.");
+
+    static constexpr std::uint16_t kInvalidImportedLayerSlot = 0xffffu;
+
+    // The encoders are odai::importer::packImportedVertex{Normal,Color,LayerPair}
+    // in src/import/imported_scene.h -- beside packImportedSceneTerrainLayerWeights,
+    // and reachable from a Vulkan-free test, which is the point.
 
     struct ImportedWaterVertex {
         float position[3];
@@ -1403,6 +1513,7 @@ private:
     // m_skinningDebugBypass is set.
     void recordSkinningPass(const FrameExecutionContext& context);
     void recordMainScenePass(const FrameExecutionContext& context, const MainPassInputs& inputs);
+    void recordSkinnedVelocityPass(const FrameExecutionContext& context);
 
     GLFWwindow* m_window = nullptr;
 
@@ -1490,6 +1601,13 @@ private:
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
     std::vector<VmaAllocation> m_depthImageAllocations;
+    // Where the normal-depth buffer is rendered. Equal to m_renderExtent under
+    // the merged depth prepass (see useMergedDepthPrepass) and to m_aoExtent
+    // otherwise -- a render pass cannot have a colour attachment smaller than
+    // its render area, so promoting the prepass to full resolution promotes
+    // this with it. Every consumer samples it by normalized UV, so nothing
+    // downstream has to know which one it got.
+    VkExtent2D m_normalDepthExtent{};
     std::vector<VkImage> m_normalDepthImages;
     std::vector<VkDeviceMemory> m_normalDepthImageMemories;
     std::vector<VkImageView> m_normalDepthImageViews;
@@ -1500,6 +1618,70 @@ private:
     std::vector<VkImageView> m_aoDepthImageViews;
     std::vector<TransientImageHandle> m_aoDepthTransientHandles;
     std::vector<bool> m_aoDepthImageInitialized;
+    // XeGTAO. The depth pyramid is five separate single-mip images rather than
+    // one mip-chained image: the AO targets come from the FrameArena's transient
+    // image pool, which creates exactly one view per image, and per-mip storage
+    // views would need new plumbing through it for no benefit -- XeGTAO point
+    // samples the pyramid, so hardware mip filtering was never in play.
+    static constexpr uint32_t kXeGtaoDepthMipCount = 5u;
+    std::array<std::vector<VkImage>, kXeGtaoDepthMipCount> m_xegtaoDepthImages;
+    std::array<std::vector<VkDeviceMemory>, kXeGtaoDepthMipCount> m_xegtaoDepthImageMemories;
+    std::array<std::vector<VkImageView>, kXeGtaoDepthMipCount> m_xegtaoDepthImageViews;
+    std::array<std::vector<TransientImageHandle>, kXeGtaoDepthMipCount> m_xegtaoDepthTransientHandles;
+    std::array<VkExtent2D, kXeGtaoDepthMipCount> m_xegtaoDepthExtents{};
+    std::vector<bool> m_xegtaoDepthInitialized;
+    // AO term as the march produced it, BEFORE denoising. The denoise pass reads
+    // this and writes m_ssaoRawImages, so everything downstream -- the joint
+    // bilateral upsample and every consumer of the blurred AO -- is unchanged.
+    // Motion vectors, render extent. See the creation site for the encoding.
+    VkFormat m_velocityFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    std::vector<VkImage> m_velocityImages;
+    std::vector<VkDeviceMemory> m_velocityImageMemories;
+    std::vector<VkImageView> m_velocityImageViews;
+    std::vector<TransientImageHandle> m_velocityTransientHandles;
+    std::vector<bool> m_velocityImageInitialized;
+    VkDescriptorSetLayout m_skinnedVelocityDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_skinnedVelocityPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_skinnedVelocityPipeline = VK_NULL_HANDLE;
+    DescriptorBufferSet m_skinnedVelocityBufferSet{};
+    // Last frame's world->clip and jitter, for the velocity pass. Distinct from
+    // the TAA uniform's copy only in that this one is captured before the main
+    // pass rather than after.
+    odai::math::Matrix4 m_velocityPrevViewProj{};
+    odai::math::Matrix4 m_velocityCurrentViewProj{};
+    float m_velocityPrevJitter[2] = {0.0f, 0.0f};
+    float m_velocityCurrentJitter[2] = {0.0f, 0.0f};
+    bool m_velocityPrevValid = false;
+
+    std::vector<VkImage> m_xegtaoAoTermImages;
+    std::vector<VkDeviceMemory> m_xegtaoAoTermImageMemories;
+    std::vector<VkImageView> m_xegtaoAoTermImageViews;
+    std::vector<TransientImageHandle> m_xegtaoAoTermTransientHandles;
+    std::vector<bool> m_xegtaoAoTermInitialized;
+    std::vector<VkImage> m_xegtaoBentNormalImages;
+    std::vector<VkDeviceMemory> m_xegtaoBentNormalImageMemories;
+    std::vector<VkImageView> m_xegtaoBentNormalImageViews;
+    std::vector<TransientImageHandle> m_xegtaoBentNormalTransientHandles;
+    std::vector<bool> m_xegtaoBentNormalInitialized;
+    // Point sampler for the pyramid. Linear filtering across neighbouring depths
+    // on one level invents surfaces between real ones and puts false horizons
+    // into the march, so this is deliberately VK_FILTER_NEAREST.
+    VkSampler m_xegtaoPointSampler = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_xegtaoPrefilterDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_xegtaoMainDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_xegtaoDenoiseDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_xegtaoPrefilterPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_xegtaoMainPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_xegtaoDenoisePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_xegtaoPrefilterPipeline = VK_NULL_HANDLE;
+    VkPipeline m_xegtaoMainPipeline = VK_NULL_HANDLE;
+    VkPipeline m_xegtaoDenoisePipeline = VK_NULL_HANDLE;
+    DescriptorBufferSet m_xegtaoPrefilterBufferSet{};
+    DescriptorBufferSet m_xegtaoMainBufferSet{};
+    DescriptorBufferSet m_xegtaoDenoiseBufferSet{};
+    // Advances once per frame; drives the temporal half of the blue noise.
+    std::uint32_t m_xegtaoTemporalIndex = 0;
+
     std::vector<VkImage> m_ssaoRawImages;
     std::vector<VkDeviceMemory> m_ssaoRawImageMemories;
     std::vector<VkImageView> m_ssaoRawImageViews;
@@ -1560,6 +1742,32 @@ private:
     VkDescriptorSetLayout m_taaDescriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_taaPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_taaPipeline = VK_NULL_HANDLE;
+    // Same descriptor layout and uniform as TAA, selected in its place when the
+    // Temporal upscaler is active. See temporal_upscale.comp.slang.
+    VkPipeline m_temporalUpscalePipeline = VK_NULL_HANDLE;
+    // True when the Temporal backend is running as a real upscale: the pipeline
+    // exists, the backend resolved to Temporal, and the render extent is
+    // actually smaller than the output. At native resolution there is nothing to
+    // upscale and the plain TAA path is the right one.
+    [[nodiscard]] bool temporalUpscaleActive() const {
+        return m_temporalUpscalePipeline != VK_NULL_HANDLE &&
+               m_upscalerStatus.active == UpscalerBackend::Temporal &&
+               (m_renderExtent.width < m_swapchainExtent.width ||
+                m_renderExtent.height < m_swapchainExtent.height);
+    }
+    // Extent the TAA/upscale pass writes, and therefore the size of the history
+    // images. Output extent when upscaling, render extent otherwise.
+    [[nodiscard]] VkExtent2D temporalOutputExtent() const {
+        return temporalUpscaleActive() ? m_swapchainExtent : m_renderExtent;
+    }
+    // The upscaling TECHNIQUE, behind render/upscale's plug-in seam. This
+    // engine's temporal one today; XeSS, FSR or DLSS by swapping what
+    // createUpscaler() returns, with no change to the frame code around it.
+    // Null when the resolved backend is Off, which is how the pass is skipped.
+    std::unique_ptr<upscale::IUpscaler> m_upscaler;
+    [[nodiscard]] upscale::HostServices makeUpscalerHostServices();
+    bool createUpscalerBackend();
+
     DescriptorBufferSet m_taaBufferSet;
     std::array<VkImage, 2> m_taaImages{};
     std::array<VkDeviceMemory, 2> m_taaImageMemories{};
@@ -1581,6 +1789,16 @@ private:
         float invView[16];
         float prevViewProj[16];
         float params[4];
+        // xy = this frame's jitter in INPUT pixels, zw = input extent. Only the
+        // temporal upscaler reads it, but it lives in the shared uniform because
+        // both shaders bind the same descriptor set layout and a struct that
+        // differs between them would be read at the wrong offsets by one of them.
+        float jitterAndInputExtent[4];
+        // x = clamp width in sigma where nothing is moving, y = where motion is
+        // fast, z = maximum per-frame blend on a direct sample hit, w = spare.
+        // Tunable because the right values depend on the upscale ratio and on
+        // how noisy the input is, and neither is knowable from one scene.
+        float upscaleTuning[4];
     };
     struct TaaPushConstants {
         std::uint32_t width;
@@ -1596,7 +1814,46 @@ private:
     // Records sample->TAA->copy-back over hdrResolve mip0. Returns true when
     // it ran, which tells the caller the image is now in TRANSFER_DST rather
     // than COLOR_ATTACHMENT layout.
-    bool recordTaaPass(VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex);
+    // What the TAA/upscale pass left hdrResolve mip0 in.
+    //
+    // A bool was not enough and that was a real bug: the caller inferred
+    // "TAA ran, therefore hdrResolve is TRANSFER_DST because it was copied back
+    // into". The UPSCALING path does not copy back -- it leaves hdrResolve in
+    // SHADER_READ_ONLY -- so with the temporal upscaler on, the bloom barrier
+    // declared an oldLayout the image was not in. Validation catches it as
+    // VUID-VkImageMemoryBarrier2-oldLayout-01197; a driver is free to do
+    // anything with it. There are THREE outcomes here, not two.
+    struct TaaPassOutcome {
+        bool ran = false;
+        VkImageLayout hdrResolveLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkPipelineStageFlags2 hdrResolveStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkAccessFlags2 hdrResolveAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    };
+    // MERGED DEPTH PREPASS: one depth rasterization per frame instead of two.
+    //
+    // The frame used to lay depth twice. The normal-depth prepass rendered the
+    // visible set at HALF resolution into its own depth image and threw it away
+    // (storeOp DONT_CARE); the main pass then cleared its own depth and
+    // rasterized the same set AGAIN, depth-only, so its alpha-testing forward
+    // shader would get early-Z. Measured on Goodsprings: the prepass 2.8 ms and
+    // the prewrite 2.76 ms of main's 8.6.
+    //
+    // Merged, the prepass runs at full render extent and writes the REAL depth
+    // buffer, which main then loads and tests against without writing. The
+    // prepass is vertex-bound, not fill-bound -- it measured the same at native
+    // and at 44% of the pixels -- so making it bigger is nearly free, and the
+    // prewrite disappears entirely.
+    //
+    // Requires a 1-sample depth buffer: the normal-depth pipelines are built
+    // VK_SAMPLE_COUNT_1_BIT and cannot write a multisampled attachment. With
+    // MSAA on, the old two-rasterization structure is kept. ODAI_MERGED_PREPASS=0
+    // forces it off for A/B; both paths are valid Vulkan.
+    [[nodiscard]] bool useMergedDepthPrepass() const;
+
+    TaaPassOutcome recordTaaPass(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t aoFrameIndex,
+        VkQueryPool gpuTimestampQueryPool);
     VkSampler m_sunShaftSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
@@ -1714,6 +1971,10 @@ private:
     // party (see docs/ROADMAP.md's out-of-scope note on mass-battle crowds).
     struct SkinnedInstanceSlot {
         DescriptorBufferSet bufferSet{};
+        // Second set, same per-slot shape, for the velocity pass's two bone
+        // matrix buffers. Per slot rather than one shared set because each actor
+        // has its own pose and the sets are written per frame, not per draw.
+        DescriptorBufferSet velocityBufferSet{};
         BufferHandle restPoseVertexBufferHandle = kInvalidBufferHandle;
         BufferHandle indexBufferHandle = kInvalidBufferHandle;
         BufferHandle outputVertexBufferHandle = kInvalidBufferHandle;
@@ -1724,6 +1985,19 @@ private:
         // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
         // FrameArena slot is actually active. See both functions' comments.
         std::vector<odai::math::Matrix4> pendingBoneMatrices;
+        // LAST frame's bone matrices, kept on the CPU and re-uploaded each frame
+        // beside the current ones so the velocity pass can pose the rest mesh
+        // twice. A CPU copy rather than reusing last frame's FrameArena slice:
+        // that slice is reclaimed on its own fence, and depending on it would
+        // make the motion vectors correct only while frames retire in the order
+        // this happens to assume.
+        std::vector<odai::math::Matrix4> previousBoneMatrices;
+        // Device addresses of this frame's current/previous bone matrix uploads,
+        // for the velocity pass's descriptor writes. Zero when this slot did not
+        // upload a pose this frame, which is what suppresses its velocity draw.
+        VkDeviceAddress currentBoneAddress = 0;
+        VkDeviceAddress previousBoneAddress = 0;
+        VkDeviceSize boneBufferBytes = 0;
         // Bindless slots this slot holds a reference on, from
         // uploadSkinnedActorTextures. Kept per instance so a re-upload (or
         // teardown) releases exactly what it took.
@@ -1781,6 +2055,10 @@ private:
         m_pipelineManager.importedStaticPipelineBlendedTwoSided;
     VkPipeline& m_importedStaticPipelineTwoSided =
         m_pipelineManager.importedStaticPipelineTwoSided;
+    VkPipeline& m_importedStaticDepthPrewritePipeline =
+        m_pipelineManager.importedStaticDepthPrewritePipeline;
+    VkPipeline& m_importedStaticDepthPrewritePipelineTwoSided =
+        m_pipelineManager.importedStaticDepthPrewritePipelineTwoSided;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
@@ -1922,6 +2200,16 @@ private:
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
     std::vector<ImportedSceneChunk> m_importedSceneChunks;
+    // Highest device-local heap usage seen this session, for the GPU Memory
+    // panel. Sampled only while that panel is open, which is enough: what it is
+    // there to show is whether the peak keeps moving while the player walks.
+    std::uint64_t m_debugDeviceMemoryPeakBytes = 0;
+    // Slots vacated by removeImportedSceneChunk, reused before the vector grows.
+    std::vector<std::size_t> m_freeImportedSceneChunks;
+    // Where uploadImportedSceneInternal placed the chunk it just built, since a
+    // recycled slot means the vector's size no longer says. kInvalid when the
+    // upload succeeded without producing one.
+    std::size_t m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
     // Suballocators over the shared geometry buffers, in vertex and index units.
     GpuArenaAllocator m_importedVertexArena;
     GpuArenaAllocator m_importedIndexArena;
@@ -1929,6 +2217,9 @@ private:
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
     std::vector<std::uint32_t> m_importedTextureSlots;
     std::vector<std::uint8_t> m_visibleImportedPageScratch;
+    // Indices of the pages that survived the clip test, in arena order. Member
+    // rather than local to keep it out of the per-frame allocator.
+    std::vector<std::uint32_t> m_visibleImportedPageOrder;
     std::uint32_t m_visibleImportedTerrainDrawCount = 0;
     std::array<std::uint32_t, kShadowCascadeCount> m_visibleImportedShadowTerrainDrawCounts{};
     std::vector<ImportedGiTriangle> m_importedGiTriangles;
@@ -2031,6 +2322,10 @@ private:
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = false;
+    DebugUiMode m_debugUiMode = DebugUiMode::Full;
+    UpscalerSettings m_upscalerSettings{};
+    UpscalerStatus m_upscalerStatus{};
+    std::vector<DebugStatGroup> m_debugStatGroups;
     bool m_showMeshingPanel = false;
     bool m_showShadowPanel = false;
     bool m_showSunPanel = false;
@@ -2052,6 +2347,7 @@ private:
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
     bool m_shadowCascadeSplitsLogged = false;
+    float m_loggedShadowCascadeFar = -1.0f;
     bool m_debugShowImportedTerrain = true;
     bool m_debugShowImportedStatics = true;
     bool m_debugShowImportedTextures = true;
@@ -2120,6 +2416,10 @@ private:
     float m_debugGpuSsaoTimeMs = 0.0f;
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
+    // Inside main's window, not additional to it.
+    float m_debugGpuPrewriteTimeMs = 0.0f;
+    float m_debugGpuVelocityTimeMs = 0.0f;
+    float m_debugGpuTaaTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
     float m_debugGpuUiTimeMs = 0.0f;
     float m_debugResolvedExposure = 1.0f;

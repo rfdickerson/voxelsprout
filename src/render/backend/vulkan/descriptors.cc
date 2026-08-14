@@ -159,6 +159,16 @@ bool RendererBackend::createDescriptorResources() {
         sunShaftBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings.push_back(sunShaftBinding);
 
+        // Bloom source: always the mip-chained render-resolution HDR target. See
+        // the note in tone_map.frag.slang for why this cannot share the scene
+        // binding once an upscaler is in the chain.
+        VkDescriptorSetLayoutBinding bloomSourceBinding{};
+        bloomSourceBinding.binding = 14;
+        bloomSourceBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bloomSourceBinding.descriptorCount = 1;
+        bloomSourceBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(bloomSourceBinding);
+
         VkDescriptorSetLayoutBinding voxelGiOccupancyDebugBinding{};
         voxelGiOccupancyDebugBinding.binding = 11;
         voxelGiOccupancyDebugBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -300,7 +310,22 @@ void RendererBackend::updateFrameDescriptorSets(
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
-    hdrSceneImageInfo.imageView = m_hdrResolveSampleImageViews[aoFrameIndex];
+    // The tonemap pass's scene input. When the temporal upscaler ran, that is
+    // its output -- already at swapchain resolution -- rather than hdrResolve,
+    // which is still at render resolution and would be stretched by a bilinear
+    // fetch. Sampling the upscaled image is what makes the reconstruction
+    // actually reach the screen instead of being resolved and then thrown away.
+    // m_taaHistoryIndex ^ 1, not m_taaHistoryIndex.
+    //
+    // These descriptors are written BEFORE recordTaaPass runs, and at that point
+    // m_taaHistoryIndex still names the image the pass is about to read as
+    // HISTORY -- it only advances to the freshly written image at the end of the
+    // pass. Sampling it here displays last frame's accumulation instead of this
+    // frame's, which is a frame of latency plus one accumulation step of
+    // staleness on every pixel.
+    hdrSceneImageInfo.imageView = temporalUpscaleActive()
+        ? m_taaImageViews[m_taaHistoryIndex ^ 1u]
+        : m_hdrResolveSampleImageViews[aoFrameIndex];
     hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo diffuseTextureImageInfo{};
@@ -451,6 +476,13 @@ void RendererBackend::updateFrameDescriptorSets(
         sampler(8, ssaoRawImageInfo);
         sampler(9, voxelGiVolumeImageInfo);
         sampler(10, sunShaftImageInfo);
+        // Bloom always reads the mip-chained hdrResolve, even when the scene
+        // above came from the upscaler's output.
+        VkDescriptorImageInfo bloomSourceImageInfo{};
+        bloomSourceImageInfo.sampler = m_hdrResolveSampler;
+        bloomSourceImageInfo.imageView = m_hdrResolveSampleImageViews[aoFrameIndex];
+        bloomSourceImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        sampler(14, bloomSourceImageInfo);
         sampler(11, voxelGiOccupancyDebugImageInfo);
         // Ray-traced scene acceleration structure (binding 12) when RT is live.
         if (hasRayTracingSceneDescriptor) {
@@ -591,8 +623,45 @@ void RendererBackend::updateFrameDescriptorSets(
             sizeof(uniformData.prevViewProj));
         // History weight 0.88: high enough to converge shimmer in ~8 frames,
         // low enough that the clamp can pull a stale region back quickly.
-        uniformData.params[0] = 0.88f;
+        // ODAI_UPSCALE_HISTORY overrides it. 0 isolates the spatial
+        // reconstruction with no temporal accumulation at all, which is the
+        // control that separates "the filter is wrong" from "the accumulation is
+        // wrong" -- they look identical in a finished frame.
+        static const float s_historyWeight = []() {
+            const char* env = std::getenv("ODAI_UPSCALE_HISTORY");
+            if (env == nullptr) {
+                return 0.88f;
+            }
+            return std::clamp(static_cast<float>(std::atof(env)), 0.0f, 0.99f);
+        }();
+        uniformData.params[0] = s_historyWeight;
         uniformData.params[1] = (m_taaHistoryValid && m_taaPrevViewProjValid) ? 1.0f : 0.0f;
+        // THIS frame's jitter, in input PIXELS, plus the input extent. The
+        // upscaler needs the jitter in pixels rather than NDC because it works
+        // on the input sample grid -- it has to know where each low-res texel
+        // actually landed to weight it. m_taaJitterNdc is NDC (2 units across
+        // the extent), so the conversion is the inverse of the one that
+        // produced it.
+        const float inputWidth = static_cast<float>(std::max(1u, m_renderExtent.width));
+        const float inputHeight = static_cast<float>(std::max(1u, m_renderExtent.height));
+        uniformData.jitterAndInputExtent[0] = (m_taaJitterNdc[0] * inputWidth) * 0.5f;
+        uniformData.jitterAndInputExtent[1] = (m_taaJitterNdc[1] * inputHeight) * 0.5f;
+        uniformData.jitterAndInputExtent[2] = inputWidth;
+        uniformData.jitterAndInputExtent[3] = inputHeight;
+        // ODAI_UPSCALE_CLAMP / ODAI_UPSCALE_BLEND, for sweeping the two values
+        // that trade sharpness against ghosting. Defaults are the measured ones.
+        static const float s_clampStatic = []() {
+            const char* env = std::getenv("ODAI_UPSCALE_CLAMP");
+            return (env != nullptr) ? static_cast<float>(std::atof(env)) : 4.0f;
+        }();
+        static const float s_maxBlend = []() {
+            const char* env = std::getenv("ODAI_UPSCALE_BLEND");
+            return (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.5f;
+        }();
+        uniformData.upscaleTuning[0] = s_clampStatic;
+        uniformData.upscaleTuning[1] = 1.25f;
+        uniformData.upscaleTuning[2] = s_maxBlend;
+        uniformData.upscaleTuning[3] = 0.0f;
         // LAST frame's jitter, which the shader takes back out of the
         // reprojected UV. prevViewProj is the matrix that frame actually
         // rendered with, so it carries that frame's jitter -- but the history
@@ -645,6 +714,19 @@ void RendererBackend::updateFrameDescriptorSets(
                 m_taaBufferSet, region,
                 descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 5),
                 uniformAddress, sizeof(TaaUniformData));
+            // Binding 6: motion vectors. Written whether or not the active
+            // pipeline reads them -- a descriptor the layout declares must be
+            // valid even for a shader that ignores it. Falls back to the
+            // normal-depth view when the velocity target does not exist, so the
+            // binding is never null.
+            const bool hasVelocity = aoFrameIndex < m_velocityImageViews.size() &&
+                m_velocityImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+                m_velocityImageInitialized[aoFrameIndex];
+            writeDescriptorBufferCombinedImageSampler(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 6), 0,
+                hasVelocity ? m_velocityImageViews[aoFrameIndex] : normalDepthImageInfo.imageView,
+                m_ssaoSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
     }
 
@@ -664,6 +746,12 @@ void RendererBackend::updateFrameDescriptorSets(
             m_ssaoBufferSet, region, outputOffset,
             m_ssaoRawImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
     }
+
+    // XeGTAO shares the same per-frame inputs as the other estimators; its sets
+    // are separate only because its bindings are.
+    writeXeGtaoDescriptors(
+        m_currentFrame, aoFrameIndex, cameraDeviceAddress, cameraBufferInfo.range,
+        normalDepthImageInfo);
 
     if (m_ssaoBlurBufferSet.valid() &&
         aoFrameIndex < m_ssaoBlurImageViews.size() &&

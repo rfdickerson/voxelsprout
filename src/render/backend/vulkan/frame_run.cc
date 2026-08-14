@@ -1,4 +1,5 @@
 #include "render/backend/vulkan/renderer_backend.h"
+#include "render/upscale/upscale_contract.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
@@ -518,7 +519,29 @@ void RendererBackend::renderFrame(
     m_debugDrawCallsPost = 0;
 
     const float aspectRatio = static_cast<float>(m_renderExtent.width) / static_cast<float>(m_renderExtent.height);
-    const float nearPlane = 0.1f;
+    // ODAI_RENDER_NEAR / ODAI_RENDER_FAR open up the view distance.
+    //
+    // The whole renderer is reverse-Z (perspectiveVulkanReverseZ, and every
+    // pipeline tests GREATER_OR_EQUAL), which is what makes a far plane this
+    // aggressive workable at all: depth precision under reverse-Z with a float
+    // depth buffer is governed almost entirely by the NEAR plane, so pushing far
+    // out costs very little and pulling near in costs a great deal. 0.1 Fallout
+    // units is 1.4 mm, far tighter than anything the player can stand next to,
+    // and it is the number to raise first if distant geometry z-fights.
+    //
+    // Shadows do NOT follow this out: the cascades are clamped separately by
+    // shadowDistanceLimit (ODAI_SHADOW_DISTANCE) below, so a large far plane
+    // does not spread the atlas over terrain nothing can see it on.
+    static const float s_nearPlaneOverride = []() {
+        const char* env = std::getenv("ODAI_RENDER_NEAR");
+        const float value = (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.0f;
+        return (value > 0.0f) ? value : 0.0f;
+    }();
+    static const float s_farPlaneOverride = []() {
+        const char* env = std::getenv("ODAI_RENDER_FAR");
+        const float value = (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.0f;
+        return (value > 0.0f) ? value : 0.0f;
+    }();
     const bool renderingImportedActors =
         importedActors != nullptr &&
         !importedActors->vertices.empty() &&
@@ -530,7 +553,22 @@ void RendererBackend::renderFrame(
         m_importedSceneInteriorMode &&
         !m_importedGiTriangles.empty();
     const bool voxelGiSceneEnabled = legacyVoxelRenderingEnabled || importedInteriorGiEnabled;
-    const float farPlane = renderingImportedScene ? 50000.0f : 500.0f;
+    const float farPlane = (s_farPlaneOverride > 0.0f)
+        ? s_farPlaneOverride
+        : (renderingImportedScene ? 50000.0f : 500.0f);
+    // NEAR is what buys depth precision under reverse-Z, and it has to be paired
+    // with the far plane rather than picked once. 0.1 against a 50000 far plane
+    // is a ratio of 500,000:1; the voxel worlds it was chosen for run a 500 far
+    // plane, where the same 0.1 is only 5,000:1 and perfectly reasonable.
+    //
+    // A Fallout unit is about 1.42 cm, so 5 units is 7 cm -- far closer than the
+    // player's collision radius ever lets the camera get to a wall, and a 50x
+    // precision improvement over 0.1 across the whole depth range. This is the
+    // number to raise (not the far plane to lower) when distant coplanar
+    // geometry z-fights; ODAI_RENDER_NEAR overrides it.
+    const float nearPlane = (s_nearPlaneOverride > 0.0f)
+        ? s_nearPlaneOverride
+        : (renderingImportedScene ? 5.0f : 0.1f);
     // tanHalfFov feeds shadow cascade sphere sizing. In ortho mode approximate
     // from the view half-height so cascade coverage matches the visible area.
     const float tanHalfFov = camera.orthographic
@@ -578,31 +616,25 @@ void RendererBackend::renderFrame(
     float jitterNdcX = 0.0f;
     float jitterNdcY = 0.0f;
     if (m_taaEnabled && m_taaJitterEnabled && !camera.orthographic) {
-        // Radical inverse in base b -- Halton's definition, written out because
-        // it is three lines and a table would need the same comment anyway.
-        const auto halton = [](std::uint32_t index, std::uint32_t base) {
-            float result = 0.0f;
-            float invBase = 1.0f / static_cast<float>(base);
-            float fraction = invBase;
-            while (index > 0u) {
-                result += static_cast<float>(index % base) * fraction;
-                index /= base;
-                fraction *= invBase;
-            }
-            return result;
-        };
-        constexpr std::uint32_t kJitterPhaseCount = 8u;
-        const std::uint32_t phase = (m_taaJitterPhase % kJitterPhaseCount) + 1u;
-        // Halton is [0,1); centre it so the offsets straddle the pixel centre.
-        const float offsetPixelsX = halton(phase, 2u) - 0.5f;
-        const float offsetPixelsY = halton(phase, 3u) - 0.5f;
-        // Pixels -> NDC. NDC spans 2 units across the render extent, so one
-        // pixel is 2/extent -- and this is the RENDER extent, not the
-        // swapchain's, because that is the grid the scene is rasterized on.
-        const float renderWidth = static_cast<float>(std::max(1u, m_renderExtent.width));
-        const float renderHeight = static_cast<float>(std::max(1u, m_renderExtent.height));
-        jitterNdcX = (offsetPixelsX * 2.0f) / renderWidth;
-        jitterNdcY = (offsetPixelsY * 2.0f) / renderHeight;
+        // THE JITTER SEQUENCE IS THE UPSCALER'S CONTRACT, NOT THIS PASS'S
+        // DETAIL, so it lives in render/upscale/upscale_contract.h alongside
+        // the quality->scale table and the mip-bias rule. Halton(2,3), a phase
+        // count that scales with the upscale ratio, centred on the pixel --
+        // stated once, where a vendor backend swapped in for the built-in one
+        // can rely on the host having honoured it.
+        const upscale::Extent2D renderExtentForJitter{
+            m_renderExtent.width, m_renderExtent.height};
+        const upscale::Extent2D displayExtentForJitter{
+            m_swapchainExtent.width, m_swapchainExtent.height};
+        const std::uint32_t jitterPhaseCount =
+            upscale::jitterPhaseCount(renderExtentForJitter, displayExtentForJitter);
+        // 1-based: Halton(0) is 0 in every base, so a 0-based sequence spends
+        // its first frame not jittering at all.
+        const std::uint32_t phase = (m_taaJitterPhase % jitterPhaseCount) + 1u;
+        const upscale::JitterOffset jitterNdc =
+            upscale::jitterOffsetNdc(phase, renderExtentForJitter);
+        jitterNdcX = jitterNdc.x;
+        jitterNdcY = jitterNdc.y;
         // clip.w is -view.z here (perspectiveVulkan sets (3,2) = -1), so adding
         // -jitter to the column that multiplies view.z shifts clip.xy by
         // jitter*clip.w -- i.e. a constant offset in NDC at every depth, which
@@ -629,6 +661,19 @@ void RendererBackend::renderFrame(
     }
     const bool taaPrevWasValid = m_taaPrevViewProjValid;
     (void)taaPrevWasValid;
+    // The velocity pass keeps its own copies because it must run whether or not
+    // TAA is enabled -- the motion vectors feed the upscaler too, and
+    // m_taaPrevViewProjColumnMajor above is only maintained under m_taaEnabled.
+    // Captured HERE, before m_taaPrevViewProj is overwritten below, for the same
+    // reason that one is: read it after and prevViewProj becomes this frame's.
+    m_velocityPrevViewProj = m_taaPrevViewProj;
+    m_velocityCurrentViewProj = mvp;
+    m_velocityPrevJitter[0] = previousFrameJitterNdc[0];
+    m_velocityPrevJitter[1] = previousFrameJitterNdc[1];
+    m_velocityCurrentJitter[0] = jitterNdcX;
+    m_velocityCurrentJitter[1] = jitterNdcY;
+    m_velocityPrevValid = m_taaPrevViewProjValid;
+
     // Rolled with prevViewProj: the two describe the same past frame.
     m_taaPrevJitterNdc = previousFrameJitterNdc;
     m_taaPrevViewProj = mvp;
@@ -778,7 +823,16 @@ void RendererBackend::renderFrame(
         cascadeDistances[cascadeIndex] = split;
     }
 
-    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && !m_shadowCascadeSplitsLogged) {
+    // Logged whenever the set CHANGES, not once. Once meant frame 0 -- before a
+    // streaming game has uploaded any geometry, so renderingImportedScene is
+    // still false and the far plane is the 500-unit fallback. The numbers that
+    // printed described a frame nobody was looking at, which is worse than not
+    // printing them.
+    const bool cascadeSplitsChanged =
+        std::abs(cascadeDistances[kShadowCascadeCount - 1] - m_loggedShadowCascadeFar) >
+        std::max(1.0f, m_loggedShadowCascadeFar * 0.02f);
+    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && cascadeSplitsChanged) {
+        m_loggedShadowCascadeFar = cascadeDistances[kShadowCascadeCount - 1];
         m_shadowCascadeSplitsLogged = true;
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             const float cascadeFar = cascadeDistances[cascadeIndex];
@@ -1189,7 +1243,13 @@ void RendererBackend::renderFrame(
     // the white lake.
     constexpr float kDefaultFogFarDistance = 60000.0f;  // ~850 m, a clear day
     if (renderingImportedScene) {
-        const bool authored = m_weatherSky.weight > 0.0f && m_weatherSky.fogFarDistance > 1.0f;
+        // Distance only, NOT gated on weight -- matching applyAerialPerspective
+        // in imported_static.frag.slang, which the comment above says these two
+        // atmospheres are calibrated against each other by. A caller publishing
+        // a fog-far with weight 0 is saying "leave my sky colours procedural,
+        // but this is how far you can see"; gating the density on weight here
+        // and not there made the two disagree by 2.7x on an Oblivion worldspace.
+        const bool authored = m_weatherSky.fogFarDistance > 1.0f;
         const float fogFarDistance =
             authored ? m_weatherSky.fogFarDistance : kDefaultFogFarDistance;
         // Mean of fogExtinctionCoefficient() in tone_map.frag.slang, which is
@@ -2089,8 +2149,8 @@ void RendererBackend::renderFrame(
         for (const odai::importer::ImportedScenePackedVertex& srcVertex : importedActors->vertices) {
             ImportedMeshVertex dstVertex{};
             std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-            std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
-            std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
+            dstVertex.packedNormal = odai::importer::packImportedVertexNormal(srcVertex.normal);
+            dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color);
             std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
             dstVertex.flags = srcVertex.flags;
             if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
@@ -2277,11 +2337,24 @@ void RendererBackend::renderFrame(
         if (outDraws.capacity() < m_importedMeshDraws.size()) {
             outDraws.reserve(m_importedMeshDraws.size());
         }
+        // Page order is arena order, i.e. the order cells happened to stream in.
+        //
+        // Sorting these front-to-back was tried and REMOVED. It was worth ~2 ms
+        // while the main pass rejected occluded fragments using only its own
+        // progressive depth writes, but the depth prewrite (frame_pass_main.cc)
+        // lays all opaque depth before any shading draw, so submission order no
+        // longer decides what gets rejected. Measured with the prewrite in
+        // place: 11.4 ms unsorted against 11.9 ms sorted, and 0.0019% of pixels
+        // different -- below the 0.048% run-to-run noise floor. It bought
+        // nothing and cost a sort per cull pass per frame.
         m_visibleImportedPageScratch.assign(m_importedPageDrawRanges.size(), 0u);
+        m_visibleImportedPageOrder.clear();
         for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            if (importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
-                m_visibleImportedPageScratch[pageIndex] = 1u;
+            if (!importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
+                continue;
             }
+            m_visibleImportedPageScratch[pageIndex] = 1u;
+            m_visibleImportedPageOrder.push_back(static_cast<std::uint32_t>(pageIndex));
         }
 
         auto appendDrawRange = [&](std::uint32_t firstDraw, std::uint32_t drawCount) -> std::uint32_t {
@@ -2298,19 +2371,16 @@ void RendererBackend::renderFrame(
             return clampedDrawCount;
         };
 
+        // Terrain stays a prefix of the visible list -- callers read
+        // m_visibleImportedTerrainDrawCount as "the first N draws are terrain" --
+        // so the sort applies WITHIN each group rather than across the two.
         std::uint32_t visibleTerrainDrawCount = 0;
-        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            if (m_visibleImportedPageScratch[pageIndex] == 0u) {
-                continue;
-            }
+        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
             const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
             visibleTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
         }
-        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            if (m_visibleImportedPageScratch[pageIndex] == 0u) {
-                continue;
-            }
+        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
             const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
             appendDrawRange(pageRange.firstDraw + terrainDrawCount, pageRange.drawCount - terrainDrawCount);
@@ -2478,8 +2548,24 @@ void RendererBackend::renderFrame(
     shadowPassInputs.canDrawMagica = canDrawMagica;
     shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
     shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
+    // ODAI_FAT_SHADOW_STREAM=1 puts the shadow pass back on the 72-byte main
+    // vertex stream instead of the 28-byte compact one.
+    //
+    // This is the measuring stick for "how much does vertex WIDTH cost a
+    // vertex-bound pass here", and it is the cheapest one in the tree because
+    // both streams and both pipelines already exist over identical geometry.
+    // Measured on Goodsprings, interleaved A/B: cutting 44 of 72 bytes -- 61%,
+    // and from a tightly packed dedicated buffer rather than a strided read, so
+    // an upper bound -- moves the shadow pass 2.12 -> 1.76 ms and 2.00 -> 1.87
+    // ms. That is 7-17% of the pass for the most aggressive cut available on
+    // the pass most sensitive to it.
+    //
+    // Worth knowing before slimming ImportedMeshVertex on the strength of an
+    // estimate: these passes are bound by geometry submission and primitive
+    // throughput far more than by attribute fetch.
+    static const bool s_fatShadowStream = std::getenv("ODAI_FAT_SHADOW_STREAM") != nullptr;
     shadowPassInputs.importedShadowVertexBuffer =
-        m_importedShadowVertexBufferHandle != kInvalidBufferHandle
+        (!s_fatShadowStream && m_importedShadowVertexBufferHandle != kInvalidBufferHandle)
             ? m_bufferAllocator.getBuffer(m_importedShadowVertexBufferHandle)
             : VK_NULL_HANDLE;
     shadowPassInputs.importedIndexBuffer = importedIndexBuffer;
@@ -2778,20 +2864,41 @@ void RendererBackend::renderFrame(
         VK_IMAGE_ASPECT_COLOR_BIT
     );
 
-    const bool aoDepthInitialized = m_aoDepthImageInitialized[imageIndex];
-    transitionImageLayout(
-        commandBuffer,
-        m_aoDepthImages[imageIndex],
-        aoDepthInitialized ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        aoDepthInitialized
-            ? (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
-            : VK_PIPELINE_STAGE_2_NONE,
-        aoDepthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT
-    );
+    // The merged prepass has no ao.depth image to transition -- it depth-tests
+    // against m_depthImages, which the main pass owns and the prepass hands
+    // over with its own barrier. But it is the prepass that now touches that
+    // image FIRST, so the transition the main pass used to do has to move here
+    // with it. UNDEFINED as the old layout is correct and cheap: the prepass
+    // clears depth, so last frame's contents are expendable by definition.
+    if (useMergedDepthPrepass()) {
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    } else {
+        const bool aoDepthInitialized = m_aoDepthImageInitialized[imageIndex];
+        transitionImageLayout(
+            commandBuffer,
+            m_aoDepthImages[imageIndex],
+            aoDepthInitialized ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            aoDepthInitialized
+                ? (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
+                : VK_PIPELINE_STAGE_2_NONE,
+            aoDepthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    }
 
     VkViewport aoViewport{};
     aoViewport.x = 0.0f;
@@ -2804,11 +2911,27 @@ void RendererBackend::renderFrame(
     VkRect2D aoScissor{};
     aoScissor.offset = {0, 0};
     aoScissor.extent = aoExtent;
+    // Built here rather than after the prepass: the merged prepass renders at
+    // the main pass's resolution and needs these.
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_renderExtent.width);
+    viewport.height = static_cast<float>(m_renderExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
     frameExecutionContext.aoFrameIndex = aoFrameIndex;
     frameExecutionContext.imageIndex = imageIndex;
     frameExecutionContext.aoExtent = aoExtent;
     frameExecutionContext.aoViewport = aoViewport;
     frameExecutionContext.aoScissor = aoScissor;
+    frameExecutionContext.viewport = viewport;
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = m_renderExtent;
+    frameExecutionContext.scissor = scissor;
 
 
     PrepassInputs prepassInputs{};
@@ -2854,19 +2977,9 @@ void RendererBackend::renderFrame(
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
 
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(m_renderExtent.width);
-    viewport.height = static_cast<float>(m_renderExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
 
-    VkRect2D scissor{};
-    scissor.offset = {0, 0};
-    scissor.extent = m_renderExtent;
-    frameExecutionContext.viewport = viewport;
-    frameExecutionContext.scissor = scissor;
+
+
 
     MainPassInputs mainPassInputs{};
     mainPassInputs.frameChunkDrawData = &frameChunkDrawData;
@@ -2900,21 +3013,25 @@ void RendererBackend::renderFrame(
     mainPassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
     mainPassInputs.preview = &preview;
     recordMainScenePass(frameExecutionContext, mainPassInputs);
+    // After the main pass so it can depth-test against what actually ended up
+    // visible, and before anything that consumes motion vectors.
+    recordSkinnedVelocityPass(frameExecutionContext);
 
     // TAA runs on the resolved HDR image before bloom mips are cut from it, so
     // bloom blooms the stabilized frame rather than the shimmering one. When it
     // ran, mip0 is left in TRANSFER_DST (the copy-back) instead of
     // COLOR_ATTACHMENT -- the transitions below take the matching source.
-    const bool taaRan = recordTaaPass(commandBuffer, aoFrameIndex);
+    const TaaPassOutcome taaOutcome = recordTaaPass(
+        commandBuffer, aoFrameIndex, frameExecutionContext.gpuTimestampQueryPool);
 
     if (m_hdrResolveMipLevels > 1u) {
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaOutcome.hdrResolveLayout,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaOutcome.hdrResolveStage,
+            taaOutcome.hdrResolveAccess,
             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             VK_ACCESS_2_TRANSFER_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3017,10 +3134,10 @@ void RendererBackend::renderFrame(
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaOutcome.hdrResolveLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaOutcome.hdrResolveStage,
+            taaOutcome.hdrResolveAccess,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3539,7 +3656,9 @@ void RendererBackend::renderFrame(
     m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
     m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
-    m_msaaColorImageInitialized[imageIndex] = true;
+    if (imageIndex < m_msaaColorImageInitialized.size()) {
+        m_msaaColorImageInitialized[imageIndex] = true;
+    }
     m_hdrResolveImageInitialized[aoFrameIndex] = true;
 
     if (

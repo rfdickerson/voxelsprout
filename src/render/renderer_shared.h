@@ -758,11 +758,14 @@ odai::math::Vector3 computeSunColor(
     return sunTint * (scatteringScale * twilightBoost);
 }
 
+// includeSunDirect=false drops the sun disk and its glow, leaving the SKY only.
+// See computeIrradianceShCoefficients for why that distinction exists.
 odai::math::Vector3 proceduralSkyRadiance(
     const odai::math::Vector3& direction,
     const odai::math::Vector3& sunDirection,
     const odai::math::Vector3& sunColor,
-    const RendererBackend::SkyDebugSettings& settings
+    const RendererBackend::SkyDebugSettings& settings,
+    bool includeSunDirect = true
 ) {
     const odai::math::Vector3 dir = odai::math::normalize(direction);
     const odai::math::Vector3 toSun = -odai::math::normalize(sunDirection);
@@ -818,8 +821,10 @@ odai::math::Vector3 proceduralSkyRadiance(
     const float phaseBoost = (phaseRayleigh * rayleigh) + (phaseMie * mie * 1.4f);
 
     const float aboveHorizon = saturate(dir.y * 4.0f + 0.2f);
-    const odai::math::Vector3 sky = (baseSky * aboveHorizon)
-        + (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)));
+    const odai::math::Vector3 sunTerm = includeSunDirect
+        ? (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)))
+        : odai::math::Vector3{};
+    const odai::math::Vector3 sky = (baseSky * aboveHorizon) + sunTerm;
 
     const odai::math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
     const float belowHorizon = saturate(-dir.y);
@@ -881,7 +886,23 @@ std::array<odai::math::Vector3, 9> computeIrradianceShCoefficients(
                 std::sin(phi) * sinTheta
             };
 
-            const odai::math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection, sunColor, settings);
+            // SKY ONLY -- THE SUN IS DELIBERATELY EXCLUDED, and this is what
+            // makes shadows visible at all.
+            //
+            // These coefficients become `ambient` in imported_static.frag,
+            // which is UNSHADOWED by construction. Integrating a sky that still
+            // contains the sun disk and its pow(sunDot, 24) glow therefore
+            // delivers most of the sun's energy a second time, omnidirectionally
+            // and with no occlusion -- so putting a surface in shadow removed
+            // only the small remainder. Measured on Goodsprings at an hour with
+            // a low sun: disabling the shadow pass entirely moved the frame by
+            // 0.61/255, i.e. the shadows were already doing nothing.
+            //
+            // The sun's contribution is the `direct` term, which IS shadowed.
+            // Counting it here as well was double-counting it, and the copy
+            // that won was the one no occluder could touch.
+            const odai::math::Vector3 radiance = proceduralSkyRadiance(
+                dir, sunDirection, sunColor, settings, /*includeSunDirect=*/false);
             const float sampleWeight = sinTheta;
             for (int basisIndex = 0; basisIndex < 9; ++basisIndex) {
                 const float basisValue = shBasis(basisIndex, dir);

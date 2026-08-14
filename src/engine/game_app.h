@@ -75,6 +75,16 @@ protected:
     // pipeline-creation time.
     virtual bool wantsStrategyMapTuning() const { return true; }
 
+    // Upscaler request, consumed by init() BEFORE renderer init for the same
+    // reason wantsStrategyMapTuning is: the quality preset chooses the internal
+    // render resolution, and that sizes every render target at swapchain build.
+    // Setting it from onInit() is too late -- the targets already exist, and the
+    // request is silently ignored.
+    //
+    // Defaults to Off (native), so every existing game is unaffected.
+    // ODAI_UPSCALER / ODAI_UPSCALER_QUALITY override whatever this returns.
+    virtual render::UpscalerSettings requestedUpscalerSettings() const { return {}; }
+
     // Draw the software mouse cursor over the frame. Off is for a capture that
     // is the product rather than a diagnostic: the cursor sits wherever the
     // desktop left it and lands in the swapchain image like any other quad, so

@@ -96,7 +96,12 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexCount > 0;
 
-    if (!m_msaaColorImageInitialized[imageIndex]) {
+    // Null when the sample count is 1: createMsaaColorTargets skips the image
+    // entirely and the main pass targets hdrResolve directly. See there.
+    const bool msaaEnabled = m_colorSampleCount != VK_SAMPLE_COUNT_1_BIT &&
+                             imageIndex < m_msaaColorImages.size() &&
+                             m_msaaColorImages[imageIndex] != VK_NULL_HANDLE;
+    if (msaaEnabled && !m_msaaColorImageInitialized[imageIndex]) {
         transitionImageLayout(
             commandBuffer,
             m_msaaColorImages[imageIndex],
@@ -121,17 +126,24 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT
     );
-    transitionImageLayout(
-        commandBuffer,
-        m_depthImages[imageIndex],
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        VK_PIPELINE_STAGE_2_NONE,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT
-    );
+    // Merged, the prepass already wrote this depth and already put a dependency
+    // on it -- transitioning from UNDEFINED here would tell the driver the
+    // contents are expendable and it is free to discard exactly what the main
+    // pass is about to load.
+    const bool mergedDepthPrepass = useMergedDepthPrepass();
+    if (!mergedDepthPrepass) {
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    }
 
     VkClearValue clearValue{};
     clearValue.color.float32[0] = 0.06f;
@@ -141,14 +153,20 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
 
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttachment.imageView = m_msaaColorImageViews[imageIndex];
+    colorAttachment.imageView =
+        msaaEnabled ? m_msaaColorImageViews[imageIndex] : m_hdrResolveImageViews[aoFrameIndex];
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.clearValue = clearValue;
-    colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-    colorAttachment.resolveImageView = m_hdrResolveImageViews[aoFrameIndex];
-    colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (msaaEnabled) {
+        colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        colorAttachment.resolveImageView = m_hdrResolveImageViews[aoFrameIndex];
+        colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    } else {
+        colorAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
+        colorAttachment.resolveImageView = VK_NULL_HANDLE;
+    }
 
     VkClearValue depthClearValue{};
     depthClearValue.depthStencil.depth = 0.0f;
@@ -158,7 +176,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depthAttachment.imageView = m_depthImageViews[imageIndex];
     depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // LOAD under the merged prepass: that pass cleared and filled this buffer.
+    // Clearing here would throw the prepass away and leave main with nothing to
+    // early-Z against.
+    depthAttachment.loadOp =
+        mergedDepthPrepass ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAttachment.clearValue = depthClearValue;
 
@@ -330,6 +352,73 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         const bool useIndirect = m_supportsMultiDrawIndirect &&
             buildImportedIndirectBatches(importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
         if (useIndirect) {
+            // DEPTH PREWRITE, in the same render pass instance as the shading
+            // draws below.
+            //
+            // The main pass clears its own depth (loadOp CLEAR) and the SSAO
+            // prepass writes into a different image at AO resolution with
+            // storeOp DONT_CARE, so nothing reaches this depth buffer before the
+            // shading draws do. Every occluded surface was therefore being run
+            // through a forward shader carrying cascaded PCF shadows, a 64-light
+            // loop, a four-layer terrain blend and PBR, only to fail the depth
+            // test afterwards. Measured: disabling the main pass's own depth
+            // writes -- removing what little rejection it had -- took main from
+            // 25.8 to 53.4 ms, i.e. roughly half the shaded fragments were
+            // already invisible.
+            //
+            // Laying depth first with a shader that does nothing but the alpha
+            // test lets the hardware kill those fragments before any of it runs.
+            // No barrier is needed: depth written by earlier draws in a render
+            // pass instance is visible to later draws in the same instance by
+            // rasterization order.
+            //
+            // The same indirect buffer is replayed, so the prewrite and the
+            // shading pass are drawing exactly the same primitives by
+            // construction -- there is no second culling path to drift.
+            // ODAI_MAIN_PREWRITE=0 skips it, for A/B measurement and as a kill
+            // switch if a driver ever disagrees about depth invariance between
+            // the two pipelines.
+            static const bool s_depthPrewriteEnabled = []() {
+                const char* env = std::getenv("ODAI_MAIN_PREWRITE");
+                return env == nullptr || (env[0] != '0');
+            }();
+            // Under the merged prepass this whole block is the thing being
+            // deleted: the depth it would lay is already in the buffer.
+            if (!mergedDepthPrepass && s_depthPrewriteEnabled &&
+                m_importedStaticDepthPrewritePipeline != VK_NULL_HANDLE) {
+                // Bracketed separately even though it is inside main's own
+                // window: this is a whole extra rasterization of the visible
+                // set, and "does laying depth first pay for itself" is not
+                // answerable while its cost is folded into the number it is
+                // supposed to be reducing.
+                writeGpuTimestampTop(kGpuTimestampQueryPrewriteStart);
+                VkPipeline boundPrewritePipeline = VK_NULL_HANDLE;
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    VkPipeline wantedPipeline =
+                        (batch.twoSided &&
+                         m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticDepthPrewritePipelineTwoSided
+                            : m_importedStaticDepthPrewritePipeline;
+                    if (wantedPipeline != boundPrewritePipeline) {
+                        vkCmdBindPipeline(
+                            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrewritePipeline = wantedPipeline;
+                    }
+                    // The alpha test must match the shading pass exactly, or a
+                    // cutout texel gets depth written for a surface that is meant
+                    // to be see-through.
+                    pushAlphaThreshold(batch.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer,
+                        indirectBuffer,
+                        indirectBase + batch.bufferOffset,
+                        batch.drawCount,
+                        sizeof(VkDrawIndexedIndirectCommand));
+                }
+                writeGpuTimestampBottom(kGpuTimestampQueryPrewriteEnd);
+            }
+
             // Two-sidedness is a pipeline switch, so the batch order (grouped
             // by it) is also the bind order -- at most one extra bind.
             VkPipeline boundOpaquePipeline = VK_NULL_HANDLE;
@@ -704,7 +793,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         transitionImageLayout(
             commandBuffer,
-            m_msaaColorImages[imageIndex],
+            msaaEnabled ? m_msaaColorImages[imageIndex] : m_hdrResolveImages[aoFrameIndex],
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,

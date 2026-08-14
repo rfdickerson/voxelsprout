@@ -29,6 +29,13 @@ public:
     // variant, so opaque DRAW_BOTH geometry was back-face culled and went
     // see-through from one side.
     VkPipeline importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+    // Depth-only prewrite for the opaque imported pass. Same vertex shader and
+    // vertex layout as importedStaticPipeline -- that is what makes the depth it
+    // writes bit-identical to what the shading pass computes -- paired with a
+    // fragment shader that does nothing but the alpha test, and a zero colour
+    // write mask.
+    VkPipeline importedStaticDepthPrewritePipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticDepthPrewritePipelineTwoSided = VK_NULL_HANDLE;
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
@@ -172,6 +179,14 @@ public:
         if (importedStaticPipelineTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineTwoSided, nullptr);
             importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+        }
+        if (importedStaticDepthPrewritePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticDepthPrewritePipeline, nullptr);
+            importedStaticDepthPrewritePipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticDepthPrewritePipelineTwoSided, nullptr);
+            importedStaticDepthPrewritePipelineTwoSided = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlendedTwoSided, nullptr);

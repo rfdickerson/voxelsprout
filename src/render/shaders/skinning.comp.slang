@@ -35,12 +35,14 @@
 //
 // and check the offsets against GpuSkinnedVertexIn / ImportedMeshVertex in
 // skinning_resources.cc and renderer_backend.h. Input stride must be 84,
-// output stride 72.
+// output stride 48.
 //
 // The output struct additionally carries the terrain-layer fields. It is bound
 // as a plain vertex buffer for the main pass, which reads it as
 // ImportedMeshVertex -- so it has to match that struct to its last byte, not
 // just up to the fields skinning happens to care about.
+
+import imported_vertex_pack;
 
 struct SkinnedVertexIn
 {
@@ -54,11 +56,18 @@ struct SkinnedVertexIn
     float boneWeight0, boneWeight1, boneWeight2, boneWeight3;
 };
 
+// 48 bytes, matching ImportedMeshVertex exactly -- see renderer_backend.h.
+//
+// The narrowed fields are declared as uint and packed by hand rather than as
+// int16_t/uint8_t: this is a StructuredBuffer, and sub-32-bit members in one
+// would require VK_KHR_8bit_storage / 16bit_storage, which this device path
+// does not enable. The graphics pipelines get the same bytes unpacked for free
+// by their vertex-attribute formats.
 struct SkinnedVertexOut
 {
     float positionX, positionY, positionZ;
-    float normalX, normalY, normalZ;
-    float colorR, colorG, colorB;
+    uint packedNormal;
+    uint packedColor;
     float u, v;
     uint textureIndex;
     uint flags;
@@ -66,7 +75,8 @@ struct SkinnedVertexOut
     // terrain layers, but the fields must exist and be initialized: the main
     // pass reads them off this same buffer, and leaving them out shortens the
     // stride so every vertex after the first is fetched from the wrong offset.
-    uint layerTextureIndex0, layerTextureIndex1, layerTextureIndex2, layerTextureIndex3;
+    uint packedLayerTexture01;
+    uint packedLayerTexture23;
     uint layerWeights;
 };
 
@@ -140,20 +150,15 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     result.positionX = finalPosition.x;
     result.positionY = finalPosition.y;
     result.positionZ = finalPosition.z;
-    result.normalX = finalNormal.x;
-    result.normalY = finalNormal.y;
-    result.normalZ = finalNormal.z;
-    result.colorR = v.colorR;
-    result.colorG = v.colorG;
-    result.colorB = v.colorB;
+    result.packedNormal = encodeImportedVertexNormal(finalNormal);
+    result.packedColor = encodeImportedVertexColor(float3(v.colorR, v.colorG, v.colorB));
     result.u = v.u;
     result.v = v.v;
     result.textureIndex = v.textureIndex;
     result.flags = v.flags;
-    result.layerTextureIndex0 = 0xffffffffu;
-    result.layerTextureIndex1 = 0xffffffffu;
-    result.layerTextureIndex2 = 0xffffffffu;
-    result.layerTextureIndex3 = 0xffffffffu;
+    // 0xffff per 16-bit slot, so both words are all-ones.
+    result.packedLayerTexture01 = 0xffffffffu;
+    result.packedLayerTexture23 = 0xffffffffu;
     result.layerWeights = 0u;
     skinnedVertices[vertexIndex] = result;
 }

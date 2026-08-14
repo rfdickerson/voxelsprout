@@ -57,6 +57,11 @@ struct TaaUniform
     // zw = LAST frame's sub-pixel jitter in NDC, which prevViewProj carries and
     // the history image does not.
     float4 params;
+    // Read only by temporal_upscale.comp.slang, which shares this descriptor set
+    // layout. Declared here so both shaders agree on the struct's size and every
+    // field before it is read from the same offset.
+    float4 jitterAndInputExtent;
+    float4 upscaleTuning;
 };
 
 [[vk::binding(5, 0)]]

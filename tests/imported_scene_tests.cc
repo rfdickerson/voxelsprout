@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1123,6 +1125,99 @@ void testAlphaThresholdRoundTrip() {
     fs::remove(scenePath);
 }
 
+// The CPU half of ImportedMeshVertex's packing against the shader half in
+// shaders/imported_vertex_pack.slang. Nothing else can catch those two
+// drifting: a wrong decode does not fail, it shades slightly wrong forever.
+//
+// The decoders below are transcribed from that Slang module deliberately -- if
+// someone edits the shader without editing this, the point is that this test
+// keeps asserting the OLD contract and starts failing.
+void testImportedVertexPacking() {
+    using odai::importer::packImportedVertexColor;
+    using odai::importer::packImportedVertexLayerPair;
+    using odai::importer::packImportedVertexNormal;
+
+    const auto decodeNormal = [](std::uint32_t packed) {
+        const auto half = [](std::uint32_t bits) {
+            return static_cast<float>(static_cast<std::int16_t>(bits & 0xffffu)) / 32767.0f;
+        };
+        float x = half(packed);
+        float z = half(packed >> 16);
+        float y = 1.0f - std::abs(x) - std::abs(z);
+        if (y < 0.0f) {
+            const float foldedX = (1.0f - std::abs(z)) * (x >= 0.0f ? 1.0f : -1.0f);
+            const float foldedZ = (1.0f - std::abs(x)) * (z >= 0.0f ? 1.0f : -1.0f);
+            x = foldedX;
+            z = foldedZ;
+        }
+        const float length = std::sqrt((x * x) + (y * y) + (z * z));
+        return std::array<float, 3>{x / length, y / length, z / length};
+    };
+    const auto decodeSrgbByte = [](std::uint32_t byte) {
+        const float c = static_cast<float>(byte) / 255.0f;
+        return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+
+    // Normals: worst-case angular error over a deterministic sweep of the sphere.
+    double worstDegrees = 0.0;
+    for (int i = 0; i < 64; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            const float theta = static_cast<float>(i) * 3.14159265f / 63.0f;
+            const float phi = static_cast<float>(j) * 6.28318531f / 64.0f;
+            const float normal[3] = {
+                std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
+            const std::array<float, 3> decoded = decodeNormal(packImportedVertexNormal(normal));
+            const float dot = (normal[0] * decoded[0]) + (normal[1] * decoded[1]) +
+                              (normal[2] * decoded[2]);
+            worstDegrees = std::max<double>(
+                worstDegrees,
+                std::acos(static_cast<double>(std::clamp(dot, -1.0f, 1.0f))) * 180.0 / 3.14159265);
+        }
+    }
+    // 0.05, against a measured worst case of 0.034 degrees. The worst case is
+    // NOT uniform over the sphere -- it sits just below the equator near the
+    // fold diagonals, around (0.98, -0.07, 0.19) -- so a random-sample estimate
+    // understates it by an order of magnitude. This grid sweep hits it.
+    expectTrue(worstDegrees < 0.05,
+               "octahedral normal packing stays under 0.05 degrees of error");
+
+    // A degenerate normal must not produce NaN -- the shader normalizes what it
+    // gets and would propagate one straight into the lighting.
+    const float zeroNormal[3] = {0.0f, 0.0f, 0.0f};
+    const std::array<float, 3> degenerate = decodeNormal(packImportedVertexNormal(zeroNormal));
+    expectTrue(std::isfinite(degenerate[0]) && std::isfinite(degenerate[1]) &&
+                   std::isfinite(degenerate[2]),
+               "a zero-length normal packs to a finite direction");
+
+    // Colour: every one of the 256 sRGB source bytes must survive the round trip
+    // exactly. That is the case that matters -- these values are authored as
+    // sRGB bytes, not as arbitrary linear floats.
+    int inexact = 0;
+    for (std::uint32_t byte = 0; byte < 256u; ++byte) {
+        const float linear = decodeSrgbByte(byte);
+        const float color[3] = {linear, linear, linear};
+        const std::uint32_t packed = packImportedVertexColor(color);
+        if ((packed & 0xffu) != byte || ((packed >> 8) & 0xffu) != byte ||
+            ((packed >> 16) & 0xffu) != byte) {
+            ++inexact;
+        }
+    }
+    expectTrue(inexact == 0, "all 256 sRGB source bytes round-trip exactly through vertex colour");
+
+    // Out-of-range input clamps rather than wrapping into a bright colour.
+    const float overbright[3] = {4.0f, -1.0f, 0.0f};
+    const std::uint32_t clamped = packImportedVertexColor(overbright);
+    expectTrue((clamped & 0xffu) == 255u, "colour above 1.0 clamps to white");
+    expectTrue(((clamped >> 8) & 0xffu) == 0u, "colour below 0.0 clamps to black");
+
+    // Layer slots: two per word, and anything that will not fit in 16 bits must
+    // land on the sentinel instead of truncating into a valid-looking slot.
+    expectTrue(packImportedVertexLayerPair(3u, 9u) == (3u | (9u << 16)),
+               "layer slots pack low half first");
+    expectTrue(packImportedVertexLayerPair(0xffffffffu, 0x1ffffu) == 0xffffffffu,
+               "unrepresentable layer slots become the 0xffff sentinel, not a truncated index");
+}
+
 int main() {
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
@@ -1137,6 +1232,7 @@ int main() {
     testMaterialLibraryRoundTrip();
     testImportedSceneRaycast();
     testAlphaThresholdRoundTrip();
+    testImportedVertexPacking();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

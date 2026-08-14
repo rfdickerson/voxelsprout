@@ -157,6 +157,7 @@ void RendererBackend::destroySkinningComputeResources() {
     // before the layout itself.
     for (SkinnedInstanceSlot& slot : m_skinningInstances) {
         destroyDescriptorBufferSet(slot.bufferSet);
+        destroyDescriptorBufferSet(slot.velocityBufferSet);
         m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
         slot.restPoseVertexBufferHandle = kInvalidBufferHandle;
         m_bufferAllocator.destroyBuffer(slot.indexBufferHandle);
@@ -167,6 +168,10 @@ void RendererBackend::destroySkinningComputeResources() {
         slot.boneCount = 0;
         slot.meshDraws.clear();
         slot.pendingBoneMatrices.clear();
+        slot.previousBoneMatrices.clear();
+        slot.currentBoneAddress = 0;
+        slot.previousBoneAddress = 0;
+        slot.boneBufferBytes = 0;
         for (const std::uint32_t textureSlot : slot.textureSlots) {
             releaseImportedTexture(textureSlot);
         }
@@ -353,6 +358,20 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             return false;
         }
     }
+    // Velocity set. Not fatal if it fails: the actor still renders, it just has
+    // no motion vector and its pixels fall back to depth reprojection.
+    if (!slot.velocityBufferSet.valid() && m_skinnedVelocityDescriptorSetLayout != VK_NULL_HANDLE) {
+        if (!createDescriptorBufferSet(
+                m_skinnedVelocityDescriptorSetLayout,
+                kMaxFramesInFlight,
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.skinnedVelocity",
+                slot.velocityBufferSet
+            )) {
+            VOX_LOGW("render") << "skinned velocity descriptor set unavailable for instance "
+                               << instanceIndex;
+        }
+    }
 
     BufferHandle newRestPoseHandle = kInvalidBufferHandle;
     if (!uploadDeviceLocalBuffer(
@@ -403,12 +422,8 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         dst.position[0] = src.position[0];
         dst.position[1] = src.position[1];
         dst.position[2] = src.position[2];
-        dst.normal[0] = src.normal[0];
-        dst.normal[1] = src.normal[1];
-        dst.normal[2] = src.normal[2];
-        dst.color[0] = src.color[0];
-        dst.color[1] = src.color[1];
-        dst.color[2] = src.color[2];
+        dst.packedNormal = odai::importer::packImportedVertexNormal(src.normal);
+        dst.packedColor = odai::importer::packImportedVertexColor(src.color);
         dst.uv[0] = src.uv[0];
         dst.uv[1] = src.uv[1];
         dst.textureIndex = src.textureIndex;
@@ -699,6 +714,46 @@ void RendererBackend::uploadSkinnedActorPoseForFrame() {
             slot.bufferSet, m_currentFrame,
             descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 1),
             boneAddress, boneBufferSize);
+
+        // Last frame's pose, uploaded alongside this frame's so the velocity
+        // pass can skin the same rest vertex into both. On the very first frame
+        // for a slot there is no previous pose, so it reuses the current one --
+        // which yields a zero motion vector, i.e. "this actor did not move",
+        // which is the right answer for a pose that has only just appeared.
+        const std::vector<odai::math::Matrix4>& previousSource =
+            (slot.previousBoneMatrices.size() == slot.pendingBoneMatrices.size())
+                ? slot.previousBoneMatrices
+                : slot.pendingBoneMatrices;
+        const std::optional<FrameArenaSlice> previousSlice = m_frameArena.allocateUpload(
+            boneBufferSize, kBoneMatrixAlignment, FrameArenaUploadKind::Unknown);
+        if (previousSlice.has_value() && previousSlice->mapped != nullptr) {
+            auto* dstPrevious = static_cast<odai::math::Matrix4*>(previousSlice->mapped);
+            for (std::size_t m = 0; m < previousSource.size(); ++m) {
+                dstPrevious[m] = transpose(previousSource[m]);
+            }
+            slot.currentBoneAddress = boneAddress;
+            slot.previousBoneAddress =
+                m_bufferAllocator.getDeviceAddress(previousSlice->buffer) + previousSlice->offset;
+            slot.boneBufferBytes = boneBufferSize;
+        } else {
+            // No previous upload means no velocity draw this frame; the pixels
+            // fall back to depth reprojection rather than reading a stale pose.
+            slot.currentBoneAddress = 0;
+            slot.previousBoneAddress = 0;
+            slot.boneBufferBytes = 0;
+        }
+        if (slot.velocityBufferSet.valid() && slot.currentBoneAddress != 0 &&
+            m_skinnedVelocityDescriptorSetLayout != VK_NULL_HANDLE) {
+            writeDescriptorBufferStorage(
+                slot.velocityBufferSet, m_currentFrame,
+                descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 0),
+                slot.currentBoneAddress, slot.boneBufferBytes);
+            writeDescriptorBufferStorage(
+                slot.velocityBufferSet, m_currentFrame,
+                descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 1),
+                slot.previousBoneAddress, slot.boneBufferBytes);
+        }
+        slot.previousBoneMatrices = slot.pendingBoneMatrices;
     }
 }
 

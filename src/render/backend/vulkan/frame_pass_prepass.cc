@@ -16,9 +16,13 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
     const uint32_t aoFrameIndex = context.aoFrameIndex;
     const uint32_t imageIndex = context.imageIndex;
-    const VkExtent2D aoExtent = context.aoExtent;
-    const VkViewport& aoViewport = context.aoViewport;
-    const VkRect2D& aoScissor = context.aoScissor;
+    // Merged: the prepass IS the depth pass, so it runs at the main pass's
+    // resolution and writes the main pass's depth buffer. See
+    // useMergedDepthPrepass in renderer_backend.h for why.
+    const bool merged = useMergedDepthPrepass();
+    const VkExtent2D aoExtent = merged ? m_renderExtent : context.aoExtent;
+    const VkViewport& aoViewport = merged ? context.viewport : context.aoViewport;
+    const VkRect2D& aoScissor = merged ? context.scissor : context.aoScissor;
     // Voxel chunk inputs: consumed by the chunk draw below, mirroring the main pass.
     // The magica/pipe prepass inputs remain on PrepassInputs but stay unconsumed —
     // those draws belong to the prior factory sim and have no caller left.
@@ -85,10 +89,14 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
 
     VkRenderingAttachmentInfo aoDepthAttachment{};
     aoDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    aoDepthAttachment.imageView = m_aoDepthImageViews[imageIndex];
+    aoDepthAttachment.imageView =
+        merged ? m_depthImageViews[imageIndex] : m_aoDepthImageViews[imageIndex];
     aoDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     aoDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    aoDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // STORE, not DONT_CARE: merged, this depth is what the main pass tests
+    // against. Discarding it is exactly what forced the second rasterization.
+    aoDepthAttachment.storeOp =
+        merged ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     aoDepthAttachment.clearValue = aoDepthClearValue;
 
     VkRenderingInfo normalDepthRenderingInfo{};
@@ -110,7 +118,13 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     // Begin/clear/end even when nothing needs the result: the attachments must
     // still end the frame in the layout the descriptor set was written for, and
     // clearing is a fraction of the cost of re-rendering the scene.
-    if (!inputs.normalDepthNeeded) {
+    //
+    // Merged, there is no such thing as "nobody needs this": the main pass
+    // tests against the depth these draws lay, and skipping them renders an
+    // empty frame. The normal-depth colour write is then the only part that is
+    // wasted when AO, shafts and water are all off, and it is a fraction of the
+    // rasterization it rides along with.
+    if (!inputs.normalDepthNeeded && !merged) {
         vkCmdEndRendering(commandBuffer);
         writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
         return;
@@ -330,6 +344,26 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
+
+    if (merged) {
+        // Depth stays in DEPTH_ATTACHMENT_OPTIMAL -- this is an execution and
+        // memory dependency, not a layout change. Without it the main pass's
+        // early depth test may read what this pass's late depth writes have not
+        // yet made visible.
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    }
 
     transitionImageLayout(
         commandBuffer,

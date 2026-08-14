@@ -338,6 +338,11 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuSsaoTimeMs = durationMs(kGpuTimestampQuerySsaoStart, kGpuTimestampQuerySsaoEnd);
     m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
+    m_debugGpuPrewriteTimeMs =
+        durationMs(kGpuTimestampQueryPrewriteStart, kGpuTimestampQueryPrewriteEnd);
+    m_debugGpuVelocityTimeMs =
+        durationMs(kGpuTimestampQueryVelocityStart, kGpuTimestampQueryVelocityEnd);
+    m_debugGpuTaaTimeMs = durationMs(kGpuTimestampQueryTaaStart, kGpuTimestampQueryTaaEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
     // Per-pass GPU breakdown. Everything above was already measured and then
@@ -368,6 +373,9 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
                 << " ssao=" << m_debugGpuSsaoTimeMs
                 << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs
                 << " main=" << m_debugGpuMainTimeMs
+                << " (prewrite=" << m_debugGpuPrewriteTimeMs << ")"
+                << " velocity=" << m_debugGpuVelocityTimeMs
+                << " taa=" << m_debugGpuTaaTimeMs
                 << " post=" << m_debugGpuPostTimeMs
                 << " ui=" << m_debugGpuUiTimeMs
                 << " autoExposure=" << m_debugGpuAutoExposureTimeMs

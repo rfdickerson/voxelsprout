@@ -494,6 +494,8 @@ void RendererBackend::clearGpuScene() {
     // Chunks and arenas go together: the buffers backing them were just
     // released above, so every recorded offset is now meaningless.
     m_importedSceneChunks.clear();
+    m_freeImportedSceneChunks.clear();
+    m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
     m_importedVertexArena.reset(0);
     m_importedIndexArena.reset(0);
     m_visibleImportedMeshDraws.clear();
@@ -655,12 +657,15 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
 }
 
 std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
-    const std::size_t chunkCountBefore = m_importedSceneChunks.size();
+    // Cleared first so a success that produced no chunk -- an empty scene, which
+    // returns true -- is distinguishable. Comparing the vector's size before and
+    // after used to serve for that, and stopped being able to once a chunk could
+    // land in a recycled slot without the vector growing at all.
+    m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
     if (!uploadImportedSceneInternal(scene, nullptr, /*appendChunk=*/true)) {
         return kInvalidImportedChunkIndex;
     }
-    if (m_importedSceneChunks.size() <= chunkCountBefore) {
-        // Upload reported success but produced no chunk -- an empty scene.
+    if (m_lastImportedChunkIndex == kInvalidImportedChunkIndex) {
         return kInvalidImportedChunkIndex;
     }
     // When ANY resident chunk carries page ranges, per-frame draw selection is
@@ -668,10 +673,10 @@ std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::Importe
     // chunk whose pages were dropped -- e.g. by the coverage check above --
     // has every draw silently excluded. Worth a line at add time; that failure
     // renders as "uploaded fine, never drawn".
-    VOX_LOGI("render") << "chunk " << (m_importedSceneChunks.size() - 1u) << " added: draws="
-                       << m_importedSceneChunks.back().draws.size() << " pages="
-                       << m_importedSceneChunks.back().pageRanges.size();
-    return m_importedSceneChunks.size() - 1u;
+    const ImportedSceneChunk& added = m_importedSceneChunks[m_lastImportedChunkIndex];
+    VOX_LOGI("render") << "chunk " << m_lastImportedChunkIndex << " added: draws="
+                       << added.draws.size() << " pages=" << added.pageRanges.size();
+    return m_lastImportedChunkIndex;
 }
 
 void RendererBackend::removeImportedSceneChunkAt(std::size_t chunkIndex) {
@@ -903,13 +908,21 @@ bool RendererBackend::copyBufferRange(
 }
 
 bool RendererBackend::ensureImportedArenaCapacity(
-    std::uint64_t vertexCount, std::uint64_t indexCount) {
+    std::uint64_t vertexCount, std::uint64_t indexCount, bool pastCapacity) {
     // Vertex and index arenas grow independently; either may already be big
-    // enough. "Big enough" here is capacity, not free space -- the caller
-    // retries allocate() after this and grows again if fragmentation defeated
-    // the first attempt.
-    const std::uint64_t neededVertices = m_importedVertexArena.used() + vertexCount;
-    const std::uint64_t neededIndices = m_importedIndexArena.used() + indexCount;
+    // enough. "Big enough" is measured against used() normally and against
+    // capacity() when the caller is here BECAUSE an allocation already failed --
+    // see the header. Measuring a post-fragmentation retry against used() makes
+    // this function a no-op, which is exactly the bug the pastCapacity flag
+    // replaced: the caller then grew the suballocator by hand, the GPU buffer
+    // stayed its old size, and allocate() started handing back offsets past the
+    // end of it.
+    const std::uint64_t vertexBase =
+        pastCapacity ? m_importedVertexArena.capacity() : m_importedVertexArena.used();
+    const std::uint64_t indexBase =
+        pastCapacity ? m_importedIndexArena.capacity() : m_importedIndexArena.used();
+    const std::uint64_t neededVertices = vertexBase + vertexCount;
+    const std::uint64_t neededIndices = indexBase + indexCount;
     const bool growVertices = neededVertices > m_importedVertexArena.capacity();
     const bool growIndices = neededIndices > m_importedIndexArena.capacity();
     if (!growVertices && !growIndices) {
@@ -919,8 +932,14 @@ bool RendererBackend::ensureImportedArenaCapacity(
     // First fill is sized exactly; only *growth* doubles. Doubling from empty
     // would round a 3.29M-vertex scene up to 4.19M and cost ~110 MB across the
     // three arenas that a one-shot uploadImportedScene() never needs.
-    const auto nextCapacity = [](std::uint64_t current, std::uint64_t needed) {
-        if (current == 0) {
+    //
+    // A fragmentation retry is sized exactly too. Doubling is the right policy
+    // for a working set that is genuinely getting bigger, but this arena never
+    // shrinks, so paying it for a hole in the free list ratchets the buffer up
+    // permanently -- at ~100 bytes per vertex across the main and shadow streams,
+    // one doubling of an 8M-vertex arena is 800 MB the session never gives back.
+    const auto nextCapacity = [pastCapacity](std::uint64_t current, std::uint64_t needed) {
+        if (current == 0 || pastCapacity) {
             return needed;
         }
         std::uint64_t capacity = current;
@@ -1061,9 +1080,18 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     chunk.pageRanges.shrink_to_fit();
     chunk.textureSlots.clear();
     chunk.textureSlots.shrink_to_fit();
+    // Lights were being left on the dead chunk. rebuildImportedDrawTables skips
+    // dead chunks so they never reached the frame, but the storage stayed for the
+    // rest of the session -- and an interior cell carries a lot of them.
+    chunk.lights.clear();
+    chunk.lights.shrink_to_fit();
     chunk.vertexCount = 0;
     chunk.indexCount = 0;
     chunk.terrainDrawCount = 0;
+    // Recycle the slot. Without this the vector only ever grows: a session that
+    // streams thousands of cells leaves thousands of dead entries behind, and
+    // rebuildImportedDrawTables walks all of them on every single add and remove.
+    m_freeImportedSceneChunks.push_back(chunkIndex);
 
     rebuildImportedDrawTables();
 }
@@ -1125,7 +1153,57 @@ bool RendererBackend::ensureImportedTextureSampler() {
     samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerCreateInfo.mipLodBias = 0.0f;
+    // MIP BIAS FOR UPSCALING. Rendering at a fraction of the output resolution
+    // means every texture lookup picks a mip chosen for the SMALLER grid, so a
+    // surface that would have sampled mip 1 at native samples mip 2 -- and the
+    // upscaler is then asked to reconstruct detail that was never rasterized.
+    // The result reads as "low resolution" in a way no amount of temporal
+    // accumulation can recover, because the information is not in any frame.
+    //
+    // log2(renderScale) is the standard correction and is what Intel's XeSS
+    // guide means by "adjust mip bias": at 0.5 scale it is -1, restoring the mip
+    // the native-resolution frame would have picked. Clamped at -2 because
+    // beyond that the sampler is fetching detail the low-res grid genuinely
+    // cannot hold and it just aliases.
+    //
+    // 0 when not upscaling, so every other game and the native path are
+    // unaffected.
+    const float renderScaleForMip =
+        (m_swapchainExtent.width > 0u && m_renderExtent.width > 0u)
+            ? (static_cast<float>(m_renderExtent.width) /
+               static_cast<float>(m_swapchainExtent.width))
+            : 1.0f;
+    //
+    // ODAI_UPSCALE_MIPBIAS overrides the computed value. The full log2 bias is
+    // the textbook answer but it assumes the upscaler can resolve the extra
+    // detail temporally, and distant terrain is exactly where it cannot: a
+    // sub-pixel sliver of hillside is a different surface every jitter phase, so
+    // the restored detail arrives as aliasing that never converges. The right
+    // value is therefore a measured trade, not a derivation.
+    // -0.5 rather than the textbook log2(0.5) = -1, measured on the distant
+    // Goodsprings skyline against a native-resolution reference:
+    //
+    //   bias    far-band detail   error vs native
+    //    0.0        10.01              4.936
+    //   -0.5        10.87              4.824   <- best on both
+    //   -1.0        11.75              4.926
+    //
+    // The full bias does restore more high-frequency energy, but past -0.5 the
+    // extra is aliasing the temporal pass cannot resolve -- distant sub-pixel
+    // geometry is a different surface every jitter phase -- so error rises again
+    // even as "detail" does. Half the textbook value is where the restored
+    // detail is still real.
+    static const float s_mipBiasOverride = []() {
+        const char* env = std::getenv("ODAI_UPSCALE_MIPBIAS");
+        return (env != nullptr) ? static_cast<float>(std::atof(env)) : 1.0f;
+    }();
+    samplerCreateInfo.mipLodBias = (renderScaleForMip < 0.999f)
+        ? ((s_mipBiasOverride <= 0.5f) ? s_mipBiasOverride : -0.5f)
+        : 0.0f;
+    VOX_LOGI("render") << "imported texture sampler: mip bias " << samplerCreateInfo.mipLodBias
+                       << " (render " << m_renderExtent.width << "x" << m_renderExtent.height
+                       << ", swapchain " << m_swapchainExtent.width << "x"
+                       << m_swapchainExtent.height << ")";
     samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
         ? std::min(m_maxSamplerAnisotropy, 8.0f)
@@ -1548,6 +1626,35 @@ bool RendererBackend::uploadImportedSceneInternal(
     std::vector<std::uint32_t> importedTextureSlots(
         uploadScene.textures.size(),
         std::numeric_limits<std::uint32_t>::max());
+
+    // The chunk built at the bottom of this function is what OWNS these slots:
+    // ImportedSceneChunk::textureSlots is the only thing removeImportedSceneChunk
+    // can release from. Every return between the acquires below and that chunk
+    // existing therefore pins each acquired texture at refcount >= 1 for the rest
+    // of the process -- there is no other handle to it. Streaming makes that
+    // unbounded rather than merely untidy: a cell that fails to upload is marked
+    // evicted, not unavailable, so the planner offers it again, and each attempt
+    // leaves another reference behind. This guard undoes the acquires on any path
+    // that does not reach the chunk.
+    //
+    // Disarmed (committed) in two places: when the chunk takes the slots, and
+    // before clearImportedSceneMeshes(), which tears the whole table down and
+    // would otherwise be double-released.
+    struct TextureSlotAcquireGuard {
+        RendererBackend* backend = nullptr;
+        const std::vector<std::uint32_t>* slots = nullptr;
+        bool committed = false;
+        void commit() { committed = true; }
+        ~TextureSlotAcquireGuard() {
+            if (committed || backend == nullptr || slots == nullptr) {
+                return;
+            }
+            for (const std::uint32_t slot : *slots) {
+                backend->releaseImportedTexture(slot);
+            }
+        }
+    } textureSlotGuard{this, &importedTextureSlots, false};
+
     if (m_supportsBindlessDescriptors &&
         m_bindlessBufferSet.valid() &&
         m_bindlessTextureCapacity > kBindlessTextureStaticCount &&
@@ -1686,6 +1793,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         scheduleCommandPoolRelease(commandPool, textureUploadTimelineValue);
         commandPool = VK_NULL_HANDLE;
         if (textureUploadFailed) {
+            // Full teardown clears the slot table itself, so the guard must not
+            // also release into it.
+            textureSlotGuard.commit();
             clearImportedSceneMeshes();
             return false;
         }
@@ -1909,8 +2019,8 @@ bool RendererBackend::uploadImportedSceneInternal(
     for (const odai::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
         ImportedMeshVertex dstVertex{};
         std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-        std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
-        std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
+        dstVertex.packedNormal = odai::importer::packImportedVertexNormal(srcVertex.normal);
+        dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color);
         std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
         dstVertex.flags = srcVertex.flags;
         if (srcVertex.textureIndex < importedTextureSlots.size()) {
@@ -1922,14 +2032,17 @@ bool RendererBackend::uploadImportedSceneInternal(
         // as textureIndex above. An unmapped layer becomes the invalid slot and
         // the shader skips it, rather than sampling whatever descriptor happens
         // to sit at the unremapped index.
-        for (std::size_t layer = 0;
-             layer < std::size(dstVertex.layerTextureIndex);
-             ++layer) {
+        std::uint32_t remappedLayers[4] = {};
+        for (std::size_t layer = 0; layer < 4; ++layer) {
             const std::uint32_t sourceIndex = srcVertex.layerTextureIndex[layer];
-            dstVertex.layerTextureIndex[layer] = sourceIndex < importedTextureSlots.size()
+            remappedLayers[layer] = sourceIndex < importedTextureSlots.size()
                 ? importedTextureSlots[sourceIndex]
                 : std::numeric_limits<std::uint32_t>::max();
         }
+        dstVertex.packedLayerTexture01 =
+            odai::importer::packImportedVertexLayerPair(remappedLayers[0], remappedLayers[1]);
+        dstVertex.packedLayerTexture23 =
+            odai::importer::packImportedVertexLayerPair(remappedLayers[2], remappedLayers[3]);
         dstVertex.layerWeights = srcVertex.layerWeights;
         vertices.push_back(dstVertex);
     }
@@ -2365,16 +2478,20 @@ bool RendererBackend::uploadImportedSceneInternal(
     }
     std::uint64_t firstVertex = m_importedVertexArena.allocate(chunkVertexCount, 1);
     if (firstVertex == GpuArenaAllocator::kInvalidOffset && chunkVertexCount > 0) {
-        m_importedVertexArena.grow(m_importedVertexArena.capacity() + chunkVertexCount);
-        if (!ensureImportedArenaCapacity(chunkVertexCount, 0)) {
+        // Capacity was already sufficient (the call above saw to that), so this
+        // is fragmentation: no single free range fits. Grow PAST capacity so the
+        // arena gains a contiguous tail block, and grow the GPU buffer with it --
+        // ensureImportedArenaCapacity does both. Growing only the suballocator
+        // here, which is what this used to do, produced an offset the buffer did
+        // not actually reach.
+        if (!ensureImportedArenaCapacity(chunkVertexCount, 0, /*pastCapacity=*/true)) {
             return false;
         }
         firstVertex = m_importedVertexArena.allocate(chunkVertexCount, 1);
     }
     std::uint64_t firstIndexSlot = m_importedIndexArena.allocate(chunkIndexCount, 1);
     if (firstIndexSlot == GpuArenaAllocator::kInvalidOffset && chunkIndexCount > 0) {
-        m_importedIndexArena.grow(m_importedIndexArena.capacity() + chunkIndexCount);
-        if (!ensureImportedArenaCapacity(0, chunkIndexCount)) {
+        if (!ensureImportedArenaCapacity(0, chunkIndexCount, /*pastCapacity=*/true)) {
             return false;
         }
         firstIndexSlot = m_importedIndexArena.allocate(chunkIndexCount, 1);
@@ -2432,7 +2549,10 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.firstIndex = firstIndexSlot;
     chunk.indexCount = chunkIndexCount;
     chunk.terrainDrawCount = chunkTerrainDrawCount;
+    // Ownership of every acquired slot passes to the chunk here; from this point
+    // removeImportedSceneChunk is what releases them.
     chunk.textureSlots = importedTextureSlots;
+    textureSlotGuard.commit();
     chunk.lights = std::move(chunkLights);
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
@@ -2445,7 +2565,17 @@ bool RendererBackend::uploadImportedSceneInternal(
         chunk.draws.push_back(draw);
     }
     chunk.pageRanges = std::move(pageDrawRanges);
-    m_importedSceneChunks.push_back(std::move(chunk));
+    // Reuse a slot an evicted chunk left behind, or append if there is none.
+    // Indices stay valid for the lifetime of a live chunk either way -- a caller
+    // holding one has already been told the chunk was removed.
+    if (!m_freeImportedSceneChunks.empty()) {
+        m_lastImportedChunkIndex = m_freeImportedSceneChunks.back();
+        m_freeImportedSceneChunks.pop_back();
+        m_importedSceneChunks[m_lastImportedChunkIndex] = std::move(chunk);
+    } else {
+        m_lastImportedChunkIndex = m_importedSceneChunks.size();
+        m_importedSceneChunks.push_back(std::move(chunk));
+    }
     rebuildImportedDrawTables();
     drawBuildMs = phaseTimer.elapsedMs();
     phaseTimer.restart();
@@ -2458,6 +2588,8 @@ bool RendererBackend::uploadImportedSceneInternal(
                            << ", indexHandle=" << m_importedIndexBufferHandle << ")";
         // The arenas are shared state now, so tear them down as a unit rather
         // than destroying handles this call happens to be holding.
+        // As above: the teardown owns the slot table from here.
+        textureSlotGuard.commit();
         clearImportedSceneMeshes();
         return false;
     }

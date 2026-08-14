@@ -1,5 +1,7 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
+#include "render/upscale/upscale_policy.h"
+
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
 #include "core/log.h"
@@ -236,6 +238,17 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         VOX_LOGE("render") << "init failed at createSsaoComputeResources\n";
         shutdown();
         return false;
+    }
+    // Not a runStep: XeGTAO failing must not fail init. The other three
+    // estimators are already built at this point and stay usable.
+    if (!createXeGtaoResources()) {
+        VOX_LOGW("render") << "XeGTAO unavailable; other AO modes unaffected";
+    }
+    // Same treatment: motion vectors are an enhancement, and without them
+    // consumers fall back to the depth reprojection that predates this pass.
+    if (!createSkinnedVelocityResources()) {
+        VOX_LOGW("render") << "skinned motion vectors unavailable; TAA falls back to depth "
+                              "reprojection for animated geometry";
     }
     // Creates the descriptor-set-layout/buffer-set/pipeline up front so
     // they're ready before any uploadSkinnedMeshTemplate() call; that
@@ -1875,7 +1888,31 @@ bool RendererBackend::createSwapchain() {
     m_swapchainFormat = surfaceFormat.format;
     m_swapchainExtent = extent;
     {
-        float renderScale = 1.0f;
+        // Resolved here, not at init, because the quality preset chooses the
+        // internal resolution and that sizes every render target -- so it has to
+        // be known before any of them are built, and re-resolved on a swapchain
+        // rebuild.
+        //
+        // XeSS runtime support is reported as false for now: the backend is not
+        // implemented past selection, so claiming the device supports it would
+        // make resolveUpscaler hand back Xess and the renderer would then run
+        // the Temporal path while reporting XeSS. Better to report the honest
+        // reason until there is something to run.
+        m_upscalerStatus = resolveUpscaler(m_upscalerSettings, /*runtimeSupportsXess=*/false);
+        if (m_upscalerStatus.requested != m_upscalerStatus.active) {
+            VOX_LOGW("render") << "upscaler: requested "
+                               << upscalerBackendName(m_upscalerStatus.requested) << " but running "
+                               << upscalerBackendName(m_upscalerStatus.active) << " -- "
+                               << m_upscalerStatus.reason;
+        } else if (m_upscalerStatus.active != UpscalerBackend::Off) {
+            VOX_LOGI("render") << "upscaler: " << upscalerBackendName(m_upscalerStatus.active)
+                               << " at " << upscalerQualityName(m_upscalerSettings.quality)
+                               << " (render scale " << m_upscalerStatus.renderScale << ")";
+        }
+
+        float renderScale = m_upscalerStatus.renderScale;
+        // ODAI_RENDER_SCALE still wins where it is set: it predates the upscaler
+        // and is what every measurement in this project's notes was taken with.
         if (const char* scaleEnv = std::getenv("ODAI_RENDER_SCALE")) {
             renderScale = static_cast<float>(std::atof(scaleEnv));
         }
@@ -1930,6 +1967,12 @@ bool RendererBackend::createSwapchain() {
     if (!createTaaTargets()) {
         return false;
     }
+    // After the extents are final and re-run on every resize: the backend's
+    // setup() is told the render and display sizes, and a reconstructing
+    // upscaler that was handed stale ones would dispatch over the wrong grid.
+    // createTaaComputeResources() has already built the pipeline layout its
+    // pipelines are created against -- it is an earlier init step.
+    createUpscalerBackend();
     if (!createHdrResolveTargets()) {
         VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
@@ -2394,6 +2437,8 @@ void RendererBackend::shutdown() {
         destroyAutoExposureResources();
         destroySunShaftResources();
         destroyTaaComputeResources();
+        destroySkinnedVelocityResources();
+        destroyXeGtaoResources();
         destroySsaoComputeResources();
         destroySkinningComputeResources();
         destroyChunkBuffers();

@@ -191,8 +191,24 @@ public:
         std::span<const std::size_t> visibleChunkIndices,
         const ImportedActorFrameData* importedActors = nullptr
     );
+    // Upscaling. Set before init() to take effect on the first swapchain build:
+    // the quality preset chooses the internal render resolution, which sizes
+    // every render target. upscalerStatus() reports what actually runs, which is
+    // not always what was asked for -- see UpscalerStatus.
+    void setUpscalerSettings(const UpscalerSettings& settings);
+    [[nodiscard]] UpscalerStatus upscalerStatus() const;
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
+    // Stats keeps the readouts and drops every tuning control; Full is the
+    // whole console. Visibility and mode are independent -- F4 toggles the
+    // former without disturbing the latter.
+    void setDebugUiMode(DebugUiMode mode);
+    [[nodiscard]] DebugUiMode debugUiMode() const;
+    // Game-supplied readouts, appended to the stats window in the order given.
+    // Rebuilt per frame by the caller; cheap to skip entirely by checking
+    // isDebugUiVisible() first, which is what avoids formatting strings nobody
+    // is going to look at.
+    void setDebugStatGroups(std::vector<DebugStatGroup> groups);
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
     void setFramePacingSettings(const FramePacingSettings& settings);

@@ -198,9 +198,16 @@ float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDi
     // the optical depth the record asks for at its fog-far distance.
     const float weatherWeight = saturate(camera.weatherSkyUpper.w);
     const float authoredFogFar = camera.weatherFog.w;
-    const float weatherEFold =
+    // The DISTANCE is taken from the record whenever one is published, without
+    // the weight -- unlike the colours below, which do lerp. A caller can then
+    // say "this world is seen through 200 km of clear air" while leaving the
+    // procedural sky gradient alone, which is what Oblivion's worldspaces need:
+    // they name no climate, so nothing sets a colour, and the 15000-unit
+    // fallback (~214 m, a dust-storm value) put Anvil behind a wall of milk.
+    // FNV publishes weight 1 whenever it publishes a fog-far at all, so this is
+    // byte-identical there.
+    const float kAerialEFoldDistance =
         (authoredFogFar > 1.0) ? (authoredFogFar / 1.4) : 15000.0;
-    const float kAerialEFoldDistance = lerp(15000.0, weatherEFold, weatherWeight);
     const float3 cameraPosition = camera.shadowVoxelGridSize.xyz;
     const float viewDistance = length(worldPosition - cameraPosition);
     const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
@@ -757,6 +764,8 @@ static const uint kDebugViewMetallic = 6u;
 static const uint kDebugViewMipLevel = 7u;
 static const uint kDebugViewCascadeIndex = 8u;
 static const uint kDebugViewTextureId = 9u;
+static const uint kDebugViewShadow = 11u;
+static const uint kDebugViewDirectRatio = 12u;
 
 // A blue->green->yellow->red ramp for scalar views. Monotonic in luminance as
 // well as in hue, so it stays readable for someone who cannot separate the red
@@ -863,7 +872,13 @@ float4 main(FragmentInput input) : SV_Target0
     // unlit early-out and every lighting term below -- an "albedo" view that
     // still went through the self-lit branch would not be albedo.
     const uint debugView = uint(camera.tonemapConfig2.y + 0.5);
-    if (debugView != kDebugViewOff)
+    // Shadow and DirectRatio are the exceptions: their inputs do not exist yet,
+    // so they are handled further down instead of here. Without this they fall
+    // into debugViewColor(), which does not know them and returns its default --
+    // and two different views then render identically, which is exactly how
+    // that mistake presents.
+    if (debugView != kDebugViewOff && debugView != kDebugViewShadow &&
+        debugView != kDebugViewDirectRatio)
     {
         const float3 debugNormal = normalize(input.inWorldNormal);
         const float debugViewDepth =
@@ -1052,6 +1067,21 @@ float4 main(FragmentInput input) : SV_Target0
         camera.sunColorShadow.xyz *
         (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.95));
     const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
+
+    // Lighting-balance views. Here rather than in debugViewColor() because
+    // neither input exists until this point.
+    if (debugView == kDebugViewShadow)
+    {
+        return float4(shadowVisibility, shadowVisibility, shadowVisibility, 1.0);
+    }
+    if (debugView == kDebugViewDirectRatio)
+    {
+        const float directLuma = dot(direct, float3(0.299, 0.587, 0.114));
+        const float ambientLuma =
+            dot(ambient * ambientOcclusion, float3(0.299, 0.587, 0.114));
+        const float ratio = directLuma / max(directLuma + ambientLuma, 1e-5);
+        return float4(ratio, ratio, ratio, 1.0);
+    }
 
     if (usePbr)
     {

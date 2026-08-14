@@ -240,12 +240,32 @@ void Renderer::renderFrame(
     m_backend->renderFrame(chunkGrid, simulation, camera, preview, simulationAlpha, visibleChunkIndices, importedActors);
 }
 
+void Renderer::setUpscalerSettings(const UpscalerSettings& settings) {
+    m_backend->setUpscalerSettings(settings);
+}
+
+UpscalerStatus Renderer::upscalerStatus() const {
+    return m_backend->upscalerStatus();
+}
+
 void Renderer::setDebugUiVisible(bool visible) {
     m_backend->setDebugUiVisible(visible);
 }
 
 bool Renderer::isDebugUiVisible() const {
     return m_backend->isDebugUiVisible();
+}
+
+void Renderer::setDebugUiMode(DebugUiMode mode) {
+    m_backend->setDebugUiMode(mode);
+}
+
+DebugUiMode Renderer::debugUiMode() const {
+    return m_backend->debugUiMode();
+}
+
+void Renderer::setDebugStatGroups(std::vector<DebugStatGroup> groups) {
+    m_backend->setDebugStatGroups(std::move(groups));
 }
 
 void Renderer::setFrameStatsVisible(bool visible) {

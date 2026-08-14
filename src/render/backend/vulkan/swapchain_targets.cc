@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <type_traits>
@@ -213,6 +214,8 @@ bool RendererBackend::createAoTargets() {
     m_ssaoRawExtent.width = std::max(1u, m_aoExtent.width / m_aoDownscale);
     m_ssaoRawExtent.height = std::max(1u, m_aoExtent.height / m_aoDownscale);
 
+    m_normalDepthExtent = useMergedDepthPrepass() ? m_renderExtent : m_aoExtent;
+
     auto createColorTargets = [&](VkFormat format,
                                   std::vector<VkImage>& outImages,
                                   std::vector<VkDeviceMemory>& outMemories,
@@ -271,6 +274,9 @@ bool RendererBackend::createAoTargets() {
     m_normalDepthImageInitialized.assign(frameTargetCount, false);
     m_aoDepthImageInitialized.assign(imageCount, false);
     m_ssaoRawImageInitialized.assign(frameTargetCount, false);
+    m_xegtaoDepthInitialized.assign(frameTargetCount, false);
+    m_xegtaoAoTermInitialized.assign(frameTargetCount, false);
+    m_xegtaoBentNormalInitialized.assign(frameTargetCount, false);
     m_ssaoBlurImageInitialized.assign(frameTargetCount, false);
     m_sunShaftImageInitialized.assign(frameTargetCount, false);
 
@@ -283,16 +289,42 @@ bool RendererBackend::createAoTargets() {
             "ao.normalDepth",
             FrameArenaPass::Ssao,
             FrameArenaPass::Ssao,
-            m_aoExtent
+            m_normalDepthExtent
         )) {
         return false;
     }
+
+    // Motion vectors for geometry that moved independently of the camera.
+    //
+    // RGBA16F, at RENDER extent rather than the AO extent: a consumer looks up
+    // history with this, and a half-resolution motion vector reprojects a
+    // silhouette to the wrong pixel. .xy is the NDC vector, .z is a validity
+    // flag (see skinned_velocity.frag), .w unused. Cleared to zero every frame,
+    // so "nothing drew here" reads as z = 0 and falls back to depth reprojection.
+    if (!createColorTargets(
+            m_velocityFormat,
+            m_velocityImages,
+            m_velocityImageMemories,
+            m_velocityImageViews,
+            m_velocityTransientHandles,
+            "velocity",
+            FrameArenaPass::Main,
+            FrameArenaPass::Post,
+            m_renderExtent
+        )) {
+        return false;
+    }
+    m_velocityImageInitialized.assign(frameTargetCount, false);
 
     m_aoDepthImages.assign(imageCount, VK_NULL_HANDLE);
     m_aoDepthImageMemories.assign(imageCount, VK_NULL_HANDLE);
     m_aoDepthImageViews.assign(imageCount, VK_NULL_HANDLE);
     m_aoDepthTransientHandles.assign(imageCount, kInvalidTransientImageHandle);
-    for (uint32_t i = 0; i < imageCount; ++i) {
+    // Not created under the merged prepass: it depth-tests against the real
+    // depth buffer instead, which is the whole point. Left as null handles so
+    // any accidental use faults loudly rather than reading a stale image.
+    const uint32_t aoDepthCount = useMergedDepthPrepass() ? 0u : imageCount;
+    for (uint32_t i = 0; i < aoDepthCount; ++i) {
         TransientImageDesc depthDesc{};
         depthDesc.imageType = VK_IMAGE_TYPE_2D;
         depthDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -341,7 +373,8 @@ bool RendererBackend::createAoTargets() {
                                         const char* debugLabel,
                                         FrameArenaPass firstPass,
                                         FrameArenaPass lastPass,
-                                        VkExtent2D targetExtent) -> bool {
+                                        VkExtent2D targetExtent,
+                                        VkFormat targetFormat) -> bool {
         outImages.assign(frameTargetCount, VK_NULL_HANDLE);
         outMemories.assign(frameTargetCount, VK_NULL_HANDLE);
         outViews.assign(frameTargetCount, VK_NULL_HANDLE);
@@ -350,7 +383,7 @@ bool RendererBackend::createAoTargets() {
             TransientImageDesc imageDesc{};
             imageDesc.imageType = VK_IMAGE_TYPE_2D;
             imageDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            imageDesc.format = m_ssaoFormat;
+            imageDesc.format = targetFormat;
             imageDesc.extent = {targetExtent.width, targetExtent.height, 1u};
             imageDesc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
             imageDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -396,7 +429,8 @@ bool RendererBackend::createAoTargets() {
             "ao.ssaoRaw",
             FrameArenaPass::Ssao,
             FrameArenaPass::Ssao,
-            m_ssaoRawExtent
+            m_ssaoRawExtent,
+            m_ssaoFormat
         )) {
         return false;
     }
@@ -408,7 +442,67 @@ bool RendererBackend::createAoTargets() {
             "ao.ssaoBlur",
             FrameArenaPass::Ssao,
             FrameArenaPass::Main,
-            m_aoExtent
+            m_aoExtent,
+            m_ssaoFormat
+        )) {
+        return false;
+    }
+
+    // XeGTAO depth pyramid: five levels, each half the previous, starting at the
+    // resolution the GTAO pass runs at.
+    //
+    // R32_SFLOAT rather than the R16F the AO targets use. These hold VIEWSPACE
+    // DEPTH in world units, and this game runs a 120000-unit far plane -- past
+    // R16F's 65504 ceiling, where every distant texel would become +inf and every
+    // horizon behind it would be garbage.
+    for (uint32_t level = 0; level < kXeGtaoDepthMipCount; ++level) {
+        VkExtent2D levelExtent{
+            std::max(1u, m_ssaoRawExtent.width >> level),
+            std::max(1u, m_ssaoRawExtent.height >> level)
+        };
+        m_xegtaoDepthExtents[level] = levelExtent;
+        if (!createSsaoComputeTarget(
+                m_xegtaoDepthImages[level],
+                m_xegtaoDepthImageMemories[level],
+                m_xegtaoDepthImageViews[level],
+                m_xegtaoDepthTransientHandles[level],
+                ("ao.xegtaoDepthMip" + std::to_string(level)).c_str(),
+                FrameArenaPass::Ssao,
+                FrameArenaPass::Ssao,
+                levelExtent,
+                VK_FORMAT_R32_SFLOAT
+            )) {
+            return false;
+        }
+    }
+
+    if (!createSsaoComputeTarget(
+            m_xegtaoAoTermImages,
+            m_xegtaoAoTermImageMemories,
+            m_xegtaoAoTermImageViews,
+            m_xegtaoAoTermTransientHandles,
+            "ao.xegtaoAoTerm",
+            FrameArenaPass::Ssao,
+            FrameArenaPass::Ssao,
+            m_ssaoRawExtent,
+            m_ssaoFormat
+        )) {
+        return false;
+    }
+
+    // Bent normals, view space, encoded to [0,1]. RGBA8 is enough: this is a
+    // direction consumed by a low-frequency ambient term, and the denoiser it
+    // feeds is already averaging across a neighbourhood.
+    if (!createSsaoComputeTarget(
+            m_xegtaoBentNormalImages,
+            m_xegtaoBentNormalImageMemories,
+            m_xegtaoBentNormalImageViews,
+            m_xegtaoBentNormalTransientHandles,
+            "ao.xegtaoBentNormal",
+            FrameArenaPass::Ssao,
+            FrameArenaPass::Main,
+            m_ssaoRawExtent,
+            VK_FORMAT_R8G8B8A8_UNORM
         )) {
         return false;
     }
@@ -513,6 +607,33 @@ bool RendererBackend::createAoTargets() {
         );
     }
 
+    // Point sampler for the XeGTAO depth pyramid. NEAREST is load-bearing, not a
+    // default: linear filtering blends neighbouring depths on the same level,
+    // which fabricates a surface between two real ones and feeds the horizon
+    // search a occluder that is not there.
+    if (m_xegtaoPointSampler == VK_NULL_HANDLE) {
+        VkSamplerCreateInfo pointSamplerInfo{};
+        pointSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        pointSamplerInfo.magFilter = VK_FILTER_NEAREST;
+        pointSamplerInfo.minFilter = VK_FILTER_NEAREST;
+        pointSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        pointSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        pointSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        pointSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        pointSamplerInfo.maxLod = 0.0f;
+        pointSamplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        const VkResult pointSamplerResult =
+            vkCreateSampler(m_device, &pointSamplerInfo, nullptr, &m_xegtaoPointSampler);
+        if (pointSamplerResult != VK_SUCCESS) {
+            logVkFailure("vkCreateSampler(xegtaoPoint)", pointSamplerResult);
+            return false;
+        }
+        setObjectName(
+            VK_OBJECT_TYPE_SAMPLER,
+            vkHandleToUint64(m_xegtaoPointSampler),
+            "renderer.sampler.xegtaoPoint");
+    }
+
     if (m_sunShaftSampler == VK_NULL_HANDLE) {
         VkSamplerCreateInfo samplerCreateInfo{};
         samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -565,6 +686,22 @@ bool RendererBackend::createHdrResolveTargets() {
          mipDimension > 1u && preferredMipLevels < kHdrResolveBloomMipCount;
          mipDimension >>= 1u) {
         ++preferredMipLevels;
+    }
+    // ODAI_BLOOM_MIPS caps the chain.
+    //
+    // Every mip past the first costs a full-image layout transition plus a blit,
+    // and the cost is per-mip rather than per-pixel: the 2x1 tail of the pyramid
+    // is as many barriers as the top and moves almost no data. On an iGPU that
+    // sync traffic is a real share of the post pass. The mips that actually
+    // carry visible glow are the first few; the rest widen a halo that is
+    // already wider than the screen.
+    static const uint32_t s_bloomMipCap = []() {
+        const char* env = std::getenv("ODAI_BLOOM_MIPS");
+        const int value = (env != nullptr) ? std::atoi(env) : 0;
+        return (value > 0) ? static_cast<uint32_t>(value) : 0u;
+    }();
+    if (s_bloomMipCap > 0u) {
+        preferredMipLevels = std::min(preferredMipLevels, s_bloomMipCap);
     }
     m_hdrResolveMipLevels = supportsBloomMipBlit ? std::max(1u, preferredMipLevels) : 1u;
     if (!supportsBloomMipBlit) {
@@ -735,6 +872,14 @@ bool RendererBackend::createHdrResolveTargets() {
     return true;
 }
 
+bool RendererBackend::useMergedDepthPrepass() const {
+    static const bool s_disabled = []() {
+        const char* env = std::getenv("ODAI_MERGED_PREPASS");
+        return env != nullptr && env[0] == '0';
+    }();
+    return !s_disabled && m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT;
+}
+
 bool RendererBackend::createMsaaColorTargets() {
     const uint32_t imageCount = static_cast<uint32_t>(m_swapchainImages.size());
     m_msaaColorImages.assign(imageCount, VK_NULL_HANDLE);
@@ -742,6 +887,24 @@ bool RendererBackend::createMsaaColorTargets() {
     m_msaaColorImageViews.assign(imageCount, VK_NULL_HANDLE);
     m_msaaColorImageInitialized.assign(imageCount, false);
     m_msaaColorImageAllocations.assign(imageCount, VK_NULL_HANDLE);
+
+    // AT ONE SAMPLE THERE IS NOTHING TO RESOLVE, so there is no reason for this
+    // image to exist. It used to be created 1-sample anyway and the main pass
+    // resolved into hdrResolve regardless -- an average-resolve from a 1-sample
+    // image to an identical 1-sample image, which is both a full-resolution copy
+    // of the whole HDR target every frame and a spec violation
+    // (VUID-VkRenderingAttachmentInfo-imageView-06861 requires RESOLVE_MODE_NONE
+    // for a 1-sample view). The FNV viewer defaults to ODAI_MSAA=1, so every
+    // frame it has ever rendered paid for it.
+    //
+    // Leaving the handles null is the signal: the main pass renders straight
+    // into hdrResolve instead. At 3412x1920 R16G16B16A16 that is ~52 MB per
+    // swapchain image of VRAM back as well.
+    if (m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT) {
+        VOX_LOGI("render") << "MSAA disabled (1 sample): main pass renders directly into "
+                              "hdrResolve, no resolve attachment";
+        return true;
+    }
 
     for (uint32_t i = 0; i < imageCount; ++i) {
         VkImageCreateInfo imageCreateInfo{};
@@ -854,7 +1017,12 @@ bool RendererBackend::createTaaTargets() {
         imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
         imageCreateInfo.format = m_hdrColorFormat;
-        imageCreateInfo.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
+        // Output extent when the temporal upscaler is running -- history has to
+        // live on the grid the result is reconstructed onto, not the grid the
+        // scene was rasterized on. Render extent otherwise, which is what plain
+        // TAA wants.
+        const VkExtent2D historyExtent = temporalOutputExtent();
+        imageCreateInfo.extent = {historyExtent.width, historyExtent.height, 1u};
         imageCreateInfo.mipLevels = 1;
         imageCreateInfo.arrayLayers = 1;
         imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1047,6 +1215,10 @@ void RendererBackend::destroyAoTargets() {
         vkDestroySampler(m_device, m_ssaoSampler, nullptr);
         m_ssaoSampler = VK_NULL_HANDLE;
     }
+    if (m_xegtaoPointSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_xegtaoPointSampler, nullptr);
+        m_xegtaoPointSampler = VK_NULL_HANDLE;
+    }
     if (m_normalDepthSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_normalDepthSampler, nullptr);
         m_normalDepthSampler = VK_NULL_HANDLE;
@@ -1079,6 +1251,23 @@ void RendererBackend::destroyAoTargets() {
             m_frameArena.destroyTransientImage(handle);
         }
     }
+    for (uint32_t level = 0; level < kXeGtaoDepthMipCount; ++level) {
+        m_xegtaoDepthImageViews[level].clear();
+        m_xegtaoDepthImages[level].clear();
+        m_xegtaoDepthImageMemories[level].clear();
+        m_xegtaoDepthTransientHandles[level].clear();
+    }
+    m_xegtaoDepthInitialized.clear();
+    m_xegtaoAoTermImageViews.clear();
+    m_xegtaoAoTermImages.clear();
+    m_xegtaoAoTermImageMemories.clear();
+    m_xegtaoAoTermTransientHandles.clear();
+    m_xegtaoAoTermInitialized.clear();
+    m_xegtaoBentNormalImageViews.clear();
+    m_xegtaoBentNormalImages.clear();
+    m_xegtaoBentNormalImageMemories.clear();
+    m_xegtaoBentNormalTransientHandles.clear();
+    m_xegtaoBentNormalInitialized.clear();
     m_ssaoRawImageViews.clear();
     m_ssaoRawImages.clear();
     m_ssaoRawImageMemories.clear();
@@ -1102,6 +1291,11 @@ void RendererBackend::destroyAoTargets() {
         }
     }
     m_normalDepthImageViews.clear();
+    m_velocityImageViews.clear();
+    m_velocityImages.clear();
+    m_velocityImageMemories.clear();
+    m_velocityTransientHandles.clear();
+    m_velocityImageInitialized.clear();
     m_normalDepthImages.clear();
     m_normalDepthImageMemories.clear();
     m_normalDepthTransientHandles.clear();

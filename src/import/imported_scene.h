@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -156,6 +157,82 @@ inline constexpr std::uint32_t packImportedSceneTerrainLayerWeights(const float 
         packed |= (quantized & 0xffu) << (layer * 8);
     }
     return packed;
+}
+
+// ---------------------------------------------------------------------------
+// GPU vertex packing for ImportedMeshVertex (render/backend/vulkan/renderer_backend.h).
+//
+// Here rather than beside that struct so a Vulkan-free test can reach it: these
+// are one half of a CPU-encode / shader-decode pair whose other half lives in
+// shaders/imported_vertex_pack.slang, and nothing but a test can catch the two
+// drifting apart. Pinned by testImportedVertexPacking.
+
+// Octahedral normal, snorm16x2 in one word. Equal-area mapping: project onto the
+// octahedron, fold the lower hemisphere out across the diagonals. Measured
+// worst-case angular error 0.034 degrees, near the fold diagonals just below
+// the equator -- not at the poles, and an order of magnitude worse than a
+// random-sample estimate suggests. See testImportedVertexPacking.
+inline std::uint32_t packImportedVertexNormal(const float normal[3]) {
+    float x = normal[0];
+    float y = normal[1];
+    float z = normal[2];
+    const float length = std::sqrt((x * x) + (y * y) + (z * z));
+    if (length < 1e-8f) {
+        // Degenerate input: pick +Y rather than emit a NaN the shader would
+        // normalize into one.
+        x = 0.0f;
+        y = 1.0f;
+        z = 0.0f;
+    } else {
+        x /= length;
+        y /= length;
+        z /= length;
+    }
+    const float sum = std::abs(x) + std::abs(y) + std::abs(z);
+    float u = x / sum;
+    float v = z / sum;
+    if (y < 0.0f) {
+        const float foldedU = (1.0f - std::abs(v)) * (u >= 0.0f ? 1.0f : -1.0f);
+        const float foldedV = (1.0f - std::abs(u)) * (v >= 0.0f ? 1.0f : -1.0f);
+        u = foldedU;
+        v = foldedV;
+    }
+    const auto toSnorm16 = [](float value) -> std::uint32_t {
+        const float clamped = value < -1.0f ? -1.0f : (value > 1.0f ? 1.0f : value);
+        const auto quantized = static_cast<std::int32_t>(std::lround(clamped * 32767.0f));
+        return static_cast<std::uint32_t>(
+            static_cast<std::uint16_t>(static_cast<std::int16_t>(quantized)));
+    };
+    return toSnorm16(u) | (toSnorm16(v) << 16);
+}
+
+// Linear float -> sRGB-encoded byte, the exact piecewise transfer function
+// rather than pow(1/2.2). sRGB-encoded and not linear because these values are
+// AUTHORED as sRGB (hex literals on the strategy map, LAND VCLR bytes in
+// Fallout): quantizing the linear value instead spends all 256 steps on the
+// highlights and bands the darks. Every one of the 256 sRGB source bytes
+// round-trips exactly through this and the shader's inverse.
+inline std::uint32_t packImportedVertexColor(const float color[3]) {
+    const auto encode = [](float linear) -> std::uint32_t {
+        const float clamped = linear < 0.0f ? 0.0f : (linear > 1.0f ? 1.0f : linear);
+        const float encoded = (clamped <= 0.0031308f)
+            ? (clamped * 12.92f)
+            : ((1.055f * std::pow(clamped, 1.0f / 2.4f)) - 0.055f);
+        return static_cast<std::uint32_t>(std::lround(encoded * 255.0f)) & 0xffu;
+    };
+    return encode(color[0]) | (encode(color[1]) << 8) | (encode(color[2]) << 16) |
+           (0xffu << 24);
+}
+
+// Two 16-bit bindless slots per word, low half first. 0xffff is "no layer" --
+// narrower than the 32-bit kImportedSceneNoTerrainLayer, which is why anything
+// that would not fit is mapped onto the sentinel rather than truncated into a
+// valid-looking slot.
+inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, std::uint32_t high) {
+    const auto narrow = [](std::uint32_t slot) -> std::uint32_t {
+        return slot > 0xfffeu ? 0xffffu : slot;
+    };
+    return narrow(low) | (narrow(high) << 16);
 }
 
 // ---------------------------------------------------------------------------

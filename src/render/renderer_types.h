@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace odai::render {
 
@@ -59,6 +61,71 @@ enum class ShadowMode : std::uint8_t {
     Auto = 2,
 };
 
+// Temporal upscaling backend.
+//
+// The renderer renders the 3D scene at a fraction of the swapchain extent and an
+// upscaler reconstructs it. Which one is a runtime choice, but availability is a
+// COMPILE-time fact: XeSS is Intel's closed-source SDK and DLSS is NVIDIA's, so
+// neither can be implemented here -- they are linked, and only when the SDK is
+// present. Requesting an unavailable backend is not an error; it reports
+// unavailable and falls back, so the same command line works on every machine.
+enum class UpscalerBackend : std::uint8_t {
+    // Render at native resolution. No reconstruction, no jitter requirement.
+    Off = 0,
+    // This engine's own temporal upscaler, built on the existing jittered TAA
+    // and the skinned motion vectors. Always available -- it is the default and
+    // the fallback for every other backend.
+    Temporal = 1,
+    // Intel XeSS-SR. Requires ODAI_ENABLE_XESS and the SDK at build time.
+    Xess = 2,
+    // AMD FidelityFX Super Resolution. DECLARED, NOT IMPLEMENTED.
+    Fsr = 3,
+    // NVIDIA DLSS. DECLARED, NOT IMPLEMENTED.
+    Dlss = 4,
+};
+
+// Quality preset, which is really a render-scale choice. The ratios are XeSS's
+// published ones so a preset means the same internal resolution whichever
+// backend renders it -- otherwise "Quality" would be a different measurement on
+// each and no comparison between them would mean anything.
+enum class UpscalerQuality : std::uint8_t {
+    UltraQuality = 0,   // 1.3x
+    Quality = 1,        // 1.5x
+    Balanced = 2,       // 1.7x
+    Performance = 3,    // 2.0x
+    UltraPerformance = 4,  // 3.0x
+};
+
+inline constexpr float upscalerQualityScale(UpscalerQuality quality) {
+    switch (quality) {
+    case UpscalerQuality::UltraQuality: return 1.0f / 1.3f;
+    case UpscalerQuality::Quality: return 1.0f / 1.5f;
+    case UpscalerQuality::Balanced: return 1.0f / 1.7f;
+    case UpscalerQuality::Performance: return 1.0f / 2.0f;
+    case UpscalerQuality::UltraPerformance: return 1.0f / 3.0f;
+    }
+    return 1.0f;
+}
+
+struct UpscalerSettings {
+    UpscalerBackend backend = UpscalerBackend::Off;
+    UpscalerQuality quality = UpscalerQuality::Quality;
+    // 0 = none. Applied by backends that expose it; ignored by those that do not.
+    float sharpness = 0.0f;
+};
+
+// What actually happened, as opposed to what was asked for. `reason` is only
+// meaningful when requested != active, and exists because "I asked for XeSS and
+// got something else" has several distinct causes that look identical on screen.
+struct UpscalerStatus {
+    UpscalerBackend requested = UpscalerBackend::Off;
+    UpscalerBackend active = UpscalerBackend::Off;
+    bool compiledIn = false;      // the backend was built into this binary
+    bool runtimeAvailable = false;  // and its runtime/device support is present
+    float renderScale = 1.0f;
+    const char* reason = "";
+};
+
 // Screen-space ambient-occlusion estimator. Each maps to its own compute pipeline
 // built from ssao.comp.slang with a different ODAI_AO_MODE, so the sample loop
 // carries no uniform branch. Off dispatches neither the AO nor the blur pass and
@@ -74,6 +141,10 @@ enum class AoMode : std::uint8_t {
     Ssao = 1,
     Hbao = 2,
     Gtao = 3,
+    // Intel's XeGTAO: the same ground-truth integral as Gtao, but marched
+    // against a prefiltered depth pyramid with blue noise and adaptive sample
+    // counts, and producing bent normals alongside the AO term.
+    Xegtao = 4,
 };
 
 // Single-channel visualizations of what the main pass actually shaded with,
@@ -108,6 +179,14 @@ enum class DebugView : std::uint8_t {
     CascadeIndex = 8,  // false-coloured shadow cascade selection
     TextureId = 9,     // bindless slot hashed to a colour
     LinearDepth = 10,  // post-pass; every other view is main-pass
+    // The two lighting-balance views. Both are computed mid-shading rather than
+    // in debugViewColor(), because their inputs do not exist until the sun and
+    // ambient terms have been evaluated.
+    Shadow = 11,       // cascaded shadow visibility: white lit, black occluded
+    DirectRatio = 12,  // direct / (direct + ambient): how much of the lighting
+                       // a shadow is even able to remove. Black means a surface
+                       // is lit entirely by unshadowed ambient, which is what
+                       // "the shadows do nothing" looks like as a measurement.
 };
 
 // True for views whose value is already a display-ready colour and must not be
@@ -333,6 +412,34 @@ struct GameplayUiLayout {
     std::array<GameplayUiRect, kGameplayHotbarSlotCount> hotbarSlots{};
     GameplayUiRect inventoryPanel{};
     std::array<GameplayUiRect, kCreativeInventoryItemCount> inventorySlots{};
+};
+
+// How much of the renderer's ImGui surface is built.
+//
+// The full panel is a tuning console -- FOV, shadow bias, AO mode, the whole
+// sky and exposure chain -- which is the right thing when you are dialling a
+// look in and the wrong thing when you are watching numbers during play. Stats
+// keeps the readouts (frame timings, GPU stages, memory, draw calls, whatever
+// the game pushed through setDebugStatGroups) and drops every control.
+enum class DebugUiMode : std::uint8_t {
+    Stats = 0,
+    Full,
+};
+
+// One labelled readout in the debug stats window.
+//
+// Deliberately just two strings. The alternative -- the renderer knowing what a
+// "cell streamer" is so it can format one -- would drag importer types across
+// the src/render boundary for the sake of a debug panel. The game formats its
+// own numbers and the renderer only prints them.
+struct DebugStatRow {
+    std::string label;
+    std::string value;
+};
+
+struct DebugStatGroup {
+    std::string title;
+    std::vector<DebugStatRow> rows;
 };
 
 struct GameplayUiState {

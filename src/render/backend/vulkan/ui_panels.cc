@@ -107,6 +107,11 @@ void RendererBackend::buildDofDebugUi() {
     if (!m_debugUiVisible || !m_showFrameStatsPanel) {
         return;
     }
+    // Tuning consoles, not readouts: Stats mode is for watching numbers
+    // during play and these are all controls.
+    if (m_debugUiMode != DebugUiMode::Full) {
+        return;
+    }
 
     constexpr ImGuiWindowFlags kPanelFlags =
         ImGuiWindowFlags_AlwaysAutoResize |
@@ -126,6 +131,11 @@ void RendererBackend::buildDofDebugUi() {
 
 void RendererBackend::buildShadowDebugUi() {
     if (!m_debugUiVisible || !m_showShadowPanel) {
+        return;
+    }
+    // Tuning consoles, not readouts: Stats mode is for watching numbers
+    // during play and these are all controls.
+    if (m_debugUiMode != DebugUiMode::Full) {
         return;
     }
 
@@ -190,6 +200,11 @@ void RendererBackend::buildShadowDebugUi() {
 
 void RendererBackend::buildSunDebugUi() {
     if (!m_debugUiVisible || !m_showSunPanel) {
+        return;
+    }
+    // Tuning consoles, not readouts: Stats mode is for watching numbers
+    // during play and these are all controls.
+    if (m_debugUiMode != DebugUiMode::Full) {
         return;
     }
 

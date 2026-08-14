@@ -67,6 +67,128 @@ if(NOT ODAI_IS_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
     message(STATUS "odai: CMAKE_BUILD_TYPE was unset, defaulting to RelWithDebInfo")
 endif()
 
+# ---------------------------------------------------------------------------
+# Temporal upscaling backends
+#
+# All three of these are VENDOR SDKs, not algorithms this project can implement:
+# XeSS and DLSS are closed source, and FSR2 is open but is a large third-party
+# integration in its own right. So each is an opt-in that requires the SDK to be
+# present, and the engine's own temporal upscaler (UpscalerBackend::Temporal) is
+# the default and the fallback -- it is always available because it is built
+# from the jittered TAA and motion vectors already in this tree.
+#
+# The point of compiling them out by default is that requesting an absent
+# backend must not be a build error OR a crash: the renderer reports it
+# unavailable and falls back, so one command line works on every machine.
+option(ODAI_ENABLE_XESS "Build the Intel XeSS-SR upscaler backend. Requires the XeSS SDK." OFF)
+set(ODAI_XESS_SDK_DIR "" CACHE PATH
+    "Root of the Intel XeSS SDK (https://github.com/intel/xess): expects inc/xess/xess.h and lib/.")
+# Declared so the selection plumbing is exercised and a request for them reports
+# the right reason. Neither has an implementation yet -- see upscaler.cc.
+option(ODAI_ENABLE_FSR "Build the AMD FSR upscaler backend. NOT IMPLEMENTED." OFF)
+option(ODAI_ENABLE_DLSS "Build the NVIDIA DLSS upscaler backend. NOT IMPLEMENTED." OFF)
+
+set(ODAI_XESS_FOUND OFF)
+if(ODAI_ENABLE_XESS)
+    # XeSS SHIPS WINDOWS BINARIES ONLY, including for its Vulkan path.
+    #
+    # Verified against SDK 3.0.2: lib/ holds MSVC import libraries (libxess.lib,
+    # an ar archive), bin/ holds PE32+ DLLs, and there is no ELF object anywhere
+    # in the tree. Intel's own Vulkan sample is declared
+    # `add_executable(BasicSampleVK WIN32 ...)` with VK_USE_PLATFORM_WIN32_KHR=1,
+    # and the developer guide lists "Windows 10/11 x64" as the only supported OS.
+    # So the Vulkan API existing (inc/xess/xess_vk.h) does NOT make the runtime
+    # portable -- there is no libxess.so to link on Linux, from Intel or anyone.
+    #
+    # This is split from the generic "not found" case because the two need
+    # completely different actions: a missing SDK means fix the path, whereas a
+    # Windows-only SDK on Linux means build for Windows (which this project
+    # supports -- see CLAUDE.md) or run the Windows build under Proton. Reporting
+    # both as "SDK not found" sends someone hunting for a path problem that does
+    # not exist, which is exactly what the first version of this did.
+    find_path(ODAI_XESS_INCLUDE_DIR
+        NAMES xess/xess.h
+        HINTS "${ODAI_XESS_SDK_DIR}/inc" "${ODAI_XESS_SDK_DIR}/include"
+        DOC "Directory containing xess/xess.h")
+    # Import library on Windows, shared object elsewhere. Named explicitly rather
+    # than relying on find_library's prefix/suffix guessing, so that "no Linux
+    # binary" is reported as such instead of as a generic miss.
+    if(WIN32)
+        find_library(ODAI_XESS_LIBRARY
+            NAMES libxess xess
+            HINTS "${ODAI_XESS_SDK_DIR}/lib" "${ODAI_XESS_SDK_DIR}/lib/x64"
+            DOC "The XeSS import library")
+    else()
+        find_library(ODAI_XESS_LIBRARY
+            NAMES libxess.so xess
+            HINTS "${ODAI_XESS_SDK_DIR}/lib" "${ODAI_XESS_SDK_DIR}/lib/x64"
+            NO_DEFAULT_PATH
+            DOC "The XeSS runtime shared object (Intel does not currently ship one)")
+    endif()
+
+    if(ODAI_XESS_INCLUDE_DIR AND ODAI_XESS_LIBRARY)
+        set(ODAI_XESS_FOUND ON)
+        message(STATUS "XeSS SDK: ${ODAI_XESS_INCLUDE_DIR} / ${ODAI_XESS_LIBRARY}")
+    elseif(ODAI_XESS_INCLUDE_DIR AND NOT WIN32)
+        # Headers present, no linkable library, and not Windows: say precisely
+        # that, because the SDK really is installed and the path really is right.
+        message(WARNING
+            "XeSS headers found at ${ODAI_XESS_INCLUDE_DIR}, but the SDK ships no "
+            "Linux library -- lib/ contains Windows .lib import libraries and bin/ "
+            "contains .dll, with no .so anywhere. Intel's XeSS SDK is Windows-only, "
+            "Vulkan path included. Build for Windows to use XeSS, or run the "
+            "Windows build under Proton. Building without the XeSS backend.")
+    else()
+        # A warning rather than an error: the option asks for a backend, and the
+        # engine runs without it. Failing configure here would mean a developer
+        # who flipped the option once could not build until they installed an
+        # SDK they may only have wanted to try.
+        message(WARNING
+            "ODAI_ENABLE_XESS is ON but the XeSS SDK was not found. "
+            "Set ODAI_XESS_SDK_DIR to a checkout of https://github.com/intel/xess. "
+            "Building without the XeSS backend.")
+    endif()
+endif()
+# odai_upscale: the Vulkan-free half of the upscaling module -- backend
+# selection, the fallback contract, and the temporal-reconstruction rules
+# (jitter sequence, phase count, mip bias) that any host has to honour.
+#
+# A LIBRARY rather than a source file, because upscale_policy.cc was previously
+# listed by hand in fifteen separate executables and every new game had to
+# remember it. Vulkan-free, so tools and tests link it without a device.
+add_library(odai_upscale STATIC
+    src/render/upscale/upscale_policy.cc
+    src/render/upscale/upscale_contract.cc
+)
+target_include_directories(odai_upscale PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:include>
+)
+if(MSVC)
+    target_compile_options(odai_upscale PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(odai_upscale PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(ODAI_XESS_FOUND)
+    # Directory-scoped rather than per-target. ODAI_HAS_XESS gates one file today
+    # (src/render/upscale/upscale_policy.cc) and the Vulkan backend later, and both are pulled
+    # into more than two dozen executables -- adding the define and the link to
+    # each of them would be 27 edits that must all be kept in step. Guarded by
+    # ODAI_XESS_FOUND, which is OFF unless the SDK was both requested and found,
+    # so a default build is unaffected by any of this.
+    add_compile_definitions(ODAI_HAS_XESS=1)
+    include_directories(${ODAI_XESS_INCLUDE_DIR})
+    link_libraries(${ODAI_XESS_LIBRARY})
+endif()
+
+if(ODAI_ENABLE_FSR)
+    message(WARNING "ODAI_ENABLE_FSR is ON but the FSR backend is not implemented; ignoring.")
+endif()
+if(ODAI_ENABLE_DLSS)
+    message(WARNING "ODAI_ENABLE_DLSS is ON but the DLSS backend is not implemented; ignoring.")
+endif()
+
 option(ODAI_ENABLE_LTO
     "Link-time / interprocedural optimization in optimized build types. Slower links." OFF)
 option(ODAI_ENABLE_NATIVE_ARCH
@@ -158,6 +280,7 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/camera_uniform.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_vertex_pack.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/noise.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slang"
@@ -255,6 +378,7 @@ if(SLANGC_EXECUTABLE)
         -DODAI_RT_REFLECTIONS=1
     )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_normaldepth.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static_depthonly.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_water_normaldepth.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/grass_billboard.frag.slang" fragment)
@@ -277,6 +401,14 @@ if(SLANGC_EXECUTABLE)
         -DODAI_AO_MODE=2
     )
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_blur.comp.slang" compute)
+    # XeGTAO: depth pyramid prefilter + the GTAO integral that marches it.
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/xegtao_prefilter.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/xegtao_main.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/xegtao_denoise.comp.slang" compute)
+    # Motion vectors for skinned actors.
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skinned_velocity.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/skinned_velocity.frag.slang" fragment)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/temporal_upscale.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_occupancy.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute)
     add_slang_shader_variant(
@@ -665,6 +797,34 @@ if(ODAI_BUILD_APP)
             target_compile_options(odai_ui_vulkan PRIVATE -Wall -Wextra -Wpedantic)
         endif()
 
+        # ---------------------------------------------------------------------------
+        # odai_upscale_vulkan — the plug-in seam and the built-in temporal backend
+        # ---------------------------------------------------------------------------
+        # Separate from odai_upscale for the same reason odai_ui_vulkan is
+        # separate from odai_ui: the policy and contract halves are Vulkan-free
+        # and testable without a device, and only this half needs a VkDevice.
+        #
+        # A vendor backend (XeSS, FSR, DLSS) is one more source file here plus a
+        # case in vendor_backends.cc -- nothing else in the tree changes.
+        add_library(odai_upscale_vulkan STATIC
+            src/render/upscale/temporal_upscaler.cc
+            src/render/upscale/vendor_backends.cc
+        )
+        target_include_directories(odai_upscale_vulkan PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
+            $<INSTALL_INTERFACE:include>
+        )
+        target_link_libraries(odai_upscale_vulkan
+            # PUBLIC: upscaler_backend.h is a public header that exposes
+            # VkCommandBuffer / VkImage in its dispatch structs.
+            PUBLIC odai_upscale Vulkan::Vulkan
+        )
+        if(MSVC)
+            target_compile_options(odai_upscale_vulkan PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        else()
+            target_compile_options(odai_upscale_vulkan PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+
         if(ODAI_BUILD_EXAMPLES)
             add_subdirectory(examples/vulkan_ui_integration)
             add_subdirectory(examples/ui_stress_test/harness)
@@ -681,6 +841,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/frame_pass_shadow.cc
             src/render/backend/vulkan/frame_pass_prepass.cc
             src/render/backend/vulkan/frame_pass_ssao.cc
+            src/render/backend/vulkan/frame_pass_velocity.cc
             src/render/backend/vulkan/frame_pass_skinning.cc
             src/render/backend/vulkan/frame_pass_main.cc
             src/render/backend/vulkan/frame_chunks.cc
@@ -754,6 +915,8 @@ if(ODAI_BUILD_APP)
     target_link_libraries(odai PRIVATE odai_audio)
     if(VULKAN_RENDER_BACKEND)
         target_link_libraries(odai PRIVATE odai_ui_vulkan)
+        target_link_libraries(odai PRIVATE odai_upscale)
+        target_link_libraries(odai PRIVATE odai_upscale_vulkan)
     endif()
 
     find_package(glfw3 CONFIG QUIET)
@@ -818,6 +981,8 @@ if(ODAI_BUILD_APP)
         target_link_libraries(odai_game_stellaris PRIVATE
             odai_ui
             odai_ui_vulkan
+            odai_upscale
+            odai_upscale_vulkan
             odai_audio
             Vulkan::Vulkan
             GPUOpen::VulkanMemoryAllocator
@@ -866,7 +1031,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_swtor PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -923,7 +1088,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_citybuilder PRIVATE
-            odai_ui odai_ui_vulkan odai_audio odai_city_script odai_content
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_city_script odai_content odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -976,7 +1141,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_legion PRIVATE
-            odai_ui odai_ui_vulkan odai_audio odai_anim
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_anim odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1045,7 +1210,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_newvegas PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
             # zlib: the runtime now inflates compressed ESM records and BSA
             # entries itself, streaming from the game's own files.
@@ -1095,7 +1260,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_snake PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1141,7 +1306,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_minesweeper PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1189,7 +1354,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_game_voxelcraft PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1236,7 +1401,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_ui_editor PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1283,7 +1448,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_retro_theme_demo PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1329,7 +1494,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_tween_demo PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1376,7 +1541,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_design_system_demo PRIVATE
-            odai_ui odai_ui_vulkan odai_audio
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1423,7 +1588,7 @@ if(ODAI_BUILD_APP)
             ODAI_PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"
         )
         target_link_libraries(odai_material_editor PRIVATE
-            odai_ui odai_ui_vulkan odai_audio odai_content
+            odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_content odai_upscale
             Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
         )
         if(TARGET glfw)
@@ -1455,6 +1620,16 @@ if(TARGET odai_ui_vulkan)
     set(ODAI_UI_HAS_VULKAN TRUE)
 endif()
 
+# The upscaling module installs alongside the UI one, and for the same reason:
+# it is meant to be vendored. Everything a host needs is the two headers plus
+# the shaders -- see docs/UPSCALE_LIBRARY.md.
+if(TARGET odai_upscale)
+    list(APPEND ODAI_UI_INSTALL_TARGETS odai_upscale)
+endif()
+if(TARGET odai_upscale_vulkan)
+    list(APPEND ODAI_UI_INSTALL_TARGETS odai_upscale_vulkan)
+endif()
+
 install(TARGETS ${ODAI_UI_INSTALL_TARGETS}
     EXPORT odai_ui_targets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -1467,6 +1642,26 @@ install(DIRECTORY src/core/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/odai_ui/core
     FILES_MATCHING PATTERN "log.h"
 )
+# The upscaling module's public surface: the two headers a host includes, the
+# renderer_types.h they share their vocabulary with, and the compute shaders --
+# which are DATA, not code, and a vendoring host has to ship them or compile
+# its own from the .slang sources beside them.
+install(DIRECTORY src/render/upscale/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/odai_ui/render/upscale
+    FILES_MATCHING PATTERN "*.h"
+)
+install(FILES src/render/renderer_types.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/odai_ui/render
+)
+install(FILES
+        src/render/shaders/taa.comp.slang
+        src/render/shaders/temporal_upscale.comp.slang
+        src/render/shaders/xegtao_main.comp.slang
+        src/render/shaders/xegtao_prefilter.comp.slang
+        src/render/shaders/xegtao_denoise.comp.slang
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/odai_upscale/shaders
+)
+
 install(EXPORT odai_ui_targets
     FILE odai_ui-targets.cmake
     NAMESPACE odai::
@@ -2056,6 +2251,21 @@ if(BUILD_TESTING)
     # reference values -- the GGX normalization identity, Schlick's endpoints, and
     # an energy-conservation bound that pins the diffuse-convention pi scale.
     # Pure CPU; no Vulkan.
+    # Upscaler backend selection: availability, fallback and the reasons given.
+    # Pure CPU; no Vulkan.
+    add_executable(odai_upscaler_tests
+        tests/upscaler_tests.cc
+        src/render/upscale/upscale_contract.cc
+        src/render/upscale/upscale_policy.cc
+    )
+    target_include_directories(odai_upscaler_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(odai_upscaler_tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(odai_upscaler_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME odai_upscaler_tests COMMAND odai_upscaler_tests)
+
     add_executable(odai_pbr_material_tests
         tests/pbr_material_tests.cc
         src/procgen/humanoid_generator.cc
