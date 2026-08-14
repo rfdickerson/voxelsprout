@@ -131,6 +131,28 @@ struct FragmentInput
     float4 inLayerWeights : TEXCOORD7;
 };
 
+// A two-sided surface's BACK face has the front face's normal, and nothing
+// downstream fixes it.
+//
+// Fallout marks a great deal of geometry DRAW_BOTH via NiStencilProperty --
+// fences, foliage cards, tent canvas, signs -- and the renderer honours it all
+// the way to a VK_CULL_MODE_NONE pipeline. What it never did was flip the
+// normal, so the back of every one of those surfaces shades with a normal
+// pointing away from the viewer: N.L clamps to zero for any sun in front of it,
+// and the face renders as flat ambient, i.e. near-black, regardless of where
+// the sun is. It reads as "that mesh has a black slab attached to it".
+//
+// Gated on the material flag rather than applied to every backface, because a
+// single-sided mesh only shows one when culling is switched off deliberately
+// (ODAI_DEBUG_NO_CULL) and flipping there would hide the very thing that
+// debug view exists to show.
+float3 resolveShadingNormal(float3 worldNormal, uint flags, bool isFrontFace)
+{
+    const float3 normal = normalize(worldNormal);
+    const bool flip = !isFrontFace && ((flags & kImportedMaterialFlagTwoSided) != 0u);
+    return flip ? -normal : normal;
+}
+
 // Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
 // this mirrors waterScreenUv() in imported_water.frag.slang so the two shaders derive the
 // same full-res-normalized UV from SV_Position without needing the extent as a uniform.
@@ -247,6 +269,13 @@ float4 sampleImportedAlbedo(FragmentInput input)
     const bool disableTextures = chunkPc.cascadeData.z > 0.5;
     if (input.inTextureIndex == kInvalidImportedTextureIndex)
     {
+        // Untextured is not by itself a defect -- terrain quadrants and
+        // vertex-coloured geometry take this path deliberately -- so the
+        // highlight is opt-in rather than the default.
+        if (chunkPc.materialParams.z > 0.5)
+        {
+            return float4(1.0, 0.0, 1.0, 1.0);
+        }
         return float4(input.inColor, 1.0);
     }
     float4 sampled = bindlessTextures[input.inTextureIndex].Sample(input.inUv);
@@ -296,11 +325,20 @@ float4 sampleImportedAlbedo(FragmentInput input)
         //
         // Both are no-ops where a layer is fully present or fully absent, so
         // large single-texture areas are untouched.
+        // Both scales come from the uniform (see renderer_shared.h). They were
+        // 220 and 70 world units, which is the trap: VTXT authors one opacity
+        // every 128 units, so noise finer than that displaces a boundary by only
+        // a few tens of units and cannot break up the lattice it is sitting on.
+        // The noise has to be COARSER than the data it is hiding.
         const float2 blendNoiseUv = input.inWorldPosition.xz;
+        const float coarseUnits = max(camera.terrainBlendConfig.y, 1.0);
+        const float fineUnits = max(camera.terrainBlendConfig.z, 1.0);
         const float blendNoise =
-            (terrainBlendNoise(blendNoiseUv * (1.0 / 220.0)) * 0.65) +
-            (terrainBlendNoise(blendNoiseUv * (1.0 / 70.0)) * 0.35);
+            (terrainBlendNoise(blendNoiseUv * (1.0 / coarseUnits)) * 0.65) +
+            (terrainBlendNoise(blendNoiseUv * (1.0 / fineUnits)) * 0.35);
         const float blendNoiseSigned = blendNoise - 0.5;
+        const float blendSharpness = saturate(camera.terrainBlendConfig.x);
+        const float blendNoiseAmount = max(camera.terrainBlendConfig.w, 0.0);
 
         for (uint layer = 0u; layer < 4u; ++layer)
         {
@@ -313,8 +351,22 @@ float4 sampleImportedAlbedo(FragmentInput input)
             // Scaled by how mid-transition the weight is, so the noise cannot
             // punch holes in a fully opaque layer or speckle a fully absent one.
             const float transitionAmount = 1.0 - abs((rawWeight * 2.0) - 1.0);
-            const float perturbed = saturate(rawWeight + (blendNoiseSigned * 0.55 * transitionAmount));
-            const float layerWeight = smoothstep(0.22, 0.78, perturbed);
+            const float perturbed =
+                saturate(rawWeight + (blendNoiseSigned * blendNoiseAmount * transitionAmount));
+            // Blended toward the raw value rather than always applying the
+            // smoothstep. At sharpness 0 this is exactly the authored weight,
+            // which is the control: the ONLY thing that separates "the wedges
+            // are in the LAND data" from "the wedges are this curve amplifying
+            // a piecewise-linear field" is being able to turn the curve off.
+            //
+            // Sharpening is why they appear. rawWeight is interpolated linearly
+            // across a triangle, so its iso-contours kink at every triangle
+            // edge; compressing the transition into a narrow band magnifies
+            // those kinks into visible facets, and the noise that should hide
+            // them is scaled by transitionAmount, which decays to zero exactly
+            // where the contour is sharpest.
+            const float layerWeight =
+                lerp(perturbed, smoothstep(0.22, 0.78, perturbed), blendSharpness);
             if (layerWeight <= 0.0)
             {
                 continue;
@@ -766,6 +818,7 @@ static const uint kDebugViewCascadeIndex = 8u;
 static const uint kDebugViewTextureId = 9u;
 static const uint kDebugViewShadow = 11u;
 static const uint kDebugViewDirectRatio = 12u;
+static const uint kDebugViewTerrainLayers = 13u;
 
 // A blue->green->yellow->red ramp for scalar views. Monotonic in luminance as
 // well as in hue, so it stays readable for someone who cannot separate the red
@@ -809,6 +862,46 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
             return float4(0.6, 0.0, 0.6, 1.0);
         }
         return float4(raw.aaa, 1.0);
+    }
+    if (view == kDebugViewTerrainLayers)
+    {
+        // Deliberately the RAW authored weights, with none of the noise
+        // perturbation or smoothstep the lit path applies below. That is what
+        // makes this an instrument: if a path boundary is wedge-shaped HERE it
+        // is in the LAND data, and if it is smooth here and faceted in the lit
+        // frame it is the stylization.
+        if ((input.inFlags & kImportedMaterialFlagTerrainLayers) == 0u)
+        {
+            // Not terrain, or terrain with a base texture and nothing painted
+            // over it. Near-black rather than black so it stays distinguishable
+            // from the background, exactly as the material-flags view does.
+            return float4(0.06, 0.06, 0.07, 1.0);
+        }
+        float3 color = float3(0.0, 0.0, 0.0);
+        float covered = 0.0;
+        for (uint layer = 0u; layer < 3u; ++layer)
+        {
+            if (input.inLayerTextures[layer] == kInvalidImportedTextureIndex)
+            {
+                continue;
+            }
+            const float weight = saturate(input.inLayerWeights[layer]);
+            color[layer] = weight;
+            covered = max(covered, weight);
+        }
+        // The BTXT base showing through, as grey: without it a post where every
+        // layer is absent and one where they are all present read the same.
+        const float baseVisible = 1.0 - covered;
+        color += float3(0.35, 0.35, 0.35) * baseVisible;
+        // A fourth layer exists in the format and has no channel left. Flag it
+        // rather than dropping it silently, since "the fourth layer is doing
+        // the thing I am looking at" is exactly the case this would hide.
+        if (input.inLayerTextures[3] != kInvalidImportedTextureIndex &&
+            input.inLayerWeights[3] > 0.0)
+        {
+            color = lerp(color, float3(1.0, 1.0, 0.0), saturate(input.inLayerWeights[3]));
+        }
+        return float4(saturate(color), 1.0);
     }
     if (view == kDebugViewMaterialFlags)
     {
@@ -866,7 +959,7 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
     return float4(1.0, 0.0, 1.0, 1.0);
 }
 
-float4 main(FragmentInput input) : SV_Target0
+float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
 {
     // Debug views replace the frame outright and deliberately run before the
     // unlit early-out and every lighting term below -- an "albedo" view that
@@ -880,7 +973,8 @@ float4 main(FragmentInput input) : SV_Target0
     if (debugView != kDebugViewOff && debugView != kDebugViewShadow &&
         debugView != kDebugViewDirectRatio)
     {
-        const float3 debugNormal = normalize(input.inWorldNormal);
+        const float3 debugNormal =
+            resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
         const float debugViewDepth =
             max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
         return debugViewColor(input, debugView, debugNormal, debugViewDepth);
@@ -902,7 +996,7 @@ float4 main(FragmentInput input) : SV_Target0
     {
         return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
-    const float3 normal = normalize(input.inWorldNormal);
+    const float3 normal = resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
     // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)
     // read as exposed rock or lighter cliff stone; flat faces are unaffected.
     // The welded terrain's smooth normals make this correct at elevation transitions.

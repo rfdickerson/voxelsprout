@@ -947,8 +947,48 @@ struct GeometryBlock {
     std::vector<float> normals;
     std::vector<float> uvs;  // UV set 0 only, 2 floats per vertex
     std::vector<std::uint32_t> triangleIndices;
+    std::uint32_t outOfRangeTriangles = 0;
+    std::uint32_t degenerateTriangles = 0;
     bool valid = false;
 };
+
+// Drops triangles that name a vertex this block does not have, and triangles
+// with two equal indices.
+//
+// The bounds check is the load-bearing one, and it has to happen HERE rather
+// than downstream: by the time shapes are merged into one vertex buffer an
+// out-of-range index is indistinguishable from a valid one pointing at a
+// neighbour's vertex, and the result is a triangle stretched between two
+// unrelated meshes. Neither reader validated this -- the strip path could not,
+// because it does not know the vertex count until the prefix has been read, and
+// the explicit-list path simply never did.
+//
+// Dropping the individual triangle rather than failing the shape is deliberate:
+// one bad index in a rock should cost one triangle, not the rock.
+void rejectUnusableTriangles(GeometryBlock& out) {
+    const std::size_t vertexCount = out.positions.size() / 3u;
+    std::vector<std::uint32_t> kept;
+    kept.reserve(out.triangleIndices.size());
+    for (std::size_t i = 0; i + 2u < out.triangleIndices.size(); i += 3u) {
+        const std::uint32_t a = out.triangleIndices[i];
+        const std::uint32_t b = out.triangleIndices[i + 1u];
+        const std::uint32_t c = out.triangleIndices[i + 2u];
+        if (a >= vertexCount || b >= vertexCount || c >= vertexCount) {
+            ++out.outOfRangeTriangles;
+            continue;
+        }
+        if (a == b || b == c || a == c) {
+            ++out.degenerateTriangles;
+            continue;
+        }
+        kept.push_back(a);
+        kept.push_back(b);
+        kept.push_back(c);
+    }
+    // A trailing partial triangle is not a triangle; the loop above already
+    // leaves it out, and keeping it would hand the renderer two thirds of one.
+    out.triangleIndices = std::move(kept);
+}
 
 // Expands one triangle strip into an indexed triangle list.
 //
@@ -1206,6 +1246,11 @@ bool readGeometryData(ByteCursor& cursor, std::size_t blockEnd, bool isStrips, G
     if (isStrips ? (cursor.pos() != blockEnd) : (cursor.pos() + sizeof(std::uint16_t) > blockEnd)) {
         return false;
     }
+
+    // After the size check, not before: a block that failed its own layout
+    // check is discarded whole, and counting its garbage triangles as rejects
+    // would report a parse failure as a data defect.
+    rejectUnusableTriangles(out);
 
     out.valid = !out.positions.empty();
     return true;
@@ -1753,6 +1798,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // both sites reported 2 for a single lost shape.
             if (readGeometryData(blockCursor, blockEnd[i] - blockStart[i], isStrips, block) &&
                 block.valid) {
+                outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
+                outModel.degenerateTriangleCount += block.degenerateTriangles;
                 geometry[i] = std::move(block);
             }
         }
@@ -2476,6 +2523,8 @@ bool parseNifSkinnedMesh(
             const bool isStrips = (typeName == "NiTriStripsData");
             if (readGeometryData(blockCursor, header.blockSize[i], isStrips, block) &&
                 block.valid) {
+                outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
+                outModel.degenerateTriangleCount += block.degenerateTriangles;
                 geometry[i] = std::move(block);
             }
         }

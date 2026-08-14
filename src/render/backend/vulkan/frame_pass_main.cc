@@ -328,6 +328,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             static const bool s_highlightAlphaTest =
                 std::getenv("ODAI_DEBUG_ALPHATEST_HIGHLIGHT") != nullptr;
             importedPushConstants.materialParams[1] = s_highlightAlphaTest ? 1.0f : 0.0f;
+            importedPushConstants.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,
@@ -526,6 +527,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
+        importedPushConstants.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
         // Per-draw, exactly as the static block above does it. This used to push
         // a single hardcoded 0.5 for every actor in the scene with a comment
         // claiming the draws below overwrote it -- nothing did, so an actor's
@@ -622,6 +624,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         // there is nothing here to sort. Two-sidedness still applies -- a
         // dust-mask or a coat flap is authored DRAW_BOTH like any other thin
         // surface.
+        skinnedPushConstants.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
         auto pushSkinnedState = [&](std::uint8_t alphaThreshold) {
             skinnedPushConstants.materialParams[0] =
                 static_cast<float>(alphaThreshold) / 255.0f;

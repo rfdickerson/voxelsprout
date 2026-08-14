@@ -673,6 +673,7 @@ std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::Importe
     // chunk whose pages were dropped -- e.g. by the coverage check above --
     // has every draw silently excluded. Worth a line at add time; that failure
     // renders as "uploaded fine, never drawn".
+    rebuildImportedWaterBuffers();
     const ImportedSceneChunk& added = m_importedSceneChunks[m_lastImportedChunkIndex];
     VOX_LOGI("render") << "chunk " << m_lastImportedChunkIndex << " added: draws="
                        << added.draws.size() << " pages=" << added.pageRanges.size();
@@ -1085,6 +1086,8 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     // rest of the session -- and an interior cell carries a lot of them.
     chunk.lights.clear();
     chunk.lights.shrink_to_fit();
+    chunk.waterPatches.clear();
+    chunk.waterPatches.shrink_to_fit();
     chunk.vertexCount = 0;
     chunk.indexCount = 0;
     chunk.terrainDrawCount = 0;
@@ -1094,6 +1097,7 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     m_freeImportedSceneChunks.push_back(chunkIndex);
 
     rebuildImportedDrawTables();
+    rebuildImportedWaterBuffers();
 }
 
 void RendererBackend::rebuildImportedDrawTables() {
@@ -1139,6 +1143,129 @@ void RendererBackend::rebuildImportedDrawTables() {
         }
     }
     m_importedIndexCount = static_cast<std::uint32_t>(liveIndexCount);
+}
+
+void RendererBackend::rebuildImportedWaterBuffers() {
+    // Bethesda authors no water geometry at all: a cell states one height and
+    // the engine fills that cell's 4096-unit footprint at it. So the entire
+    // resident water surface is four vertices per water-bearing cell -- 81 cells
+    // at the default load radius, and most of them dry. Regenerating the whole
+    // thing is cheaper than any scheme for patching it in place.
+    std::vector<ImportedWaterVertex> waterVertices;
+    std::vector<std::uint32_t> waterIndices;
+    for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+        if (!chunk.alive) {
+            continue;
+        }
+        for (const odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
+            const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
+            ImportedWaterVertex vertex{};
+            vertex.position[1] = patch.waterLevel;
+            vertex.position[0] = patch.originX;
+            vertex.position[2] = patch.originZ;
+            vertex.uv[0] = 0.0f;
+            vertex.uv[1] = 0.0f;
+            waterVertices.push_back(vertex);
+
+            vertex.position[0] = patch.originX + patch.sizeX;
+            vertex.position[2] = patch.originZ;
+            vertex.uv[0] = 1.0f;
+            waterVertices.push_back(vertex);
+
+            vertex.position[0] = patch.originX + patch.sizeX;
+            vertex.position[2] = patch.originZ + patch.sizeZ;
+            vertex.uv[1] = 1.0f;
+            waterVertices.push_back(vertex);
+
+            vertex.position[0] = patch.originX;
+            vertex.position[2] = patch.originZ + patch.sizeZ;
+            vertex.uv[0] = 0.0f;
+            waterVertices.push_back(vertex);
+
+            waterIndices.push_back(baseVertex + 0u);
+            waterIndices.push_back(baseVertex + 2u);
+            waterIndices.push_back(baseVertex + 1u);
+            waterIndices.push_back(baseVertex + 0u);
+            waterIndices.push_back(baseVertex + 3u);
+            waterIndices.push_back(baseVertex + 2u);
+        }
+    }
+
+    // The early-out is what keeps this affordable. Streaming across dry ground
+    // -- which is most of the Mojave and most of Tamriel -- adds and evicts
+    // cells constantly while the water set never changes, and the rebuild below
+    // stalls the device. Comparing the built vertices rather than the patch
+    // count catches a same-sized set at a different height too.
+    if (waterVertices.size() == m_importedWaterVerticesResident.size() &&
+        std::memcmp(
+            waterVertices.data(), m_importedWaterVerticesResident.data(),
+            waterVertices.size() * sizeof(ImportedWaterVertex)) == 0) {
+        return;
+    }
+
+    // Destroying a buffer the GPU may still be reading is the one real hazard
+    // here, and this takes the same way out the fog-map re-upload does: wait for
+    // idle first. Affordable only because of the early-out above -- crossing a
+    // shoreline is a handful of events in a session, not a per-cell cost.
+    if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle ||
+        m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
+        vkDeviceWaitIdle(m_device);
+        if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_importedWaterVertexBufferHandle);
+            m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
+        }
+        if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
+            m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+        }
+    }
+    m_importedWaterIndexCount = 0;
+    m_importedWaterVerticesResident = waterVertices;
+    if (waterVertices.empty() || waterIndices.empty()) {
+        return;
+    }
+
+    // Host-visible rather than device-local with a staging copy: this is a few
+    // kilobytes read once per pass, so the transfer machinery would cost more
+    // than the slower reads ever will.
+    const auto createHostBuffer = [this](
+                                      const void* data,
+                                      VkDeviceSize bytes,
+                                      VkBufferUsageFlags usage) -> BufferHandle {
+        BufferCreateDesc desc{};
+        desc.size = bytes;
+        desc.usage = usage;
+        desc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        desc.initialData = data;
+        return m_bufferAllocator.createBuffer(desc);
+    };
+
+    const BufferHandle vertexHandle = createHostBuffer(
+        waterVertices.data(),
+        static_cast<VkDeviceSize>(waterVertices.size() * sizeof(ImportedWaterVertex)),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    if (vertexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "streamed water vertex buffer allocation failed";
+        m_importedWaterVerticesResident.clear();
+        return;
+    }
+    const BufferHandle indexHandle = createHostBuffer(
+        waterIndices.data(),
+        static_cast<VkDeviceSize>(waterIndices.size() * sizeof(std::uint32_t)),
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    if (indexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "streamed water index buffer allocation failed";
+        m_bufferAllocator.destroyBuffer(vertexHandle);
+        m_importedWaterVerticesResident.clear();
+        return;
+    }
+
+    m_importedWaterVertexBufferHandle = vertexHandle;
+    m_importedWaterIndexBufferHandle = indexHandle;
+    m_importedWaterIndexCount = static_cast<std::uint32_t>(waterIndices.size());
+    VOX_LOGI("render") << "streamed water: " << (waterVertices.size() / 4u)
+                       << " cell patch(es)";
 }
 
 bool RendererBackend::ensureImportedTextureSampler() {
@@ -2554,6 +2681,7 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.textureSlots = importedTextureSlots;
     textureSlotGuard.commit();
     chunk.lights = std::move(chunkLights);
+    chunk.waterPatches = uploadScene.waterPatches;
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
         draw.vertexBufferHandle = m_importedVertexBufferHandle;
@@ -2599,15 +2727,16 @@ bool RendererBackend::uploadImportedSceneInternal(
     if (indexBuffer != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.importedScene.index");
     }
-    // Known limitation: water still lives in one exact-fit buffer pair rather
-    // than an arena, so an appended chunk cannot contribute water without
-    // discarding whatever is already resident. Exteriors cooked so far carry no
-    // water patches, so this is inert today -- but it must become arena-backed
-    // like the geometry before any water-bearing cell is streamed.
-    if (appendChunk && !waterVertices.empty() &&
-        m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
-        VOX_LOGW("render") << "appended imported chunk carries " << waterVertices.size()
-                           << " water vertices but water is not arena-backed yet; skipping them";
+    // A streamed chunk's water is not uploaded here. Its patches were stored on
+    // the chunk above and the whole buffer pair is regenerated from every live
+    // chunk by rebuildImportedWaterBuffers(), because one exact-fit pair cannot
+    // be appended to -- which is why this used to warn and drop them, and why
+    // every coast in every streamed worldspace was a hole.
+    //
+    // The whole-scene path below is unchanged: a cooked scene or a strategy map
+    // arrives complete, so it can size the buffers exactly once.
+    if (appendChunk) {
+        // Nothing to do; see above.
     } else if (!waterVertices.empty() && !waterIndices.empty()) {
         BufferHandle waterVertexHandle = kInvalidBufferHandle;
         if (!uploadDeviceLocalBuffer(

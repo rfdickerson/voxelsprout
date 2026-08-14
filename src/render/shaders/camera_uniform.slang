@@ -55,6 +55,9 @@ public struct CameraUniform
     // (mode, contrast, saturation, curve knee) and (overbright dampening, ...).
     public float4 tonemapConfig;
     public float4 tonemapConfig2;
+    // Terrain layer-blend shaping; see renderer_shared.h for the channel map.
+    // (sharpness, coarse noise units, fine noise units, noise amount).
+    public float4 terrainBlendConfig;
 };
 
 [[vk::binding(0, 0)]]

@@ -215,6 +215,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
     std::size_t totalUnhandledNodeTypes = 0;
     std::size_t totalMirroredShapes = 0;
     std::size_t totalReversedWinding = 0;
+    std::size_t totalOutOfRangeTriangles = 0;
+    std::size_t totalDegenerateTriangles = 0;
+    std::size_t modelsWithOutOfRangeTriangles = 0;
     std::array<std::size_t, 4> stencilDrawModes{};
     std::map<std::string, std::size_t> parseErrors;
     // Which property types are costing us textures, aggregated across the whole
@@ -248,6 +251,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
         if (model.nodeParseFailedCount != 0u) { ++modelsWithNodeParseFailure; }
         totalMirroredShapes += model.mirroredShapeCount;
         totalReversedWinding += model.reversedWindingShapeCount;
+        totalOutOfRangeTriangles += model.outOfRangeTriangleCount;
+        totalDegenerateTriangles += model.degenerateTriangleCount;
+        if (model.outOfRangeTriangleCount != 0u) { ++modelsWithOutOfRangeTriangles; }
         for (int m = 0; m < 4; ++m) {
             stencilDrawModes[m] += model.stencilDrawModeCounts[m];
         }
@@ -291,6 +297,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
               << totalUnhandledNodeTypes << "\n"
               << "  mirrored shapes   " << totalMirroredShapes << "  (negative-determinant transform)\n"
               << "  DRAW_CW shapes    " << totalReversedWinding << "  (stencil says CW is the front face)\n"
+              << "  bad triangles     " << totalOutOfRangeTriangles << " out-of-range in "
+              << modelsWithOutOfRangeTriangles << " model(s), " << totalDegenerateTriangles
+              << " degenerate  (dropped at parse)\n"
               << "  stencil drawModes ccwOrBoth=" << stencilDrawModes[0] << " ccw=" << stencilDrawModes[1]
               << " cw=" << stencilDrawModes[2] << " both=" << stencilDrawModes[3] << "\n"
               << "  shapes w/ diffuse " << shapesWithDiffuse << "\n"
@@ -1840,6 +1849,80 @@ int probeBuildCell(
               << " decalsSkipped=" << stats.shadowDecalShapesSkipped
               << " markersSkipped=" << stats.editorMarkerModelsSkipped
               << " droppedLayers=" << stats.droppedTerrainLayers << "\n";
+    // Water is the one cell property with no geometry of its own: the record
+    // states a height and the engine fills the footprint. Printing the decision
+    // and its inputs together is the only way to tell "this cell is dry" from
+    // "the height decoded wrong" -- both render as no water.
+    // A cell with no LAND is flat ground at the worldspace's DNAM default
+    // height, not a hole -- so "land=no" is only alarming once you know whether
+    // a default exists to stand in for it.
+    if (cell.land == nullptr) {
+        const auto defaultsIt = tables.worldspaceDefaultsByFormId.find(cell.worldspaceFormId);
+        if (defaultsIt == tables.worldspaceDefaultsByFormId.end()) {
+            std::cout << "  no LAND, and this worldspace declares no DNAM default land height\n";
+        } else {
+            std::cout << "  no LAND; worldspace DNAM default land height "
+                      << defaultsIt->second.defaultLandHeight << ", default water "
+                      << defaultsIt->second.defaultWaterHeight << "\n";
+        }
+    }
+    std::cout << "  water: XCLW=" << (cell.hasWater ? std::to_string(cell.waterHeight) : "<absent>");
+    if (cell.land != nullptr && cell.land->hasHeights) {
+        const auto [lowest, highest] =
+            std::minmax_element(std::begin(cell.land->heights), std::end(cell.land->heights));
+        std::cout << " terrain z [" << *lowest << "," << *highest << "]";
+    }
+    std::cout << " -> patches=" << scene.waterPatches.size() << "\n";
+    // Every one of these used to be a silent `continue`. A town with holes in it
+    // is the symptom; this is the only place that says which kind of hole.
+    const std::size_t droppedReferences =
+        stats.referencesDroppedBaseNotFound + stats.referencesDroppedBaseHasNoModel +
+        stats.referencesDroppedMeshUnresolved + stats.referencesDroppedMeshUnreadable;
+    std::cout << "  refs dropped: " << droppedReferences << " of " << cell.references.size()
+              << "  (baseNotFound=" << stats.referencesDroppedBaseNotFound
+              << " baseHasNoModel=" << stats.referencesDroppedBaseHasNoModel
+              << " meshUnresolved=" << stats.referencesDroppedMeshUnresolved
+              << " meshUnreadable=" << stats.referencesDroppedMeshUnreadable << ")\n";
+    if (!stats.droppedReferencesByBaseType.empty()) {
+        // Sorted so two runs can be diffed, and by count so the one worth
+        // chasing is first.
+        std::vector<std::pair<std::string, std::size_t>> byType(
+            stats.droppedReferencesByBaseType.begin(), stats.droppedReferencesByBaseType.end());
+        std::sort(byType.begin(), byType.end(), [](const auto& a, const auto& b) {
+            return a.second != b.second ? a.second > b.second : a.first < b.first;
+        });
+        std::cout << "    by base record type:";
+        for (const auto& [typeName, count] : byType) {
+            std::cout << " " << typeName << "=" << count;
+        }
+        std::cout << "\n";
+    }
+    // The other half of ODAI_DEBUG_UNTEXTURED_MAGENTA: the render says WHERE an
+    // untextured surface is, this says WHICH asset it wanted. Neither is much
+    // use alone.
+    if (!stats.unresolvedTexturePaths.empty() || !stats.untexturedModelPaths.empty()) {
+        std::cout << "  untextured: " << stats.untexturedShapes << " shape(s), "
+                  << stats.untexturedShapesGivenModelTexture
+                  << " rescued by a sibling shape's texture\n";
+        std::vector<std::string> paths(
+            stats.unresolvedTexturePaths.begin(), stats.unresolvedTexturePaths.end());
+        std::sort(paths.begin(), paths.end());
+        for (std::size_t i = 0; i < paths.size() && i < 12u; ++i) {
+            std::cout << "    unresolved texture: " << paths[i] << "\n";
+        }
+        if (paths.size() > 12u) {
+            std::cout << "    ... and " << (paths.size() - 12u) << " more\n";
+        }
+        std::vector<std::string> models(
+            stats.untexturedModelPaths.begin(), stats.untexturedModelPaths.end());
+        std::sort(models.begin(), models.end());
+        for (std::size_t i = 0; i < models.size() && i < 12u; ++i) {
+            std::cout << "    model with no texture: " << models[i] << "\n";
+        }
+        if (models.size() > 12u) {
+            std::cout << "    ... and " << (models.size() - 12u) << " more\n";
+        }
+    }
     std::cout << "  lights=" << scene.lights.size()
               << " placed=" << stats.lightsPlaced
               << " zeroRadiusSkipped=" << stats.lightsSkippedZeroRadius

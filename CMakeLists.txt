@@ -1912,6 +1912,14 @@ if(BUILD_TESTING)
     add_executable(odai_fnv_import_tests
         tests/fnv_import_tests.cc
         src/core/job_system.cc
+        # cell_builder and its ImportedScene/DDS dependencies, so the cell->scene
+        # decisions (water patches today) can be pinned on synthetic records
+        # rather than only observed through the probe on an installed game.
+        src/import/dds.cc
+        src/import/imported_scene.cc
+        src/import/imported_scene_query.cc
+        src/import/fnv/cell_builder.cc
+        src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/actor_records.cc
         src/import/fnv/dialogue_records.cc
         src/import/fnv/asset_source.cc

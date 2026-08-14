@@ -187,6 +187,16 @@ enum class DebugView : std::uint8_t {
                        // a shadow is even able to remove. Black means a surface
                        // is lit entirely by unshadowed ambient, which is what
                        // "the shadows do nothing" looks like as a measurement.
+    // Terrain layer blend, false-coloured: red/green/blue are ATXT layers 0/1/2
+    // and grey is the quadrant's BTXT base showing through. Geometry carrying no
+    // terrain layers at all is left near-black.
+    //
+    // It shows the weights AS AUTHORED -- before the noise perturbation and
+    // smoothstep the lit shader applies -- which is the whole point: a wedge-
+    // shaped path boundary is either in the DATA or in that stylization, and
+    // those have completely different fixes. Comparing this against the lit
+    // frame is what separates them.
+    TerrainLayers = 13,
 };
 
 // True for views whose value is already a display-ready colour and must not be

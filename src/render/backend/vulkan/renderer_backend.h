@@ -774,6 +774,11 @@ private:
     // each chunk, which is the ordering the visibility pass and the
     // terrain/static draw split both rely on.
     void rebuildImportedDrawTables();
+    // Regenerates the single water vertex/index buffer pair from every live
+    // chunk's patches. Cheap and a no-op when the patch set is unchanged, which
+    // is the overwhelmingly common case: most cells carry no visible water, so
+    // streaming across dry ground never touches this.
+    void rebuildImportedWaterBuffers();
 
     // Evicts one resident chunk: returns its arena ranges, drops one reference
     // on each texture it acquired, and rebuilds the flat draw tables. Nothing
@@ -1294,6 +1299,11 @@ private:
         // ever loaded, because removeImportedSceneChunk had no way to find them
         // again.
         std::vector<ImportedLocalLight> lights;
+        // This chunk's water surfaces, owned for the same reason the lights
+        // are: the single water buffer pair is rebuilt from the live chunks in
+        // rebuildImportedWaterBuffers(), so evicting a coastal cell takes its
+        // sea away again.
+        std::vector<odai::importer::ImportedSceneWaterPatch> waterPatches;
         std::uint32_t terrainDrawCount = 0;
         bool alive = false;
     };
@@ -2209,6 +2219,10 @@ private:
     BufferHandle m_hexInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+    // What is currently in the buffer above, kept so rebuildImportedWaterBuffers
+    // can tell a changed water set from an unchanged one without touching the
+    // GPU. Empty on the whole-scene upload path, which never rebuilds.
+    std::vector<ImportedWaterVertex> m_importedWaterVerticesResident;
     BufferHandle m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
@@ -2373,6 +2387,9 @@ private:
     bool m_debugShowImportedTerrain = true;
     bool m_debugShowImportedStatics = true;
     bool m_debugShowImportedTextures = true;
+    // ODAI_DEBUG_UNTEXTURED_MAGENTA: paint surfaces whose diffuse never
+    // resolved, instead of letting them shade from the hashed pastel.
+    bool m_debugHighlightUntextured = false;
     bool m_debugImportedFlatShading = false;
     // Bounding sphere of the uploaded imported scene (terrain + statics), used to
     // fit shadow cascades for orthographic cameras where a perspective-frustum

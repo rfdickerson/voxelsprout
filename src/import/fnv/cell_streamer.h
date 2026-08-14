@@ -84,6 +84,14 @@ struct CellStreamerStats {
     // Only cache MISSES contribute: a cell served from disk never parses a NIF,
     // so this reads zero on a warm cache no matter what the meshes contain.
     std::uint64_t nodeParseFailures = 0;
+    // Per-vertex ATXT layer contributions beyond the four a vertex can hold,
+    // summed over cells built this run. Nonzero means a quadrant lost its
+    // weakest painted layers, which renders as a hard straight edge at the
+    // quadrant boundary rather than as anything that looks like an error. Same
+    // cache caveat as nodeParseFailures: only misses contribute.
+    std::uint64_t droppedTerrainLayers = 0;
+    // Cells that contributed a water surface, i.e. coast, lake or river.
+    std::uint64_t waterPatchesLoaded = 0;
     // Draws carrying kImportedSceneMaterialFlagAlphaBlend, i.e. those replayed
     // through the blended pipeline instead of the opaque one.
     std::uint64_t blendedPartsLoaded = 0;

@@ -13,6 +13,7 @@
 
 #include "core/job_system.h"
 #include "import/fnv/asset_source.h"
+#include "import/fnv/cell_builder.h"
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/character_builder.h"
 #include "import/fnv/kf_animation.h"
@@ -665,6 +666,89 @@ void testEsmReaderWalksBothHeaderGenerations() {
 // "textures\landscape\"; Fallout's points at a TXST through TNAM. Both have to
 // land in diffuseTexturePath, and the ICON path must not be clobbered by the
 // post-walk TXST resolution.
+// Water is the one cell property with no geometry behind it: the record states
+// a height and the engine fills the cell's whole 4096-unit footprint at it. So
+// every decision here is arithmetic on two numbers, and every one of them was a
+// candidate for being silently wrong -- a flipped axis puts the sea one cell
+// away, and a missing cull puts a full-cell blended quad under all of Nevada.
+void testCellWaterPatch() {
+    using namespace odai::importer::fnv;
+    using odai::importer::ImportedScene;
+
+    const auto makeExteriorCell = [](std::int32_t gridX, std::int32_t gridZ) {
+        FalloutCellRecord cell{};
+        cell.isInterior = false;
+        cell.hasGridCoords = true;
+        cell.gridX = gridX;
+        cell.gridZ = gridZ;
+        return cell;
+    };
+    const auto giveFlatLand = [](FalloutCellRecord& cell, float height) {
+        cell.land = std::make_unique<FalloutLandRecord>();
+        cell.land->hasHeights = true;
+        for (float& post : cell.land->heights) {
+            post = height;
+        }
+    };
+
+    // No LAND at all is open ocean, not a dry cell. Tamriel (0,0) is exactly
+    // this, so a version that required terrain would drop the sea precisely
+    // where there is nothing else to draw.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(0, 0);
+        expectTrue(appendCellWaterPatch(scene, cell) && scene.waterPatches.size() == 1u,
+                   "A cell with no LAND still gets its water surface");
+    }
+
+    // Terrain entirely above the water line: the sea is under a solid floor and
+    // emitting it would cost a full-cell blended quad for nothing visible.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(3, 4);
+        giveFlatLand(cell, 512.0f);
+        cell.hasWater = true;
+        cell.waterHeight = 0.0f;
+        expectTrue(!appendCellWaterPatch(scene, cell) && scene.waterPatches.empty(),
+                   "Water strictly below every terrain post is culled");
+    }
+
+    // Terrain dipping below it: a coastline.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(-46, -7);
+        giveFlatLand(cell, -136.0f);
+        expectTrue(appendCellWaterPatch(scene, cell) && scene.waterPatches.size() == 1u,
+                   "Terrain below sea level gets water even with XCLW absent");
+        if (scene.waterPatches.size() == 1u) {
+            const auto& patch = scene.waterPatches.front();
+            // Bethesda (x, y) -> engine (x, -y), so the cell's +Y edge becomes
+            // its MINIMUM engine z: the origin moves to the opposite corner.
+            // Getting this wrong puts the patch one cell north of its cell.
+            expectNear(patch.originX, -46.0f * kExteriorCellSize, 1e-3f,
+                       "water patch origin X is the cell's own X");
+            expectNear(patch.originZ, -(-7.0f + 1.0f) * kExteriorCellSize, 1e-3f,
+                       "water patch origin Z is the cell's far edge negated");
+            expectNear(patch.sizeX, kExteriorCellSize, 1e-3f, "water patch spans a whole cell in X");
+            expectNear(patch.sizeZ, kExteriorCellSize, 1e-3f, "water patch spans a whole cell in Z");
+            // An absent XCLW is Oblivion's sea level, which is 0 -- no WRLD
+            // record in Oblivion.esm carries a DNAM to override it.
+            expectNear(patch.waterLevel, 0.0f, 1e-6f, "an absent XCLW resolves to sea level");
+        }
+    }
+
+    // Interiors state a water height too, and have no footprint to fill.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell{};
+        cell.isInterior = true;
+        cell.hasWater = true;
+        cell.waterHeight = 100.0f;
+        expectTrue(!appendCellWaterPatch(scene, cell) && scene.waterPatches.empty(),
+                   "Interior cells contribute no water patch");
+    }
+}
+
 void testOblivionLandTextureIconPath() {
     namespace fs = std::filesystem;
     using namespace odai::importer::fnv;
@@ -880,9 +964,16 @@ void testFalloutRecordExtraction() {
         appendPod(xclcPayload, static_cast<std::int32_t>(-3));
         appendPod(xclcPayload, static_cast<std::uint32_t>(0));
         const auto xclc = buildSubrecord("XCLC", xclcPayload);
+        // XCLW carrying Fallout's DRY sentinel. Every one of FalloutNV.esm's
+        // 30497 cells has this subrecord, so presence cannot mean "has water" --
+        // 0xCF000000 is -2^31 as a float and means the cell has none.
+        std::vector<std::uint8_t> xclwPayload;
+        appendPod(xclwPayload, -2147483648.0f);
+        const auto xclw = buildSubrecord("XCLW", xclwPayload);
         out.insert(out.end(), edid.begin(), edid.end());
         out.insert(out.end(), data.begin(), data.end());
         out.insert(out.end(), xclc.begin(), xclc.end());
+        out.insert(out.end(), xclw.begin(), xclw.end());
         return out;
     }();
     const auto extCellRecord = buildRecord("CELL", kExtCellFormId, 0u, extCellSubrecords);
@@ -990,6 +1081,10 @@ void testFalloutRecordExtraction() {
                "Exterior cell attributes (worldspace, grid coords, interior flag) round-trip");
     expectTrue(intCell != nullptr && intCell->isInterior && intCell->worldspaceFormId == 0u,
                "Interior cell is flagged interior and attributed to no worldspace");
+    // The fixture's XCLW is present and holds the dry sentinel. A reader that
+    // tests presence rather than value floods every cell in the game.
+    expectTrue(extCell != nullptr && !extCell->hasWater,
+               "XCLW's dry sentinel is rejected rather than read as a water height");
 
     expectTrue(extCell != nullptr && extCell->references.size() == 1u,
                "Exterior cell owns exactly the one REFR placed inside its group hierarchy");
@@ -1769,6 +1864,109 @@ void testNifParserInheritsPropertiesFromParentNodes() {
         expectTrue(
             !shape.alphaBlend,
             "blend+test still resolves to cutout when inherited, exactly as when owned");
+    }
+}
+
+// An index past the block's own vertices does NOT fault and does not draw
+// nothing: shapes are merged into one vertex buffer downstream, so it resolves
+// to a neighbouring shape's vertex and draws a triangle stretched between two
+// unrelated meshes. No retail file in either game contains one -- measured 0
+// across 20746 FalloutNV and 6399 Oblivion meshes -- which is exactly why this
+// has to be synthetic: there is nothing in the shipped data to catch it.
+void testNifParserRejectsUnusableTriangles() {
+    const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+    std::vector<std::uint8_t> rootBlock;
+    appendAvObjectPrefix(rootBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(rootBlock, static_cast<std::uint32_t>(1));   // numChildren
+    appendPod(rootBlock, static_cast<std::int32_t>(1));    // child -> the shape
+    appendPod(rootBlock, static_cast<std::uint32_t>(0));   // numEffects
+
+    std::vector<std::uint8_t> triShapeBlock;
+    appendAvObjectPrefix(triShapeBlock, {0.0f, 0.0f, 0.0f}, identityRotation, 1.0f);
+    appendPod(triShapeBlock, static_cast<std::int32_t>(2));  // data -> block 2
+
+    // Three vertices, three triangles: one usable, one naming vertex 9 in a
+    // three-vertex block, one naming vertex 1 twice.
+    std::vector<std::uint8_t> dataBlock;
+    appendPod(dataBlock, static_cast<std::int32_t>(0));     // groupId
+    appendPod(dataBlock, static_cast<std::uint16_t>(3));    // numVertices
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));     // keepFlags
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));     // compressFlags
+    appendPod(dataBlock, static_cast<std::uint8_t>(1));     // hasVertices
+    for (int v = 0; v < 3; ++v) {
+        appendPod(dataBlock, static_cast<float>(v));
+        appendPod(dataBlock, 0.0f);
+        appendPod(dataBlock, 0.0f);
+    }
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));    // vector flags
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));     // hasNormals
+    appendPod(dataBlock, 0.0f);                             // bound centre x
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);
+    appendPod(dataBlock, 0.0f);                             // bound radius
+    appendPod(dataBlock, static_cast<std::uint8_t>(0));     // hasVertexColors
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));    // consistency flags
+    appendPod(dataBlock, static_cast<std::int32_t>(-1));    // additional data
+    appendPod(dataBlock, static_cast<std::uint16_t>(3));    // numTriangles
+    appendPod(dataBlock, static_cast<std::uint32_t>(9));    // numTrianglePoints
+    appendPod(dataBlock, static_cast<std::uint8_t>(1));     // hasTriangles
+    const std::uint16_t triangles[9] = {0, 1, 2, 0, 1, 9, 1, 1, 2};
+    for (const std::uint16_t index : triangles) {
+        appendPod(dataBlock, index);
+    }
+    appendPod(dataBlock, static_cast<std::uint16_t>(0));    // numMatchGroups
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(11));
+    appendPod(fileBytes, static_cast<std::uint32_t>(3));   // numBlocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(34));  // userVersion2
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(3));   // numBlockTypes
+    appendSizedString32(fileBytes, "NiNode");
+    appendSizedString32(fileBytes, "NiTriShape");
+    appendSizedString32(fileBytes, "NiTriShapeData");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));
+    appendPod(fileBytes, static_cast<std::uint16_t>(2));
+    appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(triShapeBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(dataBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));   // numStrings
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));   // maxStringLength
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));   // numGroups
+
+    fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+    fileBytes.insert(fileBytes.end(), triShapeBlock.begin(), triShapeBlock.end());
+    fileBytes.insert(fileBytes.end(), dataBlock.begin(), dataBlock.end());
+    appendPod(fileBytes, static_cast<std::uint32_t>(1));   // Num Roots
+    appendPod(fileBytes, static_cast<std::int32_t>(0));
+
+    odai::importer::fnv::NifModel model;
+    std::string error;
+    expectTrue(
+        odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+        "A shape carrying an unusable triangle still parses -- the shape is not lost");
+    expectTrue(model.outOfRangeTriangleCount == 1u,
+               "The triangle naming a vertex the block does not have is counted");
+    expectTrue(model.degenerateTriangleCount == 1u,
+               "The triangle naming one vertex twice is counted");
+    expectTrue(model.shapes.size() == 1u, "The shape survives with its usable geometry");
+    if (model.shapes.size() == 1u) {
+        const odai::importer::fnv::NifShape& shape = model.shapes.front();
+        expectTrue(shape.triangleIndices.size() == 3u,
+                   "Only the one usable triangle reaches the shape");
+        // Dropping the individual triangle, not the shape: one bad index in a
+        // rock should cost one triangle, not the rock.
+        expectTrue(shape.positions.size() == 9u,
+                   "Rejecting triangles does not disturb the vertex array they indexed");
     }
 }
 
@@ -3653,12 +3851,14 @@ int main() {
     testEsmReaderWalksGroupsRecordsAndSubrecords();
     testEsmReaderWalksBothHeaderGenerations();
     testOblivionLandTextureIconPath();
+    testCellWaterPatch();
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
     testNifParserExtractsTransformedGeometry();
     testNifParserDoesNotReparentSubtreesToTheOrigin();
     testNifParserInheritsPropertiesFromParentNodes();
+    testNifParserRejectsUnusableTriangles();
     testNifParserRejectsImplausibleChildCount();
     testPluginHeaderRejectsOversizedRecord();
     testPluginHeaderReadsBothGenerations();

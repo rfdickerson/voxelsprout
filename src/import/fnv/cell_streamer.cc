@@ -67,7 +67,28 @@ std::string cellAxisToken(std::int32_t value) {
 // blend and two-sidedness are baked into a cached cell's packed vertex flags,
 // so a cell built before this fix carries the wrong ones and cannot be repaired
 // at load -- it has to miss.
-constexpr int kCellBuildVersion = 12;
+// 14: two changes to what a cell contains, both of which a cached cell has
+// baked in and neither of which can be repaired at load.
+//
+// Degenerate triangles are now dropped at NIF parse. Measured across all 20746
+// retail FalloutNV meshes: 7163270 of 43435533 triangles -- 16.5% of the
+// game's geometry -- name the same vertex twice and rasterize nothing. The
+// strip expander had always dropped them, because that is how Bethesda stitches
+// strips together; the explicit NiTriShapeData path had no filter at all, and
+// every one of those triangles was being submitted to every pass, every frame.
+// (Oblivion measures 0, which fits: it is 38372 strip blocks against 1956
+// explicit lists.)
+//
+// And: cells carry their WATER SURFACE (XCLW -> ImportedSceneWaterPatch). A
+// cached cell built before this has no water patch in it at all, and nothing at
+// load time can invent one -- the height it needs is in the plugin record, not
+// in the cooked scene. Without the bump every existing install keeps serving a
+// coastline with no sea and the fix looks like it did nothing.
+// (13 was this same set mid-flight: the water half landed first and wrote
+// caches, and the triangle half then had no way to invalidate them. Bumping
+// once per SHIPPED change is the rule; bumping once per editing session is not
+// enough, and the symptom is a fix that measures as doing exactly nothing.)
+constexpr int kCellBuildVersion = 14;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -149,6 +170,8 @@ struct CellStreamer::Pending {
         float cacheLoadMs = 0.0f;
         std::uint64_t effectMeshesSkipped = 0;
         std::uint64_t nodeParseFailures = 0;
+        std::uint64_t droppedTerrainLayers = 0;
+        std::uint64_t waterPatches = 0;
         std::uint64_t blendedParts = 0;
     };
 
@@ -387,6 +410,8 @@ void CellStreamer::update(
                     result.succeeded = true;
                     result.effectMeshesSkipped = builder.stats().effectMeshesSkipped;
                     result.nodeParseFailures = builder.stats().nodeParseFailures;
+                    result.droppedTerrainLayers = builder.stats().droppedTerrainLayers;
+                    result.waterPatches = builder.stats().waterPatchesEmitted;
                     result.blendedParts = countBlendedDraws(result.scene);
 
                     if (!cachePath.empty()) {
@@ -528,6 +553,8 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         ++m_stats.scenesLoaded;
         m_stats.effectMeshesSkipped += result.effectMeshesSkipped;
         m_stats.nodeParseFailures += result.nodeParseFailures;
+        m_stats.droppedTerrainLayers += result.droppedTerrainLayers;
+        m_stats.waterPatchesLoaded += result.waterPatches;
         m_stats.blendedPartsLoaded += result.blendedParts;
         if (m_onCellResident) {
             // Before result.scene is destroyed at the end of this loop.

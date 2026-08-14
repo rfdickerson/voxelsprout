@@ -51,6 +51,11 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, std::string> regionNamesByFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
+    // Worldspace formID -> its DNAM default land/water heights. Absent for a
+    // worldspace that declares none, which is every Oblivion one. See
+    // FalloutWorldspaceRecord::hasDefaultHeights for why a cell with no LAND
+    // needs this.
+    std::unordered_map<std::uint32_t, FalloutWorldspaceRecord> worldspaceDefaultsByFormId;
     // LIGH formID -> its light parameters. A LIGH also appears in the maps
     // above when it carries a MODL (29 of 501 do), because the lamp mesh and
     // the light it casts are both wanted.
@@ -82,6 +87,15 @@ bool buildFalloutWorldTables(
 // stopgap for whatever the blended pass does not pick up.
 bool isEffectOnlyModelPath(std::string_view modelPath);
 
+// Appends this cell's water surface to `outScene`, and reports whether it did.
+//
+// Free rather than a CellSceneBuilder member because the offline cooker builds
+// its ImportedScene directly and does not go through the builder -- the terrain
+// append is already duplicated between the two, and duplicating this as well is
+// how the cooked and streamed worlds drift apart.
+bool appendCellWaterPatch(
+    odai::importer::ImportedScene& outScene, const FalloutCellRecord& cell);
+
 struct CellBuildStats {
     std::size_t placedInstances = 0;
     std::size_t totalShapes = 0;
@@ -108,6 +122,33 @@ struct CellBuildStats {
     // having a zero radius (exactly one LIGH in FalloutNV.esm does).
     std::size_t lightsPlaced = 0;
     std::size_t lightsSkippedZeroRadius = 0;
+    // Cells that contributed a water surface. Zero across most of the Mojave
+    // and nonzero along any coast, lake or river.
+    std::size_t waterPatchesEmitted = 0;
+
+    // References that were placed in the cell and then drew nothing.
+    //
+    // Every one of these paths used to `continue` with no counter at all, so
+    // "this town has holes in it" had no way to be asked as a question. They are
+    // split by CAUSE because the causes have opposite fixes: a formID that
+    // resolves to no record is a load-order or remap problem, a record with no
+    // MODL is usually correct (a trigger, a marker, an activator with no mesh),
+    // and a MODL naming a file that is not there is a missing-asset problem.
+    //
+    // Counted per REFERENCE, not per base record, so a hundred placements of one
+    // missing rock read as a hundred holes -- which is what a hole in a town
+    // actually looks like.
+    //
+    // Deliberate skips (effect meshes, editor markers) are NOT counted here;
+    // they have their own counters above and folding them in would bury the
+    // signal in known-good noise.
+    std::size_t referencesDroppedBaseNotFound = 0;
+    std::size_t referencesDroppedBaseHasNoModel = 0;
+    std::size_t referencesDroppedMeshUnresolved = 0;
+    std::size_t referencesDroppedMeshUnreadable = 0;
+    // Base record type -> how many references it dropped, e.g. {"ACTI": 4}.
+    // "<base record not found>" for a formID with no record at all.
+    std::unordered_map<std::string, std::size_t> droppedReferencesByBaseType;
     bool textureBudgetExceeded = false;
 
     // Diagnostic name sets the cooker reports. Kept here rather than dropped in
@@ -193,7 +234,19 @@ private:
     std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
     std::unordered_set<std::string> m_failedTexturePaths;
     std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
-    std::unordered_set<std::uint32_t> m_failedStatics;
+    // Why a base record stopped producing geometry, so a REPEAT reference to it
+    // can be attributed to the same cause instead of only the first one being
+    // explained. kIntentional covers the deliberate skips, which are counted
+    // elsewhere and must not be counted again here.
+    enum class StaticDropReason : std::uint8_t {
+        kIntentional,
+        kBaseNotFound,
+        kBaseHasNoModel,
+        kMeshUnresolved,
+        kMeshUnreadable,
+    };
+    void noteDroppedReference(std::uint32_t baseFormId, StaticDropReason reason);
+    std::unordered_map<std::uint32_t, StaticDropReason> m_failedStatics;
     std::uint32_t m_fallbackLandTexture = 0xFFFFFFFFu;
     std::size_t m_textureBudget = 1000u;
     std::uint32_t m_maxTextureSize = 512u;

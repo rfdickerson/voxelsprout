@@ -169,6 +169,11 @@ void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene)
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
+        } else if (sub.type == "DNAM" && sub.size >= 8u) {
+            // Two floats: default land height, then default water height.
+            entry.hasDefaultHeights = true;
+            entry.defaultLandHeight = readF32(sub.data);
+            entry.defaultWaterHeight = readF32(sub.data + 4);
         }
     }
     scene.worldspaces.push_back(std::move(entry));
@@ -201,6 +206,16 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
             }
             std::memcpy(&entry.fogNear, sub.data + 12, sizeof(entry.fogNear));
             std::memcpy(&entry.fogFar, sub.data + 16, sizeof(entry.fogFar));
+        } else if (sub.type == "XCLW" && sub.size >= 4u) {
+            // Presence is not the test -- see FalloutCellRecord::hasWater. The
+            // threshold only has to separate the one sentinel Bethesda writes
+            // (-2.147e9) from a real water height; the deepest authored water
+            // in either game is thousands of units, not billions.
+            const float height = readF32(sub.data);
+            if (std::isfinite(height) && height > -1.0e9f) {
+                entry.hasWater = true;
+                entry.waterHeight = height;
+            }
         } else if (sub.type == "XCLR") {
             // A packed array of REGN formIDs. Every retail size is a multiple
             // of 4 (measured: 4, 8, 12, 16, 20 and one 24), which is what pins

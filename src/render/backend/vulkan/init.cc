@@ -105,6 +105,15 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     if (std::getenv("ODAI_DEBUG_NO_TEXTURES") != nullptr) {
         m_debugShowImportedTextures = false;
     }
+    // Diagnostic: ODAI_DEBUG_UNTEXTURED_MAGENTA=1 paints any surface whose
+    // diffuse texture failed to resolve. It has to be asked for because the
+    // default is deliberately inconspicuous -- an unresolved texture falls back
+    // to a per-model hashed pastel plus a slope-based rock tint, which reads as
+    // ordinary weathered stone. That is the right default for a screenshot and
+    // exactly wrong for finding a missing asset.
+    if (std::getenv("ODAI_DEBUG_UNTEXTURED_MAGENTA") != nullptr) {
+        m_debugHighlightUntextured = true;
+    }
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
     auto elapsedMs = [](const Clock::time_point& start) -> std::int64_t {

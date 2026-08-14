@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1333,6 +1335,37 @@ void RendererBackend::renderFrame(
     mvpUniform.tonemapConfig2[1] = static_cast<float>(static_cast<std::uint32_t>(m_debugView));
     mvpUniform.tonemapConfig2[2] = m_taaJitterNdc[0];
     mvpUniform.tonemapConfig2[3] = m_taaJitterNdc[1];
+    // Terrain layer-blend shaping, exposed so it can be turned OFF.
+    //
+    // The defaults are the values this was hardcoded to and render identically
+    // to before, deliberately. They were suspected of producing the hard,
+    // wedge-shaped boundaries visible on Goodsprings ground -- sharpening a
+    // per-vertex weight that is interpolated linearly across a triangle does
+    // magnify the triangulation -- and that suspicion is WRONG: at
+    // ODAI_FNV_TERRAIN_BLEND=0,520,170,0, which is a plain lerp of the authored
+    // weight with no noise at all, the wedges are unchanged. So is the terrain-
+    // layer debug view, which shows those weights as a smooth field. Whatever
+    // draws them is not this, and retuning it would be a look change with no
+    // defect behind it.
+    //
+    // ODAI_FNV_TERRAIN_BLEND=<sharpness>,<coarseUnits>,<fineUnits>,<amount>.
+    // Sharpness 0 is the control any future attempt at this should start from.
+    static const std::array<float, 4> s_terrainBlend = []() {
+        std::array<float, 4> values{1.0f, 220.0f, 70.0f, 0.55f};
+        if (const char* env = std::getenv("ODAI_FNV_TERRAIN_BLEND")) {
+            std::array<float, 4> parsed{};
+            const int count = std::sscanf(
+                env, "%f,%f,%f,%f", &parsed[0], &parsed[1], &parsed[2], &parsed[3]);
+            for (int i = 0; i < count && i < 4; ++i) {
+                values[static_cast<std::size_t>(i)] = parsed[static_cast<std::size_t>(i)];
+            }
+        }
+        return values;
+    }();
+    mvpUniform.terrainBlendConfig[0] = s_terrainBlend[0];
+    mvpUniform.terrainBlendConfig[1] = s_terrainBlend[1];
+    mvpUniform.terrainBlendConfig[2] = s_terrainBlend[2];
+    mvpUniform.terrainBlendConfig[3] = s_terrainBlend[3];
     mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceR, 0.0f, 4.0f);
     mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceG, 0.0f, 4.0f);
     mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceB, 0.0f, 4.0f);

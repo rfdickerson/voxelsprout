@@ -676,10 +676,12 @@ bool NewVegasApp::onInit() {
         else if (requested == "depth") { view = render::DebugView::LinearDepth; }
         else if (requested == "shadow") { view = render::DebugView::Shadow; }
         else if (requested == "directratio") { view = render::DebugView::DirectRatio; }
+        else if (requested == "terrainlayers") { view = render::DebugView::TerrainLayers; }
         else if (requested != "off") {
             VOX_LOGW("newvegas")
                 << "ODAI_FNV_DEBUGVIEW=" << requested << " is not a view name; ignoring. "
-                << "Valid: albedo normal alpha flags roughness metallic mip cascade texid depth\n";
+                << "Valid: albedo normal alpha flags roughness metallic mip cascade texid "
+                << "depth shadow directratio terrainlayers\n";
         }
         m_renderer.setDebugView(view);
     }
@@ -1885,8 +1887,32 @@ void sampleTourByParameter(float u, float outPosition[3], float outLookAt[3]) {
 // distance along the path and this table converts it back to a curve parameter.
 constexpr int kTourArcSamples = 1024;
 
+// Rebuilt whenever the loaded tour changes rather than cached forever.
+//
+// This was a function-local `static const` built on first call, which is
+// correct only because --tour-file happens to be parsed before the first frame.
+// Any runtime tour swap would keep the OLD path's arc-length table and silently
+// reparameterize the new curve by the old one's distances -- a camera that
+// speeds up and slows down at the previous tour's waypoints, which is a very
+// hard symptom to attribute back to here. Keying on the waypoint count and
+// first waypoint costs one comparison per frame and removes the trap.
 const std::vector<float>& tourArcLengths() {
-    static const std::vector<float> table = []() {
+    static std::vector<float> table;
+    static int builtForWaypointCount = -1;
+    static FlyWaypoint builtForFirstWaypoint{};
+    const int waypointCount = tourCount();
+    const FlyWaypoint firstWaypoint = tourWaypoint(0);
+    const bool stale =
+        builtForWaypointCount != waypointCount ||
+        builtForFirstWaypoint.position[0] != firstWaypoint.position[0] ||
+        builtForFirstWaypoint.position[1] != firstWaypoint.position[1] ||
+        builtForFirstWaypoint.position[2] != firstWaypoint.position[2];
+    if (!stale) {
+        return table;
+    }
+    builtForWaypointCount = waypointCount;
+    builtForFirstWaypoint = firstWaypoint;
+    table = [&]() {
         std::vector<float> lengths(kTourArcSamples + 1, 0.0f);
         float previous[3] = {};
         float ignoredLookAt[3] = {};
@@ -3075,6 +3101,8 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
                              << " cacheLoadMs=" << stats.lastCacheLoadMs
                              << " fxSkipped=" << stats.effectMeshesSkipped
                              << " nodeParseFails=" << stats.nodeParseFailures
+                             << " droppedLayers=" << stats.droppedTerrainLayers
+                             << " waterCells=" << stats.waterPatchesLoaded
                              << " blendedDraws=" << stats.blendedPartsLoaded;
     }
 }

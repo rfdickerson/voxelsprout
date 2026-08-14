@@ -192,6 +192,21 @@ struct alignas(16) CameraUniform {
     //       subtract it: a jittered projection moves the NDC of a texel centre
     //       off the usual uv*2-1.
     float tonemapConfig2[4];
+    // Terrain layer-blend shaping, for the ATXT/VTXT weights in
+    // imported_static.frag.slang.
+    //
+    // Tunable rather than baked because these numbers decide whether a painted
+    // road reads as an organic edge or as a set of hard triangular wedges, and
+    // that judgement needs one round trip through a render per value. The
+    // defaults live in the renderer, not here.
+    //
+    // [0] = sharpness in 0..1. 0 is a PLAIN LERP of the authored weight and is
+    //       the control any comparison needs; 1 is the full smoothstep.
+    // [1] = world units per coarse noise cell, [2] = per fine noise cell.
+    //       Bigger than the 128-unit LAND post spacing or the noise cannot move
+    //       a boundary far enough to break the lattice it sits on.
+    // [3] = how far the noise may displace a boundary, in weight units.
+    float terrainBlendConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {

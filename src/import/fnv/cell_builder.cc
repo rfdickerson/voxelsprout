@@ -154,42 +154,6 @@ void writeTransform(
     instance.transform[15] = 1.0f;
 }
 
-// A post on a quadrant boundary (col or row 16) is shared by two quadrants, and
-// the centre post by all four -- the cooked mesh keeps one vertex per post, so
-// those vertices have to reconcile layers from every quadrant they touch. Taking
-// the max weight per texture is what makes the seam disappear: a layer that runs
-// up to the boundary from one side keeps its opacity there instead of being
-// halved by a quadrant that never mentioned it.
-struct TerrainLayerCandidate {
-    std::uint32_t textureIndex = kNoTextureIndex;
-    float weight = 0.0f;
-    // ATXT's declared stacking order. Carried through selection because the
-    // shader composites slot 0, then 1, then 2, and a lerp chain is not
-    // commutative -- blending the same two layers in the other order gives a
-    // different colour. Selecting the strongest layers by weight and then
-    // storing them in weight order silently reordered the stack.
-    std::uint16_t layerIndex = 0;
-};
-
-void accumulateLayerWeight(
-    std::vector<TerrainLayerCandidate>& candidates,
-    std::uint32_t textureIndex,
-    float weight,
-    std::uint16_t layerIndex
-) {
-    if (textureIndex == kNoTextureIndex || weight <= 0.0f) {
-        return;
-    }
-    for (auto& candidate : candidates) {
-        if (candidate.textureIndex == textureIndex) {
-            candidate.weight = std::max(candidate.weight, weight);
-            candidate.layerIndex = std::min(candidate.layerIndex, layerIndex);
-            return;
-        }
-    }
-    candidates.push_back(TerrainLayerCandidate{textureIndex, weight, layerIndex});
-}
-
 // True when the shape is a flat sheet: its thinnest axis is negligible compared
 // to its own footprint.
 //
@@ -478,6 +442,11 @@ void mergeWorldTablesFromScene(
             put(outTables.worldspaceFormIdsByEditorId, toLowerAsciiCopy(entry.editorId),
                 remap(entry.formId));
         }
+        if (entry.hasDefaultHeights) {
+            FalloutWorldspaceRecord remapped = entry;
+            remapped.formId = remap(entry.formId);
+            put(outTables.worldspaceDefaultsByFormId, remapped.formId, remapped);
+        }
     }
 }
 
@@ -570,6 +539,9 @@ bool buildFalloutWorldTables(
         if (!entry.editorId.empty()) {
             outTables.worldspaceFormIdsByEditorId.emplace(
                 toLowerAsciiCopy(entry.editorId), entry.formId);
+        }
+        if (entry.hasDefaultHeights) {
+            outTables.worldspaceDefaultsByFormId.emplace(entry.formId, entry);
         }
     }
     return true;
@@ -699,7 +671,88 @@ std::uint32_t CellSceneBuilder::dominantLandTexture(
     return best;
 }
 
+// One water quad per exterior cell whose water surface is high enough to be
+// seen. Bethesda has no water GEOMETRY: a cell states a height and the engine
+// fills the cell's whole 4096-unit footprint at it, so this is the entire
+// representation, not an approximation of one.
+//
+// Without it every coast, lake and river in every worldspace is a hole. Anvil
+// is the case that surfaced it -- a port city on the Abecean Sea, where the
+// missing ocean occupies the left third of the frame and reads as "the terrain
+// just ends into a grey void", which is a very convincing impression of a
+// streaming bug. It is not: the sea was never imported.
+bool appendCellWaterPatch(ImportedScene& outScene, const FalloutCellRecord& cell) {
+    if (cell.isInterior || !cell.hasGridCoords) {
+        return false;
+    }
+    // See FalloutCellRecord::hasWater: an absent XCLW is Oblivion's "sea level",
+    // not "no water". The dry case is a sentinel VALUE and was rejected at parse.
+    const float waterHeight = cell.hasWater ? cell.waterHeight : 0.0f;
+    if (cell.land != nullptr && cell.land->hasHeights) {
+        // Water strictly below every post in the cell is water under a solid
+        // floor -- true of most of the Mojave, where sea level sits far beneath
+        // the desert. Emitting it anyway would put a full-cell alpha-blended
+        // quad under every cell in the worldspace, at real fill cost, for
+        // nothing visible.
+        const float lowestPost =
+            *std::min_element(std::begin(cell.land->heights), std::end(cell.land->heights));
+        if (waterHeight <= lowestPost) {
+            return false;
+        }
+    }
+    // Bethesda (x, y) -> engine (x, -y), so the cell's +Y edge becomes its
+    // MINIMUM engine z and the origin moves to the far corner.
+    ImportedSceneWaterPatch patch{};
+    patch.originX = static_cast<float>(cell.gridX) * kExteriorCellSize;
+    patch.originZ = -(static_cast<float>(cell.gridZ) + 1.0f) * kExteriorCellSize;
+    patch.sizeX = kExteriorCellSize;
+    patch.sizeZ = kExteriorCellSize;
+    patch.waterLevel = waterHeight;
+    outScene.waterPatches.push_back(patch);
+    return true;
+}
+
+// Records that one placed reference produced no geometry, and why.
+//
+// Both halves matter. The memo (m_failedStatics) is what lets a REPEAT of an
+// already-failed base be attributed to the same cause instead of only the first
+// one being explained, and the counters are what turn "this town has holes" from
+// an impression into a number with a cause attached to it.
+void CellSceneBuilder::noteDroppedReference(
+    std::uint32_t baseFormId, StaticDropReason reason) {
+    m_failedStatics[baseFormId] = reason;
+    if (reason == StaticDropReason::kIntentional) {
+        return;  // counted by effectMeshesSkipped / editorMarkerModelsSkipped
+    }
+    switch (reason) {
+        case StaticDropReason::kBaseNotFound:
+            ++m_stats.referencesDroppedBaseNotFound;
+            break;
+        case StaticDropReason::kBaseHasNoModel:
+            ++m_stats.referencesDroppedBaseHasNoModel;
+            break;
+        case StaticDropReason::kMeshUnresolved:
+            ++m_stats.referencesDroppedMeshUnresolved;
+            break;
+        case StaticDropReason::kMeshUnreadable:
+            ++m_stats.referencesDroppedMeshUnreadable;
+            break;
+        case StaticDropReason::kIntentional:
+            break;
+    }
+    const auto typeIt = m_tables.staticRecordTypes.find(baseFormId);
+    ++m_stats.droppedReferencesByBaseType[
+        typeIt == m_tables.staticRecordTypes.end() ? std::string("<base record not found>")
+                                                   : typeIt->second];
+}
+
 void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
+    // Before the LAND guard: a cell can be open ocean with no terrain at all.
+    // Tamriel (0,0) is exactly that, so gating water on terrain would drop the
+    // sea precisely where there is nothing else to draw.
+    if (appendCellWaterPatch(m_scene, cell)) {
+        ++m_stats.waterPatchesEmitted;
+    }
     if (cell.land == nullptr) {
         return;
     }
@@ -773,27 +826,43 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 // No `continue`: a LIGH that does have a mesh still needs its
                 // lamp placed, so fall through into the static path below.
             }
-            if (m_failedStatics.count(ref.baseFormId) != 0u) {
+            if (const auto failedIt = m_failedStatics.find(ref.baseFormId);
+                failedIt != m_failedStatics.end()) {
+                // A repeat of a base that already failed. Counted again, because
+                // the question this answers is "how many placements drew
+                // nothing", and one missing rock placed a hundred times is a
+                // hundred holes.
+                noteDroppedReference(ref.baseFormId, failedIt->second);
                 continue;
             }
             auto meshIt = m_meshIndexByStaticFormId.find(ref.baseFormId);
             if (meshIt == m_meshIndexByStaticFormId.end()) {
                 const auto statIt = m_tables.staticModelPaths.find(ref.baseFormId);
                 if (statIt == m_tables.staticModelPaths.end() || statIt->second.empty()) {
-                    m_failedStatics.insert(ref.baseFormId);
+                    // Two different failures wearing one shape: a formID that
+                    // names no record at all (a load-order or remap fault) and a
+                    // record that simply has no MODL (a trigger or an activator,
+                    // usually correct). staticRecordTypes is what separates them.
+                    const bool baseExists =
+                        m_tables.staticRecordTypes.find(ref.baseFormId) !=
+                        m_tables.staticRecordTypes.end();
+                    noteDroppedReference(
+                        ref.baseFormId,
+                        baseExists ? StaticDropReason::kBaseHasNoModel
+                                   : StaticDropReason::kBaseNotFound);
                     continue;
                 }
                 const std::string& staticModelPath = statIt->second;
                 std::vector<std::uint8_t> nifBytes;
                 if (isEffectOnlyModelPath(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
                 }
                 std::string meshError;
                 if (!m_assets.resolveMesh(staticModelPath, nifBytes, meshError)) {
                     std::cerr << "warning: could not resolve mesh " << staticModelPath << "\n";
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnresolved);
                     continue;
                 }
                 // Editor markers are level-design furniture, not world geometry:
@@ -815,7 +884,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 if ((isRootLevelModel && modelBaseName.rfind("marker", 0) == 0) ||
                     lowerModelPath.find("\\markers\\") != std::string::npos) {
                     ++m_stats.editorMarkerModelsSkipped;
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
                 }
 
@@ -824,7 +893,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 std::string nifError;
                 if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) || nifModel.shapes.empty()) {
                     std::cerr << "warning: failed to parse NIF " << staticModelPath << ": " << nifError << "\n";
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
                 }
                 m_stats.skippedGeometryShapes += nifModel.skippedShapeCount;
@@ -1035,7 +1104,15 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     }
                 }
                 if (mesh.vertices.empty()) {
-                    m_failedStatics.insert(ref.baseFormId);
+                    // The one drop path with no diagnostic at all: the NIF
+                    // parsed, its shapes were all filtered out (decals, gore
+                    // caps, effect-only sheets, extreme UVs), and the reference
+                    // then vanished without a word. Naming it is the difference
+                    // between "the importer is dropping things" and knowing
+                    // which asset and which filter.
+                    std::cerr << "warning: " << staticModelPath
+                              << " built no geometry (every shape was filtered)\n";
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
                 }
                 const std::uint32_t meshIndex = static_cast<std::uint32_t>(m_scene.meshes.size());

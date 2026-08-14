@@ -384,6 +384,22 @@ struct FalloutCellRecord {
     float fogNear = 0.0f;
     float fogFar = 0.0f;
 
+    // XCLW: the height of this cell's water surface, in Bethesda Z.
+    //
+    // A cell with no water does NOT omit the subrecord in Fallout -- all 30497
+    // of FalloutNV.esm's cells carry one, and a dry cell writes the sentinel
+    // 0xCF000000, which is -2^31 as a float. So "has water" is a value test,
+    // not a presence test, and a reader that trusts presence floods the whole
+    // Mojave two billion units below the ground.
+    //
+    // Oblivion is the other way round: only 751 of Oblivion.esm's 35494 cells
+    // carry XCLW at all, and no WRLD record in the file has a DNAM (censused:
+    // 84 worldspaces, 0 DNAM), so there is no authored per-worldspace default
+    // to fall back to. Tamriel's sea is simply at Z=0, which is what the
+    // absent case resolves to.
+    bool hasWater = false;
+    float waterHeight = 0.0f;
+
     std::vector<FalloutPlacedReference> references;
     // XCLR: the regions this cell belongs to, by REGN formID. A cell can be in
     // several at once (measured: up to 6), and 4363 of FalloutNV.esm's 30497
@@ -418,6 +434,22 @@ struct FalloutLandTextureRecord {
 struct FalloutWorldspaceRecord {
     std::uint32_t formId = 0;
     std::string editorId;
+    // DNAM: the height the ground sits at in any cell of this worldspace that
+    // carries NO LAND record, and the height its water sits at when a cell
+    // states none.
+    //
+    // A cell without LAND is not a hole in the world -- it is FLAT GROUND at
+    // this height, which is how Bethesda avoids authoring a heightfield for a
+    // region that is entirely covered by architecture. Megaton is the case that
+    // makes it matter: cell (-2,-7) places 107 references and has no LAND, so an
+    // importer that draws nothing there hangs a third of the town over open sky.
+    //
+    // Present on 28 of Fallout 3's 32 worldspaces and absent from every Oblivion
+    // one (censused: 84 worldspaces, 0 DNAM), which is why this is optional
+    // rather than assumed.
+    bool hasDefaultHeights = false;
+    float defaultLandHeight = 0.0f;
+    float defaultWaterHeight = 0.0f;
 };
 
 // Everything extracted from one plugin pass. Populated by extractFalloutScene

@@ -26,6 +26,7 @@
 #include "import/dds.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
+#include "import/fnv/cell_builder.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
@@ -300,44 +301,6 @@ void printUsage() {
 // terrain post sampled one corner texel of it, which is why the ground went
 // black. Always set this explicitly.
 constexpr std::uint32_t kNoTextureIndex = 0xffffffffu;
-
-// Per-post blend weights for the ATXT/VTXT layers covering one cell.
-//
-// A post on a quadrant boundary (col or row 16) is shared by two quadrants, and
-// the centre post by all four -- the cooked mesh keeps one vertex per post, so
-// those vertices have to reconcile layers from every quadrant they touch. Taking
-// the max weight per texture is what makes the seam disappear: a layer that runs
-// up to the boundary from one side keeps its opacity there instead of being
-// halved by a quadrant that never mentioned it.
-struct TerrainLayerCandidate {
-    std::uint32_t textureIndex = kNoTextureIndex;
-    float weight = 0.0f;
-    // ATXT's declared stacking order. Carried through selection because the
-    // shader composites slot 0, then 1, then 2, and a lerp chain is not
-    // commutative -- blending the same two layers in the other order gives a
-    // different colour. Selecting the strongest layers by weight and then
-    // storing them in weight order silently reordered the stack.
-    std::uint16_t layerIndex = 0;
-};
-
-void accumulateLayerWeight(
-    std::vector<TerrainLayerCandidate>& candidates,
-    std::uint32_t textureIndex,
-    float weight,
-    std::uint16_t layerIndex
-) {
-    if (textureIndex == kNoTextureIndex || weight <= 0.0f) {
-        return;
-    }
-    for (auto& candidate : candidates) {
-        if (candidate.textureIndex == textureIndex) {
-            candidate.weight = std::max(candidate.weight, weight);
-            candidate.layerIndex = std::min(candidate.layerIndex, layerIndex);
-            return;
-        }
-    }
-    candidates.push_back(TerrainLayerCandidate{textureIndex, weight, layerIndex});
-}
 
 // True when the shape is a flat sheet: its thinnest axis is negligible compared
 // to its own footprint.
@@ -870,12 +833,23 @@ int cookOne(
         ImportedSceneMesh& terrainMesh = outScene.meshes[terrainMeshIndex];
         std::size_t droppedLayerCount = 0;
         std::size_t totalLayerCount = 0;
+        std::size_t waterPatchCount = 0;
         for (const auto* cell : selectedCells) {
             if (cell->land != nullptr) {
                 totalLayerCount += cell->land->textureLayers.size();
             }
+            // Shared with the streaming path on purpose: this is the one piece
+            // of the terrain build that is NOT duplicated here, so a cooked
+            // coastline and a streamed one cannot disagree about where the
+            // water is.
+            if (odai::importer::fnv::appendCellWaterPatch(outScene, *cell)) {
+                ++waterPatchCount;
+            }
             appendTerrainCell(
                 terrainMesh, *cell, resolveLandTexture, resolveLandTextureExact, droppedLayerCount);
+        }
+        if (waterPatchCount != 0) {
+            std::cout << "Water: " << waterPatchCount << " cell(s) carry a visible water surface\n";
         }
         std::cout << "Terrain texture layers: " << totalLayerCount << " ATXT/VTXT layers across "
                   << selectedCells.size() << " cell(s)\n";

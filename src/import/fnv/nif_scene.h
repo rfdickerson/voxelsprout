@@ -117,6 +117,22 @@ struct NifModel {
     // Shapes whose NiStencilProperty declared DRAW_CW (front face is the
     // clockwise winding, the reverse of this renderer's convention).
     std::uint32_t reversedWindingShapeCount = 0;
+    // Triangles rejected at parse for naming a vertex the block does not have,
+    // and for being degenerate (two indices equal).
+    //
+    // Out-of-range is the one that matters and it is NOT harmless. Shapes are
+    // merged into one vertex buffer downstream, so an index past this block's
+    // vertices does not fault -- it resolves to some other shape's vertex, and
+    // draws a triangle stretching from this mesh to wherever that vertex is.
+    // That is the "spike shooting out of the rock" signature, and nothing else
+    // in the pipeline would ever report it.
+    //
+    // Degenerates are cosmetic by comparison: zero-area triangles that cost
+    // rasterizer time and nothing else. The strip expander already drops them
+    // (they are how Bethesda stitches strips together); this covers the
+    // explicit-triangle-list path, which had no filter at all.
+    std::uint32_t outOfRangeTriangleCount = 0;
+    std::uint32_t degenerateTriangleCount = 0;
     // Census of NiStencilProperty draw modes seen, indexed by the 2-bit value:
     // 0 = DRAW_CCW_OR_BOTH, 1 = DRAW_CCW, 2 = DRAW_CW, 3 = DRAW_BOTH.
     std::uint32_t stencilDrawModeCounts[4] = {0, 0, 0, 0};
@@ -234,6 +250,10 @@ struct NifSkinnedModel {
     // truncated. Nonzero is normal for FNV bodies; a very large value means the
     // truncation is doing visible work and is worth looking at.
     std::uint32_t truncatedInfluenceVertexCount = 0;
+    // See NifModel's fields of the same names. A skinned shape's vertices reach
+    // the GPU verbatim, so an out-of-range index here is if anything worse.
+    std::uint32_t outOfRangeTriangleCount = 0;
+    std::uint32_t degenerateTriangleCount = 0;
 };
 
 // Parses the NiNode hierarchy of a skeleton NIF into a flat bone array.
