@@ -811,6 +811,7 @@ Ray-traced shadow/reflection variants compile the same `.slang` source with `-DO
 |---|---|
 | `docs/GAME_API.md` | **Read first when adding a game under `src/games/`** — `GameApp` contract, renderer/UI API surface, the CMake block to copy |
 | `docs/UI_LIBRARY.md` | UI architecture, widget catalog, theming, container reflow contract, integration walkthrough |
+| `docs/SKYRIM_MORROWIND_IMPORT.md` | **Read first before touching Skyrim SE or Morrowind assets** — what already works unchanged, the BSA v105/LZ4 differences, and why `BSTriShape` is the one real blocker |
 | `docs/FNV_MODS.md` | **Read first to launch the FNV viewer with mods** — verified install + launch commands, env-var reference, and the silent traps |
 | `docs/FrameArena.md` | Per-frame GPU memory model |
 | `docs/ROADMAP.md` | Feature-by-feature status against the four touchstones, with explicit out-of-scope calls |
@@ -830,7 +831,12 @@ Nine subagents, each carrying a distinct lens grounded in this codebase rather t
 | Morrowind Data Files (Windows) | `C:\GOG Games\Morrowind\Data Files` |
 | Morrowind Data Files (WSL) | `/mnt/c/GOG Games/Morrowind/Data Files` |
 | Fallout: New Vegas Data Files (Linux/Steam) | `~/.steam/steam/steamapps/common/Fallout New Vegas/Data` — `odai_game_newvegas` finds this (and the usual GOG/WSL/Windows locations) on its own; the cooker and probe take it as their first argument |
+| Fallout 3 Data Files (Linux/Steam) | `~/.steam/steam/steamapps/common/Fallout 3 goty/Data` — note the `goty` suffix |
+| Oblivion Data Files (Linux/Steam) | `~/.local/share/Steam/steamapps/common/Oblivion/Data` |
+| Skyrim SE Data Files (Linux/Steam) | `~/.steam/steam/steamapps/common/Skyrim Special Edition/Data` — see `docs/SKYRIM_MORROWIND_IMPORT.md` |
+| Morrowind Data Files (Linux/Steam) | `~/.steam/steam/steamapps/common/Morrowind/Data Files` — `Data Files`, with a space |
 | OpenMW source (Windows) | `C:\Users\rfdic\OneDrive\Documents\GitHub\openmw` |
+| OpenMW source (Linux) | `~/Downloads/openmw` — reference for NIF/ESM layouts, though its NIF readers hand strips straight to OSG and never validate indices |
 | Build dir (Windows) | `cmake-build-release` |
 | Build dir (Linux) | `cmake-build-linux` |
 

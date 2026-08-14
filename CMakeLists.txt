@@ -1180,6 +1180,7 @@ if(ODAI_BUILD_APP)
             # and the shared per-cell scene builder.
             src/import/fnv/asset_source.cc
             src/import/fnv/bsa_archive.cc
+            src/import/fnv/lz4_frame.cc
             src/import/fnv/cell_builder.cc
             src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/decoded_texture_cache.cc
@@ -1812,6 +1813,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/dds.cc
         src/import/fnv/asset_source.cc
         src/import/fnv/bsa_archive.cc
+        src/import/fnv/lz4_frame.cc
         src/import/fnv/cell_builder.cc
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/esm_reader.cc
@@ -1846,6 +1848,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/cell_builder.cc
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/bsa_archive.cc
+        src/import/fnv/lz4_frame.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/plugin_load_order.cc
         src/import/fnv/weather_records.cc
@@ -1925,6 +1928,7 @@ if(BUILD_TESTING)
         src/import/fnv/asset_source.cc
         src/import/fnv/async_asset_loader.cc
         src/import/fnv/bsa_archive.cc
+        src/import/fnv/lz4_frame.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/plugin_load_order.cc
         src/import/fnv/weather_records.cc

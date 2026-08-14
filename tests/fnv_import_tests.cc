@@ -14,6 +14,7 @@
 #include "core/job_system.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/cell_builder.h"
+#include "import/fnv/lz4_frame.h"
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/character_builder.h"
 #include "import/fnv/kf_animation.h"
@@ -671,6 +672,82 @@ void testEsmReaderWalksBothHeaderGenerations() {
 // every decision here is arithmetic on two numbers, and every one of them was a
 // candidate for being silently wrong -- a flipped axis puts the sea one cell
 // away, and a missing cull puts a full-cell blended quad under all of Nevada.
+// LZ4 frame decoding, hand-built rather than round-tripped.
+//
+// There is no encoder here to round-trip against, which is the point: a decoder
+// checked only against its own encoder agrees with itself and can still be
+// wrong about the format. These bytes are written out by hand from the spec, so
+// the assertion is against LZ4, not against a mirror.
+//
+// The match in block 1 OVERLAPS its own destination -- offset 3, length 9,
+// against three bytes of output -- because that is the case a memcpy gets
+// wrong and a byte-at-a-time copy gets right, and it is not an exotic input:
+// it is how the format encodes any repeating run.
+void testLz4FrameDecoding() {
+    using namespace odai::importer::fnv;
+
+    std::vector<std::uint8_t> frame;
+    const auto push = [&frame](std::initializer_list<int> bytes) {
+        for (const int byte : bytes) {
+            frame.push_back(static_cast<std::uint8_t>(byte));
+        }
+    };
+    push({0x04, 0x22, 0x4D, 0x18});  // magic
+    push({0x60});                    // FLG: version 01, blocks independent
+    push({0x70});                    // BD: 4 MB block maximum
+    push({0x00});                    // header checksum, not verified
+
+    // Block 1, compressed: literals "abc", then a 9-byte match at offset 3,
+    // then a literals-only tail "XY".
+    const std::vector<std::uint8_t> block1{
+        0x35, 'a', 'b', 'c', 0x03, 0x00,  // token(lit 3, match 5+4), literals, offset
+        0x20, 'X', 'Y',                   // token(lit 2, no match), literals
+    };
+    push({static_cast<int>(block1.size()), 0x00, 0x00, 0x00});
+    frame.insert(frame.end(), block1.begin(), block1.end());
+
+    // Block 2, stored uncompressed: the high bit of the size says so.
+    const std::vector<std::uint8_t> block2{'Z', 'Z', 'Z', 'Z'};
+    push({static_cast<int>(block2.size()), 0x00, 0x00, 0x80});
+    frame.insert(frame.end(), block2.begin(), block2.end());
+
+    push({0x00, 0x00, 0x00, 0x00});  // end mark
+
+    const std::string expected = "abcabcabcabcXY" "ZZZZ";
+    std::vector<std::uint8_t> out;
+    std::string error;
+    expectTrue(isLz4Frame(frame.data(), frame.size()), "The frame magic is recognized");
+    expectTrue(
+        lz4FrameDecompress(frame.data(), frame.size(), expected.size(), out, error),
+        "A hand-built LZ4 frame decodes");
+    expectTrue(
+        std::string(out.begin(), out.end()) == expected,
+        "An overlapping match and a stored block both decode to the right bytes");
+
+    // A wrong declared size is corruption, and saying so here beats letting a
+    // truncated mesh fail somewhere far downstream.
+    expectTrue(
+        !lz4FrameDecompress(frame.data(), frame.size(), expected.size() + 1u, out, error),
+        "A frame that decodes to the wrong length is rejected");
+
+    std::vector<std::uint8_t> notAFrame{0x00, 0x01, 0x02, 0x03, 0x04};
+    expectTrue(!isLz4Frame(notAFrame.data(), notAFrame.size()), "Non-LZ4 bytes are not claimed");
+    expectTrue(
+        !lz4FrameDecompress(notAFrame.data(), notAFrame.size(), 0u, out, error),
+        "A payload with the wrong magic is refused rather than decoded as garbage");
+
+    // A match reaching back further than the output produced so far would read
+    // before the start of the buffer.
+    // frame[0..3] magic, [4] FLG, [5] BD, [6] header checksum, [7..10] block
+    // size, then the block: [11] token, [12..14] literals, [15..16] the match
+    // offset. 64 against the three bytes of output produced so far.
+    std::vector<std::uint8_t> badFrame = frame;
+    badFrame[15] = 0x40;
+    expectTrue(
+        !lz4FrameDecompress(badFrame.data(), badFrame.size(), 0u, out, error),
+        "A match offset pointing before the output start is rejected, not read");
+}
+
 void testCellWaterPatch() {
     using namespace odai::importer::fnv;
     using odai::importer::ImportedScene;
@@ -3852,6 +3929,7 @@ int main() {
     testEsmReaderWalksBothHeaderGenerations();
     testOblivionLandTextureIconPath();
     testCellWaterPatch();
+    testLz4FrameDecoding();
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();

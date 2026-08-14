@@ -8,6 +8,8 @@
 
 #include <zlib.h>
 
+#include "import/fnv/lz4_frame.h"
+
 namespace odai::importer::fnv {
 
 namespace {
@@ -29,6 +31,21 @@ constexpr std::uint32_t kBsaVersionFo3Fnv = 104u;
 // inflate to their declared size. The version differences are in which archive
 // FLAGS are defined, and the ONE that matters here is kFlagEmbedFileNames below.
 constexpr std::uint32_t kBsaVersionOblivion = 103u;
+// Skyrim Special Edition (TES5 SE). Measured on the retail archives.
+//
+// TWO STRUCTURAL DIFFERENCES, not one. The folder record grew from 16 bytes to
+// 24 -- a 4-byte pad and a 64-bit data offset replacing the 32-bit one -- so a
+// reader that assumes the v104 stride reads the folder table as noise and every
+// name comes out as binary garbage rather than failing. And compressed entries
+// are LZ4 FRAMES, not zlib: the payload opens with 04 22 4d 18. Both were
+// confirmed against "Skyrim - Meshes0.bsa" (978 folders, 19443 files), where
+// the 24-byte stride yields "meshes\\dungeons\\nordic\\levers\\pullchainanim"
+// as the first folder and the 16-byte stride yields nothing readable.
+//
+// Everything else is v104: the 36-byte header, 16-byte FILE records, the
+// totalFileNameLength bias, the name block, and the uint32 original-size prefix
+// ahead of the compressed payload.
+constexpr std::uint32_t kBsaVersionSkyrimSe = 105u;
 
 constexpr std::uint32_t kFlagHasFolderNames = 0x1u;
 constexpr std::uint32_t kFlagHasFileNames = 0x2u;
@@ -66,7 +83,10 @@ struct BsaHeader {
     std::uint32_t fileFlags;
 };
 
-struct BsaFolderRecord {
+// v103/v104 on-disk layout. v105 widens `offset` to 64 bits behind 4 bytes of
+// padding, so this is no longer a straight image of the file for every version
+// -- see readFolderRecord.
+struct BsaFolderRecordV104 {
     std::uint64_t nameHash;
     std::uint32_t fileCount;
     std::uint32_t offset;  // absolute file offset of this folder's name+file records
@@ -80,8 +100,28 @@ struct BsaRawFileRecord {
 #pragma pack(pop)
 
 static_assert(sizeof(BsaHeader) == 36);
-static_assert(sizeof(BsaFolderRecord) == 16);
+static_assert(sizeof(BsaFolderRecordV104) == 16);
 static_assert(sizeof(BsaRawFileRecord) == 16);
+
+// A folder record as the rest of this reader wants it, independent of which
+// on-disk layout it came from. `offset` is 64-bit because v105's is.
+struct BsaFolderRecord {
+    std::uint64_t nameHash = 0;
+    std::uint32_t fileCount = 0;
+    std::uint64_t offset = 0;
+};
+
+// Bytes one folder record occupies on disk. The ONLY structural difference
+// between v105 and its predecessors, and the one that decides whether the
+// folder table reads as paths or as noise.
+constexpr std::size_t bsaFolderRecordSize(std::uint32_t version) {
+    return version >= kBsaVersionSkyrimSe ? 24u : 16u;
+}
+
+constexpr bool isSupportedBsaVersion(std::uint32_t version) {
+    return version == kBsaVersionOblivion || version == kBsaVersionFo3Fnv ||
+           version == kBsaVersionSkyrimSe;
+}
 
 std::string toLowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -146,7 +186,7 @@ bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFi
     }
     BsaHeader header{};
     if (!readValue(input, header) || header.magic != kBsaMagic ||
-        (header.version != kBsaVersionFo3Fnv && header.version != kBsaVersionOblivion)) {
+        !isSupportedBsaVersion(header.version)) {
         return false;
     }
     outFileFlags = header.fileFlags;
@@ -171,9 +211,9 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
         m_lastError = "Not a BSA archive (bad magic): " + path.string();
         return false;
     }
-    if (header.version != kBsaVersionFo3Fnv && header.version != kBsaVersionOblivion) {
+    if (!isSupportedBsaVersion(header.version)) {
         m_lastError = "Unsupported BSA version " + std::to_string(header.version) +
-            " (only Oblivion v103 and Fallout 3 / New Vegas v104 archives are supported): " +
+            " (Oblivion v103, Fallout 3 / New Vegas v104 and Skyrim SE v105 are supported): " +
             path.string();
         return false;
     }
@@ -195,9 +235,23 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
     input.seekg(static_cast<std::streamoff>(header.folderRecordOffset), std::ios::beg);
     std::vector<BsaFolderRecord> folders(header.folderCount);
     for (BsaFolderRecord& folder : folders) {
-        if (!readValue(input, folder)) {
-            m_lastError = "Truncated BSA folder record table: " + path.string();
-            return false;
+        if (header.version >= kBsaVersionSkyrimSe) {
+            // hash, fileCount, 4 bytes of padding, then a 64-bit offset.
+            std::uint32_t padding = 0;
+            if (!readValue(input, folder.nameHash) || !readValue(input, folder.fileCount) ||
+                !readValue(input, padding) || !readValue(input, folder.offset)) {
+                m_lastError = "Truncated BSA folder record table: " + path.string();
+                return false;
+            }
+        } else {
+            BsaFolderRecordV104 raw{};
+            if (!readValue(input, raw)) {
+                m_lastError = "Truncated BSA folder record table: " + path.string();
+                return false;
+            }
+            folder.nameHash = raw.nameHash;
+            folder.fileCount = raw.fileCount;
+            folder.offset = raw.offset;
         }
     }
 
@@ -256,7 +310,7 @@ bool BsaArchive::open(const std::filesystem::path& path, std::string_view folder
         // the per-folder BString length byte, hence the `+ folderCount`.
         const std::uint64_t nameBlockOffset =
             static_cast<std::uint64_t>(header.folderRecordOffset) +
-            (static_cast<std::uint64_t>(header.folderCount) * sizeof(BsaFolderRecord)) +
+            (static_cast<std::uint64_t>(header.folderCount) * bsaFolderRecordSize(header.version)) +
             header.totalFolderNameLength + header.folderCount +
             (static_cast<std::uint64_t>(header.fileCount) * sizeof(BsaRawFileRecord));
         input.seekg(static_cast<std::streamoff>(nameBlockOffset), std::ios::beg);
@@ -374,6 +428,20 @@ bool BsaArchive::extract(
         !input.read(reinterpret_cast<char*>(compressed.data()), static_cast<std::streamsize>(compressedSize))) {
         outError = "Truncated compressed BSA data: " + entry.virtualPath;
         return false;
+    }
+
+    // Skyrim SE swapped the codec, and it is the payload that says so rather
+    // than the version alone: sniffing the frame magic means a v105 archive
+    // that still holds a zlib entry -- or a mod-built archive that mislabels
+    // itself -- decodes on what it actually contains.
+    if (isLz4Frame(compressed.data(), compressed.size())) {
+        std::string lz4Error;
+        if (!lz4FrameDecompress(
+                compressed.data(), compressed.size(), originalSize, outBytes, lz4Error)) {
+            outError = lz4Error + " for BSA entry: " + entry.virtualPath;
+            return false;
+        }
+        return true;
     }
 
     outBytes.resize(originalSize);
