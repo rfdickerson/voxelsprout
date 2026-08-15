@@ -209,6 +209,9 @@ private:
     // Post-processing curve selection. Called unconditionally from onInit, NOT
     // from the weather path -- see the definition.
     void applyTonemapSettings();
+    // Distant landscape from the game's own LOD pyramid; see the definition.
+    void loadDistantLandLod();
+    std::size_t m_distantLodChunk = static_cast<std::size_t>(-1);
     // Fills m_weatherChoices, once. Prefers the weathers this worldspace's
     // climate actually runs -- with Nevada Skies loaded that IS the mod's
     // weather set, and it is a far more useful list than every WTHR in the load

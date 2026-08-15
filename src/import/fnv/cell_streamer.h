@@ -31,6 +31,7 @@
 // waste is CPU-side, and it is measured rather than assumed (see
 // CellStreamerStats::worstBuildMs).
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -275,6 +276,32 @@ public:
 
     [[nodiscard]] CellStreamerStats stats() const;
     [[nodiscard]] std::size_t availableCellCount() const { return m_availableCells.size(); }
+    // Inclusive grid bounds of the cells this worldspace actually has, which is
+    // what a caller needs to cover the world with anything -- distant LOD tiles,
+    // a map, a preload sweep. Returns false when the worldspace is empty.
+    //
+    // Derived from the OCCUPIED cells rather than from the worldspace record's
+    // own NAM0/NAM9 corners, which are not the same thing: Bravil's corners span
+    // 52 cells of open bay and frame no city at all.
+    [[nodiscard]] bool cellGridBounds(
+        std::int32_t& outMinX, std::int32_t& outMinZ,
+        std::int32_t& outMaxX, std::int32_t& outMaxZ) const {
+        bool any = false;
+        for (const auto& [coord, unused] : m_availableCells) {
+            (void)unused;
+            if (!any) {
+                outMinX = outMaxX = coord.x;
+                outMinZ = outMaxZ = coord.z;
+                any = true;
+                continue;
+            }
+            outMinX = std::min(outMinX, coord.x);
+            outMaxX = std::max(outMaxX, coord.x);
+            outMinZ = std::min(outMinZ, coord.z);
+            outMaxZ = std::max(outMaxZ, coord.z);
+        }
+        return any;
+    }
     [[nodiscard]] bool isOpen() const { return m_jobs != nullptr; }
 
 private:

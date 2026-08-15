@@ -28,6 +28,7 @@
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/cell_builder.h"
 #include "import/fnv/fallout_records.h"
+#include "import/fnv/land_lod.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
@@ -1370,129 +1371,26 @@ int cookLodTier(
     ImportedScene scene;
     scene.sourceTag = "fnv_lod";
 
-    std::unordered_map<std::string, std::uint32_t> textureIndexByPath;
-    const auto resolveLodTexture = [&](const std::string& texturePath) -> std::uint32_t {
-        if (texturePath.empty()) {
-            return kNoTextureIndex;
-        }
-        const std::string key = toLowerAsciiCopy(texturePath);
-        const auto existing = textureIndexByPath.find(key);
-        if (existing != textureIndexByPath.end()) {
-            return existing->second;
-        }
-        std::vector<std::uint8_t> ddsBytes;
-        if (!assets.resolveTexture(texturePath, ddsBytes)) {
-            textureIndexByPath.emplace(key, kNoTextureIndex);
-            return kNoTextureIndex;
-        }
-        odai::importer::ImportedSceneTexture texture;
-        if (!odai::importer::loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
-            textureIndexByPath.emplace(key, kNoTextureIndex);
-            return kNoTextureIndex;
-        }
-        texture.sourcePath = texturePath;
-        const auto index = static_cast<std::uint32_t>(scene.textures.size());
-        scene.textures.push_back(std::move(texture));
-        textureIndexByPath.emplace(key, index);
-        return index;
-    };
-
-    const std::string loweredWorldspace = toLowerAsciiCopy(worldspaceEditorId);
-    std::size_t blocksFound = 0;
-    std::size_t blocksParsed = 0;
-    std::size_t blocksMissing = 0;
-    std::size_t totalTriangles = 0;
-
-    const std::int32_t step = tierCells;
-    for (std::int32_t bz = blockZ0; bz <= blockZ1; bz += step) {
-        for (std::int32_t bx = blockX0; bx <= blockX1; bx += step) {
-            const std::string tilePath = odai::importer::fnv::landLodTilePath(
-                loweredWorldspace, lodSet, tierCells, bx, bz);
-            std::vector<std::uint8_t> nifBytes;
-            if (!assets.resolveMesh(tilePath, nifBytes)) {
-                ++blocksMissing;
-                continue;  // the LOD grid is sparse; absent blocks are normal
-            }
-            ++blocksFound;
-
-            odai::importer::fnv::NifModel nifModel;
-            std::string nifError;
-            if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) ||
-                nifModel.shapes.empty()) {
-                std::cerr << "warning: LOD block " << bx << "," << bz << " failed to parse: "
-                          << nifError << "\n";
-                continue;
-            }
-
-            ImportedSceneMesh mesh;
-            mesh.name = "lod" + std::to_string(tierCells) + "_" + std::to_string(bx) + "_" +
-                        std::to_string(bz);
-            for (const auto& shape : nifModel.shapes) {
-                const auto baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
-                const auto partFirstIndex = static_cast<std::uint32_t>(mesh.indices.size());
-                for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
-                    ImportedSceneVertex vertex{};
-                    vertex.position[0] = shape.positions[v * 3u];
-                    vertex.position[1] = shape.positions[(v * 3u) + 1];
-                    vertex.position[2] = shape.positions[(v * 3u) + 2];
-                    if (!shape.normals.empty()) {
-                        vertex.normal[0] = shape.normals[v * 3u];
-                        vertex.normal[1] = shape.normals[(v * 3u) + 1];
-                        vertex.normal[2] = shape.normals[(v * 3u) + 2];
-                    }
-                    if ((v * 2u) + 1u < shape.uvs.size()) {
-                        vertex.uv[0] = shape.uvs[v * 2u];
-                        vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
-                    }
-                    mesh.vertices.push_back(vertex);
-                }
-                for (const std::uint32_t index : shape.triangleIndices) {
-                    mesh.indices.push_back(baseVertex + index);
-                }
-                const auto partIndexCount =
-                    static_cast<std::uint32_t>(mesh.indices.size()) - partFirstIndex;
-                if (partIndexCount == 0u) {
-                    continue;
-                }
-                ImportedSceneMeshPart part{};
-                part.firstIndex = partFirstIndex;
-                part.indexCount = partIndexCount;
-                part.textureIndex = resolveLodTexture(shape.diffuseTexturePath);
-                part.alphaTest = shape.alphaTest;
-                mesh.parts.push_back(part);
-                totalTriangles += partIndexCount / 3u;
-            }
-            if (mesh.indices.empty()) {
-                continue;
-            }
-
-            const auto meshIndex = static_cast<std::uint32_t>(scene.meshes.size());
-            scene.meshes.push_back(std::move(mesh));
-
-            // Identity placement: the vertices are already world-space, so the
-            // only thing the transform carries is the Z-up -> Y-up basis change.
-            ImportedSceneInstance instance{};
-            instance.meshIndex = meshIndex;
-            writeTransform(instance, Vec3{0.0f, 0.0f, 0.0f}, makeEngineInstanceRotation(Mat3{}), 1.0f);
-            scene.instances.push_back(instance);
-            ++blocksParsed;
-        }
-    }
-
-    if (scene.meshes.empty()) {
-        std::cerr << "error: no LOD blocks found for worldspace \"" << worldspaceEditorId
-                  << "\" in the requested block range\n";
+    // The tile walk itself lives in import/fnv/land_lod.cc so the runtime
+    // streamer builds these the same way. It used to live here, inside a
+    // function that also parsed argv and wrote a file, which is why there was
+    // no way to reach it from a game.
+    odai::importer::fnv::LandLodTierStats stats;
+    std::string error;
+    const bool ok = odai::importer::fnv::appendLandLodTier(
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveMesh(path, bytes);
+        },
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveTexture(path, bytes);
+        },
+        worldspaceEditorId, lodSet, tierCells, blockX0, blockZ0, blockX1, blockZ1,
+        /*sinkUnits=*/0.0f, scene, stats, error);
+    if (!ok) {
+        std::cerr << "error: " << error << "\n";
         return 1;
     }
 
-    // Same statement the streaming path makes in CellSceneBuilder::finish():
-    // every part's alpha mode came off its NiAlphaProperty, so the texture-
-    // content cutout guess must not run on load. Without it a cooked scene is
-    // written at v24 with the flag clear, applyTextureAlphaCutoutFlags() runs
-    // over it exactly as before, and `--scene` shows the ragged holes the
-    // streamed path no longer has -- the two paths disagreeing about the same
-    // geometry.
-    scene.alphaFlagsAuthored = true;
     odai::importer::buildImportedScenePackedRenderData(scene);
     odai::importer::buildImportedScenePageRanges(scene);
     if (!odai::importer::saveImportedScene(scene, outputPath)) {
@@ -1503,14 +1401,11 @@ int cookLodTier(
 
     const double totalMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - totalStart).count();
-    // blocksFound minus blocksParsed is the count that resolved out of the
-    // archives but failed to parse -- reported because it was being counted and
-    // then dropped, which made a parse failure look identical to a sparse-grid
-    // hole in the only summary this mode prints.
     std::cout << "LOD " << (lodSet == odai::importer::fnv::LandLodSet::Objects ? "objects" : "terrain")
-              << " level" << tierCells << ": " << blocksParsed << " tiles parsed of " << blocksFound
-              << " resolved (" << blocksMissing << " absent from the sparse grid), " << totalTriangles
-              << " triangles, " << scene.textures.size() << " textures\n";
+              << " level" << tierCells << ": " << stats.tilesParsed << " tiles parsed of "
+              << stats.tilesResolved << " resolved (" << stats.tilesMissing
+              << " absent from the sparse grid), " << stats.triangles << " triangles, "
+              << stats.textures << " textures\n";
     std::cout << "Wrote " << outputPath << " in " << totalMs << " ms\n";
     return 0;
 }

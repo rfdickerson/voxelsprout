@@ -1,5 +1,7 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "import/fnv/land_lod.h"
+
 #include "render/upscale/upscale_policy.h"
 
 #include "import/fnv/dialogue_records.h"
@@ -3081,7 +3083,110 @@ bool NewVegasApp::initStreaming() {
                          << " cells from " << m_streamDirectory
                          << " (load radius " << config.loadRadius
                          << ", unload " << config.unloadRadius << ")";
+    loadDistantLandLod();
     return true;
+}
+
+// Distant landscape, from the game's own LOD pyramid.
+//
+// OFF BY DEFAULT, because the two obvious placements are both measured wrong
+// and the right one is not built yet. Set ODAI_FNV_LOD_TIER=4|8|16|32 to load
+// one tier across the whole worldspace, which is how the numbers below were
+// taken and is still the fastest way to look at a tier.
+//
+// What a whole-world single tier does, on the Mojave:
+//
+//   level16  64 tiles, 112576 triangles, 64 textures, 40 ms
+//   level4   1024 tiles, 1976092 triangles, 1020 textures, 1130 ms
+//
+// and neither is usable:
+//
+//  * A COARSE TIER SITS ABOVE THE DETAILED TERRAIN. level16 resamples 16 cells
+//    per tile, which averages a valley away, so Goodsprings renders drowned in
+//    a smooth tan surface with the road and rooftops poking through it. The
+//    error is thousands of units, not tens, so the sink below cannot reach it
+//    -- sinking that far would bury the distant mountains it exists to draw.
+//  * A FINE TIER EXHAUSTS THE TEXTURE TABLE. Terrain LOD names one diffuse per
+//    tile, and the bindless table holds kBindlessTargetTextureCapacity = 1024
+//    total. level4's 1020 leaves nothing for the world itself, so EVERY surface
+//    in the frame loses its texture and falls back to the hashed pastel that
+//    stands in for one. It does not look like a texture-budget failure; it
+//    looks like the renderer broke.
+//
+// So the design this needs is per-tile chunks with tier RINGS -- fine tiles
+// just outside the loaded cells, coarser further out, tiles overlapping the
+// loaded square excluded -- which bounds both the triangle count and, more
+// importantly, the texture count. That is the next step, and the two numbers
+// above are the budget it has to fit inside.
+//
+// Morrowind ships no distant land whatsoever, and Oblivion's is a different
+// naming scheme with a single 32-cell tier, so this currently covers FNV and
+// Fallout 3 only. An absent tier is not an error here -- it logs and leaves the
+// horizon as it was.
+void NewVegasApp::loadDistantLandLod() {
+    if (m_streamer == nullptr) {
+        return;
+    }
+    // 0 disables, and is the default. Tiers are cell widths: 4, 8, 16, 32.
+    int tierCells = 0;
+    if (const char* env = std::getenv("ODAI_FNV_LOD_TIER")) {
+        tierCells = std::atoi(env);
+    }
+    if (tierCells <= 0) {
+        return;
+    }
+    if (!importer::fnv::landLodTierExists(importer::fnv::LandLodSet::Terrain, tierCells)) {
+        VOX_LOGW("newvegas") << "ODAI_FNV_LOD_TIER=" << tierCells
+                             << " is not one of 4, 8, 16, 32; distant LOD disabled";
+        return;
+    }
+    std::int32_t minX = 0;
+    std::int32_t minZ = 0;
+    std::int32_t maxX = 0;
+    std::int32_t maxZ = 0;
+    if (!m_streamer->cellGridBounds(minX, minZ, maxX, maxZ)) {
+        return;
+    }
+    // Enough to put the LOD surface under the detailed terrain everywhere the
+    // two overlap. Small against a cell (4096) and invisible at the distances
+    // this geometry is seen from.
+    float sinkUnits = 96.0f;
+    if (const char* env = std::getenv("ODAI_FNV_LOD_SINK")) {
+        sinkUnits = static_cast<float>(std::atof(env));
+    }
+
+    const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
+    importer::ImportedScene scene;
+    scene.sourceTag = "fnv_lod";
+    importer::fnv::LandLodTierStats stats;
+    std::string error;
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = importer::fnv::appendLandLodTier(
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveMesh(path, bytes, error);
+        },
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveTexture(path, bytes, error);
+        },
+        m_streamWorldspace, importer::fnv::LandLodSet::Terrain, tierCells,
+        minX, minZ, maxX, maxZ, sinkUnits, scene, stats, error);
+    if (!ok) {
+        VOX_LOGI("newvegas") << "no distant LOD for " << m_streamWorldspace << ": " << error;
+        return;
+    }
+    importer::buildImportedScenePackedRenderData(scene);
+    importer::buildImportedScenePageRanges(scene);
+    const std::size_t chunk = m_renderer.addImportedSceneChunk(scene);
+    const double ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (chunk == render::Renderer::kInvalidImportedChunkIndex) {
+        VOX_LOGW("newvegas") << "distant LOD upload failed";
+        return;
+    }
+    m_distantLodChunk = chunk;
+    VOX_LOGI("newvegas") << "distant LOD level" << tierCells << ": " << stats.tilesParsed
+                         << " tiles, " << stats.triangles << " triangles, " << stats.textures
+                         << " textures, sink " << sinkUnits << " units, in " << ms << " ms";
 }
 
 // Headless check that collision is actually doing its job, because walking

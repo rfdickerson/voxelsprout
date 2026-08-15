@@ -1182,6 +1182,7 @@ if(ODAI_BUILD_APP)
             src/import/fnv/bsa_archive.cc
             src/import/fnv/lz4_frame.cc
             src/import/fnv/cell_builder.cc
+            src/import/fnv/land_lod.cc
             src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/decoded_texture_cache.cc
             src/import/fnv/cell_streamer.cc
@@ -1815,6 +1816,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/bsa_archive.cc
         src/import/fnv/lz4_frame.cc
         src/import/fnv/cell_builder.cc
+        src/import/fnv/land_lod.cc
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/plugin_load_order.cc
@@ -1846,6 +1848,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/imported_scene_query.cc
         src/import/fnv/asset_source.cc
         src/import/fnv/cell_builder.cc
+        src/import/fnv/land_lod.cc
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/bsa_archive.cc
         src/import/fnv/lz4_frame.cc
@@ -1922,6 +1925,7 @@ if(BUILD_TESTING)
         src/import/imported_scene.cc
         src/import/imported_scene_query.cc
         src/import/fnv/cell_builder.cc
+        src/import/fnv/land_lod.cc
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/actor_records.cc
         src/import/fnv/dialogue_records.cc
