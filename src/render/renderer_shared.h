@@ -74,7 +74,17 @@ constexpr uint32_t kImportedLocalLightCapacity = 64;
 // ~0.5 to ~1.0 world units (~1.5 cm at Fallout scale), and TAA now averages
 // the shadow edges temporally, which is what makes the coarser maps
 // acceptable where they were not before it existed.
-constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 1024u, 1024u, 512u};
+// AND THE 4096 ATLAS WAS ONLY 39% ALLOCATED. 2048/1024/1024/512 occupies
+// 6.55M of 16.78M texels; the image was already paying for all of it. Worse,
+// the cascade covering the LARGEST area got the SMALLEST tile, so the far field
+// -- which is most of the screen on any camera looking out across a landscape
+// -- was resolved four times more coarsely than the ground under your feet.
+//
+// Four equal 2048 tiles fill the atlas exactly (a 2x2 grid) and take cascade 3
+// from 512 to 2048 texels. What that is worth, measured on a Vvardenfell flight
+// at 24000 units of shadow distance: cascade 3's texel goes from 122.8 world
+// units to 30.7, i.e. the far cascade now resolves what the NEAR one used to.
+constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 2048u, 2048u, 2048u};
 struct ShadowAtlasRect {
     uint32_t x;
     uint32_t y;
@@ -82,9 +92,9 @@ struct ShadowAtlasRect {
 };
 constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
     ShadowAtlasRect{0u, 0u, 2048u},
-    ShadowAtlasRect{2048u, 0u, 1024u},
-    ShadowAtlasRect{3072u, 0u, 1024u},
-    ShadowAtlasRect{2048u, 1024u, 512u}
+    ShadowAtlasRect{2048u, 0u, 2048u},
+    ShadowAtlasRect{0u, 2048u, 2048u},
+    ShadowAtlasRect{2048u, 2048u, 2048u}
 };
 constexpr uint32_t kShadowAtlasSize = 4096u;
 constexpr uint32_t kVoxelGiGridResolution = 64u;

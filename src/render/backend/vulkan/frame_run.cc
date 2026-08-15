@@ -791,7 +791,19 @@ void RendererBackend::renderFrame(
     // kShadowSplitNear is inside cascade 0 regardless, so using it as the
     // distribution's near end costs nothing and restores the logarithmic term
     // that makes cascade 0 tight.
-    float shadowDistanceLimit = renderingImportedScene ? 6000.0f : farPlane;
+    // 6000 was tuned for a camera standing ON the ground in Goodsprings. It is
+    // far too short for a camera that LOOKS ACROSS a landscape: the flythroughs
+    // fly 2000-3600 units up, so nothing on screen is ever within cascade 0's
+    // few hundred units and the whole frame sits in the last cascade -- or past
+    // it. Rendered as a shadow-visibility view with a low sun, that is a hard
+    // horizontal line across the middle of the frame with cast shadows below it
+    // and nothing at all above.
+    //
+    // Note this is invisible at midday. A 37-degree sun over rounded terrain
+    // casts almost nothing to begin with, so the A/B that matters is a LOW sun
+    // (ODAI_FNV_HOUR=17.5); at hour 16 the same change moves the shadowed
+    // fraction of the frame by 0.8 points and looks like it did nothing.
+    float shadowDistanceLimit = renderingImportedScene ? 24000.0f : farPlane;
     if (const char* shadowDistanceEnv = std::getenv("ODAI_SHADOW_DISTANCE")) {
         const float requested = static_cast<float>(std::atof(shadowDistanceEnv));
         if (requested > 1.0f) {
@@ -799,8 +811,46 @@ void RendererBackend::renderFrame(
         }
     }
     const float shadowFarPlane = std::min(farPlane, shadowDistanceLimit);
-    const float shadowSplitNear = std::min(std::max(nearPlane, shadowFarPlane * 0.008f), shadowFarPlane);
-    constexpr float kCascadeLambda = 0.70f;
+    // The distribution's near end, and it is an ABSOLUTE distance rather than a
+    // fraction of the far one.
+    //
+    // It used to be shadowFarPlane * 0.008, which quietly made the two
+    // inseparable: pushing shadows further out dragged the near end out with
+    // them and coarsened cascade 0 in proportion. Measured on Vvardenfell,
+    // raising ODAI_SHADOW_DISTANCE from 6000 to 45000 took cascade 0 from a
+    // 573-unit range at 0.73 units per texel to a 4298-unit range at 5.50 --
+    // 7.5x blurrier up close, which is the half of the picture that already
+    // looked right. "More shadow distance" should not be a trade against "the
+    // shadows near me".
+    //
+    // The number answers a different question anyway: how close geometry gets
+    // to the camera. Anything nearer is inside cascade 0 regardless.
+    //
+    // 48 is what 6000 * 0.008 evaluated to, so this is EXACTLY the old
+    // behaviour at the old default and changes nothing until the distance moves.
+    constexpr float kShadowDistributionNear = 48.0f;
+    const float shadowSplitNear =
+        std::min(std::max(nearPlane, kShadowDistributionNear), shadowFarPlane * 0.25f);
+    // How far the splits lean logarithmic (1.0) versus uniform (0.0). The
+    // logarithmic term is the one that keeps cascade 0 tight over a long range,
+    // so a range this is not tuned for shows up as a fat first cascade: the
+    // uniform term at p=0.25 is a QUARTER OF THE WHOLE DISTANCE, and at 0.30
+    // weight that alone is 1811 units of a 24000-unit range.
+    // 0.70 is right for a 6000-unit range and wrong for a 24000-unit one: the
+    // uniform term at p=0.25 is a quarter of the WHOLE distance, so at 0.30
+    // weight it alone puts 1811 units into cascade 0 and blurs the near
+    // shadows that already looked right. Leaning almost fully logarithmic keeps
+    // cascade 0 tight no matter how far the far end goes -- measured, cascade 0
+    // at 24000/0.95 is 517 units at 0.66 per texel, against 573 at 0.73 for the
+    // old 6000/0.70. Four times the range AND a slightly sharper near cascade.
+    //
+    // Only the imported-scene path moves; the voxel games keep 0.70 with their
+    // own far plane, because nothing here measured them.
+    float cascadeLambda = renderingImportedScene ? 0.95f : 0.70f;
+    if (const char* lambdaEnv = std::getenv("ODAI_SHADOW_LAMBDA")) {
+        cascadeLambda = std::clamp(static_cast<float>(std::atof(lambdaEnv)), 0.0f, 1.0f);
+    }
+    const float kCascadeLambda = cascadeLambda;
     constexpr float kCascadeSplitQuantization = 0.5f;
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};

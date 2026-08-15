@@ -109,7 +109,11 @@ std::string cellAxisToken(std::int32_t value) {
 // icpalacetower01.nif -- the White-Gold Tower. +374 meshes, +454494 triangles,
 // and zero out-of-range triangles across all 10.2M, which is the check that
 // says the field walk is actually right rather than merely terminating.
-constexpr int kCellBuildVersion = 17;
+// 18: Morrowind terrain carries synthesized per-vertex layer weights. VTEX
+// names one texture per 512-unit block and nothing else, so the blend between
+// blocks has to be invented at build time -- and it lives in the packed vertex,
+// which means cached cells keep the hard-edged version until this bumps.
+constexpr int kCellBuildVersion = 18;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

@@ -221,10 +221,11 @@ void appendMorrowindTerrainCell(
     const float cellOriginX = static_cast<float>(cell.gridX) * cellWorldSize;
     const float cellOriginY = static_cast<float>(cell.gridZ) * cellWorldSize;
 
-    // Group blocks by the texture they resolve to, so one part covers every
-    // block sharing a texture rather than one part per block (256 draws a cell).
-    std::unordered_map<std::uint32_t, std::vector<int>> blocksByTexture;
-    for (int block = 0; block < kMorrowindTextureGridSize * kMorrowindTextureGridSize; ++block) {
+    // Resolve every block's texture up front, because a block now needs to know
+    // what its NEIGHBOURS use as well as what it uses itself.
+    constexpr int kBlockCount = kMorrowindTextureGridSize * kMorrowindTextureGridSize;
+    std::array<std::uint32_t, kBlockCount> blockTexture{};
+    for (int block = 0; block < kBlockCount; ++block) {
         std::uint32_t textureIndex = kNoTextureIndex;
         if (static_cast<std::size_t>(block) < land.morrowindTextureGrid.size()) {
             const std::uint16_t stored = land.morrowindTextureGrid[static_cast<std::size_t>(block)];
@@ -237,8 +238,53 @@ void appendMorrowindTerrainCell(
         if (textureIndex == kNoTextureIndex) {
             textureIndex = resolveLandTexture(0u);
         }
-        blocksByTexture[textureIndex].push_back(block);
+        blockTexture[static_cast<std::size_t>(block)] = textureIndex;
     }
+
+    // Group blocks by the texture they resolve to, so one part covers every
+    // block sharing a texture rather than one part per block (256 draws a cell).
+    std::unordered_map<std::uint32_t, std::vector<int>> blocksByTexture;
+    for (int block = 0; block < kBlockCount; ++block) {
+        blocksByTexture[blockTexture[static_cast<std::size_t>(block)]].push_back(block);
+    }
+
+    // MORROWIND HAS NO PER-VERTEX TEXTURE WEIGHTS AT ALL. Where Oblivion and
+    // Fallout author ATXT/VTXT -- an opacity per layer per post -- Morrowind's
+    // VTEX names ONE texture per 512-unit block and stops. Drawn literally that
+    // is what it looks like: a staircase of hard-edged squares, most visible
+    // where a path crosses grass, and it is the single blockiest thing about
+    // this terrain.
+    //
+    // The fix is to synthesize the weights the format never stored. Treat the
+    // block textures as samples on a lattice at block CENTRES and bilinearly
+    // interpolate between the four nearest, which is exactly the 4-slot layer
+    // blend the shader already implements for the other two games -- own
+    // texture, horizontal neighbour, vertical neighbour, diagonal.
+    //
+    // Two things make this work out cleanly rather than approximately:
+    //
+    //  * UVs ARE ALREADY CONTINUOUS ACROSS A BLOCK EDGE. Each block tiles its
+    //    texture exactly once, 0..1, so at a shared edge this block's u=1 and
+    //    the neighbour's u=0 are the same point in a tiling texture. Sampling a
+    //    neighbour's texture at our own UV therefore lands where the neighbour
+    //    itself draws it, with no phase seam to hide.
+    //  * The weights are a partition of unity by construction, and the shader's
+    //    chain is a sequence of lerps, so each layer's weight is divided by the
+    //    running total (w_i = a_i / sum(a_0..a_i)). That reproduces the
+    //    normalized blend exactly rather than approximately -- see the loop.
+    //
+    // Neighbours OUTSIDE this cell are not reachable here (the adjacent LAND
+    // record is a different extract), so an out-of-range neighbour falls back to
+    // this block's own texture. That leaves the 8192-unit cell seams unblended
+    // while fixing every 512-unit block seam inside them, which is 15 of every
+    // 16 boundaries in each axis.
+    const auto textureAt = [&](int blockRow, int blockCol, std::uint32_t fallback) {
+        if (blockRow < 0 || blockRow >= kMorrowindTextureGridSize || blockCol < 0 ||
+            blockCol >= kMorrowindTextureGridSize) {
+            return fallback;
+        }
+        return blockTexture[static_cast<std::size_t>((blockRow * kMorrowindTextureGridSize) + blockCol)];
+    };
 
     for (const auto& [textureIndex, blocks] : blocksByTexture) {
         const std::uint32_t firstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
@@ -264,8 +310,63 @@ void appendMorrowindTerrainCell(
                     vertex.position[1] = world.y;
                     vertex.position[2] = world.z;
                     // One full tile of the texture across the block.
-                    vertex.uv[0] = static_cast<float>(col) / static_cast<float>(kMorrowindTextureBlockQuads);
-                    vertex.uv[1] = static_cast<float>(row) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    const float blockU =
+                        static_cast<float>(col) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    const float blockV =
+                        static_cast<float>(row) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    vertex.uv[0] = blockU;
+                    vertex.uv[1] = blockV;
+
+                    // Bilinear blend toward the neighbouring blocks' textures.
+                    // Offset from this block's CENTRE, so the influence is zero
+                    // in the middle of a block and half at its edge -- where the
+                    // neighbour computes the mirrored half and the two meet
+                    // continuously.
+                    const float offsetU = blockU - 0.5f;
+                    const float offsetV = blockV - 0.5f;
+                    const float fracU = std::abs(offsetU);
+                    const float fracV = std::abs(offsetV);
+                    const int stepCol = offsetU < 0.0f ? -1 : 1;
+                    const int stepRow = offsetV < 0.0f ? -1 : 1;
+                    const std::uint32_t ownTexture = textureIndex;
+                    const std::uint32_t neighbourU =
+                        textureAt(blockRow, blockCol + stepCol, ownTexture);
+                    const std::uint32_t neighbourV =
+                        textureAt(blockRow + stepRow, blockCol, ownTexture);
+                    const std::uint32_t neighbourUv =
+                        textureAt(blockRow + stepRow, blockCol + stepCol, ownTexture);
+                    // Partition of unity over the four nearest block centres.
+                    // amount[0] is this block's own share and is carried by the
+                    // base texture rather than by a layer slot.
+                    const float amount[4] = {
+                        (1.0f - fracU) * (1.0f - fracV),
+                        fracU * (1.0f - fracV),
+                        (1.0f - fracU) * fracV,
+                        fracU * fracV,
+                    };
+                    const std::uint32_t neighbourTexture[3] = {
+                        neighbourU, neighbourV, neighbourUv};
+                    // The shader composites as a chain of lerps from the base
+                    // sample, so a layer's weight has to be its share of the
+                    // running total, not its share of the whole. Dividing by the
+                    // cumulative sum makes the chain reproduce the normalized
+                    // blend exactly.
+                    float runningTotal = amount[0];
+                    for (int slot = 0; slot < 3; ++slot) {
+                        const float share = amount[slot + 1];
+                        runningTotal += share;
+                        // A neighbour using the same texture as this block is
+                        // not a transition and must not consume a layer slot --
+                        // blending a texture with itself is a no-op that costs a
+                        // sample, and there are only four slots for what can be
+                        // four genuinely different textures at a corner.
+                        if (neighbourTexture[slot] == ownTexture || share <= 0.0f ||
+                            runningTotal <= 0.0f) {
+                            continue;
+                        }
+                        vertex.layerTextureIndex[slot] = neighbourTexture[slot];
+                        vertex.layerWeight[slot] = share / runningTotal;
+                    }
                     if (land.hasNormals) {
                         const Vec3 normal = bethesdaToEngine(
                             land.normals[static_cast<std::size_t>(postIndex) * 3u],
