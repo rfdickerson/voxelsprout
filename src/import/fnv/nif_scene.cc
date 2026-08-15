@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace odai::importer::fnv {
@@ -16,6 +17,9 @@ constexpr std::uint32_t kSupportedNifVersion = 0x14020007u;  // 20.2.0.7 (FO3/FN
 // Oblivion. 20.0.0.5 exists in the retail archives too but is 1.2% of them.
 constexpr std::uint32_t kOblivionNifVersion = 0x14000004u;   // 20.0.0.4
 constexpr std::uint32_t kOblivionNifVersion5 = 0x14000005u;  // 20.0.0.5
+// Morrowind, and a THIRD structural generation rather than an older version of
+// the second. See NifHeader::inlineBlockTypes and ::wideBools.
+constexpr std::uint32_t kMorrowindNifVersion = 0x04000002u;  // 4.0.0.2
 constexpr std::string_view kHeaderMagicPrefix = "Gamebryo File Format, Version 20.2.0.7";
 
 // Bounds-checked sequential byte reader. Every multi-byte read fails cleanly
@@ -76,6 +80,17 @@ public:
             }
         }
         return false;
+    }
+
+    // Bounds-checked forward skip. Unlike seekAbsolute this REFUSES to run past
+    // the end rather than clamping, because it is used by the sequential
+    // walkers, where clamping would turn a desync into a silently short block.
+    bool skip(std::size_t count) {
+        if (m_pos + count > m_size) {
+            return false;
+        }
+        m_pos += count;
+        return true;
     }
 
     std::size_t pos() const { return m_pos; }
@@ -204,6 +219,18 @@ struct NifHeader {
     // FIRST FIELD of nearly every block.
     bool sequentialBlocks = false;
     bool inlineNames = false;
+    // 4.0.0.2 has no block-TYPE table either: each block is preceded by its own
+    // uint32-length-prefixed type name. That is actually easier than Oblivion's
+    // arrangement -- the type is always known before the block is read -- but it
+    // means the type table has to be synthesized during the walk rather than
+    // read up front.
+    bool inlineBlockTypes = false;
+    // AND EVERY BOOLEAN IS FOUR BYTES. Below 4.1.0.0 the format stores bools as
+    // int32; from 4.1.0.0 they are int8. This is the single most common way a
+    // 4.0.0.2 reader desyncs, because hasVertices/hasNormals/hasVertexColors/
+    // hasUV sit between the arrays they gate -- read one as a byte and the next
+    // three fields are garbage while the parse still "succeeds".
+    bool wideBools = false;
     std::uint32_t version = 0;
     std::uint32_t userVersion = 0;
     std::uint32_t userVersion2 = 0;
@@ -216,20 +243,39 @@ struct NifHeader {
 bool parseHeader(ByteCursor& cursor, NifHeader& header, std::string& outError) {
     std::string magicLine;
     if (!cursor.readLine(magicLine, '\n') ||
-        magicLine.rfind("Gamebryo File Format, Version ", 0) != 0) {
-        outError = "Not a Gamebryo NIF file (unrecognized header line)";
+        (magicLine.rfind("Gamebryo File Format, Version ", 0) != 0 &&
+         magicLine.rfind("NetImmerse File Format, Version ", 0) != 0)) {
+        outError = "Not a Gamebryo/NetImmerse NIF file (unrecognized header line)";
         return false;
     }
     if (!cursor.read(header.version)) {
         outError = "Truncated NIF version";
         return false;
     }
-    if (header.version == kOblivionNifVersion || header.version == kOblivionNifVersion5) {
+    if (header.version == kMorrowindNifVersion) {
+        header.sequentialBlocks = true;
+        header.inlineNames = true;
+        header.inlineBlockTypes = true;
+        header.wideBools = true;
+    } else if (header.version == kOblivionNifVersion || header.version == kOblivionNifVersion5) {
         header.sequentialBlocks = true;
         header.inlineNames = true;
     } else if (header.version != kSupportedNifVersion) {
-        outError = "Unsupported NIF version (20.0.0.4, 20.0.0.5 and 20.2.0.7 are supported)";
+        outError = "Unsupported NIF version (4.0.0.2, 20.0.0.4, 20.0.0.5 and 20.2.0.7 are supported)";
         return false;
+    }
+    // 4.0.0.2 predates the endianness byte, the user version and the export
+    // strings alike: the version word is followed immediately by the block
+    // count and then by the first block.
+    if (header.inlineBlockTypes) {
+        std::uint32_t morrowindBlockCount = 0;
+        if (!cursor.read(morrowindBlockCount)) {
+            outError = "Truncated NIF header";
+            return false;
+        }
+        header.blockTypeIndex.assign(morrowindBlockCount, 0u);
+        header.blockSize.assign(morrowindBlockCount, 0u);
+        return true;
     }
     std::uint8_t endianType = 0;
     if (!cursor.read(endianType) || endianType != 1u) {
@@ -388,6 +434,8 @@ std::array<float, 3> transformDirection(const Mat4& mat, const float d[3]) {
 }
 
 // Parsed NiAVObject-derived fields shared by NiNode and NiTriShape.
+bool consumeMorrowindBoundingVolume(ByteCursor& cursor);
+
 struct AvObjectFields {
     float translation[3] = {0, 0, 0};
     float rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
@@ -798,7 +846,47 @@ bool readNiStencilProperty(
 // read separately per block type. Returns false only on truncation this
 // early in the block, which should not happen for a well-formed file.
 bool readAvObjectPrefix(
-    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, AvObjectFields& out) {
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
+    AvObjectFields& out) {
+    // 4.0.0.2's NiAVObject differs in four places, and none of them is the
+    // header: extra data is ONE ref rather than a counted list, velocity sits
+    // between scale and the property list, the bounds flag is a four-byte bool,
+    // and there is no collision-object ref at all.
+    if (morrowind) {
+        std::string name;
+        if (!cursor.readSizedString<std::uint32_t>(name)) {
+            return false;
+        }
+        out.nameRef = -1;
+        if (!cursor.skip(4u) || !cursor.skip(4u)) {  // extra-data ref, controller ref
+            return false;
+        }
+        std::uint16_t flags16 = 0;
+        if (!cursor.read(flags16) || !cursor.read(out.translation) ||
+            !cursor.read(out.rotation) || !cursor.read(out.scale) || !cursor.skip(12u)) {
+            return false;
+        }
+        std::uint32_t numProperties = 0;
+        if (!cursor.read(numProperties)) {
+            return false;
+        }
+        const std::size_t remaining = cursor.size() - cursor.pos();
+        if (static_cast<std::size_t>(numProperties) * sizeof(std::int32_t) > remaining) {
+            return false;
+        }
+        for (std::uint32_t i = 0; i < numProperties; ++i) {
+            std::int32_t ref = 0;
+            if (!cursor.read(ref)) {
+                return false;
+            }
+            out.properties.push_back(ref);
+        }
+        std::uint32_t hasBounds = 0;
+        if (!cursor.read(hasBounds)) {
+            return false;
+        }
+        return hasBounds == 0u || consumeMorrowindBoundingVolume(cursor);
+    }
     // 20.0.0.4 has no string table, so the name is stored inline here rather
     // than as an index into one. This is the single most invasive difference
     // between the two header families: it changes the FIRST field of nearly
@@ -890,8 +978,9 @@ bool readAvObjectPrefix(
 // implausible float, and a numeric tolerance risks rejecting a legitimate node
 // -- which costs a whole model, the exact outcome this file is trying to avoid.
 bool readNiNode(
-    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, AvObjectFields& out) {
-    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, out)) {
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
+    AvObjectFields& out) {
+    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, morrowind, out)) {
         return false;
     }
     std::uint32_t numChildren = 0;
@@ -930,8 +1019,9 @@ bool readNiNode(
 }
 
 bool readNiTriBasedGeom(
-    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, AvObjectFields& out) {
-    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, out)) {
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
+    AvObjectFields& out) {
+    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, morrowind, out)) {
         return false;
     }
     if (!cursor.read(out.dataRef)) {
@@ -1219,7 +1309,16 @@ bool readNiTriStripsDataTail(ByteCursor& cursor, GeometryBlock& out) {
 }
 
 // Reads one geometry-data block of either shape. `isStrips` selects the tail.
-bool readGeometryData(ByteCursor& cursor, std::size_t blockEnd, bool isStrips, GeometryBlock& out) {
+bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out);
+
+bool readGeometryData(
+    ByteCursor& cursor, std::size_t blockEnd, bool isStrips, bool morrowind, GeometryBlock& out) {
+    // 4.0.0.2's data block shares no field order with the later ones -- four-byte
+    // bools, float vertex colours, the UV count read after the colours. It has
+    // its own reader, which is the same code the sequential walker measures with.
+    if (morrowind) {
+        return consumeMorrowindGeometryData(cursor, isStrips, &out);
+    }
     std::uint16_t numTriangles = 0;
     if (!readNiTriBasedGeomDataPrefix(cursor, out, numTriangles)) {
         return false;
@@ -1628,6 +1727,423 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
 
 // Fills blockStart/blockEnd by consuming each block in order. Any type without a
 // reader aborts the whole file -- see consumeOblivionBlock.
+namespace {
+
+// ---------------------------------------------------------------------------
+// NetImmerse 4.0.0.2 (Morrowind)
+//
+// A third block layout, and the differences from 20.0.0.4 are not a matter of a
+// few fields. Each block is preceded by its own uint32-length-prefixed TYPE
+// NAME, so unlike Oblivion the type is always known before the block is read --
+// but there is still no size, so every block must be consumed exactly.
+//
+// AND EVERY BOOLEAN IS FOUR BYTES. Below 4.1.0.0 the format writes bools as
+// int32. The gating bools in NiTriShapeData (hasVertices, hasNormals,
+// hasVertexColors, hasUV) sit between the arrays they gate, so reading one as a
+// byte does not fail -- it shifts everything after it by three bytes and yields
+// a mesh made of noise.
+//
+// Measured coverage over the 5798 meshes in Morrowind.bsa: ten block readers
+// cover 94.6% of the architecture set (meshes\x\, 865 files), which is what a
+// town is built from. Sixteen cover 90.8% of the whole archive.
+
+// Reads a 4.0.0.2 boolean: int32, not int8.
+bool readWideBool(ByteCursor& cursor, bool& out) {
+    std::uint32_t value = 0;
+    if (!cursor.read(value)) {
+        return false;
+    }
+    out = value != 0u;
+    return true;
+}
+
+bool consumeMorrowindSizedString(ByteCursor& cursor) {
+    std::string unused;
+    return cursor.readSizedString<std::uint32_t>(unused);
+}
+
+// uint32 count followed by that many int32 refs.
+bool consumeMorrowindRefList(ByteCursor& cursor) {
+    std::uint32_t count = 0;
+    if (!cursor.read(count)) {
+        return false;
+    }
+    return cursor.skip(static_cast<std::size_t>(count) * 4u);
+}
+
+// NiObjectNET at 4.0.0.2: name, ONE extra-data ref (not a list), controller ref.
+bool consumeMorrowindObjectNet(ByteCursor& cursor) {
+    return consumeMorrowindSizedString(cursor) && cursor.skip(4u) && cursor.skip(4u);
+}
+
+bool consumeMorrowindBoundingVolume(ByteCursor& cursor) {
+    std::uint32_t type = 0;
+    if (!cursor.read(type)) {
+        return false;
+    }
+    switch (type) {
+        case 0xFFFFFFFFu: return true;              // base, no payload
+        case 0u: return cursor.skip(16u);            // sphere: centre + radius
+        case 1u: return cursor.skip(12u + 36u + 12u);  // box: centre, axes, extents
+        case 2u: return cursor.skip(12u + 12u + 8u);   // capsule
+        // Lozenge gains two extents only at 4.2.1.0, and half-space an origin.
+        case 3u: return cursor.skip(4u + 12u + 12u + 12u);
+        case 5u: return cursor.skip(16u);
+        default: return false;                       // union and anything else
+    }
+}
+
+// NiAVObject at 4.0.0.2. Note velocity IS present here (it goes away after
+// 4.2.2.0) and the bounds flag is a four-byte bool.
+bool consumeMorrowindAvObject(ByteCursor& cursor) {
+    if (!consumeMorrowindObjectNet(cursor)) {
+        return false;
+    }
+    // flags u16, translation 3f, rotation 9f, scale f, velocity 3f
+    if (!cursor.skip(2u + 12u + 36u + 4u + 12u)) {
+        return false;
+    }
+    if (!consumeMorrowindRefList(cursor)) {  // properties
+        return false;
+    }
+    bool hasBounds = false;
+    if (!readWideBool(cursor, hasBounds)) {
+        return false;
+    }
+    return !hasBounds || consumeMorrowindBoundingVolume(cursor);
+}
+
+bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out);
+
+// Consumes exactly one 4.0.0.2 block of `typeName`. False means "this reader
+// does not know how long that block is", which fails the file -- there is no
+// size to skip by and no separator to resynchronize on.
+bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
+    // Every one of these is a bare NiNode on disk. RootCollisionNode's type name
+    // is its entire semantics: its children are collision geometry that must not
+    // be drawn, which the caller handles -- here it is just a node.
+    if (typeName == "NiNode" || typeName == "RootCollisionNode" || typeName == "AvoidNode" ||
+        typeName == "NiBSAnimationNode" || typeName == "NiBSParticleNode" ||
+        typeName == "NiBillboardNode" || typeName == "NiCollisionSwitch" ||
+        typeName == "NiSortAdjustNode" || typeName == "NiLODNode" ||
+        typeName == "NiSwitchNode" || typeName == "NiFltAnimationNode") {
+        return consumeMorrowindAvObject(cursor) && consumeMorrowindRefList(cursor) &&
+               consumeMorrowindRefList(cursor);  // children, effects
+    }
+    if (typeName == "NiTriShape" || typeName == "NiTriStrips" || typeName == "NiLines") {
+        // NiGeometry tail: data ref + skin-instance ref. MaterialData does not
+        // exist before 10.0.1.0, so there is nothing after them.
+        return consumeMorrowindAvObject(cursor) && cursor.skip(8u);
+    }
+    if (typeName == "NiTriShapeData") {
+        return consumeMorrowindGeometryData(cursor, /*strips=*/false, nullptr);
+    }
+    if (typeName == "NiTriStripsData") {
+        return consumeMorrowindGeometryData(cursor, /*strips=*/true, nullptr);
+    }
+    if (typeName == "NiSourceTexture") {
+        if (!consumeMorrowindObjectNet(cursor)) {
+            return false;
+        }
+        std::uint8_t useExternal = 0;
+        if (!cursor.read(useExternal)) {
+            return false;
+        }
+        bool hasPixelData = false;
+        if (useExternal != 0u) {
+            if (!consumeMorrowindSizedString(cursor)) {  // file name
+                return false;
+            }
+        } else {
+            std::uint8_t hasData = 0;
+            if (!cursor.read(hasData)) {
+                return false;
+            }
+            hasPixelData = hasData != 0u;
+        }
+        if (hasPixelData && !cursor.skip(4u)) {  // NiPixelData ref
+            return false;
+        }
+        // pixelLayout, useMipMaps, alphaFormat, then isStatic (one byte).
+        return cursor.skip(12u) && cursor.skip(1u);
+    }
+    if (typeName == "NiTexturingProperty") {
+        if (!consumeMorrowindObjectNet(cursor) || !cursor.skip(2u)) {  // flags
+            return false;
+        }
+        if (!cursor.skip(4u)) {  // apply mode
+            return false;
+        }
+        std::uint32_t textureCount = 0;
+        if (!cursor.read(textureCount)) {
+            return false;
+        }
+        for (std::uint32_t slot = 0; slot < textureCount; ++slot) {
+            bool enabled = false;
+            if (!readWideBool(cursor, enabled)) {
+                return false;
+            }
+            if (!enabled) {
+                continue;  // a disabled slot is the four bytes and nothing else
+            }
+            // source ref, clamp, filter, uvSet, the PS2 filter dword, then a
+            // two-byte unknown that only exists at or below 4.1.0.12.
+            if (!cursor.skip(4u * 5u) || !cursor.skip(2u)) {
+                return false;
+            }
+            // The BUMP slot carries an inline luma bias and matrix right here,
+            // which is a classic desync: it belongs to the property, not to the
+            // slot struct, and only appears when slot 5 is enabled.
+            if (slot == 5u && !cursor.skip(8u + 16u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiMaterialProperty") {
+        // flags, ambient/diffuse/specular/emissive (3f each), glossiness, alpha
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 48u + 8u);
+    }
+    if (typeName == "NiAlphaProperty") {
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 1u);
+    }
+    if (typeName == "NiZBufferProperty" || typeName == "NiShadeProperty" ||
+        typeName == "NiDitherProperty" || typeName == "NiSpecularProperty" ||
+        typeName == "NiWireframeProperty") {
+        // All of these are NiObjectNET + a single u16 at this version. The
+        // z-buffer test function is packed into those flag bits until 4.1.0.12.
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u);
+    }
+    if (typeName == "NiVertexColorProperty") {
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 4u + 4u);
+    }
+    if (typeName == "NiStencilProperty") {
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 1u + 4u * 6u);
+    }
+    if (typeName == "NiFogProperty") {
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 4u + 12u);
+    }
+    // Every extra-data block at 4.0.0.2 opens with a next-ref and a byte count
+    // INSTEAD of a name -- the name arrives at 10.0.1.0. The byte count is the
+    // payload length for NiExtraData and is otherwise redundant.
+    if (typeName == "NiStringExtraData") {
+        return cursor.skip(4u) && cursor.skip(4u) && consumeMorrowindSizedString(cursor);
+    }
+    if (typeName == "NiTextKeyExtraData") {
+        if (!cursor.skip(4u) || !cursor.skip(4u)) {
+            return false;
+        }
+        std::uint32_t keyCount = 0;
+        if (!cursor.read(keyCount)) {
+            return false;
+        }
+        for (std::uint32_t i = 0; i < keyCount; ++i) {
+            if (!cursor.skip(4u) || !consumeMorrowindSizedString(cursor)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiVertWeightsExtraData") {
+        if (!cursor.skip(4u)) {
+            return false;
+        }
+        std::uint32_t recordSize = 0;
+        if (!cursor.read(recordSize)) {
+            return false;
+        }
+        std::uint16_t weightCount = 0;
+        if (!cursor.read(weightCount)) {
+            return false;
+        }
+        return cursor.skip(static_cast<std::size_t>(weightCount) * 4u);
+    }
+    if (typeName == "NiExtraData") {
+        if (!cursor.skip(4u)) {
+            return false;
+        }
+        std::uint32_t recordSize = 0;
+        if (!cursor.read(recordSize)) {
+            return false;
+        }
+        return cursor.skip(recordSize);
+    }
+    return false;
+}
+
+// NiTriShapeData / NiTriStripsData at 4.0.0.2.
+//
+// The UV handling is the trap. At this version the "data flags" word IS the UV
+// set count with no masking, and it is read AFTER the colours -- then a separate
+// four-byte hasUV bool follows, and when it is false the count is forced to zero
+// even though the count field has already been consumed.
+// One layout, two uses: `out` null measures the block for the sequential walk,
+// non-null also extracts it. They must stay the same code -- a walker and a
+// reader that disagree by one field produce a file that "parses" into noise.
+bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out) {
+    std::uint16_t vertexCount = 0;
+    if (!cursor.read(vertexCount)) {
+        return false;
+    }
+    const auto readVectorOrSkip = [&](bool present, std::size_t componentsPerVertex,
+                                      std::vector<float>* dst) {
+        const std::size_t floatCount = static_cast<std::size_t>(vertexCount) * componentsPerVertex;
+        if (!present) {
+            return true;
+        }
+        if (out == nullptr || dst == nullptr) {
+            return cursor.skip(floatCount * sizeof(float));
+        }
+        dst->resize(floatCount);
+        for (float& value : *dst) {
+            if (!cursor.read(value)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool hasVertices = false;
+    if (!readWideBool(cursor, hasVertices) ||
+        !readVectorOrSkip(hasVertices, 3u, out ? &out->positions : nullptr)) {
+        return false;
+    }
+    bool hasNormals = false;
+    if (!readWideBool(cursor, hasNormals) ||
+        !readVectorOrSkip(hasNormals, 3u, out ? &out->normals : nullptr)) {
+        return false;
+    }
+    if (!cursor.skip(16u)) {  // bounding sphere: centre + radius
+        return false;
+    }
+    // Vertex colours are RGBA FLOATS here, not the packed bytes later versions
+    // use -- 16 bytes per vertex, and skipping 4 desynchronizes the UV count.
+    bool hasColors = false;
+    if (!readWideBool(cursor, hasColors) ||
+        !cursor.skip(hasColors ? static_cast<std::size_t>(vertexCount) * 16u : 0u)) {
+        return false;
+    }
+    std::uint16_t uvSetCount = 0;
+    if (!cursor.read(uvSetCount)) {
+        return false;
+    }
+    bool hasUv = false;
+    if (!readWideBool(cursor, hasUv)) {
+        return false;
+    }
+    if (!hasUv) {
+        // The COUNT was already consumed; only the arrays are absent.
+        uvSetCount = 0;
+    }
+    for (std::uint16_t set = 0; set < uvSetCount; ++set) {
+        // Only UV set 0 is kept, matching every other generation's reader.
+        std::vector<float>* dst = (set == 0u && out != nullptr) ? &out->uvs : nullptr;
+        if (!readVectorOrSkip(true, 2u, dst)) {
+            return false;
+        }
+    }
+    std::uint16_t triangleCount = 0;
+    if (!cursor.read(triangleCount)) {
+        return false;
+    }
+    if (strips) {
+        std::vector<std::uint16_t> lengths(triangleCount);
+        for (std::uint16_t& length : lengths) {
+            if (!cursor.read(length)) {
+                return false;
+            }
+        }
+        std::vector<std::uint16_t> strip;
+        for (const std::uint16_t length : lengths) {
+            strip.resize(length);
+            for (std::uint16_t& point : strip) {
+                if (!cursor.read(point)) {
+                    return false;
+                }
+            }
+            if (out != nullptr) {
+                appendStripTriangles(strip, out->triangleIndices);
+            }
+        }
+    } else {
+        std::uint32_t indexCount = 0;
+        if (!cursor.read(indexCount)) {
+            return false;
+        }
+        // No hasTriangles bool at this version; it arrives after 10.0.1.2.
+        if (out == nullptr) {
+            if (!cursor.skip(static_cast<std::size_t>(indexCount) * 2u)) {
+                return false;
+            }
+        } else {
+            out->triangleIndices.resize(indexCount);
+            for (std::uint32_t& index : out->triangleIndices) {
+                std::uint16_t value = 0;
+                if (!cursor.read(value)) {
+                    return false;
+                }
+                index = value;
+            }
+        }
+    }
+    std::uint16_t matchGroupCount = 0;
+    if (!cursor.read(matchGroupCount)) {
+        return false;
+    }
+    for (std::uint16_t i = 0; i < matchGroupCount; ++i) {
+        std::uint16_t count = 0;
+        if (!cursor.read(count) || !cursor.skip(static_cast<std::size_t>(count) * 2u)) {
+            return false;
+        }
+    }
+    if (out != nullptr) {
+        rejectUnusableTriangles(*out);
+        out->valid = !out->positions.empty();
+    }
+    return true;
+}
+
+// Walks a 4.0.0.2 file, recording each block's bounds and synthesizing the type
+// table the rest of the reader expects.
+bool computeMorrowindBlockBounds(
+    const std::vector<std::uint8_t>& bytes,
+    NifHeader& header,
+    std::size_t firstBlockOffset,
+    std::vector<std::size_t>& blockStart,
+    std::vector<std::size_t>& blockEnd,
+    std::string& outError) {
+    ByteCursor cursor(bytes.data(), bytes.size());
+    cursor.seekAbsolute(firstBlockOffset);
+    const std::size_t blockCount = header.blockTypeIndex.size();
+    blockStart.assign(blockCount, 0u);
+    blockEnd.assign(blockCount, 0u);
+    std::unordered_map<std::string, std::uint16_t> typeIds;
+    for (std::size_t i = 0; i < blockCount; ++i) {
+        std::string typeName;
+        if (!cursor.readSizedString<std::uint32_t>(typeName) || typeName.empty()) {
+            outError = "Truncated NIF 4.0.0.2 block type name";
+            return false;
+        }
+        const auto inserted =
+            typeIds.emplace(typeName, static_cast<std::uint16_t>(header.blockTypeNames.size()));
+        if (inserted.second) {
+            header.blockTypeNames.push_back(typeName);
+        }
+        header.blockTypeIndex[i] = inserted.first->second;
+        blockStart[i] = cursor.pos();
+        if (!consumeMorrowindBlock(cursor, typeName)) {
+            outError = "Unsupported NIF 4.0.0.2 block type '" + typeName +
+                       "' (no size is derivable without it)";
+            return false;
+        }
+        blockEnd[i] = cursor.pos();
+        header.blockSize[i] = static_cast<std::uint32_t>(blockEnd[i] - blockStart[i]);
+    }
+    return true;
+}
+
+}  // namespace
+
 bool computeSequentialBlockBounds(
     const std::vector<std::uint8_t>& bytes,
     const NifHeader& header,
@@ -1669,7 +2185,15 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     const std::size_t numBlocks = header.blockSize.size();
     std::vector<std::size_t> blockStart(numBlocks);
     std::vector<std::size_t> blockEnd(numBlocks);
-    if (header.sequentialBlocks) {
+    if (header.inlineBlockTypes) {
+        // 4.0.0.2 has no type table either, so the walk synthesizes one as it
+        // goes -- which is why this runs before the dispatch below can name a
+        // single block.
+        if (!computeMorrowindBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
+            return false;
+        }
+    } else if (header.sequentialBlocks) {
         if (!computeSequentialBlockBounds(
                 bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
             return false;
@@ -1725,7 +2249,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // NiNode-derived fails that and is counted, rather than misparsed.
         if (isNodeTypeName(typeName) || looksLikeUnhandledNodeType(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
                 nodeFields[i] = std::move(fields);
                 isNiNode[i] = true;
                 for (const std::int32_t child : nodeFields[i].children) {
@@ -1755,7 +2279,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // "successfully" and yielded zero shapes -- the silent-drop failure
             // mode, not an error.
             AvObjectFields fields;
-            if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, fields)) {
+            if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
                 nodeFields[i] = std::move(fields);
                 isTriShape[i] = true;
             }
@@ -1796,7 +2320,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // Not counted here: a data block that fails to parse is counted
             // once, at the shape that references it in the DFS below. Counting
             // both sites reported 2 for a single lost shape.
-            if (readGeometryData(blockCursor, blockEnd[i] - blockStart[i], isStrips, block) &&
+            if (readGeometryData(blockCursor, blockEnd[i] - blockStart[i], isStrips, header.inlineBlockTypes, block) &&
                 block.valid) {
                 outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
                 outModel.degenerateTriangleCount += block.degenerateTriangles;
@@ -2151,7 +2675,7 @@ bool parseNifSkeleton(
         ByteCursor blockCursor(
             bytes.data() + blockStart[i], header.blockSize[i]);
         AvObjectFields fields;
-        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, fields)) {
+        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
             nodeFields[i] = std::move(fields);
             isNiNode[i] = true;
         }
@@ -2466,7 +2990,7 @@ bool parseNifSkinnedMesh(
 
         if (isNodeTypeName(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
                 const std::int32_t nameRef = fields.nameRef;
                 if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                     nodeNames[i] = header.strings[static_cast<std::size_t>(nameRef)];
@@ -2476,7 +3000,7 @@ bool parseNifSkinnedMesh(
         } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
                    typeName == "BSSegmentedTriShape") {
             AvObjectFields fields;
-            if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, fields)) {
+            if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
                 // The skin instance ref is the very next field after the data
                 // ref readNiTriBasedGeom stops at.
                 std::int32_t skinRef = -1;
@@ -2521,7 +3045,7 @@ bool parseNifSkinnedMesh(
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
             GeometryBlock block;
             const bool isStrips = (typeName == "NiTriStripsData");
-            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, block) &&
+            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, header.inlineBlockTypes, block) &&
                 block.valid) {
                 outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
                 outModel.degenerateTriangleCount += block.degenerateTriangles;
