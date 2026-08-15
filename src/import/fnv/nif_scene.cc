@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -20,6 +21,37 @@ constexpr std::uint32_t kOblivionNifVersion5 = 0x14000005u;  // 20.0.0.5
 // Morrowind, and a THIRD structural generation rather than an older version of
 // the second. See NifHeader::inlineBlockTypes and ::wideBools.
 constexpr std::uint32_t kMorrowindNifVersion = 0x04000002u;  // 4.0.0.2
+// Oblivion ships a MIX, and the older half of it is this one. 580 of the game's
+// 9612 meshes are 10.1.x/10.2.0.0 rather than 20.0.0.x, including
+// icpalacetower01.nif -- the White-Gold Tower, the tallest thing in Cyrodiil.
+//
+// Structurally this generation is 20.0.0.4 MINUS THE ENDIAN BYTE, and nothing
+// else. Verified by hexdump rather than from the spec, because the ordering
+// question is exactly the kind that is easy to misremember:
+//
+//   20.0.0.4  ... 0a | 04 00 00 14 | 01 | 0b000000 | 5d000000 | 0b000000 | 0a "mcarofano"
+//   10.2.0.0  ... 0a | 00 00 02 0a |    | 0a000000 | 68000000 | 06000000 | 0a "mcarofano"
+//                 ^nl   ^version    ^end  ^userVer   ^numBlocks ^userVer2  ^export strings
+//
+// Endianness arrived at 20.0.0.4, so every field below it shifts back one byte
+// and everything after the export strings -- block-type table, per-block type
+// indices, sequential block bodies with no size table -- is byte-identical.
+//
+// 10.0.1.0 and 10.0.1.2 (64 meshes) are NOT included: User Version and the
+// export-info strings both arrive at 10.0.1.8, so those two have a genuinely
+// different header and would mis-parse silently rather than fail.
+constexpr std::uint32_t kGamebryo10MinVersion = 0x0a010065u;  // 10.1.0.101
+constexpr std::uint32_t kGamebryo10MaxVersion = 0x0a020000u;  // 10.2.0.0
+// TexDesc carried two PlayStation 2 fields up to and including this version.
+constexpr std::uint32_t kPs2TexDescMaxVersion = 0x0a040001u;  // 10.4.0.1
+// NiGeometryData grew a Group ID at 10.1.0.114 and an Additional Data ref at
+// 20.0.0.4 -- one at each END of the same block.
+constexpr std::uint32_t kGroupIdMinVersion = 0x0a010072u;         // 10.1.0.114
+constexpr std::uint32_t kAdditionalDataMinVersion = 0x14000004u;  // 20.0.0.4
+
+// The endian byte arrived at 20.0.0.4. Below it the field does not exist, and
+// reading one anyway consumes the low byte of User Version.
+constexpr bool nifHasEndianByte(std::uint32_t version) { return version >= 0x14000004u; }
 constexpr std::string_view kHeaderMagicPrefix = "Gamebryo File Format, Version 20.2.0.7";
 
 // Bounds-checked sequential byte reader. Every multi-byte read fails cleanly
@@ -257,11 +289,23 @@ bool parseHeader(ByteCursor& cursor, NifHeader& header, std::string& outError) {
         header.inlineNames = true;
         header.inlineBlockTypes = true;
         header.wideBools = true;
-    } else if (header.version == kOblivionNifVersion || header.version == kOblivionNifVersion5) {
+    } else if (header.version == kOblivionNifVersion || header.version == kOblivionNifVersion5 ||
+               (header.version >= kGamebryo10MinVersion &&
+                header.version <= kGamebryo10MaxVersion)) {
         header.sequentialBlocks = true;
         header.inlineNames = true;
     } else if (header.version != kSupportedNifVersion) {
-        outError = "Unsupported NIF version (4.0.0.2, 20.0.0.4, 20.0.0.5 and 20.2.0.7 are supported)";
+        // Name the version that was actually found. Listing only the SUPPORTED
+        // ones says nothing about which unsupported generation a file belongs
+        // to, so a whole class of failures reads as one undifferentiated
+        // "unsupported" -- and the header line carries the authoring tool's own
+        // spelling of it, which is what a NIF reference is indexed by.
+        char found[64];
+        std::snprintf(found, sizeof(found), "%u.%u.%u.%u", (header.version >> 24) & 0xFFu,
+                      (header.version >> 16) & 0xFFu, (header.version >> 8) & 0xFFu,
+                      header.version & 0xFFu);
+        outError = "Unsupported NIF version " + std::string(found) + " (\"" + magicLine +
+                   "\"); 4.0.0.2, 20.0.0.4, 20.0.0.5 and 20.2.0.7 are supported";
         return false;
     }
     // 4.0.0.2 predates the endianness byte, the user version and the export
@@ -277,10 +321,12 @@ bool parseHeader(ByteCursor& cursor, NifHeader& header, std::string& outError) {
         header.blockSize.assign(morrowindBlockCount, 0u);
         return true;
     }
-    std::uint8_t endianType = 0;
-    if (!cursor.read(endianType) || endianType != 1u) {
-        outError = "Unsupported NIF endianness (only little-endian archives are supported)";
-        return false;
+    if (nifHasEndianByte(header.version)) {
+        std::uint8_t endianType = 0;
+        if (!cursor.read(endianType) || endianType != 1u) {
+            outError = "Unsupported NIF endianness (only little-endian archives are supported)";
+            return false;
+        }
     }
     std::uint32_t numBlocks = 0;
     if (!cursor.read(header.userVersion) || !cursor.read(numBlocks) || !cursor.read(header.userVersion2)) {
@@ -1142,9 +1188,10 @@ void appendStripTriangles(const std::vector<std::uint16_t>& strip, std::vector<s
 //
 // `outNumTriangles` is the count the tail needs; it is advisory for strips,
 // where the real triangle count only falls out of expanding them.
-bool readNiTriBasedGeomDataPrefix(ByteCursor& cursor, GeometryBlock& out, std::uint16_t& outNumTriangles) {
+bool readNiTriBasedGeomDataPrefix(ByteCursor& cursor, GeometryBlock& out,
+                                  std::uint16_t& outNumTriangles, std::uint32_t version) {
     std::int32_t groupId = 0;
-    if (!cursor.read(groupId)) {
+    if (version >= kGroupIdMinVersion && !cursor.read(groupId)) {
         return false;
     }
     std::uint16_t numVertices = 0;
@@ -1263,7 +1310,7 @@ bool readNiTriBasedGeomDataPrefix(ByteCursor& cursor, GeometryBlock& out, std::u
         return false;
     }
     std::int32_t additionalDataRef = 0;
-    if (!cursor.read(additionalDataRef)) {
+    if (version >= kAdditionalDataMinVersion && !cursor.read(additionalDataRef)) {
         return false;
     }
 
@@ -1334,8 +1381,8 @@ bool readNiTriStripsDataTail(ByteCursor& cursor, GeometryBlock& out) {
 // Reads one geometry-data block of either shape. `isStrips` selects the tail.
 bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out);
 
-bool readGeometryData(
-    ByteCursor& cursor, std::size_t blockEnd, bool isStrips, bool morrowind, GeometryBlock& out) {
+bool readGeometryData(ByteCursor& cursor, std::size_t blockEnd, bool isStrips, bool morrowind,
+                      std::uint32_t version, GeometryBlock& out) {
     // 4.0.0.2's data block shares no field order with the later ones -- four-byte
     // bools, float vertex colours, the UV count read after the colours. It has
     // its own reader, which is the same code the sequential walker measures with.
@@ -1343,7 +1390,7 @@ bool readGeometryData(
         return consumeMorrowindGeometryData(cursor, isStrips, &out);
     }
     std::uint16_t numTriangles = 0;
-    if (!readNiTriBasedGeomDataPrefix(cursor, out, numTriangles)) {
+    if (!readNiTriBasedGeomDataPrefix(cursor, out, numTriangles, version)) {
         return false;
     }
     const bool tailOk = isStrips ? readNiTriStripsDataTail(cursor, out)
@@ -1466,8 +1513,16 @@ bool consumeNiAvObject(ByteCursor& cursor) {
 }
 
 // TexDesc: source + clamp + filter + uvSet, then an optional transform.
-bool consumeTexDesc(ByteCursor& cursor) {
+bool consumeTexDesc(ByteCursor& cursor, std::uint32_t version) {
     if (!consumeSkip(cursor, 4u + 4u + 4u + 4u)) {
+        return false;
+    }
+    // PS2 L and PS2 K are a leftover of the PlayStation 2 renderer and were
+    // dropped after 10.4.0.1. They sit in the MIDDLE of the descriptor, so
+    // skipping them on a 10.x file does not merely lose four bytes -- every
+    // texture slot after this one reads from the wrong offset, and the first
+    // thing that notices is the block AFTER the texturing property.
+    if (version <= kPs2TexDescMaxVersion && !consumeSkip(cursor, 2u + 2u)) {
         return false;
     }
     std::uint8_t hasTransform = 0;
@@ -1477,11 +1532,16 @@ bool consumeTexDesc(ByteCursor& cursor) {
     return hasTransform == 0u || consumeSkip(cursor, 8u + 8u + 4u + 4u + 8u);
 }
 
-bool consumeNiGeometryData(ByteCursor& cursor, std::uint16_t& outNumVertices) {
+bool consumeNiGeometryData(ByteCursor& cursor, std::uint16_t& outNumVertices,
+                           std::uint32_t version) {
     std::uint16_t numVertices = 0;
     std::uint8_t flag = 0;
-    if (!consumeSkip(cursor, 4u) || !cursor.read(numVertices) ||
-        !consumeSkip(cursor, 2u)) {  // groupId, numVertices, keep+compress flags
+    // Group ID arrives at 10.1.0.114, so 10.1.0.101/106 do not carry one.
+    if (version >= kGroupIdMinVersion && !consumeSkip(cursor, 4u)) {
+        return false;
+    }
+    if (!cursor.read(numVertices) ||
+        !consumeSkip(cursor, 2u)) {  // numVertices, keep+compress flags
         return false;
     }
     outNumVertices = numVertices;
@@ -1518,12 +1578,21 @@ bool consumeNiGeometryData(ByteCursor& cursor, std::uint16_t& outNumVertices) {
     if (!consumeSkip(cursor, uvSets * vertexCount * 8u)) {
         return false;
     }
-    return consumeSkip(cursor, 2u + 4u);  // consistency flags, additional data ref
+    // Consistency flags, then the Additional Data ref -- and THAT ref arrives at
+    // 20.0.0.4. Consuming four bytes for it on a 10.x file eats the head of the
+    // next block, and because these blocks carry no sizes the walk only notices
+    // one block later: the White-Gold Tower reported a NiTriStrips it has always
+    // been able to read, with NiTriStripsData as the actual culprit.
+    if (!consumeSkip(cursor, 2u)) {
+        return false;
+    }
+    return version < kAdditionalDataMinVersion || consumeSkip(cursor, 4u);
 }
 
 // Consumes exactly one block of `typeName`. False means "this reader does not
 // know how long that block is", which fails the file.
-bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
+bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
+                          std::uint32_t version) {
     // --- Havok. Skipped entirely; only the byte counts matter. ---
     if (typeName == "bhkCollisionObject" || typeName == "bhkBlendCollisionObject") {
         return consumeSkip(cursor, 10u);
@@ -1621,7 +1690,7 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
         std::uint16_t numTriangles = 0;
         std::uint8_t hasTriangles = 0;
         std::uint16_t matchGroups = 0;
-        if (!consumeNiGeometryData(cursor, numVertices) || !cursor.read(numTriangles) ||
+        if (!consumeNiGeometryData(cursor, numVertices, version) || !cursor.read(numTriangles) ||
             !consumeSkip(cursor, 4u) || !cursor.read(hasTriangles)) {
             return false;
         }
@@ -1644,7 +1713,7 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
     if (typeName == "NiTriStripsData") {
         std::uint16_t numVertices = 0;
         std::uint16_t numStrips = 0;
-        if (!consumeNiGeometryData(cursor, numVertices) || !consumeSkip(cursor, 2u) ||
+        if (!consumeNiGeometryData(cursor, numVertices, version) || !consumeSkip(cursor, 2u) ||
             !cursor.read(numStrips)) {
             return false;
         }
@@ -1689,12 +1758,12 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
             !cursor.read(textureCount)) {
             return false;
         }
-        const auto slot = [&cursor]() {
+        const auto slot = [&cursor, version]() {
             std::uint8_t has = 0;
             if (!cursor.read(has)) {
                 return false;
             }
-            return has == 0u || consumeTexDesc(cursor);
+            return has == 0u || consumeTexDesc(cursor, version);
         };
         for (int i = 0; i < 5; ++i) {  // base, dark, detail, gloss, glow
             if (!slot()) {
@@ -1707,7 +1776,7 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
                 return false;
             }
             if (hasBump != 0u &&
-                (!consumeTexDesc(cursor) || !consumeSkip(cursor, 4u + 4u + 16u))) {
+                (!consumeTexDesc(cursor, version) || !consumeSkip(cursor, 4u + 4u + 16u))) {
                 return false;
             }
         }
@@ -1729,7 +1798,7 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName) {
             if (!cursor.read(hasMap)) {
                 return false;
             }
-            if (hasMap != 0u && (!consumeTexDesc(cursor) || !consumeSkip(cursor, 4u))) {
+            if (hasMap != 0u && (!consumeTexDesc(cursor, version) || !consumeSkip(cursor, 4u))) {
                 return false;
             }
         }
@@ -2183,14 +2252,25 @@ bool computeSequentialBlockBounds(
     for (std::size_t i = 0; i < numBlocks; ++i) {
         blockStart[i] = cursor.pos();
         const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
-        if (!consumeOblivionBlock(cursor, typeName)) {
-            outError = "Unsupported NIF 20.0.0.4 block type '" + typeName +
-                       "' (no size is derivable without it)";
+        if (!consumeOblivionBlock(cursor, typeName, header.version)) {
+            // Name the block that broke AND the one before it. These blocks
+            // carry no size, so the walk can only fail where it notices, which
+            // is one block PAST wherever it actually desynchronized -- and the
+            // failing type is then a red herring that has usually been handled
+            // correctly for years. The predecessor is the suspect.
+            char where[192];
+            std::snprintf(where, sizeof(where),
+                          " at block %zu of %zu, offset %zu; previous block was '%s'",
+                          i, numBlocks, blockStart[i],
+                          i == 0u
+                              ? "(none)"
+                              : header.blockTypeNames[header.blockTypeIndex[i - 1u]].c_str());
+            outError = "Could not size NIF block type '" + typeName + "'" + where;
             return false;
         }
         blockEnd[i] = cursor.pos();
         if (blockEnd[i] > bytes.size()) {
-            outError = "NIF 20.0.0.4 block walk overran the file";
+            outError = "NIF block walk overran the file at block '" + typeName + "'";
             return false;
         }
     }
@@ -2343,7 +2423,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // Not counted here: a data block that fails to parse is counted
             // once, at the shape that references it in the DFS below. Counting
             // both sites reported 2 for a single lost shape.
-            if (readGeometryData(blockCursor, blockEnd[i] - blockStart[i], isStrips, header.inlineBlockTypes, block) &&
+            if (readGeometryData(blockCursor, blockEnd[i] - blockStart[i], isStrips,
+                             header.inlineBlockTypes, header.version, block) &&
                 block.valid) {
                 outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
                 outModel.degenerateTriangleCount += block.degenerateTriangles;
@@ -3090,7 +3171,8 @@ bool parseNifSkinnedMesh(
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
             GeometryBlock block;
             const bool isStrips = (typeName == "NiTriStripsData");
-            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, header.inlineBlockTypes, block) &&
+            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, header.inlineBlockTypes,
+                             header.version, block) &&
                 block.valid) {
                 outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
                 outModel.degenerateTriangleCount += block.degenerateTriangles;

@@ -1,0 +1,60 @@
+# The Imperial City (Oblivion) -- an orbit of the White-Gold Tower.
+#
+# Engine space: x east, y height, z south. This tour flies the ICImperialPalace
+# WORLDSPACE, not Tamriel, and that is the whole trick to finding this place:
+#
+#   THE IMPERIAL CITY IS NOT IN TAMRIEL. Its nine districts are nine separate
+#   worldspaces -- ICImperialPalace, ICMarketDistrict, ICTempleDistrict,
+#   ICTalosPlazaDistrict, ICArboretumDistrict, ICElvenGardensDistrict,
+#   ICArenaDistrict, ICImperialPrisonDistrict, ICTheArcaneUniversity -- and
+#   Tamriel's own cell (0,0) is a landless dumping ground with 1977 references
+#   in it, which is exactly convincing enough to waste an afternoon on.
+#
+# Nor do the districts sit near their own origin: ICImperialPalace occupies grid
+# x [-1,8] z [-1,16] and its content is densest at (6,15). Probing (0,0) finds
+# nothing and looks like an empty worldspace. `--cellindex <plugin> <worldspace>`
+# now prints occupied bounds and the densest cells for exactly this reason.
+#
+# Grid (6,15) is engine x 24576..28672, z -65536..-61440, terrain a flat plateau
+# at 4016..4128. The ring wall is centred near (26624, -63488) and the tour
+# orbits that point from the south-west round to the east.
+#
+# THE RADIUS IS CONSTANT AT 17000, and that was a correction. The first cut
+# closed from 17000 to 11000 over the orbit, which reads well as a plan and
+# frames badly as a picture: by the end the tower subtends more than the frame
+# and the shot crops BOTH the spire and the dome, which is the one framing that
+# shows neither the whole silhouette nor a detail worth being close to. This
+# subject is a single object 15000 units tall, so distance IS the framing, and
+# the motion is carried by the azimuth sweep and the 2400-unit climb instead.
+#
+# THE AIM POINT IS 5000 UNITS UP THE TOWER, not on the ground. The tower is tall
+# enough to leave frame entirely; aiming at its base points the camera at the
+# plateau and crops the spire, and aiming at the spire tips the dome and the ring
+# wall out of shot. (26624, ~9000, -63488) holds the whole silhouette -- spire,
+# shaft, dome, wall -- from every waypoint here.
+#
+# Late afternoon. Sun elevation is cos(hour/24*2pi)*75 with negative meaning
+# ABOVE the horizon, so ODAI_FNV_HOUR=16 puts it ~37 degrees up.
+#
+#   odai_game_newvegas --stream "<Oblivion/Data>" --plugin Oblivion.esm \
+#     --worldspace ICImperialPalace --tour-file assets/tours/imperial_city.txt \
+#     --flythrough 34 --capture-video imperial_city.mp4 30 20
+#
+# The flythrough deliberately OUTLASTS the capture -- 34 seconds of path for 20
+# recorded. The flythrough clock runs during capture warm-up, and warm-up waits
+# on streaming, so a path timed to the capture parks before the last frame. See
+# assets/tours/bravil.txt, where that was shot wrong first.
+#
+# A district worldspace is a small island: past its occupied cells the terrain
+# ends in pale flat sheets over nothing. Keeping the camera inside radius ~17000
+# and above the plateau keeps them out of frame.
+#
+# px py pz             lx ly lz
+15696 5200 -50466      26624 9000 -63488
+18643 5540 -48479      26624 9000 -63488
+21938 5880 -47147      26624 9000 -63488
+25438 6220 -46529      26624 9000 -63488
+29284 6560 -46697      26624 9000 -63488
+32992 6900 -47724      26624 9000 -63488
+36374 7250 -49564      26624 9000 -63488
+39258 7600 -52113      26624 9000 -63488

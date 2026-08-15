@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -1358,6 +1359,16 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
             return 1;
         }
         std::cout << "Extracted " << bytes.size() << " bytes.\n";
+        // ODAI_NIF_DUMP writes the decompressed asset out as-is. Everything an
+        // unsupported header needs is in its first hundred bytes, and there is
+        // otherwise no way to look at them: these files live inside a BSA, so a
+        // hex editor -- or NifSkope -- cannot reach one without this.
+        if (const char* dumpPath = std::getenv("ODAI_NIF_DUMP")) {
+            std::ofstream out(dumpPath, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+            std::cout << "wrote " << bytes.size() << " bytes to " << dumpPath << "\n";
+        }
         odai::importer::fnv::NifModel model;
         std::string error;
         const bool ok = odai::importer::fnv::parseNifStaticMesh(bytes, model, error);
@@ -1556,6 +1567,47 @@ int probeCellIndex(
             std::cout << "  no worldspace matching \"" << worldspaceFilter << "\"\n";
             return 1;
         }
+
+        // WHERE the worldspace's content sits, which is the first thing anyone
+        // pointing a camera at an unfamiliar place needs and the slowest thing
+        // to find by hand. A worldspace record's own NAM0/NAM9 corners are NOT
+        // this: Bravil's span 52 cells of open bay rather than a city, so they
+        // framed the water and not the town. Occupied cells cannot lie.
+        //
+        // Cells with an empty children group are excluded on purpose -- they are
+        // the header-only overrides that make a populated district look present
+        // at coordinates it has nothing at.
+        std::int32_t minX = 0, maxX = 0, minZ = 0, maxZ = 0;
+        std::size_t occupied = 0;
+        std::vector<std::pair<std::uint32_t, const FalloutCellIndexEntry*>> byWeight;
+        for (const FalloutCellIndexEntry& entry : index.cells) {
+            if (entry.isInterior || !entry.hasGridCoords ||
+                entry.worldspaceFormId != worldspaceFormId || entry.childrenGroupSize == 0u) {
+                continue;
+            }
+            if (occupied == 0) {
+                minX = maxX = entry.gridX;
+                minZ = maxZ = entry.gridZ;
+            }
+            minX = std::min(minX, entry.gridX);
+            maxX = std::max(maxX, entry.gridX);
+            minZ = std::min(minZ, entry.gridZ);
+            maxZ = std::max(maxZ, entry.gridZ);
+            ++occupied;
+            byWeight.emplace_back(entry.childrenGroupSize, &entry);
+        }
+        std::cout << "  occupied cells: " << occupied << ", grid x [" << minX << "," << maxX
+                  << "] z [" << minZ << "," << maxZ << "]\n";
+        // Children-group BYTES, not a reference count -- the index deliberately
+        // never walks a cell's contents, and byte size ranks density well enough
+        // to say "start looking here".
+        std::sort(byWeight.begin(), byWeight.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (std::size_t i = 0; i < byWeight.size() && i < 5u; ++i) {
+            std::cout << "    densest: (" << byWeight[i].second->gridX << ","
+                      << byWeight[i].second->gridZ << ") " << byWeight[i].first
+                      << " bytes of children\n";
+        }
     }
 
     // Pick the sample cells, preferring ones that actually have contents.
@@ -1747,21 +1799,37 @@ int probeBuildCell(
         return 1;
     }
 
-    std::uint32_t worldspaceFormId = 0;
+    // A worldspace name that resolves to nothing used to leave this at 0, which
+    // the filter below reads as "no filter" -- so a typo, or a worldspace this
+    // build cannot see, silently reported some OTHER worldspace's cell at the
+    // same grid coordinate. Since Tamriel is first in the index, every bad name
+    // rendered Tamriel and looked entirely plausible. Fail instead.
     const auto worldIt = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspaceFilter));
-    if (worldIt != tables.worldspaceFormIdsByEditorId.end()) {
-        worldspaceFormId = worldIt->second;
+    if (worldIt == tables.worldspaceFormIdsByEditorId.end()) {
+        std::cout << "no worldspace named \"" << worldspaceFilter << "\" in " << esmPath << "\n";
+        return 1;
     }
+    const std::uint32_t worldspaceFormId = worldIt->second;
 
+    // Take the entry that actually HAS a children group, not merely the first at
+    // these coordinates. A worldspace can carry several CELL records for one
+    // grid square -- an override that touches only the cell header leaves an
+    // entry with no children at all -- and stopping at the first one reports a
+    // populated city district as empty. cell_streamer.cc:274 has always made
+    // this check; this tool did not, which is why the two disagreed.
     const FalloutCellIndexEntry* entry = nullptr;
     for (const FalloutCellIndexEntry& candidate : index.cells) {
-        if (candidate.isInterior || !candidate.hasGridCoords) {
+        if (candidate.isInterior || !candidate.hasGridCoords ||
+            candidate.worldspaceFormId != worldspaceFormId) {
             continue;
         }
-        if (worldspaceFormId != 0 && candidate.worldspaceFormId != worldspaceFormId) {
+        if (candidate.gridX != cellX || candidate.gridZ != cellZ) {
             continue;
         }
-        if (candidate.gridX == cellX && candidate.gridZ == cellZ) {
+        if (entry == nullptr) {
+            entry = &candidate;
+        }
+        if (candidate.childrenGroupSize != 0u) {
             entry = &candidate;
             break;
         }
@@ -1997,16 +2065,26 @@ int probeFloaters(
         std::cout << "cell index FAILED: " << error << "\n";
         return 1;
     }
-    std::uint32_t worldspaceFormId = 0;
+    // Same two corrections as --buildcell above: an unresolvable name is an
+    // error rather than "match any worldspace", and the entry that carries the
+    // children group wins over the first one at these coordinates.
     const auto worldIt = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspaceFilter));
-    if (worldIt != tables.worldspaceFormIdsByEditorId.end()) {
-        worldspaceFormId = worldIt->second;
+    if (worldIt == tables.worldspaceFormIdsByEditorId.end()) {
+        std::cout << "no worldspace named \"" << worldspaceFilter << "\"\n";
+        return 1;
     }
+    const std::uint32_t worldspaceFormId = worldIt->second;
     const FalloutCellIndexEntry* entry = nullptr;
     for (const FalloutCellIndexEntry& candidate : index.cells) {
-        if (!candidate.isInterior && candidate.hasGridCoords &&
-            (worldspaceFormId == 0 || candidate.worldspaceFormId == worldspaceFormId) &&
-            candidate.gridX == cellX && candidate.gridZ == cellZ) {
+        if (candidate.isInterior || !candidate.hasGridCoords ||
+            candidate.worldspaceFormId != worldspaceFormId || candidate.gridX != cellX ||
+            candidate.gridZ != cellZ) {
+            continue;
+        }
+        if (entry == nullptr) {
+            entry = &candidate;
+        }
+        if (candidate.childrenGroupSize != 0u) {
             entry = &candidate;
             break;
         }

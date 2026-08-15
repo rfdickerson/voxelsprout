@@ -104,7 +104,12 @@ std::string cellAxisToken(std::int32_t value) {
 // the whole semantics -- and drawing it put untextured, UV-less slabs a few
 // units outside every wall. Across the archive that is 7067 shapes, and it took
 // shapes with no diffuse from 7217 to 150.
-constexpr int kCellBuildVersion = 16;
+// 17: NIF 10.1.0.101-10.2.0.0 is read. Oblivion ships a MIX of Gamebryo
+// generations and 580 of its meshes are the older one, including
+// icpalacetower01.nif -- the White-Gold Tower. +374 meshes, +454494 triangles,
+// and zero out-of-range triangles across all 10.2M, which is the check that
+// says the field walk is actually right rather than merely terminating.
+constexpr int kCellBuildVersion = 17;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
