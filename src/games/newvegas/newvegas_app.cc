@@ -723,28 +723,33 @@ bool NewVegasApp::onInit() {
     // pow(ssaoRaw, intensity) on a value in [0,1]. Anything below 1 pushes the
     // result toward 1, i.e. actively weakens the occlusion -- which is what the
     // inherited 0.85 was doing.
-    // 300 units -- about 4.3 m at Bethesda's ~70 units per metre -- was tuned on
-    // Goodsprings, where the nearest occluder is usually far away. It over-
-    // reaches on dense architecture: a radius that spans a whole wall face
-    // samples geometry on the far side of the building, and at the default
-    // quarter-resolution AO (ODAI_AO_DOWNSCALE=2) that over-occlusion also
-    // smears, so a flat wall picks up a muddy cast and every silhouette a dark
-    // fringe. Seyda Neen's shacks -- planks and window boxes 10 to 20 units
-    // thick -- show it plainly.
+    // 300 units, about 4.3 m at Bethesda's ~70 units per metre.
     //
-    // Measured at a pinned camera on that village, as mean luma darkening
-    // against AO off: radius 300 gives 4.73, radius 120 gives 5.06 while
-    // looking clean, and full-resolution AO at radius 300 gives 5.08 and also
-    // looks clean. So the fringe is the RADIUS over-reaching, not the estimator
-    // -- and the radius fix is free where ODAI_AO_DOWNSCALE=1 costs about
-    // 4.4 ms a frame (see CLAUDE.md's AO section).
+    // This was briefly dropped to 150 to kill a muddy cast and a dark silhouette
+    // fringe on Seyda Neen's shacks, and that was treating the estimator through
+    // the radius: the fringe was GTAO's sample pattern, and switching the default
+    // to XeGTAO removed it at the source. Re-measured afterwards on the same
+    // pinned camera, as high-frequency energy in the AO channel alone
+    // (ODAI_FNV_DEBUGVIEW=ao) and as how much of the frame is meaningfully
+    // occluded:
     //
-    // 150 rather than 120 to stay conservative about the scene this was
-    // originally tuned for. On Goodsprings the whole 300 -> 120 move changes
-    // mean AO darkening by only 10% (8.14 -> 7.29), so there is little there to
-    // lose; that is a measurement of MAGNITUDE though, not of appearance, which
-    // is the part of this change with the least evidence behind it.
-    float aoRadius = 150.0f;
+    //   radius   noise   occlusion   px below 200
+    //     100    1.694     17.40        5.4%
+    //     150    1.722     17.76        6.3%
+    //     300    1.914     21.27       10.2%
+    //     450    2.164     25.51       14.2%
+    //
+    // 300 costs 11% more AO noise than 150 and buys 60% more occluded frame, and
+    // in the LIT frame -- where AO modulates ambient, which is a fraction of the
+    // lighting -- the extra noise does not survive while the extra contact
+    // darkening does. For scale, GTAO at radius 150 measured 3.95 on this
+    // camera: XeGTAO at 300 is half as noisy as the value this replaced.
+    //
+    // Note a stale claim removed with it: the comment here used to say 128 was
+    // "the shader's own clamp ceiling in ssao.comp.slang", which would have made
+    // every value above it identical. Both estimators clamp to [0.25, 512]
+    // (ssao.comp.slang and frame_pass_ssao.cc), so the sweep above is real.
+    float aoRadius = 300.0f;
     float aoBias = 40.0f;
     float aoIntensity = 1.7f;
     if (const char* env = std::getenv("ODAI_FNV_AO_RADIUS")) {
