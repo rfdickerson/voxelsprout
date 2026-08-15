@@ -27,6 +27,7 @@
 #include <limits>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 
 namespace odai::games::newvegas {
 
@@ -789,8 +790,49 @@ bool NewVegasApp::onInit() {
     // ODAI_FNV_COLOR_LOOK=stylized restores the defaults. There was no runtime
     // knob for any of this, which is why the report of "oversaturated" had to
     // be answered by reading the shader instead of an A/B.
-    if (const char* look = std::getenv("ODAI_FNV_COLOR_LOOK");
-        look == nullptr || std::string(look) != "stylized") {
+    const std::string colorLook =
+        std::getenv("ODAI_FNV_COLOR_LOOK") != nullptr ? std::getenv("ODAI_FNV_COLOR_LOOK") : "";
+    if (colorLook == "cinematic") {
+        // A measured middle between the neutral grade above and the engine's
+        // stylized default, for the landscape flythroughs. Every number here
+        // came off a pinned West Gash frame on the Seyda Neen -> Balmora route,
+        // and the two it avoids are as informative as the ones it uses:
+        //
+        //   neutral    sd 0.188  p1 0.135  p99 0.643  sat 0.231
+        //   stylized   sd 0.260  p1 0.000  p99 0.638  sat 0.397
+        //
+        // Stylized buys its contrast by CRUSHING THE SHADOWS TO ZERO, and on a
+        // scene whose depth is carried by aerial perspective that deletes the
+        // depth cue -- the far ridge and the near rock end up the same black.
+        // So shadowDensity stays at 1.0 here and the contrast comes from the
+        // midtones and from the white point instead, which lifts the top of the
+        // histogram rather than pushing down the bottom.
+        //
+        // Vibrance is kept well under the stylized 0.12 because it targets the
+        // LEAST saturated pixels, and in fog that is most of the frame.
+        render::ColorGradingSettings grade;
+        grade.midtoneContrast = 1.12f;
+        grade.saturation = 1.10f;
+        grade.vibrance = 0.05f;
+        grade.shadowDensity = 1.0f;
+        // Cool the shadows and warm the highlights very slightly: the classic
+        // teal/amber split, at a fraction of the usual strength because
+        // Morrowind's own palette is already blue-green.
+        grade.shadowTint[2] = 0.03f;
+        grade.highlightTint[0] = 0.03f;
+        m_renderer.setColorGrading(grade);
+
+        // The look INCLUDES its white point, because the grade alone does not
+        // fix what is wrong with these frames. Grading on its own measured
+        // sd 0.1845 / p99 0.634 -- i.e. it moved saturation and essentially
+        // nothing else, since there was no highlight range for contrast to act
+        // on. The white point is what supplies that range; the two together are
+        // the look. ODAI_FNV_WHITEPOINT still overrides, in applyTonemapSettings.
+        render::TonemapSettings tonemap = m_renderer.tonemapSettings();
+        tonemap.whitePoint = 0.8f;
+        tonemap.highlightShoulder = 1.0f;
+        m_renderer.setTonemapSettings(tonemap);
+    } else if (colorLook != "stylized") {
         m_renderer.setNeutralColorGrading();
     }
 
@@ -850,6 +892,7 @@ bool NewVegasApp::onInit() {
         m_requestedWeatherEditorId = weatherEnv;
     }
     initWeather();
+    applyTonemapSettings();
 
     // Pip-Boy palette for notifications, matching the HUD chrome.
     ui::ToastStyle toastStyle{};
@@ -1295,6 +1338,63 @@ void NewVegasApp::initWeather() {
     selectWeather(m_activeWeatherFormId);
 }
 
+// The post-processing curve. Deliberately NOT part of selectWeather, where it
+// used to live: initWeather returns early on any plugin with no TES4 record, so
+// every Morrowind run silently ignored ODAI_FNV_TONEMAP entirely. A renderer
+// setting that has nothing to do with weather must not be reachable only
+// through the weather path -- the symptom was an env var that measured
+// byte-identical to unset and looked like a broken tonemap rather than a
+// missing call.
+void NewVegasApp::applyTonemapSettings() {
+    // ODAI_FNV_WHITEPOINT=<scene linear>[,<shoulder>] pins a scene value to
+    // display white on the ACES path. Off by default, because it is a look
+    // change and every other game shares this curve.
+    //
+    // What it is FOR: measured across a Seyda-Neen-to-Balmora flight, the 99th
+    // percentile of frame luma sat between 0.64 and 0.70 and moved by under
+    // 0.02 under every other knob in the chain -- fog distance, the ENB curve,
+    // the stylized colour look. The frame never reached white, and no amount of
+    // grading fixes a range the tonemap did not produce.
+    if (const char* whiteEnv = std::getenv("ODAI_FNV_WHITEPOINT")) {
+        render::TonemapSettings tonemap = m_renderer.tonemapSettings();
+        tonemap.whitePoint = std::strtof(whiteEnv, nullptr);
+        if (const char* comma = std::strchr(whiteEnv, ',')) {
+            tonemap.highlightShoulder = std::strtof(comma + 1, nullptr);
+        }
+        m_renderer.setTonemapSettings(tonemap);
+        VOX_LOGI("newvegas") << "tonemap white point " << tonemap.whitePoint << ", shoulder "
+                             << tonemap.highlightShoulder;
+    }
+
+    // ODAI_FNV_TONEMAP=enb switches the post pass to the curve Enhanced Shaders
+    // uses, with its own tuned Fallout values. Off by default: it is a distinct
+    // look, not a strict improvement, and every other game keeps the ACES fit
+    // regardless because the setting is per-renderer and only this game sets it.
+    if (const char* tonemapEnv = std::getenv("ODAI_FNV_TONEMAP")) {
+        std::string mode = tonemapEnv;
+        for (char& c : mode) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (mode == "enb" || mode == "1") {
+            render::TonemapSettings tonemap;
+            tonemap.mode = render::TonemapMode::Enb;
+            // Enhanced Shaders retunes these by time of day (contrast 1.35 day /
+            // 1.25 night, saturation 1.25 / 0.9, curve 8.0 / 10.0). Interpolate
+            // on the same day/night axis rather than picking one and calling it
+            // done -- the night values exist because the day ones look wrong
+            // after dark.
+            const bool night = m_timeOfDayHours < 6.0f || m_timeOfDayHours >= 19.0f;
+            tonemap.contrast = night ? 1.25f : 1.35f;
+            tonemap.saturation = night ? 0.90f : 1.25f;
+            tonemap.curve = night ? 10.0f : 8.0f;
+            tonemap.overbrightDampening = night ? 50.0f : 75.0f;
+            m_renderer.setTonemapSettings(tonemap);
+            VOX_LOGI("newvegas") << "tonemap: ENB (Enhanced Shaders values, "
+                                 << (night ? "night" : "day") << ")";
+        }
+    }
+}
+
 // Everything that has to happen when the active weather changes: cloud layers
 // re-uploaded, sky colours re-decoded, audio re-picked.
 //
@@ -1360,33 +1460,7 @@ void NewVegasApp::selectWeather(std::uint32_t weatherFormId) {
     applyWeather();
     initWeatherAudio();
 
-    // ODAI_FNV_TONEMAP=enb switches the post pass to the curve Enhanced Shaders
-    // uses, with its own tuned Fallout values. Off by default: it is a distinct
-    // look, not a strict improvement, and every other game keeps the ACES fit
-    // regardless because the setting is per-renderer and only this game sets it.
-    if (const char* tonemapEnv = std::getenv("ODAI_FNV_TONEMAP")) {
-        std::string mode = tonemapEnv;
-        for (char& c : mode) {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        if (mode == "enb" || mode == "1") {
-            render::TonemapSettings tonemap;
-            tonemap.mode = render::TonemapMode::Enb;
-            // Enhanced Shaders retunes these by time of day (contrast 1.35 day /
-            // 1.25 night, saturation 1.25 / 0.9, curve 8.0 / 10.0). Interpolate
-            // on the same day/night axis rather than picking one and calling it
-            // done -- the night values exist because the day ones look wrong
-            // after dark.
-            const bool night = m_timeOfDayHours < 6.0f || m_timeOfDayHours >= 19.0f;
-            tonemap.contrast = night ? 1.25f : 1.35f;
-            tonemap.saturation = night ? 0.90f : 1.25f;
-            tonemap.curve = night ? 10.0f : 8.0f;
-            tonemap.overbrightDampening = night ? 50.0f : 75.0f;
-            m_renderer.setTonemapSettings(tonemap);
-            VOX_LOGI("newvegas") << "tonemap: ENB (Enhanced Shaders values, "
-                                 << (night ? "night" : "day") << ")";
-        }
-    }
+
 }
 
 namespace {

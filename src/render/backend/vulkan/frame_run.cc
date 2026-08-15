@@ -1335,6 +1335,10 @@ void RendererBackend::renderFrame(
     mvpUniform.tonemapConfig2[1] = static_cast<float>(static_cast<std::uint32_t>(m_debugView));
     mvpUniform.tonemapConfig2[2] = m_taaJitterNdc[0];
     mvpUniform.tonemapConfig2[3] = m_taaJitterNdc[1];
+    mvpUniform.hdrHighlightConfig[0] = m_tonemapSettings.whitePoint;
+    mvpUniform.hdrHighlightConfig[1] = m_tonemapSettings.highlightShoulder;
+    mvpUniform.hdrHighlightConfig[2] = 0.0f;
+    mvpUniform.hdrHighlightConfig[3] = 0.0f;
     // Terrain layer-blend shaping, exposed so it can be turned OFF.
     //
     // The defaults are the values this was hardcoded to and render identically

@@ -45,6 +45,37 @@ float3 acesFilmTonemap(float3 color)
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
 }
 
+// The same fit, renormalized so that `whitePoint` scene-linear maps to display
+// white instead of the curve's own asymptote.
+//
+// The Narkowicz fit approaches 1.0 only as input grows without bound, so with
+// auto-exposure holding the scene around middle grey the frame's brightest
+// pixels land near 0.65 and the top third of the display range is never
+// addressed at all. Dividing by the curve's value AT the white point is the
+// standard Hable/Reinhard remedy -- curve(x)/curve(W) -- and it pins a chosen
+// scene value to 1.0 without changing the toe, so shadows keep the filmic roll
+// they already had.
+//
+// `shoulder` blends between the raw fit and the normalized one, because pinning
+// white exactly is often too much: it makes the sky clip flat. Around 0.6-0.8
+// lifts the highlights into the range while leaving the very top soft.
+//
+// whitePoint <= 0 returns the plain fit BIT-FOR-BIT, which is the default and
+// is what keeps every other game in this engine rendering exactly as before.
+float3 acesFilmTonemapWhite(float3 color, float whitePoint, float shoulder)
+{
+    const float3 raw = acesFilmTonemap(color);
+    if (whitePoint <= 0.0)
+    {
+        return raw;
+    }
+    // Scalar: the fit is applied per channel but the normalizer must not be, or
+    // it becomes a per-channel gain and shifts hue in the highlights.
+    const float3 white = acesFilmTonemap(float3(whitePoint, whitePoint, whitePoint));
+    const float3 normalized = clamp(raw / max(white, 1e-4), 0.0, 1.0);
+    return lerp(raw, normalized, clamp(shoulder, 0.0, 1.0));
+}
+
 // The tonemap Enhanced Shaders uses (ENB's POSTPROCESS==2), transcribed from
 // enbeffect.fx with its own tuned defaults.
 //
@@ -771,7 +802,10 @@ float4 main(FragmentInput input) : SV_Target0
     }
     else
     {
-        toneMapped = acesFilmTonemap(hdrColor * exposureScale);
+        toneMapped = acesFilmTonemapWhite(
+            hdrColor * exposureScale,
+            camera.hdrHighlightConfig.x,
+            camera.hdrHighlightConfig.y);
     }
     toneMapped = applyWhiteBalance(
         toneMapped,

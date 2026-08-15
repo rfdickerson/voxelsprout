@@ -166,6 +166,10 @@ void Renderer::setNeutralColorGrading() {
     m_backend->setNeutralColorGrading();
 }
 
+void Renderer::setColorGrading(const ColorGradingSettings& settings) {
+    m_backend->setColorGrading(settings);
+}
+
 void Renderer::setAutoExposureEnabled(bool enabled) {
     m_backend->setAutoExposureEnabled(enabled);
 }
@@ -366,6 +370,10 @@ void Renderer::setWeatherClouds(const WeatherCloudTextures& clouds) {
 
 void Renderer::setTonemapSettings(const TonemapSettings& settings) {
     m_backend->setTonemapSettings(settings);
+}
+
+TonemapSettings Renderer::tonemapSettings() const {
+    return m_backend->tonemapSettings();
 }
 
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,

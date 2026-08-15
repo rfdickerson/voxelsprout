@@ -139,6 +139,9 @@ public:
     // Sets every colour-grading term to its neutral value. See the backend's
     // definition for why this is a reset rather than a bypass.
     void setNeutralColorGrading();
+    // Set the whole post grade at once. setNeutralColorGrading() is exactly
+    // setColorGrading(ColorGradingSettings{}).
+    void setColorGrading(const ColorGradingSettings& settings);
     [[nodiscard]] bool isAutoExposureEnabled() const;
     // Replaces the shaded frame with a single visualization of what the main
     // pass shaded with -- see DebugView. Off by default and free when off: the
@@ -252,6 +255,10 @@ public:
     // Tone curve for the post pass. Default is ACES, so this is inert
     // unless a game selects otherwise.
     void setTonemapSettings(const TonemapSettings& settings);
+    // Read back what is in force, so a caller can change ONE field without
+    // silently resetting the rest to struct defaults -- which is exactly what
+    // `setTonemapSettings(TonemapSettings{})` does to an ENB configuration.
+    [[nodiscard]] TonemapSettings tonemapSettings() const;
     // Post-process depth of field. Focus is a view distance in world units;
     // blur ramps to maxRadiusPixels over focusRange BEHIND the focal plane and,
     // scaled by nearBlurScale, over focusRange/nearBlurScale IN FRONT of it.

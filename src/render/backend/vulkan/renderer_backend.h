@@ -342,6 +342,26 @@ public:
     // and is wrong for a viewer whose point is matching Fallout's own art:
     // saturation and vibrance compound, and vibrance pushes the LEAST saturated
     // pixels hardest, so a dusty landscape comes out vivid.
+    void setColorGrading(const ColorGradingSettings& g) {
+        // postColorLookPreset 0 is "no baked preset on top of these values".
+        // Leaving it at its default is what made the neutral grade look like it
+        // had not been applied.
+        m_skyDebugSettings.postColorLookPreset = 0;
+        m_skyDebugSettings.colorGradingWhiteBalanceR = g.whiteBalance[0];
+        m_skyDebugSettings.colorGradingWhiteBalanceG = g.whiteBalance[1];
+        m_skyDebugSettings.colorGradingWhiteBalanceB = g.whiteBalance[2];
+        m_skyDebugSettings.colorGradingContrast = g.contrast;
+        m_skyDebugSettings.colorGradingSaturation = g.saturation;
+        m_skyDebugSettings.colorGradingVibrance = g.vibrance;
+        m_skyDebugSettings.colorGradingMidtoneContrast = g.midtoneContrast;
+        m_skyDebugSettings.colorGradingShadowDensity = g.shadowDensity;
+        m_skyDebugSettings.colorGradingShadowTintR = g.shadowTint[0];
+        m_skyDebugSettings.colorGradingShadowTintG = g.shadowTint[1];
+        m_skyDebugSettings.colorGradingShadowTintB = g.shadowTint[2];
+        m_skyDebugSettings.colorGradingHighlightTintR = g.highlightTint[0];
+        m_skyDebugSettings.colorGradingHighlightTintG = g.highlightTint[1];
+        m_skyDebugSettings.colorGradingHighlightTintB = g.highlightTint[2];
+    }
     void setNeutralColorGrading() {
         m_skyDebugSettings.postColorLookPreset = 0;
         m_skyDebugSettings.colorGradingWhiteBalanceR = 1.0f;
@@ -527,6 +547,7 @@ public:
     // WeatherSkyParams instead.
     void setWeatherClouds(const WeatherCloudTextures& clouds);
     void setTonemapSettings(const TonemapSettings& settings) { m_tonemapSettings = settings; }
+    [[nodiscard]] TonemapSettings tonemapSettings() const { return m_tonemapSettings; }
     // Drives the same DoF state the sky debug panel edits; clamping happens
     // where the values feed the frame uniform.
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,

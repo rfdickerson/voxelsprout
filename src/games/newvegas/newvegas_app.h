@@ -206,6 +206,9 @@ private:
     // Makes `weatherFormId` the active weather and re-does everything that
     // depends on it: cloud layers, sky gradient, fog, audio, tonemap.
     void selectWeather(std::uint32_t weatherFormId);
+    // Post-processing curve selection. Called unconditionally from onInit, NOT
+    // from the weather path -- see the definition.
+    void applyTonemapSettings();
     // Fills m_weatherChoices, once. Prefers the weathers this worldspace's
     // climate actually runs -- with Nevada Skies loaded that IS the mod's
     // weather set, and it is a far more useful list than every WTHR in the load

@@ -304,6 +304,42 @@ struct TonemapSettings {
     float saturation = 1.25f;           // ENB "Saturation Day"
     float curve = 8.0f;                 // ENB "ToneMapping Curve Day"
     float overbrightDampening = 75.0f;  // ENB "Overbright Dampening Day"
+    // ACES-path highlight shaping. The scene-linear value (post-exposure) that
+    // should reach display white, and how much of that normalization to apply.
+    //
+    // 0 is the DEFAULT and is exactly the plain fit, so no existing game's look
+    // changes. Above 0 the curve is divided by its own value at this point --
+    // the standard curve(x)/curve(W) construction -- which is the only knob in
+    // this chain that moves the top of the histogram. Without it, auto-exposure
+    // holding the scene near middle grey leaves the frame's 99th percentile
+    // around 0.65 and the brightest third of the display range unused.
+    float whitePoint = 0.0f;
+    float highlightShoulder = 0.7f;
+};
+
+// The post colour grade, as one value instead of fourteen scattered fields on
+// the debug-settings blob.
+//
+// The chain in tone_map.frag.slang runs UNCONDITIONALLY -- there is no enable
+// bit -- so "no grading" is this struct's defaults, every term at identity, and
+// that is what Renderer::setNeutralColorGrading() writes. Anything else is a
+// look, and a look is worth naming and measuring rather than leaving as whatever
+// the debug panel happened to be initialised with.
+struct ColorGradingSettings {
+    float whiteBalance[3] = {1.0f, 1.0f, 1.0f};
+    float contrast = 1.0f;         // clamped to [0.70, 1.40] in the shader
+    float midtoneContrast = 1.0f;  // clamped to [0.80, 1.40]
+    float saturation = 1.0f;
+    // Vibrance pushes the LEAST saturated pixels hardest, so it compounds with
+    // saturation in a way that is easy to over-apply: a dusty or foggy scene is
+    // mostly low-saturation pixels, which is exactly what this term targets.
+    float vibrance = 0.0f;
+    // Below 1 DARKENS shadows. Worth being careful with on any scene carrying
+    // real aerial perspective -- the fog IS the depth cue, and crushing it to
+    // black removes the thing that made the distance readable.
+    float shadowDensity = 1.0f;
+    float shadowTint[3] = {0.0f, 0.0f, 0.0f};
+    float highlightTint[3] = {0.0f, 0.0f, 0.0f};
 };
 
 struct CameraPose {

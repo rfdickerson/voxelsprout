@@ -58,6 +58,8 @@ public struct CameraUniform
     // Terrain layer-blend shaping; see renderer_shared.h for the channel map.
     // (sharpness, coarse noise units, fine noise units, noise amount).
     public float4 terrainBlendConfig;
+    // (white point, shoulder strength, unused, unused); see renderer_shared.h.
+    public float4 hdrHighlightConfig;
 };
 
 [[vk::binding(0, 0)]]

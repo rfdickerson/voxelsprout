@@ -207,6 +207,23 @@ struct alignas(16) CameraUniform {
     //       a boundary far enough to break the lattice it sits on.
     // [3] = how far the noise may displace a boundary, in weight units.
     float terrainBlendConfig[4];
+    // HDR highlight shaping for the ACES path.
+    //
+    // [0] = white point, in post-exposure scene-linear units. The scene value
+    //       that should map to display white. 0 DISABLES the normalization and
+    //       renders the plain fit byte-identically, which is what keeps every
+    //       other game unaffected.
+    // [1] = shoulder strength in 0..1, how much of the normalization to apply.
+    // [2..3] = unused.
+    //
+    // Why this exists: the Narkowicz ACES fit reaches 1.0 only asymptotically,
+    // so with auto-exposure holding the scene near middle grey NOTHING in the
+    // frame reaches display white. Measured across a Morrowind flight, the 99th
+    // percentile of luma sat at 0.64-0.70 in every single frame and moved by
+    // less than 0.02 under every existing knob -- fog distance, ENB curve, the
+    // stylized colour look. The top third of the display range was simply never
+    // addressed, which is what "flat" looked like.
+    float hdrHighlightConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {

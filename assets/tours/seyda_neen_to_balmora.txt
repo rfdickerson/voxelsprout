@@ -1,0 +1,54 @@
+# Seyda Neen to Balmora (Morrowind) -- the road north, flown.
+#
+# Engine space: x east, y height, z south. MORROWIND CELLS ARE 8192 UNITS, four
+# times the area of every later game's, so a coordinate that looks like two
+# cells over is one. Cell (cx,cy) centres at engine x = cx*8192 + 4096,
+# engine z = -(cy*8192) - 4096.
+#
+# Seyda Neen is cell (-2,-9), engine z ~69600. Balmora is cell (-3,-2), engine
+# z ~12300 -- and Balmora was not looked up by name, because Morrowind exteriors
+# carry no editor ID to look up. It is the DENSEST CELL IN VVARDENFELL, 33604
+# bytes of children against 31590 for the runner-up, which
+# `--cellindex Morrowind.esm Vvardenfell` reports directly. The largest city on
+# the island is the largest pile of references on the island.
+#
+# That is 57000 units of ground between them, about 800 m, and the whole
+# corridor streams continuously at ODAI_FNV_LOAD_RADIUS=6 (6 x 8192 = 49152,
+# which sits just inside the 50000-unit far plane -- the two numbers agreeing is
+# what keeps a hard geometry edge out of frame on a moving camera).
+#
+# ALTITUDE IS SET BY THE TERRAIN, NOT BY TASTE. Measured max per cell along the
+# route:
+#
+#   (-2,-9) 1480   (-2,-8) 3104   (-2,-7) 3104   (-3,-6) 2504
+#   (-3,-5) 2384   (-3,-4) 2048   (-3,-3) 2032   (-3,-2) 2688
+#
+# The Bitter Coast marsh at the start is near sea level and the West Gash ridge
+# in the middle reaches 3104, so the path climbs 900 -> 3600 and settles back to
+# 1900 over the Odai valley. Flying the average would fly into the ridge.
+#
+# Aim points lead 8000-11000 units ahead, which is the same correction
+# seyda_neen.txt records at a smaller scale: a close aim point is a steep pitch,
+# and a steep pitch on a flying shot is a picture of the ground going past.
+# Leading this far holds the horizon in frame, which is where the sky, the fog
+# and the aerial perspective actually live.
+#
+#   odai_game_newvegas --stream "<Morrowind/Data Files>" --plugin Morrowind.esm \
+#     --worldspace Vvardenfell --tour-file assets/tours/seyda_neen_to_balmora.txt \
+#     --flythrough 46 --capture-video seyda_to_balmora.mp4 30 32
+#
+# The flythrough OUTLASTS the capture on purpose -- see assets/tours/bravil.txt,
+# where a path timed to the capture parked before the last frame because the
+# flythrough clock runs during streaming warm-up.
+#
+# px py pz             lx ly lz
+-11500 900 70500       -12000 700 62000
+-12288 2000 65000      -12500 1200 56000
+-13500 3200 58000      -15000 1600 49000
+-16500 3600 51000      -18500 1800 42000
+-19500 3500 44000      -20500 1800 35000
+-21000 3200 37000      -21000 1700 28000
+-21500 2900 30000      -21000 1500 21000
+-21200 2600 26000      -20480 1000 15000
+-21000 2200 21000      -20480 900 13000
+-20700 1900 17500      -20480 800 11500
