@@ -1,0 +1,41 @@
+# Bravil (Oblivion) -- in across the Niben, then up and along the curtain wall.
+#
+# Engine space: x east, y height, z south. Bravil sits on the water in southern
+# Cyrodiil, and finding it was not a matter of reading its worldspace record:
+# BravilWorld's NAM0/NAM9 corners span 52 cells of Niben Bay rather than a city
+# footprint, unlike Skingrad's, which framed its city exactly. What located it
+# was reference density -- the content clusters at Tamriel cells x 17..23,
+# y -44..-42 -- and then terrain height, which said most of those cells are
+# BELOW SEA LEVEL. Cell (21,-43) runs -4064..-2112 and is open bay; only
+# (19,-42) rises above 0. Bravil fronts that shore.
+#
+# So the approach is over water on purpose. It is the one thing this city has
+# that Skingrad and Seyda Neen do not, and the wall reads as a silhouette across
+# it from a long way out.
+#
+# The aim points sit around (89900, 700, 155700), which is roughly the Chapel of
+# Mara's spire -- the tallest thing in the city and the only feature that stays
+# legible from the far side of the bay. Far-ahead aim points for the reason the
+# Seyda Neen tour records: a close target is a steep pitch, and a steep pitch
+# over a walled city is a picture of parapet tops.
+#
+# Late afternoon. Sun elevation is cos(hour/24*2pi)*75 with negative meaning
+# ABOVE the horizon, so ODAI_FNV_HOUR=16 puts it ~37 degrees up.
+#
+#   odai_game_newvegas --stream "<Oblivion/Data>" --plugin Oblivion.esm \
+#     --worldspace Tamriel --tour-file assets/tours/bravil.txt \
+#     --flythrough 22 --capture-video bravil.mp4 30 22
+#
+# Add ODAI_FNV_DEBUGVIEW=ao for the clay-render version. Note water and sky are
+# NOT covered by the debug views -- only imported_static.frag.slang is -- so the
+# bay comes through flat grey there rather than occluded.
+#
+# px py pz            lx ly lz
+94000 800 167000     89900 700 155700
+93000 850 164000     89600 700 154500
+92000 1000 161000    89300 700 153500
+91000 1400 158200    89000 700 152500
+90000 2000 155800    88500 700 151500
+88800 2700 153600    88000 700 150500
+87400 3300 151800    88200 700 149500
+85800 3800 150300    88600 700 148800
