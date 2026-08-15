@@ -94,6 +94,13 @@ enum class UpscalerQuality : std::uint8_t {
     Balanced = 2,       // 1.7x
     Performance = 3,    // 2.0x
     UltraPerformance = 4,  // 3.0x
+    // Reconstruct at the SAME resolution: no upscale, just the temporal
+    // resolve. This exists because TAA and upscaling are separate things that
+    // this API had welded together -- recordTaaPass returns early without an
+    // upscaler object, so setTaaEnabled(true) with the default backend of Off
+    // was a silent no-op, and the only way to get TAA was to accept a 1/1.5
+    // render scale along with it.
+    Native = 5,  // 1.0x
 };
 
 inline constexpr float upscalerQualityScale(UpscalerQuality quality) {
@@ -103,6 +110,7 @@ inline constexpr float upscalerQualityScale(UpscalerQuality quality) {
     case UpscalerQuality::Balanced: return 1.0f / 1.7f;
     case UpscalerQuality::Performance: return 1.0f / 2.0f;
     case UpscalerQuality::UltraPerformance: return 1.0f / 3.0f;
+    case UpscalerQuality::Native: return 1.0f;
     }
     return 1.0f;
 }

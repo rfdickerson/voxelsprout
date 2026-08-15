@@ -43,6 +43,36 @@ int main(int argc, char** argv) {
     //
     // The renderer now caps at its own far plane; see frame_run.cc.
     odai::games::newvegas::NewVegasApp app;
+    // TAA ON, AT NATIVE RESOLUTION, BY DEFAULT.
+    //
+    // setTaaEnabled(true) was doing nothing: recordTaaPass returns early with no
+    // upscaler object, and the default backend is Off, so every run of this
+    // viewer since TAA landed has rendered with the pass costing 0.000 ms in the
+    // GPU timings. The give-away was there in every capture and reads as an
+    // unused feature rather than a broken one.
+    //
+    // It matters most for AO. XeGTAO's whole design puts its sampling error in
+    // high-frequency noise that a denoiser and a TEMPORAL average are meant to
+    // clear; without the temporal half, what is left is stipple. Measured on a
+    // Seyda Neen frame, the AO debug view's mean laplacian goes 0.965 -> 0.821,
+    // a 15% drop, purely from the resolve running at all.
+    //
+    // That 15% is the honest number and the first one I took was not. Enabling
+    // TAA the only way that worked before this change -- "--upscaler temporal"
+    // -- measured 41%, but it also dropped the render scale to 0.667, and a
+    // frame rendered at 44% of the pixels is smoother for reasons that have
+    // nothing to do with the temporal resolve.
+    //
+    // Native quality rather than the default Quality preset, because those two
+    // things had been welded together: asking for the temporal backend also
+    // dropped the render scale to 1/1.5, so "turn TAA on" silently meant "render
+    // at 44% of the pixels". A later --upscaler argument still overrides both.
+    {
+        odai::render::UpscalerSettings upscaler = app.upscalerSettings();
+        upscaler.backend = odai::render::UpscalerBackend::Temporal;
+        upscaler.quality = odai::render::UpscalerQuality::Native;
+        app.setUpscalerSettings(upscaler);
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
             app.setScenePath(argv[++i]);
@@ -74,7 +104,7 @@ int main(int argc, char** argv) {
                 app.setUpscalerSettings(upscaler);
             } else {
                 std::cout << "unknown --upscaler-quality: " << argv[i]
-                          << " (ultraquality|quality|balanced|performance|ultraperformance)\n";
+                          << " (native|ultraquality|quality|balanced|performance|ultraperformance)\n";
                 return 1;
             }
         } else if (std::strcmp(argv[i], "--weather") == 0 && i + 1 < argc) {

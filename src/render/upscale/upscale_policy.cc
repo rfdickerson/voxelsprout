@@ -60,6 +60,7 @@ const char* upscalerQualityName(UpscalerQuality quality) {
     case UpscalerQuality::Balanced: return "balanced";
     case UpscalerQuality::Performance: return "performance";
     case UpscalerQuality::UltraPerformance: return "ultraperformance";
+    case UpscalerQuality::Native: return "native";
     }
     return "unknown";
 }
@@ -92,6 +93,8 @@ bool parseUpscalerQuality(std::string_view text, UpscalerQuality& outQuality) {
         outQuality = UpscalerQuality::Performance;
     } else if (text == "ultraperformance" || text == "up") {
         outQuality = UpscalerQuality::UltraPerformance;
+    } else if (text == "native" || text == "n") {
+        outQuality = UpscalerQuality::Native;
     } else {
         return false;
     }
