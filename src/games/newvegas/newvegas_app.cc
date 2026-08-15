@@ -677,11 +677,12 @@ bool NewVegasApp::onInit() {
         else if (requested == "shadow") { view = render::DebugView::Shadow; }
         else if (requested == "directratio") { view = render::DebugView::DirectRatio; }
         else if (requested == "terrainlayers") { view = render::DebugView::TerrainLayers; }
+        else if (requested == "ao") { view = render::DebugView::AmbientOcclusion; }
         else if (requested != "off") {
             VOX_LOGW("newvegas")
                 << "ODAI_FNV_DEBUGVIEW=" << requested << " is not a view name; ignoring. "
                 << "Valid: albedo normal alpha flags roughness metallic mip cascade texid "
-                << "depth shadow directratio terrainlayers\n";
+                << "depth shadow directratio terrainlayers ao\n";
         }
         m_renderer.setDebugView(view);
     }
@@ -692,7 +693,28 @@ bool NewVegasApp::onInit() {
     // pow(ssaoRaw, intensity) on a value in [0,1]. Anything below 1 pushes the
     // result toward 1, i.e. actively weakens the occlusion -- which is what the
     // inherited 0.85 was doing.
-    float aoRadius = 300.0f;
+    // 300 units -- about 4.3 m at Bethesda's ~70 units per metre -- was tuned on
+    // Goodsprings, where the nearest occluder is usually far away. It over-
+    // reaches on dense architecture: a radius that spans a whole wall face
+    // samples geometry on the far side of the building, and at the default
+    // quarter-resolution AO (ODAI_AO_DOWNSCALE=2) that over-occlusion also
+    // smears, so a flat wall picks up a muddy cast and every silhouette a dark
+    // fringe. Seyda Neen's shacks -- planks and window boxes 10 to 20 units
+    // thick -- show it plainly.
+    //
+    // Measured at a pinned camera on that village, as mean luma darkening
+    // against AO off: radius 300 gives 4.73, radius 120 gives 5.06 while
+    // looking clean, and full-resolution AO at radius 300 gives 5.08 and also
+    // looks clean. So the fringe is the RADIUS over-reaching, not the estimator
+    // -- and the radius fix is free where ODAI_AO_DOWNSCALE=1 costs about
+    // 4.4 ms a frame (see CLAUDE.md's AO section).
+    //
+    // 150 rather than 120 to stay conservative about the scene this was
+    // originally tuned for. On Goodsprings the whole 300 -> 120 move changes
+    // mean AO darkening by only 10% (8.14 -> 7.29), so there is little there to
+    // lose; that is a measurement of MAGNITUDE though, not of appearance, which
+    // is the part of this change with the least evidence behind it.
+    float aoRadius = 150.0f;
     float aoBias = 40.0f;
     float aoIntensity = 1.7f;
     if (const char* env = std::getenv("ODAI_FNV_AO_RADIUS")) {

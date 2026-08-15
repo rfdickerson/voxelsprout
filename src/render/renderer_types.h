@@ -197,6 +197,12 @@ enum class DebugView : std::uint8_t {
     // those have completely different fixes. Comparing this against the lit
     // frame is what separates them.
     TerrainLayers = 13,
+    // Ambient occlusion alone, as a clay render: white unoccluded, dark
+    // occluded, no albedo and no lighting. The view to reach for when AO is
+    // suspected, because every other way of looking at it measures AO through
+    // the albedo-weighted ambient term and so returns a picture of the diffuse
+    // texture rather than of the occlusion.
+    AmbientOcclusion = 14,
 };
 
 // True for views whose value is already a display-ready colour and must not be

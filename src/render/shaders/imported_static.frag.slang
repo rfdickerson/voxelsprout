@@ -819,6 +819,7 @@ static const uint kDebugViewTextureId = 9u;
 static const uint kDebugViewShadow = 11u;
 static const uint kDebugViewDirectRatio = 12u;
 static const uint kDebugViewTerrainLayers = 13u;
+static const uint kDebugViewAmbientOcclusion = 14u;
 
 // A blue->green->yellow->red ramp for scalar views. Monotonic in luminance as
 // well as in hue, so it stays readable for someone who cannot separate the red
@@ -971,7 +972,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // and two different views then render identically, which is exactly how
     // that mistake presents.
     if (debugView != kDebugViewOff && debugView != kDebugViewShadow &&
-        debugView != kDebugViewDirectRatio)
+        debugView != kDebugViewDirectRatio && debugView != kDebugViewAmbientOcclusion)
     {
         const float3 debugNormal =
             resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
@@ -1164,6 +1165,23 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
 
     // Lighting-balance views. Here rather than in debugViewColor() because
     // neither input exists until this point.
+    // Ambient occlusion on its own, as a clay render: white is unoccluded, dark
+    // is occluded, and nothing else -- no albedo, no sun, no tonemap. Every
+    // other way of looking at AO measures it THROUGH the ambient term, which is
+    // albedo-weighted, so a bright texel darkens more than a dark one and the
+    // difference image comes out looking like the diffuse texture. That makes
+    // "is the AO wrong" and "is the texture busy" the same picture. This
+    // separates them.
+    //
+    // Computed here rather than in debugViewColor() for the same reason Shadow
+    // and DirectRatio are: the value does not exist until the ambient term has
+    // been evaluated, so a view that forgets the early-out exemption above
+    // falls through and renders as some other view entirely.
+    if (debugView == kDebugViewAmbientOcclusion)
+    {
+        const float ao = sampleSsaoAmbientFactor(input.inScreenPosition);
+        return float4(ao, ao, ao, 1.0);
+    }
     if (debugView == kDebugViewShadow)
     {
         return float4(shadowVisibility, shadowVisibility, shadowVisibility, 1.0);
