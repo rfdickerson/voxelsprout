@@ -128,6 +128,47 @@ path's first component is the **plugin's own file name** (`sound\voice\fallout3.
 was hardcoded and silently voiced none of Fallout 3's 46 actors; and the default spawn interior
 `GSDocMitchellHouse` is a New Vegas default rather than a constant.
 
+**Oblivion and Morrowind stream through the same viewer** — `--stream <Oblivion/Data>
+--plugin Oblivion.esm --worldspace Tamriel`, and `--plugin Morrowind.esm --worldspace
+Vvardenfell`. Authored tours live in `assets/tours/`. Three findings there generalize:
+
+- **OBLIVION SHIPS A MIX OF GAMEBRYO GENERATIONS.** 580 of its 9612 meshes are NIF
+  10.1.0.101–10.2.0.0 rather than 20.0.0.x, including `icpalacetower01.nif` — the
+  White-Gold Tower, which was simply absent while the city around it rendered fine.
+  Structurally that generation is 20.0.0.4 **minus the endian byte** (which arrived at
+  20.0.0.4), plus two version-gated fields: TexDesc carries PS2 L/K up to 10.4.0.1, and
+  `NiGeometryData` grew Group ID at 10.1.0.114 and an Additional Data ref at 20.0.0.4 — one
+  at each *end* of the same block. 10.0.1.0/10.0.1.2 are deliberately excluded: User Version
+  and the export strings arrive at 10.0.1.8, so they would mis-parse silently rather than
+  fail. Verified by hexdump, not from memory.
+
+  **These blocks carry no size table, so the walk fails one block PAST where it
+  desynchronized** — the tower reported "cannot size NiTriStrips", a type read correctly for
+  years, with `NiTriStripsData` the actual culprit. The error names the preceding block and
+  the offset now. The correctness oracle is the triangle bounds check: zero out-of-range and
+  zero degenerate across all 10.2M triangles is what says a field walk is *right* rather than
+  merely terminating.
+
+- **THE IMPERIAL CITY IS NOT IN TAMRIEL.** Its nine districts are nine separate worldspaces
+  (`ICImperialPalace`, `ICMarketDistrict`, …), and Tamriel's own cell (0,0) is a landless
+  cell holding 1977 references that renders as a flat dark square — convincing enough to
+  waste an afternoon on. Districts do not sit near their own origin either:
+  `ICImperialPalace` occupies grid x [-1,8] z [-1,16], densest at (6,15).
+  **`--cellindex <plugin> <worldspace>` prints occupied bounds and the five densest cells**,
+  which is the general answer to "where is this place" — a worldspace record's own NAM0/NAM9
+  corners are not it (Bravil's span 52 cells of open bay). Balmora was found the same way: it
+  is the densest cell in Vvardenfell, since Morrowind exteriors carry no editor ID at all.
+
+- **MORROWIND TERRAIN HAS NO PER-VERTEX TEXTURE WEIGHTS.** Where Oblivion and Fallout author
+  ATXT/VTXT, VTEX names ONE texture per 512-unit block and stops — drawn literally, a
+  staircase of hard-edged squares. The weights are synthesized at build time by treating
+  block textures as samples at block *centres* and bilinearly interpolating the four nearest,
+  which lands exactly on the 4-slot layer blend the shader already runs. Two things make it
+  exact: each block tiles its texture once, so this block's `u=1` and the neighbour's `u=0`
+  are the same point (no phase seam), and the shader composites as a chain of lerps, so a
+  weight is its share of the RUNNING total, not of the whole. Cross-*cell* neighbours are
+  unreachable (different LAND extract), leaving 1 boundary in 16 per axis unblended.
+
 **A TEMPLATE ACTOR'S SKELETON IS NOT ON THE RECORD THAT NAMES IT.** An actor whose ACBS
 template flags borrow the model (`0x0040`, Use Model/Animation) stores `marker_creature.nif` as
 its own MODL -- a real, parseable NIF carrying none of the bones a body is weighted to. Taking
@@ -290,6 +331,37 @@ knee expects — multiplying by this engine's exposure scale instead renders pur
 `grayadaptation` is adapted scene *luminance*, recovered as `0.18 / exposureScale`, not the
 reciprocal of the exposure multiplier. Both mistakes were made and measured on the way in.
 Default is ACES, so every other game is unaffected.
+
+**That switch was DEAD for Morrowind and had been all along**, which is worth knowing as a
+shape rather than as one bug: the selection lived at the end of `selectWeather`, reachable
+only through `initWeather`, which returns early on any plugin with no TES4 record. So the
+env var measured byte-identical to unset and read as a broken tonemap rather than as a call
+that never happened. It is `applyTonemapSettings()` now, called from `onInit`. A renderer
+setting has no business being reachable only through the weather path.
+
+**`ODAI_FNV_WHITEPOINT=<scene linear>[,<shoulder>]` is the only knob in the chain that moves
+the TOP of the histogram.** Across a Morrowind flight the 99th percentile of frame luma sat
+at 0.64–0.70 and moved by under 0.02 under *everything* else — fog distance (60k→400k
+changed it by 0.012), the ENB curve, the stylized colour look. The frame never reached
+white, and no amount of grading fixes a range the tonemap did not produce. Cause: the
+Narkowicz ACES fit reaches 1.0 only asymptotically, so with auto-exposure holding the scene
+near middle grey the brightest pixels land near 0.65 and stay. The fix is the standard
+`curve(x)/curve(W)` normalization. **The useful range is far lower than intuition suggests
+— `acesFilm(8)` is already ~1.0, so a white point of 8 is a no-op; 0.8 is where it bites.**
+`whitePoint 0` is the default and returns the plain fit bit-for-bit.
+
+**`ODAI_FNV_COLOR_LOOK=cinematic`** is the third option, because the two that existed were
+flat and crushed: neutral `sd 0.188 / p1 0.135 / p99 0.643`, stylized `0.260 / 0.000 /
+0.638`, cinematic `0.215 / 0.155 / 0.737`. Stylized buys its contrast by **crushing shadows
+to zero**, and on a scene whose depth is carried by aerial perspective that deletes the
+depth cue — near rock and far ridge end up the same black. So cinematic leaves
+`shadowDensity` at 1.0 and takes contrast from the midtones and the white point instead.
+`Renderer::setColorGrading(ColorGradingSettings)` is how a game names a look at all; before
+it the facade exposed only `setNeutralColorGrading()`.
+
+**Verify "renders identically" by STATISTICS, not by hash.** Consecutive renders of the same
+build are not bit-identical here (TAA, auto-exposure), so an md5 comparison proves nothing;
+four-decimal agreement of mean/sd/p1/p99 is the real check.
 
 **Render scale defaults to native.** It used to default to 0.6, drawing the 3D scene at 36%
 of the pixels and upscaling into a native-resolution UI composite — visibly soft. Measured
@@ -534,7 +606,7 @@ pose) made every pass read a garbage view-projection, and that renders as **a si
 colour with the UI still correct on top of it**. Flat frame + intact UI means the camera, not
 the geometry. Any value here must now render identically to unset.
 
-Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), `ODAI_SHADOW_DISTANCE` / `ODAI_SHADOW_LAMBDA` (see Shadow cascades below), `ODAI_FNV_WHITEPOINT` / `ODAI_FNV_COLOR_LOOK` / `ODAI_FNV_TONEMAP` (post chain), `ODAI_FNV_TERRAIN_BLEND`, `ODAI_NIF_DUMP` (write a decompressed asset out of its BSA — the only way to hexdump one), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
 
 **AO resolution and sun shafts are the two biggest costs after the main pass.** Measured on
 the LNL iGPU at a 2560x1440 swapchain, native render scale: frame 37.9 ms, of which the AO
@@ -563,6 +635,53 @@ debug views below. Distinct from F3, which is this engine's CPU timing overlay.
 `buildShadowDebugUi`/`buildSunDebugUi` were written but had **no call site** in the
 frame path, and no `GameApp` game ever called `setDebugUiVisible`, so that entire
 tuning surface existed and was unreachable.
+
+### Shadow cascades, and the open-world range
+
+**A GAME CAN PIN THE SHADOW DISTANCE OUT FROM UNDER THE RENDERER.** `newvegas_main.cc` used
+to `setenv("ODAI_SHADOW_DISTANCE", "3500", 0)` — about 50 m — so shadows worked close,
+worked midrange, and stopped, on every worldspace of every game this viewer opens, and
+every default in `frame_run.cc` was inert. The diagnostic pattern is the memorable part:
+**passing the env var explicitly worked while changing the DEFAULT measured as doing
+nothing.** Those are the same code path with one difference, and that difference is
+somebody setting the variable first. Grep for the literal before re-deriving the maths.
+
+Three things now keep the range open, and the second is what makes the first affordable:
+
+- The cap is the imported-scene far plane, i.e. shadow everything the frustum can see.
+- **The split distribution's near end is ABSOLUTE (48 units), not a fraction of the far
+  distance.** It was `shadowFarPlane * 0.008`, which welded them together: pushing shadows
+  out dragged the near end with them and coarsened cascade 0 in proportion — 6000 → 45000
+  took it from 573 units at 0.73 per texel to 4298 at 5.50, i.e. paying for distant shadows
+  with the near ones that already looked right.
+- Cascade lambda is **0.95** for imported scenes (0.70 elsewhere, unmeasured). 0.70 suits a
+  6000-unit range and not a 50000-unit one: the uniform term at p=0.25 is a quarter of the
+  *whole* distance. Cascades settle at 886/2723/10236/50000.
+
+**The atlas is four equal 2048 tiles.** It was 2048/1024/1024/512 in a 4096² image — 39%
+allocated, with the cascade covering the largest area given the smallest tile.
+
+**MEASURE SHADOWS WITH A LOW SUN OR NOT AT ALL.** At `ODAI_FNV_HOUR=16` a 37° sun over
+rounded terrain casts almost nothing, and raising the distance moves the shadowed fraction
+of the frame by under a point — it looks exactly like a change that did nothing. At 17.5 the
+same A/B is unmistakable. And measure with the camera **moving**: `skipCascadeMask` reuses
+cascade tiles when nothing moves, so a pinned camera with `ODAI_FNV_NOWANDER=1` reports the
+shadow pass at 0.0004 ms and invites the conclusion that the game submits no casters.
+
+**TAA WAS NEVER RUNNING, AND THAT IS WHERE AO STIPPLE COMES FROM.** `recordTaaPass` returns
+early without an upscaler object and `UpscalerSettings` defaults its backend to `Off`, so
+`setTaaEnabled(true)` was a silent no-op and every capture reported `taa=0.000 ms` — which
+reads as a feature nobody enabled rather than one that is broken. XeGTAO deliberately puts
+its sampling error in high-frequency noise on the understanding that a denoiser *and a
+temporal average* will clear it. `UpscalerQuality::Native` (1.0x) exists because TAA and
+upscaling were welded together: asking for the temporal backend also dropped render scale
+to 1/1.5, so "turn TAA on" meant "render at 44% of the pixels".
+
+That confound also produced a wrong number first: TAA measured 41% stipple reduction via
+`--upscaler temporal`, and **15%** once resolution was held fixed. Any A/B of a filter has
+to hold resolution fixed. Two levers measured and left alone: `ODAI_XEGTAO_BLUR` is
+saturated at its default (4→32 moves nothing), and `ODAI_AO_DOWNSCALE=1` does reach the
+residue (0.821 → 0.619 mean laplacian) at ssao 0.9 → 3.2–4.7 ms at 1080p.
 
 ### Render debug views
 
@@ -871,5 +990,14 @@ minute of wall time to about a second, and captures began opening on half-built 
 `captureWarmupComplete()` now requires the frame count **and** `CellStreamer::isStreamingIdle()`,
 with a hard ceiling so a worldspace that never settles cannot stall a capture forever.
 
-`assets/tours/` holds the authored paths for the three-game showcase (Megaton, Anvil);
-Goodsprings uses the built-in tour. See `--tour-file` above.
+`assets/tours/` holds the authored paths: Megaton and Anvil, plus Skingrad, Bravil,
+`imperial_city` and the two Morrowind ones (`seyda_neen`, `seyda_neen_to_balmora`).
+Goodsprings uses the built-in tour. See `--tour-file` above. Each file's header comment
+carries the framing decisions and the measurements behind them, which is where to look
+before re-deriving a camera path.
+
+**THE FLYTHROUGH CLOCK AND THE CAPTURE CLOCK ARE NOT THE SAME CLOCK.** The `--flythrough`
+timer runs during capture warm-up, and warm-up waits on streaming, so a path timed to match
+the capture parks before the last frame — and a parked camera looks like a badly authored
+path, not like a capture bug. Make the flythrough comfortably OUTLAST the capture (34 s of
+path for 20 recorded), and CRC a few sampled frames to assert the camera actually moved.
