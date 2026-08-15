@@ -28,7 +28,20 @@ int main(int argc, char** argv) {
     //
     // ODAI_RENDER_SCALE still dials it back; 0.6 is worth reaching for on a 4K
     // swapchain, where the fill-bound half of that budget quadruples.
-    setenv("ODAI_SHADOW_DISTANCE", "3500", 0);
+    // NO SHADOW DISTANCE OVERRIDE. There used to be a
+    // setenv("ODAI_SHADOW_DISTANCE", "3500", 0) here, sitting under the render
+    // scale comment above with no comment of its own, and it silently beat
+    // every default the renderer chose. 3500 units is about 50 metres: shadows
+    // worked close and midrange and then simply stopped, on every worldspace of
+    // every game this viewer opens.
+    //
+    // It also made the renderer's own cascade tuning unmeasurable from here. An
+    // A/B of ODAI_SHADOW_DISTANCE looked like it worked -- because passing the
+    // variable explicitly overrode this line -- while changing the DEFAULT in
+    // frame_run.cc appeared to do nothing at all. Two experiments that disagree
+    // like that are a strong hint that something upstream is pinning the value.
+    //
+    // The renderer now caps at its own far plane; see frame_run.cc.
     odai::games::newvegas::NewVegasApp app;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
