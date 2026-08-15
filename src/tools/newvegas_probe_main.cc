@@ -1650,15 +1650,15 @@ int probeCellIndex(
             const FalloutLandRecord& a = *actual.land;
             const FalloutLandRecord& b = *expected->land;
             if (a.hasHeights != b.hasHeights ||
-                (a.hasHeights && std::memcmp(a.heights, b.heights, sizeof(a.heights)) != 0)) {
+                (a.hasHeights && a.heights != b.heights)) {
                 problems.push_back("VHGT heights differ");
             }
             if (a.hasNormals != b.hasNormals ||
-                (a.hasNormals && std::memcmp(a.normals, b.normals, sizeof(a.normals)) != 0)) {
+                (a.hasNormals && a.normals != b.normals)) {
                 problems.push_back("VNML normals differ");
             }
             if (a.hasColors != b.hasColors ||
-                (a.hasColors && std::memcmp(a.colors, b.colors, sizeof(a.colors)) != 0)) {
+                (a.hasColors && a.colors != b.colors)) {
                 problems.push_back("VCLR colours differ");
             }
             if (std::memcmp(

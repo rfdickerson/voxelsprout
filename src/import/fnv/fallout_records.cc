@@ -395,15 +395,17 @@ void decodeLandHeights(const std::uint8_t* vhgtData, FalloutLandRecord& land) {
     // within [-200, +600] of the ground beneath them. Objects sitting on the
     // terrain they were authored against is the check, and it is what the
     // cell-edge continuity test could not see, being scale-invariant.
+    land.heights.assign(static_cast<std::size_t>(land.vertexCount()), 0.0f);
+    const int gridSize = land.gridSize;
     float rowStart = baseOffset;
-    for (int row = 0; row < kLandGridSize; ++row) {
+    for (int row = 0; row < gridSize; ++row) {
         float current = rowStart;
-        for (int col = 0; col < kLandGridSize; ++col) {
-            const std::int8_t delta = deltas[(row * kLandGridSize) + col];
+        for (int col = 0; col < gridSize; ++col) {
+            const std::int8_t delta = deltas[(row * gridSize) + col];
             if (!(row == 0 && col == 0)) {
                 current += static_cast<float>(delta);
             }
-            land.heights[(row * kLandGridSize) + col] = current * kLandHeightScale;
+            land.heights[(row * gridSize) + col] = current * kLandHeightScale;
             if (col == 0) {
                 rowStart = current;
             }
@@ -413,7 +415,9 @@ void decodeLandHeights(const std::uint8_t* vhgtData, FalloutLandRecord& land) {
 }
 
 void decodeLandNormals(const std::uint8_t* vnmlData, FalloutLandRecord& land) {
-    for (int i = 0; i < kLandVertexCount; ++i) {
+    const int count = land.vertexCount();
+    land.normals.assign(static_cast<std::size_t>(count) * 3u, 0.0f);
+    for (int i = 0; i < count; ++i) {
         const auto* signedBytes = reinterpret_cast<const std::int8_t*>(vnmlData + (i * 3));
         float x = static_cast<float>(signedBytes[0]) / 127.0f;
         float y = static_cast<float>(signedBytes[1]) / 127.0f;
@@ -439,7 +443,9 @@ void decodeLandNormals(const std::uint8_t* vnmlData, FalloutLandRecord& land) {
 // Unlike VNML these are unsigned: 255 is neutral (leave the texture alone), not
 // a signed component, so they scale straight to [0,1] rather than [-1,1].
 void decodeLandColors(const std::uint8_t* vclrData, FalloutLandRecord& land) {
-    for (int i = 0; i < kLandVertexCount * 3; ++i) {
+    const int count = land.vertexCount() * 3;
+    land.colors.assign(static_cast<std::size_t>(count), 1.0f);
+    for (int i = 0; i < count; ++i) {
         land.colors[i] = static_cast<float>(vclrData[i]) / 255.0f;
     }
     land.hasColors = true;
@@ -488,6 +494,168 @@ void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outSc
         }
     }
     outScene.landTextures.push_back(std::move(landTexture));
+}
+
+// ---------------------------------------------------------------------------
+// Morrowind (TES3) records.
+//
+// Every difference here is a consequence of the same two facts: there are no
+// formIDs, and there is no GRUP tree. Records are keyed by a string id, and a
+// CELL carries its own references INLINE as a run of subrecords rather than in
+// a child group -- so "extract this cell" is parsing one record, not walking a
+// byte range of the file.
+//
+// Synthetic formIDs are assigned to base records as they are scanned, and a
+// reference keeps its base's NAME text until the world tables can turn it into
+// one. Hashing the string was the obvious alternative and is wrong at this
+// scale: ~50k ids through a 32-bit hash carries a ~29% chance of at least one
+// collision, and a collision here silently places the wrong object.
+
+void parseMorrowindStatRecord(
+    const EsmRecordView& record, std::string_view recordType, FalloutSceneData& scene) {
+    FalloutStaticRecord entry{};
+    entry.recordType = std::string(recordType);
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "NAME") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "MODL") {
+            entry.modelPath = subrecordString(sub);
+        }
+    }
+    if (entry.editorId.empty()) {
+        return;
+    }
+    scene.statics.push_back(std::move(entry));
+}
+
+void parseMorrowindLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
+    FalloutLandTextureRecord entry{};
+    bool haveIndex = false;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "NAME") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "INTV" && sub.size >= 4u) {
+            // The palette index VTEX refers to -- PLUS ONE, when it gets there.
+            entry.formId = readU32(sub.data) + 1u;
+            haveIndex = true;
+        } else if (sub.type == "DATA") {
+            entry.diffuseTexturePath = subrecordString(sub);
+        }
+    }
+    if (!haveIndex || entry.diffuseTexturePath.empty()) {
+        return;
+    }
+    outScene.landTextures.push_back(std::move(entry));
+}
+
+// A TES3 LAND. 65x65 posts over an 8192-unit cell, so the same 128-unit post
+// spacing as every later game -- the CELL is bigger, not the sampling.
+void parseMorrowindLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell) {
+    if (currentCell == nullptr) {
+        return;
+    }
+    auto land = std::make_unique<FalloutLandRecord>();
+    land->gridSize = kMorrowindLandGridSize;
+    const int vertexCount = land->vertexCount();
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "VHGT" &&
+            sub.size >= 4u + static_cast<std::uint32_t>(vertexCount)) {
+            decodeLandHeights(sub.data, *land);
+        } else if (sub.type == "VNML" &&
+                   sub.size >= static_cast<std::uint32_t>(vertexCount * 3)) {
+            decodeLandNormals(sub.data, *land);
+        } else if (sub.type == "VCLR" &&
+                   sub.size >= static_cast<std::uint32_t>(vertexCount * 3)) {
+            decodeLandColors(sub.data, *land);
+        } else if (sub.type == "VTEX" &&
+                   sub.size >= static_cast<std::uint32_t>(
+                       kMorrowindTextureGridSize * kMorrowindTextureGridSize * 2)) {
+            // VTEX IS SWIZZLED. It is stored as 4x4 blocks of 4x4 entries, not
+            // in row-major order, so reading it straight gives a texture layout
+            // that is subtly scrambled rather than obviously wrong -- patches
+            // land in the right cell and the wrong quarter of it.
+            land->morrowindTextureGrid.assign(
+                static_cast<std::size_t>(kMorrowindTextureGridSize * kMorrowindTextureGridSize), 0u);
+            std::size_t readPos = 0;
+            for (int blockRow = 0; blockRow < 4; ++blockRow) {
+                for (int blockCol = 0; blockCol < 4; ++blockCol) {
+                    for (int row = 0; row < 4; ++row) {
+                        for (int col = 0; col < 4; ++col) {
+                            const int outRow = (blockRow * 4) + row;
+                            const int outCol = (blockCol * 4) + col;
+                            land->morrowindTextureGrid
+                                [static_cast<std::size_t>((outRow * kMorrowindTextureGridSize) + outCol)] =
+                                readU16(sub.data + (readPos * 2u));
+                            ++readPos;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (land->hasHeights) {
+        currentCell->land = std::move(land);
+    }
+}
+
+// A TES3 CELL, references and all. The reference block is a flat run of
+// subrecords with no count: a new reference starts at every FRMR.
+void parseMorrowindCellRecord(
+    const EsmRecordView& record, FalloutCellRecord& outCell) {
+    bool inReference = false;
+    FalloutPlacedReference current{};
+    const auto flushReference = [&]() {
+        if (inReference && !current.baseEditorId.empty()) {
+            outCell.references.push_back(current);
+        }
+        current = FalloutPlacedReference{};
+    };
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "FRMR") {
+            flushReference();
+            inReference = true;
+            if (sub.size >= 4u) {
+                current.formId = readU32(sub.data);
+            }
+            continue;
+        }
+        if (!inReference) {
+            // Cell header, which ends at the first FRMR.
+            if (sub.type == "NAME") {
+                outCell.editorId = subrecordString(sub);
+            } else if (sub.type == "DATA" && sub.size >= 12u) {
+                const std::uint32_t flags = readU32(sub.data);
+                outCell.isInterior = (flags & 0x1u) != 0u;
+                outCell.gridX = readI32(sub.data + 4);
+                outCell.gridZ = readI32(sub.data + 8);
+                outCell.hasGridCoords = !outCell.isInterior;
+            } else if (sub.type == "WHGT" && sub.size >= 4u) {
+                outCell.hasWater = true;
+                outCell.waterHeight = readF32(sub.data);
+            }
+            continue;
+        }
+        if (sub.type == "NAME") {
+            current.baseEditorId = subrecordString(sub);
+        } else if (sub.type == "DATA" && sub.size >= 24u) {
+            // Position then Euler rotation in radians, six floats.
+            current.position[0] = readF32(sub.data);
+            current.position[1] = readF32(sub.data + 4);
+            current.position[2] = readF32(sub.data + 8);
+            current.rotationRadians[0] = readF32(sub.data + 12);
+            current.rotationRadians[1] = readF32(sub.data + 16);
+            current.rotationRadians[2] = readF32(sub.data + 20);
+        } else if (sub.type == "XSCL" && sub.size >= 4u) {
+            current.scale = readF32(sub.data);
+        }
+    }
+    flushReference();
+    // An exterior with no water height still has water, at sea level -- which
+    // for Morrowind is 0 and is where the whole Bitter Coast sits.
+    if (!outCell.isInterior && !outCell.hasWater) {
+        outCell.hasWater = true;
+        outCell.waterHeight = 0.0f;
+    }
 }
 
 void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell) {
@@ -564,6 +732,94 @@ void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell
 
 }  // namespace
 
+// Indexes a TES3 plugin. Flat walk, two record types, joined by grid.
+//
+// Morrowind has no worldspace record either, so one is synthesized: every
+// exterior cell belongs to "Vvardenfell" with formID 1. Callers select a
+// worldspace by name and there has to be a name to select.
+bool buildMorrowindCellIndex(
+    EsmReader& reader, FalloutCellIndex& outIndex, std::string& outError) {
+    constexpr std::uint32_t kVvardenfellFormId = 1u;
+    outIndex.cellWorldSize =
+        kLandPostSpacing * static_cast<float>(kMorrowindLandGridSize - 1);  // 8192
+
+    // grid -> index into outIndex.cells, so a LAND record can find its cell
+    // whichever order the two appear in.
+    std::unordered_map<std::uint64_t, std::size_t> cellByGrid;
+    const auto gridKey = [](std::int32_t x, std::int32_t z) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
+               static_cast<std::uint32_t>(z);
+    };
+    struct PendingLand {
+        std::uint64_t offset = 0;
+        std::uint32_t size = 0;
+    };
+    std::unordered_map<std::uint64_t, PendingLand> landByGrid;
+
+    std::uint64_t pendingOffset = 0;
+    std::uint32_t pendingSize = 0;
+    EsmReader::Visitor visitor{};
+    visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+        pendingOffset = header.fileOffset;
+        // The FULL extent, header included, because these offsets are handed to
+        // walkRange as a byte range to re-read the record from.
+        pendingSize = static_cast<std::uint32_t>(
+            esmRecordHeaderSize(EsmPluginFormat::kMorrowind)) + header.dataSize;
+        return header.type == "CELL" || header.type == "LAND";
+    };
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        if (record.type == "LAND") {
+            // INTV carries the grid, not DATA -- the opposite of every later
+            // generation, where DATA is the grid and INTV is a water level.
+            for (const EsmSubrecordView& sub : record.subrecords) {
+                if (sub.type == "INTV" && sub.size >= 8u) {
+                    landByGrid[gridKey(readI32(sub.data), readI32(sub.data + 4))] =
+                        PendingLand{pendingOffset, pendingSize};
+                    break;
+                }
+            }
+            return;
+        }
+        FalloutCellRecord parsed{};
+        parseMorrowindCellRecord(record, parsed);
+        FalloutCellIndexEntry entry{};
+        entry.cellFormId = static_cast<std::uint32_t>(outIndex.cells.size()) + 2u;
+        entry.editorId = parsed.editorId;
+        entry.isInterior = parsed.isInterior;
+        entry.hasGridCoords = parsed.hasGridCoords;
+        entry.gridX = parsed.gridX;
+        entry.gridZ = parsed.gridZ;
+        entry.worldspaceFormId = parsed.isInterior ? 0u : kVvardenfellFormId;
+        entry.cellRecordOffset = pendingOffset;
+        // The references live in the CELL record itself, so the "children" range
+        // this index hands to the extractor IS the record.
+        entry.childrenGroupOffset = pendingOffset;
+        entry.childrenGroupSize = pendingSize;
+        entry.contributions.push_back(FalloutCellContribution{0u, pendingOffset, pendingSize});
+        (void)0;
+        if (entry.hasGridCoords) {
+            cellByGrid[gridKey(entry.gridX, entry.gridZ)] = outIndex.cells.size();
+        }
+        outIndex.cells.push_back(std::move(entry));
+    };
+    if (!reader.walk(visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    for (const auto& [key, land] : landByGrid) {
+        const auto it = cellByGrid.find(key);
+        if (it != cellByGrid.end()) {
+            outIndex.cells[it->second].landRecordOffset = land.offset;
+            outIndex.cells[it->second].landRecordSize = land.size;
+        }
+    }
+    FalloutWorldspaceRecord vvardenfell{};
+    vvardenfell.formId = kVvardenfellFormId;
+    vvardenfell.editorId = "Vvardenfell";
+    outIndex.worldspaces.push_back(std::move(vvardenfell));
+    return true;
+}
+
 bool buildFalloutCellIndex(
     const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError) {
     outIndex = FalloutCellIndex{};
@@ -572,6 +828,9 @@ bool buildFalloutCellIndex(
     if (!reader.open(esmPath)) {
         outError = reader.lastError();
         return false;
+    }
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        return buildMorrowindCellIndex(reader, outIndex, outError);
     }
 
     // Group type 6 is a cell-children group; its label is the owning CELL's
@@ -883,6 +1142,36 @@ bool extractFalloutCellMerged(
     return true;
 }
 
+// A TES3 cell is one record: its references are inline, and its terrain is a
+// sibling LAND the index already located by grid.
+bool extractMorrowindCellAt(
+    EsmReader& reader,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError) {
+    EsmReader::Visitor visitor{};
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        if (record.type == "CELL") {
+            parseMorrowindCellRecord(record, outCell);
+        } else if (record.type == "LAND") {
+            parseMorrowindLandRecord(record, &outCell);
+        }
+    };
+    if (entry.childrenGroupSize != 0u &&
+        !reader.walkRange(entry.childrenGroupOffset,
+                          entry.childrenGroupOffset + entry.childrenGroupSize, visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    if (entry.landRecordSize != 0u &&
+        !reader.walkRange(entry.landRecordOffset,
+                          entry.landRecordOffset + entry.landRecordSize, visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    return true;
+}
+
 bool extractFalloutCellAt(
     EsmReader& reader,
     const FalloutCellIndexEntry& entry,
@@ -892,6 +1181,13 @@ bool extractFalloutCellAt(
     outCell.formId = entry.cellFormId;
     outCell.isInterior = entry.isInterior;
     outCell.hasGridCoords = entry.hasGridCoords;
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        outCell.gridX = entry.gridX;
+        outCell.gridZ = entry.gridZ;
+        outCell.editorId = entry.editorId;
+        outCell.worldspaceFormId = entry.worldspaceFormId;
+        return extractMorrowindCellAt(reader, entry, outCell, outError);
+    }
     outCell.gridX = entry.gridX;
     outCell.gridZ = entry.gridZ;
     outCell.worldspaceFormId = entry.worldspaceFormId;
@@ -944,6 +1240,41 @@ bool extractFalloutScene(
     if (!reader.open(esmPath)) {
         outError = reader.lastError();
         return false;
+    }
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        // Flat walk, and synthetic formIDs handed out in scan order. Sequential
+        // rather than hashed on purpose: ~50k string ids through a 32-bit hash
+        // carries a ~29% chance of at least one collision, and a collision here
+        // places the wrong object rather than failing.
+        std::uint32_t nextFormId = 0x01000000u;
+        EsmReader::Visitor visitor{};
+        visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
+            return isModelBearingBaseType(header.type) || header.type == "LTEX" ||
+                   header.type == "STAT";
+        };
+        visitor.onRecord = [&](const EsmRecordView& record) {
+            if (record.type == "LTEX") {
+                parseMorrowindLandTextureRecord(record, outScene);
+                return;
+            }
+            parseMorrowindStatRecord(record, record.type, outScene);
+            if (!outScene.statics.empty() && outScene.statics.back().formId == 0u) {
+                outScene.statics.back().formId = nextFormId++;
+            }
+        };
+        if (!reader.walk(visitor)) {
+            outError = reader.lastError();
+            return false;
+        }
+        // TES3 has no WRLD record at all: every exterior cell simply is the
+        // outdoors. One is synthesized so callers can select a worldspace by
+        // name, and it must match buildMorrowindCellIndex's -- a cell index and
+        // a world table that disagree about the formID resolve to no cells.
+        FalloutWorldspaceRecord vvardenfell{};
+        vvardenfell.formId = 1u;
+        vvardenfell.editorId = "Vvardenfell";
+        outScene.worldspaces.push_back(std::move(vvardenfell));
+        return true;
     }
 
     // TXST diffuse paths, resolved into landTextures after the walk since an

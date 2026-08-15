@@ -189,8 +189,21 @@ bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFi
         return false;
     }
     BsaHeader header{};
-    if (!readValue(input, header) || header.magic != kBsaMagic ||
-        !isSupportedBsaVersion(header.version)) {
+    if (!readValue(input, header)) {
+        return false;
+    }
+    // Morrowind declares no content flags -- the format has none. Reporting
+    // "everything" rather than zero, because callers use these to SKIP an
+    // archive, and zero would skip the only archives Morrowind has. Getting
+    // this wrong is silent: every mesh and texture simply fails to resolve,
+    // which shades untextured rather than reporting a missing archive.
+    if (header.magic == kMorrowindArchiveVersion) {
+        outFileFlags = kBsaContentMeshes | kBsaContentTextures | kBsaContentMenus |
+                       kBsaContentSounds | kBsaContentVoices | kBsaContentShaders |
+                       kBsaContentTrees | kBsaContentFonts | kBsaContentMisc;
+        return true;
+    }
+    if (header.magic != kBsaMagic || !isSupportedBsaVersion(header.version)) {
         return false;
     }
     outFileFlags = header.fileFlags;

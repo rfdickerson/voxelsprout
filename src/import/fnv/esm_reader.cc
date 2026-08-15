@@ -451,6 +451,7 @@ bool EsmReader::walkRange(
             headerView.formId = formId;
             headerView.flags = flags;
             headerView.fileOffset = static_cast<std::uint64_t>(frame.pos);
+            headerView.dataSize = dataSize;
             if (!visitor.onRecordHeader(headerView)) {
                 frame.pos = dataEnd;
                 continue;

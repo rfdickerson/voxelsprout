@@ -2673,9 +2673,12 @@ bool NewVegasApp::initStreaming() {
         [this](const importer::CellCoord& cell) { m_collision.removeCell(cell); });
 
     importer::CellResidencyConfig config;
-    // Fallout exterior cells are 4096 world units square (33 height posts at
-    // 128-unit spacing); see fnv::kExteriorCellSize.
-    config.cellSize = 4096.0f;
+    // From the plugin, not a constant. Fallout and Oblivion exterior cells are
+    // 4096 units square (33 height posts at 128-unit spacing); Morrowind's are
+    // 8192 (65 posts at the same spacing). Everything about residency is
+    // expressed in cells, so a grid built on the wrong figure loads a quarter
+    // of the world it believes it is loading.
+    config.cellSize = m_streamer->cellWorldSize();
     if (const char* radiusEnv = std::getenv("ODAI_FNV_LOAD_RADIUS")) {
         config.loadRadius = std::max(0, std::atoi(radiusEnv));
         config.unloadRadius = config.loadRadius + 2;

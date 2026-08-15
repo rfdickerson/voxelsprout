@@ -299,6 +299,15 @@ private:
     DecodedTextureCache m_textureCache;
     FalloutWorldTables m_worldTables;
     FalloutCellIndex m_cellIndex;
+
+public:
+    // World units one exterior cell covers in the plugin being streamed. The
+    // caller sizes its residency grid from this rather than assuming 4096:
+    // Morrowind's cells are 8192, and a grid built on the wrong figure loads a
+    // quarter of the world it believes it is loading.
+    [[nodiscard]] float cellWorldSize() const { return m_cellIndex.cellWorldSize; }
+
+private:
     FalloutAssetSource m_assets;
     // Grid coordinate -> index into m_cellIndex.cells, for the chosen worldspace
     // only. The worldspace is not a rectangle, so this is also what stops the

@@ -257,6 +257,11 @@ struct FalloutRegionRecord {
 struct FalloutPlacedReference {
     std::uint32_t formId = 0;
     std::uint32_t baseFormId = 0;  // NAME: the STAT (or other base record) this instance places
+    // MORROWIND NAMES ITS BASE BY STRING. TES3 has no formIDs at all, so a
+    // reference's NAME subrecord is the base record's own id text. Empty for
+    // every later generation; when it is set, baseFormId is 0 and the caller
+    // resolves the name through FalloutWorldTables::baseFormIdsByEditorId.
+    std::string baseEditorId;
     // The record header's own flags. Bit 0x0800 is "Initially Disabled": the
     // game does not render the reference until something enables it.
     std::uint32_t recordFlags = 0;
@@ -292,10 +297,21 @@ struct FalloutLandTextureLayer {
 
 struct FalloutLandRecord {
     std::uint32_t cellFormId = 0;
+    // Posts per side. 33 for TES4 onward, 65 for Morrowind -- and the arrays
+    // below are sized from it rather than fixed, because at 65 they are four
+    // times larger and a fixed worst case would cost every Fallout cell the
+    // Morrowind price. The world a cell covers is (gridSize - 1) *
+    // kLandPostSpacing, i.e. 4096 units at 33 posts and 8192 at 65: the SPACING
+    // is the same 128 units in both, it is the cell that is bigger.
+    int gridSize = kLandGridSize;
+    [[nodiscard]] int vertexCount() const { return gridSize * gridSize; }
+    [[nodiscard]] float cellWorldSize() const {
+        return kLandPostSpacing * static_cast<float>(gridSize - 1);
+    }
     bool hasHeights = false;
-    float heights[kLandVertexCount] = {};   // row-major [row * 33 + col], world Z units
+    std::vector<float> heights;   // row-major [row * gridSize + col], world Z units
     bool hasNormals = false;
-    float normals[kLandVertexCount * 3] = {};  // row-major, normalized
+    std::vector<float> normals;   // row-major, normalized
     // VCLR: per-post terrain tint, row-major RGB in [0,1]. This is the colour
     // the game actually shades landscape with -- baked ambient and the regional
     // palette that makes the Mojave read as sunbleached tan rather than the
@@ -303,7 +319,7 @@ struct FalloutLandRecord {
     // which case the neutral 1,1,1 default leaves the diffuse texture unmodified,
     // which is exactly what the game does too.
     bool hasColors = false;
-    float colors[kLandVertexCount * 3] = {};
+    std::vector<float> colors;
     // Base texture per quadrant (0=SW,1=SE... layout mirrors BTXT's own
     // quadrant index), 0 when the quadrant has no explicit BTXT record.
     std::uint32_t quadrantBaseTextureFormId[4] = {};
@@ -317,7 +333,25 @@ struct FalloutLandRecord {
     // lists the posts where the layer is actually present, and everything else
     // stays at zero opacity.
     std::vector<FalloutLandTextureLayer> textureLayers;
+
+    // MORROWIND HAS NO QUADRANTS AND NO LAYERS. Its VTEX is a 16x16 grid of
+    // land-texture indices over the whole cell, each covering 4x4 quads, so the
+    // terrain is textured by splatting whole blocks rather than by blending
+    // per-post opacities. Empty for every other game.
+    //
+    // Values are the LTEX index PLUS ONE, exactly as stored: 0 means "the
+    // worldspace default texture", which is why this is not simply an index.
+    std::vector<std::uint16_t> morrowindTextureGrid;
 };
+
+// Side of Morrowind's VTEX grid, and how many terrain quads one of its entries
+// covers. 16 * 4 = 64 quads = the 65-post grid.
+// Morrowind's LAND grid: 65 posts a side over an 8192-unit cell. The post
+// SPACING is the same 128 units every later game uses -- the cell is four times
+// the area, not four times the sampling.
+constexpr int kMorrowindLandGridSize = 65;
+constexpr int kMorrowindTextureGridSize = 16;
+constexpr int kMorrowindTextureBlockQuads = 4;
 
 // One navmesh triangle: three vertex indices, then the index of the triangle
 // sharing each edge (kNavMeshNoNeighbour where the edge is a border). The
@@ -553,9 +587,20 @@ struct FalloutCellIndexEntry {
     // Zero size means the cell has no children group at all (no contents).
     std::uint64_t childrenGroupOffset = 0;
     std::uint32_t childrenGroupSize = 0;
+    // MORROWIND KEEPS ITS TERRAIN IN A SIBLING RECORD. TES3 has no children
+    // group at all -- a CELL carries its references inline and its LAND is a
+    // separate top-level record joined by grid coordinate -- so the index has to
+    // remember where that record was. Zero size means the cell has no terrain.
+    std::uint64_t landRecordOffset = 0;
+    std::uint32_t landRecordSize = 0;
 };
 
 struct FalloutCellIndex {
+    // World units one exterior cell covers. 4096 from Oblivion onward, 8192 in
+    // Morrowind -- the post spacing is 128 in both, the cell is four times the
+    // area. Carried here because the streamer's residency grid is expressed in
+    // cells and would otherwise load a quarter of the world it thinks it is.
+    float cellWorldSize = kExteriorCellSize;
     std::vector<FalloutCellIndexEntry> cells;
     // Indexed by FalloutCellContribution::pluginIndex, so a contribution can be
     // read without carrying the load order alongside the index everywhere.

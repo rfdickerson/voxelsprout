@@ -56,6 +56,11 @@ struct FalloutWorldTables {
     // FalloutWorldspaceRecord::hasDefaultHeights for why a cell with no LAND
     // needs this.
     std::unordered_map<std::uint32_t, FalloutWorldspaceRecord> worldspaceDefaultsByFormId;
+    // MORROWIND REFERENCES NAME THEIR BASE BY STRING, so this is how a placed
+    // reference reaches its model. Lowercased id -> the synthetic formID the
+    // scan handed that record. Empty for every later generation, where a
+    // reference carries the formID directly.
+    std::unordered_map<std::string, std::uint32_t> baseFormIdsByEditorId;
     // LIGH formID -> its light parameters. A LIGH also appears in the maps
     // above when it carries a MODL (29 of 501 do), because the lamp mesh and
     // the light it casts are both wanted.

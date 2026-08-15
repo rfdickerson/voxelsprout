@@ -617,7 +617,13 @@ bool looksLikeDdsPath(const std::string& value) {
     std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
-    return lowered.compare(lowered.size() - 4u, 4u, ".dds") == 0;
+    // .tga and .bmp are Morrowind's spelling for what ships as .dds -- see
+    // normalizeTexturePath in asset_source.cc, which rewrites the extension.
+    // Accepting them here is what lets the same scan find a NetImmerse mesh's
+    // texture; rejecting them made every Morrowind shape come out untextured.
+    return lowered.compare(lowered.size() - 4u, 4u, ".dds") == 0 ||
+           lowered.compare(lowered.size() - 4u, 4u, ".tga") == 0 ||
+           lowered.compare(lowered.size() - 4u, 4u, ".bmp") == 0;
 }
 
 // BSShaderNoLightingProperty's own field: a sized string holding the texture
@@ -708,26 +714,43 @@ bool findTexturingPropertySource(
     return false;
 }
 
-bool readNiAlphaProperty(
-    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames,
-    AlphaPropertyBlock& out) {
-    AvObjectFields unusedNameFields{};
-    // NiAlphaProperty derives from NiObjectNET: name, extra data, controller.
-    if (!cursor.read(unusedNameFields.nameRef)) {
-        return false;
+// The NiObjectNET prefix every NiProperty derives from, in all three shapes it
+// takes. This used to be open-coded as the Fallout spelling only, which read an
+// inline name's LENGTH as a name index and its bytes as the extra-data count --
+// so every Oblivion and Morrowind alpha property was misparsed, and misparsed
+// silently: the reader returns false, the shape keeps its default of "opaque",
+// and an alpha-tested leaf renders as a solid green slab.
+bool readNiObjectNetPrefix(ByteCursor& cursor, bool inlineNames, bool morrowind) {
+    if (inlineNames) {
+        std::string name;
+        if (!cursor.readSizedString<std::uint32_t>(name)) {
+            return false;
+        }
+    } else {
+        std::int32_t nameRef = 0;
+        if (!cursor.read(nameRef)) {
+            return false;
+        }
+    }
+    if (morrowind) {
+        // ONE extra-data ref, the head of a linked list, rather than a count
+        // and a list. The list form arrives at 10.0.1.0.
+        return cursor.skip(4u) && cursor.skip(4u);
     }
     std::uint32_t numExtraData = 0;
     if (!cursor.read(numExtraData) || numExtraData > 1024u) {
         return false;
     }
-    for (std::uint32_t i = 0; i < numExtraData; ++i) {
-        std::int32_t ref = 0;
-        if (!cursor.read(ref)) {
-            return false;
-        }
+    if (!cursor.skip(static_cast<std::size_t>(numExtraData) * 4u)) {
+        return false;
     }
-    std::int32_t controllerRef = 0;
-    if (!cursor.read(controllerRef)) {
+    return cursor.skip(4u);  // controller ref
+}
+
+bool readNiAlphaProperty(
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
+    AlphaPropertyBlock& out) {
+    if (!readNiObjectNetPrefix(cursor, inlineNames, morrowind)) {
         return false;
     }
     (void)userVersion2;  // NiProperty flags stay 16-bit regardless
@@ -2306,7 +2329,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
         } else if (typeName == "NiAlphaProperty") {
             AlphaPropertyBlock alpha;
-            if (readNiAlphaProperty(blockCursor, header.userVersion2, header.inlineNames, alpha)) {
+            if (readNiAlphaProperty(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, alpha)) {
                 alphaProperties[i] = alpha;
             }
         } else if (typeName == "NiStencilProperty") {
@@ -3034,7 +3057,7 @@ bool parseNifSkinnedMesh(
             }
         } else if (typeName == "NiAlphaProperty") {
             AlphaPropertyBlock alpha;
-            if (readNiAlphaProperty(blockCursor, header.userVersion2, header.inlineNames, alpha)) {
+            if (readNiAlphaProperty(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, alpha)) {
                 alphaProperties[i] = alpha;
             }
         } else if (typeName == "NiStencilProperty") {

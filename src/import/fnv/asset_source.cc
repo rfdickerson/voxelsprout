@@ -82,6 +82,25 @@ std::string normalizeTexturePath(const std::string& path) {
     if (toLowerAsciiCopy(normalized).rfind("textures\\", 0) != 0) {
         normalized = "textures\\" + normalized;
     }
+
+    // MORROWIND NAMES .tga AND SHIPS .dds. Bethesda converted the archives to
+    // DDS for load speed at some point and never updated the references, so
+    // every texture path inside a NetImmerse mesh and every LTEX filename still
+    // carries the original extension: measured over the architecture meshes in
+    // Morrowind.bsa, 3429 .tga and 125 .bmp, and not one .dds. The archive holds
+    // all of them as textures\<name>.dds.
+    //
+    // Rewritten here rather than at each call site because the same rule covers
+    // meshes, land textures and anything else that names a texture -- and doing
+    // it anywhere else means one of those quietly keeps resolving to nothing,
+    // which shades untextured rather than failing.
+    const std::string lowered = toLowerAsciiCopy(normalized);
+    for (const char* legacy : {".tga", ".bmp"}) {
+        if (lowered.size() > 4u && lowered.compare(lowered.size() - 4u, 4u, legacy) == 0) {
+            normalized.replace(normalized.size() - 4u, 4u, ".dds");
+            break;
+        }
+    }
     return normalized;
 }
 

@@ -124,6 +124,11 @@ struct EsmRecordHeaderView {
     std::uint32_t flags = 0;
     // Byte offset of this record's own header.
     std::uint64_t fileOffset = 0;
+    // Bytes of record DATA, excluding the header. Together with fileOffset and
+    // esmRecordHeaderSize() this gives the record's full extent, which is what
+    // lets a caller record a single record's byte range and re-walk it later --
+    // the only way to address a Morrowind cell, which has no children group.
+    std::uint32_t dataSize = 0;
 };
 
 // Move-only: an open reader owns a memory mapping of the plugin file.
@@ -211,6 +216,7 @@ private:
     // header sizes are a property of the file, and a per-record guess would be
     // both slower and able to disagree with itself mid-walk.
     EsmPluginFormat m_pluginFormat = EsmPluginFormat::kFallout3;
+
 };
 
 }  // namespace odai::importer::fnv

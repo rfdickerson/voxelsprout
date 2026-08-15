@@ -88,7 +88,18 @@ std::string cellAxisToken(std::int32_t value) {
 // caches, and the triangle half then had no way to invalidate them. Bumping
 // once per SHIPPED change is the rule; bumping once per editing session is not
 // enough, and the symptom is a fix that measures as doing exactly nothing.)
-constexpr int kCellBuildVersion = 14;
+// 15: Morrowind cells become cacheable, and NiAlphaProperty's NiObjectNET
+// prefix is now read per generation (readNiObjectNetPrefix). It was open-coded
+// as the Fallout spelling only, so an INLINE name had its length read as a name
+// index and its bytes as the extra-data count; the parse failed, the shape kept
+// its default of opaque, and an alpha-tested leaf rendered as a solid slab.
+// Morrowind goes 0 -> 1013 alpha-tested shapes on that fix alone.
+//
+// Oblivion measured UNCHANGED across it -- 469 alpha-tested shapes before and
+// after -- so this bump is not repairing anything there. Said explicitly
+// because the obvious reading of "a shared prefix was wrong" is that every
+// generation was affected, and that is not what the numbers say.
+constexpr int kCellBuildVersion = 15;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -939,8 +950,8 @@ std::vector<std::string> CellStreamer::regionNamesAtEngineSpace(
     // Which cell the position is in. Floors toward negative infinity: cell -1
     // spans [-4096, 0), so truncating would put every position in the strip
     // between -4096 and 0 into cell 0 and report the wrong region there.
-    const auto cellOf = [](float world) {
-        return static_cast<std::int32_t>(std::floor(world / kExteriorCellSize));
+    const auto cellOf = [this](float world) {
+        return static_cast<std::int32_t>(std::floor(world / m_cellIndex.cellWorldSize));
     };
     const CellCoord coord{cellOf(fallout[0]), cellOf(fallout[1])};
 

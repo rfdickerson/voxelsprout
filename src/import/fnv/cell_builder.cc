@@ -193,6 +193,130 @@ bool shapeIsPlanar(const odai::importer::fnv::NifShape& shape) {
     return (thinnest / largest) < kPlanarRatio;
 }
 
+// Morrowind's terrain, which is splatted rather than blended.
+//
+// There are no quadrants and no per-post opacity layers: VTEX is a 16x16 grid of
+// land-texture indices over the cell, each entry covering a 4x4 block of quads.
+// So a cell is textured by drawing whole blocks, and the natural mesh is one
+// part per distinct texture, gathering every block that uses it -- typically two
+// to eight parts rather than the four a Fallout cell emits.
+//
+// Each block gets its OWN 5x5 vertex block rather than sharing posts with its
+// neighbours. That costs 16*16*25 = 6400 posts against 4225 shared (+51%) and
+// buys the thing that matters: the texture tiles once across each block, so a
+// shared post would need two different UVs. Same trade the Fallout path makes
+// for its quadrants, for the same reason.
+void appendMorrowindTerrainCell(
+    ImportedSceneMesh& terrainMesh,
+    const odai::importer::fnv::FalloutCellRecord& cell,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandTexture,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandTextureExact
+) {
+    using odai::importer::fnv::kLandPostSpacing;
+    using odai::importer::fnv::kMorrowindTextureBlockQuads;
+    using odai::importer::fnv::kMorrowindTextureGridSize;
+    const odai::importer::fnv::FalloutLandRecord& land = *cell.land;
+    const int gridSize = land.gridSize;
+    const float cellWorldSize = land.cellWorldSize();
+    const float cellOriginX = static_cast<float>(cell.gridX) * cellWorldSize;
+    const float cellOriginY = static_cast<float>(cell.gridZ) * cellWorldSize;
+
+    // Group blocks by the texture they resolve to, so one part covers every
+    // block sharing a texture rather than one part per block (256 draws a cell).
+    std::unordered_map<std::uint32_t, std::vector<int>> blocksByTexture;
+    for (int block = 0; block < kMorrowindTextureGridSize * kMorrowindTextureGridSize; ++block) {
+        std::uint32_t textureIndex = kNoTextureIndex;
+        if (static_cast<std::size_t>(block) < land.morrowindTextureGrid.size()) {
+            const std::uint16_t stored = land.morrowindTextureGrid[static_cast<std::size_t>(block)];
+            // Stored value is the LTEX index PLUS ONE; 0 means the worldspace
+            // default, which this importer serves from the fallback texture.
+            if (stored != 0u) {
+                textureIndex = resolveLandTextureExact(stored);
+            }
+        }
+        if (textureIndex == kNoTextureIndex) {
+            textureIndex = resolveLandTexture(0u);
+        }
+        blocksByTexture[textureIndex].push_back(block);
+    }
+
+    for (const auto& [textureIndex, blocks] : blocksByTexture) {
+        const std::uint32_t firstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
+        for (const int block : blocks) {
+            const int blockRow = block / kMorrowindTextureGridSize;
+            const int blockCol = block % kMorrowindTextureGridSize;
+            const int postRow0 = blockRow * kMorrowindTextureBlockQuads;
+            const int postCol0 = blockCol * kMorrowindTextureBlockQuads;
+            const std::uint32_t baseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
+            for (int row = 0; row <= kMorrowindTextureBlockQuads; ++row) {
+                for (int col = 0; col <= kMorrowindTextureBlockQuads; ++col) {
+                    const int postRow = std::min(postRow0 + row, gridSize - 1);
+                    const int postCol = std::min(postCol0 + col, gridSize - 1);
+                    const int postIndex = (postRow * gridSize) + postCol;
+                    const float bethesdaX = cellOriginX + (static_cast<float>(postCol) * kLandPostSpacing);
+                    const float bethesdaY = cellOriginY + (static_cast<float>(postRow) * kLandPostSpacing);
+                    const float bethesdaZ =
+                        land.hasHeights ? land.heights[static_cast<std::size_t>(postIndex)] : 0.0f;
+                    const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+
+                    ImportedSceneVertex vertex{};
+                    vertex.position[0] = world.x;
+                    vertex.position[1] = world.y;
+                    vertex.position[2] = world.z;
+                    // One full tile of the texture across the block.
+                    vertex.uv[0] = static_cast<float>(col) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    vertex.uv[1] = static_cast<float>(row) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    if (land.hasNormals) {
+                        const Vec3 normal = bethesdaToEngine(
+                            land.normals[static_cast<std::size_t>(postIndex) * 3u],
+                            land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 1u],
+                            land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 2u]);
+                        vertex.normal[0] = normal.x;
+                        vertex.normal[1] = normal.y;
+                        vertex.normal[2] = normal.z;
+                    } else {
+                        vertex.normal[1] = 1.0f;
+                    }
+                    // VCLR is Morrowind's baked lighting, and it is doing more
+                    // work here than VCLR does in Fallout: this is a game with
+                    // no dynamic terrain shadowing, so the shading under trees
+                    // and against cliffs lives entirely in these bytes.
+                    if (land.hasColors) {
+                        vertex.color[0] = land.colors[static_cast<std::size_t>(postIndex) * 3u];
+                        vertex.color[1] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 1u];
+                        vertex.color[2] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 2u];
+                    }
+                    terrainMesh.vertices.push_back(vertex);
+                }
+            }
+            constexpr int kStride = kMorrowindTextureBlockQuads + 1;
+            for (int row = 0; row < kMorrowindTextureBlockQuads; ++row) {
+                for (int col = 0; col < kMorrowindTextureBlockQuads; ++col) {
+                    const std::uint32_t i00 =
+                        baseVertex + static_cast<std::uint32_t>((row * kStride) + col);
+                    const std::uint32_t i10 = i00 + 1u;
+                    const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(kStride);
+                    const std::uint32_t i11 = i01 + 1u;
+                    // Same winding as the Fallout path, and for the same reason:
+                    // bethesdaToEngine negates Y, which flips the quad's sense.
+                    terrainMesh.indices.push_back(i00);
+                    terrainMesh.indices.push_back(i11);
+                    terrainMesh.indices.push_back(i01);
+                    terrainMesh.indices.push_back(i00);
+                    terrainMesh.indices.push_back(i10);
+                    terrainMesh.indices.push_back(i11);
+                }
+            }
+        }
+        const std::uint32_t indexCount =
+            static_cast<std::uint32_t>(terrainMesh.indices.size()) - firstIndex;
+        if (indexCount != 0u) {
+            terrainMesh.parts.push_back(
+                ImportedSceneMeshPart{firstIndex, indexCount, textureIndex, false});
+        }
+    }
+}
+
 void appendTerrainCell(
     ImportedSceneMesh& terrainMesh,
     const odai::importer::fnv::FalloutCellRecord& cell,
@@ -201,6 +325,10 @@ void appendTerrainCell(
     std::size_t& outDroppedLayerCount
 ) {
     if (cell.land == nullptr) {
+        return;
+    }
+    if (cell.land->gridSize != odai::importer::fnv::kLandGridSize) {
+        appendMorrowindTerrainCell(terrainMesh, cell, resolveLandTexture, resolveLandTextureExact);
         return;
     }
     const odai::importer::fnv::FalloutLandRecord& land = *cell.land;
@@ -521,6 +649,10 @@ bool buildFalloutWorldTables(
         if (!entry.recordType.empty()) {
             outTables.staticRecordTypes.emplace(entry.formId, entry.recordType);
         }
+        if (!entry.editorId.empty()) {
+            outTables.baseFormIdsByEditorId.emplace(
+                toLowerAsciiCopy(entry.editorId), entry.formId);
+        }
     }
     for (const FalloutLightRecord& entry : data.lights) {
         outTables.lightsByFormId.emplace(entry.formId, entry);
@@ -815,7 +947,22 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
     // model names, per-model untextured lists) are not carried here: they are
     // reporting for a batch cook, not something a streaming build can act on.
     // The counters that matter are in CellBuildStats.
-    for (const auto& ref : cell.references) {
+    for (const auto& rawRef : cell.references) {
+        // Morrowind names its base by string, so the formID a reference carries
+        // is the one this builder's own scan handed out. Resolved here, once,
+        // rather than threaded through every lookup below -- everything after
+        // this point works in formIDs whichever game the cell came from.
+        FalloutPlacedReference resolvedRef;
+        const FalloutPlacedReference* refPtr = &rawRef;
+        if (rawRef.baseFormId == 0u && !rawRef.baseEditorId.empty()) {
+            resolvedRef = rawRef;
+            const auto nameIt =
+                m_tables.baseFormIdsByEditorId.find(toLowerAsciiCopy(rawRef.baseEditorId));
+            resolvedRef.baseFormId =
+                (nameIt == m_tables.baseFormIdsByEditorId.end()) ? 0u : nameIt->second;
+            refPtr = &resolvedRef;
+        }
+        const FalloutPlacedReference& ref = *refPtr;
             // Lights first, and deliberately ahead of the m_failedStatics gate:
             // only 29 of 501 LIGH records carry a MODL, so the other 472 have no
             // model path, land in m_failedStatics on first sight, and would be

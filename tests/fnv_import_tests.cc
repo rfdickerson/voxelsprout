@@ -856,9 +856,11 @@ void testCellWaterPatch() {
     const auto giveFlatLand = [](FalloutCellRecord& cell, float height) {
         cell.land = std::make_unique<FalloutLandRecord>();
         cell.land->hasHeights = true;
-        for (float& post : cell.land->heights) {
-            post = height;
-        }
+        // Sized explicitly: the height array is a vector now, so "hasHeights
+        // with an empty array" is a shape a fixture can build and the readers
+        // cannot survive -- min_element over an empty range dereferences end().
+        cell.land->heights.assign(
+            static_cast<std::size_t>(cell.land->vertexCount()), height);
     };
 
     // No LAND at all is open ocean, not a dry cell. Tamriel (0,0) is exactly
@@ -1453,10 +1455,8 @@ void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmP
 
         if (streamed.land != nullptr && expected->land != nullptr) {
             expectTrue(
-                std::memcmp(
-                    streamed.land->heights, expected->land->heights,
-                    sizeof(streamed.land->heights)) == 0,
-                "streamed LAND heights are byte-identical to the full extraction");
+                streamed.land->heights == expected->land->heights,
+                "streamed LAND heights are identical to the full extraction");
             expectTrue(
                 streamed.land->textureLayers.size() == expected->land->textureLayers.size(),
                 "streamed LAND carries the same ATXT/VTXT layers");
