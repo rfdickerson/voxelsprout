@@ -2446,6 +2446,28 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             nodeFields[blockIndex].translation, nodeFields[blockIndex].rotation, nodeFields[blockIndex].scale);
         const Mat4 worldTransform = multiply(parentTransform, localTransform);
 
+        // COLLISION GEOMETRY IS REAL GEOMETRY, and it must not be drawn.
+        //
+        // Morrowind has no Havok: a mesh's collision hull is an ordinary
+        // NiTriShape subtree parented to a node whose TYPE NAME is
+        // RootCollisionNode, and the type name is the entire semantics -- on
+        // disk the block is a bare NiNode with no extra fields. Drawn, those
+        // hulls are untextured, UV-less slabs sitting a few units outside the
+        // wall they approximate: they read as flat green panels over the
+        // building, as faces missing where the hull occludes the real wall, and
+        // as z-fighting where the two are coplanar. All three of those were
+        // visible on Seyda Neen's shacks.
+        //
+        // ex_de_shack_01.nif is the worked example: 39 shapes, of which the
+        // first three have uvs 0 and no texture. Those three are the hull.
+        //
+        // Skipped by not descending, rather than by dropping the shapes: the
+        // subtree contributes nothing else, and stopping here also skips its
+        // transform and property accumulation.
+        if (blockIndex < header.blockTypeIndex.size() &&
+            header.blockTypeNames[header.blockTypeIndex[blockIndex]] == "RootCollisionNode") {
+            continue;
+        }
         if (isNiNode[blockIndex]) {
             // What this node contributes to everything below it: whatever it
             // inherited, plus its own properties.

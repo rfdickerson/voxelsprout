@@ -99,7 +99,12 @@ std::string cellAxisToken(std::int32_t value) {
 // after -- so this bump is not repairing anything there. Said explicitly
 // because the obvious reading of "a shared prefix was wrong" is that every
 // generation was affected, and that is not what the numbers say.
-constexpr int kCellBuildVersion = 15;
+// 16: RootCollisionNode subtrees are no longer drawn. Morrowind has no Havok --
+// a mesh's collision hull is ordinary geometry under a node whose TYPE NAME is
+// the whole semantics -- and drawing it put untextured, UV-less slabs a few
+// units outside every wall. Across the archive that is 7067 shapes, and it took
+// shapes with no diffuse from 7217 to 150.
+constexpr int kCellBuildVersion = 16;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
