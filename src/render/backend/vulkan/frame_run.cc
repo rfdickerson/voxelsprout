@@ -803,7 +803,23 @@ void RendererBackend::renderFrame(
     // casts almost nothing to begin with, so the A/B that matters is a LOW sun
     // (ODAI_FNV_HOUR=17.5); at hour 16 the same change moves the shadowed
     // fraction of the frame by 0.8 points and looks like it did nothing.
-    float shadowDistanceLimit = renderingImportedScene ? 24000.0f : farPlane;
+    // 50000 is the imported-scene far plane, so this cap is now effectively
+    // "shadow everything the frustum can see" rather than a budget.
+    //
+    // It was 24000, which still left the far third of a high-camera shot
+    // unshadowed: from 7000 units up the distant peaks and the whole horizon
+    // ridge came through pure white while the near and mid ground had full
+    // shadow detail. Going to the far plane is cheaper than it sounds because
+    // the near cascades are almost fully logarithmic now -- cascade 0 widens
+    // from 517 units to 886, which is 0.66 -> 1.13 world units per texel and
+    // measured 1.06/255 mean difference on a ground-level frame, i.e. not
+    // visible. Cascade 3 lands at 64 units per texel, coarse but present, and
+    // terrain 30km out subtends little enough that a soft blob is the right
+    // answer anyway.
+    //
+    // Cost, interleaved A/B over the same moving camera: shadow pass
+    // 1.03 -> 1.77 ms, with frame time unchanged inside run-to-run noise.
+    float shadowDistanceLimit = renderingImportedScene ? 50000.0f : farPlane;
     if (const char* shadowDistanceEnv = std::getenv("ODAI_SHADOW_DISTANCE")) {
         const float requested = static_cast<float>(std::atof(shadowDistanceEnv));
         if (requested > 1.0f) {
