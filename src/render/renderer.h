@@ -277,6 +277,7 @@ public:
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
                          float maxRadiusPixels, float nearBlurScale = 0.0f);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,

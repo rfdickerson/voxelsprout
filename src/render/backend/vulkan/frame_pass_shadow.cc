@@ -76,6 +76,198 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
 
     writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
     coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan.shadow, "shadow");
+    if (inputs.renderInteriorPointShadows &&
+        inputs.interiorPointShadowLightCount > 0 &&
+        m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
+        importedVertexBuffer != VK_NULL_HANDLE &&
+        importedIndexBuffer != VK_NULL_HANDLE &&
+        !importedMeshDraws.empty()) {
+        beginDebugLabel(commandBuffer, "Pass: Interior Point Shadow Atlas", 0.34f, 0.20f, 0.16f, 1.0f);
+        transitionImageLayout(
+            commandBuffer,
+            m_shadowDepthImage,
+            m_interiorPointShadowAtlasValid
+                ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            m_interiorPointShadowAtlasValid
+                ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                : VK_PIPELINE_STAGE_2_NONE,
+            m_interiorPointShadowAtlasValid
+                ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            0,
+            1);
+
+        const bool useCompactShadowStream =
+            m_importedStaticShadowCompactPipeline != VK_NULL_HANDLE &&
+            inputs.importedShadowVertexBuffer != VK_NULL_HANDLE;
+        const VkPipeline oneSidedPipeline =
+            useCompactShadowStream ? m_importedStaticShadowCompactPipeline
+                                   : m_importedStaticShadowPipeline;
+        const VkPipeline twoSidedPipeline =
+            useCompactShadowStream ? m_importedStaticShadowCompactPipelineTwoSided
+                                   : m_importedStaticShadowPipelineTwoSided;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, oneSidedPipeline);
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        const VkBuffer pointShadowVertexBuffers[1] = {
+            useCompactShadowStream ? inputs.importedShadowVertexBuffer : importedVertexBuffer};
+        const VkDeviceSize pointShadowVertexOffsets[1] = {0};
+        vkCmdBindVertexBuffers(
+            commandBuffer, 0, 1, pointShadowVertexBuffers, pointShadowVertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        const auto includeInteriorCaster = [&](std::size_t) {
+            return m_debugShowImportedStatics;
+        };
+        VkBuffer indirectBuffer = VK_NULL_HANDLE;
+        VkDeviceSize indirectBase = 0;
+        const bool useIndirect = m_supportsMultiDrawIndirect &&
+            buildImportedIndirectBatches(
+                importedMeshDraws, includeInteriorCaster, indirectBuffer, indirectBase);
+        const std::uint32_t shadowLightCount = std::min<std::uint32_t>(
+            inputs.interiorPointShadowLightCount, kInteriorPointShadowLightCount);
+        VkClearValue depthClear{};
+        depthClear.depthStencil.depth = 0.0f;
+        vkCmdSetDepthBias(
+            commandBuffer,
+            -(m_shadowDebugSettings.casterConstantBiasBase * kImportedShadowConstantBiasScale),
+            0.0f,
+            -(m_shadowDebugSettings.casterSlopeBiasBase * kImportedShadowSlopeBiasScale));
+
+        for (std::uint32_t slot = 0; slot < shadowLightCount; ++slot) {
+            const std::uint32_t faceSize = kInteriorPointShadowFaceSize;
+            const std::uint32_t cubeX =
+                (slot % kInteriorPointShadowCubesPerRow) * (3u * faceSize);
+            const std::uint32_t cubeY =
+                (slot / kInteriorPointShadowCubesPerRow) * (2u * faceSize);
+            for (std::uint32_t face = 0; face < kInteriorPointShadowFaceCount; ++face) {
+                const std::uint32_t faceX =
+                    cubeX + ((face % 3u) * faceSize);
+                const std::uint32_t faceY =
+                    cubeY + ((face / 3u) * faceSize);
+                VkRect2D faceRect{};
+                faceRect.offset = {
+                    static_cast<std::int32_t>(faceX), static_cast<std::int32_t>(faceY)};
+                faceRect.extent = {
+                    faceSize, faceSize};
+                VkViewport faceViewport{};
+                faceViewport.x = static_cast<float>(faceX);
+                faceViewport.y = static_cast<float>(faceY);
+                faceViewport.width = static_cast<float>(faceSize);
+                faceViewport.height = static_cast<float>(faceSize);
+                faceViewport.minDepth = 0.0f;
+                faceViewport.maxDepth = 1.0f;
+
+                VkRenderingAttachmentInfo depthAttachment{};
+                depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                depthAttachment.imageView = m_shadowDepthImageView;
+                depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+                depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                depthAttachment.clearValue = depthClear;
+                VkRenderingInfo renderingInfo{};
+                renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+                renderingInfo.renderArea = faceRect;
+                renderingInfo.layerCount = 1;
+                renderingInfo.pDepthAttachment = &depthAttachment;
+                vkCmdBeginRendering(commandBuffer, &renderingInfo);
+                vkCmdSetViewport(commandBuffer, 0, 1, &faceViewport);
+                vkCmdSetScissor(commandBuffer, 0, 1, &faceRect);
+
+                ChunkPushConstants pointPush{};
+                pointPush.cascadeData[0] = static_cast<float>(
+                    (slot * kInteriorPointShadowFaceCount) + face);
+                pointPush.cascadeData[1] = 1.0f;
+                pointPush.materialParams[0] = 0.5f;
+                int lastThreshold = -1;
+                const auto pushPointThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastThreshold) {
+                        return;
+                    }
+                    lastThreshold = static_cast<int>(threshold);
+                    pointPush.materialParams[0] = static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &pointPush);
+                };
+                if (useIndirect) {
+                    VkPipeline boundPipeline = oneSidedPipeline;
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, boundPipeline);
+                    for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        const VkPipeline wantedPipeline =
+                            (batch.twoSided && twoSidedPipeline != VK_NULL_HANDLE)
+                                ? twoSidedPipeline
+                                : oneSidedPipeline;
+                        if (wantedPipeline != boundPipeline) {
+                            vkCmdBindPipeline(
+                                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                            boundPipeline = wantedPipeline;
+                        }
+                        pushPointThreshold(batch.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexedIndirect(
+                            commandBuffer,
+                            indirectBuffer,
+                            indirectBase + batch.bufferOffset,
+                            batch.drawCount,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                } else {
+                    for (const ImportedMeshDraw& draw : importedMeshDraws) {
+                        if (draw.blended || !m_debugShowImportedStatics) {
+                            continue;
+                        }
+                        pushPointThreshold(draw.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexed(
+                            commandBuffer,
+                            draw.indexCount,
+                            1,
+                            draw.firstIndex,
+                            draw.vertexOffset,
+                            0);
+                    }
+                }
+                vkCmdEndRendering(commandBuffer);
+            }
+        }
+        transitionImageLayout(
+            commandBuffer,
+            m_shadowDepthImage,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            0,
+            1);
+        vkCmdSetDepthBias(commandBuffer, 0.0f, 0.0f, 0.0f);
+        m_interiorPointShadowAtlasValid = true;
+        m_shadowRenderedValid = {};
+        VOX_LOGI("render") << "interior point shadow atlas rebuilt: lights="
+                           << shadowLightCount << ", faces="
+                           << (shadowLightCount * kInteriorPointShadowFaceCount)
+                           << ", faceSize=" << kInteriorPointShadowFaceSize;
+        endDebugLabel(commandBuffer);
+        writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
+        return;
+    }
+    if (inputs.skipDirectionalShadows) {
+        writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
+        return;
+    }
     beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(

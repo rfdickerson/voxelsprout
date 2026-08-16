@@ -76,7 +76,7 @@ constexpr uint32_t kAutoExposureHistogramBins = 64u;
 bool RendererBackend::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(14);
+        bindings.reserve(15);
 
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
@@ -204,6 +204,23 @@ bool RendererBackend::createDescriptorResources() {
         lightClusterBinding.descriptorCount = 1;
         lightClusterBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings.push_back(lightClusterBinding);
+
+        // Full-resolution 64-bit per-pixel mask produced by the contact-shadow
+        // resolve compute pass. It is a buffer so the main shader pays one
+        // coherent load and no sampler state per fragment.
+        VkDescriptorSetLayoutBinding contactShadowBinding{};
+        contactShadowBinding.binding = 16;
+        contactShadowBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        contactShadowBinding.descriptorCount = 1;
+        contactShadowBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(contactShadowBinding);
+
+        VkDescriptorSetLayoutBinding screenSpaceGiBinding{};
+        screenSpaceGiBinding.binding = 17;
+        screenSpaceGiBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        screenSpaceGiBinding.descriptorCount = 1;
+        screenSpaceGiBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(screenSpaceGiBinding);
 
         VkDescriptorSetLayoutBinding materialTableBinding{};
         materialTableBinding.binding = 13;
@@ -512,6 +529,35 @@ void RendererBackend::updateFrameDescriptorSets(
             writeDescriptorBufferStorage(
                 m_mainBufferSet, region, mainOffset(15), clusterAddress, m_lightClusterBufferSize);
         }
+        const VkBuffer contactMaskBuffer =
+            m_bufferAllocator.getBuffer(m_contactShadowFullMaskBufferHandle);
+        if (contactMaskBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = contactMaskBuffer;
+            writeDescriptorBufferStorage(
+                m_mainBufferSet, region, mainOffset(16),
+                vkGetBufferDeviceAddress(m_device, &addressInfo),
+                m_contactShadowFullMaskBufferSize);
+        }
+        const std::uint32_t screenSpaceGiCurrent = m_screenSpaceGiHistoryIndex ^ 1u;
+        BufferHandle screenSpaceGiHandle =
+            m_screenSpaceGiRecordBufferHandles[screenSpaceGiCurrent];
+        VkDeviceSize screenSpaceGiSize = m_screenSpaceGiRecordBufferSize;
+        if (screenSpaceGiHandle == kInvalidBufferHandle) {
+            screenSpaceGiHandle = m_contactShadowHalfBufferHandle;
+            screenSpaceGiSize = m_contactShadowHalfBufferSize;
+        }
+        const VkBuffer screenSpaceGiBuffer =
+            m_bufferAllocator.getBuffer(screenSpaceGiHandle);
+        if (screenSpaceGiBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = screenSpaceGiBuffer;
+            writeDescriptorBufferStorage(
+                m_mainBufferSet, region, mainOffset(17),
+                vkGetBufferDeviceAddress(m_device, &addressInfo), screenSpaceGiSize);
+        }
     }
 
     if (m_lightClusterAvailable && m_lightClusterBufferSet.valid()) {
@@ -530,6 +576,73 @@ void RendererBackend::updateFrameDescriptorSets(
                 m_lightClusterBufferSet, region, descriptorBufferBindingOffset(layout, 1),
                 clusterAddress, m_lightClusterBufferSize);
         }
+    }
+
+    if (m_contactShadowAvailable && m_contactShadowBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_contactShadowDescriptorSetLayout;
+        const auto offset = [&](uint32_t binding) {
+            return descriptorBufferBindingOffset(layout, binding);
+        };
+        writeDescriptorBufferUniform(
+            m_contactShadowBufferSet, region, offset(0),
+            cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(
+            m_contactShadowBufferSet, region, offset(1), 0u,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler,
+            normalDepthImageInfo.imageLayout);
+        const auto storage = [&](uint32_t binding, BufferHandle handle, VkDeviceSize size) {
+            const VkBuffer buffer = m_bufferAllocator.getBuffer(handle);
+            if (buffer == VK_NULL_HANDLE) {
+                return;
+            }
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = buffer;
+            writeDescriptorBufferStorage(
+                m_contactShadowBufferSet, region, offset(binding),
+                vkGetBufferDeviceAddress(m_device, &addressInfo), size);
+        };
+        storage(2u, m_lightClusterBufferHandle, m_lightClusterBufferSize);
+        storage(3u, m_contactShadowDepthBufferHandle, m_contactShadowDepthBufferSize);
+        storage(4u, m_contactShadowHalfBufferHandle, m_contactShadowHalfBufferSize);
+        storage(5u, m_contactShadowFullMaskBufferHandle, m_contactShadowFullMaskBufferSize);
+    }
+
+    if (m_screenSpaceGiAvailable && m_screenSpaceGiBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_screenSpaceGiDescriptorSetLayout;
+        const auto offset = [&](uint32_t binding) {
+            return descriptorBufferBindingOffset(layout, binding);
+        };
+        writeDescriptorBufferUniform(
+            m_screenSpaceGiBufferSet, region, offset(0),
+            cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(
+            m_screenSpaceGiBufferSet, region, offset(1), 0u,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler,
+            normalDepthImageInfo.imageLayout);
+        writeDescriptorBufferCombinedImageSampler(
+            m_screenSpaceGiBufferSet, region, offset(2), 0u,
+            m_taaImageViews[m_taaHistoryIndex], m_ssaoSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        const auto storage = [&](uint32_t binding, BufferHandle handle, VkDeviceSize size) {
+            const VkBuffer buffer = m_bufferAllocator.getBuffer(handle);
+            if (buffer == VK_NULL_HANDLE) {
+                return;
+            }
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = buffer;
+            writeDescriptorBufferStorage(
+                m_screenSpaceGiBufferSet, region, offset(binding),
+                vkGetBufferDeviceAddress(m_device, &addressInfo), size);
+        };
+        storage(3u, m_contactShadowDepthBufferHandle, m_contactShadowDepthBufferSize);
+        storage(4u, m_screenSpaceGiRecordBufferHandles[m_screenSpaceGiHistoryIndex],
+                m_screenSpaceGiRecordBufferSize);
+        storage(5u, m_screenSpaceGiRecordBufferHandles[m_screenSpaceGiHistoryIndex ^ 1u],
+                m_screenSpaceGiRecordBufferSize);
     }
 
     if (m_voxelGiComputeAvailable && m_voxelGiBufferSet.valid()) {

@@ -511,6 +511,7 @@ void RendererBackend::clearGpuScene() {
     m_debugImportedGiTriangleCount = 0;
     m_debugImportedGiVoxelizedCellCount = 0;
     m_importedLocalLights.clear();
+    m_importedParticleEmitters.clear();
     m_debugImportedLightSelectedCount = 0;
     m_importedIndexCount = 0;
     m_importedTerrainDrawCount = 0;
@@ -635,6 +636,7 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.textures = scene.renderCache.textures;
     compatibilityScene.waterPatches = scene.renderCache.waterPatches;
     compatibilityScene.lights = scene.renderCache.lights;
+    compatibilityScene.particleEmitters = scene.renderCache.particleEmitters;
     compatibilityScene.packedVertices = scene.renderCache.packedVertices;
     compatibilityScene.packedIndices = scene.renderCache.packedIndices;
     compatibilityScene.packedDraws = scene.renderCache.packedDraws;
@@ -644,6 +646,8 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.sourceLandscapeCellCount = scene.renderCache.terrainDrawCount;
     compatibilityScene.sourceWaterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
     compatibilityScene.sourceLightCount = static_cast<std::uint32_t>(scene.lights.size());
+    compatibilityScene.sourceParticleEmitterCount =
+        static_cast<std::uint32_t>(scene.particleEmitters.size());
     compatibilityScene.boundsMin[0] = scene.sceneBounds.min[0];
     compatibilityScene.boundsMin[1] = scene.sceneBounds.min[1];
     compatibilityScene.boundsMin[2] = scene.sceneBounds.min[2];
@@ -1087,6 +1091,8 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     // rest of the session -- and an interior cell carries a lot of them.
     chunk.lights.clear();
     chunk.lights.shrink_to_fit();
+    chunk.particleEmitters.clear();
+    chunk.particleEmitters.shrink_to_fit();
     chunk.waterPatches.clear();
     chunk.waterPatches.shrink_to_fit();
     chunk.vertexCount = 0;
@@ -1110,6 +1116,7 @@ void RendererBackend::rebuildImportedDrawTables() {
     // Rebuilt, not appended to, so evicting a chunk drops its lights. This runs
     // on both add and remove, which is what makes that true in both directions.
     m_importedLocalLights.clear();
+    m_importedParticleEmitters.clear();
     std::uint32_t terrainDrawTotal = 0;
     std::uint32_t staticDrawTotal = 0;
     for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
@@ -1128,6 +1135,9 @@ void RendererBackend::rebuildImportedDrawTables() {
         }
         m_importedLocalLights.insert(
             m_importedLocalLights.end(), chunk.lights.begin(), chunk.lights.end());
+        m_importedParticleEmitters.insert(
+            m_importedParticleEmitters.end(), chunk.particleEmitters.begin(),
+            chunk.particleEmitters.end());
         terrainDrawTotal += chunk.terrainDrawCount;
         staticDrawTotal +=
             static_cast<std::uint32_t>(chunk.draws.size()) - chunk.terrainDrawCount;
@@ -2144,6 +2154,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         light.color[2] = std::clamp(sceneLight.color[2], 0.0f, 8.0f);
         light.radius = sceneLight.radius;
         light.intensity = sceneLight.intensity;
+        light.flags = sceneLight.flags;
         chunkLights.push_back(light);
     }
 
@@ -2741,6 +2752,7 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.textureSlots = importedTextureSlots;
     textureSlotGuard.commit();
     chunk.lights = std::move(chunkLights);
+    chunk.particleEmitters = uploadScene.particleEmitters;
     chunk.waterPatches = uploadScene.waterPatches;
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
@@ -2765,6 +2777,10 @@ bool RendererBackend::uploadImportedSceneInternal(
         m_importedSceneChunks.push_back(std::move(chunk));
     }
     rebuildImportedDrawTables();
+    // Point-light shadow maps cache static interior geometry. Any chunk upload
+    // changes the caster set and must force the six faces to be regenerated.
+    m_interiorPointShadowAtlasValid = false;
+    m_interiorPointShadowLightSourceCount = 0;
     drawBuildMs = phaseTimer.elapsedMs();
     phaseTimer.restart();
 

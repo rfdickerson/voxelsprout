@@ -385,6 +385,10 @@ void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bo
     m_backend->setImportedSceneDebugState(showTerrain, showStatics, showTextures, flatShading, waterDebug);
 }
 
+void Renderer::setImportedInteriorLighting(const ImportedInteriorLighting& lighting) {
+    m_backend->setImportedInteriorLighting(lighting);
+}
+
 void Renderer::setImportedSceneInteriorMode(bool enabled) {
     m_backend->setImportedSceneInteriorMode(enabled);
 }

@@ -18,11 +18,11 @@
 //    counts spend the same work on both and the distant one is entirely wasted --
 //    it is sampling inside its own texel.
 //
-//  * SPATIOTEMPORAL BLUE NOISE. A Hilbert-curve index into an R2 sequence,
-//    advanced per frame. Blue noise puts the sampling error at high spatial
-//    frequency where the denoiser removes it; the temporal advance means the
-//    error is also decorrelated frame to frame, so TAA integrates it away rather
-//    than locking in a static dither pattern.
+//  * PIXEL-STABLE BLUE NOISE. A Hilbert-curve index into an R2 sequence puts the
+//    sampling error at high spatial frequency where the denoiser removes it.
+//    The production caller holds the temporal index at zero: AO has no dedicated
+//    reprojection history, and rotating this sparse horizon pattern each frame
+//    visibly flickers on rugs. ODAI_XEGTAO_TEMPORAL opts the old experiment in.
 //
 //  * POINT SAMPLING. The pyramid is read with a point sampler on purpose.
 //    Linear filtering blends neighbouring depths on the same MIP, which invents

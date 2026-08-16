@@ -559,6 +559,7 @@ public:
         m_skyDebugSettings.depthOfFieldNearBlurScale = nearBlurScale;
     }
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,
@@ -587,6 +588,10 @@ private:
     // 4096 atlas. main raised both together; taking only its atlas size here
     // would have left the image twice the size the rects address.
     static constexpr uint32_t kShadowAtlasSize = 4096;
+    // Mirrors renderer_shared.h's kInteriorPointShadowLightCount. This header
+    // deliberately does not include renderer_shared.h (several translation
+    // units include that file inside the render namespace).
+    static constexpr uint32_t kInteriorPointShadowLightCapacity = 35;
     bool m_shadowAtlasDumped = false;
     // Let the world stream in before dumping; an atlas from frame 1 is empty
     // for reasons that have nothing to do with the bug being chased.
@@ -649,7 +654,15 @@ private:
     static constexpr uint32_t kGpuTimestampQueryVelocityEnd = 41;
     static constexpr uint32_t kGpuTimestampQueryTaaStart = 42;
     static constexpr uint32_t kGpuTimestampQueryTaaEnd = 43;
-    static constexpr uint32_t kGpuTimestampQueryCount = 44;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowTraceStart = 44;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowTraceEnd = 45;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowResolveStart = 46;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowResolveEnd = 47;
+    static constexpr uint32_t kGpuTimestampQueryScreenDepthStart = 48;
+    static constexpr uint32_t kGpuTimestampQueryScreenDepthEnd = 49;
+    static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiStart = 50;
+    static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiEnd = 51;
+    static constexpr uint32_t kGpuTimestampQueryCount = 52;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -706,6 +719,12 @@ private:
     bool createLightClusterResources();
     bool createLightClusterBuffer(VkExtent2D renderExtent);
     void destroyLightClusterResources();
+    bool createContactShadowResources();
+    bool createContactShadowBuffers(VkExtent2D renderExtent);
+    void destroyContactShadowResources();
+    bool createScreenSpaceGiResources();
+    bool createScreenSpaceGiBuffers(VkExtent2D renderExtent);
+    void destroyScreenSpaceGiResources();
     void computeLightClusterSliceParams(
         float nearPlane, float farPlane, float& outScale, float& outBias) const;
     static uint32_t lightClusterGridX(VkExtent2D extent);
@@ -720,6 +739,7 @@ private:
     bool createTransferResources();
     bool createPipeBuffers();
     bool createPipePipeline();
+    bool createImportedFireParticlePipeline();
     bool createAoPipelines();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
@@ -1326,6 +1346,7 @@ private:
         float color[3] = {1.0f, 1.0f, 1.0f};
         float radius = 0.0f;
         float intensity = 1.0f;
+        std::uint32_t flags = 0u;
     };
 
     struct ImportedSceneChunk {
@@ -1347,6 +1368,7 @@ private:
         // ever loaded, because removeImportedSceneChunk had no way to find them
         // again.
         std::vector<ImportedLocalLight> lights;
+        std::vector<odai::importer::ImportedSceneParticleEmitter> particleEmitters;
         // This chunk's water surfaces, owned for the same reason the lights
         // are: the single water buffer pair is rebuilt from the live chunks in
         // rebuildImportedWaterBuffers(), so evicting a coastal cell takes its
@@ -1413,6 +1435,13 @@ private:
     };
 
     struct ShadowPassInputs {
+        // Enter the frame-graph stage and write a zero-length timestamp pair,
+        // but do not transition, clear, or draw the directional atlas.
+        bool skipDirectionalShadows = false;
+        // Interior point shadows occupy the same atlas while cascades are off.
+        // `render` is false when the cached six-face maps still match.
+        bool renderInteriorPointShadows = false;
+        std::uint32_t interiorPointShadowLightCount = 0;
         const FrameChunkDrawData* frameChunkDrawData = nullptr;
         const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
         const std::optional<FrameArenaSlice>* shadowChunkInstanceSliceOpt = nullptr;
@@ -1568,6 +1597,9 @@ private:
     // Clustered light culling; declared here rather than beside its create/
     // destroy siblings because FrameExecutionContext is not defined until now.
     void recordLightClusterPass(const FrameExecutionContext& context);
+    void recordScreenSpaceDepthHierarchyPass(const FrameExecutionContext& context);
+    void recordContactShadowPass(const FrameExecutionContext& context);
+    void recordScreenSpaceGiPass(const FrameExecutionContext& context);
     // Uploads this frame's pending skinned-actor bone matrices (set via
     // setSkinnedActorPose) through the FrameArena. Must be called after
     // m_frameArena.beginFrame() for the current frame index and before
@@ -1762,7 +1794,8 @@ private:
     DescriptorBufferSet m_xegtaoPrefilterBufferSet{};
     DescriptorBufferSet m_xegtaoMainBufferSet{};
     DescriptorBufferSet m_xegtaoDenoiseBufferSet{};
-    // Advances once per frame; drives the temporal half of the blue noise.
+    // Advances only for the opt-in ODAI_XEGTAO_TEMPORAL diagnostic. Production
+    // AO uses a pixel-stable phase because it has no dedicated temporal history.
     std::uint32_t m_xegtaoTemporalIndex = 0;
 
     std::vector<VkImage> m_ssaoRawImages;
@@ -1780,6 +1813,9 @@ private:
     std::vector<VkImageView> m_sunShaftImageViews;
     std::vector<TransientImageHandle> m_sunShaftTransientHandles;
     std::vector<bool> m_sunShaftImageInitialized;
+    // True only after a shaft dispatch. A disabled interior clears stale
+    // content once, then leaves the already-black sampled image untouched.
+    std::vector<bool> m_sunShaftImageHasContent;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
 
@@ -1942,6 +1978,11 @@ private:
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
     bool m_shadowDepthInitialized = false;
+    bool m_interiorPointShadowAtlasValid = false;
+    std::uint64_t m_interiorPointShadowSignature = 0;
+    std::array<std::uint32_t, kInteriorPointShadowLightCapacity>
+        m_interiorPointShadowLightSourceIndices{};
+    std::uint32_t m_interiorPointShadowLightSourceCount = 0;
     // Cascade-interleave cache: the matrix each cascade's atlas tile was
     // actually rendered with, and whether that tile is reusable. Invalidated
     // whenever the caster set changes (chunk add/evict -> rebuild of the draw
@@ -2042,6 +2083,34 @@ private:
     // a frame with no local lights skips the dispatch entirely while leaving
     // the resources alive for the next one.
     bool m_lightClusterCullActive = false;
+    VkDescriptorSetLayout m_contactShadowDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_contactShadowBufferSet{};
+    VkPipelineLayout m_contactShadowPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_contactShadowDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline m_contactShadowTracePipeline = VK_NULL_HANDLE;
+    VkPipeline m_contactShadowResolvePipeline = VK_NULL_HANDLE;
+    BufferHandle m_contactShadowDepthBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_contactShadowHalfBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_contactShadowFullMaskBufferHandle = kInvalidBufferHandle;
+    VkDeviceSize m_contactShadowDepthBufferSize = 0;
+    VkDeviceSize m_contactShadowHalfBufferSize = 0;
+    VkDeviceSize m_contactShadowFullMaskBufferSize = 0;
+    VkExtent2D m_contactShadowHalfExtent{};
+    std::uint32_t m_contactShadowDepthMipCount = 0;
+    bool m_contactShadowAvailable = false;
+    bool m_contactShadowActive = false;
+    VkDescriptorSetLayout m_screenSpaceGiDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_screenSpaceGiBufferSet{};
+    VkPipelineLayout m_screenSpaceGiPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_screenSpaceGiPipeline = VK_NULL_HANDLE;
+    std::array<BufferHandle, 2> m_screenSpaceGiRecordBufferHandles{
+        kInvalidBufferHandle, kInvalidBufferHandle};
+    VkDeviceSize m_screenSpaceGiRecordBufferSize = 0;
+    VkExtent2D m_screenSpaceGiExtent{};
+    std::uint32_t m_screenSpaceGiHistoryIndex = 0u;
+    bool m_screenSpaceGiHistoryValid = false;
+    bool m_screenSpaceGiAvailable = false;
+    bool m_screenSpaceGiActive = false;
     VkDescriptorSetLayout m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
     DescriptorBufferSet m_sunShaftBufferSet{};
     VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;
@@ -2146,6 +2215,8 @@ private:
     VkPipeline& m_skyCloudPipeline = m_pipelineManager.skyCloudPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
+    VkPipeline& m_importedFireParticlePipeline =
+        m_pipelineManager.importedFireParticlePipeline;
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
@@ -2334,6 +2405,7 @@ private:
     std::array<std::uint32_t, kShadowCascadeCount> m_visibleImportedShadowTerrainDrawCounts{};
     std::vector<ImportedGiTriangle> m_importedGiTriangles;
     std::vector<ImportedLocalLight> m_importedLocalLights;
+    std::vector<odai::importer::ImportedSceneParticleEmitter> m_importedParticleEmitters;
     std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
     std::vector<RtImportedSceneRecord> m_rtImportedSceneRecords;
     std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
@@ -2473,6 +2545,7 @@ private:
     bool m_importedSceneBoundsValid = false;
     bool m_debugImportedWaterSolid = false;
     bool m_importedSceneInteriorMode = false;
+    ImportedInteriorLighting m_importedInteriorLighting{};
     bool m_debugImportedLightsEnabled = true;
     float m_debugImportedLightIntensity = 1.65f;
     float m_debugImportedLightRadiusScale = 3.0f;
@@ -2516,6 +2589,12 @@ private:
     float m_debugFrameTimeMs = 0.0f;
     float m_debugGpuFrameTimeMs = 0.0f;
     float m_debugGpuShadowTimeMs = 0.0f;
+    float m_debugGpuContactShadowTraceTimeMs = 0.0f;
+    float m_debugGpuContactShadowResolveTimeMs = 0.0f;
+    float m_debugGpuContactShadowP95Ms = 0.0f;
+    float m_debugGpuScreenDepthTimeMs = 0.0f;
+    float m_debugGpuScreenSpaceGiTimeMs = 0.0f;
+    float m_debugGpuScreenSpaceGiP95Ms = 0.0f;
     float m_debugGpuGiOccupancyTimeMs = 0.0f;
     float m_debugGpuGiSurfaceTimeMs = 0.0f;
     float m_debugGpuGiSurfaceCandidateTimeMs = 0.0f;
@@ -2573,6 +2652,8 @@ private:
     float m_debugCpuFrameEwmaMs = 0.0f;
     bool m_debugCpuFrameEwmaInitialized = false;
     odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuContactShadowTimingMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuScreenSpaceGiTimingMsHistory{};
     odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugPresentedFrameTimingMsHistory{};
     float m_debugFps = 0.0f;
     std::uint32_t m_debugLatePresentCount = 0;

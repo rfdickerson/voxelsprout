@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -615,6 +616,36 @@ bool isEffectOnlyModelPath(std::string_view modelPath) {
     return baseName.rfind("fx", 0) == 0;
 }
 
+bool isFireParticleEffectModelPath(std::string_view modelPath) {
+    if (!isEffectOnlyModelPath(modelPath)) {
+        return false;
+    }
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        if (c == '/') {
+            c = '\\';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    const bool fireNamed = lowered.find("fire") != std::string::npos ||
+        lowered.find("flame") != std::string::npos ||
+        lowered.find("ember") != std::string::npos;
+    if (!fireNamed) {
+        return false;
+    }
+    // Moving/gameplay effects need an owner, duration and collision semantics;
+    // a CELL reference alone cannot supply those. This pass is for the looping
+    // environmental fire NIFs used by hearths, braziers and campfires.
+    constexpr std::array<std::string_view, 7> kDynamicTokens = {
+        "firefly", "projectile", "fireball", "firebolt", "weapon",
+        "impact", "magic"
+    };
+    return std::none_of(kDynamicTokens.begin(), kDynamicTokens.end(), [&](std::string_view token) {
+        return lowered.find(token) != std::string::npos;
+    });
+}
+
 // THE SKY IS NOT WORLD GEOMETRY, AND SKYRIM PLACES IT AS IF IT WERE.
 //
 // Tamriel's persistent cell (0,0) holds 14643 references, and among them are
@@ -1163,6 +1194,62 @@ void CellSceneBuilder::addCellLight(
     ++m_stats.lightsPlaced;
 }
 
+void CellSceneBuilder::addCellFireEmitter(
+    const FalloutPlacedReference& ref, std::string_view modelPath) {
+    ImportedSceneParticleEmitter emitter{};
+    emitter.sourceId = "refr_" + formIdHex(ref.formId);
+    const Vec3 position = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
+    emitter.position[0] = position.x;
+    emitter.position[1] = position.y;
+    emitter.position[2] = position.z;
+    emitter.seed = ref.formId ^ (ref.baseFormId * 0x9e3779b9u);
+
+    std::string lowered(modelPath);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    const float placedScale = ref.scale > 0.0f ? ref.scale : 1.0f;
+    float presetScale = 1.0f;
+    if (lowered.find("large") != std::string::npos ||
+        lowered.find("heavy") != std::string::npos) {
+        presetScale = 1.55f;
+        emitter.particleCount = 72u;
+    } else if (lowered.find("small") != std::string::npos ||
+               lowered.find("sconce") != std::string::npos ||
+               lowered.find("candle") != std::string::npos) {
+        presetScale = 0.52f;
+        emitter.particleCount = 32u;
+    } else if (lowered.find("medium") != std::string::npos) {
+        presetScale = 0.82f;
+        emitter.particleCount = 48u;
+    }
+    const float effectScale = presetScale * placedScale;
+    emitter.spawnRadius *= effectScale;
+    // REFR scale expands the footprint of a fire but not each flame tongue.
+    // Scaling all three dimensions made a 3x hearth marker produce individual
+    // five-metre billboards. Keep lobe size and rise in a physically useful
+    // range while still allowing named large/small variants to read apart.
+    emitter.upwardSpeed *= std::sqrt(presetScale);
+    emitter.particleSize *= std::sqrt(presetScale);
+    if (lowered.find("_lite") != std::string::npos) {
+        emitter.intensity = 0.38f;
+        emitter.spawnRadius = 9.0f * placedScale;
+        emitter.particleLifetime = 0.72f;
+        emitter.upwardSpeed = 58.0f;
+        emitter.particleSize = 8.0f;
+        emitter.particleCount = 20u;
+    }
+    if (std::getenv("ODAI_DEBUG_FIRE_EMITTERS") != nullptr) {
+        std::cerr << "[fire-emitter] model=" << modelPath
+                  << " ref=" << formIdHex(ref.formId)
+                  << " position=(" << emitter.position[0] << ", "
+                  << emitter.position[1] << ", " << emitter.position[2] << ")"
+                  << " scale=" << effectScale << '\n';
+    }
+    m_scene.particleEmitters.push_back(emitter);
+    ++m_stats.particleEmittersPlaced;
+}
+
 void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
     // Diagnostic sets the cooker kept (unresolved texture paths, extreme-UV
     // model names, per-model untextured lists) are not carried here: they are
@@ -1214,6 +1301,21 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 // No `continue`: a LIGH that does have a mesh still needs its
                 // lamp placed, so fall through into the static path below.
             }
+            // Effect-only NIFs are placements too. The opaque mesh path cannot
+            // draw their particles, but a stationary fire reference supplies
+            // an exact cross-game emitter origin. This must run before the
+            // failed-base cache: the same fire base can be placed many times
+            // and every REFR needs its own emitter.
+            const auto placedModelIt = m_tables.staticModelPaths.find(ref.baseFormId);
+            if (placedModelIt != m_tables.staticModelPaths.end() &&
+                isEffectOnlyModelPath(placedModelIt->second)) {
+                if (isFireParticleEffectModelPath(placedModelIt->second)) {
+                    addCellFireEmitter(ref, placedModelIt->second);
+                }
+                ++m_stats.effectMeshesSkipped;
+                noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
+                continue;
+            }
             if (const auto failedIt = m_failedStatics.find(ref.baseFormId);
                 failedIt != m_failedStatics.end()) {
                 // A repeat of a base that already failed. Counted again, because
@@ -1242,8 +1344,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 const std::string& staticModelPath = statIt->second;
                 std::vector<std::uint8_t> nifBytes;
-                if (isEffectOnlyModelPath(staticModelPath) ||
-                    isSkyOnlyModelPath(staticModelPath)) {
+                if (isSkyOnlyModelPath(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
@@ -1284,6 +1385,9 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     std::cerr << "warning: failed to parse NIF " << staticModelPath << ": " << nifError << "\n";
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
+                }
+                if (applyNifBannerGravityRestPose(staticModelPath, nifModel)) {
+                    ++m_stats.clothMeshesSettled;
                 }
                 m_stats.skippedGeometryShapes += nifModel.skippedShapeCount;
                 // Node-recognition health. Nonzero nodeParseFailures means a
@@ -1555,6 +1659,42 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
 }
 
 void CellSceneBuilder::finish(ImportedScene& outScene) {
+    // Bethesda normally places a LIGH beside each stationary fire. Preserve
+    // that authored light instead of doubling it; synthesize a clustered,
+    // flickering fallback only for effects that have no nearby light. This is
+    // also what lets sparse Oblivion cells get emissive fire without making a
+    // light-rich Skyrim interior twice as bright.
+    for (const ImportedSceneParticleEmitter& emitter : m_scene.particleEmitters) {
+        bool hasNearbyAuthoredLight = false;
+        for (const ImportedSceneLight& light : m_scene.lights) {
+            const float dx = light.position[0] - emitter.position[0];
+            const float dy = light.position[1] - emitter.position[1];
+            const float dz = light.position[2] - emitter.position[2];
+            if ((dx * dx) + (dy * dy) + (dz * dz) <= 320.0f * 320.0f) {
+                hasNearbyAuthoredLight = true;
+                break;
+            }
+        }
+        if (hasNearbyAuthoredLight) {
+            continue;
+        }
+        ImportedSceneLight light{};
+        light.sourceId = emitter.sourceId + "_firelight";
+        light.position[0] = emitter.position[0];
+        light.position[1] = emitter.position[1] + 24.0f;
+        light.position[2] = emitter.position[2];
+        light.color[0] = 1.0f;
+        light.color[1] = 0.24f;
+        light.color[2] = 0.045f;
+        light.radius = 440.0f;
+        light.intensity = 1.15f;
+        light.flags = 0x08u;
+        m_scene.lights.push_back(std::move(light));
+        ++m_stats.lightsPlaced;
+    }
+    m_scene.sourceLightCount = static_cast<std::uint32_t>(m_scene.lights.size());
+    m_scene.sourceParticleEmitterCount =
+        static_cast<std::uint32_t>(m_scene.particleEmitters.size());
     if (m_terrainMeshIndex != static_cast<std::size_t>(-1)) {
         const ImportedSceneMesh& terrainMesh = m_scene.meshes[m_terrainMeshIndex];
         // Deliberately NO instance for the terrain mesh.

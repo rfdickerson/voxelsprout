@@ -305,7 +305,20 @@ void RendererBackend::setImportedSceneDebugState(bool showTerrain, bool showStat
 }
 
 void RendererBackend::setImportedSceneInteriorMode(bool enabled) {
+    m_importedInteriorLighting = ImportedInteriorLighting{};
+    m_importedInteriorLighting.enabled = enabled;
     m_importedSceneInteriorMode = enabled;
+    m_screenSpaceGiHistoryValid = false;
+}
+
+void RendererBackend::setImportedInteriorLighting(const ImportedInteriorLighting& lighting) {
+    if (lighting.enabled != m_importedInteriorLighting.enabled ||
+        lighting.hasAuthoredLighting != m_importedInteriorLighting.hasAuthoredLighting ||
+        lighting.indirectLightingMode != m_importedInteriorLighting.indirectLightingMode) {
+        m_screenSpaceGiHistoryValid = false;
+    }
+    m_importedInteriorLighting = lighting;
+    m_importedSceneInteriorMode = lighting.enabled;
 }
 
 void RendererBackend::importedSceneDebugState(
@@ -457,7 +470,8 @@ void RendererBackend::buildFrameStatsUi() {
         static const char* kDebugViewNames[] = {
             "Off", "Albedo", "Normal", "Alpha", "Material Flags",
             "Roughness", "Metallic", "Mip Level", "Cascade Index",
-            "Texture ID", "Linear Depth"};
+            "Texture ID", "Linear Depth", "Shadow", "Direct Ratio",
+            "Terrain Layers", "Ambient Occlusion", "Screen-space GI"};
         int debugView = static_cast<int>(m_debugView);
         if (ImGui::Combo("View", &debugView, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames))) {
             m_debugView = static_cast<DebugView>(debugView);
@@ -930,6 +944,10 @@ void RendererBackend::buildFrameStatsUi() {
                 stageRow("Sun Shafts", m_debugGpuSunShaftTimeMs, 0);
                 // Graphics passes.
                 stageRow("Shadow", m_debugGpuShadowTimeMs, 0);
+                stageRow("Contact trace", m_debugGpuContactShadowTraceTimeMs, 1);
+                stageRow("Contact resolve", m_debugGpuContactShadowResolveTimeMs, 1);
+                stageRow("Screen depth", m_debugGpuScreenDepthTimeMs, 0);
+                stageRow("Screen-space GI", m_debugGpuScreenSpaceGiTimeMs, 0);
                 stageRow("Prepass (nrm/depth)", m_debugGpuPrepassTimeMs, 0);
                 stageRow("SSAO", m_debugGpuSsaoTimeMs, 0);
                 stageRow("SSAO Blur", m_debugGpuSsaoBlurTimeMs, 0);
@@ -944,6 +962,8 @@ void RendererBackend::buildFrameStatsUi() {
             const float accountedMs =
                 giTotalMs + m_debugGpuAutoExposureTimeMs + m_debugGpuSunShaftTimeMs +
                 m_debugGpuShadowTimeMs + m_debugGpuPrepassTimeMs + m_debugGpuSsaoTimeMs +
+                m_debugGpuContactShadowTraceTimeMs + m_debugGpuContactShadowResolveTimeMs +
+                m_debugGpuScreenDepthTimeMs + m_debugGpuScreenSpaceGiTimeMs +
                 m_debugGpuSsaoBlurTimeMs + m_debugGpuMainTimeMs + m_debugGpuPostTimeMs +
                 m_debugGpuUiTimeMs;
             const float otherMs = std::max(0.0f, frameGpu - accountedMs);

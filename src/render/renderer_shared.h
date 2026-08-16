@@ -103,6 +103,25 @@ constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
     ShadowAtlasRect{2048u, 2048u, 2048u}
 };
 constexpr uint32_t kShadowAtlasSize = 4096u;
+// Authored interiors reuse the directional atlas for up to 35 local lights.
+// Every cubemap uses six 256x256 faces arranged as a 3x2 tile. Five tiles per
+// row by seven rows occupy 3840x3584 of the 4096 atlas. Dragonsreach has 34
+// active lights (28 authored plus the fire emitters), so every light that can
+// fill a table/contact shadow now has a map. This is also less raster work than
+// the old 8x512 + 8x256 split (13.76M vs 15.73M depth texels).
+// The selection stays frozen until geometry residency changes, so camera
+// motion cannot trigger an atlas rebuild.
+constexpr uint32_t kInteriorPointShadowLightCount = 35u;
+constexpr uint32_t kInteriorPointShadowFaceCount = 6u;
+constexpr uint32_t kInteriorPointShadowFaceSize = 256u;
+constexpr uint32_t kInteriorPointShadowCubesPerRow = 5u;
+constexpr uint32_t kInteriorPointShadowMatrixCount =
+    kInteriorPointShadowLightCount * kInteriorPointShadowFaceCount;
+static_assert(
+    kInteriorPointShadowCubesPerRow * 3u * kInteriorPointShadowFaceSize <= kShadowAtlasSize);
+static_assert(
+    ((kInteriorPointShadowLightCount + kInteriorPointShadowCubesPerRow - 1u) /
+     kInteriorPointShadowCubesPerRow) * 2u * kInteriorPointShadowFaceSize <= kShadowAtlasSize);
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 8u;
@@ -270,6 +289,33 @@ struct alignas(16) CameraUniform {
     // Appended at the end of the block so no existing field's offset moves.
     // Mirrored in src/render/shaders/camera_uniform.slang.
     float shadowAtlasConfig[4];
+    // Authored imported-interior CELL lighting. Appended to preserve every
+    // existing offset; mirrored in camera_uniform.slang.
+    // ambient.w = has authored XCLL
+    float interiorAmbient[4];
+    // directional.w = use sky lighting
+    float interiorDirectional[4];
+    // fog.w = show sky
+    float interiorFog[4];
+    // x/y = fog near/far, z = directional shadows enabled, w = interior enabled
+    float interiorFogRange[4];
+    // Interior point lights x six cubemap faces. These matrices are used both to
+    // rasterize the atlas and to project a receiver into the matching face.
+    float interiorPointShadowViewProj[kInteriorPointShadowMatrixCount][16];
+    // Selected imported-light index for atlas slots 0..3; -1 means unused.
+    // Indexed by uploaded/clustered light, value is the stable atlas slot.
+    float interiorPointShadowLightIndices[kImportedLocalLightCapacity / 4u][4];
+    // x = active slot count, y = face UV scale, z = atlas texel size,
+    // w = enabled. Appended to keep every pre-existing uniform offset stable.
+    float interiorPointShadowParams[4];
+    // Contact-shadow reconstruction and main-pass lookup. invView maps the
+    // normal/depth prepass's reconstructed view position back to world space.
+    // config = (full width, full height, enabled, four-frame phase).
+    float contactShadowInvView[16];
+    float contactShadowConfig[4];
+    // Quarter-resolution diffuse GI. x/y are record extent, z is enabled,
+    // w is the receiver bounce scale. Appended to preserve existing offsets.
+    float screenSpaceGiConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {

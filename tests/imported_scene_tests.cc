@@ -42,6 +42,7 @@ void testImportedSceneSerialization() {
     using odai::importer::ImportedSceneInstance;
     using odai::importer::ImportedSceneLandscapeCell;
     using odai::importer::ImportedSceneLight;
+    using odai::importer::ImportedSceneParticleEmitter;
     using odai::importer::ImportedSceneMesh;
     using odai::importer::ImportedSceneMeshPart;
     using odai::importer::ImportedSceneTexture;
@@ -112,6 +113,17 @@ void testImportedSceneSerialization() {
     light.flags = 0x018u;
     scene.lights.push_back(light);
 
+    ImportedSceneParticleEmitter emitter{};
+    emitter.sourceId = "refr_fire_01";
+    emitter.position[0] = 20.0f;
+    emitter.position[1] = 4.0f;
+    emitter.position[2] = 28.0f;
+    emitter.spawnRadius = 72.0f;
+    emitter.particleLifetime = 1.4f;
+    emitter.particleCount = 64u;
+    emitter.seed = 0x12345u;
+    scene.particleEmitters.push_back(emitter);
+
     ImportedSceneInstance instance{};
     instance.meshIndex = 0u;
     instance.transform[0] = 1.0f;
@@ -155,6 +167,14 @@ void testImportedSceneSerialization() {
     expectNear(loaded.lights.front().position[1], light.position[1], 1e-6f, "Imported scene light position round-trips");
     expectNear(loaded.lights.front().color[1], light.color[1], 1e-6f, "Imported scene light color round-trips");
     expectNear(loaded.lights.front().radius, light.radius, 1e-6f, "Imported scene light radius round-trips");
+    expectTrue(loaded.particleEmitters.size() == 1u,
+               "Imported scene particle emitter count round-trips");
+    expectTrue(loaded.particleEmitters.front().sourceId == emitter.sourceId,
+               "Imported scene particle emitter id round-trips");
+    expectNear(loaded.particleEmitters.front().spawnRadius, emitter.spawnRadius, 1e-6f,
+               "Imported scene particle emitter radius round-trips");
+    expectTrue(loaded.particleEmitters.front().particleCount == emitter.particleCount,
+               "Imported scene particle emitter capacity round-trips");
 
     ImportedScene runtimeLoaded{};
     expectTrue(odai::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded), "Imported scene runtime loader works");
@@ -166,6 +186,8 @@ void testImportedSceneSerialization() {
     expectTrue(runtimeLoaded.landscapeCells.empty(), "Imported scene runtime loader skips landscape cells");
     expectTrue(runtimeLoaded.waterPatches.size() == 1u, "Imported scene runtime loader keeps water patches");
     expectTrue(runtimeLoaded.lights.size() == 1u, "Imported scene runtime loader keeps lights");
+    expectTrue(runtimeLoaded.particleEmitters.size() == 1u,
+               "Imported scene runtime loader keeps particle emitters");
     expectTrue(!runtimeLoaded.packedVertices.empty(), "Imported scene runtime loader reads packed vertices");
     expectTrue(!runtimeLoaded.packedIndices.empty(), "Imported scene runtime loader reads packed indices");
     expectTrue(!runtimeLoaded.packedDraws.empty(), "Imported scene runtime loader reads packed draws");
@@ -186,6 +208,7 @@ void testGpuSceneBuildFromImportedScene() {
     using odai::importer::ImportedScene;
     using odai::importer::ImportedSceneInstance;
     using odai::importer::ImportedSceneLight;
+    using odai::importer::ImportedSceneParticleEmitter;
     using odai::importer::ImportedSceneMesh;
     using odai::importer::ImportedSceneMeshPart;
     using odai::importer::ImportedSceneTexture;
@@ -261,6 +284,11 @@ void testGpuSceneBuildFromImportedScene() {
     light.radius = 256.0f;
     scene.lights.push_back(light);
 
+    ImportedSceneParticleEmitter emitter{};
+    emitter.sourceId = "refr_fire_02";
+    emitter.position[1] = 8.0f;
+    scene.particleEmitters.push_back(emitter);
+
     GpuSceneAsset gpuScene{};
     expectTrue(
         odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
@@ -278,6 +306,10 @@ void testGpuSceneBuildFromImportedScene() {
     expectTrue(gpuScene.renderCache.packedDraws.size() == 3u, "GPU scene preserves mesh parts as separate draws");
     expectTrue(gpuScene.lights.size() == 1u, "GPU scene keeps imported lights");
     expectTrue(gpuScene.renderCache.lights.size() == 1u, "GPU scene render cache keeps imported lights");
+    expectTrue(gpuScene.particleEmitters.size() == 1u,
+               "GPU scene keeps imported particle emitters");
+    expectTrue(gpuScene.renderCache.particleEmitters.size() == 1u,
+               "GPU scene render cache keeps imported particle emitters");
     expectTrue(!gpuScene.renderCache.pageDrawRanges.empty(), "GPU scene render cache records page draw ranges");
     expectTrue(gpuScene.renderCache.pageDrawRanges.front().firstDraw == 0u,
                "GPU scene page draw ranges start at the first draw");

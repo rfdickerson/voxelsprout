@@ -30,7 +30,7 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // This file used to carry every layout back to v15 -- a legacy stride table,
 // three field-by-field expansion paths, and a version gate on every section.
 // That machinery served files nobody has. A cooked scene is either a cell
-// cache, keyed by kCellBuildVersion (30) AND the plugin's size and mtime, or a
+// cache, keyed by kCellBuildVersion (31) AND the plugin's size and mtime, or a
 // hand-cooked .bin from a tree old enough to predate several vertex widenings;
 // in both cases the current build cannot consult it and would rebuild anyway.
 // The reader rejects anything below the floor cleanly and the caller rebuilds,
@@ -43,7 +43,10 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // kMinSupportedImportedSceneVersion AND kCellBuildVersion together. The
 // static_asserts on both struct sizes below are what force that question:
 // change a struct without touching them and the build stops.
-constexpr std::uint32_t kImportedSceneVersion = 25u;
+// v26 appends placed particle emitters after the alpha-authored byte. They are
+// field-written (not raw-blitted) so the renderer-facing preset can evolve
+// without inheriting a platform ABI.
+constexpr std::uint32_t kImportedSceneVersion = 26u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
@@ -66,6 +69,10 @@ bool readString(std::istream& input, std::string& out);
 void writeSceneMaterials(std::ostream& output, const std::vector<ImportedSceneMaterial>& materials);
 void writeSceneDoors(std::ostream& output, const std::vector<ImportedSceneDoor>& doors);
 bool readSceneDoors(std::istream& input, std::vector<ImportedSceneDoor>& out);
+void writeSceneParticleEmitters(
+    std::ostream& output, const std::vector<ImportedSceneParticleEmitter>& emitters);
+bool readSceneParticleEmitters(
+    std::istream& input, std::vector<ImportedSceneParticleEmitter>& out);
 bool readSceneMaterials(std::istream& input, std::vector<ImportedSceneMaterial>& out);
 
 std::string g_lastImportedSceneError;
@@ -564,6 +571,51 @@ bool readSceneDoors(std::istream& input, std::vector<ImportedSceneDoor>& out) {
             !readString(input, door.targetCellEditorId)) {
             return false;
         }
+    }
+    return true;
+}
+
+void writeSceneParticleEmitters(
+    std::ostream& output, const std::vector<ImportedSceneParticleEmitter>& emitters) {
+    writeValue(output, static_cast<std::uint32_t>(emitters.size()));
+    for (const ImportedSceneParticleEmitter& emitter : emitters) {
+        writeString(output, emitter.sourceId);
+        writeValue(output, static_cast<std::uint32_t>(emitter.effect));
+        output.write(reinterpret_cast<const char*>(emitter.position), sizeof(emitter.position));
+        output.write(reinterpret_cast<const char*>(emitter.color), sizeof(emitter.color));
+        writeValue(output, emitter.intensity);
+        writeValue(output, emitter.spawnRadius);
+        writeValue(output, emitter.particleLifetime);
+        writeValue(output, emitter.upwardSpeed);
+        writeValue(output, emitter.particleSize);
+        writeValue(output, emitter.particleCount);
+        writeValue(output, emitter.seed);
+    }
+}
+
+bool readSceneParticleEmitters(
+    std::istream& input, std::vector<ImportedSceneParticleEmitter>& out) {
+    std::uint32_t count = 0;
+    if (!readValue(input, count) || count > 65536u) {
+        return false;
+    }
+    out.resize(count);
+    for (ImportedSceneParticleEmitter& emitter : out) {
+        std::uint32_t effect = 0u;
+        if (!readString(input, emitter.sourceId) || !readValue(input, effect) ||
+            effect != static_cast<std::uint32_t>(ImportedParticleEffect::Fire) ||
+            !readExact(input, emitter.position, sizeof(emitter.position)) ||
+            !readExact(input, emitter.color, sizeof(emitter.color)) ||
+            !readValue(input, emitter.intensity) ||
+            !readValue(input, emitter.spawnRadius) ||
+            !readValue(input, emitter.particleLifetime) ||
+            !readValue(input, emitter.upwardSpeed) ||
+            !readValue(input, emitter.particleSize) ||
+            !readValue(input, emitter.particleCount) ||
+            !readValue(input, emitter.seed)) {
+            return false;
+        }
+        emitter.effect = static_cast<ImportedParticleEffect>(effect);
     }
     return true;
 }
@@ -1285,6 +1337,8 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     writeSceneDoors(output, scene.doors);
     // v24: whether alpha flags were authored by the importer (see header).
     writeValue(output, static_cast<std::uint8_t>(scene.alphaFlagsAuthored ? 1u : 0u));
+    // v26: lightweight procedural effect emitters (fire today).
+    writeSceneParticleEmitters(output, scene.particleEmitters);
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -1536,6 +1590,13 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         return false;
     }
     scene.alphaFlagsAuthored = authored != 0u;
+    if (!readSceneParticleEmitters(input, scene.particleEmitters)) {
+        setLastImportedSceneError(
+            "Failed to read imported scene particle emitters: " + inputPath.string());
+        return false;
+    }
+    scene.sourceParticleEmitterCount =
+        static_cast<std::uint32_t>(scene.particleEmitters.size());
 
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
@@ -1772,6 +1833,13 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         return false;
     }
     scene.alphaFlagsAuthored = authored != 0u;
+    if (!readSceneParticleEmitters(input, scene.particleEmitters)) {
+        setLastImportedSceneError(
+            "Failed to read imported scene particle emitters: " + inputPath.string());
+        return false;
+    }
+    scene.sourceParticleEmitterCount =
+        static_cast<std::uint32_t>(scene.particleEmitters.size());
 
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was

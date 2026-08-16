@@ -469,6 +469,29 @@ struct ImportedSceneLight {
     std::uint32_t flags = 0u;
 };
 
+// A source-authored, continuously looping visual effect. The first consumer is
+// Bethesda fire, but the data is deliberately renderer-facing rather than
+// Skyrim-facing: Oblivion's placed effect NIFs go through the same CELL/REFR
+// path and produce the same emitter record.
+enum class ImportedParticleEffect : std::uint32_t {
+    Fire = 1u,
+};
+
+struct ImportedSceneParticleEmitter {
+    std::string sourceId;
+    ImportedParticleEffect effect = ImportedParticleEffect::Fire;
+    float position[3] = {};
+    // Linear HDR tint. `intensity` is emission into the pre-tonemap scene.
+    float color[3] = {1.0f, 0.22f, 0.035f};
+    float intensity = 0.55f;
+    float spawnRadius = 40.0f;
+    float particleLifetime = 0.95f;
+    float upwardSpeed = 95.0f;
+    float particleSize = 18.0f;
+    std::uint32_t particleCount = 48u;
+    std::uint32_t seed = 0u;
+};
+
 struct ImportedScene {
     std::string sourceTag;
     std::vector<ImportedSceneTexture> textures;
@@ -477,6 +500,7 @@ struct ImportedScene {
     std::vector<ImportedSceneLandscapeCell> landscapeCells;
     std::vector<ImportedSceneWaterPatch> waterPatches;
     std::vector<ImportedSceneLight> lights;
+    std::vector<ImportedSceneParticleEmitter> particleEmitters;
     std::vector<ImportedSceneDoor> doors;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
@@ -506,6 +530,7 @@ struct ImportedScene {
     std::uint32_t sourceLandscapeCellCount = 0;
     std::uint32_t sourceWaterPatchCount = 0;
     std::uint32_t sourceLightCount = 0;
+    std::uint32_t sourceParticleEmitterCount = 0;
     std::uint32_t sourceUnresolvedRefCount = 0;
     float boundsMin[3] = {};
     float boundsMax[3] = {};

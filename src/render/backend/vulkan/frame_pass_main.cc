@@ -146,9 +146,10 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     }
 
     VkClearValue clearValue{};
-    clearValue.color.float32[0] = 0.06f;
-    clearValue.color.float32[1] = 0.08f;
-    clearValue.color.float32[2] = 0.12f;
+    const bool renderImportedSky = shouldRenderImportedSky(m_importedInteriorLighting);
+    clearValue.color.float32[0] = renderImportedSky ? 0.06f : m_importedInteriorLighting.fogColor[0];
+    clearValue.color.float32[1] = renderImportedSky ? 0.08f : m_importedInteriorLighting.fogColor[1];
+    clearValue.color.float32[2] = renderImportedSky ? 0.12f : m_importedInteriorLighting.fogColor[2];
     clearValue.color.float32[3] = 1.0f;
 
     VkRenderingAttachmentInfo colorAttachment{};
@@ -746,6 +747,56 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // from the camera while their shadow casters scattered dark streaks across the ground;
     // chunk_upload.cc no longer scatters instances, so this had nothing left to draw.
 
+    // Imported looping effects. Fire is analytic and stateless on the GPU:
+    // SV_InstanceID identifies a lobe, the shared frame clock advances its age,
+    // and six generated vertices form its camera-facing quad. That keeps a
+    // whole hearth to one draw with no per-frame particle-buffer upload or
+    // transfer/graphics barrier. Additive blending is order independent, so
+    // emitters from several live Bethesda cells do not need a sort.
+    if (m_importedFireParticlePipeline != VK_NULL_HANDLE &&
+        !m_importedParticleEmitters.empty()) {
+        vkCmdBindPipeline(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_importedFireParticlePipeline);
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        if (m_supportsVrs && m_cmdSetFragmentShadingRate != nullptr) {
+            const VkExtent2D fineRate{1u, 1u};
+            const VkFragmentShadingRateCombinerOpKHR combinerOps[2] = {
+                VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+                VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+            };
+            m_cmdSetFragmentShadingRate(commandBuffer, &fineRate, combinerOps);
+        }
+        for (const odai::importer::ImportedSceneParticleEmitter& emitter :
+             m_importedParticleEmitters) {
+            if (emitter.effect != odai::importer::ImportedParticleEffect::Fire ||
+                emitter.particleCount == 0u || emitter.intensity <= 0.0f) {
+                continue;
+            }
+            ChunkPushConstants push{};
+            std::memcpy(push.chunkOffset, emitter.position, sizeof(emitter.position));
+            push.chunkOffset[3] = std::max(emitter.spawnRadius, 0.0f);
+            std::memcpy(push.cascadeData, emitter.color, sizeof(emitter.color));
+            push.cascadeData[3] = std::max(emitter.intensity, 0.0f);
+            push.materialParams[0] = std::max(emitter.particleLifetime, 0.05f);
+            push.materialParams[1] = std::max(emitter.upwardSpeed, 0.0f);
+            push.materialParams[2] = std::max(emitter.particleSize, 0.5f);
+            // Keep the seed small enough that adding SV_InstanceID remains
+            // exact in float. A 24-bit form-derived seed put many values near
+            // float's integer precision limit and collapsed adjacent lobes
+            // onto one billboard instead of spreading them across the fire.
+            push.materialParams[3] = static_cast<float>(emitter.seed & 0x00000fffu);
+            vkCmdPushConstants(
+                commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(push), &push);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDraw(
+                commandBuffer, 6u,
+                std::clamp(emitter.particleCount, 1u, 256u), 0u, 0u);
+        }
+    }
+
     const bool canCaptureWaterRefraction =
         canDrawImportedWater &&
         aoFrameIndex < m_waterRefractionImages.size() &&
@@ -924,13 +975,14 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // prior game (cube/face brush + pipe ghost); the strategy map has no voxel editing.
 
     // Draw skybox last with depth-test so sun/sky only appears where no geometry wrote depth.
-    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+    if (renderImportedSky && m_skyboxPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
         bindGraphicsDescriptorBuffers(commandBuffer);
         countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
-    if (m_skyCloudPipeline != VK_NULL_HANDLE &&
+    if (renderImportedSky &&
+        m_skyCloudPipeline != VK_NULL_HANDLE &&
         m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
         m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
         m_skyCloudIndexCount > 0 &&

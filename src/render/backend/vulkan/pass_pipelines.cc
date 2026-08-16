@@ -1336,6 +1336,126 @@ bool RendererBackend::createPipePipeline() {
     return true;
 }
 
+bool RendererBackend::createImportedFireParticlePipeline() {
+    if (m_pipelineLayout == VK_NULL_HANDLE || m_depthFormat == VK_FORMAT_UNDEFINED ||
+        m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        return false;
+    }
+
+    constexpr const char* kVertexPath =
+        "../src/render/shaders/imported_fire_particle.vert.slang.spv";
+    constexpr const char* kFragmentPath =
+        "../src/render/shaders/imported_fire_particle.frag.slang.spv";
+    std::array<VkShaderModule, 2> modules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    const std::array<ShaderModuleLoadSpec, 2> specs = {{
+        {kVertexPath, "imported_fire_particle.vert"},
+        {kFragmentPath, "imported_fire_particle.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, specs, modules)) {
+        return false;
+    }
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = modules[0];
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = modules[1];
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1u;
+    viewportState.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = m_colorSampleCount;
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.blendEnable = VK_TRUE;
+    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blending{};
+    blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blending.attachmentCount = 1u;
+    blending.pAttachments = &blendAttachment;
+
+    std::array<VkDynamicState, 3> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = m_supportsVrs ? 3u : 2u;
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineRenderingCreateInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering.colorAttachmentCount = 1u;
+    rendering.pColorAttachmentFormats = &m_hdrColorFormat;
+    rendering.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
+    info.pNext = &rendering;
+    info.stageCount = static_cast<std::uint32_t>(stages.size());
+    info.pStages = stages.data();
+    info.pVertexInputState = &vertexInput;
+    info.pInputAssemblyState = &inputAssembly;
+    info.pViewportState = &viewportState;
+    info.pRasterizationState = &rasterizer;
+    info.pMultisampleState = &multisampling;
+    info.pDepthStencilState = &depthStencil;
+    info.pColorBlendState = &blending;
+    info.pDynamicState = &dynamicState;
+    info.layout = m_pipelineLayout;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    const VkResult result = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1u, &info, nullptr, &pipeline);
+    destroyShaderModules(m_device, modules);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedFireParticle)", result);
+        return false;
+    }
+    if (m_importedFireParticlePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedFireParticlePipeline, nullptr);
+    }
+    m_importedFireParticlePipeline = pipeline;
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(pipeline),
+        "pipeline.importedFireParticle");
+    VOX_LOGI("render") << "pipeline config (importedFireParticle): additive, depthRead, samples="
+                       << static_cast<std::uint32_t>(m_colorSampleCount);
+    return true;
+}
+
 bool RendererBackend::createAoPipelines() {
     if (m_pipelineLayout == VK_NULL_HANDLE) {
         return false;

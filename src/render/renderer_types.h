@@ -211,6 +211,7 @@ enum class DebugView : std::uint8_t {
     // the albedo-weighted ambient term and so returns a picture of the diffuse
     // texture rather than of the occlusion.
     AmbientOcclusion = 14,
+    ScreenSpaceGi = 15,
 };
 
 // True for views whose value is already a display-ready colour and must not be
@@ -355,6 +356,89 @@ struct WeatherCloudLayer {
 struct WeatherCloudTextures {
     WeatherCloudLayer layers[kWeatherCloudLayerCount];
 };
+
+// Lighting authored on an imported interior CELL. Colours are scene-linear;
+// importers must decode the record's sRGB bytes before submitting them.
+//
+// `hasAuthoredLighting` deliberately differs from `enabled`: the old
+// setImportedSceneInteriorMode(bool) API only knew that a scene was indoors.
+// Keeping that state distinct preserves its fixed-lighting compatibility path,
+// while streamed cells with XCLL can opt into the source-faithful policy.
+struct ImportedInteriorLighting {
+    enum class LocalShadowMode : std::uint8_t {
+        Off,
+        ShadowMaps,
+        ShadowMapsWithContact,
+        RayTraced,
+    };
+
+    enum class IndirectLightingMode : std::uint8_t {
+        Off,
+        ScreenSpaceDiffuse,
+    };
+
+    bool enabled = false;
+    bool hasAuthoredLighting = false;
+    float ambientColor[3] = {};
+    float directionalColor[3] = {};
+    float fogColor[3] = {};
+    float fogNear = 0.0f;
+    float fogFar = 0.0f;
+    bool showSky = false;
+    bool useSkyLighting = false;
+    // Source interiors are primarily lit by point lights. ShadowMaps is the
+    // production path; RayTraced is retained as a measurable A/B reference.
+    LocalShadowMode localShadowMode = LocalShadowMode::Off;
+    // Separate from voxel GI: Bethesda rooms are much larger than that
+    // camera-following 64^3 volume and instead reuse screen depth + TAA history.
+    IndirectLightingMode indirectLightingMode = IndirectLightingMode::Off;
+};
+
+inline constexpr bool useAuthoredImportedInteriorLighting(
+    const ImportedInteriorLighting& lighting) {
+    return lighting.enabled && lighting.hasAuthoredLighting;
+}
+
+inline constexpr bool shouldRenderImportedDirectionalShadows(
+    const ImportedInteriorLighting& lighting) {
+    return !useAuthoredImportedInteriorLighting(lighting);
+}
+
+inline constexpr bool shouldRenderImportedSky(const ImportedInteriorLighting& lighting) {
+    return !useAuthoredImportedInteriorLighting(lighting) || lighting.showSky;
+}
+
+inline constexpr bool shouldUseImportedSkyLighting(const ImportedInteriorLighting& lighting) {
+    return !useAuthoredImportedInteriorLighting(lighting) || lighting.useSkyLighting;
+}
+
+inline constexpr bool shouldUseImportedPointShadowMaps(
+    const ImportedInteriorLighting& lighting) {
+    return useAuthoredImportedInteriorLighting(lighting) &&
+        (lighting.localShadowMode == ImportedInteriorLighting::LocalShadowMode::ShadowMaps ||
+         lighting.localShadowMode ==
+             ImportedInteriorLighting::LocalShadowMode::ShadowMapsWithContact);
+}
+
+inline constexpr bool shouldUseImportedContactShadows(
+    const ImportedInteriorLighting& lighting) {
+    return useAuthoredImportedInteriorLighting(lighting) &&
+        lighting.localShadowMode ==
+            ImportedInteriorLighting::LocalShadowMode::ShadowMapsWithContact;
+}
+
+inline constexpr bool shouldUseImportedRayTracedLocalShadows(
+    const ImportedInteriorLighting& lighting) {
+    return useAuthoredImportedInteriorLighting(lighting) &&
+        lighting.localShadowMode == ImportedInteriorLighting::LocalShadowMode::RayTraced;
+}
+
+inline constexpr bool shouldUseImportedScreenSpaceGi(
+    const ImportedInteriorLighting& lighting) {
+    return useAuthoredImportedInteriorLighting(lighting) &&
+        lighting.indirectLightingMode ==
+            ImportedInteriorLighting::IndirectLightingMode::ScreenSpaceDiffuse;
+}
 
 // Which tone curve the post pass runs, and its parameters.
 //

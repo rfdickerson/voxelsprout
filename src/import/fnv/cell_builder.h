@@ -107,6 +107,11 @@ bool buildFalloutWorldTables(
 // stopgap for whatever the blended pass does not pick up.
 bool isEffectOnlyModelPath(std::string_view modelPath);
 
+// Stationary Bethesda fire effects are authored as placed effect-only NIFs in
+// both TES4 and TES5. They cannot use the opaque static-mesh path, but their
+// REFR position is exactly the emitter origin a procedural renderer needs.
+bool isFireParticleEffectModelPath(std::string_view modelPath);
+
 // True for the game's own sky objects (Skyrim places sky\clouddistant*.nif and
 // friends as ordinary references in Tamriel's persistent cell). See the
 // definition: drawn as scenery they are a white plane over the landscape.
@@ -150,6 +155,10 @@ struct CellBuildStats {
     std::size_t nifsParsed = 0;
     std::size_t extremeUvShapes = 0;
     std::size_t effectMeshesSkipped = 0;
+    std::size_t particleEmittersPlaced = 0;
+    // Animated banner meshes settled into a deterministic gravity rest pose
+    // with Jolt before their vertices are packed into the scene cache.
+    std::size_t clothMeshesSettled = 0;
     // REFR header flag 0x800: quest objects hidden until a script enables
     // them. Skipped, because an unstarted game does not show them -- and some
     // are worldspace-sized (Skyrim's MG07 blizzard barrier).
@@ -215,6 +224,7 @@ public:
     // from addCellStatics, and additive to the lamp mesh rather than instead
     // of it.
     void addCellLight(const FalloutPlacedReference& ref, const FalloutLightRecord& light);
+    void addCellFireEmitter(const FalloutPlacedReference& ref, std::string_view modelPath);
 
     // Convenience for the single-cell (streaming) case.
     void addCell(const FalloutCellRecord& cell) {

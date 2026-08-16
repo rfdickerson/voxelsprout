@@ -237,6 +237,7 @@ endif()
 # the vcpkg `stb` port in normal builds; ODAI_STB_INCLUDE_DIR overrides it for
 # headless checks without vcpkg.
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(Jolt CONFIG REQUIRED)
 # zlib: BSA archive/ESM record decompression for the Fallout: New Vegas
 # import pipeline (src/import/fnv/). The only place zlib is used directly.
 find_package(ZLIB REQUIRED)
@@ -362,6 +363,8 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_fire_particle.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_fire_particle.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_terrain.tesc.slang" hull)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_terrain.tese.slang" domain)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.frag.slang" fragment)
@@ -390,6 +393,10 @@ if(SLANGC_EXECUTABLE)
     # estimateVisibility() compiles in, so each pipeline's sample loop is branch-free.
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/light_cluster_cull.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/contact_shadow_depth.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/contact_shadow_trace.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/contact_shadow_resolve.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/screen_space_gi.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang"
@@ -846,6 +853,8 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/frame_pass_prepass.cc
             src/render/backend/vulkan/frame_pass_ssao.cc
             src/render/backend/vulkan/light_clusters.cc
+            src/render/backend/vulkan/contact_shadows.cc
+            src/render/backend/vulkan/screen_space_gi.cc
             src/render/backend/vulkan/frame_pass_velocity.cc
             src/render/backend/vulkan/frame_pass_skinning.cc
             src/render/backend/vulkan/frame_pass_main.cc
@@ -1224,7 +1233,7 @@ if(ODAI_BUILD_APP)
         )
         target_link_libraries(odai_game_newvegas PRIVATE
             odai_ui odai_ui_vulkan odai_upscale_vulkan odai_audio odai_upscale
-            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui
+            Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui Jolt::Jolt
             # zlib: the runtime now inflates compressed ESM records and BSA
             # entries itself, streaming from the game's own files.
             ZLIB::ZLIB
@@ -1833,7 +1842,7 @@ if(ODAI_BUILD_TOOLS)
             src/import/imported_scene_query.cc
     )
     target_include_directories(odai_newvegas_cooker PRIVATE src)
-    target_link_libraries(odai_newvegas_cooker PRIVATE ZLIB::ZLIB)
+    target_link_libraries(odai_newvegas_cooker PRIVATE ZLIB::ZLIB Jolt::Jolt)
     if(MSVC)
         target_compile_options(odai_newvegas_cooker PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
@@ -1870,7 +1879,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/kf_animation.cc
     )
     target_include_directories(odai_newvegas_probe PRIVATE src)
-    target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB)
+    target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB Jolt::Jolt)
     if(MSVC)
         target_compile_options(odai_newvegas_probe PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
@@ -1950,7 +1959,7 @@ if(BUILD_TESTING)
         src/import/fnv/kf_animation.cc
     )
     target_include_directories(odai_fnv_import_tests PRIVATE src)
-    target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB)
+    target_link_libraries(odai_fnv_import_tests PRIVATE ZLIB::ZLIB Jolt::Jolt)
     if(MSVC)
         target_compile_options(odai_fnv_import_tests PRIVATE /W4 /permissive-)
     else()

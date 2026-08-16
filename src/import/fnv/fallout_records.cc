@@ -234,7 +234,11 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
         } else if (sub.type == "DATA" && sub.size >= 1u) {
-            entry.isInterior = (sub.data[0] & 0x1u) != 0u;
+            entry.cellFlags = sub.data[0];
+            if (sub.size >= 2u) {
+                entry.cellFlags |= static_cast<std::uint16_t>(sub.data[1]) << 8u;
+            }
+            entry.isInterior = (entry.cellFlags & kCellFlagInterior) != 0u;
         } else if (sub.type == "XCLC" && sub.size >= 8u) {
             entry.hasGridCoords = true;
             entry.gridX = readI32(sub.data);
@@ -839,6 +843,7 @@ bool buildMorrowindCellIndex(
         entry.cellFormId = static_cast<std::uint32_t>(outIndex.cells.size()) + 2u;
         entry.editorId = parsed.editorId;
         entry.isInterior = parsed.isInterior;
+        entry.cellFlags = parsed.cellFlags;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.gridX = parsed.gridX;
         entry.gridZ = parsed.gridZ;
@@ -985,6 +990,7 @@ bool buildFalloutCellIndex(
         entry.gridZ = parsed.gridZ;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.isInterior = parsed.isInterior;
+        entry.cellFlags = parsed.cellFlags;
         entry.hasLighting = parsed.hasLighting;
         for (int channel = 0; channel < 3; ++channel) {
             entry.ambientColor[channel] = parsed.ambientColor[channel];
@@ -1076,6 +1082,16 @@ bool buildFalloutCellIndex(
             if (!cell.regionFormIds.empty()) {
                 merged.regionFormIds = cell.regionFormIds;
             }
+            merged.isInterior = cell.isInterior;
+            merged.cellFlags = cell.cellFlags;
+            merged.hasLighting = cell.hasLighting;
+            for (int channel = 0; channel < 3; ++channel) {
+                merged.ambientColor[channel] = cell.ambientColor[channel];
+                merged.directionalColor[channel] = cell.directionalColor[channel];
+                merged.fogColor[channel] = cell.fogColor[channel];
+            }
+            merged.fogNear = cell.fogNear;
+            merged.fogFar = cell.fogFar;
             merged.contributions = std::move(combined);
         }
         for (const auto& [referenceFormId, cellSlot] : single.cellIndexByReferenceFormId) {
@@ -1145,7 +1161,16 @@ bool extractFalloutCellMerged(
     outCell.gridZ = entry.gridZ;
     outCell.hasGridCoords = entry.hasGridCoords;
     outCell.isInterior = entry.isInterior;
+    outCell.cellFlags = entry.cellFlags;
     outCell.regionFormIds = entry.regionFormIds;
+    outCell.hasLighting = entry.hasLighting;
+    for (int channel = 0; channel < 3; ++channel) {
+        outCell.ambientColor[channel] = entry.ambientColor[channel];
+        outCell.directionalColor[channel] = entry.directionalColor[channel];
+        outCell.fogColor[channel] = entry.fogColor[channel];
+    }
+    outCell.fogNear = entry.fogNear;
+    outCell.fogFar = entry.fogFar;
 
     // References keyed by formID, remembering the order they were first seen so
     // the merged list is deterministic rather than hash-ordered. A later
@@ -1235,6 +1260,7 @@ bool extractFalloutCellAt(
     outCell = FalloutCellRecord{};
     outCell.formId = entry.cellFormId;
     outCell.isInterior = entry.isInterior;
+    outCell.cellFlags = entry.cellFlags;
     outCell.hasGridCoords = entry.hasGridCoords;
     if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
         outCell.gridX = entry.gridX;

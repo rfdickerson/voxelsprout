@@ -928,6 +928,8 @@ int cookOne(
                     failedStatics.insert(ref.baseFormId);
                     continue;
                 }
+                odai::importer::fnv::applyNifBannerGravityRestPose(
+                    statIt->second->modelPath, nifModel);
                 skippedGeometryShapes += nifModel.skippedShapeCount;
 
                 // A model's own most-used texture, for sub-shapes that carry no

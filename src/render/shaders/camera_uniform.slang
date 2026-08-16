@@ -70,6 +70,21 @@ public struct CameraUniform
     // (one atlas texel in UV, unused x3). Replaces shadowMap.GetDimensions() at
     // every PCF site -- see renderer_shared.h for the measurement.
     public float4 shadowAtlasConfig;
+    // Authored imported-interior CELL lighting; see renderer_shared.h.
+    public float4 interiorAmbient;
+    public float4 interiorDirectional;
+    public float4 interiorFog;
+    public float4 interiorFogRange;
+    public float4x4 interiorPointShadowViewProj[210];
+    public float4 interiorPointShadowLightIndices[16];
+    // x = active slot count, y = face UV scale, z = atlas texel size,
+    // w = enabled.
+    public float4 interiorPointShadowParams;
+    public float4x4 contactShadowInvView;
+    // x/y = full-resolution contact mask extent, z = enabled, w = phase.
+    public float4 contactShadowConfig;
+    // x/y = quarter-resolution record extent, z = enabled, w = bounce scale.
+    public float4 screenSpaceGiConfig;
 };
 
 [[vk::binding(0, 0)]]

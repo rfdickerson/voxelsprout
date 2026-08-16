@@ -68,6 +68,11 @@ bool keyDown(GLFWwindow* window, int key) {
     return glfwGetKey(window, key) == GLFW_PRESS;
 }
 
+float srgbChannelToLinear(float srgb) {
+    return srgb <= 0.04045f ? (srgb / 12.92f)
+                            : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+}
+
 }  // namespace
 
 float NewVegasApp::verticalFovDegreesFor(float horizontalFovDegrees, float aspectRatio) {
@@ -583,7 +588,10 @@ bool NewVegasApp::onInit() {
     // for a contribution that was already invisible.
     m_renderer.setVoxelGiEnabled(false);
     // No TLAS to trace against once GI is off, so stop building acceleration
-    // structures on every uploadImportedScene too.
+    // structures on every uploadImportedScene too. Interior shadows default to
+    // the cached point-shadow atlas and need no acceleration structure. The RT
+    // A/B mode below keeps the runtime alive for the same fixed tour when
+    // explicitly requested.
     //
     // ODAI_FNV_RT=1 keeps the RT runtime alive anyway. GI is not the only
     // possible TLAS consumer any more: ray-traced sun shadows want one too, and
@@ -593,14 +601,15 @@ bool NewVegasApp::onInit() {
     // TLAS -- the BLAS record block in uploadImportedSceneInternal is not gated
     // on the chunk path at all, it is gated on rayTracingRuntimeReady().
     //
-    // Off by default until the acceleration-structure build cost on a STREAMING
-    // world is measured; the whole reason this line exists is that those builds
-    // were expensive per upload, and a cell stream calls upload constantly.
-    const bool rayTracingRequested = std::getenv("ODAI_FNV_RT") != nullptr;
+    const char* interiorShadowModeEnv = std::getenv("ODAI_FNV_INTERIOR_SHADOWS");
+    const bool rayTracedInteriorShadows =
+        interiorShadowModeEnv != nullptr && std::strcmp(interiorShadowModeEnv, "rt") == 0;
+    const bool rayTracingRequested =
+        std::getenv("ODAI_FNV_RT") != nullptr || rayTracedInteriorShadows;
     m_renderer.setRayTracingEnabled(rayTracingRequested);
     if (rayTracingRequested) {
-        VOX_LOGI("newvegas") << "ODAI_FNV_RT: ray tracing runtime left enabled "
-                                "(acceleration structures will build per cell upload)";
+        VOX_LOGI("newvegas") << "ray tracing runtime left enabled "
+                                "(acceleration structures will build per scene upload)";
     }
     // Volumetric sun shafts. sun_shafts.comp.slang is a real single-scattering
     // raymarch -- height-falloff density, Henyey-Greenstein phase, shadow-map
@@ -711,11 +720,12 @@ bool NewVegasApp::onInit() {
         else if (requested == "directratio") { view = render::DebugView::DirectRatio; }
         else if (requested == "terrainlayers") { view = render::DebugView::TerrainLayers; }
         else if (requested == "ao") { view = render::DebugView::AmbientOcclusion; }
+        else if (requested == "ssgi") { view = render::DebugView::ScreenSpaceGi; }
         else if (requested != "off") {
             VOX_LOGW("newvegas")
                 << "ODAI_FNV_DEBUGVIEW=" << requested << " is not a view name; ignoring. "
                 << "Valid: albedo normal alpha flags roughness metallic mip cascade texid "
-                << "depth shadow directratio terrainlayers ao\n";
+                << "depth shadow directratio terrainlayers ao ssgi\n";
         }
         m_renderer.setDebugView(view);
     }
@@ -907,7 +917,13 @@ bool NewVegasApp::onInit() {
     if (const char* weatherEnv = std::getenv("ODAI_FNV_WEATHER")) {
         m_requestedWeatherEditorId = weatherEnv;
     }
-    initWeather();
+    // An interior publishes its own XCLL and CELL sky policy during
+    // initStreaming. Applying the exterior climate afterwards used to replace
+    // both with SkyrimCloudy, which is why Dragonsreach looked sunlit and blue
+    // through openings despite authoring black fog and zero directional light.
+    if (!m_interiorStarted) {
+        initWeather();
+    }
     applyTonemapSettings();
 
     // Pip-Boy palette for notifications, matching the HUD chrome.
@@ -1931,14 +1947,9 @@ void NewVegasApp::applyWeather() {
     // through a display-referred fudge twice. The renderer takes hue from these
     // and bounds the intensity itself; see WeatherSkyParams::lightingWeight.
     const auto decodeLinear = [](const importer::fnv::FalloutColorRgb& color, float* out) {
-        const auto channel = [](std::uint8_t value) {
-            const float srgb = static_cast<float>(value) / 255.0f;
-            return srgb <= 0.04045f ? (srgb / 12.92f)
-                                    : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
-        };
-        out[0] = channel(color.r);
-        out[1] = channel(color.g);
-        out[2] = channel(color.b);
+        out[0] = srgbChannelToLinear(static_cast<float>(color.r) / 255.0f);
+        out[1] = srgbChannelToLinear(static_cast<float>(color.g) / 255.0f);
+        out[2] = srgbChannelToLinear(static_cast<float>(color.b) / 255.0f);
     };
     decodeLinear(skyColor(FalloutWeatherColor::Sunlight), params.sunlightColor);
     decodeLinear(skyColor(FalloutWeatherColor::Ambient), params.ambientColor);
@@ -3052,14 +3063,57 @@ bool NewVegasApp::initStreaming() {
         // bright, and with none of the contact darkening the interior path gets
         // from lerp(0.28, 1.0, skyVisibility). It reads as "AO is broken"
         // rather than as "this scene never said it was indoors".
-        m_renderer.setImportedSceneInteriorMode(true);
-        // XCLL is read and reported but not yet APPLIED: the renderer has no
-        // ambient override to hand it to, so the room takes the interior rig's
-        // fixed ambient rather than the one the cell authored. Stated here so
-        // the gap is visible rather than looking like the values were wrong.
+        render::ImportedInteriorLighting lighting{};
+        lighting.enabled = true;
+        lighting.hasAuthoredLighting = interior.hasLighting;
+        lighting.fogNear = interior.fogNear;
+        lighting.fogFar = interior.fogFar;
+        lighting.showSky = interior.showSky;
+        lighting.useSkyLighting = interior.useSkyLighting;
+        lighting.localShadowMode =
+            render::ImportedInteriorLighting::LocalShadowMode::ShadowMapsWithContact;
+        lighting.indirectLightingMode =
+            render::ImportedInteriorLighting::IndirectLightingMode::ScreenSpaceDiffuse;
+        if (const char* shadowMode = std::getenv("ODAI_FNV_INTERIOR_SHADOWS")) {
+            if (std::strcmp(shadowMode, "rt") == 0) {
+                lighting.localShadowMode =
+                    render::ImportedInteriorLighting::LocalShadowMode::RayTraced;
+            } else if (std::strcmp(shadowMode, "maps") == 0) {
+                lighting.localShadowMode =
+                    render::ImportedInteriorLighting::LocalShadowMode::ShadowMaps;
+            } else if (std::strcmp(shadowMode, "contact") == 0) {
+                lighting.localShadowMode =
+                    render::ImportedInteriorLighting::LocalShadowMode::ShadowMapsWithContact;
+            } else if (std::strcmp(shadowMode, "off") == 0) {
+                lighting.localShadowMode = render::ImportedInteriorLighting::LocalShadowMode::Off;
+            } else {
+                VOX_LOGW("newvegas")
+                    << "unknown ODAI_FNV_INTERIOR_SHADOWS='" << shadowMode
+                    << "'; using contact";
+            }
+        }
+        if (const char* giMode = std::getenv("ODAI_FNV_INTERIOR_GI")) {
+            if (std::strcmp(giMode, "ssgi") == 0) {
+                lighting.indirectLightingMode =
+                    render::ImportedInteriorLighting::IndirectLightingMode::ScreenSpaceDiffuse;
+            } else if (std::strcmp(giMode, "off") == 0) {
+                lighting.indirectLightingMode =
+                    render::ImportedInteriorLighting::IndirectLightingMode::Off;
+            } else {
+                VOX_LOGW("newvegas")
+                    << "unknown ODAI_FNV_INTERIOR_GI='" << giMode
+                    << "'; using ssgi";
+            }
+        }
+        for (int channel = 0; channel < 3; ++channel) {
+            lighting.ambientColor[channel] = srgbChannelToLinear(interior.ambientColor[channel]);
+            lighting.directionalColor[channel] = srgbChannelToLinear(interior.directionalColor[channel]);
+            lighting.fogColor[channel] = srgbChannelToLinear(interior.fogColor[channel]);
+        }
+        m_renderer.setImportedInteriorLighting(lighting);
         VOX_LOGI("newvegas") << "started inside " << m_startInsideInterior
                              << (interior.hasLighting
-                                     ? " (XCLL read; not applied -- no ambient override yet)"
+                                     ? " (linear XCLL applied)"
                                      : " (no XCLL lighting on this cell)");
         m_interiorStarted = true;
     }
@@ -3269,6 +3323,11 @@ bool NewVegasApp::initStreaming() {
             }
         }
     }
+    if (m_interiorStarted) {
+        VOX_LOGI("newvegas")
+            << "interior-only residency active: exterior cells=0, distant LOD=off, water=0";
+        return true;
+    }
     VOX_LOGI("newvegas") << "streaming " << m_streamer->availableCellCount()
                          << " cells from " << m_streamDirectory
                          << " (load radius " << config.loadRadius
@@ -3475,7 +3534,7 @@ void NewVegasApp::runCollisionSelfTest() {
 }
 
 void NewVegasApp::updateStreaming(float deltaSeconds) {
-    if (!m_streamer) {
+    if (!m_streamer || m_interiorStarted) {
         return;
     }
 

@@ -33,6 +33,10 @@
 
 namespace odai::importer::fnv {
 
+inline constexpr std::uint16_t kCellFlagInterior = 0x0001u;
+inline constexpr std::uint16_t kCellFlagShowSky = 0x0040u;
+inline constexpr std::uint16_t kCellFlagUseSkyLighting = 0x0080u;
+
 // Height-post grid dimensions for one LAND record (one exterior cell).
 constexpr int kLandGridSize = 33;
 constexpr int kLandVertexCount = kLandGridSize * kLandGridSize;
@@ -409,6 +413,10 @@ struct FalloutCellRecord {
     std::uint32_t formId = 0;
     std::string editorId;
     bool isInterior = false;
+    // Complete CELL DATA flags. Skyrim interiors use Show Sky (0x40) and Use
+    // Sky Lighting (0x80) independently; collapsing DATA to isInterior loses
+    // the distinction that decides both the background and ambient policy.
+    std::uint16_t cellFlags = 0u;
     bool hasGridCoords = false;
     std::int32_t gridX = 0;
     std::int32_t gridZ = 0;
@@ -600,6 +608,7 @@ struct FalloutCellIndexEntry {
     std::int32_t gridZ = 0;
     bool hasGridCoords = false;
     bool isInterior = false;
+    std::uint16_t cellFlags = 0u;
     // XCLR, carried through from the cell header so region lookup costs the
     // streamer nothing at runtime -- the index pass already walks these
     // subrecords for EDID and XCLC.

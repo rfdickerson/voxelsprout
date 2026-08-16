@@ -171,9 +171,21 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         mainPush.sampleDistributionPower = 2.0f;
         mainPush.thinOccluderCompensation = 0.0f;
         mainPush.finalValuePower = 2.2f;
-        // Advances every frame so the blue noise is decorrelated in time and TAA
-        // integrates the sampling error away instead of locking in a dither.
-        mainPush.temporalIndex = m_xegtaoTemporalIndex++;
+        // Keep the R2 pattern pixel-stable by default. In this renderer the AO
+        // term has no dedicated temporal history; asking the colour TAA pass to
+        // absorb a binary horizon pattern left shallow receivers (most visibly
+        // Dragonsreach's rugs) flickering even at a stationary camera. The
+        // AO-off control reduced that crop's frame delta by 17x, and freezing
+        // this phase removes the source while the edge-aware denoiser still
+        // suppresses the resulting static high-frequency pattern.
+        //
+        // Retain an opt-in for estimator experiments, but it is not a production
+        // default until AO owns a reprojection/history pass of its own.
+        static const bool s_temporalNoise = []() {
+            const char* env = std::getenv("ODAI_XEGTAO_TEMPORAL");
+            return env != nullptr && env[0] != '0';
+        }();
+        mainPush.temporalIndex = s_temporalNoise ? m_xegtaoTemporalIndex++ : 0u;
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_xegtaoMainPipeline);
         bindDescriptorBuffer(

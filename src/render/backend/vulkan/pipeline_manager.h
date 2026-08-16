@@ -17,6 +17,7 @@ public:
     VkPipeline skyCloudPipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
+    VkPipeline importedFireParticlePipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     // Same shaders as importedStaticPipeline, with alpha blending on and depth
     // writes off — used for the blended tail of each imported chunk's draws.
@@ -180,6 +181,10 @@ public:
         if (pipePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, pipePipeline, nullptr);
             pipePipeline = VK_NULL_HANDLE;
+        }
+        if (importedFireParticlePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedFireParticlePipeline, nullptr);
+            importedFireParticlePipeline = VK_NULL_HANDLE;
         }
         if (importedStaticPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipeline, nullptr);

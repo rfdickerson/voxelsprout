@@ -141,7 +141,16 @@ std::string cellAxisToken(std::int32_t value) {
 //     BSVertexData never looked at its colour nibble -- so the overlay rendered
 //     as a hard-edged uniform sheet, which reads as a decal or z-fighting
 //     problem rather than as a missing vertex attribute.
-constexpr int kCellBuildVersion = 30;
+// 31: stationary fire-effect NIF placements become procedural emissive
+//     particle emitters. Their effect source meshes remain suppressed instead
+//     of returning as opaque sheets.
+// 32: fire scale widens the emitter footprint without enlarging every lobe;
+//     nearby authored LIGH records win, with a flickering clustered fallback
+//     only where the game did not place one.
+// 33: animated banner skin partitions are settled under Jolt soft-body gravity
+//     with their authored top attachment pinned, instead of freezing in the
+//     sideways wind-blown bind pose.
+constexpr int kCellBuildVersion = 33;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -694,6 +703,9 @@ bool CellStreamer::buildInteriorScene(
     builder.finish(outScene);
 
     outInterior.hasLighting = record.hasLighting;
+    outInterior.cellFlags = record.cellFlags;
+    outInterior.showSky = (record.cellFlags & kCellFlagShowSky) != 0u;
+    outInterior.useSkyLighting = (record.cellFlags & kCellFlagUseSkyLighting) != 0u;
     for (int channel = 0; channel < 3; ++channel) {
         outInterior.ambientColor[channel] = record.ambientColor[channel];
         outInterior.directionalColor[channel] = record.directionalColor[channel];
@@ -794,11 +806,26 @@ bool CellStreamer::buildInteriorScene(
         outInterior.spawnFromBounds = true;
     }
 
+    const CellBuildStats& buildStats = builder.stats();
+    const std::size_t droppedReferences =
+        buildStats.referencesDroppedBaseNotFound +
+        buildStats.referencesDroppedBaseHasNoModel +
+        buildStats.referencesDroppedMeshUnresolved +
+        buildStats.referencesDroppedMeshUnreadable;
     VOX_LOGI("streamer") << "interior " << interiorEditorId << ": " << record.references.size()
                          << " refs, " << outScene.packedVertices.size() << " verts, ambient ("
                          << static_cast<int>(outInterior.ambientColor[0] * 255.0f) << ","
                          << static_cast<int>(outInterior.ambientColor[1] * 255.0f) << ","
                          << static_cast<int>(outInterior.ambientColor[2] * 255.0f) << ")"
+                         << ", XCLL=" << (outInterior.hasLighting ? "applied" : "absent")
+                         << ", showSky=" << (outInterior.showSky ? "yes" : "no")
+                         << ", useSkyLighting=" << (outInterior.useSkyLighting ? "yes" : "no")
+                         << ", droppedRefs=" << droppedReferences
+                         << ", skippedShapes=" << buildStats.skippedGeometryShapes
+                         << ", particleEmitters=" << buildStats.particleEmittersPlaced
+                         << ", gravityCloth=" << buildStats.clothMeshesSettled
+                         << ", nodeParseFailures=" << buildStats.nodeParseFailures
+                         << ", unresolvedTextures=" << buildStats.unresolvedTexturePaths.size()
                          << (outInterior.hasSpawn
                                  ? (outInterior.spawnFromBounds
                                         ? ", spawn from geometry bounds (no navmesh)"

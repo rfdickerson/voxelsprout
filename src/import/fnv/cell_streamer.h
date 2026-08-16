@@ -214,6 +214,9 @@ public:
         // As authored, sRGB 0..1. See FalloutCellRecord's XCLL note: an interior
         // has no sun, so ambient is usually the whole rig.
         bool hasLighting = false;
+        std::uint16_t cellFlags = 0u;
+        bool showSky = false;
+        bool useSkyLighting = false;
         float ambientColor[3] = {};
         float directionalColor[3] = {};
         float fogColor[3] = {};

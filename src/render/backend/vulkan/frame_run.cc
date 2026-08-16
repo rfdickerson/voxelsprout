@@ -589,9 +589,16 @@ void RendererBackend::renderFrame(
         !importedActors->indices.empty() &&
         !importedActors->draws.empty();
     const bool renderingImportedScene = !m_importedMeshDraws.empty() || renderingImportedActors;
+    const bool directionalShadowsForFrame =
+        shouldRenderImportedDirectionalShadows(m_importedInteriorLighting);
+    bool renderInteriorPointShadowsThisFrame = false;
+    std::uint32_t interiorPointShadowLightCount = 0;
+    const bool sunShaftsForFrame =
+        m_sunShaftsRequested && shouldRenderImportedSky(m_importedInteriorLighting);
     const bool legacyVoxelRenderingEnabled = !renderingImportedScene;
     const bool importedInteriorGiEnabled =
         m_importedSceneInteriorMode &&
+        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting) &&
         !m_importedGiTriangles.empty();
     const bool voxelGiSceneEnabled = legacyVoxelRenderingEnabled || importedInteriorGiEnabled;
     const float farPlane = (s_farPlaneOverride > 0.0f)
@@ -926,6 +933,9 @@ void RendererBackend::renderFrame(
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if (!directionalShadowsForFrame) {
+            break;
+        }
         const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(kShadowCascadeCount);
         const float logarithmicSplit = shadowSplitNear * std::pow(shadowFarPlane / shadowSplitNear, p);
         const float uniformSplit = shadowSplitNear + ((shadowFarPlane - shadowSplitNear) * p);
@@ -951,7 +961,7 @@ void RendererBackend::renderFrame(
     // still false and the far plane is the 500-unit fallback. The numbers that
     // printed described a frame nobody was looking at, which is worse than not
     // printing them.
-    const bool cascadeSplitsChanged =
+    const bool cascadeSplitsChanged = directionalShadowsForFrame &&
         std::abs(cascadeDistances[kShadowCascadeCount - 1] - m_loggedShadowCascadeFar) >
         std::max(1.0f, m_loggedShadowCascadeFar * 0.02f);
     if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && cascadeSplitsChanged) {
@@ -972,6 +982,9 @@ void RendererBackend::renderFrame(
 
     std::array<odai::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if (!directionalShadowsForFrame) {
+            break;
+        }
         const float cascadeFar = cascadeDistances[cascadeIndex];
         const float farHalfHeight = cascadeFar * tanHalfFov;
         const float farHalfWidth = farHalfHeight * aspectRatio;
@@ -1138,6 +1151,9 @@ void RendererBackend::renderFrame(
     const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
     if (!s_shadowInterleaveDisabled) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if (!directionalShadowsForFrame) {
+                break;
+            }
             if (!m_shadowRenderedValid[cascadeIndex]) {
                 continue;
             }
@@ -1172,6 +1188,9 @@ void RendererBackend::renderFrame(
         }
     }
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if (!directionalShadowsForFrame) {
+            break;
+        }
         if ((shadowSkipCascadeMask & (1u << cascadeIndex)) == 0u) {
             m_shadowRenderedMatrices[cascadeIndex] = lightViewProjMatrices[cascadeIndex];
             m_shadowRenderedValid[cascadeIndex] = true;
@@ -1219,6 +1238,11 @@ void RendererBackend::renderFrame(
     std::memcpy(mvpUniform.mvp, mvpColumnMajor.m, sizeof(mvpUniform.mvp));
     std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
+    const odai::math::Matrix4 inverseViewColumnMajor =
+        transpose(odai::math::inverse(view));
+    std::memcpy(mvpUniform.contactShadowInvView,
+                inverseViewColumnMajor.m,
+                sizeof(mvpUniform.contactShadowInvView));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const odai::math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
         const odai::math::Matrix4 inverseLightViewProjColumnMajor =
@@ -1353,7 +1377,8 @@ void RendererBackend::renderFrame(
     // effect and the interesting band is the few hundred units around the
     // viewer, not an altitude fixed at world build time.
     float fogBaseHeight = m_skyDebugSettings.volumetricFogBaseHeight;
-    if (renderingImportedScene) {
+    if (renderingImportedScene &&
+        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting)) {
         fogBaseHeight = eye.y - 240.0f;
     }
     // An authored weather says how far it can be seen through, and that beats
@@ -1378,7 +1403,8 @@ void RendererBackend::renderFrame(
     // with no weather plugin loaded, was the only configuration still rendering
     // the white lake.
     constexpr float kDefaultFogFarDistance = 60000.0f;  // ~850 m, a clear day
-    if (renderingImportedScene) {
+    if (renderingImportedScene &&
+        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting)) {
         // Distance only, NOT gated on weight -- matching applyAerialPerspective
         // in imported_static.frag.slang, which the comment above says these two
         // atmospheres are calibrated against each other by. A caller publishing
@@ -1489,6 +1515,19 @@ void RendererBackend::renderFrame(
     mvpUniform.shadowAtlasConfig[1] = 0.0f;
     mvpUniform.shadowAtlasConfig[2] = 0.0f;
     mvpUniform.shadowAtlasConfig[3] = 0.0f;
+    for (int channel = 0; channel < 3; ++channel) {
+        mvpUniform.interiorAmbient[channel] = m_importedInteriorLighting.ambientColor[channel];
+        mvpUniform.interiorDirectional[channel] = m_importedInteriorLighting.directionalColor[channel];
+        mvpUniform.interiorFog[channel] = m_importedInteriorLighting.fogColor[channel];
+    }
+    mvpUniform.interiorAmbient[3] = m_importedInteriorLighting.hasAuthoredLighting ? 1.0f : 0.0f;
+    mvpUniform.interiorDirectional[3] = m_importedInteriorLighting.useSkyLighting ? 1.0f : 0.0f;
+    mvpUniform.interiorFog[3] = m_importedInteriorLighting.showSky ? 1.0f : 0.0f;
+    mvpUniform.interiorFogRange[0] = m_importedInteriorLighting.fogNear;
+    mvpUniform.interiorFogRange[1] = m_importedInteriorLighting.fogFar;
+    mvpUniform.interiorFogRange[2] =
+        shouldRenderImportedDirectionalShadows(m_importedInteriorLighting) ? 1.0f : 0.0f;
+    mvpUniform.interiorFogRange[3] = m_importedInteriorLighting.enabled ? 1.0f : 0.0f;
     // Terrain layer-blend shaping, exposed so it can be turned OFF.
     //
     // The defaults are the values this was hardcoded to and render identically
@@ -1556,7 +1595,15 @@ void RendererBackend::renderFrame(
     };
     std::array<SelectedImportedLight, kImportedLocalLightCapacity> selectedImportedLights{};
     std::size_t selectedImportedLightCount = 0;
-    const float importedLightRadiusScale = std::clamp(m_debugImportedLightRadiusScale, 0.25f, 8.0f);
+    // XCLL interiors use the LIGH records at authored radius/intensity. The
+    // viewer's historical 3x radius / 1.65x intensity are outdoor readability
+    // knobs; applying them inside made overlapping chandeliers bleach the hall
+    // even after the exterior sun had correctly been removed.
+    const bool authoredInteriorLighting =
+        useAuthoredImportedInteriorLighting(m_importedInteriorLighting);
+    const float importedLightRadiusScale = authoredInteriorLighting
+        ? 1.0f
+        : std::clamp(m_debugImportedLightRadiusScale, 0.25f, 8.0f);
     // THE SHADER LOOP IS BOUNDED BY HOW MANY LIGHTS WE UPLOAD, and a light that
     // cannot reach a visible pixel still costs every fragment a full iteration.
     // The scoring below keeps the best 64 by distance from the VIEW AXIS, which
@@ -1661,8 +1708,9 @@ void RendererBackend::renderFrame(
                                << " (frustum culled " << importedLightsFrustumCulled << ")";
         }
     }
-    const float importedLightGlobalIntensity =
-        std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
+    const float importedLightGlobalIntensity = authoredInteriorLighting
+        ? 1.0f
+        : std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
     auto mixImportedLightSignature = [](std::uint64_t hash, std::uint64_t value) {
         hash ^= value;
         hash *= 1099511628211ull;
@@ -1682,9 +1730,32 @@ void RendererBackend::renderFrame(
         static_cast<std::uint64_t>(selectedImportedLightCount));
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightGlobalIntensity);
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightRadiusScale);
+    const auto animatedImportedLightIntensity = [&](const ImportedLocalLight& light) {
+        const float phase =
+            (light.position[0] * 0.0131f) + (light.position[1] * 0.0173f) +
+            (light.position[2] * 0.0117f);
+        float modulation = 1.0f;
+        if ((light.flags & 0x08u) != 0u) {  // flicker
+            const float a = std::sin((flowTimeSeconds * 12.7f) + phase);
+            const float b = std::sin((flowTimeSeconds * 19.1f) + (phase * 1.73f));
+            modulation = 0.82f + (0.18f * (0.5f + (0.5f * a * b)));
+        } else if ((light.flags & 0x40u) != 0u) {  // flicker slow
+            const float a = std::sin((flowTimeSeconds * 4.1f) + phase);
+            const float b = std::sin((flowTimeSeconds * 6.7f) + (phase * 1.37f));
+            modulation = 0.84f + (0.16f * (0.5f + (0.5f * a * b)));
+        } else if ((light.flags & 0x80u) != 0u) {  // pulse
+            modulation = 0.78f + (0.22f * (0.5f + 0.5f * std::sin(
+                (flowTimeSeconds * 5.5f) + phase)));
+        } else if ((light.flags & 0x100u) != 0u) {  // pulse slow
+            modulation = 0.80f + (0.20f * (0.5f + 0.5f * std::sin(
+                (flowTimeSeconds * 2.2f) + phase)));
+        }
+        return light.intensity * modulation;
+    };
     for (std::size_t lightIndex = 0; lightIndex < selectedImportedLightCount; ++lightIndex) {
         const ImportedLocalLight& light = *selectedImportedLights[lightIndex].light;
         const float lightRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
+        const float animatedIntensity = animatedImportedLightIntensity(light);
         mvpUniform.importedLightPositionRadius[lightIndex][0] = light.position[0];
         mvpUniform.importedLightPositionRadius[lightIndex][1] = light.position[1];
         mvpUniform.importedLightPositionRadius[lightIndex][2] = light.position[2];
@@ -1692,7 +1763,7 @@ void RendererBackend::renderFrame(
         mvpUniform.importedLightColorIntensity[lightIndex][0] = light.color[0];
         mvpUniform.importedLightColorIntensity[lightIndex][1] = light.color[1];
         mvpUniform.importedLightColorIntensity[lightIndex][2] = light.color[2];
-        mvpUniform.importedLightColorIntensity[lightIndex][3] = light.intensity;
+        mvpUniform.importedLightColorIntensity[lightIndex][3] = animatedIntensity;
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[0]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[1]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[2]);
@@ -1701,6 +1772,131 @@ void RendererBackend::renderFrame(
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.color[1]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.color[2]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.intensity);
+    }
+    for (std::uint32_t lightIndex = 0; lightIndex < kImportedLocalLightCapacity; ++lightIndex) {
+        mvpUniform.interiorPointShadowLightIndices[lightIndex / 4u][lightIndex % 4u] = -1.0f;
+    }
+    const bool useInteriorPointShadowMaps =
+        shouldUseImportedPointShadowMaps(m_importedInteriorLighting);
+    if (useInteriorPointShadowMaps) {
+        if (!m_interiorPointShadowAtlasValid ||
+            m_interiorPointShadowLightSourceCount == 0) {
+            m_interiorPointShadowLightSourceCount = 0;
+            const auto appendShadowSource = [&](std::uint32_t sourceIndex) {
+                if (sourceIndex >= m_importedLocalLights.size() ||
+                    m_interiorPointShadowLightSourceCount >= kInteriorPointShadowLightCount) {
+                    return;
+                }
+                const auto first = m_interiorPointShadowLightSourceIndices.begin();
+                const auto last = first + static_cast<std::ptrdiff_t>(
+                    m_interiorPointShadowLightSourceCount);
+                if (std::find(first, last, sourceIndex) != last) {
+                    return;
+                }
+                m_interiorPointShadowLightSourceIndices[
+                    m_interiorPointShadowLightSourceCount++] = sourceIndex;
+            };
+            // Seed with the entry-view relevance order, then use the remaining
+            // capacity for off-camera lights. The old code stopped after the
+            // visible seed (16 in the fixed Dragonsreach view), so those
+            // unshadowed lights still filled table and contact shadows even
+            // though the atlas had room for the complete 34-light interior.
+            for (std::size_t selectedIndex = 0;
+                 selectedIndex < selectedImportedLightCount;
+                 ++selectedIndex) {
+                appendShadowSource(static_cast<std::uint32_t>(
+                    selectedImportedLights[selectedIndex].light -
+                    m_importedLocalLights.data()));
+            }
+            for (std::uint32_t sourceIndex = 0;
+                 sourceIndex < static_cast<std::uint32_t>(m_importedLocalLights.size());
+                 ++sourceIndex) {
+                appendShadowSource(sourceIndex);
+            }
+        }
+        interiorPointShadowLightCount = m_interiorPointShadowLightSourceCount;
+        std::array<const ImportedLocalLight*, kInteriorPointShadowLightCount> shadowLights{};
+        for (std::uint32_t slot = 0; slot < interiorPointShadowLightCount; ++slot) {
+            const std::uint32_t sourceIndex =
+                m_interiorPointShadowLightSourceIndices[slot];
+            if (sourceIndex < m_importedLocalLights.size()) {
+                shadowLights[slot] = &m_importedLocalLights[sourceIndex];
+            }
+        }
+        // The lighting list remains camera-selected. Publish an atlas slot for
+        // any of those lights that belonged to the entry-view selection; newly
+        // visible lights still illuminate, but do not force a depth rebuild.
+        for (std::uint32_t lightIndex = 0;
+             lightIndex < static_cast<std::uint32_t>(selectedImportedLightCount);
+             ++lightIndex) {
+            for (std::uint32_t slot = 0; slot < interiorPointShadowLightCount; ++slot) {
+                if (selectedImportedLights[lightIndex].light == shadowLights[slot]) {
+                    mvpUniform.interiorPointShadowLightIndices[lightIndex / 4u][lightIndex % 4u] =
+                        static_cast<float>(slot);
+                    break;
+                }
+            }
+        }
+        constexpr std::array<odai::math::Vector3, kInteriorPointShadowFaceCount> kFaceDirections = {{
+            {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+            {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+        }};
+        constexpr std::array<odai::math::Vector3, kInteriorPointShadowFaceCount> kFaceUps = {{
+            {0.0f, -1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+            {0.0f, -1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+        }};
+        std::uint64_t pointShadowSignature = 1469598103934665603ull;
+        pointShadowSignature = mixImportedLightSignature(
+            pointShadowSignature, interiorPointShadowLightCount);
+        for (std::uint32_t slot = 0; slot < interiorPointShadowLightCount; ++slot) {
+            if (shadowLights[slot] == nullptr) {
+                continue;
+            }
+            const ImportedLocalLight& light = *shadowLights[slot];
+            const odai::math::Vector3 lightPosition{
+                light.position[0], light.position[1], light.position[2]};
+            const float lightRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, light.position[0]);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, light.position[1]);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, light.position[2]);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, lightRadius);
+            const float shadowNear = std::max(2.0f, lightRadius * 0.003f);
+            const odai::math::Matrix4 pointProjection = perspectiveVulkan(
+                odai::math::radians(91.0f), 1.0f, shadowNear, lightRadius);
+            for (std::uint32_t face = 0; face < kInteriorPointShadowFaceCount; ++face) {
+                const odai::math::Matrix4 pointView = lookAt(
+                    lightPosition,
+                    lightPosition + kFaceDirections[face],
+                    kFaceUps[face]);
+                const odai::math::Matrix4 pointViewProj = pointProjection * pointView;
+                const odai::math::Matrix4 pointViewProjColumnMajor = transpose(pointViewProj);
+                std::memcpy(
+                    mvpUniform.interiorPointShadowViewProj[
+                        (slot * kInteriorPointShadowFaceCount) + face],
+                    pointViewProjColumnMajor.m,
+                    sizeof(pointViewProjColumnMajor.m));
+            }
+        }
+        mvpUniform.interiorPointShadowParams[0] =
+            static_cast<float>(interiorPointShadowLightCount);
+        mvpUniform.interiorPointShadowParams[1] =
+            static_cast<float>(kInteriorPointShadowFaceSize) /
+            static_cast<float>(kShadowAtlasSize);
+        mvpUniform.interiorPointShadowParams[2] =
+            1.0f / static_cast<float>(kShadowAtlasSize);
+        mvpUniform.interiorPointShadowParams[3] =
+            interiorPointShadowLightCount > 0 ? 1.0f : 0.0f;
+        renderInteriorPointShadowsThisFrame =
+            interiorPointShadowLightCount > 0 &&
+            (!m_interiorPointShadowAtlasValid ||
+             m_interiorPointShadowSignature != pointShadowSignature);
+        m_interiorPointShadowSignature = pointShadowSignature;
+    } else {
+        m_interiorPointShadowAtlasValid = false;
+        m_interiorPointShadowSignature = 0;
+        m_interiorPointShadowLightSourceCount = 0;
     }
     mvpUniform.importedLightConfig[0] = static_cast<float>(selectedImportedLightCount);
     mvpUniform.importedLightConfig[1] = importedLightGlobalIntensity;
@@ -1742,6 +1938,27 @@ void RendererBackend::renderFrame(
     mvpUniform.lightClusterConfig1[1] = m_lightClusterSliceBias;
     mvpUniform.lightClusterConfig1[2] = 0.0f;
     mvpUniform.lightClusterConfig1[3] = 0.0f;
+
+    m_contactShadowActive =
+        shouldUseImportedContactShadows(m_importedInteriorLighting) &&
+        m_contactShadowAvailable && m_lightClusterCullActive &&
+        m_contactShadowDepthBufferHandle != kInvalidBufferHandle &&
+        m_contactShadowHalfBufferHandle != kInvalidBufferHandle &&
+        m_contactShadowFullMaskBufferHandle != kInvalidBufferHandle;
+    m_screenSpaceGiActive =
+        shouldUseImportedScreenSpaceGi(m_importedInteriorLighting) &&
+        m_screenSpaceGiAvailable && m_taaEnabled && useMergedDepthPrepass() &&
+        m_contactShadowDepthBufferHandle != kInvalidBufferHandle &&
+        m_screenSpaceGiRecordBufferHandles[0] != kInvalidBufferHandle &&
+        m_screenSpaceGiRecordBufferHandles[1] != kInvalidBufferHandle;
+    mvpUniform.contactShadowConfig[0] = static_cast<float>(m_renderExtent.width);
+    mvpUniform.contactShadowConfig[1] = static_cast<float>(m_renderExtent.height);
+    mvpUniform.contactShadowConfig[2] = m_contactShadowActive ? 1.0f : 0.0f;
+    mvpUniform.contactShadowConfig[3] = static_cast<float>(m_taaJitterPhase & 3u);
+    mvpUniform.screenSpaceGiConfig[0] = static_cast<float>(m_screenSpaceGiExtent.width);
+    mvpUniform.screenSpaceGiConfig[1] = static_cast<float>(m_screenSpaceGiExtent.height);
+    mvpUniform.screenSpaceGiConfig[2] = m_screenSpaceGiActive ? 1.0f : 0.0f;
+    mvpUniform.screenSpaceGiConfig[3] = 0.18f;
 
     mvpUniform.fogMapConfig[0] = m_fogMapInvExtentX;
     mvpUniform.fogMapConfig[1] = m_fogMapInvExtentZ;
@@ -2861,6 +3078,10 @@ void RendererBackend::renderFrame(
     recordSkinningPass(frameExecutionContext);
 
     ShadowPassInputs shadowPassInputs{};
+    shadowPassInputs.skipDirectionalShadows =
+        !shouldRenderImportedDirectionalShadows(m_importedInteriorLighting);
+    shadowPassInputs.renderInteriorPointShadows = renderInteriorPointShadowsThisFrame;
+    shadowPassInputs.interiorPointShadowLightCount = interiorPointShadowLightCount;
     shadowPassInputs.frameChunkDrawData = &frameChunkDrawData;
     shadowPassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
     shadowPassInputs.shadowChunkInstanceSliceOpt = &shadowChunkInstanceSliceOpt;
@@ -3289,7 +3510,9 @@ void RendererBackend::renderFrame(
     // re-render of its geometry every frame.
     prepassInputs.normalDepthNeeded =
         m_debugEnableSsao ||
-        (m_sunShaftsRequested && m_sunShaftComputeAvailable) ||
+        m_contactShadowActive ||
+        m_screenSpaceGiActive ||
+        (sunShaftsForFrame && m_sunShaftComputeAvailable) ||
         m_importedWaterIndexCount > 0u;
     recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
@@ -3301,6 +3524,9 @@ void RendererBackend::renderFrame(
     // pure geometry, not scene depth -- so it sits here only to keep the
     // compute dispatch off the critical path between prepass and main.
     recordLightClusterPass(frameExecutionContext);
+    recordScreenSpaceDepthHierarchyPass(frameExecutionContext);
+    recordContactShadowPass(frameExecutionContext);
+    recordScreenSpaceGiPass(frameExecutionContext);
 
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
@@ -3640,7 +3866,7 @@ void RendererBackend::renderFrame(
         wroteSunShaftTimestamps = true;
         writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
         const bool sunShaftInitialized = m_sunShaftImageInitialized[aoFrameIndex];
-        if (m_sunShaftsRequested &&
+        if (sunShaftsForFrame &&
             m_sunShaftComputeAvailable &&
             m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
             m_sunShaftPipeline != VK_NULL_HANDLE &&
@@ -3692,31 +3918,32 @@ void RendererBackend::renderFrame(
                 (sunShaftPushConstants.height + (kSunShaftWorkgroupSize - 1u)) / kSunShaftWorkgroupSize;
             vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1u);
 
-            transitionImageLayout(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                VK_IMAGE_LAYOUT_GENERAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
+            transitionImageLayout(commandBuffer, m_sunShaftImages[aoFrameIndex],
+                                  VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT);
             m_sunShaftImageInitialized[aoFrameIndex] = true;
+            m_sunShaftImageHasContent[aoFrameIndex] = true;
             endDebugLabel(commandBuffer);
         } else {
+          const bool clearDisabledShafts =
+              !sunShaftInitialized || m_sunShaftImageHasContent[aoFrameIndex];
+          if (clearDisabledShafts) {
             transitionImageLayout(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                sunShaftInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                commandBuffer, m_sunShaftImages[aoFrameIndex],
+                sunShaftInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                    : VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                sunShaftInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-                sunShaftInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                sunShaftInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                                    : VK_PIPELINE_STAGE_2_NONE,
+                sunShaftInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                                    : VK_ACCESS_2_NONE,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
             const VkClearColorValue clearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
             VkImageSubresourceRange clearRange{};
             clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -3724,45 +3951,37 @@ void RendererBackend::renderFrame(
             clearRange.levelCount = 1u;
             clearRange.baseArrayLayer = 0u;
             clearRange.layerCount = 1u;
-            vkCmdClearColorImage(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                &clearValue,
-                1,
-                &clearRange
-            );
-            transitionImageLayout(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
+            vkCmdClearColorImage(commandBuffer, m_sunShaftImages[aoFrameIndex],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &clearValue, 1, &clearRange);
+            transitionImageLayout(commandBuffer, m_sunShaftImages[aoFrameIndex],
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                  VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT);
             m_sunShaftImageInitialized[aoFrameIndex] = true;
+            m_sunShaftImageHasContent[aoFrameIndex] = false;
+          }
         }
         writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
     }
     if (!wroteSunShaftTimestamps) {
-        writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
-        writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
+      writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
+      writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
     }
 
     transitionImageLayout(
-        commandBuffer,
-        m_swapchainImages[imageIndex],
-        m_swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        commandBuffer, m_swapchainImages[imageIndex],
+        m_swapchainImageInitialized[imageIndex]
+            ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+            : VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
-    );
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
     VkRenderingAttachmentInfo toneMapColorAttachment{};
     toneMapColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;

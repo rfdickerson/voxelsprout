@@ -1216,10 +1216,20 @@ void testFalloutRecordExtraction() {
     const auto intCellSubrecords = [] {
         std::vector<std::uint8_t> out;
         const auto edid = buildSubrecord("EDID", stringPayload("TestInteriorCell"));
-        std::vector<std::uint8_t> dataPayload{0x1u};  // interior (bit 0 set)
+        // Interior + Show Sky + Use Sky Lighting, plus a high byte that proves
+        // the complete two-byte Skyrim DATA flags survive the streaming index.
+        std::vector<std::uint8_t> dataPayload{0xC1u, 0x04u};
         const auto data = buildSubrecord("DATA", dataPayload);
+        std::vector<std::uint8_t> xcllPayload{
+            91u, 80u, 64u, 255u,
+            7u, 8u, 9u, 255u,
+            11u, 12u, 13u, 255u};
+        appendPod(xcllPayload, 125.0f);
+        appendPod(xcllPayload, 6300.0f);
+        const auto xcll = buildSubrecord("XCLL", xcllPayload);
         out.insert(out.end(), edid.begin(), edid.end());
         out.insert(out.end(), data.begin(), data.end());
+        out.insert(out.end(), xcll.begin(), xcll.end());
         return out;
     }();
     const auto intCellRecord = buildRecord("CELL", kIntCellFormId, 0u, intCellSubrecords);
@@ -1287,6 +1297,19 @@ void testFalloutRecordExtraction() {
                "Exterior cell attributes (worldspace, grid coords, interior flag) round-trip");
     expectTrue(intCell != nullptr && intCell->isInterior && intCell->worldspaceFormId == 0u,
                "Interior cell is flagged interior and attributed to no worldspace");
+    expectTrue(intCell != nullptr && intCell->cellFlags == 0x04C1u,
+               "CELL DATA flags, including show-sky/use-sky-lighting and the high byte, round-trip");
+    if (intCell != nullptr) {
+        expectTrue(intCell->hasLighting, "Interior XCLL is retained");
+        expectNear(intCell->ambientColor[0], 91.0f / 255.0f, 1e-6f,
+                   "XCLL ambient round-trips in authored sRGB");
+        expectNear(intCell->directionalColor[2], 9.0f / 255.0f, 1e-6f,
+                   "XCLL directional round-trips in authored sRGB");
+        expectNear(intCell->fogColor[1], 12.0f / 255.0f, 1e-6f,
+                   "XCLL fog colour round-trips in authored sRGB");
+        expectNear(intCell->fogNear, 125.0f, 1e-6f, "XCLL fog-near round-trips");
+        expectNear(intCell->fogFar, 6300.0f, 1e-6f, "XCLL fog-far round-trips");
+    }
     // The fixture's XCLW is present and holds the dry sentinel. A reader that
     // tests presence rather than value floods every cell in the game.
     expectTrue(extCell != nullptr && !extCell->hasWater,
@@ -1467,6 +1490,7 @@ void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmP
         }
         expectTrue(
             entry.isInterior == expected->isInterior &&
+                entry.cellFlags == expected->cellFlags &&
                 entry.hasGridCoords == expected->hasGridCoords &&
                 entry.gridX == expected->gridX && entry.gridZ == expected->gridZ &&
                 entry.worldspaceFormId == expected->worldspaceFormId,
@@ -1480,6 +1504,14 @@ void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmP
         expectTrue(
             streamed.references.size() == expected->references.size(),
             "streamed cell has the same reference count as the full extraction");
+        expectTrue(
+            streamed.cellFlags == expected->cellFlags &&
+                streamed.hasLighting == expected->hasLighting &&
+                streamed.ambientColor[0] == expected->ambientColor[0] &&
+                streamed.directionalColor[2] == expected->directionalColor[2] &&
+                streamed.fogColor[1] == expected->fogColor[1] &&
+                streamed.fogNear == expected->fogNear && streamed.fogFar == expected->fogFar,
+            "streamed CELL flags and complete XCLL match full extraction");
         expectTrue(
             streamed.navMeshes.size() == expected->navMeshes.size(),
             "streamed cell has the same navmesh count as the full extraction");
@@ -4436,6 +4468,69 @@ void testActorRaceAndWardrobeAssembly() {
     fs::remove(esmPath);
 }
 
+void testBethesdaFireParticleEffectClassification() {
+    using odai::importer::fnv::isFireParticleEffectModelPath;
+    expectTrue(
+        isFireParticleEffectModelPath("Effects\\FXfireWithEmbers01.nif"),
+        "Skyrim stationary fire effect becomes a particle emitter");
+    expectTrue(
+        isFireParticleEffectModelPath("Effects/Fire/FlameNode01.nif"),
+        "Oblivion stationary flame effect becomes a particle emitter");
+    expectTrue(
+        !isFireParticleEffectModelPath("Effects\\Magic\\FXFireballProjectile.nif"),
+        "moving fire projectiles are not treated as stationary emitters");
+    expectTrue(
+        !isFireParticleEffectModelPath("Architecture\\WhiteRun\\WRIntCastleFloorFirePit01.nif"),
+        "opaque fire-pit furniture is not mistaken for its separate fire effect");
+    expectTrue(
+        !isFireParticleEffectModelPath("Critters\\Firefly\\Firefly.nif"),
+        "fireflies are not classified as fire");
+}
+
+void testAnimatedBannerSettlesUnderJoltGravity() {
+    using odai::importer::fnv::NifModel;
+    using odai::importer::fnv::NifShape;
+    using odai::importer::fnv::applyNifBannerGravityRestPose;
+
+    NifModel banner;
+    banner.hasEmbeddedTransformAnimation = true;
+    NifShape shape;
+    // Z-up NIF cloth: top edge at x=0, lower edge blown three units sideways
+    // while dropping four. Jolt should preserve its five-unit length and make
+    // the free edge hang primarily in -Z under gravity.
+    shape.positions = {
+         0.0f, -1.0f,  0.0f,
+         0.0f,  1.0f,  0.0f,
+        -3.0f, -1.0f, -4.0f,
+        -3.0f,  1.0f, -4.0f,
+    };
+    shape.triangleIndices = {0u, 2u, 1u, 1u, 2u, 3u};
+    banner.shapes.push_back(shape);
+
+    expectTrue(
+        applyNifBannerGravityRestPose("Clutter\\Banners\\AnimatedBanner01.nif", banner),
+        "animated banner is accepted by the Jolt cloth-rest path");
+    const auto& settled = banner.shapes[0].positions;
+    expectTrue(
+        std::abs(settled[0]) < 0.05f && std::abs(settled[3]) < 0.05f,
+        "the authored top attachment vertices stay pinned");
+    expectTrue(
+        std::abs(settled[6]) < 1.5f && std::abs(settled[9]) < 1.5f,
+        "the free cloth edge no longer points sideways");
+    expectTrue(
+        settled[8] < -4.2f && settled[11] < -4.2f,
+        "gravity redirects the preserved cloth length downward");
+    expectTrue(
+        banner.shapes[0].normals.size() == banner.shapes[0].positions.size(),
+        "settled cloth normals are rebuilt for the new pose");
+
+    NifModel staticBanner;
+    staticBanner.shapes.push_back(shape);
+    expectTrue(
+        !applyNifBannerGravityRestPose("Clutter\\Banners\\StaticBanner01.nif", staticBanner),
+        "a banner without embedded animation keeps its authored static pose");
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -4471,6 +4566,8 @@ int main() {
     testTemplateSkeletonThroughNestedLeveledLists();
     testOblivionWeatherFogAndCloudTints();
     testSkyrimWeatherCloudLayers();
+    testBethesdaFireParticleEffectClassification();
+    testAnimatedBannerSettlesUnderJoltGravity();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

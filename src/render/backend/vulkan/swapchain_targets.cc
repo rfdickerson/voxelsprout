@@ -222,6 +222,14 @@ bool RendererBackend::createAoTargets() {
     if (!createLightClusterBuffer(m_renderExtent)) {
         return false;
     }
+    if (!createContactShadowBuffers(m_renderExtent)) {
+        VOX_LOGW("render") << "contact-shadow buffers unavailable; hybrid mode will use maps only";
+        m_contactShadowAvailable = false;
+    }
+    if (m_screenSpaceGiAvailable && !createScreenSpaceGiBuffers(m_renderExtent)) {
+        VOX_LOGW("render") << "screen-space GI buffers unavailable; using authored ambient only";
+        m_screenSpaceGiAvailable = false;
+    }
 
     auto createColorTargets = [&](VkFormat format,
                                   std::vector<VkImage>& outImages,
@@ -286,6 +294,7 @@ bool RendererBackend::createAoTargets() {
     m_xegtaoBentNormalInitialized.assign(frameTargetCount, false);
     m_ssaoBlurImageInitialized.assign(frameTargetCount, false);
     m_sunShaftImageInitialized.assign(frameTargetCount, false);
+    m_sunShaftImageHasContent.assign(frameTargetCount, false);
 
     if (!createColorTargets(
             m_normalDepthFormat,
@@ -1087,6 +1096,7 @@ bool RendererBackend::createTaaTargets() {
     // Fresh images: whatever history existed died with the old swapchain.
     m_taaImageInitialized = {false, false};
     m_taaHistoryValid = false;
+    m_screenSpaceGiHistoryValid = false;
     m_taaHistoryIndex = 0;
     return true;
 }
@@ -1108,6 +1118,7 @@ void RendererBackend::destroyTaaTargets() {
     }
     m_taaImageInitialized = {false, false};
     m_taaHistoryValid = false;
+    m_screenSpaceGiHistoryValid = false;
 }
 
 void RendererBackend::destroyHdrResolveTargets() {
@@ -1252,6 +1263,7 @@ void RendererBackend::destroyAoTargets() {
     m_sunShaftImageMemories.clear();
     m_sunShaftTransientHandles.clear();
     m_sunShaftImageInitialized.clear();
+    m_sunShaftImageHasContent.clear();
 
     for (TransientImageHandle handle : m_ssaoRawTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {

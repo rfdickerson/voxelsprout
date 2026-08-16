@@ -324,6 +324,22 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
 
     m_debugGpuFrameTimeMs = durationMs(kGpuTimestampQueryFrameStart, kGpuTimestampQueryFrameEnd);
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
+    m_debugGpuContactShadowTraceTimeMs = durationMs(
+        kGpuTimestampQueryContactShadowTraceStart, kGpuTimestampQueryContactShadowTraceEnd);
+    m_debugGpuContactShadowResolveTimeMs = durationMs(
+        kGpuTimestampQueryContactShadowResolveStart, kGpuTimestampQueryContactShadowResolveEnd);
+    m_debugGpuContactShadowTimingMsHistory.push(
+        m_debugGpuContactShadowTraceTimeMs + m_debugGpuContactShadowResolveTimeMs);
+    m_debugGpuContactShadowP95Ms = odai::core::percentile(
+        m_debugGpuContactShadowTimingMsHistory, 0.95f);
+    m_debugGpuScreenDepthTimeMs = durationMs(
+        kGpuTimestampQueryScreenDepthStart, kGpuTimestampQueryScreenDepthEnd);
+    m_debugGpuScreenSpaceGiTimeMs = durationMs(
+        kGpuTimestampQueryScreenSpaceGiStart, kGpuTimestampQueryScreenSpaceGiEnd);
+    m_debugGpuScreenSpaceGiTimingMsHistory.push(
+        m_debugGpuScreenDepthTimeMs + m_debugGpuScreenSpaceGiTimeMs);
+    m_debugGpuScreenSpaceGiP95Ms = odai::core::percentile(
+        m_debugGpuScreenSpaceGiTimingMsHistory, 0.95f);
     m_debugGpuGiOccupancyTimeMs = durationMs(kGpuTimestampQueryGiOccupancyStart, kGpuTimestampQueryGiOccupancyEnd);
     m_debugGpuGiSurfaceTimeMs = durationMs(kGpuTimestampQueryGiSurfaceStart, kGpuTimestampQueryGiSurfaceEnd);
     m_debugGpuGiSurfaceCandidateTimeMs = durationMs(kGpuTimestampQueryGiSurfaceCandidateStart, kGpuTimestampQueryGiSurfaceCandidateEnd);
@@ -368,7 +384,15 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         if ((s_timingLogFrame++ % 60u) == 0u) {
             VOX_LOGI("render")
                 << "GPU ms: frame=" << m_debugGpuFrameTimeMs
+                << " p50=" << m_debugGpuFrameP50Ms
+                << " p95=" << m_debugGpuFrameP95Ms
                 << " shadow=" << m_debugGpuShadowTimeMs
+                << " contactTrace=" << m_debugGpuContactShadowTraceTimeMs
+                << " contactResolve=" << m_debugGpuContactShadowResolveTimeMs
+                << " contactP95=" << m_debugGpuContactShadowP95Ms
+                << " screenDepth=" << m_debugGpuScreenDepthTimeMs
+                << " ssgi=" << m_debugGpuScreenSpaceGiTimeMs
+                << " ssgiP95=" << m_debugGpuScreenSpaceGiP95Ms
                 << " prepass=" << m_debugGpuPrepassTimeMs
                 << " ssao=" << m_debugGpuSsaoTimeMs
                 << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs

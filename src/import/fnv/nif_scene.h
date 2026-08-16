@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace odai::importer::fnv {
@@ -84,6 +85,10 @@ struct NifShape {
 
 struct NifModel {
     std::vector<NifShape> shapes;
+    // Embedded Gamebryo transform animation was present. Static geometry can
+    // still be extracted, but skinned cloth needs a deliberate rest pose when
+    // these controllers are not evaluated by the runtime.
+    bool hasEmbeddedTransformAnimation = false;
     // Count of geometry blocks that were dropped rather than emitted as
     // possibly-corrupt geometry: either the NiTriShapeData/NiTriStripsData
     // field layout did not parse cleanly, or a NiTriShape/NiTriStrips pointed
@@ -306,5 +311,10 @@ bool parseNifBlockSummary(
 
 bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outModel, std::string& outError);
 bool loadNifStaticMesh(const std::filesystem::path& path, NifModel& outModel, std::string& outError);
+
+// Bakes animated banner geometry into a gravity-rest pose for the static world
+// importer. Returns true when a model was recognized and changed. Bethesda's
+// Z-up model space is retained; only the wind displacement is collapsed.
+bool applyNifBannerGravityRestPose(std::string_view modelPath, NifModel& model);
 
 }  // namespace odai::importer::fnv

@@ -27,6 +27,18 @@ Sampler3D<float4> voxelGiOccupancyVolume;
 [[vk::binding(15, 0)]]
 StructuredBuffer<uint2> clusterLightMask;
 
+// One bit per uploaded local light, produced by the half-resolution contact
+// trace and bilateral full-resolution resolve. The camera flag keeps mapped,
+// RT and legacy scenes from reading stale data when the pass did not run.
+[[vk::binding(16, 0)]]
+StructuredBuffer<uint2> contactShadowMask;
+
+// Quarter-resolution incident radiance plus the representative receiver guide.
+// The main pass performs the bilateral gather so there is no full-resolution
+// GI resolve buffer or extra bandwidth pass.
+[[vk::binding(17, 0)]]
+StructuredBuffer<uint4> screenSpaceGiRecords;
+
 #ifdef ODAI_RT_SHADOWS
 [[vk::binding(12, 0)]]
 RaytracingAccelerationStructure shadowScene;
@@ -617,6 +629,81 @@ float sampleRayTracedDirectionalShadow(float3 worldPosition, float3 normal, floa
 }
 #endif
 
+int interiorPointShadowFace(float3 lightToReceiver)
+{
+    const float3 a = abs(lightToReceiver);
+    if (a.x >= a.y && a.x >= a.z)
+    {
+        return lightToReceiver.x >= 0.0 ? 0 : 1;
+    }
+    if (a.y >= a.z)
+    {
+        return lightToReceiver.y >= 0.0 ? 2 : 3;
+    }
+    return lightToReceiver.z >= 0.0 ? 4 : 5;
+}
+
+float sampleInteriorPointShadowMap(
+    int lightIndex,
+    float3 worldPosition,
+    float3 normal,
+    float3 lightPosition,
+    float lightRadius,
+    float ndotl)
+{
+    if (camera.interiorPointShadowParams.w < 0.5)
+    {
+        return 1.0;
+    }
+    const int slotCount = clamp(int(camera.interiorPointShadowParams.x + 0.5), 0, 35);
+    const int shadowSlot = int(
+        camera.interiorPointShadowLightIndices[lightIndex >> 2][lightIndex & 3] + 0.5);
+    if (shadowSlot < 0 || shadowSlot >= slotCount)
+    {
+        return 1.0;
+    }
+
+    const float receiverOffset = max(1.5, lightRadius * 0.0025) * (1.0 + (1.0 - ndotl));
+    const float3 samplePosition = worldPosition + (normal * receiverOffset);
+    const float3 lightToReceiver = samplePosition - lightPosition;
+    const int face = interiorPointShadowFace(lightToReceiver);
+    const int matrixIndex = (shadowSlot * 6) + face;
+    const float4 shadowClip = mul(
+        camera.interiorPointShadowViewProj[matrixIndex],
+        float4(samplePosition, 1.0));
+    if (shadowClip.w <= 0.0)
+    {
+        return 1.0;
+    }
+    const float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    float2 localUv = (shadowNdc.xy * 0.5) + 0.5;
+    if (any(localUv <= 0.0) || any(localUv >= 1.0) ||
+        shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0)
+    {
+        return 1.0;
+    }
+
+    const float faceScale = camera.interiorPointShadowParams.y;
+    const float texel = camera.interiorPointShadowParams.z;
+    // Keep the compare footprint inside its face. Adjacent faces share the
+    // atlas image but not a projection, so crossing that edge is invalid.
+    const float localInset = texel / max(faceScale, 1e-6);
+    localUv = clamp(localUv, localInset, 1.0 - localInset);
+    // Five 3x2 cubemap tiles fit per row at 256px faces in a 4096 atlas.
+    // Derive the count from the published face scale so CPU and shader cannot
+    // silently disagree if the atlas or face size changes together.
+    const int cubesPerRow = max(1, int(1.0 / (3.0 * faceScale)));
+    const float2 tileOrigin = float2(
+        float(shadowSlot % cubesPerRow) * (3.0 * faceScale),
+        float(shadowSlot / cubesPerRow) * (2.0 * faceScale));
+    const float2 faceOrigin = float2(face % 3, face / 3) * faceScale;
+    const float2 atlasUv = tileOrigin + faceOrigin + (localUv * faceScale);
+    // Reverse-Z comparison: increasing the receiver reference moves it toward
+    // the light and suppresses self-shadowing acne.
+    const float depthBias = 0.0012 + ((1.0 - ndotl) * 0.0018);
+    return shadowMap.SampleCmpLevelZero(atlasUv, shadowNdc.z + depthBias);
+}
+
 // Diffuse contribution of the local point lights, and — for surfaces that opted
 // into a PBR material — their specular highlights accumulated into outSpecular.
 // Non-PBR surfaces pass applySpecular=false and get exactly the pre-PBR result.
@@ -653,6 +740,16 @@ float3 evaluateImportedLocalLights(
         const uint low = (lightCount >= 32) ? 0xffffffffu : ((1u << uint(lightCount)) - 1u);
         const uint high = (lightCount > 32) ? ((1u << uint(lightCount - 32)) - 1u) : 0u;
         mask = uint2(low, high);
+    }
+
+    uint2 contactMask = uint2(0u, 0u);
+    if (camera.contactShadowConfig.z > 0.5)
+    {
+        const uint2 contactExtent = max(
+            uint2(camera.contactShadowConfig.xy + 0.5), uint2(1u, 1u));
+        const uint2 contactPixel = min(uint2(screenPosition), contactExtent - 1u);
+        contactMask = contactShadowMask[
+            contactPixel.y * contactExtent.x + contactPixel.x];
     }
 
     float3 lighting = float3(0.0, 0.0, 0.0);
@@ -701,7 +798,22 @@ float3 evaluateImportedLocalLights(
             lightDirection,
             distanceToLight,
             ndotl);
+#else
+        visibility = sampleInteriorPointShadowMap(
+            lightIndex,
+            worldPosition,
+            normal,
+            positionRadius.xyz,
+            radius,
+            ndotl);
 #endif
+        const uint contactBit = lightIndex < 32
+            ? ((contactMask.x >> uint(lightIndex)) & 1u)
+            : ((contactMask.y >> uint(lightIndex - 32)) & 1u);
+        if (contactBit != 0u)
+        {
+            visibility = 0.0;
+        }
         // Left exactly as it was pre-PBR, factoring included: this expression is
         // the legacy path for every surface without a material, and a reassociation
         // here would shift existing scenes by an ULP for no reason.
@@ -891,6 +1003,72 @@ static const uint kDebugViewShadow = 11u;
 static const uint kDebugViewDirectRatio = 12u;
 static const uint kDebugViewTerrainLayers = 13u;
 static const uint kDebugViewAmbientOcclusion = 14u;
+static const uint kDebugViewScreenSpaceGi = 15u;
+
+float3 unpackScreenSpaceGiNormal(uint packed)
+{
+    const uint2 encoded = uint2(packed & 0xffffu, packed >> 16u);
+    float2 oct = (float2(encoded) / 65535.0) * 2.0 - 1.0;
+    float3 decoded = float3(oct, 1.0 - abs(oct.x) - abs(oct.y));
+    if (decoded.z < 0.0)
+    {
+        decoded.xy = (1.0 - abs(decoded.yx)) *
+            select(decoded.xy >= 0.0, float2(1.0, 1.0), float2(-1.0, -1.0));
+    }
+    return normalize(decoded);
+}
+
+float3 unpackScreenSpaceGiIrradiance(uint2 packed)
+{
+    return float3(
+        f16tof32(packed.x & 0xffffu),
+        f16tof32(packed.x >> 16u),
+        f16tof32(packed.y & 0xffffu));
+}
+
+float3 sampleImportedScreenSpaceGi(
+    float2 screenPosition, float viewDepth, float3 worldNormal)
+{
+    if (camera.screenSpaceGiConfig.z <= 0.5)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+    const uint2 extent = max(
+        uint2(camera.screenSpaceGiConfig.xy + 0.5), uint2(1u, 1u));
+    const float2 recordPosition = (screenPosition - 2.5) * 0.25;
+    const int2 base = int2(floor(recordPosition));
+    const float2 fraction = frac(recordPosition);
+    float3 accumulated = float3(0.0, 0.0, 0.0);
+    float weightSum = 0.0;
+    [unroll]
+    for (int y = 0; y < 2; ++y)
+    {
+        [unroll]
+        for (int x = 0; x < 2; ++x)
+        {
+            const int2 pixel = clamp(base + int2(x, y), int2(0, 0), int2(extent) - 1);
+            const uint4 record = screenSpaceGiRecords[
+                uint(pixel.y) * extent.x + uint(pixel.x)];
+            const float candidateDepth = asfloat(record.z);
+            if (candidateDepth <= 1e-4)
+            {
+                continue;
+            }
+            const float depthLimit = max(8.0, viewDepth * 0.01);
+            if (abs(candidateDepth - viewDepth) > depthLimit ||
+                dot(unpackScreenSpaceGiNormal(record.w), worldNormal) < 0.75)
+            {
+                continue;
+            }
+            const float weightX = x == 0 ? (1.0 - fraction.x) : fraction.x;
+            const float weightY = y == 0 ? (1.0 - fraction.y) : fraction.y;
+            const float weight = max(weightX * weightY, 1e-4);
+            accumulated += unpackScreenSpaceGiIrradiance(record.xy) * weight;
+            weightSum += weight;
+        }
+    }
+    return weightSum > 0.0 ? accumulated / weightSum : float3(0.0, 0.0, 0.0);
+}
 
 // A blue->green->yellow->red ramp for scalar views. Monotonic in luminance as
 // well as in hue, so it stays readable for someone who cannot separate the red
@@ -1043,7 +1221,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // and two different views then render identically, which is exactly how
     // that mistake presents.
     if (debugView != kDebugViewOff && debugView != kDebugViewShadow &&
-        debugView != kDebugViewDirectRatio && debugView != kDebugViewAmbientOcclusion)
+        debugView != kDebugViewDirectRatio && debugView != kDebugViewAmbientOcclusion &&
+        debugView != kDebugViewScreenSpaceGi)
     {
         const float3 debugNormal =
             resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
@@ -1114,8 +1293,10 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float wrappedNdotL = saturate((ndotl * 0.65) + 0.35);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
+    const bool interiorMode = chunkPc.cascadeData.y > 0.5;
+    const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;
     float shadowVisibility = 1.0;
-    if (ndotl > 0.0001)
+    if (!authoredInterior && ndotl > 0.0001)
     {
 #ifdef ODAI_RT_SHADOWS
         shadowVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, normal, ndotl);
@@ -1124,11 +1305,10 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
 #endif
     }
 
-    const bool interiorMode = chunkPc.cascadeData.y > 0.5;
     const float3 skyProbeNormal = float3(0.0, 1.0, 0.0);
     const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
     float skyVisibility = 1.0;
-    if (interiorMode)
+    if (interiorMode && !authoredInterior)
     {
 #ifdef ODAI_RT_SHADOWS
         skyVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, skyProbeNormal, skyProbeNdotL);
@@ -1141,7 +1321,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // to 1.0 here — see docs/stylized_low_poly.md). Scoped to ambient only, not direct
     // sun, so sunlit faces stay clean instead of muddying under an AO halo.
     const float ambientOcclusion =
-        (interiorMode ? lerp(0.28, 1.0, skyVisibility) : 1.0) * sampleSsaoAmbientFactor(input.inScreenPosition);
+        ((interiorMode && !authoredInterior) ? lerp(0.28, 1.0, skyVisibility) : 1.0) *
+        sampleSsaoAmbientFactor(input.inScreenPosition);
     // THE EXTERIOR FLOOR IS WHAT HID THE SHADOWS. It is added unconditionally,
     // so it is light a shadow cannot take away: at 0.18-0.21 it set a floor no
     // occluder could darken past, and putting EVERY pixel in full shadow moved
@@ -1152,10 +1333,15 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // hole, and the Mojave's sky bounce is real -- but it is now small next to
     // the sky irradiance that varies with the weather and the hour, rather than
     // dominating it.
-    const float3 ambient =
+    const float3 legacyAmbient =
         (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.055, 0.060, 0.070)) +
         (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));
-    const float3 voxelGi = interiorMode
+    const float3 ambient = authoredInterior
+        ? camera.interiorAmbient.xyz +
+            ((camera.interiorDirectional.w > 0.5) ? ambientIrradiance * float3(0.92, 0.95, 1.00) * 0.22
+                                                   : float3(0.0, 0.0, 0.0))
+        : legacyAmbient;
+    const float3 voxelGi = (interiorMode && !authoredInterior)
         ? sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35
         : float3(0.0, 0.0, 0.0);
     const float3 voxelGiDebug = sampleImportedVoxelGiDebug(input.inWorldPosition, normal);
@@ -1215,7 +1401,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
             input.inScreenPosition.xy,
             viewDepth,
             specular) *
-        (interiorMode ? 1.25 : 1.0);
+        ((interiorMode && !authoredInterior) ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
 
     // wrappedNdotL is ndotl*0.65 + 0.35: a true-cosine core plus a constant
@@ -1231,10 +1417,23 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float directCore = ndotl * 0.65;
     const float directFill = max(wrappedNdotL - directCore, 0.0);
     const float occludedWrap = directCore + (directFill * ambientOcclusion);
-    const float3 direct =
-        camera.sunColorShadow.xyz *
-        (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.95));
-    const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
+    const float3 direct = authoredInterior
+        ? camera.interiorDirectional.xyz * occludedWrap
+        : camera.sunColorShadow.xyz *
+            (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.95));
+    float3 screenSpaceGi = (authoredInterior &&
+        (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u)
+        ? sampleImportedScreenSpaceGi(input.inScreenPosition.xy, viewDepth, normal) *
+            camera.screenSpaceGiConfig.w
+        : float3(0.0, 0.0, 0.0);
+    const float3 directAndAmbient =
+        (ambient * ambientOcclusion) + direct + importedLights;
+    const float lightingLuma = dot(
+        directAndAmbient, float3(0.2126, 0.7152, 0.0722));
+    const float giLuma = dot(screenSpaceGi, float3(0.2126, 0.7152, 0.0722));
+    const float giLimit = 0.35 * (lightingLuma + 0.05);
+    screenSpaceGi *= min(1.0, giLimit / max(giLuma, 1e-5));
+    const float3 diffuseLight = directAndAmbient + voxelGi + screenSpaceGi;
 
     // Lighting-balance views. Here rather than in debugViewColor() because
     // neither input exists until this point.
@@ -1255,6 +1454,13 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         const float ao = sampleSsaoAmbientFactor(input.inScreenPosition);
         return float4(ao, ao, ao, 1.0);
     }
+    if (debugView == kDebugViewScreenSpaceGi)
+    {
+        const float peak = max(max(screenSpaceGi.x, screenSpaceGi.y), screenSpaceGi.z);
+        const float3 hue = peak > 1e-5 ? screenSpaceGi / peak : float3(0.0, 0.0, 0.0);
+        const float intensity = saturate(log2(1.0 + peak * 16.0) * 0.25);
+        return float4(hue * intensity, 1.0);
+    }
     if (debugView == kDebugViewShadow)
     {
         return float4(shadowVisibility, shadowVisibility, shadowVisibility, 1.0);
@@ -1273,9 +1479,10 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         // Sun specular uses the same radiance and shadow term the diffuse sun
         // does, minus the wrapped-NdotL softening (that wrap is a diffuse
         // stylization; a specular lobe wrapped past the terminator reads wrong).
-        const float3 sunRadiance =
-            camera.sunColorShadow.xyz *
-            (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+        const float3 sunRadiance = authoredInterior
+            ? camera.interiorDirectional.xyz
+            : camera.sunColorShadow.xyz *
+                (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
         // kPbrDiffuseConventionScale converts pbrDirectSpecular's normalized BRDF
         // into the same units as the `direct` diffuse term above, which omits the
         // Lambert 1/pi. Without it a metal loses all of its diffuse to
@@ -1311,6 +1518,13 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     if (!interiorMode)
     {
         shaded = applyAerialPerspective(shaded, input.inWorldPosition, -viewDir);
+    }
+    else if (authoredInterior && camera.interiorFogRange.y > camera.interiorFogRange.x + 0.001)
+    {
+        const float fogFactor = saturate(
+            (viewDepth - camera.interiorFogRange.x) /
+            (camera.interiorFogRange.y - camera.interiorFogRange.x));
+        shaded = lerp(shaded, camera.interiorFog.xyz, fogFactor);
     }
 
     // Fog-of-war visibility blend. Only applied when the fog map is active

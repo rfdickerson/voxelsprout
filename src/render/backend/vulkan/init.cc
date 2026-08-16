@@ -245,6 +245,14 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    // Optional like clustered culling: mapped interior shadows remain a valid
+    // fallback if the contact compute shaders are absent on a developer build.
+    if (!createContactShadowResources()) {
+        VOX_LOGW("render") << "contact shadows unavailable; using cached point-shadow maps";
+    }
+    if (!createScreenSpaceGiResources()) {
+        VOX_LOGW("render") << "screen-space GI unavailable; using authored ambient only";
+    }
     if (!runStep("createTaaComputeResources", [&] { return createTaaComputeResources(); })) {
         return false;
     }
@@ -301,6 +309,13 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     } else {
         if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
             VOX_LOGE("render") << "init failed at createPipePipeline\n";
+            shutdown();
+            return false;
+        }
+        if (!runStep("createImportedFireParticlePipeline", [&] {
+                return createImportedFireParticlePipeline();
+            })) {
+            VOX_LOGE("render") << "init failed at createImportedFireParticlePipeline\n";
             shutdown();
             return false;
         }
@@ -2168,6 +2183,11 @@ bool RendererBackend::recreateSwapchain() {
             VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
             return false;
         }
+        if (!createImportedFireParticlePipeline()) {
+            VOX_LOGE("render")
+                << "recreateSwapchain failed: createImportedFireParticlePipeline\n";
+            return false;
+        }
         if (!createAoPipelines()) {
             VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
             return false;
@@ -2452,6 +2472,8 @@ void RendererBackend::shutdown() {
         destroyAutoExposureResources();
         destroySunShaftResources();
         destroyLightClusterResources();
+        destroyContactShadowResources();
+        destroyScreenSpaceGiResources();
         destroyTaaComputeResources();
         destroyFrameCaptureResources();
         destroySkinnedVelocityResources();
@@ -2603,6 +2625,14 @@ void RendererBackend::shutdown() {
     m_gpuTimestampQuerySubmitted.fill(false);
     m_debugGpuFrameTimeMs = 0.0f;
     m_debugGpuShadowTimeMs = 0.0f;
+    m_debugGpuContactShadowTraceTimeMs = 0.0f;
+    m_debugGpuContactShadowResolveTimeMs = 0.0f;
+    m_debugGpuContactShadowP95Ms = 0.0f;
+    m_debugGpuContactShadowTimingMsHistory.clear();
+    m_debugGpuScreenDepthTimeMs = 0.0f;
+    m_debugGpuScreenSpaceGiTimeMs = 0.0f;
+    m_debugGpuScreenSpaceGiP95Ms = 0.0f;
+    m_debugGpuScreenSpaceGiTimingMsHistory.clear();
     m_debugGpuGiOccupancyTimeMs = 0.0f;
     m_debugGpuGiSurfaceTimeMs = 0.0f;
     m_debugGpuGiSurfaceCandidateTimeMs = 0.0f;
