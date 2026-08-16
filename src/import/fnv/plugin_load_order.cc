@@ -14,6 +14,7 @@ namespace odai::importer::fnv {
 namespace {
 
 constexpr std::uint32_t kTes4MasterFlag = 0x00000001u;
+constexpr std::uint32_t kTes4LocalizedFlag = 0x00000080u;
 // The largest record header of any supported generation: type[4], dataSize[4],
 // flags[4], formId[4], versionControlInfo[4], formVersion[2], unknown[2]. Read
 // this many bytes to sniff the file, then rewind to the header size the sniff
@@ -120,6 +121,7 @@ bool readFalloutPluginHeader(
     const std::uint32_t dataSize = readU32(header + 4);
     const std::uint32_t flags = readU32(header + 8);
     outHeader.isMaster = (flags & kTes4MasterFlag) != 0u;
+    outHeader.isLocalized = (flags & kTes4LocalizedFlag) != 0u;
 
     // Seek to where the record body actually starts, because the read above
     // deliberately overshot. Oblivion's header is 20 bytes, so continuing

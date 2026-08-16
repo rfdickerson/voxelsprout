@@ -715,6 +715,10 @@ void mergeWorldTablesFromScene(
     for (const FalloutRegionRecord& entry : data.regions) {
         if (entry.isDiscoverable()) {
             put(outTables.regionNamesByFormId, remap(entry.formId), entry.mapName);
+            if (entry.mapNameStringId != 0u) {
+                put(outTables.regionNameStringIdsByFormId, remap(entry.formId),
+                    entry.mapNameStringId);
+            }
         }
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
@@ -853,6 +857,9 @@ bool buildFalloutWorldTables(
     for (const FalloutRegionRecord& entry : data.regions) {
         if (entry.isDiscoverable()) {
             outTables.regionNamesByFormId.emplace(entry.formId, entry.mapName);
+            if (entry.mapNameStringId != 0u) {
+                outTables.regionNameStringIdsByFormId.emplace(entry.formId, entry.mapNameStringId);
+            }
         }
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
@@ -1354,6 +1361,16 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         if ((v * 2u) + 1u < shape.uvs.size()) {
                             vertex.uv[0] = shape.uvs[v * 2u];
                             vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
+                        }
+                        // Alpha only. The RGB of a Bethesda vertex colour is
+                        // usually a baked ambient-occlusion tint that this
+                        // renderer already gets from its own AO pass, and
+                        // multiplying it in on top would double-darken every
+                        // corner -- so it is deliberately left out while the
+                        // channel that has no other source is taken. See
+                        // ImportedSceneVertex::colorAlpha.
+                        if ((v * 4u) + 3u < shape.colors.size()) {
+                            vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
                         }
                         mesh.vertices.push_back(vertex);
                     }

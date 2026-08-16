@@ -49,6 +49,13 @@ struct FalloutWorldTables {
     // rather than present-with-an-empty-string, so a lookup miss means "do not
     // announce this" without the caller having to re-check.
     std::unordered_map<std::uint32_t, std::string> regionNamesByFormId;
+    // REGN formID -> its RDMP read as a localized string ID, for the plugins
+    // that store one instead of the text (Skyrim; see strings_table.h). The
+    // names above are the raw bytes in that case and are wrong -- Whiterun's
+    // reads "h" -- so a caller holding an asset source resolves these and
+    // overwrites regionNamesByFormId. Empty for every Fallout/Oblivion plugin,
+    // which makes that resolution a no-op rather than a special case.
+    std::unordered_map<std::uint32_t, std::uint32_t> regionNameStringIdsByFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
     // Every worldspace by formID, with its DNAM default land/water heights

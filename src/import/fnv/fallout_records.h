@@ -249,9 +249,22 @@ struct FalloutRegionRecord {
     std::uint32_t formId = 0;
     std::string editorId;
     // RDMP. Empty for the 221 regions that are not player-facing.
+    //
+    // ON A LOCALIZED PLUGIN THIS IS NOT THE NAME. Skyrim stores RDMP as a
+    // four-byte string ID (see strings_table.h) and reading it as a zstring
+    // yields its low byte as a character -- Whiterun's region announces "h".
+    // Both fields are filled unconditionally because the parser does not see
+    // the TES4 header; whoever has the plugin's localized flag decides which to
+    // believe. FalloutWorldTables carries both for the same reason.
     std::string mapName;
+    // RDMP read as a string ID. Zero unless RDMP was exactly four bytes, which
+    // is what a localized plugin always writes and what a real map name never
+    // is (the shortest in FalloutNV.esm is "Goodsprings").
+    std::uint32_t mapNameStringId = 0;
 
-    [[nodiscard]] bool isDiscoverable() const { return !mapName.empty(); }
+    [[nodiscard]] bool isDiscoverable() const {
+        return !mapName.empty() || mapNameStringId != 0u;
+    }
 };
 
 struct FalloutPlacedReference {

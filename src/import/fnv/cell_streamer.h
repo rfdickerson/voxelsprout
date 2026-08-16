@@ -309,6 +309,13 @@ private:
 
     void applyCompletedLoads(render::Renderer& renderer);
 
+    // Rewrites regionNamesByFormId for the plugins that store RDMP as a
+    // localized string ID rather than as text (Skyrim; see strings_table.h).
+    // Runs after the world tables are built and before anything reads a name.
+    // A no-op for every Fallout and Oblivion plugin, whose RDMP already IS the
+    // name -- the string-ID map is empty for them.
+    void resolveLocalizedRegionNames();
+
     CellResidencyPlanner m_planner;
     std::filesystem::path m_esmPath;
     // The whole load order, when the caller supplied extra plugins. Cells,

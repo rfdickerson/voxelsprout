@@ -196,6 +196,13 @@ void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
             entry.editorId = subrecordString(sub);
         } else if (sub.type == "RDMP") {
             entry.mapName = subrecordString(sub);
+            // A localized plugin writes a four-byte string ID here instead of
+            // the text. Recorded rather than decided on, because this parser
+            // never sees the TES4 header that says which the plugin is; see
+            // FalloutRegionRecord::mapNameStringId.
+            if (sub.size == 4u) {
+                entry.mapNameStringId = readU32(sub.data);
+            }
         }
     }
     scene.regions.push_back(std::move(entry));

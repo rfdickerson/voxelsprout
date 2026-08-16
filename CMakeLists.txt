@@ -1190,6 +1190,7 @@ if(ODAI_BUILD_APP)
             src/import/fnv/cell_streamer.cc
             src/import/fnv/esm_reader.cc
             src/import/fnv/plugin_load_order.cc
+            src/import/fnv/strings_table.cc
             src/import/fnv/weather_records.cc
             src/import/fnv/fallout_records.cc
             src/import/fnv/nif_scene.cc
@@ -1822,6 +1823,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/decoded_texture_cache.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/plugin_load_order.cc
+        src/import/fnv/strings_table.cc
         src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
@@ -1856,6 +1858,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/lz4_frame.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/plugin_load_order.cc
+        src/import/fnv/strings_table.cc
         src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/dialogue_records.cc
@@ -1937,6 +1940,7 @@ if(BUILD_TESTING)
         src/import/fnv/lz4_frame.cc
         src/import/fnv/esm_reader.cc
         src/import/fnv/plugin_load_order.cc
+        src/import/fnv/strings_table.cc
         src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc

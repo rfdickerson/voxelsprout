@@ -11,6 +11,7 @@
 
 #include "core/job_system.h"
 #include "import/fnv/esm_reader.h"
+#include "import/fnv/strings_table.h"
 #include "core/log.h"
 #include "core/frame_profiler.h"
 #include "import/imported_scene.h"
@@ -131,7 +132,16 @@ std::string cellAxisToken(std::int32_t value) {
 //     being read as a path made of formID bytes
 // 29: distant-LOD shells (*LOD.nif) draw two-sided -- they are hollow
 //     single-sided hulls, and culling ate half of Dragonsreach
-constexpr int kCellBuildVersion = 29;
+// 30: authored VERTEX ALPHA is read and lives in the packed vertex. It is what
+//     feathers a placed road, path or dirt patch into the ground under it:
+//     Whiterun's WRMainRoadPlains lays an alpha-TESTED grass/moss overlay whose
+//     texture alpha is uniform and whose vertex alpha ramps 0->1 across the
+//     fringe (108 of 238 vertices on one shape, 269 of 613 on another). Both
+//     NIF generations dropped the channel -- the classic reader seeked past it,
+//     BSVertexData never looked at its colour nibble -- so the overlay rendered
+//     as a hard-edged uniform sheet, which reads as a decal or z-fighting
+//     problem rather than as a missing vertex attribute.
+constexpr int kCellBuildVersion = 30;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -283,6 +293,7 @@ bool CellStreamer::open(
             return false;
         }
     }
+    resolveLocalizedRegionNames();
 
     std::string loweredWorldspace = worldspaceEditorId;
     for (char& c : loweredWorldspace) {
@@ -979,6 +990,78 @@ void CellStreamer::waitIdle() {
     }
     std::unique_lock<std::mutex> lock(m_pending->mutex);
     m_pending->idle.wait(lock, [this]() { return m_pending->inFlight == 0u; });
+}
+
+void CellStreamer::resolveLocalizedRegionNames() {
+    if (m_worldTables.regionNameStringIdsByFormId.empty()) {
+        return;  // no plugin here stores its region names as string IDs
+    }
+    // Which plugin a region came from decides which table to look it up in:
+    // string IDs are local to the file that stored them, exactly like a
+    // formID's mod index. After remapping, the formID's high byte IS the global
+    // load-order position, so it names the plugin directly.
+    const auto pluginFileNameAt = [this](std::uint8_t globalIndex) -> std::string {
+        if (!m_useLoadOrder) {
+            return m_esmPath.filename().string();
+        }
+        const std::vector<FalloutLoadOrderEntry>& entries = m_loadOrder.entries();
+        for (const FalloutLoadOrderEntry& entry : entries) {
+            if (entry.globalIndex == globalIndex) {
+                return entry.header.isLocalized ? entry.header.fileName : std::string();
+            }
+        }
+        return {};
+    };
+    if (!m_useLoadOrder) {
+        // The single-plugin path never reads a TES4 header, so ask for one.
+        // Cheap: a few hundred bytes at the front of the file.
+        FalloutPluginHeader header{};
+        std::string headerError;
+        if (!readFalloutPluginHeader(m_esmPath, header, headerError) || !header.isLocalized) {
+            return;
+        }
+    }
+
+    std::unordered_map<std::string, FalloutStringTable> tablesByPlugin;
+    std::size_t resolved = 0;
+    std::size_t missing = 0;
+    for (const auto& [formId, stringId] : m_worldTables.regionNameStringIdsByFormId) {
+        const std::string pluginFileName = pluginFileNameAt(static_cast<std::uint8_t>(formId >> 24u));
+        if (pluginFileName.empty()) {
+            continue;
+        }
+        auto table = tablesByPlugin.find(pluginFileName);
+        if (table == tablesByPlugin.end()) {
+            FalloutStringTable loaded;
+            std::string tableError;
+            if (!loadFalloutStringTable(
+                    m_assets, pluginFileName, falloutStringLanguage(),
+                    FalloutStringFileKind::Strings, loaded, tableError)) {
+                VOX_LOGW("streamer")
+                    << "localized plugin " << pluginFileName << " has no readable "
+                    << falloutStringLanguage() << " string table (" << tableError
+                    << "); region names will read as single characters";
+                // Cached as empty so a missing table is looked for once, not
+                // once per region.
+                table = tablesByPlugin.emplace(pluginFileName, FalloutStringTable{}).first;
+            } else {
+                table = tablesByPlugin.emplace(pluginFileName, std::move(loaded)).first;
+            }
+        }
+        const std::string* text = table->second.find(stringId);
+        if (text == nullptr || text->empty()) {
+            ++missing;
+            continue;
+        }
+        VOX_LOGD("streamer") << "region " << std::hex << formId << std::dec << " string "
+                             << stringId << " -> \"" << *text << "\"";
+        m_worldTables.regionNamesByFormId[formId] = *text;
+        ++resolved;
+    }
+    // A localized plugin whose table never loaded would otherwise announce "h"
+    // at the player with nothing in the log to say why.
+    VOX_LOGI("streamer") << "localized region names: " << resolved << " resolved, " << missing
+                         << " unresolved across " << tablesByPlugin.size() << " plugin(s)";
 }
 
 std::vector<std::string> CellStreamer::regionNamesAtEngineSpace(
