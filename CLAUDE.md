@@ -1084,6 +1084,7 @@ Ray-traced shadow/reflection variants compile the same `.slang` source with `-DO
 | `docs/UI_LIBRARY.md` | UI architecture, widget catalog, theming, container reflow contract, integration walkthrough |
 | `docs/SKYRIM_MORROWIND_IMPORT.md` | **Read first before touching Skyrim SE or Morrowind assets** — what already works unchanged, the BSA v105/LZ4 differences, and why `BSTriShape` is the one real blocker |
 | `docs/FNV_MODS.md` | **Read first to launch the FNV viewer with mods** — verified install + launch commands, env-var reference, and the silent traps |
+| `docs/SKYRIM_MODS.md` | The same for Skyrim SE (SMIM, Skyrim Flora Overhaul), plus the measured split between what an asset mod replaces and what its `.esp` cannot reach |
 | `docs/FrameArena.md` | Per-frame GPU memory model |
 | `docs/ROADMAP.md` | Feature-by-feature status against the four touchstones, with explicit out-of-scope calls |
 | `docs/EARLY_ACCESS_PLAN.md`, `docs/devlog.md` | Planning and history |
