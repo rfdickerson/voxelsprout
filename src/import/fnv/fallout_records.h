@@ -572,6 +572,12 @@ struct FalloutCellIndexEntry {
     float fogColor[3] = {};
     float fogNear = 0.0f;
     float fogFar = 0.0f;
+    // XCLW, carried for the same reason as the lighting above. Until it was,
+    // EVERY streamed cell reported no water -- rivers, lakes and the sea
+    // existed only in cooked scenes, because the cooker parses the CELL record
+    // in full while the streamer rebuilds it from this entry.
+    bool hasWater = false;
+    float waterHeight = 0.0f;
     // EDID, when the cell has one. Interiors are named ("GSDocMitchellHouse");
     // most exterior cells are not. This is what lets a caller ask for a place by
     // name instead of by grid coordinate.

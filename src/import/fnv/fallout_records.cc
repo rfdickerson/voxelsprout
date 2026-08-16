@@ -213,8 +213,14 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
             // threshold only has to separate the one sentinel Bethesda writes
             // (-2.147e9) from a real water height; the deepest authored water
             // in either game is thousands of units, not billions.
+            // Two sentinels, not one. -2.147e9 is "no water"; FLT_MAX
+            // (0x7F7FFFFF) is Skyrim's "use the worldspace default height",
+            // which the old lower-bound-only guard read as water 3.4e38 units
+            // up. Leaving hasWater false hands the cell to the same implied-
+            // height path an absent XCLW takes, which resolves the worldspace
+            // default -- exactly what the sentinel means.
             const float height = readF32(sub.data);
-            if (std::isfinite(height) && height > -1.0e9f) {
+            if (std::isfinite(height) && height > -1.0e9f && height < 1.0e9f) {
                 entry.hasWater = true;
                 entry.waterHeight = height;
             }
@@ -942,6 +948,8 @@ bool buildFalloutCellIndex(
         }
         entry.fogNear = parsed.fogNear;
         entry.fogFar = parsed.fogFar;
+        entry.hasWater = parsed.hasWater;
+        entry.waterHeight = parsed.waterHeight;
         entry.regionFormIds = parsed.regionFormIds;
         entry.cellRecordOffset = pendingCellRecordOffset;
         outIndex.cells.push_back(entry);
@@ -1201,6 +1209,8 @@ bool extractFalloutCellAt(
     }
     outCell.fogNear = entry.fogNear;
     outCell.fogFar = entry.fogFar;
+    outCell.hasWater = entry.hasWater;
+    outCell.waterHeight = entry.waterHeight;
 
     if (entry.childrenGroupSize == 0u) {
         return true;  // a cell with no children group simply has no contents

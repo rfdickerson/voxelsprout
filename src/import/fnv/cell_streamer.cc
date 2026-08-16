@@ -124,7 +124,9 @@ std::string cellAxisToken(std::int32_t value) {
 // 26: ~760 more Oblivion meshes parse (Havok, skinning and animation blocks
 //     the no-size-table walk could not size), so cells containing them stop
 //     dropping that geometry
-constexpr int kCellBuildVersion = 26;
+// 27: streamed cells carry their water again -- the cell index never held
+//     XCLW, so every river, lake and sea existed only in cooked scenes
+constexpr int kCellBuildVersion = 27;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
