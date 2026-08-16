@@ -719,6 +719,20 @@ bool NewVegasApp::onInit() {
         }
         m_renderer.setDebugView(view);
     }
+    // ODAI_FNV_DRAW=terrain|statics splits the imported draw list the way the
+    // F4 panel's checkboxes do, for the same reason the debug views have an env
+    // var: a --screenshot run cannot operate ImGui, and "is this artifact
+    // terrain or a static" is unanswerable from a lit frame when the two draw
+    // on top of each other.
+    if (const char* drawEnv = std::getenv("ODAI_FNV_DRAW")) {
+        const std::string requested = drawEnv;
+        const bool showTerrain = requested != "statics";
+        const bool showStatics = requested != "terrain";
+        m_renderer.setImportedSceneDebugState(
+            showTerrain, showStatics, /*showTextures=*/true, /*flatShading=*/false,
+            /*waterDebug=*/false);
+        VOX_LOGI("newvegas") << "imported draws restricted to " << requested;
+    }
     // Sweepable, because "too subtle" is a measurable claim: the A/B against
     // AO-off below is what says whether a value actually changed the image.
     //
@@ -1307,8 +1321,30 @@ void NewVegasApp::initWeather() {
             VOX_LOGW("newvegas") << "weather: no worldspace record named \"" << m_streamWorldspace
                                  << "\"; leaving the procedural sky alone";
         } else {
-            const auto climateIt =
-                m_weatherTables.climateByWorldspaceFormId.find(worldspaceIt->second);
+            // A WALLED CITY INHERITS ITS PARENT'S CLIMATE. Skyrim's
+            // WhiterunWorld record is an EDID and a WNAM and nothing else, so
+            // asking it for a climate finds none and the city renders under the
+            // bare procedural sky -- no authored gradient, and no cloud layer at
+            // all. Tamriel, one hop up, carries the climate for the whole
+            // province. Bounded rather than recursive; the chain is one link in
+            // practice and a cycle must not hang startup.
+            auto climateIt = m_weatherTables.climateByWorldspaceFormId.find(worldspaceIt->second);
+            std::uint32_t inheritedFrom = worldspaceIt->second;
+            for (int hop = 0; hop < 8 && climateIt == m_weatherTables.climateByWorldspaceFormId.end();
+                 ++hop) {
+                const auto parentIt = m_weatherTables.parentWorldspaceFormId.find(inheritedFrom);
+                if (parentIt == m_weatherTables.parentWorldspaceFormId.end()) {
+                    break;
+                }
+                inheritedFrom = parentIt->second;
+                climateIt = m_weatherTables.climateByWorldspaceFormId.find(inheritedFrom);
+            }
+            if (climateIt != m_weatherTables.climateByWorldspaceFormId.end() &&
+                inheritedFrom != worldspaceIt->second) {
+                VOX_LOGI("newvegas") << "weather: " << m_streamWorldspace
+                                     << " names no climate; inherited from parent worldspace 0x"
+                                     << std::hex << inheritedFrom << std::dec;
+            }
             if (climateIt == m_weatherTables.climateByWorldspaceFormId.end()) {
                 VOX_LOGW("newvegas") << "weather: worldspace " << m_streamWorldspace
                                      << " names no climate; leaving the procedural sky alone";
@@ -1324,6 +1360,25 @@ void NewVegasApp::initWeather() {
             }
         }
         if (bestClimate != nullptr) {
+            // TNAM, in 10-minute units, giving the START and END of each
+            // transition; the samplers want the single hour at which the
+            // Sunrise and Sunset slots PEAK, which is the midpoint.
+            // SkyrimClimate authors 5:30-10:00 and 16:00-20:30, so its dawn
+            // peaks at 7:45 rather than the 6:00 default -- close to two hours
+            // out, which is a whole slot's worth of colour.
+            const auto hoursFromTnam = [](std::uint8_t begin, std::uint8_t end) {
+                return ((static_cast<float>(begin) + static_cast<float>(end)) * 0.5f) / 6.0f;
+            };
+            const float sunrise = hoursFromTnam(bestClimate->sunriseBegin, bestClimate->sunriseEnd);
+            const float sunset = hoursFromTnam(bestClimate->sunsetBegin, bestClimate->sunsetEnd);
+            // A climate with no TNAM reads as 0 and 0, which would put dusk
+            // before dawn and collapse the whole day curve onto one slot.
+            if (sunrise > 0.5f && sunset > sunrise + 1.0f && sunset < 23.5f) {
+                m_sunriseHour = sunrise;
+                m_sunsetHour = sunset;
+            }
+            VOX_LOGI("newvegas") << "climate " << bestClimate->editorId << ": sunrise peaks "
+                                 << m_sunriseHour << "h, sunset " << m_sunsetHour << "h";
             const auto best = std::max_element(
                 bestClimate->weathers.begin(), bestClimate->weathers.end(),
                 [](const auto& a, const auto& b) { return a.chance < b.chance; });
@@ -1397,6 +1452,51 @@ void NewVegasApp::applyTonemapSettings() {
     }
 }
 
+namespace {
+
+// Turns Skyrim's semantic cloud band into the slice of sky it covers and the
+// projection its art was drawn for. The record says WHERE a layer belongs (see
+// FalloutCloudBand); this says what that means to the renderer, which is the
+// game's business rather than the importer's.
+//
+// The windows overlap on purpose: a deck of cloud and the bank under it are not
+// separated by a line in the sky. The numbers are dir.y, so 0 is the horizon
+// and 1 the zenith, and the horizon band's 0.30 ceiling is about 17 degrees --
+// roughly where a real cloud bank stops reading as "on the skyline".
+void applySkyrimCloudBand(importer::fnv::FalloutCloudBand band,
+                          render::WeatherCloudLayer& target) {
+    using Band = importer::fnv::FalloutCloudBand;
+    switch (band) {
+        case Band::Upper:
+            target.mapping = render::WeatherCloudMapping::TilingPlane;
+            target.scale = 2.6f;
+            target.bandLow = 0.20f;
+            target.bandHigh = 1.0f;
+            break;
+        case Band::Lower:
+            target.mapping = render::WeatherCloudMapping::TilingPlane;
+            target.scale = 1.5f;
+            target.bandLow = 0.10f;
+            target.bandHigh = 1.0f;
+            break;
+        case Band::Horizon:
+            target.mapping = render::WeatherCloudMapping::Cylindrical;
+            // Bearing repeats: the art is one bank, not a panorama of the whole
+            // compass, so it has to go round more than once.
+            target.scale = 4.0f;
+            target.bandLow = 0.0f;
+            target.bandHigh = 0.30f;
+            break;
+        case Band::Fill:
+        case Band::WholeSky:
+            target.mapping = render::WeatherCloudMapping::TilingPlane;
+            target.scale = 2.0f;
+            break;
+    }
+}
+
+}  // namespace
+
 // Everything that has to happen when the active weather changes: cloud layers
 // re-uploaded, sky colours re-decoded, audio re-picked.
 //
@@ -1416,46 +1516,68 @@ void NewVegasApp::selectWeather(std::uint32_t weatherFormId) {
     if (active != nullptr && m_streamer != nullptr) {
         const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
         render::WeatherCloudTextures clouds;
+        const bool tiling =
+            active->cloudMapping == importer::fnv::FalloutCloudMapping::TilingPlane;
+        for (int& source : m_cloudLayerSource) {
+            source = -1;
+        }
         int loadedLayers = 0;
-        for (std::size_t layer = 0; layer < importer::fnv::FalloutWeatherRecord::kCloudLayerCount;
-             ++layer) {
-            m_cloudLayerEnabled[layer] = false;
-            const std::string& path = active->cloudTextures[layer];
-            if (importer::fnv::isEmptyCloudLayer(path)) {
-                continue;
-            }
+
+        // The record has already dropped the layers it disables and paired each
+        // survivor with its own tint; this only has to fill the renderer's four
+        // slots with the ones whose textures actually resolve, REMEMBERING WHICH
+        // LAYER EACH SLOT CAME FROM so applyWeather tints it from the same one.
+        for (std::size_t index = 0;
+             index < active->cloudLayers.size() &&
+             static_cast<std::size_t>(loadedLayers) < render::kWeatherCloudLayerCount;
+             ++index) {
+            const importer::fnv::FalloutWeatherCloudLayer& layer = active->cloudLayers[index];
+            const std::size_t slot = static_cast<std::size_t>(loadedLayers);
             std::vector<std::uint8_t> bytes;
             std::string assetError;
-            if (!assets.resolveTexture(path, bytes, assetError)) {
-                VOX_LOGW("newvegas") << "cloud layer " << layer << " (" << path
+            if (!assets.resolveTexture(layer.texture, bytes, assetError)) {
+                // Not a warning for Skyrim: a retail record names layers whose
+                // textures do not ship (SkyrimCloudy's disabled ones are dead
+                // leftovers from the Oblivion and Fallout records it was copied
+                // from), and NAM1 has already thrown those away. One that gets
+                // this far is worth hearing about.
+                VOX_LOGW("newvegas") << "cloud layer " << layer.index << " (" << layer.texture
                                      << ") unresolved: " << assetError;
                 continue;
             }
-            if (!importer::loadDdsFromMemory(bytes.data(), bytes.size(), clouds.layers[layer])) {
-                VOX_LOGW("newvegas") << "cloud layer " << layer << " (" << path << ") failed to decode";
-                clouds.layers[layer] = importer::ImportedSceneTexture{};
+            render::WeatherCloudLayer& target = clouds.layers[slot];
+            if (!importer::loadDdsFromMemory(bytes.data(), bytes.size(), target.texture)) {
+                VOX_LOGW("newvegas") << "cloud layer " << layer.index << " (" << layer.texture
+                                     << ") failed to decode";
+                target.texture = importer::ImportedSceneTexture{};
                 continue;
             }
-            clouds.layers[layer].sourcePath = path;
-            // Layers 0/1 are the lower pair and 2/3 the upper, which is what the
-            // record's two cloud speeds refer to. Speeds are stored 0..255 over
-            // a range the game treats as roughly +/- one texture width a minute.
-            const std::uint8_t speedByte =
-                (layer < 2) ? active->cloudSpeedLower : active->cloudSpeedUpper;
-            // 128 is "still"; either side of it scrolls in opposite directions.
-            // Radians per second about the zenith -- a dome map rotates, it does
-            // not translate. 128 is "still"; either side turns the other way.
-            clouds.scrollSpeed[layer] =
-                (static_cast<float>(speedByte) - 128.0f) / 128.0f * 0.0035f;
-            // Dome scale: 1.0 puts the horizon exactly on the texture's
-            // inscribed circle, which is how these fisheye sky maps are drawn.
-            // Slightly under 1 for the upper layers pulls their rim inside the
-            // horizon so they read as higher and further away.
-            clouds.domeScale[layer] = (layer < 2) ? 1.0f : 0.92f;
-            m_cloudLayerEnabled[layer] = true;
+            target.texture.sourcePath = layer.texture;
+            if (tiling) {
+                // Texture units per second. Skyrim's bytes are a rate, not a
+                // velocity in any unit this renderer shares, so the scale is
+                // chosen for the look: a sheet crosses the sky in a couple of
+                // minutes at the speeds SkyrimCloudy authors.
+                target.scrollU = layer.driftX * 0.010f;
+                target.scrollV = layer.driftY * 0.010f;
+                applySkyrimCloudBand(layer.band, target);
+            } else {
+                // Radians per second about the zenith -- a dome map rotates, it
+                // does not translate.
+                target.mapping = render::WeatherCloudMapping::DomeFisheye;
+                target.scrollU = layer.driftX * 0.0035f;
+                // Dome scale: 1.0 puts the horizon exactly on the texture's
+                // inscribed circle, which is how these fisheye sky maps are
+                // drawn. Slightly under 1 for the upper layers pulls their rim
+                // inside the horizon so they read as higher and further away.
+                target.scale = (layer.index < 2) ? 1.0f : 0.92f;
+            }
+            m_cloudLayerSource[slot] = static_cast<int>(index);
             ++loadedLayers;
         }
-        VOX_LOGI("newvegas") << "cloud layers: " << loadedLayers << " of 4 in use";
+        VOX_LOGI("newvegas") << "cloud layers: " << loadedLayers << " of "
+                             << active->cloudLayers.size() << " authored in use ("
+                             << (tiling ? "tiling sheets" : "dome fisheye") << ")";
         m_renderer.setWeatherClouds(clouds);
     }
 
@@ -1771,31 +1893,90 @@ void NewVegasApp::applyWeather() {
 
     using importer::fnv::FalloutWeatherColor;
     const float hour = m_timeOfDayHours;
+    // The climate's own dawn and dusk, not the sampler's 6/19 defaults; see
+    // m_sunriseHour. Threaded through EVERY sample below, because two samples
+    // taken against different day curves disagree about which slot it is --
+    // the sky would reach its sunset colour while the clouds were still on Day.
+    const float dawn = m_sunriseHour;
+    const float dusk = m_sunsetHour;
+    const auto skyColor = [&](FalloutWeatherColor channel) {
+        return sampleFalloutWeatherColor(*weather, channel, hour, dawn, dusk);
+    };
     render::WeatherSkyParams params;
     params.weight = 1.0f;
-    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::SkyUpper, hour), params.skyUpper);
-    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::SkyLower, hour), params.skyLower);
-    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::Horizon, hour), params.horizon);
-    decode(sampleFalloutWeatherColor(*weather, FalloutWeatherColor::Fog, hour), params.fogColor);
+    decode(skyColor(FalloutWeatherColor::SkyUpper), params.skyUpper);
+    decode(skyColor(FalloutWeatherColor::SkyLower), params.skyLower);
+    decode(skyColor(FalloutWeatherColor::Horizon), params.horizon);
+    // Aerial perspective is the FAR haze, so a record that separates the two
+    // (Skyrim) must hand over the far colour; channel 1 is its near fog and is
+    // a saturated tint meant for the first few metres.
+    if (weather->hasFogFarColor) {
+        decode(sampleFalloutWeatherColorRow(weather->fogFarColors, hour, dawn, dusk),
+               params.fogColor);
+    } else {
+        decode(skyColor(FalloutWeatherColor::Fog), params.fogColor);
+    }
     // Day fog until dusk, night fog after; the record authors the two
     // separately and there is no third value to interpolate toward.
-    const bool daytime = hour >= 6.0f && hour < 19.0f;
+    const bool daytime = hour >= dawn && hour < dusk;
     params.fogFarDistance = daytime ? weather->fogDayFar : weather->fogNightFar;
 
-    // Cloud tints come from PNAM, one colour per layer per time slot, sampled
-    // the same way the sky colours are. Layers with no texture were switched
-    // off at upload time and their opacity is ignored.
-    for (int layer = 0; layer < render::kWeatherCloudLayerCount; ++layer) {
-        const importer::fnv::FalloutColorRgb tint =
-            sampleFalloutWeatherCloudTint(*weather, layer, hour);
-        decode(tint, params.cloudTint[layer]);
+    // Sunlight and Ambient light the GROUND. These two channels were read out
+    // of every record and then dropped, so a storm rendered as a dark sky over
+    // sunlit terrain -- the sky was the only thing the weather touched.
+    //
+    // Decoded plainly to linear rather than through decode() above: that
+    // function's gain and contrast exist to make an EMISSIVE sky readable
+    // through an ACES curve, and applying them here would push a light source
+    // through a display-referred fudge twice. The renderer takes hue from these
+    // and bounds the intensity itself; see WeatherSkyParams::lightingWeight.
+    const auto decodeLinear = [](const importer::fnv::FalloutColorRgb& color, float* out) {
+        const auto channel = [](std::uint8_t value) {
+            const float srgb = static_cast<float>(value) / 255.0f;
+            return srgb <= 0.04045f ? (srgb / 12.92f)
+                                    : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+        };
+        out[0] = channel(color.r);
+        out[1] = channel(color.g);
+        out[2] = channel(color.b);
+    };
+    decodeLinear(skyColor(FalloutWeatherColor::Sunlight), params.sunlightColor);
+    decodeLinear(skyColor(FalloutWeatherColor::Ambient), params.ambientColor);
+    // ODAI_FNV_LIGHT_WEIGHT=0 is the A/B control, and the only way to attribute
+    // a brightness change to the weather rather than to the sky gradient.
+    static const float s_lightingWeight = []() {
+        const char* env = std::getenv("ODAI_FNV_LIGHT_WEIGHT");
+        return env != nullptr ? std::clamp(static_cast<float>(std::atof(env)), 0.0f, 1.0f) : 1.0f;
+    }();
+    params.lightingWeight = s_lightingWeight;
+    // DATA's Sun Glare byte, which is the one field in that block the sky can
+    // use directly. SkyrimCloudy authors 153 of 255; a fog weather authors far
+    // less, and the difference is a sun with a halo against one that is a bare
+    // disc in soup.
+    params.sunGlare = static_cast<float>(weather->sunGlare) / 255.0f;
+
+    // Cloud tints and opacities come from the layer the slot is DRAWING, not
+    // from the slot number -- see m_cloudLayerSource. Both track time of day
+    // and are sampled the same way the sky colours are.
+    for (int slot = 0; slot < render::kWeatherCloudLayerCount; ++slot) {
         // ODAI_FNV_NOCLOUDS isolates the sky gradient from the cloud layers.
         // Worth keeping: "the sky is black" has two very different causes
         // (an authored-dark gradient vs. total cloud cover) and they are
         // indistinguishable on screen.
         static const bool s_noClouds = std::getenv("ODAI_FNV_NOCLOUDS") != nullptr;
-        params.cloudOpacity[layer] =
-            (m_cloudLayerEnabled[layer] && !s_noClouds) ? 1.0f : 0.0f;
+        const int source = m_cloudLayerSource[slot];
+        if (source < 0 || static_cast<std::size_t>(source) >= weather->cloudLayers.size() ||
+            s_noClouds) {
+            params.cloudOpacity[slot] = 0.0f;
+            continue;
+        }
+        const importer::fnv::FalloutWeatherCloudLayer& layer =
+            weather->cloudLayers[static_cast<std::size_t>(source)];
+        decode(sampleFalloutWeatherCloudTint(layer, hour, dawn, dusk), params.cloudTint[slot]);
+        // JNAM, where the record authors one. Skyrim holds its fully-opaque
+        // 32x32 fill swatch at 0.4-0.5 here; drawn at 1.0 that layer is a coat
+        // of paint over the whole sky.
+        params.cloudOpacity[slot] = sampleFalloutWeatherCloudAlpha(layer, hour, dawn, dusk);
     }
     // One line per weather change, not per frame: "the sky is black" is
     // otherwise indistinguishable from "the sky is not being set at all".
@@ -4654,7 +4835,19 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
     // shows a mid-adaptation image rather than what the scene settles at.
     if (!m_screenshotPath.empty()) {
         ++m_framesRendered;
-        if (m_framesRendered >= m_screenshotWarmupFrames) {
+        // A FRAME COUNT IS NOT A STREAMING WAIT, and this path was still
+        // counting frames alone long after the video path stopped. On an empty
+        // scene a frame costs almost nothing, so several hundred of them elapse
+        // in about a second while the cells are still arriving -- and the shot
+        // comes out as bare sky over the skybox's ground colour, which reads as
+        // "the geometry stopped rendering" rather than "the shot was early".
+        // Two hours went into the wrong half of that sentence.
+        //
+        // Same ceiling as the video path, so a worldspace that never settles
+        // still produces a file instead of hanging.
+        const bool settled = m_framesRendered >= m_captureWarmupFrameCeiling ||
+            m_streamer == nullptr || m_streamer->isStreamingIdle();
+        if (m_framesRendered >= m_screenshotWarmupFrames && settled) {
             if (!m_renderer.captureFrameToFile(m_screenshotPath)) {
                 VOX_LOGE("newvegas") << "screenshot capture failed";
             }

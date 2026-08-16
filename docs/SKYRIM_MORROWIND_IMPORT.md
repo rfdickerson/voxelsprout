@@ -242,12 +242,47 @@ pre-20.0.0.x NIFs ... should stay unsupported." Morrowind is entirely that tier.
 
 ---
 
+## 4b. Skyrim SE — sky, sun, lighting, clouds and fog ✅ done
+
+The record layer needed no work; the WTHR/CLMT reader in
+`src/import/fnv/weather_records.{h,cc}` did, in five places. The whole of it is
+written up in `CLAUDE.md` under "Cloud layers"; the short version, because the
+first four are silent and the fifth is not:
+
+| | Fallout / Oblivion | Skyrim |
+|---|---|---|
+| cloud textures | DNAM/CNAM/ANAM/BNAM | `chr('0'+layer) + "0TX"`, up to 29 |
+| which are live | `sky\alpha.dds` placeholder | **NAM1**, a disabled bitfield |
+| tints | PNAM, 4 layers | PNAM, **32** layers |
+| opacity | none | **JNAM**, 128 floats |
+| drift | 2 bytes in DATA | **RNAM/QNAM**, per layer |
+| NAM0 | 10 rows | **17** rows (row 12 is Fog Far) |
+| FNAM | 6 floats (4 in Oblivion) | **8** floats |
+| projection | fisheye dome map | **tiling sheet**, plus a cylindrical horizon band |
+
+**The one that costs an afternoon is the first row crossed with the third.**
+Skyrim authors a black daytime tint on exactly the layers NAM1 disables, so
+picking textures and tints independently pairs a live texture with a dead
+tint and paints the entire sky opaque black over correctly lit ground. It does
+not look like a channel mix-up; it looks like a broken shader.
+`testSkyrimWeatherCloudLayers` pins the pairing.
+
+Also landed here and not Skyrim-specific: WTHR's **Ambient and Sunlight**
+channels now light the ground (hue from the record, bounded gain, the renderer
+keeps its own intensity), DATA's **Sun Glare** byte scales the sun's halo, and
+the **climate's TNAM** supplies the sunrise and sunset hours the colour slots
+interpolate against instead of a hardcoded 6 and 19 — SkyrimClimate's are 7.75
+and 18.25, so the defaults sampled the wrong slots for over an hour either side
+of both.
+
+---
+
 ## 5. Recommended order
 
 1. **Skyrim BSA v105 + LZ4** ✅ done. Unblocks every other Skyrim step and is
    independently verifiable (`--archives`, `--find`, `--texture`).
-2. **`BSTriShape` + `BSLightingShaderProperty`.** Two readers, and Skyrim static
-   meshes render. This is the single highest-value piece of work in this
+2. **`BSTriShape` + `BSLightingShaderProperty`** ✅ done. Two readers, and Skyrim
+   static meshes render. This was the single highest-value piece of work in this
    document: it takes `--nifs` from 0 shapes to most of 22091 files.
 3. **Skyrim textures.** Unmeasured. SSE uses BC7 widely, and `src/import/dds.cc`
    rejects a zero fourCC today (the DX10 header extension), so expect this to

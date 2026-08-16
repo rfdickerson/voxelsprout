@@ -169,6 +169,45 @@ Vvardenfell`. Authored tours live in `assets/tours/`. Three findings there gener
   weight is its share of the RUNNING total, not of the whole. Cross-*cell* neighbours are
   unreachable (different LAND extract), leaving 1 boundary in 16 per axis unblended.
 
+**THE GAME HIDES THINGS TWO WAYS, AND DRAWING EITHER ONE PAINTS A PLANE OVER THE WORLD.**
+Both were found by the same symptom in Skyrim — terrain renders correctly, then a flat
+near-white plane appears OVER it a beat later — and both apply to every game this engine reads:
+
+- **REFR header flag 0x800 is "Initially Disabled"**: quest objects waiting for a script.
+  Nothing in `cell_builder.cc` had ever checked it. Some are worldspace-sized —
+  Skyrim's MG07 blizzard barrier measures 246723 x 341884 units, parked in Tamriel's
+  persistent cell (0,0) among its 14643 references. XESP (enable-parent) state is
+  deliberately NOT resolved: a viewer has no quest engine, and the flag alone matches what
+  an unstarted save shows.
+- **NiAVObject flag bit 0 is HIDDEN**, and the parser read the flags word and threw it away.
+  The load-bearing case is particle emitter SOURCE meshes — `shrineofboethiah01.nif`'s
+  "emit2", "pStripEmitter07", "OrderedAlphaBound" are hidden BSTriShapes a NiPSysMeshEmitter
+  spawns from, no UVs, no shader, vertices tens of thousands of units across. Skipped by not
+  descending, like EditorMarker; counted in `NifModel::hiddenShapeCount`.
+
+The diagnostic that cracked it: **`ODAI_FNV_DRAW=terrain|statics`** splits the imported draw
+list the way the F4 checkboxes do, from a script. Terrain-only rendered a perfect landscape;
+statics-only rendered the plane — which converted "the terrain is broken" (two hours) into
+"one static is enormous" (twenty minutes). The probe's `--buildcell` now prints the widest
+meshes by XZ extent, which named the culprits immediately. Both fixes are baked into cached
+cells (`kCellBuildVersion` 24/25).
+
+**The game's own sky meshes are placed as world geometry** (`sky\clouddistant*.nif` and
+friends, as ordinary REFRs in the persistent cell). This engine draws its sky from WTHR
+records, so `isSkyOnlyModelPath` drops anything whose model path roots at `sky\`.
+
+**A NO-SIZE-TABLE NIF WALK GROWS ONE SIZER AT A TIME, AND THE FAILURE HISTOGRAM IS THE
+WORK LIST.** Oblivion 20.0.0.4 and Morrowind 4.0.0.2 blocks carry no size table, so every
+unknown block type fails the whole file. `--nifs` prints failures grouped by message; fixing
+the top entry re-runs the walk one block further and surfaces the next, so the histogram
+converges in passes (Oblivion: 1345 → 573 → 298 failures of 3000; Morrowind 1126 → 318 of
+7320 — remaining are 10.0.1.x by policy and particle controllers). Layouts came from
+OpenMW's readers (`~/Downloads/openmw/components/nif/`), verified by the triangle-bounds
+oracle staying at zero. Two traps inside that work: a MORPH key group reads its
+interpolation type EVEN WITH ZERO KEYS (the one place key groups differ, and exactly what
+retail morph base targets hit), and `bhkPackedNiTriStripsShape`'s subshape list is counted
+by a **uint16** where every neighbouring count is a uint32.
+
 **A TEMPLATE ACTOR'S SKELETON IS NOT ON THE RECORD THAT NAMES IT.** An actor whose ACBS
 template flags borrow the model (`0x0040`, Use Model/Animation) stores `marker_creature.nif` as
 its own MODL -- a real, parseable NIF carrying none of the bones a body is weighted to. Taking
@@ -293,17 +332,60 @@ white, so a luminance key makes the layer opaque), and the layer colour is PNAM'
 multiplying it by the texture's rgb squares the darkness and renders a heavy overcast pure
 black.
 
-**These textures are SKY DOME MAPS, not tiling planes.** Each is a fisheye of the whole sky:
-zenith at the centre of the image, horizon on the rim of an inscribed circle. Nevada Skies'
-`WesternSky1.dds` is unmistakable about it — a cloud disc with sun rays radiating into the
-dark corners. So the mapping is angle-from-zenith → radius, compass bearing → angle, landing
-every sample inside one copy of the texture. Two earlier attempts got this wrong: a true
-plane projection `dir.xz / dir.y` diverges at the horizon into radial streaks, and the
-softened `dir.xz / (dir.y + k)` that replaced it maps the sky into roughly [-0.76, 0.76] of
-UV space, crosses zero, and lets the sampler WRAP — tiling the entire fisheye and putting a
-visible seam down the sky with the image repeating from it. Tiling a fisheye is meaningless;
-no amount of scale tuning hides it. Scrolling is likewise a ROTATION about the zenith, not a
-UV translation, which would slide the fisheye off its own centre.
+**FALLOUT AND OBLIVION CLOUD TEXTURES ARE SKY DOME MAPS, not tiling planes.** Each is a
+fisheye of the whole sky: zenith at the centre of the image, horizon on the rim of an
+inscribed circle. Nevada Skies' `WesternSky1.dds` is unmistakable about it — a cloud disc
+with sun rays radiating into the dark corners. So the mapping is angle-from-zenith → radius,
+compass bearing → angle, landing every sample inside one copy of the texture. Two earlier
+attempts got this wrong: a true plane projection `dir.xz / dir.y` diverges at the horizon
+into radial streaks, and the softened `dir.xz / (dir.y + k)` that replaced it maps the sky
+into roughly [-0.76, 0.76] of UV space, crosses zero, and lets the sampler WRAP — tiling the
+entire fisheye and putting a visible seam down the sky with the image repeating from it.
+Tiling a fisheye is meaningless; no amount of scale tuning hides it. Scrolling is likewise a
+ROTATION about the zenith, not a UV translation, which would slide the fisheye off its own
+centre.
+
+**SKYRIM'S ARE THE OPPOSITE, AND ITS WHOLE CLOUD BLOCK IS A DIFFERENT SHAPE.**
+`Sky\SkyrimCloudsLower01.dds` has no radial structure at all — it is a seamlessly tileable
+cloud field whose shape is, as ever, in its alpha. So the mapping there is
+`dir.xz / (dir.y + 0.35)` with wrap addressing, and drift is a UV translation. `k = 0.35` is
+what keeps it finite: the UV radius tops out around 2.9 sheets instead of diverging into
+streaks at the skyline. `FalloutCloudMapping` on the record says which, per weather.
+
+The record differs in four more ways, and the first one silently paints the sky solid black:
+
+- **A layer's TEXTURE, TINT, OPACITY AND DRIFT are indexed by the same layer number, and
+  taking them from different places is fatal.** Skyrim authors up to 29 layers in
+  subrecords named `chr('0' + layer) + "0TX"` (so layer 0 is `00TX`, layer 10 is `:0TX`,
+  layer 28 is `L0TX`), tints them from a **32-row PNAM**, and gives each a per-slot opacity
+  in **JNAM** (128 floats). Reading the first four textures and the first four PNAM rows
+  independently — which four DNAM/CNAM/ANAM/BNAM slots invite — pairs a live layer's texture
+  with a DEAD layer's tint, and Skyrim authors a **black daytime tint on exactly the layers
+  it disables**. The result is a fully opaque black sky over correctly lit ground, which
+  reads as a broken shader rather than as a channel mix-up. Pinned by
+  `testSkyrimWeatherCloudLayers`.
+- **NAM1 is a per-layer DISABLED bitfield** (1 = disabled) and is the only honest way to
+  know which layers are live. SkyrimCloudy's is `0xEF9EF0FF`, leaving 8-11, 16, 21, 22 and
+  28 — and the layers it disables are exactly the ones whose textures do not ship:
+  `Sky\OblivionCloudCloudyUpper01`, `Sky\WastelandCloudHorizon01` and `Sky\SkyrimClouds04`
+  exist in no Skyrim archive, being leftovers from the Oblivion and Fallout records these
+  were copied from.
+- **THE LAYER NUMBER IS AN ELEVATION.** Censused across SkyrimClear, SkyrimCloudy,
+  SkyrimFog and SkyrimOvercastRain the textures sort cleanly by index: 0-7 `…CloudsUpper*`
+  (high wisps), 8-14 `…CloudsLower*` (the main deck), 15-27 `…CloudsHorizon01` (banks around
+  the skyline), 28 `…CloudsFill` (a flat 32×32 swatch). SkyrimClear proves it on its own —
+  it enables 0-7 and 15/19/20 and no Lower layer at all. That is what lets 29 layers be
+  reduced to a compositor's four without the sky becoming a whiteout: each band gets its own
+  slice of `dir.y`, and the horizon band gets a **cylindrical** mapping (bearing across,
+  elevation up) because that art is four horizontal stripes of cloud tops drawn to be seen
+  edge-on. Under the plane projection the same texture becomes stripes running across the
+  sky in one compass direction, which is the tell that the mapping is wrong rather than the
+  tuning. The Fill band is dropped: a flat colour over the whole sky is the same job the
+  authored NAM0 gradient already does, better.
+- **A sheet is repeated on several adjacent layers for parallax** — SkyrimCloudy puts
+  `SkyrimCloudsLower01` on 8, 9, 10 and 11 at slightly different drift rates — so layers are
+  deduplicated **per band**, not globally: SkyrimOvercastRain puts `SkyrimCloudsLower03` on
+  layer 8 *and* on layer 27, and those are an overhead deck and a horizon bank.
 
 **`ODAI_FNV_SKY_GAIN` / `ODAI_FNV_SKY_CONTRAST` exist because WTHR colours are
 display-referred.** They were authored as final sRGB for a renderer that showed them
@@ -379,9 +461,34 @@ a smaller change than threading a custom decoding backend through the audio PIMP
 plays only when the record's classification bits say it is raining. `ODAI_FNV_MUSIC`
 overrides the track.
 
-Not wired up yet: WTHR's **Ambient/Sunlight** channels, so terrain lighting does not yet
-respond to the weather, and there are no rain **particles** — the mood is sky, fog and
-sound only.
+**WTHR's Ambient and Sunlight channels light the GROUND**, and until recently they were read
+and thrown away — so a storm rendered as a dark sky over a sunlit desert, with the weather
+touching nothing but the dome. Only the **hue** is taken from the record: these are
+display-referred sRGB authored for a renderer that used them literally, and handing one to an
+HDR pipeline as radiance re-calibrates the whole frame's exposure. The record supplies
+direction in colour space plus a bounded gain from its own luminance
+(`sqrt(lum / linear(sRGB 178))`, clamped to 0.35–1.35), and the renderer keeps the intensity
+it derived from the sun's altitude. `weatherLightTint` in `frame_run.cc`; **the ambient tint
+is applied to the whole SH set, not only its DC term** — tinting the constant alone leaves the
+directional terms carrying the old hue, so an up-facing and a side-facing surface end up lit
+by two different weathers. `ODAI_FNV_LIGHT_WEIGHT=0` is the A/B control and restores the old
+behaviour exactly. Measured on a pinned Goodsprings frame, over the shack: mean 0.3861 →
+0.3893, red +3.0%, blue −1.5% — small and warm, which is what NVWastelandClearNight's
+Sunlight channel says.
+
+DATA's **Sun Glare** byte scales the sun's halo and low-sun bloom (not the disc: a weather
+dims the sun by putting cloud in front of it, and fading the disc reads as it burning out).
+
+Still not wired up: WTHR's own **Sun** colour channel (the disc takes the Sunlight hue
+instead), and there are no rain **particles** — the mood is sky, fog, light and sound.
+
+**The climate's TNAM is what says when dawn and dusk ARE.** The colour samplers take a
+sunrise and sunset hour and default to 6 and 19; SkyrimClimate authors 5:30–10:00 and
+16:00–20:30, whose midpoints are 7.75 and 18.25. Leaving the defaults pinned samples the
+wrong two slots for well over an hour either side of both, which is a whole slot's worth of
+colour. Every sample in `applyWeather` — sky, fog, cloud tint, cloud alpha, sunlight, ambient
+— is threaded with the same pair, because two samples on different day curves disagree about
+which slot it is and the sky reaches its sunset colour while the clouds are still on Day.
 
 **Victor** (`src/games/newvegas/newvegas_victor.{h,cc}`) is the one live NPC: a GPU-skinned
 Securitron standing beside the spawn, animated from the game's own `.kf` clips, who answers
@@ -606,7 +713,7 @@ pose) made every pass read a garbage view-projection, and that renders as **a si
 colour with the UI still correct on top of it**. Flat frame + intact UI means the camera, not
 the geometry. Any value here must now render identically to unset.
 
-Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), `ODAI_SHADOW_DISTANCE` / `ODAI_SHADOW_LAMBDA` (see Shadow cascades below), `ODAI_FNV_WHITEPOINT` / `ODAI_FNV_COLOR_LOOK` / `ODAI_FNV_TONEMAP` (post chain), `ODAI_FNV_TERRAIN_BLEND`, `ODAI_NIF_DUMP` (write a decompressed asset out of its BSA — the only way to hexdump one), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
+Runtime env vars: `ODAI_STRATEGY_MAP`, `ODAI_IMPORTED_SCENE` (view any cooked `.bin` with no strategy-map support compiled in), `ODAI_LOG_LEVEL`, `ODAI_PRESENT_MODE`, `ODAI_PERF_OVERLAY` (start every `GameApp` game with the CPU timing overlay up; **F3** toggles it at runtime), `ODAI_FNV_MODS` / `ODAI_FNV_TEX_SIZE` (see Asset mods above), `ODAI_SHADOW_DISTANCE` / `ODAI_SHADOW_LAMBDA` (see Shadow cascades below), `ODAI_FNV_WHITEPOINT` / `ODAI_FNV_COLOR_LOOK` / `ODAI_FNV_TONEMAP` (post chain), `ODAI_FNV_LIGHT_WEIGHT` (how much of WTHR's Ambient/Sunlight reaches the ground; 0 is the A/B control), `ODAI_FNV_TERRAIN_BLEND`, `ODAI_NIF_DUMP` (write a decompressed asset out of its BSA — the only way to hexdump one), and `ODAI_CITY_DEMO` / `ODAI_CITY_SEED` / `ODAI_CITY_STORM` / `ODAI_CITY_STORY` for citybuilder.
 
 **AO resolution and sun shafts are the two biggest costs after the main pass.** Measured on
 the LNL iGPU at a 2560x1440 swapchain, native render scale: frame 37.9 ms, of which the AO
@@ -622,6 +729,16 @@ Two defaults changed as a result:
   haloes every silhouette at 2x. Measured: AO 6.04 → 1.66 ms, for a 0.4% mean brightness
   change (run-to-run noise with `ODAI_FNV_NOWANDER=1` is 0.05%). `=1` restores the old
   resolution. Read once at swapchain build, since it sizes the targets.
+
+  **The blur's depth weight has to be RELATIVE, because depth here is view distance in
+  world units.** It was `exp(-|Δd| * 4.0)` — written for a depth in [0,1] — which at
+  Bethesda scale collapses every tap on any surface not parallel to the screen. That
+  renders not as a halo but as BANDING: with all depth weights at e^-hundreds, the
+  quotient is decided by whichever raw row sits nearest in depth, and on oblique terrain
+  that alternates per output row (Skyrim's tundra showed it clearly; FNV's near ground
+  mostly hid it). The tolerance is now 3% of the centre depth with a 4-unit floor: a
+  grazing slope moves a few percent per raw texel and is accepted, a fence against the
+  ground behind it differs by 10x the tolerance and still rejects.
 - **Sun shafts now default OFF** for the FNV viewer. `skyConfig4`'s density/falloff/scatter
   are near zero for this game, so the pass was invisible and cost 4.7 ms. `ODAI_FNV_SHAFTS=1`
   turns it back on — do that *first* when tuning those densities, and flip the default back
@@ -989,6 +1106,13 @@ because capture was slow. The moment it got 28x faster those same 60 frames went
 minute of wall time to about a second, and captures began opening on half-built towns.
 `captureWarmupComplete()` now requires the frame count **and** `CellStreamer::isStreamingIdle()`,
 with a hard ceiling so a worldspace that never settles cannot stall a capture forever.
+
+**`--screenshot` was still counting frames alone long after the video path stopped**, and it
+is the path every visual check goes through. On a scene that has not streamed yet a frame
+costs almost nothing, so several hundred elapse in about a second — a 400-frame `--screenshot`
+lands on bare sky over the skybox's ground colour, which reads as *"the geometry stopped
+rendering"* rather than as *"the shot was early"*, and that is a very expensive sentence to
+get the wrong half of. It takes the same streaming gate and the same ceiling now.
 
 `assets/tours/` holds the authored paths: Megaton and Anvil, plus Skingrad, Bravil,
 `imperial_city` and the two Morrowind ones (`seyda_neen`, `seyda_neen_to_balmora`).

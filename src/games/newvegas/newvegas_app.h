@@ -453,9 +453,22 @@ private:
     std::vector<std::string> m_extraPlugins;  // beyond m_streamPlugin, in load order
     std::string m_requestedWeatherEditorId;
     std::uint32_t m_activeWeatherFormId = 0;
-    // Which cloud layers actually have a texture. A weather's unused layers
-    // point at the transparent placeholder and are never uploaded.
-    bool m_cloudLayerEnabled[4] = {};
+    // When the weather's colour slots peak, from the active climate's TNAM.
+    // 6 and 19 are the samplers' own rough Fallout defaults and stand in when
+    // no climate resolves -- SkyrimClimate authors 7.75 and 18.25, so leaving
+    // these pinned samples the wrong two slots for over an hour either side of
+    // dawn and dusk. Read once per climate rather than per frame.
+    float m_sunriseHour = 6.0f;
+    float m_sunsetHour = 19.0f;
+    // Which of the active weather's cloud layers each of the renderer's four
+    // slots is drawing, as an index into FalloutWeatherRecord::cloudLayers;
+    // -1 for a slot with nothing in it.
+    //
+    // A SLOT NUMBER IS NOT A LAYER NUMBER and storing only "is this slot in
+    // use" is what made the Skyrim sky solid black: the tints were then read
+    // from PNAM rows 0..3 while the textures came from layers 8, 16 and 28, and
+    // Skyrim authors a black daytime tint on exactly the layers it disables.
+    int m_cloudLayerSource[4] = {-1, -1, -1, -1};
     audio::SoundHandle m_rainLoop{};
     audio::SoundHandle m_windLoop{};
     audio::AmbientHandle m_rainAmbient{};
