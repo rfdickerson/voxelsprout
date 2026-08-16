@@ -662,9 +662,11 @@ void testMaterialLibraryRoundTrip() {
                "Material scene loads (runtime loader)");
     verify(runtime, "runtime loader sees 3 materials");
 
-    // Back-compat: rewrite the header version as 17 and confirm the file still
-    // loads, with an empty table and vertex flags untouched. This is the whole
-    // reason the section is appended and version-gated.
+    // A DOCTORED-OLD HEADER MUST BE REJECTED. This rewrites a current file's
+    // version word to 17 and nothing else, so its bytes are still perfectly
+    // valid -- the point is that the version alone decides, and the reader does
+    // not attempt a layout it no longer knows how to read. See
+    // kMinSupportedImportedSceneVersion.
     const fs::path legacyPath = fs::temp_directory_path() / "odai_material_library_v17.bin";
     {
         std::ifstream in(scenePath, std::ios::binary);
@@ -676,11 +678,8 @@ void testMaterialLibraryRoundTrip() {
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     }
     ImportedScene legacy;
-    expectTrue(loadImportedScene(legacyPath, legacy), "A v17 file still loads");
-    expectTrue(legacy.materials.empty(), "v17 file loads with an empty material table");
-    expectTrue(!legacy.packedVertices.empty() &&
-                   legacy.packedVertices[0].flags == scene.packedVertices[0].flags,
-               "v17 file keeps its vertex flags byte-identical");
+    expectTrue(!loadImportedScene(legacyPath, legacy), "a v17 file no longer loads");
+    expectTrue(legacy.packedVertices.empty(), "a rejected file leaves the scene untouched");
 
     fs::remove(scenePath);
     fs::remove(legacyPath);
@@ -876,49 +875,26 @@ void testPreV19VertexLayoutCompatibility() {
                      static_cast<std::streamsize>(downgraded.size()));
     }
 
+    // A BELOW-FLOOR FILE MUST BE REJECTED, NOT EXPANDED. The reader used to
+    // carry every layout back to v15; it now supports exactly
+    // kMinSupportedImportedSceneVersion and up, because a scene older than that
+    // is one no current build can produce or consult -- a cell cache is keyed by
+    // kCellBuildVersion and the plugin's size and mtime, so the caller rebuilds
+    // it either way.
+    //
+    // The failure has to be CLEAN. This fixture is a v19 file with its header
+    // rewritten to 18 and its vertex block narrowed, so every byte after the
+    // mesh block sits at the wrong offset: a reader that tried anyway would
+    // report success on garbage rather than error, which is the whole reason
+    // this fixture exists.
     ImportedScene loaded{};
-    expectTrue(loadImportedScene(v18Path, loaded), "v18 file loads");
-    expectTrue(loaded.sourceFileVersion == 18u, "v18 file reports its own version");
-    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3,
-               "v18 mesh vertices survive the narrower on-disk layout");
-    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3) {
-        const ImportedSceneVertex& second = loaded.meshes[0].vertices[1];
-        expectNear(second.position[0], 4.0f, 1e-5f, "v18 vertex position expands correctly");
-        expectNear(second.uv[0], 1.0f, 1e-5f, "v18 vertex uv expands correctly");
-        expectNear(second.color[0], 1.0f, 1e-5f, "v18 vertex colour defaults to white (r)");
-        expectNear(second.color[1], 1.0f, 1e-5f, "v18 vertex colour defaults to white (g)");
-        expectNear(second.color[2], 1.0f, 1e-5f, "v18 vertex colour defaults to white (b)");
-        expectTrue(second.layerTextureIndex[0] == kImportedSceneNoTerrainLayer,
-                   "v18 vertex has no terrain layers");
-    }
-    // The packed block sits after the mesh block, so reading it back correctly
-    // is what proves the mesh block was sized right — and it exercises the
-    // packed array's own legacy stride at the same time.
-    expectTrue(loaded.packedVertices.size() == scene.packedVertices.size(),
-               "v18 packed vertex count survives the mesh block");
-    if (loaded.packedVertices.size() == scene.packedVertices.size() && !loaded.packedVertices.empty()) {
-        const ImportedScenePackedVertex& expected = scene.packedVertices[1];
-        const ImportedScenePackedVertex& actual = loaded.packedVertices[1];
-        expectNear(actual.position[0], expected.position[0], 1e-5f, "v18 packed position expands correctly");
-        expectNear(actual.uv[0], expected.uv[0], 1e-5f, "v18 packed uv expands correctly");
-        expectTrue(actual.textureIndex == expected.textureIndex, "v18 packed texture index expands correctly");
-        expectTrue(actual.layerTextureIndex[0] == kImportedSceneNoTerrainLayer,
-                   "v18 packed vertex has no terrain layers");
-        expectTrue(actual.layerWeights == 0u, "v18 packed vertex has zero layer weights");
-        expectTrue((actual.flags & kImportedSceneMaterialFlagTerrainLayers) == 0u,
-                   "v18 packed vertex does not claim terrain layers");
-    }
-
-    // Same file through the runtime loader, which skips meshes by computed size
-    // rather than reading them — the other half of the stride bug. It keeps only
-    // the packed stream (meshes and instances are skipped by design), so that is
-    // what proves it resumed at the right offset.
+    expectTrue(!loadImportedScene(v18Path, loaded),
+               "a file below the supported version floor is rejected");
+    expectTrue(!getImportedSceneLastError().empty(),
+               "rejecting an old file names a reason");
     ImportedScene runtimeLoaded{};
-    expectTrue(loadImportedSceneRuntime(v18Path, runtimeLoaded), "v18 file loads through the runtime loader");
-    expectTrue(runtimeLoaded.packedVertices.size() == scene.packedVertices.size(),
-               "runtime loader skips the v18 mesh block by the on-disk stride");
-    expectTrue(runtimeLoaded.packedDraws.size() == scene.packedDraws.size(),
-               "runtime loader reads v18 packed draws from the right offset");
+    expectTrue(!loadImportedSceneRuntime(v18Path, runtimeLoaded),
+               "the runtime loader rejects it too");
 
     std::error_code cleanupError;
     fs::remove(v19Path, cleanupError);
