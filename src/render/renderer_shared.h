@@ -59,6 +59,12 @@ constexpr uint32_t kBindlessTextureStaticCount = 11;
 constexpr uint32_t kInvalidImportedTextureSlot = 0xFFFFFFFFu;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
+// Clustered (Forward+) light culling grid. MIRRORED in
+// src/render/shaders/light_clusters.slang -- change both together. A mismatch
+// does not fail: the compute pass and the fragment shader simply disagree about
+// which cluster a pixel is in, and lights switch off in bands across the screen.
+constexpr uint32_t kLightClusterTileSize = 64;
+constexpr uint32_t kLightClusterSliceCount = 24;
 // The three shadow-atlas constants below are one layout expressed three ways and
 // must be edited together: kShadowCascadeResolution feeds the texel-snapping math
 // (frame_run.cc), kShadowAtlasRects places each cascade in the atlas and derives
@@ -238,6 +244,32 @@ struct alignas(16) CameraUniform {
     // stylized colour look. The top third of the display range was simply never
     // addressed, which is what "flat" looked like.
     float hdrHighlightConfig[4];
+    // Clustered (Forward+) local-light culling. See
+    // src/render/shaders/light_clusters.slang for the scheme.
+    //
+    // config0 = (grid x, grid y, grid z, tile size in pixels)
+    // config1 = (slice scale, slice bias, unused, unused)
+    //
+    // A ZERO GRID MEANS THE PASS DID NOT RUN and every consumer falls back to
+    // walking the full light array. That is the safe direction: a stale mask
+    // would silently unlight geometry, and "no lights this frame" is not
+    // distinguishable from "the cull pass was skipped" at the shader.
+    float lightClusterConfig0[4];
+    float lightClusterConfig1[4];
+    // Shadow atlas geometry the fragment shaders need per PCF tap.
+    //
+    // [0] = one atlas texel in UV, i.e. 1/kShadowAtlasSize. [1..3] unused.
+    //
+    // THIS EXISTS BECAUSE `shadowMap.GetDimensions()` IS NOT FREE. Every PCF
+    // site asked the sampler for the atlas size, and the cascade blend asks
+    // twice; on the LNL iGPU that lowers to a real resinfo message the compiler
+    // will not hoist out of the fragment. Measured on Whiterun at 1080p:
+    // replacing the two queries with this constant took the main pass from
+    // 17.15 ms to 15.36 ms -- 1.79 ms, for byte-identical output.
+    //
+    // Appended at the end of the block so no existing field's offset moves.
+    // Mirrored in src/render/shaders/camera_uniform.slang.
+    float shadowAtlasConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {

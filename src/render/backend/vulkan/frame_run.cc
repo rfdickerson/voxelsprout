@@ -1481,6 +1481,14 @@ void RendererBackend::renderFrame(
     mvpUniform.hdrHighlightConfig[1] = m_tonemapSettings.highlightShoulder;
     mvpUniform.hdrHighlightConfig[2] = 0.0f;
     mvpUniform.hdrHighlightConfig[3] = 0.0f;
+    // See renderer_shared.h: this is what the PCF sites use instead of asking
+    // the sampler for the atlas size once (twice, in the cascade blend) per
+    // fragment. kShadowAtlasSize is one of the mirrored atlas constants -- if
+    // it moves, this follows it for free.
+    mvpUniform.shadowAtlasConfig[0] = 1.0f / static_cast<float>(kShadowAtlasSize);
+    mvpUniform.shadowAtlasConfig[1] = 0.0f;
+    mvpUniform.shadowAtlasConfig[2] = 0.0f;
+    mvpUniform.shadowAtlasConfig[3] = 0.0f;
     // Terrain layer-blend shaping, exposed so it can be turned OFF.
     //
     // The defaults are the values this was hardcoded to and render identically
@@ -1549,12 +1557,65 @@ void RendererBackend::renderFrame(
     std::array<SelectedImportedLight, kImportedLocalLightCapacity> selectedImportedLights{};
     std::size_t selectedImportedLightCount = 0;
     const float importedLightRadiusScale = std::clamp(m_debugImportedLightRadiusScale, 0.25f, 8.0f);
+    // THE SHADER LOOP IS BOUNDED BY HOW MANY LIGHTS WE UPLOAD, and a light that
+    // cannot reach a visible pixel still costs every fragment a full iteration.
+    // The scoring below keeps the best 64 by distance from the VIEW AXIS, which
+    // is not the same as being in the frustum: a torch inside a building behind
+    // the camera scores ~0 and takes a slot. Measured on Whiterun at 4K,
+    // capping the loop at 16 instead of 64 moved the main pass 17.15 -> 14.03,
+    // i.e. the surplus lights cost ~0.065 ms each in pure rejection.
+    //
+    // The four SIDE planes come straight out of the row-major view-projection
+    // (Gribb-Hartmann: plane = row3 +/- rowN). Near/far are done separately
+    // against the view axis rather than from rows 2/3, because those two depend
+    // on the depth convention and this renderer is reverse-Z -- getting them
+    // backwards would cull lights that are plainly visible, which is a far
+    // worse failure than keeping a few extra.
+    struct FrustumPlane {
+        odai::math::Vector3 normal;
+        float distance = 0.0f;
+    };
+    std::array<FrustumPlane, 4> sidePlanes{};
+    {
+        const float* m = mvp.m;  // row-major: m[(row * 4) + col]
+        const auto makePlane = [](float a, float b, float c, float d) {
+            const float length = std::sqrt((a * a) + (b * b) + (c * c));
+            const float inverseLength = (length > 1e-6f) ? (1.0f / length) : 0.0f;
+            return FrustumPlane{
+                odai::math::Vector3{a * inverseLength, b * inverseLength, c * inverseLength},
+                d * inverseLength};
+        };
+        for (int axis = 0; axis < 2; ++axis) {
+            const int row = axis * 4;
+            sidePlanes[static_cast<std::size_t>(axis * 2)] = makePlane(
+                m[12] + m[row + 0], m[13] + m[row + 1], m[14] + m[row + 2], m[15] + m[row + 3]);
+            sidePlanes[static_cast<std::size_t>((axis * 2) + 1)] = makePlane(
+                m[12] - m[row + 0], m[13] - m[row + 1], m[14] - m[row + 2], m[15] - m[row + 3]);
+        }
+    }
+    std::size_t importedLightsFrustumCulled = 0;
     if (m_debugImportedLightsEnabled && !m_importedLocalLights.empty()) {
         for (const ImportedLocalLight& light : m_importedLocalLights) {
             const odai::math::Vector3 lightPosition{light.position[0], light.position[1], light.position[2]};
             const odai::math::Vector3 cameraToLight = lightPosition - eye;
             const float influenceRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
             const float alongView = odai::math::dot(cameraToLight, forward);
+            // Conservative on purpose: a sphere is only rejected when it is
+            // wholly outside a plane, so a light grazing the screen edge is
+            // kept. Over-inclusion costs a loop iteration; under-inclusion
+            // makes a lamp go out when the camera turns, which is worse.
+            bool outsideFrustum = alongView > (farPlane + influenceRadius);
+            for (const FrustumPlane& plane : sidePlanes) {
+                if (outsideFrustum) {
+                    break;
+                }
+                outsideFrustum =
+                    (odai::math::dot(plane.normal, lightPosition) + plane.distance) < -influenceRadius;
+            }
+            if (outsideFrustum) {
+                ++importedLightsFrustumCulled;
+                continue;
+            }
             const odai::math::Vector3 closestViewPoint = eye + (forward * std::max(alongView, 0.0f));
             const odai::math::Vector3 lightToViewRay = lightPosition - closestViewPoint;
             const float viewRayDistanceSquared = odai::math::lengthSquared(lightToViewRay);
@@ -1592,6 +1653,14 @@ void RendererBackend::renderFrame(
             });
     }
     m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
+    if (std::getenv("ODAI_DRAW_COUNTS") != nullptr) {
+        static std::uint64_t s_lightLogFrame = 0;
+        if ((s_lightLogFrame++ % 60u) == 0u) {
+            VOX_LOGI("render") << "local lights: uploaded=" << selectedImportedLightCount
+                               << " of " << m_importedLocalLights.size()
+                               << " (frustum culled " << importedLightsFrustumCulled << ")";
+        }
+    }
     const float importedLightGlobalIntensity =
         std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
     auto mixImportedLightSignature = [](std::uint64_t hash, std::uint64_t value) {
@@ -1637,6 +1706,42 @@ void RendererBackend::renderFrame(
     mvpUniform.importedLightConfig[1] = importedLightGlobalIntensity;
     mvpUniform.importedLightConfig[2] = m_debugImportedLightsEnabled ? 1.0f : 0.0f;
     mvpUniform.importedLightConfig[3] = static_cast<float>(m_importedLocalLights.size());
+
+    // Clustered (Forward+) light culling. The grid is published to the shader
+    // ONLY when the pass will actually run this frame; a zero grid is how the
+    // fragment shader knows to walk the full light array instead of reading a
+    // mask nothing wrote. That direction is the safe one -- the fallback costs
+    // performance, a stale mask would cost light.
+    //
+    // ODAI_LIGHT_CLUSTERS=0 forces the fallback. The two paths must render
+    // identically -- the cull only decides which lights are ITERATED, never how
+    // they shade -- so this is the control that says whether a lighting
+    // difference came from the culling or from something else.
+    static const bool s_lightClustersEnabled = []() {
+        const char* env = std::getenv("ODAI_LIGHT_CLUSTERS");
+        return env == nullptr || (env[0] != '0');
+    }();
+    m_lightClusterCullActive =
+        s_lightClustersEnabled && m_lightClusterAvailable &&
+        m_lightClusterBufferHandle != kInvalidBufferHandle &&
+        selectedImportedLightCount > 0 && importedLightGlobalIntensity > 0.0f;
+    computeLightClusterSliceParams(
+        nearPlane, farPlane, m_lightClusterSliceScale, m_lightClusterSliceBias);
+    if (m_lightClusterCullActive) {
+        mvpUniform.lightClusterConfig0[0] = static_cast<float>(m_lightClusterGridX);
+        mvpUniform.lightClusterConfig0[1] = static_cast<float>(m_lightClusterGridY);
+        mvpUniform.lightClusterConfig0[2] = static_cast<float>(kLightClusterSliceCount);
+        mvpUniform.lightClusterConfig0[3] = static_cast<float>(kLightClusterTileSize);
+    } else {
+        mvpUniform.lightClusterConfig0[0] = 0.0f;
+        mvpUniform.lightClusterConfig0[1] = 0.0f;
+        mvpUniform.lightClusterConfig0[2] = 0.0f;
+        mvpUniform.lightClusterConfig0[3] = 0.0f;
+    }
+    mvpUniform.lightClusterConfig1[0] = m_lightClusterSliceScale;
+    mvpUniform.lightClusterConfig1[1] = m_lightClusterSliceBias;
+    mvpUniform.lightClusterConfig1[2] = 0.0f;
+    mvpUniform.lightClusterConfig1[3] = 0.0f;
 
     mvpUniform.fogMapConfig[0] = m_fogMapInvExtentX;
     mvpUniform.fogMapConfig[1] = m_fogMapInvExtentZ;
@@ -3191,6 +3296,11 @@ void RendererBackend::renderFrame(
     if (m_debugEnableSsao) {
         recordSsaoPasses(frameExecutionContext);
     }
+
+    // Before main, after the prepass. It depends on neither -- the clusters are
+    // pure geometry, not scene depth -- so it sits here only to keep the
+    // compute dispatch off the critical path between prepass and main.
+    recordLightClusterPass(frameExecutionContext);
 
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;

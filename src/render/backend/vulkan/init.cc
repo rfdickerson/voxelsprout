@@ -240,6 +240,11 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    if (!runStep("createLightClusterResources", [&] { return createLightClusterResources(); })) {
+        VOX_LOGE("render") << "init failed at createLightClusterResources\n";
+        shutdown();
+        return false;
+    }
     if (!runStep("createTaaComputeResources", [&] { return createTaaComputeResources(); })) {
         return false;
     }
@@ -2446,6 +2451,7 @@ void RendererBackend::shutdown() {
         destroyVoxelGiResources();
         destroyAutoExposureResources();
         destroySunShaftResources();
+        destroyLightClusterResources();
         destroyTaaComputeResources();
         destroyFrameCaptureResources();
         destroySkinnedVelocityResources();

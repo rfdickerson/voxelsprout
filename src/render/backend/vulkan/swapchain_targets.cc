@@ -216,6 +216,13 @@ bool RendererBackend::createAoTargets() {
 
     m_normalDepthExtent = useMergedDepthPrepass() ? m_renderExtent : m_aoExtent;
 
+    // The cluster grid is a function of the render extent, so it is rebuilt
+    // here rather than at init: a resize that left it stale would have every
+    // fragment reading a cluster computed for the old tiling.
+    if (!createLightClusterBuffer(m_renderExtent)) {
+        return false;
+    }
+
     auto createColorTargets = [&](VkFormat format,
                                   std::vector<VkImage>& outImages,
                                   std::vector<VkDeviceMemory>& outMemories,

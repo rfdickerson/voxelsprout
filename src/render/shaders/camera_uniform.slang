@@ -63,6 +63,13 @@ public struct CameraUniform
     public float4 terrainBlendConfig;
     // (white point, shoulder strength, unused, unused); see renderer_shared.h.
     public float4 hdrHighlightConfig;
+    // Clustered light culling; see light_clusters.slang.
+    // (grid x, grid y, grid z, tile size px) and (slice scale, slice bias, 0, 0).
+    public float4 lightClusterConfig0;
+    public float4 lightClusterConfig1;
+    // (one atlas texel in UV, unused x3). Replaces shadowMap.GetDimensions() at
+    // every PCF site -- see renderer_shared.h for the measurement.
+    public float4 shadowAtlasConfig;
 };
 
 [[vk::binding(0, 0)]]

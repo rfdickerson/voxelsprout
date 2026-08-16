@@ -196,6 +196,15 @@ bool RendererBackend::createDescriptorResources() {
         // Pushed unconditionally, after the conditional binding 12 above. The
         // hole when ray tracing is off is fine — descriptorBufferBindingOffset()
         // resolves offsets per binding rather than by position.
+        // Clustered light culling: the per-cluster 64-bit mask the cull compute
+        // pass writes. See src/render/shaders/light_clusters.slang.
+        VkDescriptorSetLayoutBinding lightClusterBinding{};
+        lightClusterBinding.binding = 15;
+        lightClusterBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        lightClusterBinding.descriptorCount = 1;
+        lightClusterBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(lightClusterBinding);
+
         VkDescriptorSetLayoutBinding materialTableBinding{};
         materialTableBinding.binding = 13;
         materialTableBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -487,6 +496,39 @@ void RendererBackend::updateFrameDescriptorSets(
         // Ray-traced scene acceleration structure (binding 12) when RT is live.
         if (hasRayTracingSceneDescriptor) {
             writeDescriptorBufferAccelerationStructure(m_mainBufferSet, region, mainOffset(12), m_rtTlas.deviceAddress);
+        }
+
+        // Cluster light mask (binding 15). Written unconditionally when the
+        // buffer exists: the descriptor must be valid even on a frame where the
+        // cull pass is skipped, because the fragment shader's fallback branch
+        // is decided by a uniform, not by the descriptor, and a null descriptor
+        // in a bound set is undefined behaviour whether or not it is read.
+        const VkBuffer clusterBuffer = m_bufferAllocator.getBuffer(m_lightClusterBufferHandle);
+        if (clusterBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo clusterAddrInfo{};
+            clusterAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            clusterAddrInfo.buffer = clusterBuffer;
+            const VkDeviceAddress clusterAddress = vkGetBufferDeviceAddress(m_device, &clusterAddrInfo);
+            writeDescriptorBufferStorage(
+                m_mainBufferSet, region, mainOffset(15), clusterAddress, m_lightClusterBufferSize);
+        }
+    }
+
+    if (m_lightClusterAvailable && m_lightClusterBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_lightClusterDescriptorSetLayout;
+        writeDescriptorBufferUniform(
+            m_lightClusterBufferSet, region, descriptorBufferBindingOffset(layout, 0),
+            cameraDeviceAddress, cameraBufferInfo.range);
+        const VkBuffer clusterBuffer = m_bufferAllocator.getBuffer(m_lightClusterBufferHandle);
+        if (clusterBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo clusterAddrInfo{};
+            clusterAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            clusterAddrInfo.buffer = clusterBuffer;
+            const VkDeviceAddress clusterAddress = vkGetBufferDeviceAddress(m_device, &clusterAddrInfo);
+            writeDescriptorBufferStorage(
+                m_lightClusterBufferSet, region, descriptorBufferBindingOffset(layout, 1),
+                clusterAddress, m_lightClusterBufferSize);
         }
     }
 

@@ -476,10 +476,10 @@ float sampleShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, flo
         return 1.0;
     }
 
-    uint texW = 0;
-    uint texH = 0;
-    shadowMap.GetDimensions(texW, texH);
-    const float2 atlasTexelSize = 1.0 / float2(float(texW), float(texH));
+    // From the uniform, not shadowMap.GetDimensions() -- see the same site in
+    // imported_static.frag.slang for the measurement.
+    const float2 atlasTexelSize =
+        float2(camera.shadowAtlasConfig.x, camera.shadowAtlasConfig.x);
     const float2 texelSize = atlasTexelSize;
     const float texelScale = max(texelSize.x, texelSize.y);
 

@@ -2,6 +2,7 @@ import camera_uniform;
 import chunk_push_constants;
 import pbr;
 import sh_lighting;
+import light_clusters;
 
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
@@ -20,6 +21,11 @@ Sampler3D<float4> voxelGiVolume;
 
 [[vk::binding(11, 0)]]
 Sampler3D<float4> voxelGiOccupancyVolume;
+
+// Clustered light culling: one 64-bit mask per cluster, written by
+// light_cluster_cull.comp. See light_clusters.slang.
+[[vk::binding(15, 0)]]
+StructuredBuffer<uint2> clusterLightMask;
 
 #ifdef ODAI_RT_SHADOWS
 [[vk::binding(12, 0)]]
@@ -621,6 +627,8 @@ float3 evaluateImportedLocalLights(
     float3 albedo,
     PbrSurface surface,
     bool applySpecular,
+    float2 screenPosition,
+    float viewDepth,
     inout float3 outSpecular)
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
@@ -630,11 +638,40 @@ float3 evaluateImportedLocalLights(
         return float3(0.0, 0.0, 0.0);
     }
 
+    // CLUSTERED (Forward+): iterate only the lights the cull pass says reach
+    // this fragment's cluster, found from SV_Position and view depth. The
+    // fallback walks all of them, and is what runs when the cull pass did not
+    // (grid dimensions zero -- see lightClustersActive) so a missing mask can
+    // only ever cost performance, never light.
+    uint2 mask;
+    if (lightClustersActive())
+    {
+        mask = clusterLightMask[lightClusterIndexForFragment(screenPosition, viewDepth)];
+    }
+    else
+    {
+        const uint low = (lightCount >= 32) ? 0xffffffffu : ((1u << uint(lightCount)) - 1u);
+        const uint high = (lightCount > 32) ? ((1u << uint(lightCount - 32)) - 1u) : 0u;
+        mask = uint2(low, high);
+    }
+
     float3 lighting = float3(0.0, 0.0, 0.0);
     [loop]
-    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    while ((mask.x | mask.y) != 0u)
     {
-        if (lightIndex >= lightCount) break;
+        // Lowest set bit first, then clear it: the loop runs exactly as many
+        // times as there are lights in this cluster, with no per-slot test.
+        int lightIndex;
+        if (mask.x != 0u)
+        {
+            lightIndex = int(firstbitlow(mask.x));
+            mask.x &= mask.x - 1u;
+        }
+        else
+        {
+            lightIndex = 32 + int(firstbitlow(mask.y));
+            mask.y &= mask.y - 1u;
+        }
         const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
         const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
         const float3 toLight = positionRadius.xyz - worldPosition;
@@ -723,7 +760,13 @@ int chooseShadowCascade(float viewDepth)
     return 3;
 }
 
-float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, float ndotl)
+// `singleTap` takes ONE comparison instead of the 3x3. Only the cascade blend
+// passes it: that result is immediately lerped against the near cascade's full
+// kernel across a band that exists to hide the seam, so nine taps there buy a
+// softness nothing can see. Both call sites pass a literal, so the branch folds
+// away in each inlined copy.
+float sampleImportedShadowPcf(
+    float3 worldPosition, float3 normal, int cascadeIndex, float ndotl, bool singleTap)
 {
     const float cascadeT = float(cascadeIndex) / 3.0;
     const float normalOffset =
@@ -746,14 +789,21 @@ float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIn
         return 1.0;
     }
 
-    uint texW = 0;
-    uint texH = 0;
-    shadowMap.GetDimensions(texW, texH);
-    const float2 texelSize = 1.0 / float2(float(texW), float(texH));
+    // From the uniform, NOT shadowMap.GetDimensions(). That query lowers to a
+    // resinfo message the compiler will not hoist out of the fragment, and the
+    // cascade blend below calls this function twice: 1.79 ms of the main pass
+    // on Whiterun at 1080p, for a value that is a compile-time constant on the
+    // CPU. See CameraUniform::shadowAtlasConfig.
+    const float2 texelSize = float2(camera.shadowAtlasConfig.x, camera.shadowAtlasConfig.x);
     const float texelScale = max(texelSize.x, texelSize.y);
     const float bias =
         lerp(camera.shadowConfig0.z, camera.shadowConfig0.w, cascadeT) * texelScale +
         lerp(camera.shadowConfig1.x, camera.shadowConfig1.y, cascadeT) * texelScale * (1.0 - ndotl);
+    if (singleTap)
+    {
+        return shadowMap.SampleCmpLevelZero(shadowUv, shadowDepthRef + bias);
+    }
+
     const int kernelRadius = clamp(int(camera.shadowConfig3.w + 0.5), 1, 3);
 
     float visibility = 0.0;
@@ -807,7 +857,7 @@ float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIn
 float sampleImportedCascadedShadow(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
     const int primaryCascade = chooseShadowCascade(viewDepth);
-    float shadow = sampleImportedShadowPcf(worldPosition, normal, primaryCascade, ndotl);
+    float shadow = sampleImportedShadowPcf(worldPosition, normal, primaryCascade, ndotl, false);
     if (primaryCascade >= 3) return shadow;
 
     const float prevSplit = (primaryCascade == 0) ? 0.0 : camera.shadowCascadeSplits[primaryCascade - 1];
@@ -816,7 +866,12 @@ float sampleImportedCascadedShadow(float3 worldPosition, float3 normal, float vi
     const float blendT = smoothstep(split - blendRange, split, viewDepth);
     if (blendT <= 0.0) return shadow;
 
-    const float nextShadow = sampleImportedShadowPcf(worldPosition, normal, primaryCascade + 1, ndotl);
+    // Single tap: this is the whole cost of the blend band, and the band is a
+    // crossfade. Measured on Whiterun at 1080p, 9 taps -> 1 tap here took the
+    // main pass 17.15 -> 15.13 ms; removing the blend entirely reached only
+    // 14.41, i.e. this recovers three quarters of it and keeps the seam hidden.
+    const float nextShadow =
+        sampleImportedShadowPcf(worldPosition, normal, primaryCascade + 1, ndotl, true);
     return lerp(shadow, nextShadow, blendT);
 }
 
@@ -1157,6 +1212,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
             albedo,
             surface,
             usePbr,
+            input.inScreenPosition.xy,
+            viewDepth,
             specular) *
         (interiorMode ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));

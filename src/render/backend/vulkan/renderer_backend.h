@@ -697,6 +697,20 @@ public:
 
 private:
     bool createSunShaftResources();
+    // Clustered (Forward+) local-light culling. See
+    // src/render/shaders/light_clusters.slang for the scheme and
+    // light_clusters.cc for why the mask is fixed-size rather than an index
+    // list. Every one of these is a no-op when the shader is missing: the
+    // fragment shader keeps a full-array fallback, so this pass can only make
+    // lighting cheaper, never absent.
+    bool createLightClusterResources();
+    bool createLightClusterBuffer(VkExtent2D renderExtent);
+    void destroyLightClusterResources();
+    void computeLightClusterSliceParams(
+        float nearPlane, float farPlane, float& outScale, float& outBias) const;
+    static uint32_t lightClusterGridX(VkExtent2D extent);
+    static uint32_t lightClusterGridY(VkExtent2D extent);
+    static uint32_t lightClusterCount(VkExtent2D extent);
     bool createSsaoComputeResources();
     bool createSkinningComputeResources();
     bool createTimelineSemaphore();
@@ -1037,6 +1051,19 @@ private:
         std::uint32_t height = 1u;
         float fineRadiusScale = 0.0f;
         float pad = 0.0f;
+    };
+
+    // Mirrors LightClusterPushConstants in
+    // shaders/light_cluster_cull.comp.slang -- change both together.
+    struct LightClusterPushConstants {
+        std::uint32_t gridX = 1u;
+        std::uint32_t gridY = 1u;
+        std::uint32_t gridZ = 1u;
+        std::uint32_t tileSize = 64u;
+        float sliceScale = 1.0f;
+        float sliceBias = 0.0f;
+        std::uint32_t extentX = 1u;
+        std::uint32_t extentY = 1u;
     };
 
     struct XeGtaoPrefilterPushConstants {
@@ -1538,6 +1565,9 @@ private:
     void recordSsaoPasses(
         const FrameExecutionContext& context
     );
+    // Clustered light culling; declared here rather than beside its create/
+    // destroy siblings because FrameExecutionContext is not defined until now.
+    void recordLightClusterPass(const FrameExecutionContext& context);
     // Uploads this frame's pending skinned-actor bone matrices (set via
     // setSkinnedActorPose) through the FrameArena. Must be called after
     // m_frameArena.beginFrame() for the current frame index and before
@@ -1996,6 +2026,22 @@ private:
     VkPipelineLayout m_autoExposurePipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_autoExposureHistogramPipeline = VK_NULL_HANDLE;
     VkPipeline m_autoExposureUpdatePipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_lightClusterDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_lightClusterBufferSet{};
+    VkPipelineLayout m_lightClusterPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_lightClusterPipeline = VK_NULL_HANDLE;
+    BufferHandle m_lightClusterBufferHandle = kInvalidBufferHandle;
+    VkDeviceSize m_lightClusterBufferSize = 0;
+    uint32_t m_lightClusterGridX = 0;
+    uint32_t m_lightClusterGridY = 0;
+    float m_lightClusterSliceScale = 1.0f;
+    float m_lightClusterSliceBias = 0.0f;
+    // Pipeline and buffer exist.
+    bool m_lightClusterAvailable = false;
+    // ...AND there is something to cull this frame. Separate from the above so
+    // a frame with no local lights skips the dispatch entirely while leaving
+    // the resources alive for the next one.
+    bool m_lightClusterCullActive = false;
     VkDescriptorSetLayout m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
     DescriptorBufferSet m_sunShaftBufferSet{};
     VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;

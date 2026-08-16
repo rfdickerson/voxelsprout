@@ -389,6 +389,7 @@ if(SLANGC_EXECUTABLE)
     # Ambient occlusion: one source, three estimators. ODAI_AO_MODE picks which
     # estimateVisibility() compiles in, so each pipeline's sample loop is branch-free.
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/light_cluster_cull.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang"
@@ -844,6 +845,7 @@ if(ODAI_BUILD_APP)
             src/render/backend/vulkan/frame_pass_shadow.cc
             src/render/backend/vulkan/frame_pass_prepass.cc
             src/render/backend/vulkan/frame_pass_ssao.cc
+            src/render/backend/vulkan/light_clusters.cc
             src/render/backend/vulkan/frame_pass_velocity.cc
             src/render/backend/vulkan/frame_pass_skinning.cc
             src/render/backend/vulkan/frame_pass_main.cc
