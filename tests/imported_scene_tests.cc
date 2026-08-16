@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -40,6 +42,7 @@ void testImportedSceneSerialization() {
     using odai::importer::ImportedSceneInstance;
     using odai::importer::ImportedSceneLandscapeCell;
     using odai::importer::ImportedSceneLight;
+    using odai::importer::ImportedSceneParticleEmitter;
     using odai::importer::ImportedSceneMesh;
     using odai::importer::ImportedSceneMeshPart;
     using odai::importer::ImportedSceneTexture;
@@ -110,6 +113,17 @@ void testImportedSceneSerialization() {
     light.flags = 0x018u;
     scene.lights.push_back(light);
 
+    ImportedSceneParticleEmitter emitter{};
+    emitter.sourceId = "refr_fire_01";
+    emitter.position[0] = 20.0f;
+    emitter.position[1] = 4.0f;
+    emitter.position[2] = 28.0f;
+    emitter.spawnRadius = 72.0f;
+    emitter.particleLifetime = 1.4f;
+    emitter.particleCount = 64u;
+    emitter.seed = 0x12345u;
+    scene.particleEmitters.push_back(emitter);
+
     ImportedSceneInstance instance{};
     instance.meshIndex = 0u;
     instance.transform[0] = 1.0f;
@@ -153,6 +167,14 @@ void testImportedSceneSerialization() {
     expectNear(loaded.lights.front().position[1], light.position[1], 1e-6f, "Imported scene light position round-trips");
     expectNear(loaded.lights.front().color[1], light.color[1], 1e-6f, "Imported scene light color round-trips");
     expectNear(loaded.lights.front().radius, light.radius, 1e-6f, "Imported scene light radius round-trips");
+    expectTrue(loaded.particleEmitters.size() == 1u,
+               "Imported scene particle emitter count round-trips");
+    expectTrue(loaded.particleEmitters.front().sourceId == emitter.sourceId,
+               "Imported scene particle emitter id round-trips");
+    expectNear(loaded.particleEmitters.front().spawnRadius, emitter.spawnRadius, 1e-6f,
+               "Imported scene particle emitter radius round-trips");
+    expectTrue(loaded.particleEmitters.front().particleCount == emitter.particleCount,
+               "Imported scene particle emitter capacity round-trips");
 
     ImportedScene runtimeLoaded{};
     expectTrue(odai::importer::loadImportedSceneRuntime(scenePath, runtimeLoaded), "Imported scene runtime loader works");
@@ -164,6 +186,8 @@ void testImportedSceneSerialization() {
     expectTrue(runtimeLoaded.landscapeCells.empty(), "Imported scene runtime loader skips landscape cells");
     expectTrue(runtimeLoaded.waterPatches.size() == 1u, "Imported scene runtime loader keeps water patches");
     expectTrue(runtimeLoaded.lights.size() == 1u, "Imported scene runtime loader keeps lights");
+    expectTrue(runtimeLoaded.particleEmitters.size() == 1u,
+               "Imported scene runtime loader keeps particle emitters");
     expectTrue(!runtimeLoaded.packedVertices.empty(), "Imported scene runtime loader reads packed vertices");
     expectTrue(!runtimeLoaded.packedIndices.empty(), "Imported scene runtime loader reads packed indices");
     expectTrue(!runtimeLoaded.packedDraws.empty(), "Imported scene runtime loader reads packed draws");
@@ -184,6 +208,7 @@ void testGpuSceneBuildFromImportedScene() {
     using odai::importer::ImportedScene;
     using odai::importer::ImportedSceneInstance;
     using odai::importer::ImportedSceneLight;
+    using odai::importer::ImportedSceneParticleEmitter;
     using odai::importer::ImportedSceneMesh;
     using odai::importer::ImportedSceneMeshPart;
     using odai::importer::ImportedSceneTexture;
@@ -259,6 +284,11 @@ void testGpuSceneBuildFromImportedScene() {
     light.radius = 256.0f;
     scene.lights.push_back(light);
 
+    ImportedSceneParticleEmitter emitter{};
+    emitter.sourceId = "refr_fire_02";
+    emitter.position[1] = 8.0f;
+    scene.particleEmitters.push_back(emitter);
+
     GpuSceneAsset gpuScene{};
     expectTrue(
         odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
@@ -276,6 +306,10 @@ void testGpuSceneBuildFromImportedScene() {
     expectTrue(gpuScene.renderCache.packedDraws.size() == 3u, "GPU scene preserves mesh parts as separate draws");
     expectTrue(gpuScene.lights.size() == 1u, "GPU scene keeps imported lights");
     expectTrue(gpuScene.renderCache.lights.size() == 1u, "GPU scene render cache keeps imported lights");
+    expectTrue(gpuScene.particleEmitters.size() == 1u,
+               "GPU scene keeps imported particle emitters");
+    expectTrue(gpuScene.renderCache.particleEmitters.size() == 1u,
+               "GPU scene render cache keeps imported particle emitters");
     expectTrue(!gpuScene.renderCache.pageDrawRanges.empty(), "GPU scene render cache records page draw ranges");
     expectTrue(gpuScene.renderCache.pageDrawRanges.front().firstDraw == 0u,
                "GPU scene page draw ranges start at the first draw");
@@ -660,9 +694,11 @@ void testMaterialLibraryRoundTrip() {
                "Material scene loads (runtime loader)");
     verify(runtime, "runtime loader sees 3 materials");
 
-    // Back-compat: rewrite the header version as 17 and confirm the file still
-    // loads, with an empty table and vertex flags untouched. This is the whole
-    // reason the section is appended and version-gated.
+    // A DOCTORED-OLD HEADER MUST BE REJECTED. This rewrites a current file's
+    // version word to 17 and nothing else, so its bytes are still perfectly
+    // valid -- the point is that the version alone decides, and the reader does
+    // not attempt a layout it no longer knows how to read. See
+    // kMinSupportedImportedSceneVersion.
     const fs::path legacyPath = fs::temp_directory_path() / "odai_material_library_v17.bin";
     {
         std::ifstream in(scenePath, std::ios::binary);
@@ -674,11 +710,8 @@ void testMaterialLibraryRoundTrip() {
         out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     }
     ImportedScene legacy;
-    expectTrue(loadImportedScene(legacyPath, legacy), "A v17 file still loads");
-    expectTrue(legacy.materials.empty(), "v17 file loads with an empty material table");
-    expectTrue(!legacy.packedVertices.empty() &&
-                   legacy.packedVertices[0].flags == scene.packedVertices[0].flags,
-               "v17 file keeps its vertex flags byte-identical");
+    expectTrue(!loadImportedScene(legacyPath, legacy), "a v17 file no longer loads");
+    expectTrue(legacy.packedVertices.empty(), "a rejected file leaves the scene untouched");
 
     fs::remove(scenePath);
     fs::remove(legacyPath);
@@ -874,49 +907,26 @@ void testPreV19VertexLayoutCompatibility() {
                      static_cast<std::streamsize>(downgraded.size()));
     }
 
+    // A BELOW-FLOOR FILE MUST BE REJECTED, NOT EXPANDED. The reader used to
+    // carry every layout back to v15; it now supports exactly
+    // kMinSupportedImportedSceneVersion and up, because a scene older than that
+    // is one no current build can produce or consult -- a cell cache is keyed by
+    // kCellBuildVersion and the plugin's size and mtime, so the caller rebuilds
+    // it either way.
+    //
+    // The failure has to be CLEAN. This fixture is a v19 file with its header
+    // rewritten to 18 and its vertex block narrowed, so every byte after the
+    // mesh block sits at the wrong offset: a reader that tried anyway would
+    // report success on garbage rather than error, which is the whole reason
+    // this fixture exists.
     ImportedScene loaded{};
-    expectTrue(loadImportedScene(v18Path, loaded), "v18 file loads");
-    expectTrue(loaded.sourceFileVersion == 18u, "v18 file reports its own version");
-    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3,
-               "v18 mesh vertices survive the narrower on-disk layout");
-    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3) {
-        const ImportedSceneVertex& second = loaded.meshes[0].vertices[1];
-        expectNear(second.position[0], 4.0f, 1e-5f, "v18 vertex position expands correctly");
-        expectNear(second.uv[0], 1.0f, 1e-5f, "v18 vertex uv expands correctly");
-        expectNear(second.color[0], 1.0f, 1e-5f, "v18 vertex colour defaults to white (r)");
-        expectNear(second.color[1], 1.0f, 1e-5f, "v18 vertex colour defaults to white (g)");
-        expectNear(second.color[2], 1.0f, 1e-5f, "v18 vertex colour defaults to white (b)");
-        expectTrue(second.layerTextureIndex[0] == kImportedSceneNoTerrainLayer,
-                   "v18 vertex has no terrain layers");
-    }
-    // The packed block sits after the mesh block, so reading it back correctly
-    // is what proves the mesh block was sized right — and it exercises the
-    // packed array's own legacy stride at the same time.
-    expectTrue(loaded.packedVertices.size() == scene.packedVertices.size(),
-               "v18 packed vertex count survives the mesh block");
-    if (loaded.packedVertices.size() == scene.packedVertices.size() && !loaded.packedVertices.empty()) {
-        const ImportedScenePackedVertex& expected = scene.packedVertices[1];
-        const ImportedScenePackedVertex& actual = loaded.packedVertices[1];
-        expectNear(actual.position[0], expected.position[0], 1e-5f, "v18 packed position expands correctly");
-        expectNear(actual.uv[0], expected.uv[0], 1e-5f, "v18 packed uv expands correctly");
-        expectTrue(actual.textureIndex == expected.textureIndex, "v18 packed texture index expands correctly");
-        expectTrue(actual.layerTextureIndex[0] == kImportedSceneNoTerrainLayer,
-                   "v18 packed vertex has no terrain layers");
-        expectTrue(actual.layerWeights == 0u, "v18 packed vertex has zero layer weights");
-        expectTrue((actual.flags & kImportedSceneMaterialFlagTerrainLayers) == 0u,
-                   "v18 packed vertex does not claim terrain layers");
-    }
-
-    // Same file through the runtime loader, which skips meshes by computed size
-    // rather than reading them — the other half of the stride bug. It keeps only
-    // the packed stream (meshes and instances are skipped by design), so that is
-    // what proves it resumed at the right offset.
+    expectTrue(!loadImportedScene(v18Path, loaded),
+               "a file below the supported version floor is rejected");
+    expectTrue(!getImportedSceneLastError().empty(),
+               "rejecting an old file names a reason");
     ImportedScene runtimeLoaded{};
-    expectTrue(loadImportedSceneRuntime(v18Path, runtimeLoaded), "v18 file loads through the runtime loader");
-    expectTrue(runtimeLoaded.packedVertices.size() == scene.packedVertices.size(),
-               "runtime loader skips the v18 mesh block by the on-disk stride");
-    expectTrue(runtimeLoaded.packedDraws.size() == scene.packedDraws.size(),
-               "runtime loader reads v18 packed draws from the right offset");
+    expectTrue(!loadImportedSceneRuntime(v18Path, runtimeLoaded),
+               "the runtime loader rejects it too");
 
     std::error_code cleanupError;
     fs::remove(v19Path, cleanupError);
@@ -1123,6 +1133,99 @@ void testAlphaThresholdRoundTrip() {
     fs::remove(scenePath);
 }
 
+// The CPU half of ImportedMeshVertex's packing against the shader half in
+// shaders/imported_vertex_pack.slang. Nothing else can catch those two
+// drifting: a wrong decode does not fail, it shades slightly wrong forever.
+//
+// The decoders below are transcribed from that Slang module deliberately -- if
+// someone edits the shader without editing this, the point is that this test
+// keeps asserting the OLD contract and starts failing.
+void testImportedVertexPacking() {
+    using odai::importer::packImportedVertexColor;
+    using odai::importer::packImportedVertexLayerPair;
+    using odai::importer::packImportedVertexNormal;
+
+    const auto decodeNormal = [](std::uint32_t packed) {
+        const auto half = [](std::uint32_t bits) {
+            return static_cast<float>(static_cast<std::int16_t>(bits & 0xffffu)) / 32767.0f;
+        };
+        float x = half(packed);
+        float z = half(packed >> 16);
+        float y = 1.0f - std::abs(x) - std::abs(z);
+        if (y < 0.0f) {
+            const float foldedX = (1.0f - std::abs(z)) * (x >= 0.0f ? 1.0f : -1.0f);
+            const float foldedZ = (1.0f - std::abs(x)) * (z >= 0.0f ? 1.0f : -1.0f);
+            x = foldedX;
+            z = foldedZ;
+        }
+        const float length = std::sqrt((x * x) + (y * y) + (z * z));
+        return std::array<float, 3>{x / length, y / length, z / length};
+    };
+    const auto decodeSrgbByte = [](std::uint32_t byte) {
+        const float c = static_cast<float>(byte) / 255.0f;
+        return (c <= 0.04045f) ? (c / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+
+    // Normals: worst-case angular error over a deterministic sweep of the sphere.
+    double worstDegrees = 0.0;
+    for (int i = 0; i < 64; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            const float theta = static_cast<float>(i) * 3.14159265f / 63.0f;
+            const float phi = static_cast<float>(j) * 6.28318531f / 64.0f;
+            const float normal[3] = {
+                std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
+            const std::array<float, 3> decoded = decodeNormal(packImportedVertexNormal(normal));
+            const float dot = (normal[0] * decoded[0]) + (normal[1] * decoded[1]) +
+                              (normal[2] * decoded[2]);
+            worstDegrees = std::max<double>(
+                worstDegrees,
+                std::acos(static_cast<double>(std::clamp(dot, -1.0f, 1.0f))) * 180.0 / 3.14159265);
+        }
+    }
+    // 0.05, against a measured worst case of 0.034 degrees. The worst case is
+    // NOT uniform over the sphere -- it sits just below the equator near the
+    // fold diagonals, around (0.98, -0.07, 0.19) -- so a random-sample estimate
+    // understates it by an order of magnitude. This grid sweep hits it.
+    expectTrue(worstDegrees < 0.05,
+               "octahedral normal packing stays under 0.05 degrees of error");
+
+    // A degenerate normal must not produce NaN -- the shader normalizes what it
+    // gets and would propagate one straight into the lighting.
+    const float zeroNormal[3] = {0.0f, 0.0f, 0.0f};
+    const std::array<float, 3> degenerate = decodeNormal(packImportedVertexNormal(zeroNormal));
+    expectTrue(std::isfinite(degenerate[0]) && std::isfinite(degenerate[1]) &&
+                   std::isfinite(degenerate[2]),
+               "a zero-length normal packs to a finite direction");
+
+    // Colour: every one of the 256 sRGB source bytes must survive the round trip
+    // exactly. That is the case that matters -- these values are authored as
+    // sRGB bytes, not as arbitrary linear floats.
+    int inexact = 0;
+    for (std::uint32_t byte = 0; byte < 256u; ++byte) {
+        const float linear = decodeSrgbByte(byte);
+        const float color[3] = {linear, linear, linear};
+        const std::uint32_t packed = packImportedVertexColor(color);
+        if ((packed & 0xffu) != byte || ((packed >> 8) & 0xffu) != byte ||
+            ((packed >> 16) & 0xffu) != byte) {
+            ++inexact;
+        }
+    }
+    expectTrue(inexact == 0, "all 256 sRGB source bytes round-trip exactly through vertex colour");
+
+    // Out-of-range input clamps rather than wrapping into a bright colour.
+    const float overbright[3] = {4.0f, -1.0f, 0.0f};
+    const std::uint32_t clamped = packImportedVertexColor(overbright);
+    expectTrue((clamped & 0xffu) == 255u, "colour above 1.0 clamps to white");
+    expectTrue(((clamped >> 8) & 0xffu) == 0u, "colour below 0.0 clamps to black");
+
+    // Layer slots: two per word, and anything that will not fit in 16 bits must
+    // land on the sentinel instead of truncating into a valid-looking slot.
+    expectTrue(packImportedVertexLayerPair(3u, 9u) == (3u | (9u << 16)),
+               "layer slots pack low half first");
+    expectTrue(packImportedVertexLayerPair(0xffffffffu, 0x1ffffu) == 0xffffffffu,
+               "unrepresentable layer slots become the 0xffff sentinel, not a truncated index");
+}
+
 int main() {
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
@@ -1137,6 +1240,7 @@ int main() {
     testMaterialLibraryRoundTrip();
     testImportedSceneRaycast();
     testAlphaThresholdRoundTrip();
+    testImportedVertexPacking();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

@@ -1,5 +1,6 @@
 #include "import/fnv/fallout_records.h"
 
+#include <iostream>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
@@ -89,10 +90,37 @@ bool isModelBearingBaseType(std::string_view type) {
            type == "TERM" || type == "LIGH" || type == "BOOK" || type == "KEYM" ||
            type == "ALCH" || type == "AMMO" || type == "WEAP" || type == "ARMO" ||
            type == "NOTE" || type == "IMOD" || type == "CCRD" || type == "CHIP" ||
-           type == "CMNY" || type == "SCOL";
+           type == "CMNY" || type == "SCOL" ||
+           // FLOR is the TES harvestable-plant record (Skyrim hangs Whiterun's
+           // garlic braids and gourds from it; Oblivion uses it for every
+           // ingredient plant). It is an ordinary MODL carrier, and leaving it
+           // out of this list read as "plants randomly missing" rather than as
+           // a type filter.
+           type == "FLOR";
     // PWAT (placeable water) is deliberately excluded: it belongs to the water
     // render path, and going through the opaque static path draws it as a solid
     // pale slab lying across the scene.
+}
+
+// True when the bytes read as a model path a filesystem could hold: printable
+// ASCII, NUL-terminated or not. SKYRIM'S ARMO REPURPOSED "MODL" -- in TES5 that
+// subrecord holds the ARMA armature formID LIST, four binary bytes per entry,
+// and the world model moved to MOD2/MOD4. Reading it as a string hands the
+// asset source a path made of formID bytes, which fails with a warning whose
+// "name" is line noise -- memorable, but only after an evening of staring at
+// it. FNV's ARMO MODL is a real string, so the discriminator has to be the
+// SHAPE of the payload, not the record type.
+bool looksLikeModelPath(const std::string& text) {
+    if (text.empty()) {
+        return false;
+    }
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte < 0x20u || byte >= 0x7fu) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
@@ -103,7 +131,18 @@ void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
         } else if (sub.type == "MODL") {
-            entry.modelPath = subrecordString(sub);
+            const std::string candidate = subrecordString(sub);
+            if (looksLikeModelPath(candidate)) {
+                entry.modelPath = candidate;
+            }
+        } else if (sub.type == "MOD2" && entry.modelPath.empty()) {
+            // TES5 ARMO's male world model. Taken only when MODL yielded
+            // nothing, so every earlier generation -- where MOD2 does not
+            // exist on the records this reads -- is untouched.
+            const std::string candidate = subrecordString(sub);
+            if (looksLikeModelPath(candidate)) {
+                entry.modelPath = candidate;
+            }
         }
     }
     scene.statics.push_back(std::move(entry));
@@ -157,6 +196,13 @@ void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
             entry.editorId = subrecordString(sub);
         } else if (sub.type == "RDMP") {
             entry.mapName = subrecordString(sub);
+            // A localized plugin writes a four-byte string ID here instead of
+            // the text. Recorded rather than decided on, because this parser
+            // never sees the TES4 header that says which the plugin is; see
+            // FalloutRegionRecord::mapNameStringId.
+            if (sub.size == 4u) {
+                entry.mapNameStringId = readU32(sub.data);
+            }
         }
     }
     scene.regions.push_back(std::move(entry));
@@ -168,6 +214,13 @@ void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene)
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
+        } else if (sub.type == "DNAM" && sub.size >= 8u) {
+            // Two floats: default land height, then default water height.
+            entry.hasDefaultHeights = true;
+            entry.defaultLandHeight = readF32(sub.data);
+            entry.defaultWaterHeight = readF32(sub.data + 4);
+        } else if (sub.type == "WNAM" && sub.size >= 4u) {
+            entry.parentWorldspaceFormId = readU32(sub.data);
         }
     }
     scene.worldspaces.push_back(std::move(entry));
@@ -181,11 +234,45 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
         } else if (sub.type == "DATA" && sub.size >= 1u) {
-            entry.isInterior = (sub.data[0] & 0x1u) != 0u;
+            entry.cellFlags = sub.data[0];
+            if (sub.size >= 2u) {
+                entry.cellFlags |= static_cast<std::uint16_t>(sub.data[1]) << 8u;
+            }
+            entry.isInterior = (entry.cellFlags & kCellFlagInterior) != 0u;
         } else if (sub.type == "XCLC" && sub.size >= 8u) {
             entry.hasGridCoords = true;
             entry.gridX = readI32(sub.data);
             entry.gridZ = readI32(sub.data + 4);
+        } else if (sub.type == "XCLL" && sub.size >= 20u) {
+            // Bytes are sRGB as authored; the renderer works in linear, and the
+            // decode belongs with the consumer rather than here, so these stay
+            // 0..1 sRGB and are converted where they are used.
+            entry.hasLighting = true;
+            for (int channel = 0; channel < 3; ++channel) {
+                entry.ambientColor[channel] =
+                    static_cast<float>(sub.data[channel]) / 255.0f;
+                entry.directionalColor[channel] =
+                    static_cast<float>(sub.data[4 + channel]) / 255.0f;
+                entry.fogColor[channel] = static_cast<float>(sub.data[8 + channel]) / 255.0f;
+            }
+            std::memcpy(&entry.fogNear, sub.data + 12, sizeof(entry.fogNear));
+            std::memcpy(&entry.fogFar, sub.data + 16, sizeof(entry.fogFar));
+        } else if (sub.type == "XCLW" && sub.size >= 4u) {
+            // Presence is not the test -- see FalloutCellRecord::hasWater. The
+            // threshold only has to separate the one sentinel Bethesda writes
+            // (-2.147e9) from a real water height; the deepest authored water
+            // in either game is thousands of units, not billions.
+            // Two sentinels, not one. -2.147e9 is "no water"; FLT_MAX
+            // (0x7F7FFFFF) is Skyrim's "use the worldspace default height",
+            // which the old lower-bound-only guard read as water 3.4e38 units
+            // up. Leaving hasWater false hands the cell to the same implied-
+            // height path an absent XCLW takes, which resolves the worldspace
+            // default -- exactly what the sentinel means.
+            const float height = readF32(sub.data);
+            if (std::isfinite(height) && height > -1.0e9f && height < 1.0e9f) {
+                entry.hasWater = true;
+                entry.waterHeight = height;
+            }
         } else if (sub.type == "XCLR") {
             // A packed array of REGN formIDs. Every retail size is a multiple
             // of 4 (measured: 4, 8, 12, 16, 20 and one 24), which is what pins
@@ -205,6 +292,7 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
     }
     FalloutPlacedReference ref{};
     ref.formId = record.formId;
+    ref.recordFlags = record.flags;
     ref.scale = 1.0f;
     bool hasData = false;
     for (const EsmSubrecordView& sub : record.subrecords) {
@@ -220,6 +308,14 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             hasData = true;
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             ref.scale = readF32(sub.data);
+        } else if (sub.type == "XESP" && sub.size >= 8u) {
+            // Enable parent: this reference's enabled state follows another
+            // reference's, optionally inverted (flag bit 0). Bethesda uses it to
+            // ship two versions of a thing in the same spot and let quest state
+            // pick one.
+            ref.hasEnableParent = true;
+            ref.enableParentFormId = readU32(sub.data);
+            ref.enableParentOpposite = (readU32(sub.data + 4) & 0x00000001u) != 0u;
         } else if (sub.type == "XTEL" && sub.size >= 28u) {
             // formID of the destination door reference, then the arrival
             // position and rotation in that door's cell.
@@ -356,15 +452,17 @@ void decodeLandHeights(const std::uint8_t* vhgtData, FalloutLandRecord& land) {
     // within [-200, +600] of the ground beneath them. Objects sitting on the
     // terrain they were authored against is the check, and it is what the
     // cell-edge continuity test could not see, being scale-invariant.
+    land.heights.assign(static_cast<std::size_t>(land.vertexCount()), 0.0f);
+    const int gridSize = land.gridSize;
     float rowStart = baseOffset;
-    for (int row = 0; row < kLandGridSize; ++row) {
+    for (int row = 0; row < gridSize; ++row) {
         float current = rowStart;
-        for (int col = 0; col < kLandGridSize; ++col) {
-            const std::int8_t delta = deltas[(row * kLandGridSize) + col];
+        for (int col = 0; col < gridSize; ++col) {
+            const std::int8_t delta = deltas[(row * gridSize) + col];
             if (!(row == 0 && col == 0)) {
                 current += static_cast<float>(delta);
             }
-            land.heights[(row * kLandGridSize) + col] = current * kLandHeightScale;
+            land.heights[(row * gridSize) + col] = current * kLandHeightScale;
             if (col == 0) {
                 rowStart = current;
             }
@@ -374,7 +472,9 @@ void decodeLandHeights(const std::uint8_t* vhgtData, FalloutLandRecord& land) {
 }
 
 void decodeLandNormals(const std::uint8_t* vnmlData, FalloutLandRecord& land) {
-    for (int i = 0; i < kLandVertexCount; ++i) {
+    const int count = land.vertexCount();
+    land.normals.assign(static_cast<std::size_t>(count) * 3u, 0.0f);
+    for (int i = 0; i < count; ++i) {
         const auto* signedBytes = reinterpret_cast<const std::int8_t*>(vnmlData + (i * 3));
         float x = static_cast<float>(signedBytes[0]) / 127.0f;
         float y = static_cast<float>(signedBytes[1]) / 127.0f;
@@ -400,7 +500,9 @@ void decodeLandNormals(const std::uint8_t* vnmlData, FalloutLandRecord& land) {
 // Unlike VNML these are unsigned: 255 is neutral (leave the texture alone), not
 // a signed component, so they scale straight to [0,1] rather than [-1,1].
 void decodeLandColors(const std::uint8_t* vclrData, FalloutLandRecord& land) {
-    for (int i = 0; i < kLandVertexCount * 3; ++i) {
+    const int count = land.vertexCount() * 3;
+    land.colors.assign(static_cast<std::size_t>(count), 1.0f);
+    for (int i = 0; i < count; ++i) {
         land.colors[i] = static_cast<float>(vclrData[i]) / 255.0f;
     }
     land.hasColors = true;
@@ -418,6 +520,23 @@ void parseTextureSetRecord(const EsmRecordView& record, std::unordered_map<std::
     }
 }
 
+// Oblivion's LTEX names its texture DIRECTLY in ICON, with no TXST in between:
+// the TNAM -> TXST -> TX00 indirection is a Fallout 3-era addition. Reading
+// only TNAM on an Oblivion plugin resolves no land textures at all and the
+// whole terrain shades untextured -- silently, because an LTEX with no path is
+// not an error anywhere downstream.
+//
+// ICON is relative to "textures\landscape\", not to "textures\", so the prefix
+// has to be added here: normalizeTexturePath() only prepends "textures\" and
+// would produce "textures\Dementia\DementiaMoss01.dds", which resolves to
+// nothing. Measured over all 229 LTEX records in Oblivion.esm: 226 resolve
+// under textures\landscape\, 0 under textures\ directly, and the 3 that resolve
+// nowhere name assets the game does not ship (CHRock01.dds and two others).
+//
+// Fallout plugins carry no ICON on an LTEX, so this branch never fires for
+// them and their TNAM path is untouched.
+constexpr std::string_view kOblivionLandTextureFolder = "landscape\\";
+
 void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
     FalloutLandTextureRecord landTexture{};
     landTexture.formId = record.formId;
@@ -426,9 +545,174 @@ void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outSc
             landTexture.editorId = subrecordString(sub);
         } else if (sub.type == "TNAM" && sub.size >= 4u) {
             landTexture.textureSetFormId = readU32(sub.data);
+        } else if (sub.type == "ICON" && sub.size > 0u) {
+            landTexture.diffuseTexturePath =
+                std::string(kOblivionLandTextureFolder) + subrecordString(sub);
         }
     }
     outScene.landTextures.push_back(std::move(landTexture));
+}
+
+// ---------------------------------------------------------------------------
+// Morrowind (TES3) records.
+//
+// Every difference here is a consequence of the same two facts: there are no
+// formIDs, and there is no GRUP tree. Records are keyed by a string id, and a
+// CELL carries its own references INLINE as a run of subrecords rather than in
+// a child group -- so "extract this cell" is parsing one record, not walking a
+// byte range of the file.
+//
+// Synthetic formIDs are assigned to base records as they are scanned, and a
+// reference keeps its base's NAME text until the world tables can turn it into
+// one. Hashing the string was the obvious alternative and is wrong at this
+// scale: ~50k ids through a 32-bit hash carries a ~29% chance of at least one
+// collision, and a collision here silently places the wrong object.
+
+void parseMorrowindStatRecord(
+    const EsmRecordView& record, std::string_view recordType, FalloutSceneData& scene) {
+    FalloutStaticRecord entry{};
+    entry.recordType = std::string(recordType);
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "NAME") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "MODL") {
+            entry.modelPath = subrecordString(sub);
+        }
+    }
+    if (entry.editorId.empty()) {
+        return;
+    }
+    scene.statics.push_back(std::move(entry));
+}
+
+void parseMorrowindLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
+    FalloutLandTextureRecord entry{};
+    bool haveIndex = false;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "NAME") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "INTV" && sub.size >= 4u) {
+            // The palette index VTEX refers to -- PLUS ONE, when it gets there.
+            entry.formId = readU32(sub.data) + 1u;
+            haveIndex = true;
+        } else if (sub.type == "DATA") {
+            entry.diffuseTexturePath = subrecordString(sub);
+        }
+    }
+    if (!haveIndex || entry.diffuseTexturePath.empty()) {
+        return;
+    }
+    outScene.landTextures.push_back(std::move(entry));
+}
+
+// A TES3 LAND. 65x65 posts over an 8192-unit cell, so the same 128-unit post
+// spacing as every later game -- the CELL is bigger, not the sampling.
+void parseMorrowindLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell) {
+    if (currentCell == nullptr) {
+        return;
+    }
+    auto land = std::make_unique<FalloutLandRecord>();
+    land->gridSize = kMorrowindLandGridSize;
+    const int vertexCount = land->vertexCount();
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "VHGT" &&
+            sub.size >= 4u + static_cast<std::uint32_t>(vertexCount)) {
+            decodeLandHeights(sub.data, *land);
+        } else if (sub.type == "VNML" &&
+                   sub.size >= static_cast<std::uint32_t>(vertexCount * 3)) {
+            decodeLandNormals(sub.data, *land);
+        } else if (sub.type == "VCLR" &&
+                   sub.size >= static_cast<std::uint32_t>(vertexCount * 3)) {
+            decodeLandColors(sub.data, *land);
+        } else if (sub.type == "VTEX" &&
+                   sub.size >= static_cast<std::uint32_t>(
+                       kMorrowindTextureGridSize * kMorrowindTextureGridSize * 2)) {
+            // VTEX IS SWIZZLED. It is stored as 4x4 blocks of 4x4 entries, not
+            // in row-major order, so reading it straight gives a texture layout
+            // that is subtly scrambled rather than obviously wrong -- patches
+            // land in the right cell and the wrong quarter of it.
+            land->morrowindTextureGrid.assign(
+                static_cast<std::size_t>(kMorrowindTextureGridSize * kMorrowindTextureGridSize), 0u);
+            std::size_t readPos = 0;
+            for (int blockRow = 0; blockRow < 4; ++blockRow) {
+                for (int blockCol = 0; blockCol < 4; ++blockCol) {
+                    for (int row = 0; row < 4; ++row) {
+                        for (int col = 0; col < 4; ++col) {
+                            const int outRow = (blockRow * 4) + row;
+                            const int outCol = (blockCol * 4) + col;
+                            land->morrowindTextureGrid
+                                [static_cast<std::size_t>((outRow * kMorrowindTextureGridSize) + outCol)] =
+                                readU16(sub.data + (readPos * 2u));
+                            ++readPos;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (land->hasHeights) {
+        currentCell->land = std::move(land);
+    }
+}
+
+// A TES3 CELL, references and all. The reference block is a flat run of
+// subrecords with no count: a new reference starts at every FRMR.
+void parseMorrowindCellRecord(
+    const EsmRecordView& record, FalloutCellRecord& outCell) {
+    bool inReference = false;
+    FalloutPlacedReference current{};
+    const auto flushReference = [&]() {
+        if (inReference && !current.baseEditorId.empty()) {
+            outCell.references.push_back(current);
+        }
+        current = FalloutPlacedReference{};
+    };
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "FRMR") {
+            flushReference();
+            inReference = true;
+            if (sub.size >= 4u) {
+                current.formId = readU32(sub.data);
+            }
+            continue;
+        }
+        if (!inReference) {
+            // Cell header, which ends at the first FRMR.
+            if (sub.type == "NAME") {
+                outCell.editorId = subrecordString(sub);
+            } else if (sub.type == "DATA" && sub.size >= 12u) {
+                const std::uint32_t flags = readU32(sub.data);
+                outCell.isInterior = (flags & 0x1u) != 0u;
+                outCell.gridX = readI32(sub.data + 4);
+                outCell.gridZ = readI32(sub.data + 8);
+                outCell.hasGridCoords = !outCell.isInterior;
+            } else if (sub.type == "WHGT" && sub.size >= 4u) {
+                outCell.hasWater = true;
+                outCell.waterHeight = readF32(sub.data);
+            }
+            continue;
+        }
+        if (sub.type == "NAME") {
+            current.baseEditorId = subrecordString(sub);
+        } else if (sub.type == "DATA" && sub.size >= 24u) {
+            // Position then Euler rotation in radians, six floats.
+            current.position[0] = readF32(sub.data);
+            current.position[1] = readF32(sub.data + 4);
+            current.position[2] = readF32(sub.data + 8);
+            current.rotationRadians[0] = readF32(sub.data + 12);
+            current.rotationRadians[1] = readF32(sub.data + 16);
+            current.rotationRadians[2] = readF32(sub.data + 20);
+        } else if (sub.type == "XSCL" && sub.size >= 4u) {
+            current.scale = readF32(sub.data);
+        }
+    }
+    flushReference();
+    // An exterior with no water height still has water, at sea level -- which
+    // for Morrowind is 0 and is where the whole Bitter Coast sits.
+    if (!outCell.isInterior && !outCell.hasWater) {
+        outCell.hasWater = true;
+        outCell.waterHeight = 0.0f;
+    }
 }
 
 void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell) {
@@ -505,13 +789,106 @@ void parseLandRecord(const EsmRecordView& record, FalloutCellRecord* currentCell
 
 }  // namespace
 
+// Indexes a TES3 plugin. Flat walk, two record types, joined by grid.
+//
+// Morrowind has no worldspace record either, so one is synthesized: every
+// exterior cell belongs to "Vvardenfell" with formID 1. Callers select a
+// worldspace by name and there has to be a name to select.
+bool buildMorrowindCellIndex(
+    EsmReader& reader, FalloutCellIndex& outIndex, std::string& outError) {
+    constexpr std::uint32_t kVvardenfellFormId = 1u;
+    outIndex.cellWorldSize =
+        kLandPostSpacing * static_cast<float>(kMorrowindLandGridSize - 1);  // 8192
+
+    // grid -> index into outIndex.cells, so a LAND record can find its cell
+    // whichever order the two appear in.
+    std::unordered_map<std::uint64_t, std::size_t> cellByGrid;
+    const auto gridKey = [](std::int32_t x, std::int32_t z) {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
+               static_cast<std::uint32_t>(z);
+    };
+    struct PendingLand {
+        std::uint64_t offset = 0;
+        std::uint32_t size = 0;
+    };
+    std::unordered_map<std::uint64_t, PendingLand> landByGrid;
+
+    std::uint64_t pendingOffset = 0;
+    std::uint32_t pendingSize = 0;
+    EsmReader::Visitor visitor{};
+    visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
+        pendingOffset = header.fileOffset;
+        // The FULL extent, header included, because these offsets are handed to
+        // walkRange as a byte range to re-read the record from.
+        pendingSize = static_cast<std::uint32_t>(
+            esmRecordHeaderSize(EsmPluginFormat::kMorrowind)) + header.dataSize;
+        return header.type == "CELL" || header.type == "LAND";
+    };
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        if (record.type == "LAND") {
+            // INTV carries the grid, not DATA -- the opposite of every later
+            // generation, where DATA is the grid and INTV is a water level.
+            for (const EsmSubrecordView& sub : record.subrecords) {
+                if (sub.type == "INTV" && sub.size >= 8u) {
+                    landByGrid[gridKey(readI32(sub.data), readI32(sub.data + 4))] =
+                        PendingLand{pendingOffset, pendingSize};
+                    break;
+                }
+            }
+            return;
+        }
+        FalloutCellRecord parsed{};
+        parseMorrowindCellRecord(record, parsed);
+        FalloutCellIndexEntry entry{};
+        entry.cellFormId = static_cast<std::uint32_t>(outIndex.cells.size()) + 2u;
+        entry.editorId = parsed.editorId;
+        entry.isInterior = parsed.isInterior;
+        entry.cellFlags = parsed.cellFlags;
+        entry.hasGridCoords = parsed.hasGridCoords;
+        entry.gridX = parsed.gridX;
+        entry.gridZ = parsed.gridZ;
+        entry.worldspaceFormId = parsed.isInterior ? 0u : kVvardenfellFormId;
+        entry.cellRecordOffset = pendingOffset;
+        // The references live in the CELL record itself, so the "children" range
+        // this index hands to the extractor IS the record.
+        entry.childrenGroupOffset = pendingOffset;
+        entry.childrenGroupSize = pendingSize;
+        entry.contributions.push_back(FalloutCellContribution{0u, pendingOffset, pendingSize});
+        (void)0;
+        if (entry.hasGridCoords) {
+            cellByGrid[gridKey(entry.gridX, entry.gridZ)] = outIndex.cells.size();
+        }
+        outIndex.cells.push_back(std::move(entry));
+    };
+    if (!reader.walk(visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    for (const auto& [key, land] : landByGrid) {
+        const auto it = cellByGrid.find(key);
+        if (it != cellByGrid.end()) {
+            outIndex.cells[it->second].landRecordOffset = land.offset;
+            outIndex.cells[it->second].landRecordSize = land.size;
+        }
+    }
+    FalloutWorldspaceRecord vvardenfell{};
+    vvardenfell.formId = kVvardenfellFormId;
+    vvardenfell.editorId = "Vvardenfell";
+    outIndex.worldspaces.push_back(std::move(vvardenfell));
+    return true;
+}
+
 bool buildFalloutCellIndex(
     const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError) {
     outIndex = FalloutCellIndex{};
+    outIndex.pluginPaths.push_back(esmPath);
     EsmReader reader;
     if (!reader.open(esmPath)) {
         outError = reader.lastError();
         return false;
+    }
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        return buildMorrowindCellIndex(reader, outIndex, outError);
     }
 
     // Group type 6 is a cell-children group; its label is the owning CELL's
@@ -565,6 +942,11 @@ bool buildFalloutCellIndex(
                 FalloutCellIndexEntry& entry = outIndex.cells[found->second];
                 entry.childrenGroupOffset = group.fileOffset;
                 entry.childrenGroupSize = group.groupSize;
+                // The same range, expressed the way the merged reader wants it,
+                // so a single-plugin index is just a load order of one.
+                entry.contributions.clear();
+                entry.contributions.push_back(
+                    FalloutCellContribution{0u, group.fileOffset, group.groupSize});
             }
             // Descend anyway: the REFR headers inside are what build
             // cellIndexByReferenceFormId, and headers are cheap.
@@ -608,6 +990,17 @@ bool buildFalloutCellIndex(
         entry.gridZ = parsed.gridZ;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.isInterior = parsed.isInterior;
+        entry.cellFlags = parsed.cellFlags;
+        entry.hasLighting = parsed.hasLighting;
+        for (int channel = 0; channel < 3; ++channel) {
+            entry.ambientColor[channel] = parsed.ambientColor[channel];
+            entry.directionalColor[channel] = parsed.directionalColor[channel];
+            entry.fogColor[channel] = parsed.fogColor[channel];
+        }
+        entry.fogNear = parsed.fogNear;
+        entry.fogFar = parsed.fogFar;
+        entry.hasWater = parsed.hasWater;
+        entry.waterHeight = parsed.waterHeight;
         entry.regionFormIds = parsed.regionFormIds;
         entry.cellRecordOffset = pendingCellRecordOffset;
         outIndex.cells.push_back(entry);
@@ -623,6 +1016,242 @@ bool buildFalloutCellIndex(
     return true;
 }
 
+bool buildFalloutCellIndex(
+    const FalloutLoadOrder& order, FalloutCellIndex& outIndex, std::string& outError) {
+    outIndex = FalloutCellIndex{};
+    if (order.empty()) {
+        outError = "empty load order";
+        return false;
+    }
+    for (const FalloutLoadOrderEntry& entry : order.entries()) {
+        outIndex.pluginPaths.push_back(entry.path);
+    }
+
+    // Cells merge by their REMAPPED formID: the same cell described by the base
+    // game and by a patch is one cell with two contributions, not two cells.
+    std::unordered_map<std::uint32_t, std::size_t> entryByCellFormId;
+
+    for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
+        FalloutCellIndex single;
+        std::string error;
+        if (!buildFalloutCellIndex(order.entries()[pluginIndex].path, single, error)) {
+            // Same rule as the world tables: a patch that will not read costs
+            // its own records, not the base game's.
+            std::cerr << "[fnv] cell index: skipping "
+                      << order.entries()[pluginIndex].header.fileName << ": " << error << "\n";
+            continue;
+        }
+        const auto remap = [&](std::uint32_t formId) {
+            return formId == 0u ? 0u : order.remapFormId(pluginIndex, formId);
+        };
+        for (FalloutCellIndexEntry& cell : single.cells) {
+            const std::uint32_t cellFormId = remap(cell.cellFormId);
+            cell.cellFormId = cellFormId;
+            cell.worldspaceFormId = remap(cell.worldspaceFormId);
+            for (std::uint32_t& regionFormId : cell.regionFormIds) {
+                regionFormId = remap(regionFormId);
+            }
+            // Point this plugin's contribution at ITS file, whatever the
+            // single-plugin builder recorded (index 0, meaning itself).
+            std::vector<FalloutCellContribution> contributions;
+            if (cell.childrenGroupSize != 0u) {
+                contributions.push_back(FalloutCellContribution{
+                    pluginIndex, cell.childrenGroupOffset, cell.childrenGroupSize});
+            }
+            const auto existing = entryByCellFormId.find(cellFormId);
+            if (existing == entryByCellFormId.end()) {
+                cell.contributions = std::move(contributions);
+                entryByCellFormId.emplace(cellFormId, outIndex.cells.size());
+                outIndex.cells.push_back(std::move(cell));
+                continue;
+            }
+            // A later plugin's CELL record replaces the earlier one's metadata,
+            // but its contributions ACCUMULATE -- the base game still supplies
+            // every reference the patch did not mention.
+            FalloutCellIndexEntry& merged = outIndex.cells[existing->second];
+            std::vector<FalloutCellContribution> combined = std::move(merged.contributions);
+            combined.insert(combined.end(), contributions.begin(), contributions.end());
+            if (!cell.editorId.empty()) {
+                merged.editorId = cell.editorId;
+            }
+            if (cell.hasGridCoords) {
+                merged.gridX = cell.gridX;
+                merged.gridZ = cell.gridZ;
+                merged.hasGridCoords = true;
+            }
+            if (!cell.regionFormIds.empty()) {
+                merged.regionFormIds = cell.regionFormIds;
+            }
+            merged.isInterior = cell.isInterior;
+            merged.cellFlags = cell.cellFlags;
+            merged.hasLighting = cell.hasLighting;
+            for (int channel = 0; channel < 3; ++channel) {
+                merged.ambientColor[channel] = cell.ambientColor[channel];
+                merged.directionalColor[channel] = cell.directionalColor[channel];
+                merged.fogColor[channel] = cell.fogColor[channel];
+            }
+            merged.fogNear = cell.fogNear;
+            merged.fogFar = cell.fogFar;
+            merged.contributions = std::move(combined);
+        }
+        for (const auto& [referenceFormId, cellSlot] : single.cellIndexByReferenceFormId) {
+            if (cellSlot >= single.cells.size()) {
+                continue;
+            }
+            const auto found = entryByCellFormId.find(single.cells[cellSlot].cellFormId);
+            if (found != entryByCellFormId.end()) {
+                outIndex.cellIndexByReferenceFormId[remap(referenceFormId)] = found->second;
+            }
+        }
+        if (outIndex.worldspaces.empty()) {
+            outIndex.worldspaces = single.worldspaces;
+        }
+    }
+    return true;
+}
+
+// Rewrites every formID a cell carries from `pluginIndex`'s local mod-index
+// space into the load order's global one.
+//
+// The list is exhaustive on purpose: a formID left un-remapped does not fail, it
+// silently addresses a DIFFERENT record -- the base a reference places, the LTEX
+// a terrain layer paints with, the door a teleport leads to. Missing one is the
+// class of bug that renders as the wrong mesh in the right place.
+void remapCellFormIds(const FalloutLoadOrder& order, std::size_t pluginIndex,
+                      FalloutCellRecord& cell) {
+    const auto remap = [&](std::uint32_t formId) {
+        return formId == 0u ? 0u : order.remapFormId(pluginIndex, formId);
+    };
+    cell.formId = remap(cell.formId);
+    cell.worldspaceFormId = remap(cell.worldspaceFormId);
+    for (std::uint32_t& regionFormId : cell.regionFormIds) {
+        regionFormId = remap(regionFormId);
+    }
+    for (FalloutPlacedReference& ref : cell.references) {
+        ref.formId = remap(ref.formId);
+        ref.baseFormId = remap(ref.baseFormId);
+        ref.teleportTargetRefFormId = remap(ref.teleportTargetRefFormId);
+        ref.enableParentFormId = remap(ref.enableParentFormId);
+    }
+    if (cell.land != nullptr) {
+        cell.land->cellFormId = remap(cell.land->cellFormId);
+        for (std::uint32_t& baseTexture : cell.land->quadrantBaseTextureFormId) {
+            baseTexture = remap(baseTexture);
+        }
+        for (FalloutLandTextureLayer& layer : cell.land->textureLayers) {
+            layer.textureFormId = remap(layer.textureFormId);
+        }
+    }
+    for (FalloutNavMeshRecord& navMesh : cell.navMeshes) {
+        navMesh.cellFormId = remap(navMesh.cellFormId);
+    }
+}
+
+bool extractFalloutCellMerged(
+    const FalloutCellIndex& index,
+    const FalloutLoadOrder& order,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError) {
+    outCell = FalloutCellRecord{};
+    outCell.formId = entry.cellFormId;
+    outCell.editorId = entry.editorId;
+    outCell.worldspaceFormId = entry.worldspaceFormId;
+    outCell.gridX = entry.gridX;
+    outCell.gridZ = entry.gridZ;
+    outCell.hasGridCoords = entry.hasGridCoords;
+    outCell.isInterior = entry.isInterior;
+    outCell.cellFlags = entry.cellFlags;
+    outCell.regionFormIds = entry.regionFormIds;
+    outCell.hasLighting = entry.hasLighting;
+    for (int channel = 0; channel < 3; ++channel) {
+        outCell.ambientColor[channel] = entry.ambientColor[channel];
+        outCell.directionalColor[channel] = entry.directionalColor[channel];
+        outCell.fogColor[channel] = entry.fogColor[channel];
+    }
+    outCell.fogNear = entry.fogNear;
+    outCell.fogFar = entry.fogFar;
+
+    // References keyed by formID, remembering the order they were first seen so
+    // the merged list is deterministic rather than hash-ordered. A later
+    // plugin's version REPLACES an earlier one in place: that is what moving or
+    // retexturing a placement looks like on disk.
+    std::unordered_map<std::uint32_t, std::size_t> referenceSlotByFormId;
+
+    for (const FalloutCellContribution& contribution : entry.contributions) {
+        if (contribution.childrenGroupSize == 0u ||
+            contribution.pluginIndex >= index.pluginPaths.size()) {
+            continue;
+        }
+        EsmReader reader;
+        if (!reader.open(index.pluginPaths[contribution.pluginIndex])) {
+            // A plugin that will not open costs its overrides, not the cell.
+            continue;
+        }
+        FalloutCellIndexEntry single = entry;
+        single.childrenGroupOffset = contribution.childrenGroupOffset;
+        single.childrenGroupSize = contribution.childrenGroupSize;
+        FalloutCellRecord part;
+        std::string error;
+        if (!extractFalloutCellAt(reader, single, part, error)) {
+            outError = error;
+            return false;
+        }
+        remapCellFormIds(order, contribution.pluginIndex, part);
+
+        for (FalloutPlacedReference& ref : part.references) {
+            const auto slot = referenceSlotByFormId.find(ref.formId);
+            if (slot == referenceSlotByFormId.end()) {
+                referenceSlotByFormId.emplace(ref.formId, outCell.references.size());
+                outCell.references.push_back(std::move(ref));
+            } else {
+                outCell.references[slot->second] = std::move(ref);
+            }
+        }
+        // Terrain and navmesh are whole-record overrides: a plugin either ships
+        // a LAND for this cell or says nothing about it. Only replace when it
+        // actually supplied one, or a patch that touches only references would
+        // erase the terrain under them.
+        if (part.land != nullptr) {
+            outCell.land = std::move(part.land);
+        }
+        if (!part.navMeshes.empty()) {
+            outCell.navMeshes = std::move(part.navMeshes);
+        }
+    }
+    return true;
+}
+
+// A TES3 cell is one record: its references are inline, and its terrain is a
+// sibling LAND the index already located by grid.
+bool extractMorrowindCellAt(
+    EsmReader& reader,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError) {
+    EsmReader::Visitor visitor{};
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        if (record.type == "CELL") {
+            parseMorrowindCellRecord(record, outCell);
+        } else if (record.type == "LAND") {
+            parseMorrowindLandRecord(record, &outCell);
+        }
+    };
+    if (entry.childrenGroupSize != 0u &&
+        !reader.walkRange(entry.childrenGroupOffset,
+                          entry.childrenGroupOffset + entry.childrenGroupSize, visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    if (entry.landRecordSize != 0u &&
+        !reader.walkRange(entry.landRecordOffset,
+                          entry.landRecordOffset + entry.landRecordSize, visitor)) {
+        outError = reader.lastError();
+        return false;
+    }
+    return true;
+}
+
 bool extractFalloutCellAt(
     EsmReader& reader,
     const FalloutCellIndexEntry& entry,
@@ -631,10 +1260,28 @@ bool extractFalloutCellAt(
     outCell = FalloutCellRecord{};
     outCell.formId = entry.cellFormId;
     outCell.isInterior = entry.isInterior;
+    outCell.cellFlags = entry.cellFlags;
     outCell.hasGridCoords = entry.hasGridCoords;
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        outCell.gridX = entry.gridX;
+        outCell.gridZ = entry.gridZ;
+        outCell.editorId = entry.editorId;
+        outCell.worldspaceFormId = entry.worldspaceFormId;
+        return extractMorrowindCellAt(reader, entry, outCell, outError);
+    }
     outCell.gridX = entry.gridX;
     outCell.gridZ = entry.gridZ;
     outCell.worldspaceFormId = entry.worldspaceFormId;
+    outCell.hasLighting = entry.hasLighting;
+    for (int channel = 0; channel < 3; ++channel) {
+        outCell.ambientColor[channel] = entry.ambientColor[channel];
+        outCell.directionalColor[channel] = entry.directionalColor[channel];
+        outCell.fogColor[channel] = entry.fogColor[channel];
+    }
+    outCell.fogNear = entry.fogNear;
+    outCell.fogFar = entry.fogFar;
+    outCell.hasWater = entry.hasWater;
+    outCell.waterHeight = entry.waterHeight;
 
     if (entry.childrenGroupSize == 0u) {
         return true;  // a cell with no children group simply has no contents
@@ -676,6 +1323,41 @@ bool extractFalloutScene(
     if (!reader.open(esmPath)) {
         outError = reader.lastError();
         return false;
+    }
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        // Flat walk, and synthetic formIDs handed out in scan order. Sequential
+        // rather than hashed on purpose: ~50k string ids through a 32-bit hash
+        // carries a ~29% chance of at least one collision, and a collision here
+        // places the wrong object rather than failing.
+        std::uint32_t nextFormId = 0x01000000u;
+        EsmReader::Visitor visitor{};
+        visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
+            return isModelBearingBaseType(header.type) || header.type == "LTEX" ||
+                   header.type == "STAT";
+        };
+        visitor.onRecord = [&](const EsmRecordView& record) {
+            if (record.type == "LTEX") {
+                parseMorrowindLandTextureRecord(record, outScene);
+                return;
+            }
+            parseMorrowindStatRecord(record, record.type, outScene);
+            if (!outScene.statics.empty() && outScene.statics.back().formId == 0u) {
+                outScene.statics.back().formId = nextFormId++;
+            }
+        };
+        if (!reader.walk(visitor)) {
+            outError = reader.lastError();
+            return false;
+        }
+        // TES3 has no WRLD record at all: every exterior cell simply is the
+        // outdoors. One is synthesized so callers can select a worldspace by
+        // name, and it must match buildMorrowindCellIndex's -- a cell index and
+        // a world table that disagree about the formID resolve to no cells.
+        FalloutWorldspaceRecord vvardenfell{};
+        vvardenfell.formId = 1u;
+        vvardenfell.editorId = "Vvardenfell";
+        outScene.worldspaces.push_back(std::move(vvardenfell));
+        return true;
     }
 
     // TXST diffuse paths, resolved into landTextures after the walk since an
@@ -800,7 +1482,12 @@ bool extractFalloutScene(
         return false;
     }
 
+    // Only fills a path that is still empty, so an Oblivion LTEX's own ICON is
+    // not clobbered by a coincidental TXST match on formID 0.
     for (FalloutLandTextureRecord& landTexture : outScene.landTextures) {
+        if (!landTexture.diffuseTexturePath.empty()) {
+            continue;
+        }
         const auto it = textureSetPaths.find(landTexture.textureSetFormId);
         if (it != textureSetPaths.end()) {
             landTexture.diffuseTexturePath = it->second;

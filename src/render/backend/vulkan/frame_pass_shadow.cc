@@ -2,7 +2,11 @@
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include "sim/network_procedural.h"
 #include "render/backend/vulkan/frame_graph_runtime.h"
@@ -72,6 +76,198 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
 
     writeGpuTimestampTop(kGpuTimestampQueryShadowStart);
     coreFramePassOrderValidator.markPassEntered(coreFrameGraphPlan.shadow, "shadow");
+    if (inputs.renderInteriorPointShadows &&
+        inputs.interiorPointShadowLightCount > 0 &&
+        m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
+        importedVertexBuffer != VK_NULL_HANDLE &&
+        importedIndexBuffer != VK_NULL_HANDLE &&
+        !importedMeshDraws.empty()) {
+        beginDebugLabel(commandBuffer, "Pass: Interior Point Shadow Atlas", 0.34f, 0.20f, 0.16f, 1.0f);
+        transitionImageLayout(
+            commandBuffer,
+            m_shadowDepthImage,
+            m_interiorPointShadowAtlasValid
+                ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            m_interiorPointShadowAtlasValid
+                ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                : VK_PIPELINE_STAGE_2_NONE,
+            m_interiorPointShadowAtlasValid
+                ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            0,
+            1);
+
+        const bool useCompactShadowStream =
+            m_importedStaticShadowCompactPipeline != VK_NULL_HANDLE &&
+            inputs.importedShadowVertexBuffer != VK_NULL_HANDLE;
+        const VkPipeline oneSidedPipeline =
+            useCompactShadowStream ? m_importedStaticShadowCompactPipeline
+                                   : m_importedStaticShadowPipeline;
+        const VkPipeline twoSidedPipeline =
+            useCompactShadowStream ? m_importedStaticShadowCompactPipelineTwoSided
+                                   : m_importedStaticShadowPipelineTwoSided;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, oneSidedPipeline);
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        const VkBuffer pointShadowVertexBuffers[1] = {
+            useCompactShadowStream ? inputs.importedShadowVertexBuffer : importedVertexBuffer};
+        const VkDeviceSize pointShadowVertexOffsets[1] = {0};
+        vkCmdBindVertexBuffers(
+            commandBuffer, 0, 1, pointShadowVertexBuffers, pointShadowVertexOffsets);
+        vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        const auto includeInteriorCaster = [&](std::size_t) {
+            return m_debugShowImportedStatics;
+        };
+        VkBuffer indirectBuffer = VK_NULL_HANDLE;
+        VkDeviceSize indirectBase = 0;
+        const bool useIndirect = m_supportsMultiDrawIndirect &&
+            buildImportedIndirectBatches(
+                importedMeshDraws, includeInteriorCaster, indirectBuffer, indirectBase);
+        const std::uint32_t shadowLightCount = std::min<std::uint32_t>(
+            inputs.interiorPointShadowLightCount, kInteriorPointShadowLightCount);
+        VkClearValue depthClear{};
+        depthClear.depthStencil.depth = 0.0f;
+        vkCmdSetDepthBias(
+            commandBuffer,
+            -(m_shadowDebugSettings.casterConstantBiasBase * kImportedShadowConstantBiasScale),
+            0.0f,
+            -(m_shadowDebugSettings.casterSlopeBiasBase * kImportedShadowSlopeBiasScale));
+
+        for (std::uint32_t slot = 0; slot < shadowLightCount; ++slot) {
+            const std::uint32_t faceSize = kInteriorPointShadowFaceSize;
+            const std::uint32_t cubeX =
+                (slot % kInteriorPointShadowCubesPerRow) * (3u * faceSize);
+            const std::uint32_t cubeY =
+                (slot / kInteriorPointShadowCubesPerRow) * (2u * faceSize);
+            for (std::uint32_t face = 0; face < kInteriorPointShadowFaceCount; ++face) {
+                const std::uint32_t faceX =
+                    cubeX + ((face % 3u) * faceSize);
+                const std::uint32_t faceY =
+                    cubeY + ((face / 3u) * faceSize);
+                VkRect2D faceRect{};
+                faceRect.offset = {
+                    static_cast<std::int32_t>(faceX), static_cast<std::int32_t>(faceY)};
+                faceRect.extent = {
+                    faceSize, faceSize};
+                VkViewport faceViewport{};
+                faceViewport.x = static_cast<float>(faceX);
+                faceViewport.y = static_cast<float>(faceY);
+                faceViewport.width = static_cast<float>(faceSize);
+                faceViewport.height = static_cast<float>(faceSize);
+                faceViewport.minDepth = 0.0f;
+                faceViewport.maxDepth = 1.0f;
+
+                VkRenderingAttachmentInfo depthAttachment{};
+                depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                depthAttachment.imageView = m_shadowDepthImageView;
+                depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+                depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                depthAttachment.clearValue = depthClear;
+                VkRenderingInfo renderingInfo{};
+                renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+                renderingInfo.renderArea = faceRect;
+                renderingInfo.layerCount = 1;
+                renderingInfo.pDepthAttachment = &depthAttachment;
+                vkCmdBeginRendering(commandBuffer, &renderingInfo);
+                vkCmdSetViewport(commandBuffer, 0, 1, &faceViewport);
+                vkCmdSetScissor(commandBuffer, 0, 1, &faceRect);
+
+                ChunkPushConstants pointPush{};
+                pointPush.cascadeData[0] = static_cast<float>(
+                    (slot * kInteriorPointShadowFaceCount) + face);
+                pointPush.cascadeData[1] = 1.0f;
+                pointPush.materialParams[0] = 0.5f;
+                int lastThreshold = -1;
+                const auto pushPointThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastThreshold) {
+                        return;
+                    }
+                    lastThreshold = static_cast<int>(threshold);
+                    pointPush.materialParams[0] = static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &pointPush);
+                };
+                if (useIndirect) {
+                    VkPipeline boundPipeline = oneSidedPipeline;
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, boundPipeline);
+                    for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        const VkPipeline wantedPipeline =
+                            (batch.twoSided && twoSidedPipeline != VK_NULL_HANDLE)
+                                ? twoSidedPipeline
+                                : oneSidedPipeline;
+                        if (wantedPipeline != boundPipeline) {
+                            vkCmdBindPipeline(
+                                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                            boundPipeline = wantedPipeline;
+                        }
+                        pushPointThreshold(batch.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexedIndirect(
+                            commandBuffer,
+                            indirectBuffer,
+                            indirectBase + batch.bufferOffset,
+                            batch.drawCount,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                } else {
+                    for (const ImportedMeshDraw& draw : importedMeshDraws) {
+                        if (draw.blended || !m_debugShowImportedStatics) {
+                            continue;
+                        }
+                        pushPointThreshold(draw.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexed(
+                            commandBuffer,
+                            draw.indexCount,
+                            1,
+                            draw.firstIndex,
+                            draw.vertexOffset,
+                            0);
+                    }
+                }
+                vkCmdEndRendering(commandBuffer);
+            }
+        }
+        transitionImageLayout(
+            commandBuffer,
+            m_shadowDepthImage,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            0,
+            1);
+        vkCmdSetDepthBias(commandBuffer, 0.0f, 0.0f, 0.0f);
+        m_interiorPointShadowAtlasValid = true;
+        m_shadowRenderedValid = {};
+        VOX_LOGI("render") << "interior point shadow atlas rebuilt: lights="
+                           << shadowLightCount << ", faces="
+                           << (shadowLightCount * kInteriorPointShadowFaceCount)
+                           << ", faceSize=" << kInteriorPointShadowFaceSize;
+        endDebugLabel(commandBuffer);
+        writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
+        return;
+    }
+    if (inputs.skipDirectionalShadows) {
+        writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
+        return;
+    }
     beginDebugLabel(commandBuffer, "Pass: Shadow Atlas", 0.28f, 0.22f, 0.22f, 1.0f);
     const bool shadowInitialized = m_shadowDepthInitialized;
     transitionImageLayout(
@@ -278,12 +474,36 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     buildImportedIndirectBatches(
                         cascadeImportedMeshDraws, includeDraw, indirectBuffer, indirectBase);
                 if (useIndirect) {
+                    // Two-sided casters need cull NONE, matching the main pass.
+                    // The variant has to follow the same compact/full stream
+                    // choice the bind above made, since the two pipelines
+                    // differ in vertex input.
+                    const VkPipeline oneSidedShadowPipeline =
+                        useCompactShadowStream ? m_importedStaticShadowCompactPipeline
+                                               : m_importedStaticShadowPipeline;
+                    const VkPipeline twoSidedShadowPipeline =
+                        useCompactShadowStream ? m_importedStaticShadowCompactPipelineTwoSided
+                                               : m_importedStaticShadowPipelineTwoSided;
+                    VkPipeline boundShadowPipeline = oneSidedShadowPipeline;
                     for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        const VkPipeline wantedPipeline =
+                            (batch.twoSided && twoSidedShadowPipeline != VK_NULL_HANDLE)
+                                ? twoSidedShadowPipeline
+                                : oneSidedShadowPipeline;
+                        if (wantedPipeline != boundShadowPipeline) {
+                            vkCmdBindPipeline(
+                                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                            boundShadowPipeline = wantedPipeline;
+                        }
                         pushAlphaThreshold(batch.alphaThreshold);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                             batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                    if (boundShadowPipeline != oneSidedShadowPipeline) {
+                        vkCmdBindPipeline(
+                            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, oneSidedShadowPipeline);
                     }
                 } else {
                     for (std::size_t drawIndex = 0; drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
@@ -320,19 +540,35 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
                 vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
                 ChunkPushConstants importedPushConstants{};
-                // Neutral alpha-test threshold. Draws that carry an authored one
-                // overwrite this; leaving it zeroed would mean nothing cuts out.
                 importedPushConstants.materialParams[0] = 0.5f;
                 importedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &importedPushConstants
-                );
+                // Per draw, so an actor casts the silhouette its own authored
+                // threshold cuts rather than the one 0.5 happens to cut. The
+                // cascade index has to ride along in the same push, which is
+                // why this is a local helper and not the one the static block
+                // above uses.
+                int lastPushedActorThreshold = -1;
+                const auto pushActorAlphaThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastPushedActorThreshold) {
+                        return;
+                    }
+                    lastPushedActorThreshold = static_cast<int>(threshold);
+                    importedPushConstants.materialParams[0] =
+                        static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &importedPushConstants
+                    );
+                };
                 for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
+                    if (importedDraw.blended) {
+                        continue;  // a blended surface casts no opaque shadow
+                    }
+                    pushActorAlphaThreshold(importedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -356,21 +592,32 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticShadowPipeline);
                 bindGraphicsDescriptorBuffers(commandBuffer);
                 ChunkPushConstants skinnedPushConstants{};
-                // Neutral alpha-test threshold. Draws that carry an authored one
-                // overwrite this; leaving it zeroed would mean nothing cuts out.
                 skinnedPushConstants.materialParams[0] = 0.5f;
                 skinnedPushConstants.cascadeData[0] = static_cast<float>(cascadeIndex);
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &skinnedPushConstants
-                );
+                // Per draw, as in the actor block above.
+                int lastPushedSkinnedThreshold = -1;
+                const auto pushSkinnedAlphaThreshold = [&](std::uint8_t threshold) {
+                    if (static_cast<int>(threshold) == lastPushedSkinnedThreshold) {
+                        return;
+                    }
+                    lastPushedSkinnedThreshold = static_cast<int>(threshold);
+                    skinnedPushConstants.materialParams[0] =
+                        static_cast<float>(threshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer,
+                        m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        sizeof(ChunkPushConstants),
+                        &skinnedPushConstants
+                    );
+                };
                 VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
                 VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
                 for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                    if (skinnedDraw.blended) {
+                        continue;  // a blended surface casts no opaque shadow
+                    }
                     const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
                     const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
                     if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
@@ -386,6 +633,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                         boundSkinnedIndexBuffer = drawIndexBuffer;
                     }
+                    pushSkinnedAlphaThreshold(skinnedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
                 }
@@ -417,6 +665,228 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     );
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
+
+    // Dumps the PREVIOUS frame's atlas -- this frame's is still only recorded,
+    // not submitted -- which is what you want anyway: a fully streamed one.
+    if (const char* dumpPath = std::getenv("ODAI_SHADOW_DUMP")) {
+        if (!m_shadowAtlasDumped && m_shadowAtlasDumpCountdown-- <= 0) {
+            m_shadowAtlasDumped = true;
+            dumpShadowAtlas(dumpPath);
+        }
+    }
+}
+
+
+// ODAI_SHADOW_DUMP=<path> writes the shadow atlas out as a PGM, once.
+//
+// An EMPTY atlas and a correctly-populated-but-wrongly-sampled one look
+// identical on screen -- everything lit -- because with reverse-Z the clear is
+// 0.0 and "receiver depth >= 0" is always true. Reading the image back is the
+// only thing that separates those two, and they need opposite fixes.
+//
+// Reverse-Z, so in the output BLACK IS EMPTY (far/cleared) and brighter is a
+// caster nearer the light. A tile that is uniformly black was never drawn into.
+void RendererBackend::dumpShadowAtlas(const char* outputPath) {
+    if (m_shadowDepthImage == VK_NULL_HANDLE || m_device == VK_NULL_HANDLE) {
+        VOX_LOGW("render") << "shadow atlas dump: no atlas image";
+        return;
+    }
+    vkDeviceWaitIdle(m_device);
+
+    const VkDeviceSize pixelCount =
+        static_cast<VkDeviceSize>(kShadowAtlasSize) * static_cast<VkDeviceSize>(kShadowAtlasSize);
+    const VkDeviceSize bufferSize = pixelCount * sizeof(float);
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = bufferSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &staging) != VK_SUCCESS) {
+            VOX_LOGW("render") << "shadow atlas dump: staging buffer creation failed";
+            return;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(m_device, staging, &requirements);
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = requirements.size;
+        VkPhysicalDeviceMemoryProperties memoryProperties{};
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memoryProperties);
+        constexpr VkMemoryPropertyFlags kWanted =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        uint32_t memoryTypeIndex = memoryProperties.memoryTypeCount;
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+            if (((requirements.memoryTypeBits & (1u << i)) != 0u) &&
+                ((memoryProperties.memoryTypes[i].propertyFlags & kWanted) == kWanted)) {
+                memoryTypeIndex = i;
+                break;
+            }
+        }
+        if (memoryTypeIndex == memoryProperties.memoryTypeCount) {
+            VOX_LOGW("render") << "shadow atlas dump: no host-visible memory type";
+            vkDestroyBuffer(m_device, staging, nullptr);
+            return;
+        }
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (vkAllocateMemory(m_device, &allocateInfo, nullptr, &stagingMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(m_device, staging, stagingMemory, 0) != VK_SUCCESS) {
+            VOX_LOGW("render") << "shadow atlas dump: staging memory allocation failed";
+            vkDestroyBuffer(m_device, staging, nullptr);
+            return;
+        }
+    }
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &pool) == VK_SUCCESS) {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = pool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(m_device, &allocInfo, &cmd) == VK_SUCCESS) {
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cmd, &beginInfo);
+
+            const auto barrier = [&](VkImageLayout oldLayout, VkImageLayout newLayout) {
+                VkImageMemoryBarrier2 imageBarrier{};
+                imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+                imageBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                imageBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+                imageBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                imageBarrier.dstAccessMask =
+                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+                imageBarrier.oldLayout = oldLayout;
+                imageBarrier.newLayout = newLayout;
+                imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imageBarrier.image = m_shadowDepthImage;
+                imageBarrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+                VkDependencyInfo dependency{};
+                dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+                dependency.imageMemoryBarrierCount = 1;
+                dependency.pImageMemoryBarriers = &imageBarrier;
+                vkCmdPipelineBarrier2(cmd, &dependency);
+            };
+
+            barrier(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            region.imageExtent = {kShadowAtlasSize, kShadowAtlasSize, 1u};
+            vkCmdCopyImageToBuffer(
+                cmd, m_shadowDepthImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+            barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+            vkEndCommandBuffer(cmd);
+            VkSubmitInfo submit{};
+            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit.commandBufferCount = 1;
+            submit.pCommandBuffers = &cmd;
+            vkQueueSubmit(m_graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+            vkQueueWaitIdle(m_graphicsQueue);
+
+            void* mapped = nullptr;
+            if (vkMapMemory(m_device, stagingMemory, 0, bufferSize, 0, &mapped) == VK_SUCCESS &&
+                mapped != nullptr) {
+                const float* depths = static_cast<const float*>(mapped);
+                // 16-BIT, not 8. One 8-bit step is 1/255 of a cascade's depth
+                // range, which at cascade 3 (~20000 world units deep) is ~79
+                // world units -- so a 60-unit occluder separation lands BELOW
+                // the quantization floor and reads as "no shadow" no matter
+                // what the renderer did. That artifact cost a round of chasing
+                // a cascade-3 bug that was not there. 16-bit puts the step at
+                // 0.31 units, comfortably under anything worth measuring.
+                std::vector<unsigned char> pixels(static_cast<std::size_t>(pixelCount) * 2u);
+                double sum = 0.0;
+                std::size_t nonZero = 0;
+                for (std::size_t i = 0; i < static_cast<std::size_t>(pixelCount); ++i) {
+                    const float d = depths[i];
+                    sum += d;
+                    nonZero += (d > 0.0f) ? 1u : 0u;
+                    const auto q = static_cast<std::uint16_t>(
+                        std::clamp(d, 0.0f, 1.0f) * 65535.0f + 0.5f);
+                    // PGM is big-endian.
+                    pixels[i * 2u] = static_cast<unsigned char>(q >> 8);
+                    pixels[(i * 2u) + 1u] = static_cast<unsigned char>(q & 0xffu);
+                }
+                if (std::FILE* file = std::fopen(outputPath, "wb")) {
+                    std::fprintf(file, "P5\n%u %u\n65535\n", kShadowAtlasSize, kShadowAtlasSize);
+                    std::fwrite(pixels.data(), 1, pixels.size(), file);
+                    std::fclose(file);
+                }
+                // The counts are the actual finding; the image is for looking at
+                // WHERE the content is, once you know there is any.
+                VOX_LOGI("render") << "shadow atlas dump -> " << outputPath << ": "
+                                   << nonZero << "/" << pixels.size() << " texels written ("
+                                   << (100.0 * static_cast<double>(nonZero) /
+                                       static_cast<double>(pixels.size()))
+                                   << "%), mean depth " << (sum / static_cast<double>(pixels.size()));
+                // Per cascade tile, because a whole-atlas percentage hides
+                // "cascade 0 is empty and cascade 3 is fine".
+                for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+                    const ShadowAtlasRect rect = kShadowAtlasRects[cascadeIndex];
+                    std::size_t tileNonZero = 0;
+                    float tileMin = 1.0f;
+                    float tileMax = 0.0f;
+                    double tileSum = 0.0;
+                    for (uint32_t y = 0; y < rect.size; ++y) {
+                        for (uint32_t x = 0; x < rect.size; ++x) {
+                            const std::size_t index =
+                                (static_cast<std::size_t>(rect.y + y) * kShadowAtlasSize) +
+                                (rect.x + x);
+                            const float d = depths[index];
+                            if (d > 0.0f) {
+                                ++tileNonZero;
+                                tileMin = std::min(tileMin, d);
+                                tileMax = std::max(tileMax, d);
+                                tileSum += d;
+                            }
+                        }
+                    }
+                    const std::size_t tileTexels =
+                        static_cast<std::size_t>(rect.size) * static_cast<std::size_t>(rect.size);
+                    VOX_LOGI("render") << "  cascade " << cascadeIndex << " tile "
+                                       << tileNonZero << "/" << tileTexels << " written"
+                                       << " depth min/mean/max "
+                                       << (tileNonZero != 0u ? tileMin : 0.0f) << "/"
+                                       << (tileNonZero != 0u
+                                               ? tileSum / static_cast<double>(tileNonZero)
+                                               : 0.0)
+                                       << "/" << tileMax;
+                    // The SAMPLING matrix for this cascade, so a CPU cross-check
+                    // can replicate the shader's ref-vs-stored comparison against
+                    // this very dump. Row-major, 16 floats.
+                    const odai::math::Matrix4& lp = m_shadowRenderedMatrices[cascadeIndex];
+                    std::string matrixText;
+                    for (int mi = 0; mi < 16; ++mi) {
+                        // %.9e, NOT to_string: these coefficients are ~1e-5
+                        // against world coordinates ~1e5, so six decimals of
+                        // text injects more error than the bug being chased.
+                        char field[32];
+                        std::snprintf(field, sizeof(field), "%.9e", lp.m[mi]);
+                        matrixText += (mi != 0 ? " " : "");
+                        matrixText += field;
+                    }
+                    VOX_LOGI("render") << "  cascade " << cascadeIndex << " sampleMatrix "
+                                       << matrixText;
+                }
+                vkUnmapMemory(m_device, stagingMemory);
+            }
+        }
+        vkDestroyCommandPool(m_device, pool, nullptr);
+    }
+    vkDestroyBuffer(m_device, staging, nullptr);
+    vkFreeMemory(m_device, stagingMemory, nullptr);
 }
 
 }  // namespace odai::render

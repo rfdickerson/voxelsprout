@@ -1,13 +1,35 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 
 #include "math/math.h"
 #include "render/renderer_types.h"
 #include "world/chunk.h"
 
 namespace odai::render {
+
+inline constexpr std::uint32_t screenSpaceGiQuarterExtent(std::uint32_t fullExtent) {
+    return std::max(1u, (fullExtent + 3u) / 4u);
+}
+
+inline bool screenSpaceGiHistorySampleAccepted(
+    float storedDepth,
+    float expectedDepth,
+    float normalAgreement) {
+    if (storedDepth <= 1e-4f || expectedDepth <= 1e-4f || normalAgreement < 0.5f) {
+        return false;
+    }
+    return std::abs(storedDepth - expectedDepth) <=
+        std::max(12.0f, expectedDepth * 0.02f);
+}
+
+inline float screenSpaceGiClampedLuminance(float indirectLuminance, float directLuminance) {
+    return std::clamp(indirectLuminance, 0.0f,
+                      0.35f * (std::max(directLuminance, 0.0f) + 0.05f));
+}
 
 struct CameraFrameDerived {
     math::Vector3 forward;

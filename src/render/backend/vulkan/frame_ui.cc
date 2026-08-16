@@ -101,6 +101,31 @@ bool RendererBackend::isDebugUiVisible() const {
 }
 
 
+void RendererBackend::setUpscalerSettings(const UpscalerSettings& settings) {
+    m_upscalerSettings = settings;
+}
+
+
+UpscalerStatus RendererBackend::upscalerStatus() const {
+    return m_upscalerStatus;
+}
+
+
+void RendererBackend::setDebugUiMode(DebugUiMode mode) {
+    m_debugUiMode = mode;
+}
+
+
+DebugUiMode RendererBackend::debugUiMode() const {
+    return m_debugUiMode;
+}
+
+
+void RendererBackend::setDebugStatGroups(std::vector<DebugStatGroup> groups) {
+    m_debugStatGroups = std::move(groups);
+}
+
+
 void RendererBackend::setFrameStatsVisible(bool visible) {
     setDebugUiVisible(visible);
 }
@@ -280,7 +305,20 @@ void RendererBackend::setImportedSceneDebugState(bool showTerrain, bool showStat
 }
 
 void RendererBackend::setImportedSceneInteriorMode(bool enabled) {
+    m_importedInteriorLighting = ImportedInteriorLighting{};
+    m_importedInteriorLighting.enabled = enabled;
     m_importedSceneInteriorMode = enabled;
+    m_screenSpaceGiHistoryValid = false;
+}
+
+void RendererBackend::setImportedInteriorLighting(const ImportedInteriorLighting& lighting) {
+    if (lighting.enabled != m_importedInteriorLighting.enabled ||
+        lighting.hasAuthoredLighting != m_importedInteriorLighting.hasAuthoredLighting ||
+        lighting.indirectLightingMode != m_importedInteriorLighting.indirectLightingMode) {
+        m_screenSpaceGiHistoryValid = false;
+    }
+    m_importedInteriorLighting = lighting;
+    m_importedSceneInteriorMode = lighting.enabled;
 }
 
 void RendererBackend::importedSceneDebugState(
@@ -308,21 +346,78 @@ void RendererBackend::buildFrameStatsUi() {
         return;
     }
 
-    constexpr ImGuiWindowFlags kPanelFlags =
-        ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoSavedSettings;
-    if (!ImGui::Begin("Strategy Map", &m_showFrameStatsPanel, kPanelFlags)) {
+    // Stats mode drops every control and keeps the readouts. The two get
+    // different window titles because they are genuinely different tools -- one
+    // is a tuning console, the other is an instrument panel you leave up while
+    // playing -- and because ImGui keys window state by title, so sharing one
+    // would carry a console-sized layout onto a panel a fraction of its height.
+    const bool fullControls = (m_debugUiMode == DebugUiMode::Full);
+    const char* const windowTitle = fullControls ? "Renderer" : "Stats";
+
+    // AlwaysAutoResize is wrong for the stats panel and right for the console.
+    // The console is a stack of collapsed headers the reader opens one at a time;
+    // the stats panel has everything open at once by design, and auto-resize let
+    // it grow taller than the framebuffer -- which does not clamp, it just runs
+    // off the bottom of the screen, taking the streaming groups with it. Giving
+    // it a bounded default size instead means the overflow becomes a scrollbar.
+    ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoSavedSettings;
+    if (fullControls) {
+        panelFlags |= ImGuiWindowFlags_AlwaysAutoResize;
+    } else {
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        ImGui::SetNextWindowSize(
+            ImVec2(std::min(display.x * 0.32f, 640.0f), display.y * 0.88f),
+            ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(display.x * 0.012f, display.y * 0.05f), ImGuiCond_FirstUseEver);
+    }
+    if (!ImGui::Begin(windowTitle, &m_showFrameStatsPanel, panelFlags)) {
         ImGui::End();
         return;
     }
 
+    // Whatever the game pushed this frame.
+    const auto buildGameStatGroups = [this]() {
+        for (const DebugStatGroup& group : m_debugStatGroups) {
+            if (!ImGui::CollapsingHeader(group.title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                continue;
+            }
+            for (const DebugStatRow& row : group.rows) {
+                // A blank row is a spacer, which is how a game separates related
+                // runs of rows without needing a group per run.
+                if (row.label.empty() && row.value.empty()) {
+                    ImGui::Spacing();
+                    continue;
+                }
+                ImGui::Text("%s: %s", row.label.c_str(), row.value.c_str());
+            }
+        }
+    };
+    // Position depends on which panel this is. In the console the renderer's own
+    // sections are the subject and the game's are an addendum, so they go last.
+    // In the stats panel the game's are what the player actually came to read --
+    // and the GPU stage table alone is a screen tall, so putting them after it
+    // would leave them below the fold on every launch.
+    if (!fullControls) {
+        buildGameStatGroups();
+    }
+
     const float autoScale = std::numeric_limits<float>::max();
-    if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
+    if (fullControls && ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // See the twin of this in ui_panels.cc: dragging claims FOV from the
+        // game, "Follow app" hands it back.
+        if (ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg")) {
+            m_debugCameraFovOverride = true;
+        }
+        if (m_debugCameraFovOverride) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Follow app")) {
+                m_debugCameraFovOverride = false;
+            }
+        }
         ImGui::Text("Map Draws: %u", static_cast<unsigned>(m_importedMeshDraws.size()));
     }
 
-    if (ImGui::CollapsingHeader("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (fullControls && ImGui::CollapsingHeader("Frame Pacing", ImGuiTreeNodeFlags_DefaultOpen)) {
         int pacingMode = static_cast<int>(m_framePacingSettings.mode);
         if (ImGui::Combo("Mode", &pacingMode, "Off\0Passive\0Scheduled\0")) {
             m_framePacingSettings.mode = static_cast<FramePacingMode>(pacingMode);
@@ -370,7 +465,31 @@ void RendererBackend::buildFrameStatsUi() {
         }
     }
 
-    if (ImGui::CollapsingHeader("Lighting & Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (fullControls && ImGui::CollapsingHeader("Render Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Order matches DebugView's enumerators in renderer_types.h.
+        static const char* kDebugViewNames[] = {
+            "Off", "Albedo", "Normal", "Alpha", "Material Flags",
+            "Roughness", "Metallic", "Mip Level", "Cascade Index",
+            "Texture ID", "Linear Depth", "Shadow", "Direct Ratio",
+            "Terrain Layers", "Ambient Occlusion", "Screen-space GI"};
+        int debugView = static_cast<int>(m_debugView);
+        if (ImGui::Combo("View", &debugView, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames))) {
+            m_debugView = static_cast<DebugView>(debugView);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Replaces the frame with one channel of what the main pass shaded with.\n"
+                "Covers imported statics, terrain and actors; sky and water are unchanged.\n\n"
+                "Alpha: sampled alpha, with the alpha-test discard bypassed\n"
+                "Material Flags: red=alphaTest green=alphaBlend blue=twoSided yellow=unlit,\n"
+                "  dark grey = no material flags at all");
+        }
+        if (m_debugView == DebugView::MaterialFlags) {
+            ImGui::TextDisabled("dark grey = no flags | R test | G blend | B 2-sided | Y unlit");
+        }
+    }
+
+    if (fullControls && ImGui::CollapsingHeader("Lighting & Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
         int shadowMode = static_cast<int>(m_shadowSettings.mode);
         if (ImGui::Combo("Shadow Backend", &shadowMode, "Shadow Maps\0Ray Traced (Beta)\0Auto (Beta)\0")) {
             setShadowSettings(ShadowSettings{static_cast<ShadowMode>(shadowMode)});
@@ -389,7 +508,7 @@ void RendererBackend::buildFrameStatsUi() {
         ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");
         if (ImGui::TreeNodeEx("Ambient Occlusion", ImGuiTreeNodeFlags_DefaultOpen)) {
             // Order matches AoMode's enumerators; Off skips both AO dispatches.
-            static const char* kAoModeNames[] = {"Off", "SSAO", "HBAO", "GTAO"};
+            static const char* kAoModeNames[] = {"Off", "SSAO", "HBAO", "GTAO", "XeGTAO"};
             int aoMode = static_cast<int>(m_shadowDebugSettings.aoMode);
             if (ImGui::Combo("Mode", &aoMode, kAoModeNames, IM_ARRAYSIZE(kAoModeNames))) {
                 m_shadowDebugSettings.aoMode = static_cast<AoMode>(aoMode);
@@ -510,7 +629,7 @@ void RendererBackend::buildFrameStatsUi() {
         }
     }
 
-    if (ImGui::CollapsingHeader("Sky & Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (fullControls && ImGui::CollapsingHeader("Sky & Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::TreeNodeEx("Advanced Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Auto Sunrise Tuning", &m_skyDebugSettings.autoSunriseTuning);
             ImGui::SliderFloat("Auto Sunrise Blend", &m_skyDebugSettings.autoSunriseBlend, 0.0f, 1.0f, "%.2f");
@@ -555,7 +674,7 @@ void RendererBackend::buildFrameStatsUi() {
         }
     }
 
-    if (ImGui::CollapsingHeader("Post", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (fullControls && ImGui::CollapsingHeader("Post", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Eye Adaptation");
         ImGui::Checkbox("Auto Exposure", &m_skyDebugSettings.autoExposureEnabled);
         ImGui::SliderFloat("Manual Exposure", &m_skyDebugSettings.manualExposure, 0.05f, 4.0f, "%.3f");
@@ -825,6 +944,10 @@ void RendererBackend::buildFrameStatsUi() {
                 stageRow("Sun Shafts", m_debugGpuSunShaftTimeMs, 0);
                 // Graphics passes.
                 stageRow("Shadow", m_debugGpuShadowTimeMs, 0);
+                stageRow("Contact trace", m_debugGpuContactShadowTraceTimeMs, 1);
+                stageRow("Contact resolve", m_debugGpuContactShadowResolveTimeMs, 1);
+                stageRow("Screen depth", m_debugGpuScreenDepthTimeMs, 0);
+                stageRow("Screen-space GI", m_debugGpuScreenSpaceGiTimeMs, 0);
                 stageRow("Prepass (nrm/depth)", m_debugGpuPrepassTimeMs, 0);
                 stageRow("SSAO", m_debugGpuSsaoTimeMs, 0);
                 stageRow("SSAO Blur", m_debugGpuSsaoBlurTimeMs, 0);
@@ -839,6 +962,8 @@ void RendererBackend::buildFrameStatsUi() {
             const float accountedMs =
                 giTotalMs + m_debugGpuAutoExposureTimeMs + m_debugGpuSunShaftTimeMs +
                 m_debugGpuShadowTimeMs + m_debugGpuPrepassTimeMs + m_debugGpuSsaoTimeMs +
+                m_debugGpuContactShadowTraceTimeMs + m_debugGpuContactShadowResolveTimeMs +
+                m_debugGpuScreenDepthTimeMs + m_debugGpuScreenSpaceGiTimeMs +
                 m_debugGpuSsaoBlurTimeMs + m_debugGpuMainTimeMs + m_debugGpuPostTimeMs +
                 m_debugGpuUiTimeMs;
             const float otherMs = std::max(0.0f, frameGpu - accountedMs);
@@ -890,6 +1015,86 @@ void RendererBackend::buildFrameStatsUi() {
                     b.statistics.allocationCount,
                     static_cast<double>(b.statistics.allocationBytes) / kMiB);
             }
+
+            // Everything below exists to answer one question a heap total cannot:
+            // when device memory climbs through a long streaming session, WHICH
+            // pool is climbing. The heap bar says "more"; these say "the texture
+            // table is not giving slots back" or "the arena keeps growing" or
+            // "the deferred release queue is not draining", which are different
+            // bugs with different fixes.
+            ImGui::Separator();
+
+            // High-water marks. A leak and a big-but-stable working set look
+            // identical in an instantaneous reading; what separates them is
+            // whether the peak keeps moving while the player walks in circles.
+            std::uint64_t deviceUsage = 0;
+            for (uint32_t heap = 0; heap < memProps.memoryHeapCount; ++heap) {
+                if ((memProps.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
+                    deviceUsage += budgets[heap].usage;
+                }
+            }
+            m_debugDeviceMemoryPeakBytes = std::max(m_debugDeviceMemoryPeakBytes, deviceUsage);
+            ImGui::Text(
+                "Device-local now %.1f MiB, session peak %.1f MiB",
+                static_cast<double>(deviceUsage) / kMiB,
+                static_cast<double>(m_debugDeviceMemoryPeakBytes) / kMiB);
+
+            // Imported geometry arenas. Bytes are the three streams that share
+            // one vertex index space: main vertices, the compact shadow copy,
+            // and indices. freeBlocks climbing steadily is fragmentation, which
+            // is what forces the arena to grow even when used() is flat -- and
+            // the arena never shrinks, so every growth is permanent.
+            const std::uint64_t vertexCapacity = m_importedVertexArena.capacity();
+            const std::uint64_t vertexUsed = m_importedVertexArena.used();
+            const std::uint64_t indexCapacity = m_importedIndexArena.capacity();
+            const std::uint64_t indexUsed = m_importedIndexArena.used();
+            const std::uint64_t vertexStride =
+                sizeof(ImportedMeshVertex) + sizeof(ImportedShadowVertex);
+            ImGui::Text(
+                "Geometry arena: %.1f / %.1f MiB used (%llu / %llu verts, %llu / %llu indices)",
+                static_cast<double>(vertexUsed * vertexStride + indexUsed * sizeof(std::uint32_t)) / kMiB,
+                static_cast<double>(vertexCapacity * vertexStride + indexCapacity * sizeof(std::uint32_t)) / kMiB,
+                static_cast<unsigned long long>(vertexUsed),
+                static_cast<unsigned long long>(vertexCapacity),
+                static_cast<unsigned long long>(indexUsed),
+                static_cast<unsigned long long>(indexCapacity));
+            ImGui::Text(
+                "   fragmentation: %zu vtx free blocks (largest %llu), %zu idx free blocks (largest %llu)",
+                m_importedVertexArena.freeBlockCount(),
+                static_cast<unsigned long long>(m_importedVertexArena.largestFreeBlock()),
+                m_importedIndexArena.freeBlockCount(),
+                static_cast<unsigned long long>(m_importedIndexArena.largestFreeBlock()));
+
+            // Bindless textures. `resident` is what actually holds VkImages, so
+            // it is the number that must plateau as the player walks. `slots`
+            // only ever grows -- it is the high-water mark, and slots between it
+            // and resident are recycled bookkeeping, not memory.
+            ImGui::Text(
+                "Bindless textures: %zu resident, %zu slots ever, %zu free, capacity %u",
+                m_importedTextureSlotTable.residentCount(),
+                m_importedTextureSlotTable.slotCount(),
+                m_importedTextureSlotTable.freeCount(),
+                (m_bindlessTextureCapacity > kBindlessTextureStaticCount)
+                    ? m_bindlessTextureCapacity - kBindlessTextureStaticCount
+                    : 0u);
+
+            std::size_t liveChunks = 0;
+            for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+                liveChunks += chunk.alive ? 1u : 0u;
+            }
+            ImGui::Text(
+                "Scene chunks: %zu live, %zu slots, %zu recycled",
+                liveChunks, m_importedSceneChunks.size(), m_freeImportedSceneChunks.size());
+
+            // Pending releases retire on the render timeline. A count that grows
+            // without bound means the timeline is not advancing past the values
+            // they were scheduled at, and nothing queued here is ever freed --
+            // which reads as a leak even though every destroy call is present.
+            ImGui::Text(
+                "Deferred releases pending: %zu buffers, %zu images, %zu command pools",
+                m_deferredBufferReleases.size(),
+                m_deferredImageReleases.size(),
+                m_deferredCommandPoolReleases.size());
             ImGui::TreePop();
         }
         if (ImGui::TreeNodeEx("Draw Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -932,7 +1137,7 @@ void RendererBackend::buildFrameStatsUi() {
         }
     }
 
-    if (ImGui::CollapsingHeader("Renderer Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (fullControls && ImGui::CollapsingHeader("Renderer Diagnostics", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (m_supportsDisplayTiming) {
             ImGui::Text(
                 "Display Timing Present ID submit/presented: %u / %u",
@@ -978,6 +1183,10 @@ void RendererBackend::buildFrameStatsUi() {
             ImGui::Text("Storage Image Limit: %u", m_desktopCapabilityProbe.maxDescriptorSetStorageImages);
             ImGui::TreePop();
         }
+    }
+
+    if (fullControls) {
+        buildGameStatGroups();
     }
     ImGui::End();
 }

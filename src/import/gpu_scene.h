@@ -105,6 +105,7 @@ struct GpuSceneRenderCache {
     std::vector<ImportedSceneTexture> textures;
     std::vector<ImportedSceneWaterPatch> waterPatches;
     std::vector<ImportedSceneLight> lights;
+    std::vector<ImportedSceneParticleEmitter> particleEmitters;
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;
     std::vector<ImportedScenePackedDraw> packedDraws;
@@ -118,6 +119,7 @@ struct GpuSceneAsset {
     std::vector<ImportedSceneTexture> textures;
     std::vector<ImportedSceneWaterPatch> waterPatches;
     std::vector<ImportedSceneLight> lights;
+    std::vector<ImportedSceneParticleEmitter> particleEmitters;
     std::vector<ImportedSceneVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<GpuSceneMeshAssetPart> meshParts;

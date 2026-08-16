@@ -324,6 +324,22 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
 
     m_debugGpuFrameTimeMs = durationMs(kGpuTimestampQueryFrameStart, kGpuTimestampQueryFrameEnd);
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
+    m_debugGpuContactShadowTraceTimeMs = durationMs(
+        kGpuTimestampQueryContactShadowTraceStart, kGpuTimestampQueryContactShadowTraceEnd);
+    m_debugGpuContactShadowResolveTimeMs = durationMs(
+        kGpuTimestampQueryContactShadowResolveStart, kGpuTimestampQueryContactShadowResolveEnd);
+    m_debugGpuContactShadowTimingMsHistory.push(
+        m_debugGpuContactShadowTraceTimeMs + m_debugGpuContactShadowResolveTimeMs);
+    m_debugGpuContactShadowP95Ms = odai::core::percentile(
+        m_debugGpuContactShadowTimingMsHistory, 0.95f);
+    m_debugGpuScreenDepthTimeMs = durationMs(
+        kGpuTimestampQueryScreenDepthStart, kGpuTimestampQueryScreenDepthEnd);
+    m_debugGpuScreenSpaceGiTimeMs = durationMs(
+        kGpuTimestampQueryScreenSpaceGiStart, kGpuTimestampQueryScreenSpaceGiEnd);
+    m_debugGpuScreenSpaceGiTimingMsHistory.push(
+        m_debugGpuScreenDepthTimeMs + m_debugGpuScreenSpaceGiTimeMs);
+    m_debugGpuScreenSpaceGiP95Ms = odai::core::percentile(
+        m_debugGpuScreenSpaceGiTimingMsHistory, 0.95f);
     m_debugGpuGiOccupancyTimeMs = durationMs(kGpuTimestampQueryGiOccupancyStart, kGpuTimestampQueryGiOccupancyEnd);
     m_debugGpuGiSurfaceTimeMs = durationMs(kGpuTimestampQueryGiSurfaceStart, kGpuTimestampQueryGiSurfaceEnd);
     m_debugGpuGiSurfaceCandidateTimeMs = durationMs(kGpuTimestampQueryGiSurfaceCandidateStart, kGpuTimestampQueryGiSurfaceCandidateEnd);
@@ -338,6 +354,11 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuSsaoTimeMs = durationMs(kGpuTimestampQuerySsaoStart, kGpuTimestampQuerySsaoEnd);
     m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
+    m_debugGpuPrewriteTimeMs =
+        durationMs(kGpuTimestampQueryPrewriteStart, kGpuTimestampQueryPrewriteEnd);
+    m_debugGpuVelocityTimeMs =
+        durationMs(kGpuTimestampQueryVelocityStart, kGpuTimestampQueryVelocityEnd);
+    m_debugGpuTaaTimeMs = durationMs(kGpuTimestampQueryTaaStart, kGpuTimestampQueryTaaEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
     // Per-pass GPU breakdown. Everything above was already measured and then
@@ -363,11 +384,22 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         if ((s_timingLogFrame++ % 60u) == 0u) {
             VOX_LOGI("render")
                 << "GPU ms: frame=" << m_debugGpuFrameTimeMs
+                << " p50=" << m_debugGpuFrameP50Ms
+                << " p95=" << m_debugGpuFrameP95Ms
                 << " shadow=" << m_debugGpuShadowTimeMs
+                << " contactTrace=" << m_debugGpuContactShadowTraceTimeMs
+                << " contactResolve=" << m_debugGpuContactShadowResolveTimeMs
+                << " contactP95=" << m_debugGpuContactShadowP95Ms
+                << " screenDepth=" << m_debugGpuScreenDepthTimeMs
+                << " ssgi=" << m_debugGpuScreenSpaceGiTimeMs
+                << " ssgiP95=" << m_debugGpuScreenSpaceGiP95Ms
                 << " prepass=" << m_debugGpuPrepassTimeMs
                 << " ssao=" << m_debugGpuSsaoTimeMs
                 << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs
                 << " main=" << m_debugGpuMainTimeMs
+                << " (prewrite=" << m_debugGpuPrewriteTimeMs << ")"
+                << " velocity=" << m_debugGpuVelocityTimeMs
+                << " taa=" << m_debugGpuTaaTimeMs
                 << " post=" << m_debugGpuPostTimeMs
                 << " ui=" << m_debugGpuUiTimeMs
                 << " autoExposure=" << m_debugGpuAutoExposureTimeMs

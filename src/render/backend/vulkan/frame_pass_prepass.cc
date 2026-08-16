@@ -16,9 +16,13 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
     const uint32_t aoFrameIndex = context.aoFrameIndex;
     const uint32_t imageIndex = context.imageIndex;
-    const VkExtent2D aoExtent = context.aoExtent;
-    const VkViewport& aoViewport = context.aoViewport;
-    const VkRect2D& aoScissor = context.aoScissor;
+    // Merged: the prepass IS the depth pass, so it runs at the main pass's
+    // resolution and writes the main pass's depth buffer. See
+    // useMergedDepthPrepass in renderer_backend.h for why.
+    const bool merged = useMergedDepthPrepass();
+    const VkExtent2D aoExtent = merged ? m_renderExtent : context.aoExtent;
+    const VkViewport& aoViewport = merged ? context.viewport : context.aoViewport;
+    const VkRect2D& aoScissor = merged ? context.scissor : context.aoScissor;
     // Voxel chunk inputs: consumed by the chunk draw below, mirroring the main pass.
     // The magica/pipe prepass inputs remain on PrepassInputs but stay unconsumed —
     // those draws belong to the prior factory sim and have no caller left.
@@ -85,10 +89,14 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
 
     VkRenderingAttachmentInfo aoDepthAttachment{};
     aoDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    aoDepthAttachment.imageView = m_aoDepthImageViews[imageIndex];
+    aoDepthAttachment.imageView =
+        merged ? m_depthImageViews[imageIndex] : m_aoDepthImageViews[imageIndex];
     aoDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     aoDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    aoDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // STORE, not DONT_CARE: merged, this depth is what the main pass tests
+    // against. Discarding it is exactly what forced the second rasterization.
+    aoDepthAttachment.storeOp =
+        merged ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     aoDepthAttachment.clearValue = aoDepthClearValue;
 
     VkRenderingInfo normalDepthRenderingInfo{};
@@ -110,7 +118,13 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     // Begin/clear/end even when nothing needs the result: the attachments must
     // still end the frame in the layout the descriptor set was written for, and
     // clearing is a fraction of the cost of re-rendering the scene.
-    if (!inputs.normalDepthNeeded) {
+    //
+    // Merged, there is no such thing as "nobody needs this": the main pass
+    // tests against the depth these draws lay, and skipping them renders an
+    // empty frame. The normal-depth colour write is then the only part that is
+    // wasted when AO, shafts and water are all off, and it is a fraction of the
+    // rasterization it rides along with.
+    if (!inputs.normalDepthNeeded && !merged) {
         vkCmdEndRendering(commandBuffer);
         writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
         return;
@@ -156,6 +170,33 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     // (the strategy map's settlements/units/grid); the prior game's magica normal-depth
     // draws remain removed.
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
+        // The normal-depth shader alpha-tests too, so it needs the same
+        // authored threshold the main pass uses -- otherwise SSAO sees a
+        // different silhouette than the lit pass does.
+        //
+        // Hoisted to cover the static, actor and skinned blocks below. It used
+        // to live inside the static block, which left the actor and skinned
+        // draws testing against whatever threshold the last static draw had
+        // pushed. Push constants survive a pipeline bind within one layout, so
+        // the redundant-push filter stays valid across all three.
+        ChunkPushConstants importedPrepassPushConstants{};
+        importedPrepassPushConstants.materialParams[0] = 0.5f;
+        int lastPushedThreshold = -1;
+        const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
+            if (static_cast<int>(threshold) == lastPushedThreshold) {
+                return;
+            }
+            lastPushedThreshold = static_cast<int>(threshold);
+            importedPrepassPushConstants.materialParams[0] =
+                static_cast<float>(threshold) / 255.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &importedPrepassPushConstants);
+        };
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
             importedVertexBuffer != VK_NULL_HANDLE &&
             importedIndexBuffer != VK_NULL_HANDLE &&
@@ -168,31 +209,48 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            // The normal-depth shader alpha-tests too, so it needs the same
-            // authored threshold the main pass uses -- otherwise SSAO sees a
-            // different silhouette than the lit pass does.
-            ChunkPushConstants importedPrepassPushConstants{};
-            importedPrepassPushConstants.materialParams[0] = 0.5f;
-            int lastPushedThreshold = -1;
-            const auto pushAlphaThreshold = [&](std::uint8_t threshold) {
-                if (static_cast<int>(threshold) == lastPushedThreshold) {
-                    return;
+            // Tessellated terrain, mirroring frame_pass_main exactly -- this
+            // pass lays the depth the main pass tests against, so if main
+            // tessellates and this does not, the ground develops holes. Drawn
+            // first because buildImportedIndirectBatches reuses member scratch.
+            const std::size_t tessTerrainDrawCount = std::min<std::size_t>(
+                m_visibleImportedNearTerrainDrawCount, terrainDrawCount);
+            const bool tessellateTerrain =
+                m_importedTerrainTessNormalDepthPipeline != VK_NULL_HANDLE &&
+                m_debugShowImportedTerrain && tessTerrainDrawCount > 0u;
+            if (tessellateTerrain) {
+                const auto includeTerrainDraw = [&](std::size_t drawIndex) {
+                    return drawIndex < tessTerrainDrawCount;
+                };
+                VkBuffer terrainIndirectBuffer = VK_NULL_HANDLE;
+                VkDeviceSize terrainIndirectBase = 0;
+                if (m_supportsMultiDrawIndirect &&
+                    buildImportedIndirectBatches(
+                        importedMeshDraws, includeTerrainDraw, terrainIndirectBuffer,
+                        terrainIndirectBase)) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_importedTerrainTessNormalDepthPipeline);
+                    for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        pushAlphaThreshold(batch.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsPrepass, 1);
+                        vkCmdDrawIndexedIndirect(
+                            commandBuffer, terrainIndirectBuffer,
+                            terrainIndirectBase + batch.bufferOffset, batch.drawCount,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_importedStaticNormalDepthPipeline);
                 }
-                lastPushedThreshold = static_cast<int>(threshold);
-                importedPrepassPushConstants.materialParams[0] =
-                    static_cast<float>(threshold) / 255.0f;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &importedPrepassPushConstants);
-            };
+            }
             // Same indirect batching as the main pass: one call per distinct
             // alpha-test threshold instead of one per draw.
             const auto includeDraw = [&](std::size_t drawIndex) {
                 if (drawIndex < terrainDrawCount) {
+                    if (tessellateTerrain && drawIndex < tessTerrainDrawCount) {
+                        return false;
+                    }
                     return m_debugShowImportedTerrain;
                 }
                 return m_debugShowImportedStatics;
@@ -203,12 +261,35 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 buildImportedIndirectBatches(
                     importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
             if (useIndirect) {
+                // Batches are already grouped by two-sidedness (frame_draws.cc
+                // buckets on it), so this is at most one extra bind -- and
+                // until now the split existed here with nothing to switch to,
+                // making it pure overhead.
+                VkPipeline boundPrepassPipeline = m_importedStaticNormalDepthPipeline;
                 for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    const VkPipeline wantedPipeline =
+                        (batch.twoSided &&
+                         m_importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticNormalDepthPipelineTwoSided
+                            : m_importedStaticNormalDepthPipeline;
+                    if (wantedPipeline != boundPrepassPipeline) {
+                        vkCmdBindPipeline(
+                            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrepassPipeline = wantedPipeline;
+                    }
                     pushAlphaThreshold(batch.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                         batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                }
+                // The actor block below binds its own pipeline, but the skinned
+                // block after it does not -- leave the one-sided pipeline bound.
+                if (boundPrepassPipeline != m_importedStaticNormalDepthPipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_importedStaticNormalDepthPipeline);
                 }
             } else {
                 for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
@@ -239,6 +320,14 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
             for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
+                if (importedDraw.blended) {
+                    continue;  // no depth/normal contribution from blended surfaces
+                }
+                // Per draw. This block pushed nothing at all before, so an
+                // actor's alpha test ran against whatever threshold the static
+                // block above happened to leave in the push range -- which is
+                // the last static draw's, not the actor's.
+                pushAlphaThreshold(importedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -258,6 +347,9 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
             VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
             for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                if (skinnedDraw.blended) {
+                    continue;  // no depth/normal contribution from blended surfaces
+                }
                 const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
                 const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
                 if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
@@ -273,6 +365,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                     boundSkinnedIndexBuffer = drawIndexBuffer;
                 }
+                pushAlphaThreshold(skinnedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
                 vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }
@@ -289,6 +382,26 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryPrepassEnd);
+
+    if (merged) {
+        // Depth stays in DEPTH_ATTACHMENT_OPTIMAL -- this is an execution and
+        // memory dependency, not a layout change. Without it the main pass's
+        // early depth test may read what this pass's late depth writes have not
+        // yet made visible.
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    }
 
     transitionImageLayout(
         commandBuffer,

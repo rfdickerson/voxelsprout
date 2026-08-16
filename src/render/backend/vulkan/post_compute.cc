@@ -967,9 +967,19 @@ bool RendererBackend::createTaaComputeResources() {
         taaUniformBinding.descriptorCount = 1;
         taaUniformBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 6> bindings = {
+        // Binding 6: per-object motion vectors. Unused by taa.comp.slang and
+        // read by temporal_upscale.comp.slang; a binding a shader does not
+        // reference is legal, and one layout for both is what lets the pass pick
+        // a pipeline rather than duplicate its descriptor plumbing.
+        VkDescriptorSetLayoutBinding velocityBinding{};
+        velocityBinding.binding = 6;
+        velocityBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        velocityBinding.descriptorCount = 1;
+        velocityBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        const std::array<VkDescriptorSetLayoutBinding, 7> bindings = {
             cameraBinding, currentColorBinding, historyBinding,
-            normalDepthBinding, outputBinding, taaUniformBinding
+            normalDepthBinding, outputBinding, taaUniformBinding, velocityBinding
         };
         if (!createDescriptorSetLayout(
                 bindings,
@@ -1037,14 +1047,51 @@ bool RendererBackend::createTaaComputeResources() {
         destroyTaaComputeResources();
         return false;
     }
+
+    // The upscaler shares the TAA pipeline layout, so it is built here and
+    // selected per frame. Optional: if its shader is missing the Temporal
+    // backend still resolves, and recordTaaPass falls back to same-resolution
+    // TAA -- a softer image than a real upscale, but not a broken one.
+    {
+        constexpr const char* kTemporalUpscaleShaderPath =
+            "../src/render/shaders/temporal_upscale.comp.slang.spv";
+        if (std::filesystem::exists(kTemporalUpscaleShaderPath)) {
+            VkShaderModule upscaleModule = VK_NULL_HANDLE;
+            if (createShaderModuleFromFile(
+                    m_device, kTemporalUpscaleShaderPath, "temporal_upscale.comp", upscaleModule)) {
+                if (!createComputePipeline(
+                        m_taaPipelineLayout, upscaleModule, m_temporalUpscalePipeline,
+                        "vkCreateComputePipelines(temporalUpscale)", "pipeline.temporalUpscale",
+                        VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+                    VOX_LOGW("render") << "temporal upscale pipeline creation failed; "
+                                          "Temporal backend will run same-resolution TAA";
+                }
+                vkDestroyShaderModule(m_device, upscaleModule, nullptr);
+            }
+        } else {
+            VOX_LOGW("render") << "temporal_upscale shader missing; Temporal backend will run "
+                                  "same-resolution TAA";
+        }
+    }
     vkDestroyShaderModule(m_device, taaShaderModule, nullptr);
     return true;
 }
 
 void RendererBackend::destroyTaaComputeResources() {
+    // BEFORE the pipelines below, and more importantly before vkDestroyDevice.
+    // The backend owns VkPipelines built against this device, and a unique_ptr
+    // member would otherwise be destroyed at ~RendererBackend -- after the
+    // device is gone. That is a use-after-free the loader catches as
+    // "vkDestroyPipeline: Invalid device" and the process aborts on exit, long
+    // after the frame that looked fine.
+    m_upscaler.reset();
     if (m_taaPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_taaPipeline, nullptr);
         m_taaPipeline = VK_NULL_HANDLE;
+    }
+    if (m_temporalUpscalePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_temporalUpscalePipeline, nullptr);
+        m_temporalUpscalePipeline = VK_NULL_HANDLE;
     }
     if (m_taaPipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(m_device, m_taaPipelineLayout, nullptr);
@@ -1057,72 +1104,161 @@ void RendererBackend::destroyTaaComputeResources() {
     }
 }
 
-bool RendererBackend::recordTaaPass(VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex) {
-    if (!m_taaEnabled || m_taaPipeline == VK_NULL_HANDLE || !m_taaBufferSet.valid()) {
+upscale::HostServices RendererBackend::makeUpscalerHostServices() {
+    upscale::HostServices host{};
+    host.device = m_device;
+    // Descriptor provisioning stays here on purpose: this engine writes
+    // VK_EXT_descriptor_buffer sets, which is not something a vendor SDK knows
+    // about and not something a backend should have to.
+    host.bindDescriptors = [this](VkCommandBuffer cmd, VkPipelineLayout layout,
+                                  std::uint32_t frameIndex) {
+        bindDescriptorBuffer(
+            cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, m_taaBufferSet, frameIndex);
+    };
+    host.transitionImage = [](VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout,
+                              VkImageLayout newLayout, VkPipelineStageFlags2 srcStage,
+                              VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
+                              VkAccessFlags2 dstAccess) {
+        taaTransitionImage(
+            cmd, image, oldLayout, newLayout, srcStage, srcAccess, dstStage, dstAccess);
+    };
+    host.beginDebugLabel = [this](VkCommandBuffer cmd, const char* label, float r, float g,
+                                  float b, float a) {
+        beginDebugLabel(cmd, label, r, g, b, a);
+    };
+    host.endDebugLabel = [this](VkCommandBuffer cmd) { endDebugLabel(cmd); };
+    host.loadShader = [this](const char* path, const char* debugName, VkShaderModule& out) {
+        return createShaderModuleFromFile(m_device, path, debugName, out);
+    };
+    return host;
+}
+
+bool RendererBackend::createUpscalerBackend() {
+    m_upscaler = upscale::createUpscaler(m_upscalerStatus.active, makeUpscalerHostServices());
+    if (!m_upscaler) {
+        // Off resolves to no technique at all, which is correct rather than an
+        // error. Anything else reaching here means resolveUpscaler() picked a
+        // backend createUpscaler() cannot build, which is a bug in one of them.
+        return m_upscalerStatus.active == UpscalerBackend::Off;
+    }
+    upscale::SetupInfo setup{};
+    setup.renderExtent = {m_renderExtent.width, m_renderExtent.height};
+    setup.displayExtent = {m_swapchainExtent.width, m_swapchainExtent.height};
+    setup.invertedDepth = true;
+    setup.hdrInput = true;
+    setup.pipelineLayout = m_taaPipelineLayout;
+    if (!m_upscaler->setup(setup)) {
+        VOX_LOGW("render") << "upscaler backend "
+                           << upscalerBackendName(m_upscaler->id())
+                           << " failed setup; the frame will run without it";
+        m_upscaler.reset();
         return false;
+    }
+    const upscale::Capabilities caps = m_upscaler->capabilities();
+    if (!caps.available) {
+        VOX_LOGW("render") << "upscaler backend " << upscalerBackendName(m_upscaler->id())
+                           << " unavailable: " << caps.unavailableReason;
+        m_upscaler.reset();
+        return false;
+    }
+    return true;
+}
+
+RendererBackend::TaaPassOutcome RendererBackend::recordTaaPass(
+    VkCommandBuffer commandBuffer,
+    std::uint32_t aoFrameIndex,
+    VkQueryPool gpuTimestampQueryPool) {
+    if (!m_taaEnabled || !m_upscaler || !m_taaBufferSet.valid()) {
+        return {};
     }
     if (aoFrameIndex >= m_hdrResolveImages.size() ||
         m_hdrResolveImages[aoFrameIndex] == VK_NULL_HANDLE) {
-        return false;
+        return {};
     }
     const std::uint32_t currentImage = m_taaHistoryIndex ^ 1u;
     const std::uint32_t historyImage = m_taaHistoryIndex;
     if (m_taaImages[currentImage] == VK_NULL_HANDLE ||
         m_taaImages[historyImage] == VK_NULL_HANDLE) {
-        return false;
+        return {};
     }
 
-    beginDebugLabel(commandBuffer, "Pass: TAA", 0.22f, 0.34f, 0.40f, 1.0f);
+    // Covers the TAA resolve AND the temporal upscale -- they are one pass with
+    // two output paths, and separating them would make the upscaled and
+    // non-upscaled frames report different pass sets for the same work.
+    const auto writeTaaTimestamp = [&](uint32_t queryIndex, VkPipelineStageFlags2 stage) {
+        if (gpuTimestampQueryPool != VK_NULL_HANDLE) {
+            vkCmdWriteTimestamp2(commandBuffer, stage, gpuTimestampQueryPool, queryIndex);
+        }
+    };
+    writeTaaTimestamp(kGpuTimestampQueryTaaStart, VK_PIPELINE_STAGE_2_NONE);
 
-    // hdrResolve mip0: main-pass color output -> compute sampled input.
-    taaTransitionImage(
-        commandBuffer, m_hdrResolveImages[aoFrameIndex],
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    // EVERYTHING BETWEEN HERE AND THE COPY-BACK BELOW IS THE BACKEND'S.
+    //
+    // The transitions, the pipeline choice and the dispatch grid are properties
+    // of the technique, not of this frame -- XeSS wants different resource
+    // states and a different dispatch than this does, and DLSS different again.
+    // What stays here is what the HOST owns either way: which images exist,
+    // whose descriptors point at them, and what happens to the result.
+    upscale::DispatchInfo dispatch{};
+    dispatch.commandBuffer = commandBuffer;
+    dispatch.frameIndex = m_currentFrame;
+    dispatch.colorInput = m_hdrResolveImages[aoFrameIndex];
+    dispatch.colorInputLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    dispatch.history = m_taaImages[historyImage];
+    dispatch.historyInitialized = m_taaImageInitialized[historyImage];
+    dispatch.output = m_taaImages[currentImage];
+    dispatch.outputInitialized = m_taaImageInitialized[currentImage];
+    dispatch.jitter = {m_taaJitterNdc[0], m_taaJitterNdc[1]};
+    dispatch.resetHistory = !m_taaHistoryValid;
 
-    // This frame's output image -> GENERAL for storage writes. Its previous
-    // contents (history from two frames ago) are dead; UNDEFINED is both legal
-    // and faster when it was never written.
-    taaTransitionImage(
-        commandBuffer, m_taaImages[currentImage],
-        m_taaImageInitialized[currentImage] ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-                                           : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL,
-        m_taaImageInitialized[currentImage] ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                            : VK_PIPELINE_STAGE_2_NONE,
-        m_taaImageInitialized[currentImage] ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
-                                            : VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    const upscale::DispatchResult dispatched = m_upscaler->dispatch(dispatch);
+    if (!dispatched.ran) {
+        writeTaaTimestamp(kGpuTimestampQueryTaaEnd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+        return {};
+    }
+    m_taaImageInitialized[historyImage] = true;
+    const bool upscaling = dispatched.resultInOutput;
 
-    // The history image the descriptor points at must be in SHADER_READ_ONLY
-    // even on the first frame, when it holds nothing and the shader's weight
-    // is zero -- validation checks descriptor layouts regardless of branches.
-    if (!m_taaImageInitialized[historyImage]) {
+    if (upscaling) {
+        // No copy-back: the result is larger than hdrResolve and there is
+        // nothing to copy it into. The tonemap pass samples the upscaled image
+        // directly instead (see updateFrameDescriptorSets), which is also where
+        // the resolution change now happens rather than in a bilinear fetch.
+        //
+        // The cost is that the bloom chain, which is built from hdrResolve's mip
+        // pyramid, keeps reading the pre-upscale image. Bloom is low frequency
+        // and this is the usual arrangement, but it does mean bloom no longer
+        // sees the temporally resolved result the way it did at native
+        // resolution.
         taaTransitionImage(
-            commandBuffer, m_taaImages[historyImage],
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        m_taaImageInitialized[historyImage] = true;
+            commandBuffer, m_taaImages[currentImage],
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        // hdrResolve is left where the main pass put it; nothing transitioned it
+        // for a copy that is not happening.
+        taaTransitionImage(
+            commandBuffer, m_hdrResolveImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        m_taaImageInitialized[currentImage] = true;
+        endDebugLabel(commandBuffer);
+        m_taaHistoryIndex = currentImage;
+        // Both of these, not just the index. m_taaHistoryValid is what the
+        // uniform's history-valid flag is built from, and leaving it false here
+        // multiplied the history weight to zero on every frame -- the pass ran,
+        // wrote a correct image, and accumulated nothing, which is
+        // indistinguishable from a working upscaler with the weight turned down.
+        m_taaHistoryValid = true;
+        writeTaaTimestamp(kGpuTimestampQueryTaaEnd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+        return TaaPassOutcome{
+            true,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
     }
-
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_taaPipeline);
-    bindDescriptorBuffer(
-        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_taaPipelineLayout,
-        0, m_taaBufferSet, m_currentFrame);
-
-    TaaPushConstants pushConstants{};
-    pushConstants.width = m_renderExtent.width;
-    pushConstants.height = m_renderExtent.height;
-    vkCmdPushConstants(
-        commandBuffer, m_taaPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-        0, sizeof(TaaPushConstants), &pushConstants);
-    vkCmdDispatch(
-        commandBuffer,
-        (m_renderExtent.width + 7u) / 8u,
-        (m_renderExtent.height + 7u) / 8u,
-        1u);
 
     // Copy the result back over hdrResolve mip0 so the bloom/tonemap chain
     // reads TAA output without knowing TAA exists.
@@ -1159,7 +1295,302 @@ bool RendererBackend::recordTaaPass(VkCommandBuffer commandBuffer, std::uint32_t
 
     m_taaHistoryIndex = currentImage;
     m_taaHistoryValid = true;
+    writeTaaTimestamp(kGpuTimestampQueryTaaEnd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+    return TaaPassOutcome{
+        true,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT};
+}
+
+
+// XeGTAO resource creation. Two pipelines: the depth prefilter that builds the
+// pyramid, and the GTAO integral that marches it.
+//
+// Failure here is NOT fatal. The three original estimators keep their own
+// pipelines and are unaffected; XeGTAO simply reports unavailable and the AO
+// mode selection falls back. That matters because this needs two extra shaders
+// on disk and a descriptor layout with a five-element sampler array, and a build
+// without slangc has neither.
+bool RendererBackend::createXeGtaoResources() {
+    constexpr const char* kPrefilterShaderPath =
+        "../src/render/shaders/xegtao_prefilter.comp.slang.spv";
+    constexpr const char* kMainShaderPath =
+        "../src/render/shaders/xegtao_main.comp.slang.spv";
+    constexpr const char* kDenoiseShaderPath =
+        "../src/render/shaders/xegtao_denoise.comp.slang.spv";
+
+    if (!std::filesystem::exists(kPrefilterShaderPath) || !std::filesystem::exists(kMainShaderPath) ||
+        !std::filesystem::exists(kDenoiseShaderPath)) {
+        VOX_LOGW("render") << "XeGTAO shaders missing; XeGTAO mode unavailable";
+        return false;
+    }
+
+    const auto computeBinding = [](uint32_t binding, VkDescriptorType type, uint32_t count) {
+        VkDescriptorSetLayoutBinding layoutBinding{};
+        layoutBinding.binding = binding;
+        layoutBinding.descriptorType = type;
+        layoutBinding.descriptorCount = count;
+        layoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        return layoutBinding;
+    };
+
+    // Prefilter: camera, the normal-depth source, and one storage image per
+    // pyramid level.
+    if (m_xegtaoPrefilterDescriptorSetLayout == VK_NULL_HANDLE) {
+        const std::array<VkDescriptorSetLayoutBinding, 7> bindings = {
+            computeBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1),
+            computeBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1),
+            computeBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+            computeBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+            computeBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+            computeBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+            computeBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+        };
+        if (!createDescriptorSetLayout(
+                bindings, m_xegtaoPrefilterDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(xegtaoPrefilter)",
+                "renderer.descriptorSetLayout.xegtaoPrefilter", nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+            destroyXeGtaoResources();
+            return false;
+        }
+    }
+    // Main: camera, normal-depth, the pyramid as a 5-element sampler array (the
+    // march indexes it by computed level, so it has to be one array binding
+    // rather than five), the AO output and the bent normal output.
+    if (m_xegtaoMainDescriptorSetLayout == VK_NULL_HANDLE) {
+        const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
+            computeBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1),
+            computeBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1),
+            computeBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kXeGtaoDepthMipCount),
+            computeBinding(3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+            computeBinding(4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+        };
+        if (!createDescriptorSetLayout(
+                bindings, m_xegtaoMainDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(xegtaoMain)",
+                "renderer.descriptorSetLayout.xegtaoMain", nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+            destroyXeGtaoResources();
+            return false;
+        }
+    }
+
+    // Denoise: the pre-denoise AO term, the bent-normal target (for its packed
+    // edges in .w) and the final AO image.
+    if (m_xegtaoDenoiseDescriptorSetLayout == VK_NULL_HANDLE) {
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            computeBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1),
+            computeBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1),
+            computeBinding(2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+        };
+        if (!createDescriptorSetLayout(
+                bindings, m_xegtaoDenoiseDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(xegtaoDenoise)",
+                "renderer.descriptorSetLayout.xegtaoDenoise", nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+            destroyXeGtaoResources();
+            return false;
+        }
+    }
+
+    const VkBufferUsageFlags descriptorBufferUsage =
+        VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+        VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT;
+    if (!m_xegtaoPrefilterBufferSet.valid() &&
+        !createDescriptorBufferSet(
+            m_xegtaoPrefilterDescriptorSetLayout, kMaxFramesInFlight, descriptorBufferUsage,
+            "renderer.descriptorBuffer.xegtaoPrefilter", m_xegtaoPrefilterBufferSet)) {
+        destroyXeGtaoResources();
+        return false;
+    }
+    if (!m_xegtaoMainBufferSet.valid() &&
+        !createDescriptorBufferSet(
+            m_xegtaoMainDescriptorSetLayout, kMaxFramesInFlight, descriptorBufferUsage,
+            "renderer.descriptorBuffer.xegtaoMain", m_xegtaoMainBufferSet)) {
+        destroyXeGtaoResources();
+        return false;
+    }
+
+    if (!m_xegtaoDenoiseBufferSet.valid() &&
+        !createDescriptorBufferSet(
+            m_xegtaoDenoiseDescriptorSetLayout, kMaxFramesInFlight, descriptorBufferUsage,
+            "renderer.descriptorBuffer.xegtaoDenoise", m_xegtaoDenoiseBufferSet)) {
+        destroyXeGtaoResources();
+        return false;
+    }
+
+    std::array<VkShaderModule, 3> shaderModules = {
+        VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    if (!createShaderModuleFromFile(
+            m_device, kPrefilterShaderPath, "xegtao_prefilter.comp", shaderModules[0]) ||
+        !createShaderModuleFromFile(
+            m_device, kMainShaderPath, "xegtao_main.comp", shaderModules[1]) ||
+        !createShaderModuleFromFile(
+            m_device, kDenoiseShaderPath, "xegtao_denoise.comp", shaderModules[2])) {
+        destroyShaderModules(m_device, shaderModules);
+        destroyXeGtaoResources();
+        return false;
+    }
+
+    VkPushConstantRange prefilterRange{};
+    prefilterRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    prefilterRange.size = sizeof(XeGtaoPrefilterPushConstants);
+    const std::array<VkPushConstantRange, 1> prefilterRanges = {prefilterRange};
+
+    VkPushConstantRange mainRange{};
+    mainRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    mainRange.size = sizeof(XeGtaoMainPushConstants);
+    const std::array<VkPushConstantRange, 1> mainRanges = {mainRange};
+
+    VkPushConstantRange denoiseRange{};
+    denoiseRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    denoiseRange.size = sizeof(XeGtaoDenoisePushConstants);
+    const std::array<VkPushConstantRange, 1> denoiseRanges = {denoiseRange};
+
+    if (!createComputePipelineLayout(
+            m_xegtaoPrefilterDescriptorSetLayout, prefilterRanges, m_xegtaoPrefilterPipelineLayout,
+            "vkCreatePipelineLayout(xegtaoPrefilter)", "renderer.pipelineLayout.xegtaoPrefilter") ||
+        !createComputePipeline(
+            m_xegtaoPrefilterPipelineLayout, shaderModules[0], m_xegtaoPrefilterPipeline,
+            "vkCreateComputePipelines(xegtaoPrefilter)", "pipeline.xegtaoPrefilter",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT) ||
+        !createComputePipelineLayout(
+            m_xegtaoMainDescriptorSetLayout, mainRanges, m_xegtaoMainPipelineLayout,
+            "vkCreatePipelineLayout(xegtaoMain)", "renderer.pipelineLayout.xegtaoMain") ||
+        !createComputePipeline(
+            m_xegtaoMainPipelineLayout, shaderModules[1], m_xegtaoMainPipeline,
+            "vkCreateComputePipelines(xegtaoMain)", "pipeline.xegtaoMain",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT) ||
+        !createComputePipelineLayout(
+            m_xegtaoDenoiseDescriptorSetLayout, denoiseRanges, m_xegtaoDenoisePipelineLayout,
+            "vkCreatePipelineLayout(xegtaoDenoise)", "renderer.pipelineLayout.xegtaoDenoise") ||
+        !createComputePipeline(
+            m_xegtaoDenoisePipelineLayout, shaderModules[2], m_xegtaoDenoisePipeline,
+            "vkCreateComputePipelines(xegtaoDenoise)", "pipeline.xegtaoDenoise",
+            VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+        destroyShaderModules(m_device, shaderModules);
+        destroyXeGtaoResources();
+        return false;
+    }
+
+    destroyShaderModules(m_device, shaderModules);
+    VOX_LOGI("render") << "XeGTAO resources ready (depth pyramid levels="
+                       << kXeGtaoDepthMipCount << ")";
     return true;
+}
+
+void RendererBackend::destroyXeGtaoResources() {
+    if (m_xegtaoPrefilterPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_xegtaoPrefilterPipeline, nullptr);
+        m_xegtaoPrefilterPipeline = VK_NULL_HANDLE;
+    }
+    if (m_xegtaoMainPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_xegtaoMainPipeline, nullptr);
+        m_xegtaoMainPipeline = VK_NULL_HANDLE;
+    }
+    if (m_xegtaoDenoisePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_xegtaoDenoisePipeline, nullptr);
+        m_xegtaoDenoisePipeline = VK_NULL_HANDLE;
+    }
+    if (m_xegtaoPrefilterPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_xegtaoPrefilterPipelineLayout, nullptr);
+        m_xegtaoPrefilterPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_xegtaoMainPipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_xegtaoMainPipelineLayout, nullptr);
+        m_xegtaoMainPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_xegtaoDenoisePipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_xegtaoDenoisePipelineLayout, nullptr);
+        m_xegtaoDenoisePipelineLayout = VK_NULL_HANDLE;
+    }
+    destroyDescriptorBufferSet(m_xegtaoDenoiseBufferSet);
+    if (m_xegtaoDenoiseDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_xegtaoDenoiseDescriptorSetLayout, nullptr);
+        m_xegtaoDenoiseDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    destroyDescriptorBufferSet(m_xegtaoPrefilterBufferSet);
+    destroyDescriptorBufferSet(m_xegtaoMainBufferSet);
+    if (m_xegtaoPrefilterDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_xegtaoPrefilterDescriptorSetLayout, nullptr);
+        m_xegtaoPrefilterDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (m_xegtaoMainDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_xegtaoMainDescriptorSetLayout, nullptr);
+        m_xegtaoMainDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+}
+
+// Per-frame descriptor writes. The AO targets are per-frame-in-flight, so the
+// views change with aoFrameIndex and these cannot be written once at creation.
+void RendererBackend::writeXeGtaoDescriptors(
+    uint32_t frameIndex, uint32_t aoFrameIndex, VkDeviceAddress cameraAddress,
+    VkDeviceSize cameraRange, const VkDescriptorImageInfo& normalDepthInfo) {
+    if (!m_xegtaoPrefilterBufferSet.valid() || !m_xegtaoMainBufferSet.valid() ||
+        aoFrameIndex >= m_xegtaoBentNormalImageViews.size() ||
+        m_xegtaoBentNormalImageViews[aoFrameIndex] == VK_NULL_HANDLE) {
+        return;
+    }
+
+    // Prefilter set.
+    writeDescriptorBufferUniform(
+        m_xegtaoPrefilterBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoPrefilterDescriptorSetLayout, 0),
+        cameraAddress, cameraRange);
+    writeDescriptorBufferCombinedImageSampler(
+        m_xegtaoPrefilterBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoPrefilterDescriptorSetLayout, 1), 0,
+        normalDepthInfo.imageView, normalDepthInfo.sampler, normalDepthInfo.imageLayout);
+    for (uint32_t level = 0; level < kXeGtaoDepthMipCount; ++level) {
+        writeDescriptorBufferStorageImage(
+            m_xegtaoPrefilterBufferSet, frameIndex,
+            descriptorBufferBindingOffset(m_xegtaoPrefilterDescriptorSetLayout, 2 + level),
+            m_xegtaoDepthImageViews[level][aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    // Main set.
+    writeDescriptorBufferUniform(
+        m_xegtaoMainBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoMainDescriptorSetLayout, 0),
+        cameraAddress, cameraRange);
+    writeDescriptorBufferCombinedImageSampler(
+        m_xegtaoMainBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoMainDescriptorSetLayout, 1), 0,
+        normalDepthInfo.imageView, normalDepthInfo.sampler, normalDepthInfo.imageLayout);
+    for (uint32_t level = 0; level < kXeGtaoDepthMipCount; ++level) {
+        writeDescriptorBufferCombinedImageSamplerArray(
+            m_xegtaoMainBufferSet, frameIndex,
+            descriptorBufferBindingOffset(m_xegtaoMainDescriptorSetLayout, 2), level,
+            kXeGtaoDepthMipCount, m_xegtaoDepthImageViews[level][aoFrameIndex],
+            m_xegtaoPointSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    writeDescriptorBufferStorageImage(
+        m_xegtaoMainBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoMainDescriptorSetLayout, 3),
+        m_xegtaoAoTermImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
+    writeDescriptorBufferStorageImage(
+        m_xegtaoMainBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoMainDescriptorSetLayout, 4),
+        m_xegtaoBentNormalImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
+
+    // Denoise set: pre-denoise AO in, edges from the bent normal's alpha, final
+    // AO out into the image every existing consumer already reads.
+    writeDescriptorBufferCombinedImageSampler(
+        m_xegtaoDenoiseBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoDenoiseDescriptorSetLayout, 0), 0,
+        m_xegtaoAoTermImageViews[aoFrameIndex], m_xegtaoPointSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    writeDescriptorBufferCombinedImageSampler(
+        m_xegtaoDenoiseBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoDenoiseDescriptorSetLayout, 1), 0,
+        m_xegtaoBentNormalImageViews[aoFrameIndex], m_xegtaoPointSampler,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    writeDescriptorBufferStorageImage(
+        m_xegtaoDenoiseBufferSet, frameIndex,
+        descriptorBufferBindingOffset(m_xegtaoDenoiseDescriptorSetLayout, 2),
+        m_ssaoRawImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
 }
 
 } // namespace odai::render

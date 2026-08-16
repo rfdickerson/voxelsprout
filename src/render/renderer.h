@@ -79,6 +79,16 @@ public:
     // (see renderer_types.h) -- each slot is fully independent (own template,
     // own pose, own draws), sized for a small party, not a mass-battle crowd.
     bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
+    // Uploads a skinned actor's textures and returns one bindless slot per
+    // input, in order (0xffffffff where a texture was unusable). Those slots
+    // are what ImportedSkinnedMeshVertex::textureIndex must hold: a skinned
+    // template's vertices go to the GPU verbatim, with none of the scene-index
+    // remapping addImportedSceneChunk does for world geometry, so there is no
+    // other way for a skinned actor to be textured. Call before
+    // uploadSkinnedMeshTemplate and write the slots into the vertices.
+    std::vector<std::uint32_t> uploadSkinnedActorTextures(
+        std::uint32_t instanceIndex,
+        const std::vector<odai::importer::ImportedSceneTexture>& textures);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     void setSkinningDebugBypass(bool bypass);
     // Temporal AA (camera reprojection; static world). Off by default.
@@ -129,7 +139,17 @@ public:
     // Sets every colour-grading term to its neutral value. See the backend's
     // definition for why this is a reset rather than a bypass.
     void setNeutralColorGrading();
+    // Set the whole post grade at once. setNeutralColorGrading() is exactly
+    // setColorGrading(ColorGradingSettings{}).
+    void setColorGrading(const ColorGradingSettings& settings);
     [[nodiscard]] bool isAutoExposureEnabled() const;
+    // Replaces the shaded frame with a single visualization of what the main
+    // pass shaded with -- see DebugView. Off by default and free when off: the
+    // mode rides in an already-spare camera-uniform channel and every consumer
+    // is behind a "!= Off" branch, so an unset view compiles to the same work
+    // the shader always did. Call any time after init().
+    void setDebugView(DebugView view);
+    [[nodiscard]] DebugView debugView() const;
     void setVoxelGiEnabled(bool enabled);
     [[nodiscard]] bool isVoxelGiEnabled() const;
     // App-level opt-out of the sun shaft pass (a 20-tap radial march per pixel at AO
@@ -152,6 +172,13 @@ public:
     // presented yet. See frame_capture.cc for why this lives in the engine
     // instead of relying on an external screenshot tool.
     bool captureFrameToFile(const std::string& outputPath);
+    // The same readback as tightly packed RGB, for streaming a sequence into an
+    // encoder rather than to disk (see render/video_writer.h). Unlike the file
+    // form, this is meant to be called every frame: the readback resources are
+    // built once and reused.
+    bool captureFrameRgb(std::vector<std::uint8_t>& outRgb,
+                         std::uint32_t& outWidth,
+                         std::uint32_t& outHeight);
     void setGameplayUiState(const GameplayUiState& state);
     // Hand the renderer the UI geometry to draw over the scene this frame.
     void setUiDrawData(const odai::ui::UiDrawData& drawData);
@@ -174,8 +201,24 @@ public:
         std::span<const std::size_t> visibleChunkIndices,
         const ImportedActorFrameData* importedActors = nullptr
     );
+    // Upscaling. Set before init() to take effect on the first swapchain build:
+    // the quality preset chooses the internal render resolution, which sizes
+    // every render target. upscalerStatus() reports what actually runs, which is
+    // not always what was asked for -- see UpscalerStatus.
+    void setUpscalerSettings(const UpscalerSettings& settings);
+    [[nodiscard]] UpscalerStatus upscalerStatus() const;
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
+    // Stats keeps the readouts and drops every tuning control; Full is the
+    // whole console. Visibility and mode are independent -- F4 toggles the
+    // former without disturbing the latter.
+    void setDebugUiMode(DebugUiMode mode);
+    [[nodiscard]] DebugUiMode debugUiMode() const;
+    // Game-supplied readouts, appended to the stats window in the order given.
+    // Rebuilt per frame by the caller; cheap to skip entirely by checking
+    // isDebugUiVisible() first, which is what avoids formatting strings nobody
+    // is going to look at.
+    void setDebugStatGroups(std::vector<DebugStatGroup> groups);
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
     void setFramePacingSettings(const FramePacingSettings& settings);
@@ -212,11 +255,29 @@ public:
     // Tone curve for the post pass. Default is ACES, so this is inert
     // unless a game selects otherwise.
     void setTonemapSettings(const TonemapSettings& settings);
-    // Post-process depth of field (tilt-shift/diorama look). Focus is a view
-    // distance in world units; geometry within +-focusRange stays sharp and
-    // blur ramps to maxRadiusPixels beyond it.
-    void setDepthOfField(bool enabled, float focusDistance, float focusRange, float maxRadiusPixels);
+    // Read back what is in force, so a caller can change ONE field without
+    // silently resetting the rest to struct defaults -- which is exactly what
+    // `setTonemapSettings(TonemapSettings{})` does to an ENB configuration.
+    [[nodiscard]] TonemapSettings tonemapSettings() const;
+    // Post-process depth of field. Focus is a view distance in world units;
+    // blur ramps to maxRadiusPixels over focusRange BEHIND the focal plane and,
+    // scaled by nearBlurScale, over focusRange/nearBlurScale IN FRONT of it.
+    //
+    // nearBlurScale is the near-field ramp rate, and it is the knob that picks
+    // the look: 0 is far-only (a blurred backdrop with a sharp foreground),
+    // ~1.25 blurs both ends hard for a tilt-shift/diorama miniature, and a
+    // value BELOW 1 stretches the near ramp out -- which is what a portrait
+    // framing wants, so a subject standing a little in front of the focal
+    // plane does not go soft along with the ground it is standing on.
+    //
+    // It DEFAULTS TO 0 so that adding the near field changed no existing
+    // caller's look: before this parameter the shader blurred only the far
+    // side, and a caller that does not ask for a near field still gets exactly
+    // that.
+    void setDepthOfField(bool enabled, float focusDistance, float focusRange,
+                         float maxRadiusPixels, float nearBlurScale = 0.0f);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,

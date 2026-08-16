@@ -1,5 +1,7 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "render/upscale/upscale_policy.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -26,8 +28,51 @@ int main(int argc, char** argv) {
     //
     // ODAI_RENDER_SCALE still dials it back; 0.6 is worth reaching for on a 4K
     // swapchain, where the fill-bound half of that budget quadruples.
-    setenv("ODAI_SHADOW_DISTANCE", "3500", 0);
+    // NO SHADOW DISTANCE OVERRIDE. There used to be a
+    // setenv("ODAI_SHADOW_DISTANCE", "3500", 0) here, sitting under the render
+    // scale comment above with no comment of its own, and it silently beat
+    // every default the renderer chose. 3500 units is about 50 metres: shadows
+    // worked close and midrange and then simply stopped, on every worldspace of
+    // every game this viewer opens.
+    //
+    // It also made the renderer's own cascade tuning unmeasurable from here. An
+    // A/B of ODAI_SHADOW_DISTANCE looked like it worked -- because passing the
+    // variable explicitly overrode this line -- while changing the DEFAULT in
+    // frame_run.cc appeared to do nothing at all. Two experiments that disagree
+    // like that are a strong hint that something upstream is pinning the value.
+    //
+    // The renderer now caps at its own far plane; see frame_run.cc.
     odai::games::newvegas::NewVegasApp app;
+    // TAA ON, AT NATIVE RESOLUTION, BY DEFAULT.
+    //
+    // setTaaEnabled(true) was doing nothing: recordTaaPass returns early with no
+    // upscaler object, and the default backend is Off, so every run of this
+    // viewer since TAA landed has rendered with the pass costing 0.000 ms in the
+    // GPU timings. The give-away was there in every capture and reads as an
+    // unused feature rather than a broken one.
+    //
+    // It matters most for AO. XeGTAO's whole design puts its sampling error in
+    // high-frequency noise that a denoiser and a TEMPORAL average are meant to
+    // clear; without the temporal half, what is left is stipple. Measured on a
+    // Seyda Neen frame, the AO debug view's mean laplacian goes 0.965 -> 0.821,
+    // a 15% drop, purely from the resolve running at all.
+    //
+    // That 15% is the honest number and the first one I took was not. Enabling
+    // TAA the only way that worked before this change -- "--upscaler temporal"
+    // -- measured 41%, but it also dropped the render scale to 0.667, and a
+    // frame rendered at 44% of the pixels is smoother for reasons that have
+    // nothing to do with the temporal resolve.
+    //
+    // Native quality rather than the default Quality preset, because those two
+    // things had been welded together: asking for the temporal backend also
+    // dropped the render scale to 1/1.5, so "turn TAA on" silently meant "render
+    // at 44% of the pixels". A later --upscaler argument still overrides both.
+    {
+        odai::render::UpscalerSettings upscaler = app.upscalerSettings();
+        upscaler.backend = odai::render::UpscalerBackend::Temporal;
+        upscaler.quality = odai::render::UpscalerQuality::Native;
+        app.setUpscalerSettings(upscaler);
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
             app.setScenePath(argv[++i]);
@@ -42,6 +87,26 @@ int main(int argc, char** argv) {
             // An extra plugin loaded after --plugin; masters resolve on their
             // own, so "--plugin-add NevadaSkies.esp" is enough.
             app.addPlugin(argv[++i]);
+        } else if (std::strcmp(argv[i], "--upscaler") == 0 && i + 1 < argc) {
+            // off | temporal | xess | fsr | dlss. Unavailable backends report
+            // why and fall back rather than failing to launch.
+            odai::render::UpscalerSettings upscaler = app.upscalerSettings();
+            if (odai::render::parseUpscalerBackend(argv[++i], upscaler.backend)) {
+                app.setUpscalerSettings(upscaler);
+            } else {
+                std::cout << "unknown --upscaler backend: " << argv[i]
+                          << " (off|temporal|xess|fsr|dlss)\n";
+                return 1;
+            }
+        } else if (std::strcmp(argv[i], "--upscaler-quality") == 0 && i + 1 < argc) {
+            odai::render::UpscalerSettings upscaler = app.upscalerSettings();
+            if (odai::render::parseUpscalerQuality(argv[++i], upscaler.quality)) {
+                app.setUpscalerSettings(upscaler);
+            } else {
+                std::cout << "unknown --upscaler-quality: " << argv[i]
+                          << " (native|ultraquality|quality|balanced|performance|ultraperformance)\n";
+                return 1;
+            }
         } else if (std::strcmp(argv[i], "--weather") == 0 && i + 1 < argc) {
             app.setWeather(argv[++i]);
         } else if (std::strcmp(argv[i], "--mod") == 0 && i + 1 < argc) {
@@ -52,6 +117,10 @@ int main(int argc, char** argv) {
             app.setStreamCacheDirectory(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
             app.setStreamCacheEnabled(false);
+        } else if (std::strcmp(argv[i], "--interior") == 0 && i + 1 < argc) {
+            // Start INSIDE this interior rather than on its doorstep, which is
+            // where New Vegas itself begins: --interior GSDocMitchellHouse.
+            app.startInsideInterior(argv[++i]);
         } else if (std::strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
             // Interior cell whose doorstep to start on, e.g. GSDocMitchellHouse.
             app.setStreamSpawnInterior(argv[++i]);
@@ -81,12 +150,67 @@ int main(int argc, char** argv) {
                 }
             }
             app.setScreenshotRequest(path, warmupFrames);
+        } else if (std::strcmp(argv[i], "--tour-file") == 0 && i + 1 < argc) {
+            const std::string path = argv[++i];
+            const int loaded = odai::games::newvegas::loadTourFile(path);
+            if (loaded == 0) {
+                std::cout << "could not read a tour from " << path
+                          << " (need at least 4 lines of 'px py pz lx ly lz')\n";
+                return 1;
+            }
+            std::cout << "tour: " << loaded << " waypoints from " << path << "\n";
+        } else if (std::strcmp(argv[i], "--flythrough") == 0) {
+            // Scripted tour of Goodsprings. Optional length in seconds.
+            float seconds = 40.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                seconds = static_cast<float>(std::atof(argv[++i]));
+            }
+            app.setFlythroughSeconds(seconds > 1.0f ? seconds : 40.0f);
+        } else if (std::strcmp(argv[i], "--capture-seq") == 0 && i + 1 < argc) {
+            // <dir> [fps] [seconds]. Frames are numbered PPMs for ffmpeg.
+            const std::string directory = argv[++i];
+            float fps = 30.0f;
+            float seconds = 40.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                fps = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                seconds = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (fps < 1.0f) {
+                fps = 30.0f;
+            }
+            app.setCaptureSequence(directory, static_cast<int>(fps * seconds), fps);
+        } else if (std::strcmp(argv[i], "--capture-video") == 0 && i + 1 < argc) {
+            // <out.mp4> [fps] [seconds]. Frames are piped to ffmpeg as they are
+            // rendered; nothing lands on disk but the finished file.
+            const std::string outputPath = argv[++i];
+            float fps = 60.0f;
+            float seconds = 40.0f;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                fps = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                seconds = static_cast<float>(std::atof(argv[++i]));
+            }
+            if (fps < 1.0f) {
+                fps = 60.0f;
+            }
+            app.setCaptureVideo(outputPath, static_cast<int>(fps * seconds), fps);
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::cout << "odai_game_newvegas [--scene <path.bin>]\n"
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
                       << "odai_game_newvegas --screenshot <out.ppm> [frames]\n"
                       << "  Render `frames` frames (default 8), write a PPM, and quit.\n"
                       << "  Cook a scene first with odai_newvegas_cooker.\n"
+                      << "odai_game_newvegas --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
+                      << "  Fly the tour and encode it directly, then quit. Needs ffmpeg on PATH;\n"
+                      << "  $ODAI_CAPTURE_ENCODER overrides the auto-detected H.264 encoder.\n"
+                      << "odai_game_newvegas --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
+                      << "  The same, as numbered PPMs. Prefer --capture-video: a still sequence\n"
+                      << "  at this resolution is gigabytes.\n"
+                      << "odai_game_newvegas --tour-file <path>\n"
+                      << "  Replace the built-in Goodsprings path with rows of `px py pz  lx ly lz`.\n"
                       << "odai_game_newvegas --character [<skeleton.nif> <part.nif>...]\n"
                       << "  Stand one GPU-skinned character in bind pose, no world.\n"
                       << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n"

@@ -31,6 +31,7 @@
 // waste is CPU-side, and it is measured rather than assumed (see
 // CellStreamerStats::worstBuildMs).
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -42,6 +43,7 @@
 #include "import/cell_residency_planner.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/cell_builder.h"
+#include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
 
@@ -83,6 +85,14 @@ struct CellStreamerStats {
     // Only cache MISSES contribute: a cell served from disk never parses a NIF,
     // so this reads zero on a warm cache no matter what the meshes contain.
     std::uint64_t nodeParseFailures = 0;
+    // Per-vertex ATXT layer contributions beyond the four a vertex can hold,
+    // summed over cells built this run. Nonzero means a quadrant lost its
+    // weakest painted layers, which renders as a hard straight edge at the
+    // quadrant boundary rather than as anything that looks like an error. Same
+    // cache caveat as nodeParseFailures: only misses contribute.
+    std::uint64_t droppedTerrainLayers = 0;
+    // Cells that contributed a water surface, i.e. coast, lake or river.
+    std::uint64_t waterPatchesLoaded = 0;
     // Draws carrying kImportedSceneMaterialFlagAlphaBlend, i.e. those replayed
     // through the blended pipeline instead of the opaque one.
     std::uint64_t blendedPartsLoaded = 0;
@@ -117,6 +127,15 @@ public:
     // The plugin's size and modification time are folded into a subdirectory
     // name, so a changed or different plugin simply misses rather than reading
     // stale geometry -- nothing is ever deleted to invalidate. Empty disables it.
+    // Stream with an explicit load order instead of one plugin. The order's
+    // FIRST entry must be the plugin the worldspace lives in; the rest override
+    // it in ascending priority. Call before open(). Without this the streamer
+    // reads exactly one plugin, which is what it always did.
+    void setLoadOrder(FalloutLoadOrder order) {
+        m_loadOrder = std::move(order);
+        m_useLoadOrder = !m_loadOrder.empty();
+    }
+
     void setCacheDirectory(std::filesystem::path directory) {
         m_cacheDirectory = std::move(directory);
     }
@@ -181,6 +200,54 @@ public:
     // terrain heights. Returns false when no cells are available.
     bool suggestedSpawnEngineSpace(float outPosition[3]) const;
 
+    // True when no cell build is in flight and none is waiting to be applied.
+    // A capture uses this to know the world has stopped arriving. Counting warm-up
+    // FRAMES is the obvious proxy and a bad one: how much streaming fits in a
+    // fixed frame count depends entirely on how fast the renderer happens to be,
+    // so speeding up capture silently shortened the warm-up and started recording
+    // half-loaded towns.
+    bool isStreamingIdle() const;
+
+    // Everything a room needs that is not its geometry: how it is lit, and
+    // somewhere inside it to stand.
+    struct InteriorScene {
+        // As authored, sRGB 0..1. See FalloutCellRecord's XCLL note: an interior
+        // has no sun, so ambient is usually the whole rig.
+        bool hasLighting = false;
+        std::uint16_t cellFlags = 0u;
+        bool showSky = false;
+        bool useSkyLighting = false;
+        float ambientColor[3] = {};
+        float directionalColor[3] = {};
+        float fogColor[3] = {};
+        float fogNear = 0.0f;
+        float fogFar = 0.0f;
+        // Engine space, on the floor. Taken from the room's own teleport door
+        // and stepped inward, because a door is the one reference in an interior
+        // guaranteed to stand somewhere a person can.
+        bool hasSpawn = false;
+        float spawnPosition[3] = {};
+        float spawnYawDegrees = 0.0f;
+        // True when spawnPosition came from the scene's bounding box rather than
+        // from a navmesh triangle. Skyrim's NAVM is a TES5-layout record this
+        // reader does not parse, so this is the path EVERY Skyrim interior
+        // takes; it is reported because "centre of the bounding box" can land
+        // in a wall where "middle of the largest floor" cannot.
+        bool spawnFromBounds = false;
+    };
+
+    // Builds one INTERIOR cell into a scene, synchronously -- interiors are one
+    // room, not a streaming grid, and Doc Mitchell's house is ~1.6 s cold and
+    // far less warm. Uses the same extract-and-build path the streaming jobs do,
+    // so an interior cannot drift from how an exterior cell is made.
+    //
+    // Returns false if no interior with that EditorID exists.
+    bool buildInteriorScene(
+        const std::string& interiorEditorId,
+        ImportedScene& outScene,
+        InteriorScene& outInterior,
+        std::string& outError);
+
     // Spawn on the doorstep of a named interior, in ENGINE space -- e.g.
     // "GSDocMitchellHouse" for where Fallout: New Vegas actually starts you.
     //
@@ -218,6 +285,32 @@ public:
 
     [[nodiscard]] CellStreamerStats stats() const;
     [[nodiscard]] std::size_t availableCellCount() const { return m_availableCells.size(); }
+    // Inclusive grid bounds of the cells this worldspace actually has, which is
+    // what a caller needs to cover the world with anything -- distant LOD tiles,
+    // a map, a preload sweep. Returns false when the worldspace is empty.
+    //
+    // Derived from the OCCUPIED cells rather than from the worldspace record's
+    // own NAM0/NAM9 corners, which are not the same thing: Bravil's corners span
+    // 52 cells of open bay and frame no city at all.
+    [[nodiscard]] bool cellGridBounds(
+        std::int32_t& outMinX, std::int32_t& outMinZ,
+        std::int32_t& outMaxX, std::int32_t& outMaxZ) const {
+        bool any = false;
+        for (const auto& [coord, unused] : m_availableCells) {
+            (void)unused;
+            if (!any) {
+                outMinX = outMaxX = coord.x;
+                outMinZ = outMaxZ = coord.z;
+                any = true;
+                continue;
+            }
+            outMinX = std::min(outMinX, coord.x);
+            outMaxX = std::max(outMaxX, coord.x);
+            outMinZ = std::min(outMinZ, coord.z);
+            outMaxZ = std::max(outMaxZ, coord.z);
+        }
+        return any;
+    }
     [[nodiscard]] bool isOpen() const { return m_jobs != nullptr; }
 
 private:
@@ -225,8 +318,21 @@ private:
 
     void applyCompletedLoads(render::Renderer& renderer);
 
+    // Rewrites regionNamesByFormId for the plugins that store RDMP as a
+    // localized string ID rather than as text (Skyrim; see strings_table.h).
+    // Runs after the world tables are built and before anything reads a name.
+    // A no-op for every Fallout and Oblivion plugin, whose RDMP already IS the
+    // name -- the string-ID map is empty for them.
+    void resolveLocalizedRegionNames();
+
     CellResidencyPlanner m_planner;
     std::filesystem::path m_esmPath;
+    // The whole load order, when the caller supplied extra plugins. Cells,
+    // references and base records are then merged across it with later plugins
+    // overriding earlier ones -- the only way a patch's fixes reach the scene.
+    // Empty means the single-plugin path, which stays byte-identical.
+    FalloutLoadOrder m_loadOrder;
+    bool m_useLoadOrder = false;
     std::vector<std::filesystem::path> m_modDirectories;
     std::uint32_t m_maxTextureSize = 512u;
     std::filesystem::path m_cacheDirectory;
@@ -236,6 +342,15 @@ private:
     DecodedTextureCache m_textureCache;
     FalloutWorldTables m_worldTables;
     FalloutCellIndex m_cellIndex;
+
+public:
+    // World units one exterior cell covers in the plugin being streamed. The
+    // caller sizes its residency grid from this rather than assuming 4096:
+    // Morrowind's cells are 8192, and a grid built on the wrong figure loads a
+    // quarter of the world it believes it is loading.
+    [[nodiscard]] float cellWorldSize() const { return m_cellIndex.cellWorldSize; }
+
+private:
     FalloutAssetSource m_assets;
     // Grid coordinate -> index into m_cellIndex.cells, for the chosen worldspace
     // only. The worldspace is not a rectangle, so this is also what stops the

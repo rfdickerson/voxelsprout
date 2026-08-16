@@ -148,14 +148,33 @@ struct UiNavStickMapper {
     float releaseThreshold = 0.35f;
 
     void apply(UiNavInput& input, float axisX, float axisY) {
-        m_x = resolve(m_x, axisX);
-        m_y = resolve(m_y, axisY);
-        input.setAction(UiNavAction::Left, m_x < 0);
-        input.setAction(UiNavAction::Right, m_x > 0);
+        int directionX = 0;
+        int directionY = 0;
+        resolveDirection(axisX, axisY, directionX, directionY);
+        input.setAction(UiNavAction::Left, directionX < 0);
+        input.setAction(UiNavAction::Right, directionX > 0);
         // Screen-space: stick up (negative axis on every gamepad GLFW reports)
         // moves focus up.
-        input.setAction(UiNavAction::Up, m_y < 0);
-        input.setAction(UiNavAction::Down, m_y > 0);
+        input.setAction(UiNavAction::Up, directionY < 0);
+        input.setAction(UiNavAction::Down, directionY > 0);
+    }
+
+    // Advances the hysteresis latch and reports the resolved direction WITHOUT
+    // writing to a UiNavInput. -1/0/+1 per axis, screen-space.
+    //
+    // This exists because setAction derives its press edge from the previous
+    // value of `down`, so it must be called at most ONCE per action per frame.
+    // A caller that has a stick AND a d-pad AND arrow keys cannot use apply()
+    // and then OR the digital sources in on top: apply() would write false,
+    // the digital source would write true, and the second call would see the
+    // first call's false as "last frame" and manufacture a brand-new press --
+    // every frame the key is held. That reads as a menu that scrolls at frame
+    // rate. Resolve here, OR the sources together, and set once.
+    void resolveDirection(float axisX, float axisY, int& outDirectionX, int& outDirectionY) {
+        m_x = resolve(m_x, axisX);
+        m_y = resolve(m_y, axisY);
+        outDirectionX = m_x;
+        outDirectionY = m_y;
     }
 
 private:

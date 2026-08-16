@@ -21,9 +21,10 @@
 // rig (anim::makeBipedSkeleton, procgen::buildHumanoidSkinnedMesh), driven
 // through Renderer::uploadSkinnedMeshTemplate/setSkinnedActorPose.
 //
-// Deliberately NOT a mass-battle RTS: kMaxSkinnedInstances (8) is the hard
-// ceiling, matching docs/ROADMAP.md's explicit out-of-scope note on
-// thousands-of-units crowd rendering.
+// Deliberately NOT a mass-battle RTS: kMaxSkinnedInstances is the hard ceiling,
+// matching docs/ROADMAP.md's explicit out-of-scope note on thousands-of-units
+// crowd rendering. (That constant is no longer 8 -- see renderer_types.h -- but
+// the point stands: every slot is independently posed and dispatched.)
 namespace odai::games::legion {
 
 enum class CombatState : std::uint8_t { Idle, Walk, Attack, Dead };

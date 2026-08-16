@@ -13,6 +13,27 @@ Sampler2D<float4> normalDepthTexture;
 Sampler2D<float4> ssaoTexture;
 [[vk::binding(10, 0)]]
 Sampler2D<float4> sunShaftTexture;
+// SEPARATE FROM hdrSceneColor, and the reason is the bloom chain below.
+//
+// Bloom is gathered by sampling MIPS 0-5 of one texture. hdrSceneColor is the
+// scene input, and once a temporal upscaler exists that is a single-mip image at
+// output resolution -- every "mip" fetch then returns mip0, so bloom becomes six
+// copies of the full-resolution scene added on top of itself. Measured as a
+// uniform 1.27x brightening of the whole frame, which reads as a washed-out
+// image rather than as anything bloom-shaped.
+//
+// This binding always points at the mip-chained render-resolution HDR target,
+// whether or not an upscaler ran. When none did, both bindings are the same
+// image and the result is byte-identical to before.
+[[vk::binding(14, 0)]]
+Sampler2D<float4> bloomSourceColor;
+
+// DebugView in src/render/renderer_types.h; change both together. Only the two
+// this pass acts on are named here -- every other mode is handled in
+// imported_static.frag.slang and reaches here as "not Off", which is all the
+// tonemap bypass needs to know.
+static const uint kDebugViewOff = 0u;
+static const uint kDebugViewLinearDepth = 10u;
 
 float3 acesFilmTonemap(float3 color)
 {
@@ -22,6 +43,37 @@ float3 acesFilmTonemap(float3 color)
     const float d = 0.59;
     const float e = 0.14;
     return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+}
+
+// The same fit, renormalized so that `whitePoint` scene-linear maps to display
+// white instead of the curve's own asymptote.
+//
+// The Narkowicz fit approaches 1.0 only as input grows without bound, so with
+// auto-exposure holding the scene around middle grey the frame's brightest
+// pixels land near 0.65 and the top third of the display range is never
+// addressed at all. Dividing by the curve's value AT the white point is the
+// standard Hable/Reinhard remedy -- curve(x)/curve(W) -- and it pins a chosen
+// scene value to 1.0 without changing the toe, so shadows keep the filmic roll
+// they already had.
+//
+// `shoulder` blends between the raw fit and the normalized one, because pinning
+// white exactly is often too much: it makes the sky clip flat. Around 0.6-0.8
+// lifts the highlights into the range while leaving the very top soft.
+//
+// whitePoint <= 0 returns the plain fit BIT-FOR-BIT, which is the default and
+// is what keeps every other game in this engine rendering exactly as before.
+float3 acesFilmTonemapWhite(float3 color, float whitePoint, float shoulder)
+{
+    const float3 raw = acesFilmTonemap(color);
+    if (whitePoint <= 0.0)
+    {
+        return raw;
+    }
+    // Scalar: the fit is applied per channel but the normalizer must not be, or
+    // it becomes a per-channel gain and shifts hue in the highlights.
+    const float3 white = acesFilmTonemap(float3(whitePoint, whitePoint, whitePoint));
+    const float3 normalized = clamp(raw / max(white, 1e-4), 0.0, 1.0);
+    return lerp(raw, normalized, clamp(shoulder, 0.0, 1.0));
 }
 
 // The tonemap Enhanced Shaders uses (ENB's POSTPROCESS==2), transcribed from
@@ -192,9 +244,32 @@ float depthOfFieldRadiusPixels(float viewDepth)
     const float sharpDistance = max(camera.dofConfig.y, 0.5);
     const float falloffDistance = max(camera.dofConfig.z, 0.5);
     const float maxRadiusPixels = max(camera.dofConfig.w, 0.0);
+
+    // Behind the subject.
     const float distanceBeyondFocus = max(viewDepth - sharpDistance, 0.0);
-    const float focusFalloff = smoothstep(0.0, falloffDistance, distanceBeyondFocus);
-    return focusFalloff * maxRadiusPixels;
+    const float farFalloff = smoothstep(0.0, falloffDistance, distanceBeyondFocus);
+
+    // In FRONT of the subject. A lens defocuses on both sides of the focal
+    // plane, and leaving this out is very visible on a portrait framing: the
+    // background separates but whatever the camera is standing behind -- a
+    // fence, a doorway, the ground -- stays razor sharp, which reads as a
+    // blurred backdrop rather than as a shallow lens.
+    //
+    // The near side ramps FASTER than the far side, which is also what real
+    // optics do (near depth of field is roughly half the far at portrait
+    // distances), and dofConfig2.x is how much faster. It was already uploaded
+    // for this and simply never read; 0 disables the near field and restores
+    // the far-only behaviour exactly.
+    const float nearBlurScale = camera.dofConfig2.x;
+    float nearFalloff = 0.0;
+    if (nearBlurScale > 0.0001)
+    {
+        const float distanceBeforeFocus = max(sharpDistance - viewDepth, 0.0);
+        nearFalloff =
+            smoothstep(0.0, falloffDistance / nearBlurScale, distanceBeforeFocus);
+    }
+
+    return max(farFalloff, nearFalloff) * maxRadiusPixels;
 }
 
 float3 sampleDepthOfField(
@@ -268,12 +343,12 @@ float3 sampleMipChainBloom(float2 uv, float exposureScale)
 {
     const float bloomThreshold = max(camera.skyConfig3.x / max(exposureScale, 1e-4), 0.0);
     const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
-    const float3 bloomMip0 = extractBloom(hdrSceneColor.SampleLevel(uv, 0.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip1 = extractBloom(hdrSceneColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip2 = extractBloom(hdrSceneColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip3 = extractBloom(hdrSceneColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip4 = extractBloom(hdrSceneColor.SampleLevel(uv, 4.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip5 = extractBloom(hdrSceneColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip0 = extractBloom(bloomSourceColor.SampleLevel(uv, 0.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip1 = extractBloom(bloomSourceColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip2 = extractBloom(bloomSourceColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip3 = extractBloom(bloomSourceColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip4 = extractBloom(bloomSourceColor.SampleLevel(uv, 4.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip5 = extractBloom(bloomSourceColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
 
     float3 bloom =
         (bloomMip0 * 0.20) +
@@ -462,7 +537,29 @@ float3 volumetricIncidentRadiance(
     const float3 groundBounce = lerp(float3(0.54, 0.49, 0.40), float3(0.66, 0.46, 0.30), twilightFactor);
     const float3 skyRadiance = lerp(skyHorizon, skyZenith, pow(skyT, 0.45));
     const float ambientStrength = lerp(0.86, 1.26, dayFactor);
-    const float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
+    float3 ambientRadiance = lerp(skyRadiance, groundBounce, valleyT * 0.10) * ambientStrength;
+
+    // THE PALETTE ABOVE IS A CLEAR-BLUE-SKY ASSUMPTION. Fog is lit by the sky
+    // it sits under, so hardcoding one sky makes the haze disagree with any
+    // authored weather: a Mojave dust weather renders an olive sky with
+    // blue-grey haze in front of it, which reads as two unrelated atmospheres
+    // meeting at the horizon line.
+    //
+    // A WTHR record already ships the answer -- its Fog channel is the colour
+    // the game authored for distance haze under exactly this weather, at
+    // exactly this hour -- and it was being uploaded to `weatherFog` and read
+    // by nothing at all. Weight 0 (every game but New Vegas) leaves the
+    // procedural palette byte-identical.
+    const float weatherWeight = saturate(camera.weatherSkyUpper.w);
+    if (weatherWeight > 0.0)
+    {
+        // Fog colour for horizontal and downward rays, which is where geometry
+        // is; only a ray heading for the zenith picks up the sky colour, and
+        // that one is mostly looking at sky the fog pass never touches.
+        const float3 weatherHaze =
+            lerp(camera.weatherFog.xyz, camera.weatherSkyUpper.xyz, smoothstep(0.5, 1.0, skyT));
+        ambientRadiance = lerp(ambientRadiance, weatherHaze, weatherWeight);
+    }
 
     const float cosTheta = clamp(dot(worldViewDir, toSun), -1.0, 1.0);
     const float sunPhase = hgPhase(cosTheta, camera.skyConfig0.z);
@@ -552,6 +649,27 @@ float4 main(FragmentInput input) : SV_Target0
         toneMapped = applySaturation(toneMapped, 1.0);
         const float3 ldrSrgb = pow(clamp(toneMapped, 0.0, 1.0), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
         return float4(ldrSrgb, 1.0);
+    }
+
+    // DebugView in src/render/renderer_types.h. Every mode but LinearDepth is
+    // produced by the main pass and has already written a display-ready colour
+    // into hdrSceneColor, so the whole exposure/tonemap/grading chain below has
+    // to be skipped -- an albedo view shown through ACES and auto-exposure is
+    // not albedo. Only the sRGB encode is kept, because the swapchain is UNORM
+    // and something has to do it.
+    const uint debugView = uint(camera.tonemapConfig2.y + 0.5);
+    if (debugView == kDebugViewLinearDepth)
+    {
+        // Ramped over the far shadow cascade, which is the scene's own sense of
+        // "far" rather than an arbitrary constant.
+        const float far = max(camera.shadowCascadeSplits.w, 1.0);
+        const float t = saturate(viewDepth / far) * geometryMask;
+        return float4(pow(float3(t, t, t), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)), 1.0);
+    }
+    if (debugView != kDebugViewOff)
+    {
+        return float4(
+            pow(saturate(hdrColor), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2)), 1.0);
     }
 
     if (ssaoMode > 2.5)
@@ -684,7 +802,10 @@ float4 main(FragmentInput input) : SV_Target0
     }
     else
     {
-        toneMapped = acesFilmTonemap(hdrColor * exposureScale);
+        toneMapped = acesFilmTonemapWhite(
+            hdrColor * exposureScale,
+            camera.hdrHighlightConfig.x,
+            camera.hdrHighlightConfig.y);
     }
     toneMapped = applyWhiteBalance(
         toneMapped,

@@ -1,21 +1,28 @@
 import camera_uniform;
+import imported_vertex_pack;
 
 struct VertexInput
 {
     [[vk::location(0)]] float3 inPosition : TEXCOORD0;
-    [[vk::location(1)]] float3 inNormal : TEXCOORD1;
-    [[vk::location(2)]] float3 inColor : TEXCOORD2;
+    // Octahedral snorm16x2; the fetch hands it over as float2 in [-1,1].
+    [[vk::location(1)]] float2 inNormalOct : TEXCOORD1;
+    // sRGB-encoded unorm8x3 plus a LINEAR alpha byte. The alpha is authored
+    // vertex alpha (see ImportedSceneVertex::colorAlpha) and is not sRGB: it is
+    // a coverage fraction, not a colour, so it passes through undecoded.
+    [[vk::location(2)]] float4 inColorSrgb : TEXCOORD2;
     [[vk::location(3)]] float2 inUv : TEXCOORD3;
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
     [[vk::location(5)]] uint inFlags : TEXCOORD5;
     // Terrain layer blend (Fallout ATXT/VTXT). The four slots are bindless
-    // texture indices, constant across a draw; the weights arrive as one packed
-    // word and are unpacked here so they can interpolate across the triangle.
-    [[vk::location(6)]] uint inLayerTexture0 : TEXCOORD6;
-    [[vk::location(7)]] uint inLayerTexture1 : TEXCOORD7;
-    [[vk::location(8)]] uint inLayerTexture2 : TEXCOORD8;
-    [[vk::location(9)]] uint inLayerTexture3 : TEXCOORD9;
-    [[vk::location(10)]] uint inLayerWeights : TEXCOORD10;
+    // texture indices, constant across a draw, and arrive as ONE
+    // R16G16B16A16_UINT fetch; the weights arrive as one packed word and are
+    // unpacked here so they can interpolate across the triangle.
+    //
+    // 0xffff, not 0xffffffff, is "no layer" now that the slots are 16 bits --
+    // widened back below so the fragment shader keeps comparing against the
+    // 32-bit invalid sentinel it always did.
+    [[vk::location(6)]] uint4 inLayerTextures : TEXCOORD6;
+    [[vk::location(7)]] uint inLayerWeights : TEXCOORD7;
 };
 
 struct VertexOutput
@@ -23,7 +30,8 @@ struct VertexOutput
     float4 position : SV_Position;
     float3 outWorldPosition : TEXCOORD0;
     float3 outWorldNormal : TEXCOORD1;
-    float3 outColor : TEXCOORD2;
+    // .rgb the decoded linear tint, .a the authored vertex alpha.
+    float4 outColor : TEXCOORD2;
     float2 outUv : TEXCOORD3;
     nointerpolation uint outTextureIndex : TEXCOORD4;
     nointerpolation uint outFlags : TEXCOORD5;
@@ -38,13 +46,15 @@ VertexOutput main(VertexInput input)
 {
     VertexOutput output;
     output.outWorldPosition = input.inPosition;
-    output.outWorldNormal = normalize(input.inNormal);
-    output.outColor = input.inColor;
+    output.outWorldNormal = decodeImportedVertexNormal(input.inNormalOct);
+    output.outColor = float4(decodeImportedVertexColor(input.inColorSrgb), input.inColorSrgb.a);
     output.outUv = input.inUv;
     output.outTextureIndex = input.inTextureIndex;
     output.outFlags = input.inFlags;
-    output.outLayerTextures = uint4(
-        input.inLayerTexture0, input.inLayerTexture1, input.inLayerTexture2, input.inLayerTexture3);
+    output.outLayerTextures = select(
+        input.inLayerTextures == uint4(0xffffu, 0xffffu, 0xffffu, 0xffffu),
+        uint4(0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu),
+        input.inLayerTextures);
     // Byte n is layer n's weight over [0,1]; mirrors
     // packImportedSceneTerrainLayerWeights in src/import/imported_scene.h.
     output.outLayerWeights = float4(

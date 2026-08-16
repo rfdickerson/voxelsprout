@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -154,42 +155,6 @@ void writeTransform(
     instance.transform[15] = 1.0f;
 }
 
-// A post on a quadrant boundary (col or row 16) is shared by two quadrants, and
-// the centre post by all four -- the cooked mesh keeps one vertex per post, so
-// those vertices have to reconcile layers from every quadrant they touch. Taking
-// the max weight per texture is what makes the seam disappear: a layer that runs
-// up to the boundary from one side keeps its opacity there instead of being
-// halved by a quadrant that never mentioned it.
-struct TerrainLayerCandidate {
-    std::uint32_t textureIndex = kNoTextureIndex;
-    float weight = 0.0f;
-    // ATXT's declared stacking order. Carried through selection because the
-    // shader composites slot 0, then 1, then 2, and a lerp chain is not
-    // commutative -- blending the same two layers in the other order gives a
-    // different colour. Selecting the strongest layers by weight and then
-    // storing them in weight order silently reordered the stack.
-    std::uint16_t layerIndex = 0;
-};
-
-void accumulateLayerWeight(
-    std::vector<TerrainLayerCandidate>& candidates,
-    std::uint32_t textureIndex,
-    float weight,
-    std::uint16_t layerIndex
-) {
-    if (textureIndex == kNoTextureIndex || weight <= 0.0f) {
-        return;
-    }
-    for (auto& candidate : candidates) {
-        if (candidate.textureIndex == textureIndex) {
-            candidate.weight = std::max(candidate.weight, weight);
-            candidate.layerIndex = std::min(candidate.layerIndex, layerIndex);
-            return;
-        }
-    }
-    candidates.push_back(TerrainLayerCandidate{textureIndex, weight, layerIndex});
-}
-
 // True when the shape is a flat sheet: its thinnest axis is negligible compared
 // to its own footprint.
 //
@@ -229,6 +194,231 @@ bool shapeIsPlanar(const odai::importer::fnv::NifShape& shape) {
     return (thinnest / largest) < kPlanarRatio;
 }
 
+// Morrowind's terrain, which is splatted rather than blended.
+//
+// There are no quadrants and no per-post opacity layers: VTEX is a 16x16 grid of
+// land-texture indices over the cell, each entry covering a 4x4 block of quads.
+// So a cell is textured by drawing whole blocks, and the natural mesh is one
+// part per distinct texture, gathering every block that uses it -- typically two
+// to eight parts rather than the four a Fallout cell emits.
+//
+// Each block gets its OWN 5x5 vertex block rather than sharing posts with its
+// neighbours. That costs 16*16*25 = 6400 posts against 4225 shared (+51%) and
+// buys the thing that matters: the texture tiles once across each block, so a
+// shared post would need two different UVs. Same trade the Fallout path makes
+// for its quadrants, for the same reason.
+void appendMorrowindTerrainCell(
+    ImportedSceneMesh& terrainMesh,
+    const odai::importer::fnv::FalloutCellRecord& cell,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandTexture,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandTextureExact
+) {
+    using odai::importer::fnv::kLandPostSpacing;
+    using odai::importer::fnv::kMorrowindTextureBlockQuads;
+    using odai::importer::fnv::kMorrowindTextureGridSize;
+    const odai::importer::fnv::FalloutLandRecord& land = *cell.land;
+    const int gridSize = land.gridSize;
+    const float cellWorldSize = land.cellWorldSize();
+    const float cellOriginX = static_cast<float>(cell.gridX) * cellWorldSize;
+    const float cellOriginY = static_cast<float>(cell.gridZ) * cellWorldSize;
+
+    // Resolve every block's texture up front, because a block now needs to know
+    // what its NEIGHBOURS use as well as what it uses itself.
+    constexpr int kBlockCount = kMorrowindTextureGridSize * kMorrowindTextureGridSize;
+    std::array<std::uint32_t, kBlockCount> blockTexture{};
+    for (int block = 0; block < kBlockCount; ++block) {
+        std::uint32_t textureIndex = kNoTextureIndex;
+        if (static_cast<std::size_t>(block) < land.morrowindTextureGrid.size()) {
+            const std::uint16_t stored = land.morrowindTextureGrid[static_cast<std::size_t>(block)];
+            // Stored value is the LTEX index PLUS ONE; 0 means the worldspace
+            // default, which this importer serves from the fallback texture.
+            if (stored != 0u) {
+                textureIndex = resolveLandTextureExact(stored);
+            }
+        }
+        if (textureIndex == kNoTextureIndex) {
+            textureIndex = resolveLandTexture(0u);
+        }
+        blockTexture[static_cast<std::size_t>(block)] = textureIndex;
+    }
+
+    // Group blocks by the texture they resolve to, so one part covers every
+    // block sharing a texture rather than one part per block (256 draws a cell).
+    std::unordered_map<std::uint32_t, std::vector<int>> blocksByTexture;
+    for (int block = 0; block < kBlockCount; ++block) {
+        blocksByTexture[blockTexture[static_cast<std::size_t>(block)]].push_back(block);
+    }
+
+    // MORROWIND HAS NO PER-VERTEX TEXTURE WEIGHTS AT ALL. Where Oblivion and
+    // Fallout author ATXT/VTXT -- an opacity per layer per post -- Morrowind's
+    // VTEX names ONE texture per 512-unit block and stops. Drawn literally that
+    // is what it looks like: a staircase of hard-edged squares, most visible
+    // where a path crosses grass, and it is the single blockiest thing about
+    // this terrain.
+    //
+    // The fix is to synthesize the weights the format never stored. Treat the
+    // block textures as samples on a lattice at block CENTRES and bilinearly
+    // interpolate between the four nearest, which is exactly the 4-slot layer
+    // blend the shader already implements for the other two games -- own
+    // texture, horizontal neighbour, vertical neighbour, diagonal.
+    //
+    // Two things make this work out cleanly rather than approximately:
+    //
+    //  * UVs ARE ALREADY CONTINUOUS ACROSS A BLOCK EDGE. Each block tiles its
+    //    texture exactly once, 0..1, so at a shared edge this block's u=1 and
+    //    the neighbour's u=0 are the same point in a tiling texture. Sampling a
+    //    neighbour's texture at our own UV therefore lands where the neighbour
+    //    itself draws it, with no phase seam to hide.
+    //  * The weights are a partition of unity by construction, and the shader's
+    //    chain is a sequence of lerps, so each layer's weight is divided by the
+    //    running total (w_i = a_i / sum(a_0..a_i)). That reproduces the
+    //    normalized blend exactly rather than approximately -- see the loop.
+    //
+    // Neighbours OUTSIDE this cell are not reachable here (the adjacent LAND
+    // record is a different extract), so an out-of-range neighbour falls back to
+    // this block's own texture. That leaves the 8192-unit cell seams unblended
+    // while fixing every 512-unit block seam inside them, which is 15 of every
+    // 16 boundaries in each axis.
+    const auto textureAt = [&](int blockRow, int blockCol, std::uint32_t fallback) {
+        if (blockRow < 0 || blockRow >= kMorrowindTextureGridSize || blockCol < 0 ||
+            blockCol >= kMorrowindTextureGridSize) {
+            return fallback;
+        }
+        return blockTexture[static_cast<std::size_t>((blockRow * kMorrowindTextureGridSize) + blockCol)];
+    };
+
+    for (const auto& [textureIndex, blocks] : blocksByTexture) {
+        const std::uint32_t firstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
+        for (const int block : blocks) {
+            const int blockRow = block / kMorrowindTextureGridSize;
+            const int blockCol = block % kMorrowindTextureGridSize;
+            const int postRow0 = blockRow * kMorrowindTextureBlockQuads;
+            const int postCol0 = blockCol * kMorrowindTextureBlockQuads;
+            const std::uint32_t baseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
+            for (int row = 0; row <= kMorrowindTextureBlockQuads; ++row) {
+                for (int col = 0; col <= kMorrowindTextureBlockQuads; ++col) {
+                    const int postRow = std::min(postRow0 + row, gridSize - 1);
+                    const int postCol = std::min(postCol0 + col, gridSize - 1);
+                    const int postIndex = (postRow * gridSize) + postCol;
+                    const float bethesdaX = cellOriginX + (static_cast<float>(postCol) * kLandPostSpacing);
+                    const float bethesdaY = cellOriginY + (static_cast<float>(postRow) * kLandPostSpacing);
+                    const float bethesdaZ =
+                        land.hasHeights ? land.heights[static_cast<std::size_t>(postIndex)] : 0.0f;
+                    const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+
+                    ImportedSceneVertex vertex{};
+                    vertex.position[0] = world.x;
+                    vertex.position[1] = world.y;
+                    vertex.position[2] = world.z;
+                    // One full tile of the texture across the block.
+                    const float blockU =
+                        static_cast<float>(col) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    const float blockV =
+                        static_cast<float>(row) / static_cast<float>(kMorrowindTextureBlockQuads);
+                    vertex.uv[0] = blockU;
+                    vertex.uv[1] = blockV;
+
+                    // Bilinear blend toward the neighbouring blocks' textures.
+                    // Offset from this block's CENTRE, so the influence is zero
+                    // in the middle of a block and half at its edge -- where the
+                    // neighbour computes the mirrored half and the two meet
+                    // continuously.
+                    const float offsetU = blockU - 0.5f;
+                    const float offsetV = blockV - 0.5f;
+                    const float fracU = std::abs(offsetU);
+                    const float fracV = std::abs(offsetV);
+                    const int stepCol = offsetU < 0.0f ? -1 : 1;
+                    const int stepRow = offsetV < 0.0f ? -1 : 1;
+                    const std::uint32_t ownTexture = textureIndex;
+                    const std::uint32_t neighbourU =
+                        textureAt(blockRow, blockCol + stepCol, ownTexture);
+                    const std::uint32_t neighbourV =
+                        textureAt(blockRow + stepRow, blockCol, ownTexture);
+                    const std::uint32_t neighbourUv =
+                        textureAt(blockRow + stepRow, blockCol + stepCol, ownTexture);
+                    // Partition of unity over the four nearest block centres.
+                    // amount[0] is this block's own share and is carried by the
+                    // base texture rather than by a layer slot.
+                    const float amount[4] = {
+                        (1.0f - fracU) * (1.0f - fracV),
+                        fracU * (1.0f - fracV),
+                        (1.0f - fracU) * fracV,
+                        fracU * fracV,
+                    };
+                    const std::uint32_t neighbourTexture[3] = {
+                        neighbourU, neighbourV, neighbourUv};
+                    // The shader composites as a chain of lerps from the base
+                    // sample, so a layer's weight has to be its share of the
+                    // running total, not its share of the whole. Dividing by the
+                    // cumulative sum makes the chain reproduce the normalized
+                    // blend exactly.
+                    float runningTotal = amount[0];
+                    for (int slot = 0; slot < 3; ++slot) {
+                        const float share = amount[slot + 1];
+                        runningTotal += share;
+                        // A neighbour using the same texture as this block is
+                        // not a transition and must not consume a layer slot --
+                        // blending a texture with itself is a no-op that costs a
+                        // sample, and there are only four slots for what can be
+                        // four genuinely different textures at a corner.
+                        if (neighbourTexture[slot] == ownTexture || share <= 0.0f ||
+                            runningTotal <= 0.0f) {
+                            continue;
+                        }
+                        vertex.layerTextureIndex[slot] = neighbourTexture[slot];
+                        vertex.layerWeight[slot] = share / runningTotal;
+                    }
+                    if (land.hasNormals) {
+                        const Vec3 normal = bethesdaToEngine(
+                            land.normals[static_cast<std::size_t>(postIndex) * 3u],
+                            land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 1u],
+                            land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 2u]);
+                        vertex.normal[0] = normal.x;
+                        vertex.normal[1] = normal.y;
+                        vertex.normal[2] = normal.z;
+                    } else {
+                        vertex.normal[1] = 1.0f;
+                    }
+                    // VCLR is Morrowind's baked lighting, and it is doing more
+                    // work here than VCLR does in Fallout: this is a game with
+                    // no dynamic terrain shadowing, so the shading under trees
+                    // and against cliffs lives entirely in these bytes.
+                    if (land.hasColors) {
+                        vertex.color[0] = land.colors[static_cast<std::size_t>(postIndex) * 3u];
+                        vertex.color[1] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 1u];
+                        vertex.color[2] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 2u];
+                    }
+                    terrainMesh.vertices.push_back(vertex);
+                }
+            }
+            constexpr int kStride = kMorrowindTextureBlockQuads + 1;
+            for (int row = 0; row < kMorrowindTextureBlockQuads; ++row) {
+                for (int col = 0; col < kMorrowindTextureBlockQuads; ++col) {
+                    const std::uint32_t i00 =
+                        baseVertex + static_cast<std::uint32_t>((row * kStride) + col);
+                    const std::uint32_t i10 = i00 + 1u;
+                    const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(kStride);
+                    const std::uint32_t i11 = i01 + 1u;
+                    // Same winding as the Fallout path, and for the same reason:
+                    // bethesdaToEngine negates Y, which flips the quad's sense.
+                    terrainMesh.indices.push_back(i00);
+                    terrainMesh.indices.push_back(i11);
+                    terrainMesh.indices.push_back(i01);
+                    terrainMesh.indices.push_back(i00);
+                    terrainMesh.indices.push_back(i10);
+                    terrainMesh.indices.push_back(i11);
+                }
+            }
+        }
+        const std::uint32_t indexCount =
+            static_cast<std::uint32_t>(terrainMesh.indices.size()) - firstIndex;
+        if (indexCount != 0u) {
+            terrainMesh.parts.push_back(
+                ImportedSceneMeshPart{firstIndex, indexCount, textureIndex, false});
+        }
+    }
+}
+
 void appendTerrainCell(
     ImportedSceneMesh& terrainMesh,
     const odai::importer::fnv::FalloutCellRecord& cell,
@@ -237,6 +427,10 @@ void appendTerrainCell(
     std::size_t& outDroppedLayerCount
 ) {
     if (cell.land == nullptr) {
+        return;
+    }
+    if (cell.land->gridSize != odai::importer::fnv::kLandGridSize) {
+        appendMorrowindTerrainCell(terrainMesh, cell, resolveLandTexture, resolveLandTextureExact);
         return;
     }
     const odai::importer::fnv::FalloutLandRecord& land = *cell.land;
@@ -422,6 +616,235 @@ bool isEffectOnlyModelPath(std::string_view modelPath) {
     return baseName.rfind("fx", 0) == 0;
 }
 
+bool isFireParticleEffectModelPath(std::string_view modelPath) {
+    if (!isEffectOnlyModelPath(modelPath)) {
+        return false;
+    }
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        if (c == '/') {
+            c = '\\';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    const bool fireNamed = lowered.find("fire") != std::string::npos ||
+        lowered.find("flame") != std::string::npos ||
+        lowered.find("ember") != std::string::npos;
+    if (!fireNamed) {
+        return false;
+    }
+    // Moving/gameplay effects need an owner, duration and collision semantics;
+    // a CELL reference alone cannot supply those. This pass is for the looping
+    // environmental fire NIFs used by hearths, braziers and campfires.
+    constexpr std::array<std::string_view, 7> kDynamicTokens = {
+        "firefly", "projectile", "fireball", "firebolt", "weapon",
+        "impact", "magic"
+    };
+    return std::none_of(kDynamicTokens.begin(), kDynamicTokens.end(), [&](std::string_view token) {
+        return lowered.find(token) != std::string::npos;
+    });
+}
+
+// THE SKY IS NOT WORLD GEOMETRY, AND SKYRIM PLACES IT AS IF IT WERE.
+//
+// Tamriel's persistent cell (0,0) holds 14643 references, and among them are
+// the game's own sky objects: sky\clouddistant01.nif and its ten siblings, the
+// aurora, the cloud shapes. Those are sky-dome scale -- tens of thousands of
+// units across -- and Skyrim's own renderer draws them on the sky dome, keyed
+// to the weather, never as scenery.
+//
+// Imported literally they become enormous opaque quads hanging over the
+// landscape. The symptom is not "a floating mesh": it is a flat, near-white
+// plane covering the ground with the real terrain visible only where it pokes
+// out at the edges, appearing a moment AFTER the terrain because the persistent
+// cell is slow to build. The material-flags and untextured-highlight views both
+// call it ordinary geometry, because that is exactly what it now is. The
+// giveaway is the NORMAL view: one uniform up-facing normal across a region
+// that ought to be a hillside.
+//
+// This engine draws its own sky from the WTHR record (see
+// src/import/fnv/weather_records.h), so these meshes have no job here at all.
+// True for Bethesda's distant-LOD stand-in meshes, which are named by suffix:
+// wrcastlemainbuilding01LOD.nif, wrjorvaskr01lod.nif, wrskyforge01lod.nif.
+// Matched on the stem rather than anywhere in the path so a directory called
+// "lod" full of real geometry is not swept up.
+bool isDistantLodModelPath(std::string_view modelPath) {
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    constexpr std::string_view kSuffix = "lod.nif";
+    return lowered.size() > kSuffix.size() &&
+        lowered.compare(lowered.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+}
+
+bool isSkyOnlyModelPath(std::string_view modelPath) {
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        if (c == '/') {
+            c = '\\';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    // Anchored at the model root rather than matched anywhere in the path: a
+    // "sky" component deeper in a path is a building's skylight or an interior
+    // named for one, not the firmament.
+    return lowered.rfind("sky\\", 0) == 0 || lowered.rfind("meshes\\sky\\", 0) == 0;
+}
+
+namespace {
+
+// Fills `outTables` from one plugin's records, rewriting every formID from that
+// plugin's local mod-index space into the load order's global one.
+//
+// `laterWins` is what makes an override plugin work. The single-plugin path
+// keeps first-wins (emplace) because it is the same either way with one file,
+// and changing it would be a behaviour change for no reason.
+// Defined below; declared here because mergeWorldTablesFromScene calls it.
+void resolveWorldspaceInheritance(FalloutWorldTables& outTables);
+
+void mergeWorldTablesFromScene(
+    const FalloutSceneData& data,
+    const FalloutLoadOrder& order,
+    std::size_t pluginIndex,
+    bool laterWins,
+    FalloutWorldTables& outTables) {
+    const auto remap = [&](std::uint32_t formId) {
+        return order.remapFormId(pluginIndex, formId);
+    };
+    const auto put = [&](auto& map, const auto& key, const auto& value) {
+        if (laterWins) {
+            map.insert_or_assign(key, value);
+        } else {
+            map.emplace(key, value);
+        }
+    };
+    for (const FalloutStaticRecord& entry : data.statics) {
+        const std::uint32_t formId = remap(entry.formId);
+        if (!entry.modelPath.empty()) {
+            put(outTables.staticModelPaths, formId, entry.modelPath);
+        }
+        if (!entry.editorId.empty()) {
+            put(outTables.staticEditorIds, formId, entry.editorId);
+        }
+        if (!entry.recordType.empty()) {
+            put(outTables.staticRecordTypes, formId, entry.recordType);
+        }
+    }
+    for (const FalloutLightRecord& entry : data.lights) {
+        FalloutLightRecord light = entry;
+        light.formId = remap(entry.formId);
+        put(outTables.lightsByFormId, light.formId, light);
+    }
+    for (const FalloutLandTextureRecord& entry : data.landTextures) {
+        if (!entry.diffuseTexturePath.empty()) {
+            put(outTables.landTexturePaths, remap(entry.formId), entry.diffuseTexturePath);
+        }
+    }
+    for (const FalloutRegionRecord& entry : data.regions) {
+        if (entry.isDiscoverable()) {
+            put(outTables.regionNamesByFormId, remap(entry.formId), entry.mapName);
+            if (entry.mapNameStringId != 0u) {
+                put(outTables.regionNameStringIdsByFormId, remap(entry.formId),
+                    entry.mapNameStringId);
+            }
+        }
+    }
+    for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
+        if (!entry.editorId.empty()) {
+            put(outTables.worldspaceFormIdsByEditorId, toLowerAsciiCopy(entry.editorId),
+                remap(entry.formId));
+        }
+        // Every worldspace, not only the ones carrying DNAM: a child inherits
+        // its defaults from its WNAM parent, and the parent has to be in the
+        // map to be found. resolveWorldspaceInheritance() pushes them down.
+        FalloutWorldspaceRecord remapped = entry;
+        remapped.formId = remap(entry.formId);
+        if (remapped.parentWorldspaceFormId != 0u) {
+            remapped.parentWorldspaceFormId = remap(entry.parentWorldspaceFormId);
+        }
+        put(outTables.worldspaceDefaultsByFormId, remapped.formId, remapped);
+    }
+    resolveWorldspaceInheritance(outTables);
+}
+
+// Pushes DNAM defaults down the WNAM parent chain, so a child worldspace that
+// declares none answers with its parent's.
+//
+// Skyrim needs this and the earlier games do not: WhiterunWorld's entire WRLD
+// record is an EDID plus a WNAM, and every walled city is the same shape. The
+// chain is walked with a visit cap rather than a visited set because it is
+// two or three links long in practice and a cycle must not hang a load.
+void resolveWorldspaceInheritance(FalloutWorldTables& outTables) {
+    constexpr int kMaxParentHops = 8;
+    for (auto& entry : outTables.worldspaceDefaultsByFormId) {
+        FalloutWorldspaceRecord& worldspace = entry.second;
+        if (worldspace.hasDefaultHeights) {
+            continue;
+        }
+        std::uint32_t parentFormId = worldspace.parentWorldspaceFormId;
+        for (int hop = 0; hop < kMaxParentHops && parentFormId != 0u; ++hop) {
+            const auto found = outTables.worldspaceDefaultsByFormId.find(parentFormId);
+            if (found == outTables.worldspaceDefaultsByFormId.end()) {
+                break;
+            }
+            if (found->second.hasDefaultHeights) {
+                worldspace.hasDefaultHeights = true;
+                worldspace.defaultLandHeight = found->second.defaultLandHeight;
+                worldspace.defaultWaterHeight = found->second.defaultWaterHeight;
+                break;
+            }
+            parentFormId = found->second.parentWorldspaceFormId;
+        }
+    }
+}
+
+// The filter both builders use: reject every worldspace group and every cell's
+// contents, so no LAND record is ever decompressed. That is what makes this
+// affordable at startup.
+FalloutExtractFilter worldTableFilter() {
+    FalloutExtractFilter filter{};
+    filter.wantWorldspace = [](std::uint32_t) { return false; };
+    filter.wantCellContents = [](const FalloutCellRecord&) { return false; };
+    return filter;
+}
+
+}  // namespace
+
+bool buildFalloutWorldTables(
+    const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError) {
+    outTables = FalloutWorldTables{};
+    if (order.empty()) {
+        outError = "empty load order";
+        return false;
+    }
+    // Ascending load order: each plugin's records replace what an earlier one
+    // offered, which is what an override plugin is for. A base record a patch
+    // fixes -- a corrected MODL, a light's parameters -- takes effect here.
+    for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
+        const FalloutLoadOrderEntry& entry = order.entries()[pluginIndex];
+        FalloutSceneData data;
+        const FalloutExtractFilter filter = worldTableFilter();
+        std::string error;
+        if (!extractFalloutScene(entry.path, filter, data, error)) {
+            // One unreadable plugin must not take the whole world down: the
+            // base game's records are already in, and losing a patch's is a
+            // degraded scene rather than no scene.
+            //
+            // std::cerr rather than VOX_LOGW for the reason the alpha-test log
+            // below states: this file links into odai_newvegas_probe and
+            // odai_newvegas_cooker, neither of which links core/log.cc.
+            std::cerr << "[fnv] world tables: skipping " << entry.header.fileName << ": " << error
+                      << "\n";
+            continue;
+        }
+        mergeWorldTablesFromScene(data, order, pluginIndex, /*laterWins=*/true, outTables);
+    }
+    return true;
+}
+
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError) {
     outTables = FalloutWorldTables{};
@@ -449,6 +872,10 @@ bool buildFalloutWorldTables(
         if (!entry.recordType.empty()) {
             outTables.staticRecordTypes.emplace(entry.formId, entry.recordType);
         }
+        if (!entry.editorId.empty()) {
+            outTables.baseFormIdsByEditorId.emplace(
+                toLowerAsciiCopy(entry.editorId), entry.formId);
+        }
     }
     for (const FalloutLightRecord& entry : data.lights) {
         outTables.lightsByFormId.emplace(entry.formId, entry);
@@ -461,6 +888,9 @@ bool buildFalloutWorldTables(
     for (const FalloutRegionRecord& entry : data.regions) {
         if (entry.isDiscoverable()) {
             outTables.regionNamesByFormId.emplace(entry.formId, entry.mapName);
+            if (entry.mapNameStringId != 0u) {
+                outTables.regionNameStringIdsByFormId.emplace(entry.formId, entry.mapNameStringId);
+            }
         }
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
@@ -468,7 +898,9 @@ bool buildFalloutWorldTables(
             outTables.worldspaceFormIdsByEditorId.emplace(
                 toLowerAsciiCopy(entry.editorId), entry.formId);
         }
+        outTables.worldspaceDefaultsByFormId.emplace(entry.formId, entry);
     }
+    resolveWorldspaceInheritance(outTables);
     return true;
 }
 
@@ -569,19 +1001,142 @@ std::uint32_t CellSceneBuilder::dominantLandTexture(
             }
         }
     }
+    // Most-used candidate that ACTUALLY RESOLVES, not simply most-used.
+    //
+    // A BTXT is free to name a formID that is not a land texture at all --
+    // Fallout 3's MegatonWorld cell -1,-6 names 0xa8b, which is a levelled NPC
+    // list. Picking it because it was the only candidate and then failing to
+    // resolve it leaves the whole cell with no fallback, so every quadrant
+    // draws untextured. Bethesda never saw it because Megaton's crater floor is
+    // hidden under the town.
+    std::uint32_t best = kNoTextureIndex;
     std::uint32_t bestFormId = 0;
     std::size_t bestUse = 0;
     for (const auto& [formId, count] : useCounts) {
         // Ties broken by formID so a cook stays reproducible.
-        if (count > bestUse || (count == bestUse && formId < bestFormId)) {
-            bestFormId = formId;
-            bestUse = count;
+        if (count < bestUse || (count == bestUse && formId >= bestFormId)) {
+            continue;
+        }
+        const std::uint32_t resolved = resolveLandTexture(formId, /*exact=*/true);
+        if (resolved == kNoTextureIndex) {
+            continue;
+        }
+        best = resolved;
+        bestFormId = formId;
+        bestUse = count;
+    }
+    return best;
+}
+
+// One water quad per exterior cell whose water surface is high enough to be
+// seen. Bethesda has no water GEOMETRY: a cell states a height and the engine
+// fills the cell's whole 4096-unit footprint at it, so this is the entire
+// representation, not an approximation of one.
+//
+// Without it every coast, lake and river in every worldspace is a hole. Anvil
+// is the case that surfaced it -- a port city on the Abecean Sea, where the
+// missing ocean occupies the left third of the frame and reads as "the terrain
+// just ends into a grey void", which is a very convincing impression of a
+// streaming bug. It is not: the sea was never imported.
+bool appendCellWaterPatch(
+    ImportedScene& outScene, const FalloutCellRecord& cell,
+    const FalloutWorldspaceRecord* worldspace) {
+    if (cell.isInterior || !cell.hasGridCoords) {
+        return false;
+    }
+    // See FalloutCellRecord::hasWater: an absent XCLW is Oblivion's "sea level",
+    // not "no water". The dry case is a sentinel VALUE and was rejected at parse.
+    //
+    // BUT "SEA LEVEL" IS ONLY MEANINGFUL WHERE THERE IS A SEA TO BE LEVEL WITH.
+    // A CITY WORLDSPACE HAS NO LAND RECORD AT ALL -- WhiterunWorld, and every
+    // Imperial City district -- so the lowest-post guard below cannot run, and
+    // the implied height of 0 was emitted unconditionally. Whiterun's ground is
+    // placed statics sitting at engine y about -3120, which put a full-cell
+    // alpha-blended water quad 3120 units ABOVE the city, slicing through the
+    // houses. On screen it is a flat grey wedge across the frame that reads as
+    // broken geometry rather than as water in the wrong place.
+    //
+    // So an absent XCLW needs land to mean sea level. An EXPLICIT XCLW is still
+    // honoured with or without land, because that is authored intent -- which is
+    // what keeps a landless open-water cell wet.
+    // The implied height is the WORLDSPACE's default water height, resolved up
+    // the WNAM parent chain -- not zero. Tamriel declares -14000; WhiterunWorld
+    // declares nothing at all and inherits it. Falling back to 0 put the sea
+    // 14000 units too high, which in a city standing at y -3120 is a full-cell
+    // quad through the rooftops.
+    // A LANDLESS CELL IS STILL EMITTED. Tamriel (0,0) has no LAND and is open
+    // ocean; requiring terrain would drop the sea exactly where there is
+    // nothing else to draw. Oblivion declares no DNAM on any of its 84
+    // worldspaces, so there the implied height stays 0 -- its sea level -- and
+    // this changes nothing. It is Skyrim that needed the lookup.
+    const bool hasImpliedHeight = worldspace != nullptr && worldspace->hasDefaultHeights;
+    const float impliedHeight = hasImpliedHeight ? worldspace->defaultWaterHeight : 0.0f;
+    const float waterHeight = cell.hasWater ? cell.waterHeight : impliedHeight;
+    if (cell.land != nullptr && cell.land->hasHeights) {
+        // Water strictly below every post in the cell is water under a solid
+        // floor -- true of most of the Mojave, where sea level sits far beneath
+        // the desert. Emitting it anyway would put a full-cell alpha-blended
+        // quad under every cell in the worldspace, at real fill cost, for
+        // nothing visible.
+        const float lowestPost =
+            *std::min_element(std::begin(cell.land->heights), std::end(cell.land->heights));
+        if (waterHeight <= lowestPost) {
+            return false;
         }
     }
-    return (bestFormId == 0u) ? kNoTextureIndex : resolveLandTexture(bestFormId, /*exact=*/true);
+    // Bethesda (x, y) -> engine (x, -y), so the cell's +Y edge becomes its
+    // MINIMUM engine z and the origin moves to the far corner.
+    ImportedSceneWaterPatch patch{};
+    patch.originX = static_cast<float>(cell.gridX) * kExteriorCellSize;
+    patch.originZ = -(static_cast<float>(cell.gridZ) + 1.0f) * kExteriorCellSize;
+    patch.sizeX = kExteriorCellSize;
+    patch.sizeZ = kExteriorCellSize;
+    patch.waterLevel = waterHeight;
+    outScene.waterPatches.push_back(patch);
+    return true;
+}
+
+// Records that one placed reference produced no geometry, and why.
+//
+// Both halves matter. The memo (m_failedStatics) is what lets a REPEAT of an
+// already-failed base be attributed to the same cause instead of only the first
+// one being explained, and the counters are what turn "this town has holes" from
+// an impression into a number with a cause attached to it.
+void CellSceneBuilder::noteDroppedReference(
+    std::uint32_t baseFormId, StaticDropReason reason) {
+    m_failedStatics[baseFormId] = reason;
+    if (reason == StaticDropReason::kIntentional) {
+        return;  // counted by effectMeshesSkipped / editorMarkerModelsSkipped
+    }
+    switch (reason) {
+        case StaticDropReason::kBaseNotFound:
+            ++m_stats.referencesDroppedBaseNotFound;
+            break;
+        case StaticDropReason::kBaseHasNoModel:
+            ++m_stats.referencesDroppedBaseHasNoModel;
+            break;
+        case StaticDropReason::kMeshUnresolved:
+            ++m_stats.referencesDroppedMeshUnresolved;
+            break;
+        case StaticDropReason::kMeshUnreadable:
+            ++m_stats.referencesDroppedMeshUnreadable;
+            break;
+        case StaticDropReason::kIntentional:
+            break;
+    }
+    const auto typeIt = m_tables.staticRecordTypes.find(baseFormId);
+    ++m_stats.droppedReferencesByBaseType[
+        typeIt == m_tables.staticRecordTypes.end() ? std::string("<base record not found>")
+                                                   : typeIt->second];
 }
 
 void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
+    // Before the LAND guard: a cell can be open ocean with no terrain at all.
+    // Tamriel (0,0) is exactly that, so gating water on terrain would drop the
+    // sea precisely where there is nothing else to draw.
+    if (appendCellWaterPatch(m_scene, cell, m_tables.findWorldspace(cell.worldspaceFormId))) {
+        ++m_stats.waterPatchesEmitted;
+    }
     if (cell.land == nullptr) {
         return;
     }
@@ -639,12 +1194,103 @@ void CellSceneBuilder::addCellLight(
     ++m_stats.lightsPlaced;
 }
 
+void CellSceneBuilder::addCellFireEmitter(
+    const FalloutPlacedReference& ref, std::string_view modelPath) {
+    ImportedSceneParticleEmitter emitter{};
+    emitter.sourceId = "refr_" + formIdHex(ref.formId);
+    const Vec3 position = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
+    emitter.position[0] = position.x;
+    emitter.position[1] = position.y;
+    emitter.position[2] = position.z;
+    emitter.seed = ref.formId ^ (ref.baseFormId * 0x9e3779b9u);
+
+    std::string lowered(modelPath);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    const float placedScale = ref.scale > 0.0f ? ref.scale : 1.0f;
+    float presetScale = 1.0f;
+    if (lowered.find("large") != std::string::npos ||
+        lowered.find("heavy") != std::string::npos) {
+        presetScale = 1.55f;
+        emitter.particleCount = 72u;
+    } else if (lowered.find("small") != std::string::npos ||
+               lowered.find("sconce") != std::string::npos ||
+               lowered.find("candle") != std::string::npos) {
+        presetScale = 0.52f;
+        emitter.particleCount = 32u;
+    } else if (lowered.find("medium") != std::string::npos) {
+        presetScale = 0.82f;
+        emitter.particleCount = 48u;
+    }
+    const float effectScale = presetScale * placedScale;
+    emitter.spawnRadius *= effectScale;
+    // REFR scale expands the footprint of a fire but not each flame tongue.
+    // Scaling all three dimensions made a 3x hearth marker produce individual
+    // five-metre billboards. Keep lobe size and rise in a physically useful
+    // range while still allowing named large/small variants to read apart.
+    emitter.upwardSpeed *= std::sqrt(presetScale);
+    emitter.particleSize *= std::sqrt(presetScale);
+    if (lowered.find("_lite") != std::string::npos) {
+        emitter.intensity = 0.38f;
+        emitter.spawnRadius = 9.0f * placedScale;
+        emitter.particleLifetime = 0.72f;
+        emitter.upwardSpeed = 58.0f;
+        emitter.particleSize = 8.0f;
+        emitter.particleCount = 20u;
+    }
+    if (std::getenv("ODAI_DEBUG_FIRE_EMITTERS") != nullptr) {
+        std::cerr << "[fire-emitter] model=" << modelPath
+                  << " ref=" << formIdHex(ref.formId)
+                  << " position=(" << emitter.position[0] << ", "
+                  << emitter.position[1] << ", " << emitter.position[2] << ")"
+                  << " scale=" << effectScale << '\n';
+    }
+    m_scene.particleEmitters.push_back(emitter);
+    ++m_stats.particleEmittersPlaced;
+}
+
 void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
     // Diagnostic sets the cooker kept (unresolved texture paths, extreme-UV
     // model names, per-model untextured lists) are not carried here: they are
     // reporting for a batch cook, not something a streaming build can act on.
     // The counters that matter are in CellBuildStats.
-    for (const auto& ref : cell.references) {
+    for (const auto& rawRef : cell.references) {
+        // Morrowind names its base by string, so the formID a reference carries
+        // is the one this builder's own scan handed out. Resolved here, once,
+        // rather than threaded through every lookup below -- everything after
+        // this point works in formIDs whichever game the cell came from.
+        FalloutPlacedReference resolvedRef;
+        const FalloutPlacedReference* refPtr = &rawRef;
+        if (rawRef.baseFormId == 0u && !rawRef.baseEditorId.empty()) {
+            resolvedRef = rawRef;
+            const auto nameIt =
+                m_tables.baseFormIdsByEditorId.find(toLowerAsciiCopy(rawRef.baseEditorId));
+            resolvedRef.baseFormId =
+                (nameIt == m_tables.baseFormIdsByEditorId.end()) ? 0u : nameIt->second;
+            refPtr = &resolvedRef;
+        }
+        const FalloutPlacedReference& ref = *refPtr;
+        // INITIALLY DISABLED REFERENCES DO NOT RENDER, and nothing here had
+        // ever checked. These are quest objects waiting for a script -- and
+        // some are enormous: Skyrim's MG07 blizzard barrier is a dome measured
+        // at 246723 x 341884 units, parked in Tamriel's persistent cell. Drawn
+        // literally it is a flat near-white plane over the whole landscape,
+        // appearing a beat after the terrain because the persistent cell is
+        // slow to build -- which reads as a renderer bug, not as a flag.
+        //
+        // XESP (enable-parent) state is NOT resolved: the parent can live in
+        // any cell, and its runtime state does not exist in a viewer with no
+        // quest engine. The flag alone is the authored "hidden until story
+        // says otherwise", and honouring just it matches what an unstarted
+        // save shows. A ref that is enable-parented to a disabled parent
+        // WITHOUT carrying the flag itself still draws; measured across the
+        // Skyrim spawn cells that is scenery (ferns under a bridge), not
+        // barriers.
+        if ((ref.recordFlags & 0x00000800u) != 0u) {
+            ++m_stats.disabledReferencesSkipped;
+            continue;
+        }
             // Lights first, and deliberately ahead of the m_failedStatics gate:
             // only 29 of 501 LIGH records carry a MODL, so the other 472 have no
             // model path, land in m_failedStatics on first sight, and would be
@@ -655,27 +1301,58 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 // No `continue`: a LIGH that does have a mesh still needs its
                 // lamp placed, so fall through into the static path below.
             }
-            if (m_failedStatics.count(ref.baseFormId) != 0u) {
+            // Effect-only NIFs are placements too. The opaque mesh path cannot
+            // draw their particles, but a stationary fire reference supplies
+            // an exact cross-game emitter origin. This must run before the
+            // failed-base cache: the same fire base can be placed many times
+            // and every REFR needs its own emitter.
+            const auto placedModelIt = m_tables.staticModelPaths.find(ref.baseFormId);
+            if (placedModelIt != m_tables.staticModelPaths.end() &&
+                isEffectOnlyModelPath(placedModelIt->second)) {
+                if (isFireParticleEffectModelPath(placedModelIt->second)) {
+                    addCellFireEmitter(ref, placedModelIt->second);
+                }
+                ++m_stats.effectMeshesSkipped;
+                noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
+                continue;
+            }
+            if (const auto failedIt = m_failedStatics.find(ref.baseFormId);
+                failedIt != m_failedStatics.end()) {
+                // A repeat of a base that already failed. Counted again, because
+                // the question this answers is "how many placements drew
+                // nothing", and one missing rock placed a hundred times is a
+                // hundred holes.
+                noteDroppedReference(ref.baseFormId, failedIt->second);
                 continue;
             }
             auto meshIt = m_meshIndexByStaticFormId.find(ref.baseFormId);
             if (meshIt == m_meshIndexByStaticFormId.end()) {
                 const auto statIt = m_tables.staticModelPaths.find(ref.baseFormId);
                 if (statIt == m_tables.staticModelPaths.end() || statIt->second.empty()) {
-                    m_failedStatics.insert(ref.baseFormId);
+                    // Two different failures wearing one shape: a formID that
+                    // names no record at all (a load-order or remap fault) and a
+                    // record that simply has no MODL (a trigger or an activator,
+                    // usually correct). staticRecordTypes is what separates them.
+                    const bool baseExists =
+                        m_tables.staticRecordTypes.find(ref.baseFormId) !=
+                        m_tables.staticRecordTypes.end();
+                    noteDroppedReference(
+                        ref.baseFormId,
+                        baseExists ? StaticDropReason::kBaseHasNoModel
+                                   : StaticDropReason::kBaseNotFound);
                     continue;
                 }
                 const std::string& staticModelPath = statIt->second;
                 std::vector<std::uint8_t> nifBytes;
-                if (isEffectOnlyModelPath(staticModelPath)) {
+                if (isSkyOnlyModelPath(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
                 }
                 std::string meshError;
                 if (!m_assets.resolveMesh(staticModelPath, nifBytes, meshError)) {
                     std::cerr << "warning: could not resolve mesh " << staticModelPath << "\n";
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnresolved);
                     continue;
                 }
                 // Editor markers are level-design furniture, not world geometry:
@@ -697,7 +1374,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 if ((isRootLevelModel && modelBaseName.rfind("marker", 0) == 0) ||
                     lowerModelPath.find("\\markers\\") != std::string::npos) {
                     ++m_stats.editorMarkerModelsSkipped;
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
                 }
 
@@ -706,8 +1383,11 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 std::string nifError;
                 if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) || nifModel.shapes.empty()) {
                     std::cerr << "warning: failed to parse NIF " << staticModelPath << ": " << nifError << "\n";
-                    m_failedStatics.insert(ref.baseFormId);
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
+                }
+                if (applyNifBannerGravityRestPose(staticModelPath, nifModel)) {
+                    ++m_stats.clothMeshesSettled;
                 }
                 m_stats.skippedGeometryShapes += nifModel.skippedShapeCount;
                 // Node-recognition health. Nonzero nodeParseFailures means a
@@ -786,6 +1466,16 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             vertex.uv[0] = shape.uvs[v * 2u];
                             vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
                         }
+                        // Alpha only. The RGB of a Bethesda vertex colour is
+                        // usually a baked ambient-occlusion tint that this
+                        // renderer already gets from its own AO pass, and
+                        // multiplying it in on top would double-darken every
+                        // corner -- so it is deliberately left out while the
+                        // channel that has no other source is taken. See
+                        // ImportedSceneVertex::colorAlpha.
+                        if ((v * 4u) + 3u < shape.colors.size()) {
+                            vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
+                        }
                         mesh.vertices.push_back(vertex);
                     }
                     for (const std::uint32_t index : shape.triangleIndices) {
@@ -809,7 +1499,26 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         }
                         part.alphaTest = shape.alphaTest;
                         part.alphaBlend = shape.alphaBlend;
-                        part.twoSided = shape.twoSided;
+                        part.unlit = shape.unlit;
+                        // A DISTANT-LOD SHELL IS A HOLLOW, SINGLE-SIDED HULL,
+                        // and back-face culling eats half of it.
+                        //
+                        // Bethesda places `*LOD.nif` stand-ins in the PARENT
+                        // worldspace for anything whose real geometry lives in
+                        // a child one: Dragonsreach in Tamriel is
+                        // WRCastleMainBuilding01LOD, the whole building in 1324
+                        // triangles off a shared LOD atlas, with no interior
+                        // faces because the game only ever shows it from far
+                        // outside. Drawn one-sided here, every angle that looks
+                        // along a wall sees straight through it, and the
+                        // symptom is exactly "half of Dragonsreach is missing"
+                        // -- with nothing dropped and no reference unresolved,
+                        // which is what makes it so hard to place.
+                        //
+                        // Forcing them two-sided costs nothing (the shell is
+                        // tiny) and makes the silhouette solid from every
+                        // angle, which is all a stand-in has to be.
+                        part.twoSided = shape.twoSided || isDistantLodModelPath(staticModelPath);
                         part.alphaThreshold = shape.alphaThreshold;
                         // ODAI_FNV_LOG_ALPHATEST=1 names every surface that will
                         // run the discard, with the threshold and texture it
@@ -916,7 +1625,15 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     }
                 }
                 if (mesh.vertices.empty()) {
-                    m_failedStatics.insert(ref.baseFormId);
+                    // The one drop path with no diagnostic at all: the NIF
+                    // parsed, its shapes were all filtered out (decals, gore
+                    // caps, effect-only sheets, extreme UVs), and the reference
+                    // then vanished without a word. Naming it is the difference
+                    // between "the importer is dropping things" and knowing
+                    // which asset and which filter.
+                    std::cerr << "warning: " << staticModelPath
+                              << " built no geometry (every shape was filtered)\n";
+                    noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
                 }
                 const std::uint32_t meshIndex = static_cast<std::uint32_t>(m_scene.meshes.size());
@@ -942,6 +1659,42 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
 }
 
 void CellSceneBuilder::finish(ImportedScene& outScene) {
+    // Bethesda normally places a LIGH beside each stationary fire. Preserve
+    // that authored light instead of doubling it; synthesize a clustered,
+    // flickering fallback only for effects that have no nearby light. This is
+    // also what lets sparse Oblivion cells get emissive fire without making a
+    // light-rich Skyrim interior twice as bright.
+    for (const ImportedSceneParticleEmitter& emitter : m_scene.particleEmitters) {
+        bool hasNearbyAuthoredLight = false;
+        for (const ImportedSceneLight& light : m_scene.lights) {
+            const float dx = light.position[0] - emitter.position[0];
+            const float dy = light.position[1] - emitter.position[1];
+            const float dz = light.position[2] - emitter.position[2];
+            if ((dx * dx) + (dy * dy) + (dz * dz) <= 320.0f * 320.0f) {
+                hasNearbyAuthoredLight = true;
+                break;
+            }
+        }
+        if (hasNearbyAuthoredLight) {
+            continue;
+        }
+        ImportedSceneLight light{};
+        light.sourceId = emitter.sourceId + "_firelight";
+        light.position[0] = emitter.position[0];
+        light.position[1] = emitter.position[1] + 24.0f;
+        light.position[2] = emitter.position[2];
+        light.color[0] = 1.0f;
+        light.color[1] = 0.24f;
+        light.color[2] = 0.045f;
+        light.radius = 440.0f;
+        light.intensity = 1.15f;
+        light.flags = 0x08u;
+        m_scene.lights.push_back(std::move(light));
+        ++m_stats.lightsPlaced;
+    }
+    m_scene.sourceLightCount = static_cast<std::uint32_t>(m_scene.lights.size());
+    m_scene.sourceParticleEmitterCount =
+        static_cast<std::uint32_t>(m_scene.particleEmitters.size());
     if (m_terrainMeshIndex != static_cast<std::size_t>(-1)) {
         const ImportedSceneMesh& terrainMesh = m_scene.meshes[m_terrainMeshIndex];
         // Deliberately NO instance for the terrain mesh.

@@ -21,7 +21,9 @@
 #include "import/fnv/character_builder.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/dialogue_records.h"
+#include "import/fnv/actor_records.h"
 #include "import/fnv/fallout_records.h"
+#include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
@@ -33,6 +35,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -44,6 +47,15 @@ namespace {
 
 using odai::importer::fnv::BsaArchive;
 using odai::importer::fnv::BsaFileEntry;
+
+// Small hex formatter: the enable-parent report in the floater dump is built as
+// a string, so it cannot lean on the stream's std::hex the way the other formID
+// prints do.
+std::string toHex(std::uint32_t value) {
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), "%x", value);
+    return buffer;
+}
 
 std::string toLowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
@@ -204,6 +216,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
     std::size_t totalUnhandledNodeTypes = 0;
     std::size_t totalMirroredShapes = 0;
     std::size_t totalReversedWinding = 0;
+    std::size_t totalOutOfRangeTriangles = 0;
+    std::size_t totalDegenerateTriangles = 0;
+    std::size_t modelsWithOutOfRangeTriangles = 0;
     std::array<std::size_t, 4> stencilDrawModes{};
     std::map<std::string, std::size_t> parseErrors;
     // Which property types are costing us textures, aggregated across the whole
@@ -237,6 +252,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
         if (model.nodeParseFailedCount != 0u) { ++modelsWithNodeParseFailure; }
         totalMirroredShapes += model.mirroredShapeCount;
         totalReversedWinding += model.reversedWindingShapeCount;
+        totalOutOfRangeTriangles += model.outOfRangeTriangleCount;
+        totalDegenerateTriangles += model.degenerateTriangleCount;
+        if (model.outOfRangeTriangleCount != 0u) { ++modelsWithOutOfRangeTriangles; }
         for (int m = 0; m < 4; ++m) {
             stencilDrawModes[m] += model.stencilDrawModeCounts[m];
         }
@@ -280,6 +298,9 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
               << totalUnhandledNodeTypes << "\n"
               << "  mirrored shapes   " << totalMirroredShapes << "  (negative-determinant transform)\n"
               << "  DRAW_CW shapes    " << totalReversedWinding << "  (stencil says CW is the front face)\n"
+              << "  bad triangles     " << totalOutOfRangeTriangles << " out-of-range in "
+              << modelsWithOutOfRangeTriangles << " model(s), " << totalDegenerateTriangles
+              << " degenerate  (dropped at parse)\n"
               << "  stencil drawModes ccwOrBoth=" << stencilDrawModes[0] << " ccw=" << stencilDrawModes[1]
               << " cw=" << stencilDrawModes[2] << " both=" << stencilDrawModes[3] << "\n"
               << "  shapes w/ diffuse " << shapesWithDiffuse << "\n"
@@ -427,6 +448,197 @@ int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virt
     return 1;
 }
 
+// Dumps a .kf animation file's block layout and the raw words of its
+// NiControllerSequence.
+//
+// Exists for the same reason --nifblocks does: the ControlledBlock layout is
+// the one part of the KF format that is genuinely version-conditional (a
+// string-palette offset before 20.1.0.3, a header string index after), and
+// guessing which branch retail New Vegas took is exactly the mistake this file
+// header warns about. --nifblocks cannot be used instead because its index is
+// filtered to ".nif" and a .kf is not one.
+int dumpKfAnimation(const std::filesystem::path& dataPath, const std::string& virtualPath) {
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "cannot index archives under " << dataPath << "\n";
+        return 1;
+    }
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    if (!assets.resolveMesh(virtualPath, bytes, error)) {
+        std::cout << "resolve failed: " << error << "\n";
+        return 1;
+    }
+    odai::importer::fnv::NifBlockSummary summary;
+    if (!odai::importer::fnv::parseNifBlockSummary(bytes, summary, error)) {
+        std::cout << "header parse FAILED: " << error << "\n";
+        return 1;
+    }
+    std::cout << virtualPath << ": " << bytes.size() << " bytes, "
+              << summary.blockTypeNames.size() << " blocks, " << summary.strings.size()
+              << " strings\n";
+
+    std::map<std::string, std::size_t> typeCounts;
+    for (const std::string& typeName : summary.blockTypeNames) {
+        ++typeCounts[typeName];
+    }
+    std::cout << "block types:\n";
+    for (const auto& [typeName, count] : typeCounts) {
+        std::cout << "  " << count << "x " << typeName << "\n";
+    }
+
+    // The sequence block, word by word. Its header is a handful of floats and
+    // refs followed by the controlled-block array, and reading the words as
+    // both int and float side by side is what makes the boundary visible --
+    // start/stop time are recognisable floats, refs are small ints.
+    for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+        if (summary.blockTypeNames[i] != "NiControllerSequence") {
+            continue;
+        }
+        const std::size_t start = summary.blockStarts[i];
+        const std::size_t words = summary.blockSizes[i] / 4u;
+        std::cout << "[" << i << "] NiControllerSequence, " << summary.blockSizes[i]
+                  << " bytes (" << words << " words):\n";
+        for (std::size_t w = 0; w < words && w < 96u; ++w) {
+            std::int32_t asInt = 0;
+            float asFloat = 0.0f;
+            std::memcpy(&asInt, bytes.data() + start + (w * 4u), 4u);
+            std::memcpy(&asFloat, bytes.data() + start + (w * 4u), 4u);
+            std::cout << "  w" << w << " int=" << asInt << " float=" << asFloat;
+            if (asInt >= 0 && static_cast<std::size_t>(asInt) < summary.strings.size()) {
+                std::cout << " str=\"" << summary.strings[static_cast<std::size_t>(asInt)] << "\"";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // First interpolator/data pair, same treatment.
+    for (const char* wanted : {"NiTransformInterpolator", "NiTransformData"}) {
+        for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+            if (summary.blockTypeNames[i] != wanted) {
+                continue;
+            }
+            const std::size_t start = summary.blockStarts[i];
+            const std::size_t words = summary.blockSizes[i] / 4u;
+            std::cout << "[" << i << "] " << wanted << ", " << summary.blockSizes[i]
+                      << " bytes (" << words << " words):\n";
+            for (std::size_t w = 0; w < words && w < 40u; ++w) {
+                std::int32_t asInt = 0;
+                float asFloat = 0.0f;
+                std::memcpy(&asInt, bytes.data() + start + (w * 4u), 4u);
+                std::memcpy(&asFloat, bytes.data() + start + (w * 4u), 4u);
+                std::cout << "  w" << w << " int=" << asInt << " float=" << asFloat << "\n";
+            }
+            break;
+        }
+    }
+
+    // And what the reader itself makes of it -- the dump above is only useful
+    // next to the parse it is supposed to justify.
+    odai::importer::fnv::KfAnimation animation;
+    if (!odai::importer::fnv::parseKfAnimation(bytes, animation, error)) {
+        std::cout << "parseKfAnimation FAILED: " << error << "\n";
+        return 1;
+    }
+    std::cout << "parsed \"" << animation.name << "\": " << animation.duration() << "s, "
+              << (animation.loops() ? "looping" : "one-shot") << ", " << animation.tracks.size()
+              << " tracks (" << animation.stats.transformInterpolators << " transform, "
+              << animation.stats.unsupportedInterpolators << " unsupported, of "
+              << animation.stats.controlledBlocks << " controlled blocks)\n";
+    if (!animation.stats.unsupportedNodes.empty()) {
+        std::cout << "  undecoded (B-spline) nodes:";
+        for (const std::string& node : animation.stats.unsupportedNodes) {
+            std::cout << " " << node;
+        }
+        std::cout << "\n";
+    }
+    std::size_t shownTracks = 0;
+    for (const auto& track : animation.tracks) {
+        if (shownTracks++ >= 8u) {
+            break;
+        }
+        std::cout << "  " << track.nodeName << ": " << track.rotationKeys.size() << " rot, "
+                  << track.translationKeys.size() << " trans, " << track.scaleKeys.size()
+                  << " scale";
+        if (!track.rotationKeys.empty()) {
+            std::cout << "  t[" << track.rotationKeys.front().time << ".."
+                      << track.rotationKeys.back().time << "]";
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << "string table:\n";
+    for (std::size_t i = 0; i < summary.strings.size() && i < 40u; ++i) {
+        std::cout << "  [" << i << "] \"" << summary.strings[i] << "\"\n";
+    }
+    return 0;
+}
+
+// Parses every .kf under a folder and reports what the reader made of each.
+//
+// One file parsing is not evidence the layout is right -- it is evidence it is
+// right for that file. The securitron alone ships 89 clips spanning every key
+// type and both interpolator families, and a stride error shows up as a
+// scattering of failures across them rather than a clean break.
+int probeKfFolder(const std::filesystem::path& dataPath, const std::string& folderNeedle) {
+    const std::string loweredNeedle = toLowerAscii(folderNeedle);
+    std::size_t parsed = 0;
+    std::size_t failed = 0;
+    std::size_t noTracks = 0;
+    std::size_t totalTracks = 0;
+    std::size_t totalUnsupported = 0;
+    std::map<std::string, std::size_t> failureReasons;
+
+    for (const auto& archivePath : listArchives(dataPath)) {
+        std::uint32_t contentFlags = 0;
+        if (odai::importer::fnv::peekBsaContentFlags(archivePath, contentFlags) &&
+            (contentFlags & odai::importer::fnv::kBsaContentMeshes) == 0u) {
+            continue;
+        }
+        BsaArchive archive;
+        if (!archive.open(archivePath)) {
+            continue;
+        }
+        for (const BsaFileEntry& entry : archive.files()) {
+            const std::string lowered = toLowerAscii(entry.virtualPath);
+            if (lowered.size() < 4u || lowered.compare(lowered.size() - 3u, 3u, ".kf") != 0) {
+                continue;
+            }
+            if (lowered.find(loweredNeedle) == std::string::npos) {
+                continue;
+            }
+            std::vector<std::uint8_t> bytes;
+            std::string error;
+            if (!archive.extract(entry, bytes, error)) {
+                ++failed;
+                ++failureReasons["extract: " + error];
+                continue;
+            }
+            odai::importer::fnv::KfAnimation animation;
+            if (!odai::importer::fnv::parseKfAnimation(bytes, animation, error)) {
+                ++failed;
+                ++failureReasons[error];
+                continue;
+            }
+            ++parsed;
+            totalTracks += animation.tracks.size();
+            totalUnsupported += animation.stats.unsupportedInterpolators;
+            if (animation.tracks.empty()) {
+                ++noTracks;
+                std::cout << "  NO TRACKS: " << entry.virtualPath << "\n";
+            }
+        }
+    }
+    std::cout << parsed << " parsed, " << failed << " failed, " << noTracks
+              << " parsed but empty\n"
+              << "  " << totalTracks << " tracks total, " << totalUnsupported
+              << " unsupported interpolators skipped\n";
+    for (const auto& [reason, count] : failureReasons) {
+        std::cout << "  " << count << "x " << reason << "\n";
+    }
+    return failed == 0 ? 0 : 1;
+}
+
 // Dumps a skeleton NIF's bone hierarchy as an indented tree.
 //
 // The tree shape is the check that matters and it is one a human has to make:
@@ -507,6 +719,22 @@ int probeSkinnedNif(const std::filesystem::path& dataPath, const std::string& vi
             std::cout << "  \"" << shape.name << "\" verts " << vertexCount << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", bones " << shape.boneNames.size()
                       << ", diffuse \"" << shape.diffuseTexturePath << "\"\n";
+            // Where the geometry actually sits, in the file's own space, and
+            // the transform that is supposed to carry it into the skeleton's.
+            // A part in the wrong place on screen is one or the other, and the
+            // two need different fixes.
+            float rawMin[3] = {1e30f, 1e30f, 1e30f};
+            float rawMax[3] = {-1e30f, -1e30f, -1e30f};
+            for (std::size_t v = 0; v + 2u < shape.positions.size(); v += 3u) {
+                for (int a2 = 0; a2 < 3; ++a2) {
+                    rawMin[a2] = std::min(rawMin[a2], shape.positions[v + static_cast<std::size_t>(a2)]);
+                    rawMax[a2] = std::max(rawMax[a2], shape.positions[v + static_cast<std::size_t>(a2)]);
+                }
+            }
+            std::cout << "      skin-space bounds (" << rawMin[0] << ".." << rawMax[0] << ", "
+                      << rawMin[1] << ".." << rawMax[1] << ", " << rawMin[2] << ".." << rawMax[2]
+                      << ")  skinTransform t(" << shape.skinTransform[3] << ", "
+                      << shape.skinTransform[7] << ", " << shape.skinTransform[11] << ")\n";
             // How many bones each vertex actually uses, after truncation. A
             // column at 1 on a body mesh means the weights did not parse.
             std::size_t byCount[odai::importer::fnv::kNifMaxBoneInfluences + 1] = {};
@@ -806,6 +1034,16 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
         std::cout << "resolve failed: " << error << "\n";
         return 1;
     }
+    // Same escape hatch --nif has, for the same reason: these files live inside
+    // a BSA, so nothing outside this tool can look at one. A cloud layer's
+    // LAYOUT -- fisheye dome map or tiling plane -- is not a number this mode
+    // can print, and getting it wrong renders a seam rather than an error.
+    if (const char* dumpPath = std::getenv("ODAI_NIF_DUMP")) {
+        std::ofstream out(dumpPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(ddsBytes.data()),
+                  static_cast<std::streamsize>(ddsBytes.size()));
+        std::cout << "wrote " << ddsBytes.size() << " bytes to " << dumpPath << "\n";
+    }
     ImportedSceneTexture texture;
     if (!loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
         std::cout << "DDS decode failed\n";
@@ -1019,6 +1257,105 @@ int probeFooters(const std::filesystem::path& dataPath, std::size_t limit) {
     return 0;
 }
 
+// Independent ground truth for the VHGT decode. The game ships its own distant
+// terrain as meshes -- meshes\landscape\lod\<worldspace>\blocks\*.nif -- baked
+// by the GECK from the same LAND records the streamer reads. Their vertices are
+// already in world space (a level4 block's bounds land exactly on its 4x4 cell
+// footprint), so the height they report at an XY can be compared directly with
+// the height our own decode produces there.
+//
+// This is what answers "is the terrain wrong or is the reference high", which
+// clearances alone cannot: every placed reference in a cell is positioned
+// relative to the same terrain, so if that terrain is wrong they all agree with
+// each other and still disagree with the game.
+//
+// Caveat worth stating up front: level4 is the FINEST LOD and is still ~20x
+// coarser than the full 33x33-per-cell heightfield (855 vertices over 4x4
+// cells, ~585 units apart). It resolves a hillside, not a doorstep -- so a
+// disagreement of tens of units means nothing and one of ~170 means a great
+// deal.
+int lodHeightAt(const std::filesystem::path& dataPath, const std::string& nifPath,
+                float worldX, float worldY) {
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "asset source open FAILED\n";
+        return 1;
+    }
+    std::vector<std::uint8_t> nifBytes;
+    std::string error;
+    if (!assets.resolveMesh(nifPath, nifBytes, error)) {
+        std::cout << "resolve FAILED: " << error << "\n";
+        return 1;
+    }
+    odai::importer::fnv::NifModel model;
+    if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, model, error)) {
+        std::cout << "parse FAILED: " << error << "\n";
+        return 1;
+    }
+    struct Near {
+        float distanceSquared;
+        float x;
+        float y;
+        float z;
+    };
+    // A LOD block carries a SKIRT: a second ring of vertices at the block's
+    // edge dropped far below the surface, so neighbouring blocks cannot show a
+    // crack between them. They sit at the same XY as the surface vertex above
+    // them and at the block's minimum Z (-14098 in the x-20.y0 block, against a
+    // terrain around 8200), so averaging them in reports a height thousands of
+    // units below anything real. Collapsing each XY to its HIGHEST vertex drops
+    // the skirt and keeps the surface, without needing to know the skirt depth.
+    std::map<std::pair<int, int>, float> surfaceByXy;
+    for (const odai::importer::fnv::NifShape& shape : model.shapes) {
+        const std::size_t vertexCount = shape.positions.size() / 3u;
+        for (std::size_t v = 0; v < vertexCount; ++v) {
+            const float vx = shape.positions[(v * 3u) + 0];
+            const float vy = shape.positions[(v * 3u) + 1];
+            const float vz = shape.positions[(v * 3u) + 2];
+            const std::pair<int, int> key{static_cast<int>(std::lround(vx)),
+                                          static_cast<int>(std::lround(vy))};
+            const auto existing = surfaceByXy.find(key);
+            if (existing == surfaceByXy.end() || vz > existing->second) {
+                surfaceByXy[key] = vz;
+            }
+        }
+    }
+    std::vector<Near> nearest;
+    nearest.reserve(surfaceByXy.size());
+    for (const auto& [xy, z] : surfaceByXy) {
+        const float dx = static_cast<float>(xy.first) - worldX;
+        const float dy = static_cast<float>(xy.second) - worldY;
+        nearest.push_back(
+            Near{(dx * dx) + (dy * dy), static_cast<float>(xy.first),
+                 static_cast<float>(xy.second), z});
+    }
+    if (nearest.empty()) {
+        std::cout << "no vertices in " << nifPath << "\n";
+        return 1;
+    }
+    std::sort(nearest.begin(), nearest.end(),
+              [](const Near& a, const Near& b) { return a.distanceSquared < b.distanceSquared; });
+    std::cout << nifPath << ": " << nearest.size() << " surface vertices (skirt removed)\n";
+    std::cout << "  query (" << worldX << ", " << worldY << ")\n";
+    const std::size_t show = std::min<std::size_t>(nearest.size(), 8u);
+    // Inverse-distance blend of the nearest few, which is the best a scattered
+    // LOD grid supports -- it is not a regular lattice this can bilerp on.
+    double weightSum = 0.0;
+    double heightSum = 0.0;
+    for (std::size_t i = 0; i < show; ++i) {
+        const float distance = std::sqrt(nearest[i].distanceSquared);
+        std::cout << "    d=" << static_cast<int>(distance) << "  ("
+                  << static_cast<int>(nearest[i].x) << ", " << static_cast<int>(nearest[i].y)
+                  << ")  z=" << nearest[i].z << "\n";
+        const double weight = 1.0 / std::max(1.0, static_cast<double>(distance));
+        weightSum += weight;
+        heightSum += weight * static_cast<double>(nearest[i].z);
+    }
+    std::cout << "  LOD height at query (inverse-distance over " << show
+              << " nearest) = " << (heightSum / std::max(1e-9, weightSum)) << "\n";
+    return 0;
+}
+
 int probeSingleNif(const std::filesystem::path& dataPath, const std::string& virtualPath) {
     MeshIndex index = buildMeshIndex(dataPath);
     for (std::size_t a = 0; a < index.archives.size(); ++a) {
@@ -1032,11 +1369,22 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
             return 1;
         }
         std::cout << "Extracted " << bytes.size() << " bytes.\n";
+        // ODAI_NIF_DUMP writes the decompressed asset out as-is. Everything an
+        // unsupported header needs is in its first hundred bytes, and there is
+        // otherwise no way to look at them: these files live inside a BSA, so a
+        // hex editor -- or NifSkope -- cannot reach one without this.
+        if (const char* dumpPath = std::getenv("ODAI_NIF_DUMP")) {
+            std::ofstream out(dumpPath, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+            std::cout << "wrote " << bytes.size() << " bytes to " << dumpPath << "\n";
+        }
         odai::importer::fnv::NifModel model;
         std::string error;
         const bool ok = odai::importer::fnv::parseNifStaticMesh(bytes, model, error);
         std::cout << "parse " << (ok ? "ok" : "FAILED") << (error.empty() ? "" : (": " + error)) << "\n"
-                  << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount << "\n";
+                  << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount
+                  << ", editor markers " << model.editorMarkerShapeCount << "\n";
         for (const odai::importer::fnv::NifShape& shape : model.shapes) {
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
@@ -1047,6 +1395,28 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                       << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
+            // Vertex-alpha census. This is the channel that feathers a placed
+            // road into the ground under it, so "does this shape have one, and
+            // is it actually varying" is the question a hard-edged road asks.
+            // A constant 1.0 is not a feather; a spread is.
+            if (!shape.colors.empty()) {
+                float minAlpha = 1.0F;
+                float maxAlpha = 0.0F;
+                std::size_t fadedVertices = 0;
+                for (std::size_t v = 3u; v < shape.colors.size(); v += 4u) {
+                    const float alpha = shape.colors[v];
+                    minAlpha = std::min(minAlpha, alpha);
+                    maxAlpha = std::max(maxAlpha, alpha);
+                    if (alpha < 0.99F) {
+                        ++fadedVertices;
+                    }
+                }
+                std::cout << "      vertex color: yes, alpha [" << minAlpha << ", " << maxAlpha
+                          << "] faded=" << fadedVertices << "/" << (shape.colors.size() / 4u)
+                          << "\n";
+            } else {
+                std::cout << "      vertex color: none\n";
+            }
             // Winding orientation: signed volume via the divergence theorem,
             // plus the fraction of faces whose geometric normal agrees with
             // the shape's authored vertex normals. A closed shell wound
@@ -1230,6 +1600,47 @@ int probeCellIndex(
             std::cout << "  no worldspace matching \"" << worldspaceFilter << "\"\n";
             return 1;
         }
+
+        // WHERE the worldspace's content sits, which is the first thing anyone
+        // pointing a camera at an unfamiliar place needs and the slowest thing
+        // to find by hand. A worldspace record's own NAM0/NAM9 corners are NOT
+        // this: Bravil's span 52 cells of open bay rather than a city, so they
+        // framed the water and not the town. Occupied cells cannot lie.
+        //
+        // Cells with an empty children group are excluded on purpose -- they are
+        // the header-only overrides that make a populated district look present
+        // at coordinates it has nothing at.
+        std::int32_t minX = 0, maxX = 0, minZ = 0, maxZ = 0;
+        std::size_t occupied = 0;
+        std::vector<std::pair<std::uint32_t, const FalloutCellIndexEntry*>> byWeight;
+        for (const FalloutCellIndexEntry& entry : index.cells) {
+            if (entry.isInterior || !entry.hasGridCoords ||
+                entry.worldspaceFormId != worldspaceFormId || entry.childrenGroupSize == 0u) {
+                continue;
+            }
+            if (occupied == 0) {
+                minX = maxX = entry.gridX;
+                minZ = maxZ = entry.gridZ;
+            }
+            minX = std::min(minX, entry.gridX);
+            maxX = std::max(maxX, entry.gridX);
+            minZ = std::min(minZ, entry.gridZ);
+            maxZ = std::max(maxZ, entry.gridZ);
+            ++occupied;
+            byWeight.emplace_back(entry.childrenGroupSize, &entry);
+        }
+        std::cout << "  occupied cells: " << occupied << ", grid x [" << minX << "," << maxX
+                  << "] z [" << minZ << "," << maxZ << "]\n";
+        // Children-group BYTES, not a reference count -- the index deliberately
+        // never walks a cell's contents, and byte size ranks density well enough
+        // to say "start looking here".
+        std::sort(byWeight.begin(), byWeight.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (std::size_t i = 0; i < byWeight.size() && i < 5u; ++i) {
+            std::cout << "    densest: (" << byWeight[i].second->gridX << ","
+                      << byWeight[i].second->gridZ << ") " << byWeight[i].first
+                      << " bytes of children\n";
+        }
     }
 
     // Pick the sample cells, preferring ones that actually have contents.
@@ -1324,15 +1735,15 @@ int probeCellIndex(
             const FalloutLandRecord& a = *actual.land;
             const FalloutLandRecord& b = *expected->land;
             if (a.hasHeights != b.hasHeights ||
-                (a.hasHeights && std::memcmp(a.heights, b.heights, sizeof(a.heights)) != 0)) {
+                (a.hasHeights && a.heights != b.heights)) {
                 problems.push_back("VHGT heights differ");
             }
             if (a.hasNormals != b.hasNormals ||
-                (a.hasNormals && std::memcmp(a.normals, b.normals, sizeof(a.normals)) != 0)) {
+                (a.hasNormals && a.normals != b.normals)) {
                 problems.push_back("VNML normals differ");
             }
             if (a.hasColors != b.hasColors ||
-                (a.hasColors && std::memcmp(a.colors, b.colors, sizeof(a.colors)) != 0)) {
+                (a.hasColors && a.colors != b.colors)) {
                 problems.push_back("VCLR colours differ");
             }
             if (std::memcmp(
@@ -1421,21 +1832,37 @@ int probeBuildCell(
         return 1;
     }
 
-    std::uint32_t worldspaceFormId = 0;
+    // A worldspace name that resolves to nothing used to leave this at 0, which
+    // the filter below reads as "no filter" -- so a typo, or a worldspace this
+    // build cannot see, silently reported some OTHER worldspace's cell at the
+    // same grid coordinate. Since Tamriel is first in the index, every bad name
+    // rendered Tamriel and looked entirely plausible. Fail instead.
     const auto worldIt = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspaceFilter));
-    if (worldIt != tables.worldspaceFormIdsByEditorId.end()) {
-        worldspaceFormId = worldIt->second;
+    if (worldIt == tables.worldspaceFormIdsByEditorId.end()) {
+        std::cout << "no worldspace named \"" << worldspaceFilter << "\" in " << esmPath << "\n";
+        return 1;
     }
+    const std::uint32_t worldspaceFormId = worldIt->second;
 
+    // Take the entry that actually HAS a children group, not merely the first at
+    // these coordinates. A worldspace can carry several CELL records for one
+    // grid square -- an override that touches only the cell header leaves an
+    // entry with no children at all -- and stopping at the first one reports a
+    // populated city district as empty. cell_streamer.cc:274 has always made
+    // this check; this tool did not, which is why the two disagreed.
     const FalloutCellIndexEntry* entry = nullptr;
     for (const FalloutCellIndexEntry& candidate : index.cells) {
-        if (candidate.isInterior || !candidate.hasGridCoords) {
+        if (candidate.isInterior || !candidate.hasGridCoords ||
+            candidate.worldspaceFormId != worldspaceFormId) {
             continue;
         }
-        if (worldspaceFormId != 0 && candidate.worldspaceFormId != worldspaceFormId) {
+        if (candidate.gridX != cellX || candidate.gridZ != cellZ) {
             continue;
         }
-        if (candidate.gridX == cellX && candidate.gridZ == cellZ) {
+        if (entry == nullptr) {
+            entry = &candidate;
+        }
+        if (candidate.childrenGroupSize != 0u) {
             entry = &candidate;
             break;
         }
@@ -1463,6 +1890,49 @@ int probeBuildCell(
     if (!assets.open(dataPath)) {
         std::cout << "asset source FAILED to open " << dataPath << "\n";
         return 1;
+    }
+
+    // Per-quadrant BASE texture, which is what an untextured-looking terrain
+    // comes down to: BTXT names an LTEX per quadrant, and a quadrant naming
+    // none falls back to the cell set's dominant texture -- which is itself
+    // nothing when no quadrant anywhere named one.
+    if (cell.land != nullptr) {
+        // VNML, as decoded. Printed because a terrain that shades flat and
+        // white is almost never a texture problem: it is the surface being lit
+        // as though it faced sideways, and nothing else in this output would
+        // say so. Bethesda space here, so a level post reads (0, 0, 1).
+        std::cout << "  land normals: " << (cell.land->hasNormals ? "present" : "ABSENT");
+        if (cell.land->hasNormals && cell.land->normals.size() >= 9u) {
+            const int centre = (cell.land->gridSize / 2) * cell.land->gridSize +
+                (cell.land->gridSize / 2);
+            const auto show = [&](const char* label, int post) {
+                const std::size_t base = static_cast<std::size_t>(post) * 3u;
+                if (base + 2u < cell.land->normals.size()) {
+                    std::cout << " " << label << "(" << cell.land->normals[base] << ","
+                              << cell.land->normals[base + 1] << ","
+                              << cell.land->normals[base + 2] << ")";
+                }
+            };
+            show("post0", 0);
+            show("centre", centre);
+        }
+        std::cout << "\n";
+        std::cout << "  land base textures (BTXT) per quadrant:";
+        for (const std::uint32_t formId : cell.land->quadrantBaseTextureFormId) {
+            std::cout << " ";
+            if (formId == 0u) {
+                std::cout << "<none>";
+            } else {
+                const auto path = tables.landTexturePaths.find(formId);
+                std::cout << std::hex << formId << std::dec
+                          << (path != tables.landTexturePaths.end()
+                                  ? ("=" + path->second)
+                                  : std::string("=UNRESOLVED"));
+            }
+        }
+        std::cout << "\n  land texture LAYERS (ATXT): " << cell.land->textureLayers.size() << "\n";
+    } else {
+        std::cout << "  no LAND record\n";
     }
 
     const auto buildStart = std::chrono::steady_clock::now();
@@ -1494,12 +1964,209 @@ int probeBuildCell(
               << " packedIndices=" << scene.packedIndices.size()
               << " packedDraws=" << scene.packedDraws.size()
               << " terrainParts=" << stats.terrainPartsEmitted << "\n";
+    // The terrain mesh's normals AFTER the basis change, in engine space, where
+    // a level post must read (0, 1, 0). Printed next to the raw VNML above so a
+    // terrain that shades like a wall can be blamed on the decode or on the
+    // basis change without guessing which.
+    for (const auto& mesh : scene.meshes) {
+        if (mesh.name != "terrain" || mesh.vertices.empty()) {
+            continue;
+        }
+        double sum[3] = {0.0, 0.0, 0.0};
+        for (const auto& vertex : mesh.vertices) {
+            for (int axis = 0; axis < 3; ++axis) {
+                sum[axis] += vertex.normal[axis];
+            }
+        }
+        const double count = static_cast<double>(mesh.vertices.size());
+        std::cout << "  terrain normals (engine space, mean over " << mesh.vertices.size()
+                  << " posts): (" << (sum[0] / count) << "," << (sum[1] / count) << ","
+                  << (sum[2] / count) << ")\n";
+        // VCLR, which MULTIPLIES the sampled texture. A dark mean here is the
+        // difference between "the land texture is wrong" and "the land texture
+        // is fine and something is multiplying it to black".
+        double colorSum[3] = {0.0, 0.0, 0.0};
+        for (const auto& vertex : mesh.vertices) {
+            for (int channel = 0; channel < 3; ++channel) {
+                colorSum[channel] += vertex.color[channel];
+            }
+        }
+        std::cout << "  terrain vertex colour (VCLR, mean): (" << (colorSum[0] / count) << ","
+                  << (colorSum[1] / count) << "," << (colorSum[2] / count) << ")\n";
+        break;
+    }
+    // And the same normals once they have been through the PACKED stream, which
+    // is what the renderer actually uploads. The mesh above is the builder's
+    // output; anything that goes wrong between the two shows up as a difference
+    // here and nowhere else.
+    {
+        double packedSum[3] = {0.0, 0.0, 0.0};
+        std::size_t packedCount = 0;
+        for (const auto& vertex : scene.packedVertices) {
+            if ((vertex.flags & odai::importer::kImportedSceneMaterialFlagTerrainLayers) == 0u) {
+                continue;
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                packedSum[axis] += vertex.normal[axis];
+            }
+            ++packedCount;
+        }
+        if (packedCount > 0u) {
+            const double count = static_cast<double>(packedCount);
+            std::cout << "  packed terrain normals (mean over " << packedCount << " verts): ("
+                      << (packedSum[0] / count) << "," << (packedSum[1] / count) << ","
+                      << (packedSum[2] / count) << ")\n";
+        } else {
+            std::cout << "  packed terrain normals: no packed vertex carries the terrain-layer"
+                      << " flag\n";
+        }
+    }
+    // The widest meshes in the built scene, in world units. A single object
+    // spanning several cells is almost always the answer to "what is this
+    // plane over the landscape", and nothing else in this output names it.
+    {
+        struct Footprint {
+            float extentX;
+            float extentZ;
+            std::string name;
+        };
+        std::vector<Footprint> footprints;
+        for (const auto& mesh : scene.meshes) {
+            if (mesh.vertices.empty()) {
+                continue;
+            }
+            float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
+            for (const auto& vertex : mesh.vertices) {
+                minX = std::min(minX, vertex.position[0]);
+                maxX = std::max(maxX, vertex.position[0]);
+                minZ = std::min(minZ, vertex.position[2]);
+                maxZ = std::max(maxZ, vertex.position[2]);
+            }
+            footprints.push_back({maxX - minX, maxZ - minZ, mesh.name});
+        }
+        std::sort(footprints.begin(), footprints.end(), [](const auto& a, const auto& b) {
+            return std::max(a.extentX, a.extentZ) > std::max(b.extentX, b.extentZ);
+        });
+        std::cout << "  widest meshes (XZ extent, world units):\n";
+        for (std::size_t i = 0; i < footprints.size() && i < 8u; ++i) {
+            std::cout << "    " << footprints[i].extentX << " x " << footprints[i].extentZ
+                      << "  " << footprints[i].name << "\n";
+        }
+    }
     std::cout << "  shapes=" << stats.totalShapes
               << " untextured=" << stats.untexturedShapes
               << " placed=" << stats.placedInstances
               << " decalsSkipped=" << stats.shadowDecalShapesSkipped
               << " markersSkipped=" << stats.editorMarkerModelsSkipped
               << " droppedLayers=" << stats.droppedTerrainLayers << "\n";
+    // Water is the one cell property with no geometry of its own: the record
+    // states a height and the engine fills the footprint. Printing the decision
+    // and its inputs together is the only way to tell "this cell is dry" from
+    // "the height decoded wrong" -- both render as no water.
+    // A cell with no LAND is flat ground at the worldspace's DNAM default
+    // height, not a hole -- so "land=no" is only alarming once you know whether
+    // a default exists to stand in for it.
+    if (cell.land == nullptr) {
+        const auto defaultsIt = tables.worldspaceDefaultsByFormId.find(cell.worldspaceFormId);
+        if (defaultsIt == tables.worldspaceDefaultsByFormId.end()) {
+            std::cout << "  no LAND, and this worldspace declares no DNAM default land height\n";
+        } else {
+            std::cout << "  no LAND; worldspace DNAM default land height "
+                      << defaultsIt->second.defaultLandHeight << ", default water "
+                      << defaultsIt->second.defaultWaterHeight << "\n";
+        }
+    }
+    std::cout << "  water: XCLW=" << (cell.hasWater ? std::to_string(cell.waterHeight) : "<absent>");
+    if (cell.land != nullptr && cell.land->hasHeights) {
+        const auto [lowest, highest] =
+            std::minmax_element(std::begin(cell.land->heights), std::end(cell.land->heights));
+        std::cout << " terrain z [" << *lowest << "," << *highest << "]";
+    }
+    std::cout << " -> patches=" << scene.waterPatches.size() << "\n";
+    // Every one of these used to be a silent `continue`. A town with holes in it
+    // is the symptom; this is the only place that says which kind of hole.
+    const std::size_t droppedReferences =
+        stats.referencesDroppedBaseNotFound + stats.referencesDroppedBaseHasNoModel +
+        stats.referencesDroppedMeshUnresolved + stats.referencesDroppedMeshUnreadable;
+    std::cout << "  refs dropped: " << droppedReferences << " of " << cell.references.size()
+              << "  (baseNotFound=" << stats.referencesDroppedBaseNotFound
+              << " baseHasNoModel=" << stats.referencesDroppedBaseHasNoModel
+              << " meshUnresolved=" << stats.referencesDroppedMeshUnresolved
+              << " meshUnreadable=" << stats.referencesDroppedMeshUnreadable << ")\n";
+    // Name the dropped bases, not only count them: "STAT=21 baseHasNoModel"
+    // says a fifth of Whiterun is missing and nothing else; the formIDs are
+    // what --formid can then answer for.
+    if (!builder.failedStatics().empty()) {
+        std::cout << "  dropped base records (formID reason [type] editorID/model):\n";
+        std::size_t shown = 0;
+        for (const auto& [baseFormId, reason] : builder.failedStatics()) {
+            if (reason == CellSceneBuilder::StaticDropReason::kIntentional) {
+                continue;
+            }
+            if (++shown > 24u) {
+                std::cout << "    ...\n";
+                break;
+            }
+            const char* reasonName = "?";
+            switch (reason) {
+                case CellSceneBuilder::StaticDropReason::kBaseNotFound: reasonName = "baseNotFound"; break;
+                case CellSceneBuilder::StaticDropReason::kBaseHasNoModel: reasonName = "baseHasNoModel"; break;
+                case CellSceneBuilder::StaticDropReason::kMeshUnresolved: reasonName = "meshUnresolved"; break;
+                case CellSceneBuilder::StaticDropReason::kMeshUnreadable: reasonName = "meshUnreadable"; break;
+                case CellSceneBuilder::StaticDropReason::kIntentional: break;
+            }
+            const auto typeIt = tables.staticRecordTypes.find(baseFormId);
+            const auto editorIt = tables.staticEditorIds.find(baseFormId);
+            const auto modelIt = tables.staticModelPaths.find(baseFormId);
+            std::cout << "    0x" << std::hex << baseFormId << std::dec << "  " << reasonName
+                      << "  [" << (typeIt != tables.staticRecordTypes.end() ? typeIt->second : "?")
+                      << "]  "
+                      << (editorIt != tables.staticEditorIds.end() ? editorIt->second : "")
+                      << "  "
+                      << (modelIt != tables.staticModelPaths.end() ? modelIt->second : "<no model>")
+                      << "\n";
+        }
+    }
+    if (!stats.droppedReferencesByBaseType.empty()) {
+        // Sorted so two runs can be diffed, and by count so the one worth
+        // chasing is first.
+        std::vector<std::pair<std::string, std::size_t>> byType(
+            stats.droppedReferencesByBaseType.begin(), stats.droppedReferencesByBaseType.end());
+        std::sort(byType.begin(), byType.end(), [](const auto& a, const auto& b) {
+            return a.second != b.second ? a.second > b.second : a.first < b.first;
+        });
+        std::cout << "    by base record type:";
+        for (const auto& [typeName, count] : byType) {
+            std::cout << " " << typeName << "=" << count;
+        }
+        std::cout << "\n";
+    }
+    // The other half of ODAI_DEBUG_UNTEXTURED_MAGENTA: the render says WHERE an
+    // untextured surface is, this says WHICH asset it wanted. Neither is much
+    // use alone.
+    if (!stats.unresolvedTexturePaths.empty() || !stats.untexturedModelPaths.empty()) {
+        std::cout << "  untextured: " << stats.untexturedShapes << " shape(s), "
+                  << stats.untexturedShapesGivenModelTexture
+                  << " rescued by a sibling shape's texture\n";
+        std::vector<std::string> paths(
+            stats.unresolvedTexturePaths.begin(), stats.unresolvedTexturePaths.end());
+        std::sort(paths.begin(), paths.end());
+        for (std::size_t i = 0; i < paths.size() && i < 12u; ++i) {
+            std::cout << "    unresolved texture: " << paths[i] << "\n";
+        }
+        if (paths.size() > 12u) {
+            std::cout << "    ... and " << (paths.size() - 12u) << " more\n";
+        }
+        std::vector<std::string> models(
+            stats.untexturedModelPaths.begin(), stats.untexturedModelPaths.end());
+        std::sort(models.begin(), models.end());
+        for (std::size_t i = 0; i < models.size() && i < 12u; ++i) {
+            std::cout << "    model with no texture: " << models[i] << "\n";
+        }
+        if (models.size() > 12u) {
+            std::cout << "    ... and " << (models.size() - 12u) << " more\n";
+        }
+    }
     std::cout << "  lights=" << scene.lights.size()
               << " placed=" << stats.lightsPlaced
               << " zeroRadiusSkipped=" << stats.lightsSkippedZeroRadius
@@ -1521,26 +2188,79 @@ int probeFloaters(
     using namespace odai::importer::fnv;
 
     std::string error;
+    // ODAI_FLOATERS_PLUGINS=<comma-separated plugin file names> builds the same
+    // merged view of the world the streamer uses when extra plugins are loaded,
+    // so a floater introduced BY a mod can be told apart from one the base game
+    // ships. Without it this reads one plugin, which is what it always did.
+    FalloutLoadOrder order;
+    bool useOrder = false;
+    if (const char* pluginsEnv = std::getenv("ODAI_FLOATERS_PLUGINS")) {
+        std::vector<std::string> requested;
+        requested.push_back(esmPath.filename().string());
+        std::string current;
+        for (const char* cursor = pluginsEnv; ; ++cursor) {
+            if (*cursor == ',' || *cursor == '\0') {
+                if (!current.empty()) {
+                    requested.push_back(current);
+                    current.clear();
+                }
+                if (*cursor == '\0') {
+                    break;
+                }
+                continue;
+            }
+            current.push_back(*cursor);
+        }
+        if (const char* rootsEnv = std::getenv("ODAI_FLOATERS_MODROOTS")) {
+            order.addSearchRoot(std::filesystem::path(rootsEnv));
+        }
+        std::string orderError;
+        if (!order.open(dataPath, requested, orderError)) {
+            std::cout << "load order FAILED: " << orderError << "\n";
+            return 1;
+        }
+        useOrder = true;
+        std::cout << "load order:";
+        for (const auto& loaded : order.entries()) {
+            std::cout << " " << loaded.header.fileName;
+        }
+        std::cout << "\n";
+    }
+
     FalloutWorldTables tables;
-    if (!buildFalloutWorldTables(esmPath, tables, error)) {
+    const bool worldOk = useOrder ? buildFalloutWorldTables(order, tables, error)
+                                  : buildFalloutWorldTables(esmPath, tables, error);
+    if (!worldOk) {
         std::cout << "world tables FAILED: " << error << "\n";
         return 1;
     }
     FalloutCellIndex index;
-    if (!buildFalloutCellIndex(esmPath, index, error)) {
+    const bool indexOk = useOrder ? buildFalloutCellIndex(order, index, error)
+                                  : buildFalloutCellIndex(esmPath, index, error);
+    if (!indexOk) {
         std::cout << "cell index FAILED: " << error << "\n";
         return 1;
     }
-    std::uint32_t worldspaceFormId = 0;
+    // Same two corrections as --buildcell above: an unresolvable name is an
+    // error rather than "match any worldspace", and the entry that carries the
+    // children group wins over the first one at these coordinates.
     const auto worldIt = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspaceFilter));
-    if (worldIt != tables.worldspaceFormIdsByEditorId.end()) {
-        worldspaceFormId = worldIt->second;
+    if (worldIt == tables.worldspaceFormIdsByEditorId.end()) {
+        std::cout << "no worldspace named \"" << worldspaceFilter << "\"\n";
+        return 1;
     }
+    const std::uint32_t worldspaceFormId = worldIt->second;
     const FalloutCellIndexEntry* entry = nullptr;
     for (const FalloutCellIndexEntry& candidate : index.cells) {
-        if (!candidate.isInterior && candidate.hasGridCoords &&
-            (worldspaceFormId == 0 || candidate.worldspaceFormId == worldspaceFormId) &&
-            candidate.gridX == cellX && candidate.gridZ == cellZ) {
+        if (candidate.isInterior || !candidate.hasGridCoords ||
+            candidate.worldspaceFormId != worldspaceFormId || candidate.gridX != cellX ||
+            candidate.gridZ != cellZ) {
+            continue;
+        }
+        if (entry == nullptr) {
+            entry = &candidate;
+        }
+        if (candidate.childrenGroupSize != 0u) {
             entry = &candidate;
             break;
         }
@@ -1551,13 +2271,20 @@ int probeFloaters(
     }
 
     EsmReader reader;
-    if (!reader.open(esmPath)) {
+    if (!useOrder && !reader.open(esmPath)) {
         return 1;
     }
     FalloutCellRecord cell;
-    if (!extractFalloutCellAt(reader, *entry, cell, error)) {
+    const bool extracted = useOrder
+        ? extractFalloutCellMerged(index, order, *entry, cell, error)
+        : extractFalloutCellAt(reader, *entry, cell, error);
+    if (!extracted) {
         std::cout << "extract FAILED: " << error << "\n";
         return 1;
+    }
+    if (useOrder) {
+        std::cout << "cell contributions: " << entry->contributions.size()
+                  << "  merged references: " << cell.references.size() << "\n";
     }
     if (cell.land == nullptr || !cell.land->hasHeights) {
         std::cout << "cell has no LAND heights to compare against\n";
@@ -1583,12 +2310,130 @@ int probeFloaters(
                (at(x0, y1) * (1 - fx) * fy) + (at(x1, y1) * fx * fy);
     };
 
+    // ODAI_FLOATERS_LAND prints the decoded 33x33 VHGT grid as a coarse map.
+    // "Is the terrain wrong here" is otherwise unanswerable from clearances
+    // alone: a floater over FLAT ground means the placement is high, a floater
+    // over ground that should have a berm means the LAND decode lost it.
+    if (std::getenv("ODAI_FLOATERS_LAND") != nullptr) {
+        float minH = std::numeric_limits<float>::max();
+        float maxH = std::numeric_limits<float>::lowest();
+        for (int i = 0; i < kLandGridSize * kLandGridSize; ++i) {
+            minH = std::min(minH, cell.land->heights[i]);
+            maxH = std::max(maxH, cell.land->heights[i]);
+        }
+        std::cout << "  LAND 33x33 heights " << minH << " .. " << maxH
+                  << " (row 0 = south edge, col 0 = west edge; 128 units per post)\n";
+        for (int y = kLandGridSize - 1; y >= 0; --y) {
+            std::cout << "   y" << (y < 10 ? " " : "") << y << " ";
+            for (int x = 0; x < kLandGridSize; ++x) {
+                std::cout << " " << static_cast<int>(cell.land->heights[(y * kLandGridSize) + x]);
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // ODAI_FLOATERS_LOD=<lod block virtual path> validates the VHGT decode
+    // against the game's own baked distant terrain, across the whole cell
+    // rather than at one point. If our heightfield were wrong by the ~170 units
+    // a floating road implies, this sweep is where it would show as a bias; a
+    // mean near zero with a spread of a few tens of units is just the LOD being
+    // ~20x coarser than the heightfield it was baked from.
+    if (const char* lodEnv = std::getenv("ODAI_FLOATERS_LOD")) {
+        odai::importer::fnv::FalloutAssetSource lodAssets;
+        std::vector<std::uint8_t> lodBytes;
+        std::string lodError;
+        odai::importer::fnv::NifModel lodModel;
+        if (lodAssets.open(dataPath) && lodAssets.resolveMesh(lodEnv, lodBytes, lodError) &&
+            odai::importer::fnv::parseNifStaticMesh(lodBytes, lodModel, lodError)) {
+            // Collapse each XY to its highest vertex: LOD blocks carry a skirt
+            // far below the surface at the block edge (see --lodheight).
+            std::map<std::pair<int, int>, float> surfaceByXy;
+            for (const odai::importer::fnv::NifShape& shape : lodModel.shapes) {
+                const std::size_t vertexCount = shape.positions.size() / 3u;
+                for (std::size_t v = 0; v < vertexCount; ++v) {
+                    const std::pair<int, int> key{
+                        static_cast<int>(std::lround(shape.positions[(v * 3u) + 0])),
+                        static_cast<int>(std::lround(shape.positions[(v * 3u) + 1]))};
+                    const float vz = shape.positions[(v * 3u) + 2];
+                    const auto existing = surfaceByXy.find(key);
+                    if (existing == surfaceByXy.end() || vz > existing->second) {
+                        surfaceByXy[key] = vz;
+                    }
+                }
+            }
+            double sumDiff = 0.0;
+            double sumAbsDiff = 0.0;
+            float worstDiff = 0.0f;
+            float worstX = 0.0f;
+            float worstY = 0.0f;
+            std::size_t samples = 0;
+            for (int gy = 0; gy < kLandGridSize; gy += 2) {
+                for (int gx = 0; gx < kLandGridSize; gx += 2) {
+                    const float wx = cellOriginX + (static_cast<float>(gx) * kLandPostSpacing);
+                    const float wy = cellOriginY + (static_cast<float>(gy) * kLandPostSpacing);
+                    // Inverse-distance over the nearest few LOD surface points.
+                    std::vector<std::pair<float, float>> byDistance;  // (d, z)
+                    byDistance.reserve(surfaceByXy.size());
+                    for (const auto& [xy, z] : surfaceByXy) {
+                        const float dx = static_cast<float>(xy.first) - wx;
+                        const float dy = static_cast<float>(xy.second) - wy;
+                        byDistance.emplace_back(std::sqrt((dx * dx) + (dy * dy)), z);
+                    }
+                    std::partial_sort(byDistance.begin(),
+                                      byDistance.begin() + std::min<std::size_t>(byDistance.size(), 4u),
+                                      byDistance.end(),
+                                      [](const auto& a, const auto& b) { return a.first < b.first; });
+                    double weightSum = 0.0;
+                    double heightSum = 0.0;
+                    for (std::size_t i = 0; i < std::min<std::size_t>(byDistance.size(), 4u); ++i) {
+                        const double weight = 1.0 / std::max(1.0f, byDistance[i].first);
+                        weightSum += weight;
+                        heightSum += weight * byDistance[i].second;
+                    }
+                    if (weightSum <= 0.0) {
+                        continue;
+                    }
+                    const float lodHeight = static_cast<float>(heightSum / weightSum);
+                    const float ourHeight = cell.land->heights[(gy * kLandGridSize) + gx];
+                    const float diff = ourHeight - lodHeight;
+                    sumDiff += diff;
+                    sumAbsDiff += std::abs(diff);
+                    if (std::abs(diff) > std::abs(worstDiff)) {
+                        worstDiff = diff;
+                        worstX = wx;
+                        worstY = wy;
+                    }
+                    ++samples;
+                }
+            }
+            if (samples > 0) {
+                std::cout << "  LAND-vs-LOD over " << samples << " posts: mean(ours-lod)="
+                          << (sumDiff / static_cast<double>(samples))
+                          << "  mean|diff|=" << (sumAbsDiff / static_cast<double>(samples))
+                          << "  worst=" << worstDiff << " at (" << static_cast<int>(worstX) << ","
+                          << static_cast<int>(worstY) << ")\n";
+            }
+        } else {
+            std::cout << "  LAND-vs-LOD skipped: " << lodError << "\n";
+        }
+    }
+
     // Ground truth for "is it floating": transform the mesh's own vertices into
     // world space and take the MINIMUM clearance over the terrain beneath them.
     // The reference origin sitting high means nothing on its own -- a sloped
     // road piece is authored with its origin at the raised end.
     FalloutAssetSource assets;
-    const bool haveAssets = assets.open(dataPath);
+    bool haveAssets = assets.open(dataPath);
+    // Mod directories must reach the ASSET source too, not just plugin
+    // resolution. A reference whose mesh does not resolve scores zero clearance
+    // and is silently never reported as floating -- so with the mod's meshes
+    // missing, every placement the mod introduces is invisible to this check,
+    // which is exactly the geometry a new mod is most likely to get wrong.
+    if (haveAssets) {
+        if (const char* rootsEnv = std::getenv("ODAI_FLOATERS_MODROOTS")) {
+            assets.addModDirectory(std::filesystem::path(rootsEnv));
+        }
+    }
     std::unordered_map<std::uint32_t, std::vector<std::array<float, 3>>> meshPointsByFormId;
     const auto meshPointsFor = [&](std::uint32_t baseFormId,
                                    const std::string& modelPath) -> const std::vector<std::array<float, 3>>& {
@@ -1628,16 +2473,37 @@ int probeFloaters(
         float localY;
         bool outsideCell;
         std::string model;
+        // Absolute values behind the two offsets above. A delta alone cannot
+        // say WHICH side is wrong -- a road 167 units over the ground is either
+        // a placement that is too high or terrain that is too low, and those
+        // have opposite fixes.
+        float originZ;
+        float groundZ;
+        bool initiallyDisabled;
+        std::uint32_t refFormId;
+        std::uint32_t recordFlags;
+        bool hasEnableParent;
+        std::uint32_t enableParentFormId;
+        bool enableParentOpposite;
+        float euler[3];
     };
     std::vector<Entry> entries;
     std::size_t unknownBaseCount = 0;
+    std::map<std::string, std::vector<std::uint32_t>> droppedByType;
     for (const FalloutPlacedReference& ref : cell.references) {
         const auto modelIt = tables.staticModelPaths.find(ref.baseFormId);
         if (modelIt == tables.staticModelPaths.end()) {
-            // The base record is not a STAT this importer knows. Every such
+            // The base record is not one this importer places. Every such
             // reference is silently dropped from the scene, which is how a road
-            // can end up resting on nothing.
+            // can end up resting on nothing -- so name them rather than just
+            // counting them. A count says something is missing; the TYPE says
+            // whether it is geometry that should have been there.
             ++unknownBaseCount;
+            const auto droppedTypeIt = tables.staticRecordTypes.find(ref.baseFormId);
+            droppedByType[droppedTypeIt == tables.staticRecordTypes.end()
+                              ? std::string("<base record not found>")
+                              : droppedTypeIt->second]
+                .push_back(ref.baseFormId);
             continue;
         }
         const float ground = terrainHeightAt(ref.position[0], ref.position[1]);
@@ -1675,7 +2541,13 @@ int probeFloaters(
             minClearance = 0.0f;  // no mesh points; do not report it as floating
         }
         entries.push_back(Entry{ref.position[2] - ground, minClearance, rotationMagnitude,
-                                ref.scale, localX, localY, outsideCell, modelIt->second});
+                                ref.scale, localX, localY, outsideCell, modelIt->second,
+                                ref.position[2], ground,
+                                (ref.recordFlags & 0x00000800u) != 0u, ref.formId, ref.recordFlags,
+                                ref.hasEnableParent, ref.enableParentFormId,
+                                ref.enableParentOpposite,
+                                {ref.rotationRadians[0], ref.rotationRadians[1],
+                                 ref.rotationRadians[2]}});
     }
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
         return a.minClearance > b.minClearance;
@@ -1714,7 +2586,14 @@ int probeFloaters(
 
     std::cout << "cell (" << cellX << "," << cellZ << "): " << entries.size()
               << " placed statics, " << unknownBaseCount
-              << " references DROPPED (base record is not a known STAT)\n";
+              << " references DROPPED (base record carries no model this importer places)\n";
+    for (const auto& [type, formIds] : droppedByType) {
+        std::cout << "    DROPPED " << type << " x" << formIds.size() << " :";
+        for (std::size_t i = 0; i < formIds.size() && i < 8u; ++i) {
+            std::cout << " 0x" << std::hex << formIds[i] << std::dec;
+        }
+        std::cout << "\n";
+    }
     std::size_t floating = 0;
     for (const Entry& e : entries) {
         if (e.minClearance > 50.0f) {
@@ -1723,14 +2602,31 @@ int probeFloaters(
     }
     std::cout << "  " << floating << " have their ENTIRE mesh more than 50 units clear of the "
               << "terrain (i.e. genuinely floating)\n";
-    const std::size_t show = std::min<std::size_t>(entries.size(), 14u);
+    // ODAI_FLOATERS_ALL lists every placement, not just the worst 14. A floater
+    // is only diagnosable against its NEIGHBOURS -- "is the terrain wrong here
+    // or is this one reference high" is answered by what sits beside it.
+    const bool showAll = std::getenv("ODAI_FLOATERS_ALL") != nullptr;
+    const std::size_t show =
+        showAll ? entries.size() : std::min<std::size_t>(entries.size(), 14u);
     for (std::size_t i = 0; i < show; ++i) {
-        std::cout << "  clearance +" << static_cast<int>(entries[i].minClearance)
+        std::cout << "  ref 0x" << std::hex << entries[i].refFormId << std::dec
+                  << "  clearance +" << static_cast<int>(entries[i].minClearance)
                   << "  origin +" << static_cast<int>(entries[i].offset) << " units  rot "
                   << static_cast<int>(entries[i].rotationMagnitudeDegrees) << " deg  scale "
                   << entries[i].scale << (entries[i].outsideCell ? "  OUTSIDE-CELL" : "")
                   << "  local(" << static_cast<int>(entries[i].localX) << ","
-                  << static_cast<int>(entries[i].localY) << ")  " << entries[i].model << "\n";
+                  << static_cast<int>(entries[i].localY) << ")  z=" << entries[i].originZ
+                  << " ground=" << entries[i].groundZ
+                  << "  flags=0x" << toHex(entries[i].recordFlags)
+                  << (entries[i].initiallyDisabled ? "  INITIALLY-DISABLED" : "")
+                  << (entries[i].hasEnableParent
+                          ? ("  ENABLE-PARENT=0x" + toHex(entries[i].enableParentFormId) +
+                             (entries[i].enableParentOpposite ? "(opposite)" : ""))
+                          : std::string())
+                  << "  rotXYZ(" << static_cast<int>(entries[i].euler[0] * 57.2957795f) << ","
+                  << static_cast<int>(entries[i].euler[1] * 57.2957795f) << ","
+                  << static_cast<int>(entries[i].euler[2] * 57.2957795f) << ")"
+                  << "  " << entries[i].model << "\n";
     }
     return 0;
 }
@@ -2008,6 +2904,500 @@ int probeDialogueTree(const std::filesystem::path& pluginPath, const std::string
                       << (c == 0 ? "   <- following this one" : "") << "\n";
         }
         current = node.choices.front().targetNode;
+    }
+    return 0;
+}
+
+// Everything the plugin says about how one actor gets into the world and moves
+// around it: the base record's AI package list and script, every ACRE/ACHR that
+// places him (with its enable-parent, which is how Bethesda swaps one actor
+// between locations), and the packages/script those name.
+//
+// Written because "how does Victor move around Goodsprings" cannot be answered
+// from the reference alone -- a reference is a fixed position. Movement lives in
+// PACK records and in script text, and the several places he appears are
+// several references toggled by quest state, not one reference being driven.
+// Every actor placed within `radius` of a world XY, with what its base record
+// offers a renderer.
+//
+// The point is the last column. A CREA carries its own geometry (MODL is the
+// skeleton, NIFZ the body parts) and can be loaded the way Victor is. An NPC_
+// carries a skeleton and NOTHING else: its body comes from its RACE's part
+// models plus whatever it is wearing, which is a different and much larger
+// import path. "Populate the town" is cheap or expensive depending entirely on
+// which of these the town is made of, and that is not guessable.
+int probeActorsNear(
+    const std::filesystem::path& pluginPath, float centreX, float centreY, float radius
+) {
+    odai::importer::fnv::FalloutActorScan scan;
+    std::string error;
+    if (!odai::importer::fnv::findActorsNear(pluginPath, centreX, centreY, radius, scan, error)) {
+        std::cout << "scan failed: " << error << "\n";
+        return 1;
+    }
+    const auto sourceName = [](odai::importer::fnv::ActorGeometrySource source) {
+        switch (source) {
+            case odai::importer::fnv::ActorGeometrySource::OwnBodyParts: return "own-parts";
+            case odai::importer::fnv::ActorGeometrySource::Template:     return "TEMPLATE ";
+            case odai::importer::fnv::ActorGeometrySource::Race:         return "race     ";
+            default:                                                     return "NONE     ";
+        }
+    };
+    std::cout << "scan tables: " << scan.bases.size() << " bases, " << scan.leveledLists.size()
+              << " levelled actor lists, " << scan.leveledItems.size() << " levelled item lists, "
+              << scan.races.size() << " races, " << scan.armors.size() << " armors, "
+              << scan.voiceTypes.size() << " voice types\n";
+    std::map<std::string, std::size_t> bySource;
+    std::size_t disabled = 0;
+    std::cout << scan.placements.size() << " placement(s) within " << radius << " units of ("
+              << centreX << ", " << centreY << "), " << scan.bases.size() << " actor bases:\n";
+    for (const auto& placement : scan.placements) {
+        const auto resolved = scan.resolve(placement.baseFormId);
+        ++bySource[sourceName(resolved.geometrySource)];
+        disabled += placement.initiallyDisabled ? 1u : 0u;
+        const float dx = placement.position[0] - centreX;
+        const float dy = placement.position[1] - centreY;
+        std::cout << "  " << sourceName(resolved.geometrySource) << " "
+                  << (resolved.base != nullptr ? resolved.base->recordType : std::string("?"))
+                  << " " << (resolved.base != nullptr ? resolved.base->editorId : std::string("?"))
+                  << "  d=" << static_cast<int>(std::sqrt((dx * dx) + (dy * dy)))
+                  << "  parts=" << resolved.bodyPartPaths.size();
+        if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::Template) {
+            std::cout << "  via=" << std::hex << resolved.resolvedBaseFormId << std::dec;
+        }
+        if (resolved.base != nullptr && resolved.base->raceFormId != 0u &&
+            resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::Race) {
+            std::cout << "  race=" << std::hex << resolved.base->raceFormId << std::dec
+                      << (resolved.base->isFemale ? " female" : " male")
+                      << "  carried=" << resolved.base->inventoryFormIds.size()
+                      << "  worn=" << resolved.wornArmorFormIds.size();
+        }
+        if (resolved.base != nullptr && resolved.base->templateFlags != 0u) {
+            std::cout << "  tplFlags=0x" << std::hex << resolved.base->templateFlags << std::dec
+                      << " tplt=" << std::hex << resolved.base->templateFormId << std::dec
+                      << " modl=\"" << resolved.base->skeletonPath << "\""
+                      << " -> skeleton=\"" << resolved.skeletonPath << "\"";
+        }
+        if (resolved.base != nullptr) {
+            const std::string voiceFolder = scan.voiceFolderFor(resolved.base->formId);
+            std::cout << "  voice=" << (voiceFolder.empty() ? std::string("<none>") : voiceFolder);
+        }
+        if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::None &&
+            resolved.base != nullptr) {
+            std::cout << "  tplt=" << std::hex << resolved.base->templateFormId
+                      << " race=" << resolved.base->raceFormId << std::dec
+                      << " modl=\"" << resolved.base->skeletonPath << "\""
+                      << " -> skeleton=\"" << resolved.skeletonPath << "\"";
+        }
+        if (placement.initiallyDisabled) { std::cout << "  INITIALLY-DISABLED"; }
+        std::cout << "\n";
+        // The assembled part list, which is the whole answer for an NPC_ and
+        // the only place a wrong slot (a hat where the head should be, an
+        // outfit that never resolved) is visible before it reaches a screen.
+        for (const std::string& part : resolved.bodyPartPaths) {
+            std::cout << "        " << part << "\n";
+        }
+        // An NPC_ who resolved no armour at all is standing in the race's
+        // underwear. Naming what he was carrying is the only way to tell
+        // "carries nothing wearable" from "carries something this does not
+        // follow yet".
+        if (resolved.geometrySource == odai::importer::fnv::ActorGeometrySource::Race &&
+            resolved.wornArmorFormIds.empty() && resolved.base != nullptr) {
+            const auto* wardrobe = scan.inheritedFrom(
+                resolved.base->formId, odai::importer::fnv::kActorTemplateUseInventory);
+            std::cout << "        UNDRESSED, carrying:";
+            if (wardrobe != nullptr) {
+                for (const std::uint32_t item : wardrobe->inventoryFormIds) {
+                    std::cout << " " << std::hex << item << std::dec
+                              << (scan.leveledItems.count(item) != 0u ? "(list)" : "");
+                }
+            }
+            std::cout << "\n";
+        }
+    }
+    std::cout << "\nby geometry source:\n";
+    for (const auto& [name, count] : bySource) {
+        std::cout << "  " << name << " " << count << "\n";
+    }
+    std::cout << "  (" << disabled << " initially disabled)\n";
+    return 0;
+}
+
+int probeActor(const std::filesystem::path& pluginPath, const std::string& wantedEditorId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(wantedEditorId);
+
+    const auto readU32 = [](const odai::importer::fnv::EsmSubrecordView& sub, std::size_t offset) {
+        std::uint32_t value = 0;
+        if (sub.size >= offset + 4u) {
+            std::memcpy(&value, sub.data + offset, 4u);
+        }
+        return value;
+    };
+    const auto subString = [](const odai::importer::fnv::EsmSubrecordView& sub) {
+        std::string out(reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+        while (!out.empty() && out.back() == '\0') { out.pop_back(); }
+        return out;
+    };
+
+    // Pass 1: the base actor -- its script and its AI package list.
+    std::uint32_t actorFormId = 0;
+    std::uint32_t scriptFormId = 0;
+    std::vector<std::uint32_t> packageFormIds;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return actorFormId == 0u && (header.type == "CREA" || header.type == "NPC_");
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (actorFormId != 0u) { return; }
+            bool match = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "EDID" && toLowerAscii(subString(sub)) == wanted) { match = true; }
+            }
+            if (!match) { return; }
+            actorFormId = record.formId;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "SCRI") { scriptFormId = readU32(sub, 0); }
+                else if (sub.type == "PKID") { packageFormIds.push_back(readU32(sub, 0)); }
+            }
+        };
+        reader.walk(visitor);
+    }
+    if (actorFormId == 0u) {
+        std::cout << "no CREA/NPC_ with EditorID \"" << wantedEditorId << "\"\n";
+        return 1;
+    }
+    std::cout << wantedEditorId << " = " << std::hex << actorFormId << std::dec
+              << "   script=" << std::hex << scriptFormId << std::dec
+              << "   " << packageFormIds.size() << " AI packages\n";
+
+    // Pass 2: every placement of him, and the cells they sit in.
+    struct Placement {
+        std::uint32_t refFormId = 0;
+        std::uint32_t cellFormId = 0;
+        float position[3] = {};
+        std::uint32_t enableParent = 0;
+        bool initiallyDisabled = false;
+    };
+    std::vector<Placement> placements;
+    std::map<std::uint32_t, std::string> cellNames;
+    {
+        std::uint32_t currentCell = 0;
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return header.type == "CELL" || header.type == "ACRE" || header.type == "ACHR";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type == "CELL") {
+                currentCell = record.formId;
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "EDID") { cellNames[record.formId] = subString(sub); }
+                }
+                return;
+            }
+            std::uint32_t base = 0;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "NAME") { base = readU32(sub, 0); }
+            }
+            if (base != actorFormId) { return; }
+            Placement placement;
+            placement.refFormId = record.formId;
+            placement.cellFormId = currentCell;
+            // Record header flag 0x800 is "Initially Disabled" -- the switch
+            // that makes a placement dormant until something enables it.
+            placement.initiallyDisabled = (record.flags & 0x00000800u) != 0u;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "DATA" && sub.size >= 12u) {
+                    std::memcpy(placement.position, sub.data, sizeof(placement.position));
+                } else if (sub.type == "XESP") {
+                    placement.enableParent = readU32(sub, 0);
+                }
+            }
+            placements.push_back(placement);
+        };
+        reader.walk(visitor);
+    }
+    std::cout << "\n" << placements.size() << " placement(s):\n";
+    for (const Placement& placement : placements) {
+        const auto named = cellNames.find(placement.cellFormId);
+        std::cout << "  ref " << std::hex << placement.refFormId << std::dec
+                  << "  cell " << std::hex << placement.cellFormId << std::dec
+                  << " (" << (named == cellNames.end() ? std::string("<unnamed>") : named->second) << ")"
+                  << "  pos (" << placement.position[0] << ", " << placement.position[1]
+                  << ", " << placement.position[2] << ")";
+        if (placement.initiallyDisabled) { std::cout << "  INITIALLY-DISABLED"; }
+        if (placement.enableParent != 0u) {
+            std::cout << "  enableParent=" << std::hex << placement.enableParent << std::dec;
+        }
+        std::cout << "\n";
+    }
+
+    // Pass 3: the AI packages he carries, and the script that drives him.
+    std::vector<std::uint32_t> packageTargets;
+    {
+        std::set<std::uint32_t> wantedPackages(packageFormIds.begin(), packageFormIds.end());
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return (header.type == "PACK" && wantedPackages.count(header.formId) != 0u) ||
+                   (header.type == "SCPT" && header.formId == scriptFormId);
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type == "PACK") {
+                std::string edid;
+                std::uint32_t packageType = 0xffffffffu;
+                std::uint32_t locationType = 0xffffffffu;
+                std::uint32_t locationTarget = 0;
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "EDID") { edid = subString(sub); }
+                    // PKDT: u32 flags, u8 type, ...
+                    else if (sub.type == "PKDT" && sub.size >= 5u) { packageType = sub.data[4]; }
+                    // PLDT: u32 type, u32 target, i32 radius.
+                    else if (sub.type == "PLDT" && sub.size >= 8u) {
+                        locationType = readU32(sub, 0);
+                        locationTarget = readU32(sub, 4);
+                    }
+                }
+                std::cout << "  PACK " << std::hex << record.formId << std::dec << " " << edid
+                          << "  type=" << static_cast<int>(packageType);
+                if (locationType != 0xffffffffu) {
+                    std::cout << "  locationType=" << locationType
+                              << " target=" << std::hex << locationTarget << std::dec;
+                    if (locationTarget != 0u) { packageTargets.push_back(locationTarget); }
+                }
+                std::cout << "\n";
+                return;
+            }
+            // SCPT: SCTX is the uncompiled source, which is where MoveTo /
+            // Enable / Disable actually appear in readable form.
+            for (const auto& sub : record.subrecords) {
+                if (sub.type != "SCTX") { continue; }
+                std::cout << "\n--- script source (" << sub.size << " bytes) ---\n"
+                          << subString(sub) << "\n--- end script ---\n";
+            }
+        };
+        std::cout << "\nAI packages:\n";
+        reader.walk(visitor);
+    }
+
+    // Pass 4: resolve what the packages and enable-parents actually POINT AT.
+    // A package target is a formID, and "target=16adc6" says nothing about
+    // whether he is patrolling a marker, a door or another actor.
+    // Patrol route. A Patrol package names ONE marker; the route is the chain
+    // of markers reached from it by XLKR (linked reference), which is how
+    // Bethesda expresses "walk this circuit". Every XMarker REFR is collected in
+    // a single pass and the chain is then followed in memory -- following it by
+    // re-walking the plugin per hop would be one full pass per marker.
+    {
+        struct Marker { float position[3] = {}; std::uint32_t linked = 0; };
+        std::map<std::uint32_t, Marker> markers;
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return header.type == "REFR";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            Marker marker;
+            bool linkedFound = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "XLKR") { marker.linked = readU32(sub, 0); linkedFound = true; }
+                else if (sub.type == "DATA" && sub.size >= 12u) {
+                    std::memcpy(marker.position, sub.data, sizeof(marker.position));
+                }
+            }
+            if (linkedFound) { markers[record.formId] = marker; }
+        };
+        reader.walk(visitor);
+
+        for (const std::uint32_t packageTarget : packageTargets) {
+            if (markers.count(packageTarget) == 0u) { continue; }
+            std::cout << "\npatrol route from " << std::hex << packageTarget << std::dec << ":\n";
+            std::uint32_t current = packageTarget;
+            std::set<std::uint32_t> visited;
+            int hop = 0;
+            while (current != 0u && visited.insert(current).second && hop < 32) {
+                const auto found = markers.find(current);
+                if (found == markers.end()) {
+                    std::cout << "  " << hop << ": " << std::hex << current << std::dec
+                              << " (not a linked marker)\n";
+                    break;
+                }
+                std::cout << "  " << hop << ": " << std::hex << current << std::dec << "  ("
+                          << found->second.position[0] << ", " << found->second.position[1]
+                          << ", " << found->second.position[2] << ")\n";
+                current = found->second.linked;
+                ++hop;
+            }
+            if (current != 0u && visited.count(current) != 0u) {
+                std::cout << "  loops back to " << std::hex << current << std::dec << "\n";
+            }
+        }
+    }
+
+    std::set<std::uint32_t> lookups;
+    for (const Placement& placement : placements) {
+        if (placement.enableParent != 0u) { lookups.insert(placement.enableParent); }
+    }
+    if (!lookups.empty()) {
+        std::cout << "\nreferenced records:\n";
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return lookups.count(header.formId) != 0u;
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            std::string edid;
+            std::uint32_t base = 0;
+            float position[3] = {};
+            bool hasPosition = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "EDID") { edid = subString(sub); }
+                else if (sub.type == "NAME") { base = readU32(sub, 0); }
+                else if (sub.type == "DATA" && sub.size >= 12u) {
+                    std::memcpy(position, sub.data, sizeof(position));
+                    hasPosition = true;
+                }
+            }
+            std::cout << "  " << std::hex << record.formId << std::dec << " " << record.type
+                      << " " << edid;
+            if (base != 0u) { std::cout << "  base=" << std::hex << base << std::dec; }
+            if (hasPosition) {
+                std::cout << "  pos (" << position[0] << ", " << position[1] << ", "
+                          << position[2] << ")";
+            }
+            std::cout << "\n    subrecords:";
+            for (const auto& sub : record.subrecords) {
+                std::cout << " " << sub.type << "(" << sub.size << ")";
+            }
+            std::cout << "\n";
+        };
+        reader.walk(visitor);
+    }
+    return 0;
+}
+
+// Which CTDA function binds an INFO to a VOICE TYPE rather than to one actor.
+//
+// Derived the same way GetIsID was: histogram every CTDA function index whose
+// param1 is the wanted VTYP's formID, across every INFO in the plugin. The one
+// that dominates is the answer. Guessing from documentation is how you end up
+// attributing a whole town's dialogue through the wrong field and finding out
+// only when the lines are visibly wrong.
+int probeVoiceTypeDialogue(const std::filesystem::path& pluginPath, const std::string& wantedEditorId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(wantedEditorId);
+
+    std::uint32_t voiceTypeFormId = 0;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return voiceTypeFormId == 0u && header.type == "VTYP";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (voiceTypeFormId != 0u) { return; }
+            for (const auto& sub : record.subrecords) {
+                if (sub.type != "EDID") { continue; }
+                std::string edid(
+                    reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+                while (!edid.empty() && edid.back() == '\0') { edid.pop_back(); }
+                if (toLowerAscii(edid) == wanted) { voiceTypeFormId = record.formId; }
+            }
+        };
+        reader.walk(visitor);
+    }
+    if (voiceTypeFormId == 0u) {
+        std::cout << "no VTYP with EditorID \"" << wantedEditorId << "\"\n";
+        return 1;
+    }
+    std::cout << wantedEditorId << " = " << std::hex << voiceTypeFormId << std::dec << "\n";
+
+    std::map<std::uint32_t, std::size_t> functionHistogram;
+    std::size_t infosReferencing = 0;
+    std::size_t infosWithText = 0;
+    {
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [](const odai::importer::fnv::EsmRecordHeaderView& header) {
+            return header.type == "INFO";
+        };
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            bool referenced = false;
+            bool hasText = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "NAM1" && sub.size > 1u) { hasText = true; }
+                if (sub.type != "CTDA" || sub.size < 28u) { continue; }
+                std::uint32_t function = 0;
+                std::uint32_t param1 = 0;
+                std::memcpy(&function, sub.data + 8, 4u);
+                std::memcpy(&param1, sub.data + 12, 4u);
+                if (param1 == voiceTypeFormId) {
+                    ++functionHistogram[function];
+                    referenced = true;
+                }
+            }
+            infosReferencing += referenced ? 1u : 0u;
+            infosWithText += (referenced && hasText) ? 1u : 0u;
+        };
+        reader.walk(visitor);
+    }
+
+    std::cout << infosReferencing << " INFO(s) name this voice type in a condition ("
+              << infosWithText << " of them carry spoken text)\n"
+              << "CTDA function indices whose param1 is this voice type:\n";
+    for (const auto& [function, count] : functionHistogram) {
+        std::cout << "  function " << function << "  x" << count << "\n";
+    }
+    return 0;
+}
+
+// Answers "what IS 0x104f04". A formID is how every record in the format
+// refers to every other one, so the usual question mid-investigation is what
+// type a reference lands on -- an inventory entry that resolves to nothing
+// wearable could be ammo, a note, or an outfit this code does not follow yet,
+// and those need different fixes.
+int probeFormId(const std::filesystem::path& pluginPath, std::uint32_t wantedFormId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open failed: " << reader.lastError() << "\n";
+        return 1;
+    }
+    bool found = false;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecordHeader = [&](const odai::importer::fnv::EsmRecordHeaderView& header) {
+        return !found && header.formId == wantedFormId;
+    };
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        if (found) { return; }
+        found = true;
+        std::cout << std::hex << record.formId << std::dec << " " << record.type << "\n";
+        for (const auto& sub : record.subrecords) {
+            std::cout << "  " << sub.type << "(" << sub.size << ")";
+            const std::string text(
+                reinterpret_cast<const char*>(sub.data), static_cast<std::size_t>(sub.size));
+            const bool printable = !text.empty() &&
+                std::all_of(text.begin(), text.end() - 1, [](char c) {
+                    return static_cast<unsigned char>(c) >= 32u &&
+                        static_cast<unsigned char>(c) < 127u;
+                });
+            if (printable && text.back() == '\0') {
+                std::cout << " \"" << text.substr(0, text.size() - 1) << "\"";
+            } else if (sub.size == 4u) {
+                std::uint32_t value = 0;
+                std::memcpy(&value, sub.data, 4u);
+                std::cout << " = " << std::hex << value << std::dec;
+            }
+            std::cout << "\n";
+        }
+    };
+    reader.walk(visitor);
+    if (!found) {
+        std::cout << "no record with formID " << std::hex << wantedFormId << std::dec << "\n";
+        return 1;
     }
     return 0;
 }
@@ -2665,6 +4055,10 @@ void printUsage() {
               << "  odai_newvegas_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --lodheight <lodBlock.nif> <worldX> <worldY>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --kf <virtualPath.kf>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --kfsweep <folderSubstring>\n"
+              << "  odai_newvegas_probe <DataFilesPath> --actor <Plugin.esm> <ActorEditorID>\n"
               << "  odai_newvegas_probe <DataFilesPath> --footers [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --dialogue <Plugin.esm> <speakerEdid> [limit]\n"
               << "  odai_newvegas_probe <DataFilesPath> --dialoguetree <Plugin.esm> <speakerEdid> [steps]\n"
@@ -2712,6 +4106,73 @@ int main(int argc, char** argv) {
     if (mode == "--nif" && argc >= 4) {
         return probeSingleNif(dataPath, argv[3]);
     }
+    if (mode == "--lodheight" && argc >= 6) {
+        return lodHeightAt(dataPath, argv[3], static_cast<float>(std::atof(argv[4])),
+                           static_cast<float>(std::atof(argv[5])));
+    }
+    if (mode == "--basemodel" && argc >= 5) {
+        odai::importer::fnv::EsmReader reader;
+        if (!reader.open(dataPath / argv[3])) {
+            std::cout << "open failed: " << reader.lastError() << "\n";
+            return 1;
+        }
+        const std::string wanted = toLowerAscii(argv[4]);
+        odai::importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+            if (record.type != "CREA" && record.type != "NPC_") return;
+            std::string edid, modl;
+            for (const auto& sub : record.subrecords) {
+                if (sub.size == 0u) continue;
+                std::string v(reinterpret_cast<const char*>(sub.data), sub.size);
+                while (!v.empty() && v.back() == '\0') v.pop_back();
+                if (sub.type == "EDID") edid = v;
+                else if (sub.type == "MODL") modl = v;
+            }
+            if (!edid.empty() && toLowerAscii(edid) == wanted) {
+                std::cout << record.type << " " << edid << " form=" << std::hex
+                          << std::uppercase << record.formId << std::dec
+                          << " MODL=\"" << modl << "\"\n";
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "NIFZ" && sub.size != 0u) {
+                        // Creature body-part meshes: NUL-separated model paths.
+                        // MODL on a CREA names the SKELETON, so this is where
+                        // the geometry actually lives.
+                        std::string blob(reinterpret_cast<const char*>(sub.data), sub.size);
+                        std::size_t begin = 0;
+                        while (begin < blob.size()) {
+                            const std::size_t end = blob.find('\0', begin);
+                            const std::string part = blob.substr(
+                                begin, end == std::string::npos ? std::string::npos : end - begin);
+                            if (!part.empty()) {
+                                std::cout << "   NIFZ part: \"" << part << "\"\n";
+                            }
+                            if (end == std::string::npos) break;
+                            begin = end + 1;
+                        }
+                    }
+                }
+            }
+        };
+        reader.walk(visitor);
+        return 0;
+    }
+    if (mode == "--speakerpos" && argc >= 5) {
+        odai::importer::fnv::SpeakerPlacement placement;
+        std::string error;
+        if (!odai::importer::fnv::findSpeakerPlacement(dataPath / argv[3], argv[4], placement, error)) {
+            std::cout << "failed: " << error << "\n";
+            return 1;
+        }
+        std::cout << argv[4] << " ref=" << std::hex << std::uppercase << placement.referenceFormId
+                  << " cell=" << placement.cellFormId << std::dec
+                  << " pos=(" << placement.position[0] << ", " << placement.position[1] << ", "
+                  << placement.position[2] << ")\n"
+                  << "  skeleton=\"" << placement.skeletonPath << "\"\n";
+        for (const std::string& part : placement.bodyPartPaths) {
+            std::cout << "  part=\"" << part << "\"\n";
+        }
+        return 0;
+    }
     if (mode == "--dialoguetree" && argc >= 5) {
         return probeDialogueTree(dataPath / argv[3], argv[4],
                                  argc >= 6 ? static_cast<std::size_t>(std::stoull(argv[5])) : 6u);
@@ -2726,6 +4187,20 @@ int main(int argc, char** argv) {
     }
     if (mode == "--nifblocks" && argc >= 4) {
         return dumpNifBlocks(dataPath, argv[3]);
+    }
+    if (mode == "--kf" && argc >= 4) {
+        return dumpKfAnimation(dataPath, argv[3]);
+    }
+    if (mode == "--actorsnear" && argc >= 7) {
+        return probeActorsNear(dataPath / argv[3], static_cast<float>(std::atof(argv[4])),
+                               static_cast<float>(std::atof(argv[5])),
+                               static_cast<float>(std::atof(argv[6])));
+    }
+    if (mode == "--actor" && argc >= 5) {
+        return probeActor(dataPath / argv[3], argv[4]);
+    }
+    if (mode == "--kfsweep" && argc >= 4) {
+        return probeKfFolder(dataPath, argv[3]);
     }
     if (mode == "--regions" && argc >= 4) {
         return probeRegions(dataPath / argv[3], argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 15u);
@@ -2752,6 +4227,13 @@ int main(int argc, char** argv) {
         return probeRefsByBaseType(
             dataPath, dataPath / argv[3], argv[4],
             argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 15u);
+    }
+    if (mode == "--voicedialogue" && argc >= 5) {
+        return probeVoiceTypeDialogue(dataPath / argv[3], argv[4]);
+    }
+    if (mode == "--formid" && argc >= 5) {
+        return probeFormId(
+            dataPath / argv[3], static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 16)));
     }
     if (mode == "--record" && argc >= 5) {
         return probeRecordType(

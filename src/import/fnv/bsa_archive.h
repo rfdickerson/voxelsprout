@@ -1,9 +1,21 @@
 #pragma once
 
-// Reader for Bethesda BSA archives version 104 (Fallout 3 / Fallout: New
-// Vegas / original Skyrim). Big-endian ("Xbox360") archives and the Skyrim
-// Special Edition v105 embedded-file-name extension are not supported —
-// New Vegas never produced either.
+// Reader for Bethesda BSA archives: version 103 (Oblivion), 104 (Fallout 3 /
+// New Vegas / Skyrim LE), 105 (Skyrim Special Edition) and the Morrowind
+// archive, which has no version number at all. Big-endian ("Xbox360") archives
+// are not supported.
+//
+// MORROWIND'S ARCHIVE IS NOT A VERSION OF THIS FORMAT, it is a different one
+// wearing the same file extension. It has no "BSA\0" magic -- the file opens
+// with the literal value 0x100 -- no folders, no archive flags, and no
+// compression of any kind. What it does have is the same thing every other
+// version has once indexed: a list of (virtual path, offset, size), which is
+// why it lives behind this class rather than beside it. See openMorrowind().
+//
+// v103 and v104 share every structure below. The only behavioural difference
+// is kEmbedFileNames (0x100): Oblivion sets the bit on retail archives but
+// never writes an embedded name, so the reader clears it on v103. See the
+// constant's comment in bsa_archive.cc for what happens if it does not.
 //
 // Format reference (BSA v103/v104, all fields little-endian):
 //   Header (36 bytes): "BSA\0", version, folderRecordOffset, archiveFlags,
@@ -31,6 +43,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -64,12 +77,25 @@ struct BsaFileEntry {
 // Reads only the 36-byte header and reports the archive's content flags (a
 // mask of BsaContentFlags). Lets a caller decide whether an archive is worth
 // opening before paying to index every file in it. Returns false if the file
-// is not a readable v104 BSA.
+// is not a readable BSA of any supported generation. A Morrowind archive
+// declares no content flags, so it reports every flag set: its contents are
+// unknown until indexed, and claiming "no meshes here" would skip it entirely.
 bool peekBsaContentFlags(const std::filesystem::path& path, std::uint32_t& outFileFlags);
 
 class BsaArchive {
 public:
-    bool open(const std::filesystem::path& path);
+    // `folderPrefixFilter` indexes only files whose FOLDER path starts with it
+    // (case-insensitive, backslash-separated, no trailing slash). Empty -- the
+    // default -- indexes the whole archive, exactly as before.
+    //
+    // This exists because indexing is dominated by per-file bookkeeping, not by
+    // reading: every entry costs a built virtual-path string, a vector slot and
+    // a lowercased key in the path index. "Fallout - Voices1.bsa" holds 105517
+    // files, and a caller that wants one actor's 487 voice lines pays for all
+    // of them in both time and resident memory. The name block still has to be
+    // read sequentially (the names are NUL-terminated in order, so they cannot
+    // be seeked past), but a filtered-out file skips everything after that.
+    bool open(const std::filesystem::path& path, std::string_view folderPrefixFilter = {});
 
     // Mask of BsaContentFlags declared by the archive header.
     std::uint32_t contentFlags() const { return m_fileFlags; }
@@ -105,8 +131,16 @@ public:
     const std::string& lastError() const { return m_lastError; }
 
 private:
+    // Indexes the Morrowind layout. Split out rather than branched inline
+    // because the two share no structure at all -- no folders, no flags, no
+    // compression -- and only converge again at m_files.
+    bool openMorrowind(const std::filesystem::path& path, std::string_view folderPrefixFilter);
+
     std::filesystem::path m_path;
     std::uint32_t m_archiveFlags = 0;
+    // Which BSA version was opened. Some archive-flag BITS mean different things
+    // across versions, so the flags alone are not enough to read one.
+    std::uint32_t m_version = 0;
     std::uint32_t m_fileFlags = 0;
     std::vector<BsaFileEntry> m_files;
     std::unordered_map<std::string, std::size_t> m_pathIndex;  // lowercase virtualPath -> m_files index

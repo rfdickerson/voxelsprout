@@ -74,6 +74,12 @@ bool Renderer::uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const Impo
     return m_backend->uploadSkinnedMeshTemplate(instanceIndex, meshTemplate);
 }
 
+std::vector<std::uint32_t> Renderer::uploadSkinnedActorTextures(
+    std::uint32_t instanceIndex, const std::vector<odai::importer::ImportedSceneTexture>& textures
+) {
+    return m_backend->uploadSkinnedActorTextures(instanceIndex, textures);
+}
+
 void Renderer::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose) {
     m_backend->setSkinnedActorPose(instanceIndex, pose);
 }
@@ -150,8 +156,18 @@ bool Renderer::captureFrameToFile(const std::string& outputPath) {
     return m_backend->captureLastFrameToFile(outputPath);
 }
 
+bool Renderer::captureFrameRgb(std::vector<std::uint8_t>& outRgb,
+                               std::uint32_t& outWidth,
+                               std::uint32_t& outHeight) {
+    return m_backend->captureLastFrameRgb(outRgb, outWidth, outHeight);
+}
+
 void Renderer::setNeutralColorGrading() {
     m_backend->setNeutralColorGrading();
+}
+
+void Renderer::setColorGrading(const ColorGradingSettings& settings) {
+    m_backend->setColorGrading(settings);
 }
 
 void Renderer::setAutoExposureEnabled(bool enabled) {
@@ -160,6 +176,14 @@ void Renderer::setAutoExposureEnabled(bool enabled) {
 
 bool Renderer::isAutoExposureEnabled() const {
     return m_backend->isAutoExposureEnabled();
+}
+
+void Renderer::setDebugView(DebugView view) {
+    m_backend->setDebugView(view);
+}
+
+DebugView Renderer::debugView() const {
+    return m_backend->debugView();
 }
 
 void Renderer::setVoxelGiEnabled(bool enabled) {
@@ -226,12 +250,32 @@ void Renderer::renderFrame(
     m_backend->renderFrame(chunkGrid, simulation, camera, preview, simulationAlpha, visibleChunkIndices, importedActors);
 }
 
+void Renderer::setUpscalerSettings(const UpscalerSettings& settings) {
+    m_backend->setUpscalerSettings(settings);
+}
+
+UpscalerStatus Renderer::upscalerStatus() const {
+    return m_backend->upscalerStatus();
+}
+
 void Renderer::setDebugUiVisible(bool visible) {
     m_backend->setDebugUiVisible(visible);
 }
 
 bool Renderer::isDebugUiVisible() const {
     return m_backend->isDebugUiVisible();
+}
+
+void Renderer::setDebugUiMode(DebugUiMode mode) {
+    m_backend->setDebugUiMode(mode);
+}
+
+DebugUiMode Renderer::debugUiMode() const {
+    return m_backend->debugUiMode();
+}
+
+void Renderer::setDebugStatGroups(std::vector<DebugStatGroup> groups) {
+    m_backend->setDebugStatGroups(std::move(groups));
 }
 
 void Renderer::setFrameStatsVisible(bool visible) {
@@ -328,13 +372,21 @@ void Renderer::setTonemapSettings(const TonemapSettings& settings) {
     m_backend->setTonemapSettings(settings);
 }
 
+TonemapSettings Renderer::tonemapSettings() const {
+    return m_backend->tonemapSettings();
+}
+
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,
-                               float maxRadiusPixels) {
-    m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels);
+                               float maxRadiusPixels, float nearBlurScale) {
+    m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels, nearBlurScale);
 }
 
 void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug) {
     m_backend->setImportedSceneDebugState(showTerrain, showStatics, showTextures, flatShading, waterDebug);
+}
+
+void Renderer::setImportedInteriorLighting(const ImportedInteriorLighting& lighting) {
+    m_backend->setImportedInteriorLighting(lighting);
 }
 
 void Renderer::setImportedSceneInteriorMode(bool enabled) {

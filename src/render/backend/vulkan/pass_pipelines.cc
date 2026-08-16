@@ -428,6 +428,8 @@ bool RendererBackend::createPipePipeline() {
     constexpr const char* kImportedStaticVertexShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
     constexpr const char* kImportedStaticFragmentShaderPath = "../src/render/shaders/imported_static.frag.slang.spv";
     constexpr const char* kImportedStaticRtFragmentShaderPath = "../src/render/shaders/imported_static_rt.frag.slang.spv";
+    constexpr const char* kImportedStaticDepthOnlyFragmentShaderPath =
+        "../src/render/shaders/imported_static_depthonly.frag.slang.spv";
     constexpr const char* kImportedWaterVertexShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
     constexpr const char* kImportedWaterFragmentShaderPath = "../src/render/shaders/imported_water.frag.slang.spv";
     constexpr const char* kImportedWaterRtFragmentShaderPath = "../src/render/shaders/imported_water_rt.frag.slang.spv";
@@ -619,6 +621,19 @@ bool RendererBackend::createPipePipeline() {
         return false;
     }
 
+    // Loaded separately and treated as optional: if the shader is missing (no
+    // slangc on PATH when the tree was built) the prewrite pipelines stay null
+    // and the main pass simply runs as it did before, rejecting only against its
+    // own depth writes. Slower, still correct.
+    std::array<VkShaderModule, 1> importedDepthOnlyShaderModules = {VK_NULL_HANDLE};
+    const std::array<ShaderModuleLoadSpec, 1> importedDepthOnlyLoadSpecs = {{
+        {kImportedStaticDepthOnlyFragmentShaderPath, "imported_static_depthonly.frag"},
+    }};
+    const bool hasImportedDepthOnlyVariant =
+        std::filesystem::exists(kImportedStaticDepthOnlyFragmentShaderPath) &&
+        createShaderModulesFromFiles(
+            m_device, importedDepthOnlyLoadSpecs, importedDepthOnlyShaderModules);
+
     VkPipelineShaderStageCreateInfo importedVertexShaderStage{};
     importedVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     importedVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -647,22 +662,35 @@ bool RendererBackend::createPipePipeline() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    // Locations 6-10: terrain layer blend (Fallout ATXT/VTXT). Four bindless
-    // slots plus one packed weight word; inert unless the vertex carries
-    // kImportedSceneMaterialFlagTerrainLayers.
-    VkVertexInputAttributeDescription importedAttributes[11]{};
+    // Eight attributes over 48 bytes. Three are unpacked by the vertex FETCH
+    // rather than in the shader: R16G16_SNORM, R8G8B8A8_UNORM and
+    // R16G16B16A16_UINT are all in Vulkan's mandatory vertex-buffer format set,
+    // so the narrowing costs no shader instructions and needs no capability
+    // check.
+    //
+    // Location 6 is the entire terrain-layer slot quad in ONE fetch -- four u16
+    // bindless slots that used to be four separate R32_UINT attributes. That
+    // relies on the two packed words being adjacent, which the static_assert
+    // below pins.
+    static_assert(
+        offsetof(ImportedMeshVertex, packedLayerTexture23) ==
+            offsetof(ImportedMeshVertex, packedLayerTexture01) + sizeof(std::uint32_t),
+        "location 6 reads both layer words as one R16G16B16A16_UINT fetch");
+    VkVertexInputAttributeDescription importedAttributes[8]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     importedAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
     importedAttributes[1].location = 1;
     importedAttributes[1].binding = 0;
-    importedAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedAttributes[1].format = VK_FORMAT_R16G16_SNORM;
+    importedAttributes[1].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedNormal));
     importedAttributes[2].location = 2;
     importedAttributes[2].binding = 0;
-    importedAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedAttributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+    importedAttributes[2].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedColor));
     importedAttributes[3].location = 3;
     importedAttributes[3].binding = 0;
     importedAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
@@ -675,23 +703,21 @@ bool RendererBackend::createPipePipeline() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
-    for (uint32_t layer = 0; layer < 4; ++layer) {
-        importedAttributes[6 + layer].location = 6 + layer;
-        importedAttributes[6 + layer].binding = 0;
-        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
-        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
-            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
-    }
-    importedAttributes[10].location = 10;
-    importedAttributes[10].binding = 0;
-    importedAttributes[10].format = VK_FORMAT_R32_UINT;
-    importedAttributes[10].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
+    importedAttributes[6].location = 6;
+    importedAttributes[6].binding = 0;
+    importedAttributes[6].format = VK_FORMAT_R16G16B16A16_UINT;
+    importedAttributes[6].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedLayerTexture01));
+    importedAttributes[7].location = 7;
+    importedAttributes[7].binding = 0;
+    importedAttributes[7].format = VK_FORMAT_R32_UINT;
+    importedAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 11;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     VkGraphicsPipelineCreateInfo importedPipelineCreateInfo = pipelineCreateInfo;
@@ -709,6 +735,86 @@ bool RendererBackend::createPipePipeline() {
         : VK_CULL_MODE_BACK_BIT;
     importedPipelineCreateInfo.pRasterizationState = &importedRasterizer;
 
+    // ODAI_MAIN_DEPTH_WRITE=0 drops depth writes from the opaque imported pass.
+    //
+    // Diagnostic for one specific question: is main paying for overdraw? The
+    // fragment shader discards (alpha test), and a discarding shader that ALSO
+    // writes depth cannot have its depth write hoisted before the shader runs,
+    // which on some drivers takes the early-Z test down with it. With the
+    // normal-depth prepass having already laid exact depth, main does not need
+    // to write it -- GREATER_OR_EQUAL against the prepass result still passes
+    // the frontmost surface and rejects everything behind it.
+    //
+    // Only meaningful with AO on, because that is what makes the prepass run.
+    VkPipelineDepthStencilStateCreateInfo importedDepthStencil = depthStencil;
+    static const bool s_mainDepthWrite = []() {
+        const char* env = std::getenv("ODAI_MAIN_DEPTH_WRITE");
+        return env == nullptr || (env[0] != '0');
+    }();
+    // Under the merged depth prepass main must NOT write depth. That is not a
+    // micro-optimization: a fragment shader that discards (this one alpha-tests)
+    // and also writes depth cannot have its depth write hoisted ahead of the
+    // shader, which on several drivers disables early-Z for the whole draw --
+    // the exact rejection the prepass exists to provide. Testing GREATER_OR_EQUAL
+    // against depth the prepass already laid gives the same visible result.
+    importedDepthStencil.depthWriteEnable =
+        (useMergedDepthPrepass() || !s_mainDepthWrite) ? VK_FALSE : VK_TRUE;
+    importedPipelineCreateInfo.pDepthStencilState = &importedDepthStencil;
+
+    // Depth-only prewrite pipelines. Same create info as the shading pipeline --
+    // crucially the same vertex shader and vertex input, so the depth written
+    // here is bit-identical to the depth the shading pass computes -- with the
+    // fragment shader swapped for the alpha-test-only one and colour writes
+    // masked off entirely.
+    if (hasImportedDepthOnlyVariant) {
+        VkPipelineShaderStageCreateInfo depthOnlyFragmentStage = importedFragmentShaderStage;
+        depthOnlyFragmentStage.module = importedDepthOnlyShaderModules[0];
+        const std::array<VkPipelineShaderStageCreateInfo, 2> depthOnlyStages = {
+            importedVertexShaderStage,
+            depthOnlyFragmentStage
+        };
+        VkPipelineColorBlendAttachmentState depthOnlyBlendAttachment{};
+        depthOnlyBlendAttachment.colorWriteMask = 0;
+        VkPipelineColorBlendStateCreateInfo depthOnlyColorBlending{};
+        depthOnlyColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        depthOnlyColorBlending.attachmentCount = 1;
+        depthOnlyColorBlending.pAttachments = &depthOnlyBlendAttachment;
+        // Depth writes are the whole point here, regardless of what the
+        // ODAI_MAIN_DEPTH_WRITE diagnostic did to the shading pipeline.
+        VkPipelineDepthStencilStateCreateInfo depthOnlyDepthStencil = depthStencil;
+        depthOnlyDepthStencil.depthTestEnable = VK_TRUE;
+        depthOnlyDepthStencil.depthWriteEnable = VK_TRUE;
+
+        VkGraphicsPipelineCreateInfo depthOnlyCreateInfo = importedPipelineCreateInfo;
+        depthOnlyCreateInfo.stageCount = static_cast<uint32_t>(depthOnlyStages.size());
+        depthOnlyCreateInfo.pStages = depthOnlyStages.data();
+        depthOnlyCreateInfo.pColorBlendState = &depthOnlyColorBlending;
+        depthOnlyCreateInfo.pDepthStencilState = &depthOnlyDepthStencil;
+
+        VkPipeline depthPrewritePipeline = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(
+                m_device, m_pipelineCache, 1, &depthOnlyCreateInfo, nullptr,
+                &depthPrewritePipeline) == VK_SUCCESS) {
+            m_importedStaticDepthPrewritePipeline = depthPrewritePipeline;
+        } else {
+            VOX_LOGW("render") << "imported depth prewrite pipeline creation failed; "
+                                  "main pass will rely on its own depth writes";
+        }
+
+        VkPipelineRasterizationStateCreateInfo depthOnlyTwoSidedRasterizer = importedRasterizer;
+        depthOnlyTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+        VkGraphicsPipelineCreateInfo depthOnlyTwoSidedCreateInfo = depthOnlyCreateInfo;
+        depthOnlyTwoSidedCreateInfo.pRasterizationState = &depthOnlyTwoSidedRasterizer;
+        VkPipeline depthPrewritePipelineTwoSided = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(
+                m_device, m_pipelineCache, 1, &depthOnlyTwoSidedCreateInfo, nullptr,
+                &depthPrewritePipelineTwoSided) == VK_SUCCESS) {
+            m_importedStaticDepthPrewritePipelineTwoSided = depthPrewritePipelineTwoSided;
+        }
+        vkDestroyShaderModule(m_device, importedDepthOnlyShaderModules[0], nullptr);
+        VOX_LOGI("render") << "imported depth prewrite pipelines ready";
+    }
+
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     const VkResult importedPipelineResult = vkCreateGraphicsPipelines(
         m_device,
@@ -724,6 +830,78 @@ bool RendererBackend::createPipePipeline() {
         logVkFailure("vkCreateGraphicsPipelines(importedStatic)", importedPipelineResult);
         return false;
     }
+    // Tessellated terrain variant: same vertex shader, same fragment shader,
+    // same everything except a hull/domain pair between them and patch-list
+    // assembly. Optional the same way the prewrite shaders are -- if slangc was
+    // absent when the tree built, terrain simply stays flat.
+    //
+    // Created only when the merged depth prepass is on: main depth-tests
+    // GREATER_OR_EQUAL against depth the prepass laid, and the prepass has its
+    // own copy of these stages (createNormalDepthPipelines) so the two
+    // rasterize identical geometry. Without the merged prepass the flat and
+    // tessellated surfaces would be depth-compared against each other, and the
+    // Phong offset reads as speckled z-fighting across every hillside.
+    {
+        constexpr const char* kImportedTerrainTescPath =
+            "../src/render/shaders/imported_terrain.tesc.slang.spv";
+        constexpr const char* kImportedTerrainTesePath =
+            "../src/render/shaders/imported_terrain.tese.slang.spv";
+        static const bool s_terrainTessEnabled = []() {
+            const char* env = std::getenv("ODAI_TERRAIN_TESS");
+            return env == nullptr || (env[0] != '0');
+        }();
+        if (s_terrainTessEnabled && useMergedDepthPrepass() &&
+            std::filesystem::exists(kImportedTerrainTescPath) &&
+            std::filesystem::exists(kImportedTerrainTesePath)) {
+            std::array<VkShaderModule, 2> tessModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            const std::array<ShaderModuleLoadSpec, 2> tessLoadSpecs = {{
+                {kImportedTerrainTescPath, "imported_terrain.tesc"},
+                {kImportedTerrainTesePath, "imported_terrain.tese"},
+            }};
+            if (createShaderModulesFromFiles(m_device, tessLoadSpecs, tessModules)) {
+                VkPipelineShaderStageCreateInfo tessControlStage{};
+                tessControlStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessControlStage.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+                tessControlStage.module = tessModules[0];
+                tessControlStage.pName = "main";
+                VkPipelineShaderStageCreateInfo tessEvalStage{};
+                tessEvalStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessEvalStage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+                tessEvalStage.module = tessModules[1];
+                tessEvalStage.pName = "main";
+                const std::array<VkPipelineShaderStageCreateInfo, 4> terrainTessStages = {
+                    importedVertexShaderStage,
+                    tessControlStage,
+                    tessEvalStage,
+                    importedFragmentShaderStage,
+                };
+                VkPipelineInputAssemblyStateCreateInfo terrainInputAssembly = inputAssembly;
+                terrainInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+                VkPipelineTessellationStateCreateInfo terrainTessState{};
+                terrainTessState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+                terrainTessState.patchControlPoints = 3;
+                VkGraphicsPipelineCreateInfo terrainTessCreateInfo = importedPipelineCreateInfo;
+                terrainTessCreateInfo.stageCount =
+                    static_cast<uint32_t>(terrainTessStages.size());
+                terrainTessCreateInfo.pStages = terrainTessStages.data();
+                terrainTessCreateInfo.pInputAssemblyState = &terrainInputAssembly;
+                terrainTessCreateInfo.pTessellationState = &terrainTessState;
+                VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
+                if (vkCreateGraphicsPipelines(
+                        m_device, m_pipelineCache, 1, &terrainTessCreateInfo, nullptr,
+                        &terrainTessPipeline) == VK_SUCCESS) {
+                    m_importedTerrainTessPipeline = terrainTessPipeline;
+                    VOX_LOGI("render") << "imported terrain tessellation pipeline ready";
+                } else {
+                    VOX_LOGW("render")
+                        << "imported terrain tessellation pipeline creation failed; "
+                           "terrain stays flat";
+                }
+                destroyShaderModules(m_device, tessModules);
+            }
+        }
+    }
+
     // Alpha-blended variant of the same shaders.
     //
     // Fallout places glass, dust, light beams and vulture billboards as ordinary
@@ -1158,6 +1336,126 @@ bool RendererBackend::createPipePipeline() {
     return true;
 }
 
+bool RendererBackend::createImportedFireParticlePipeline() {
+    if (m_pipelineLayout == VK_NULL_HANDLE || m_depthFormat == VK_FORMAT_UNDEFINED ||
+        m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
+        return false;
+    }
+
+    constexpr const char* kVertexPath =
+        "../src/render/shaders/imported_fire_particle.vert.slang.spv";
+    constexpr const char* kFragmentPath =
+        "../src/render/shaders/imported_fire_particle.frag.slang.spv";
+    std::array<VkShaderModule, 2> modules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    const std::array<ShaderModuleLoadSpec, 2> specs = {{
+        {kVertexPath, "imported_fire_particle.vert"},
+        {kFragmentPath, "imported_fire_particle.frag"},
+    }};
+    if (!createShaderModulesFromFiles(m_device, specs, modules)) {
+        return false;
+    }
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = modules[0];
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = modules[1];
+    stages[1].pName = "main";
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1u;
+    viewportState.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.rasterizationSamples = m_colorSampleCount;
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.blendEnable = VK_TRUE;
+    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blending{};
+    blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blending.attachmentCount = 1u;
+    blending.pAttachments = &blendAttachment;
+
+    std::array<VkDynamicState, 3> dynamicStates = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = m_supportsVrs ? 3u : 2u;
+    dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineRenderingCreateInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering.colorAttachmentCount = 1u;
+    rendering.pColorAttachmentFormats = &m_hdrColorFormat;
+    rendering.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
+    info.pNext = &rendering;
+    info.stageCount = static_cast<std::uint32_t>(stages.size());
+    info.pStages = stages.data();
+    info.pVertexInputState = &vertexInput;
+    info.pInputAssemblyState = &inputAssembly;
+    info.pViewportState = &viewportState;
+    info.pRasterizationState = &rasterizer;
+    info.pMultisampleState = &multisampling;
+    info.pDepthStencilState = &depthStencil;
+    info.pColorBlendState = &blending;
+    info.pDynamicState = &dynamicState;
+    info.layout = m_pipelineLayout;
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    const VkResult result = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1u, &info, nullptr, &pipeline);
+    destroyShaderModules(m_device, modules);
+    if (result != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedFireParticle)", result);
+        return false;
+    }
+    if (m_importedFireParticlePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedFireParticlePipeline, nullptr);
+    }
+    m_importedFireParticlePipeline = pipeline;
+    setObjectName(
+        VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(pipeline),
+        "pipeline.importedFireParticle");
+    VOX_LOGI("render") << "pipeline config (importedFireParticle): additive, depthRead, samples="
+                       << static_cast<std::uint32_t>(m_colorSampleCount);
+    return true;
+}
+
 bool RendererBackend::createAoPipelines() {
     if (m_pipelineLayout == VK_NULL_HANDLE) {
         return false;
@@ -1215,6 +1513,7 @@ bool RendererBackend::createAoPipelines() {
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
         if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
@@ -1224,6 +1523,10 @@ bool RendererBackend::createAoPipelines() {
         if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticNormalDepthPipelineTwoSided, nullptr);
+            importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
         }
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedWaterNormalDepthPipeline, nullptr);
@@ -1446,22 +1749,35 @@ bool RendererBackend::createAoPipelines() {
     importedBindings[0].stride = sizeof(ImportedMeshVertex);
     importedBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    // Locations 6-10: terrain layer blend (Fallout ATXT/VTXT). Four bindless
-    // slots plus one packed weight word; inert unless the vertex carries
-    // kImportedSceneMaterialFlagTerrainLayers.
-    VkVertexInputAttributeDescription importedAttributes[11]{};
+    // Eight attributes over 48 bytes. Three are unpacked by the vertex FETCH
+    // rather than in the shader: R16G16_SNORM, R8G8B8A8_UNORM and
+    // R16G16B16A16_UINT are all in Vulkan's mandatory vertex-buffer format set,
+    // so the narrowing costs no shader instructions and needs no capability
+    // check.
+    //
+    // Location 6 is the entire terrain-layer slot quad in ONE fetch -- four u16
+    // bindless slots that used to be four separate R32_UINT attributes. That
+    // relies on the two packed words being adjacent, which the static_assert
+    // below pins.
+    static_assert(
+        offsetof(ImportedMeshVertex, packedLayerTexture23) ==
+            offsetof(ImportedMeshVertex, packedLayerTexture01) + sizeof(std::uint32_t),
+        "location 6 reads both layer words as one R16G16B16A16_UINT fetch");
+    VkVertexInputAttributeDescription importedAttributes[8]{};
     importedAttributes[0].location = 0;
     importedAttributes[0].binding = 0;
     importedAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
     importedAttributes[0].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, position));
     importedAttributes[1].location = 1;
     importedAttributes[1].binding = 0;
-    importedAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, normal));
+    importedAttributes[1].format = VK_FORMAT_R16G16_SNORM;
+    importedAttributes[1].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedNormal));
     importedAttributes[2].location = 2;
     importedAttributes[2].binding = 0;
-    importedAttributes[2].format = VK_FORMAT_R32G32B32_SFLOAT;
-    importedAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, color));
+    importedAttributes[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+    importedAttributes[2].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedColor));
     importedAttributes[3].location = 3;
     importedAttributes[3].binding = 0;
     importedAttributes[3].format = VK_FORMAT_R32G32_SFLOAT;
@@ -1474,23 +1790,21 @@ bool RendererBackend::createAoPipelines() {
     importedAttributes[5].binding = 0;
     importedAttributes[5].format = VK_FORMAT_R32_UINT;
     importedAttributes[5].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
-    for (uint32_t layer = 0; layer < 4; ++layer) {
-        importedAttributes[6 + layer].location = 6 + layer;
-        importedAttributes[6 + layer].binding = 0;
-        importedAttributes[6 + layer].format = VK_FORMAT_R32_UINT;
-        importedAttributes[6 + layer].offset = static_cast<uint32_t>(
-            offsetof(ImportedMeshVertex, layerTextureIndex) + (layer * sizeof(std::uint32_t)));
-    }
-    importedAttributes[10].location = 10;
-    importedAttributes[10].binding = 0;
-    importedAttributes[10].format = VK_FORMAT_R32_UINT;
-    importedAttributes[10].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
+    importedAttributes[6].location = 6;
+    importedAttributes[6].binding = 0;
+    importedAttributes[6].format = VK_FORMAT_R16G16B16A16_UINT;
+    importedAttributes[6].offset =
+        static_cast<uint32_t>(offsetof(ImportedMeshVertex, packedLayerTexture01));
+    importedAttributes[7].location = 7;
+    importedAttributes[7].binding = 0;
+    importedAttributes[7].format = VK_FORMAT_R32_UINT;
+    importedAttributes[7].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
     VkPipelineVertexInputStateCreateInfo importedVertexInputInfo{};
     importedVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedVertexInputInfo.pVertexBindingDescriptions = importedBindings;
-    importedVertexInputInfo.vertexAttributeDescriptionCount = 11;
+    importedVertexInputInfo.vertexAttributeDescriptionCount = 8;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;
@@ -1509,6 +1823,97 @@ bool RendererBackend::createAoPipelines() {
         destroyNewPipelines();
         destroyShaderModules(m_device, shaderModules);
         return false;
+    }
+
+    // Two-sided variant. The prepass batches are already split on two-sidedness
+    // (frame_draws.cc buckets by it) but had no pipeline to switch to, so thin
+    // DRAW_BOTH geometry -- window glass, foliage cards, awnings -- wrote depth
+    // and normals for its front faces only, and SSAO then saw a different
+    // silhouette than the lit pass did.
+    VkPipelineRasterizationStateCreateInfo importedNormalDepthTwoSidedRasterizer = rasterizer;
+    importedNormalDepthTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    pipelineCreateInfo.pRasterizationState = &importedNormalDepthTwoSidedRasterizer;
+    const VkResult importedNormalDepthTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &pipelineCreateInfo,
+        nullptr,
+        &importedStaticNormalDepthPipelineTwoSided
+    );
+    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    if (importedNormalDepthTwoSidedResult != VK_SUCCESS) {
+        logVkFailure(
+            "vkCreateGraphicsPipelines(importedStaticNormalDepthTwoSided)",
+            importedNormalDepthTwoSidedResult);
+        destroyNewPipelines();
+        destroyShaderModules(m_device, shaderModules);
+        return false;
+    }
+
+    // Tessellated terrain variant of the normal-depth prepass, matching the
+    // main pass's terrain pipeline stage for stage. The two MUST tessellate
+    // identically -- main depth-tests EQUAL-ish (GREATER_OR_EQUAL, write off)
+    // against depth this pass lays, so a factor or displacement that differs
+    // between them punches holes in the ground.
+    {
+        constexpr const char* kImportedTerrainTescPath =
+            "../src/render/shaders/imported_terrain.tesc.slang.spv";
+        constexpr const char* kImportedTerrainTesePath =
+            "../src/render/shaders/imported_terrain.tese.slang.spv";
+        static const bool s_terrainTessEnabled = []() {
+            const char* env = std::getenv("ODAI_TERRAIN_TESS");
+            return env == nullptr || (env[0] != '0');
+        }();
+        if (s_terrainTessEnabled && useMergedDepthPrepass() &&
+            std::filesystem::exists(kImportedTerrainTescPath) &&
+            std::filesystem::exists(kImportedTerrainTesePath)) {
+            std::array<VkShaderModule, 2> tessModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            const std::array<ShaderModuleLoadSpec, 2> tessLoadSpecs = {{
+                {kImportedTerrainTescPath, "imported_terrain.tesc"},
+                {kImportedTerrainTesePath, "imported_terrain.tese"},
+            }};
+            if (createShaderModulesFromFiles(m_device, tessLoadSpecs, tessModules)) {
+                VkPipelineShaderStageCreateInfo tessControlStage{};
+                tessControlStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessControlStage.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+                tessControlStage.module = tessModules[0];
+                tessControlStage.pName = "main";
+                VkPipelineShaderStageCreateInfo tessEvalStage{};
+                tessEvalStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessEvalStage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+                tessEvalStage.module = tessModules[1];
+                tessEvalStage.pName = "main";
+                const std::array<VkPipelineShaderStageCreateInfo, 4> terrainStages = {
+                    importedNormalDepthStageInfos[0],
+                    tessControlStage,
+                    tessEvalStage,
+                    importedNormalDepthStageInfos[1],
+                };
+                VkPipelineInputAssemblyStateCreateInfo terrainInputAssembly = inputAssembly;
+                terrainInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+                VkPipelineTessellationStateCreateInfo terrainTessState{};
+                terrainTessState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+                terrainTessState.patchControlPoints = 3;
+                VkGraphicsPipelineCreateInfo terrainCreateInfo = pipelineCreateInfo;
+                terrainCreateInfo.stageCount = static_cast<uint32_t>(terrainStages.size());
+                terrainCreateInfo.pStages = terrainStages.data();
+                terrainCreateInfo.pInputAssemblyState = &terrainInputAssembly;
+                terrainCreateInfo.pTessellationState = &terrainTessState;
+                terrainCreateInfo.pVertexInputState = &importedVertexInputInfo;
+                terrainCreateInfo.pRasterizationState = &rasterizer;
+                VkPipeline terrainPipeline = VK_NULL_HANDLE;
+                if (vkCreateGraphicsPipelines(
+                        m_device, m_pipelineCache, 1, &terrainCreateInfo, nullptr,
+                        &terrainPipeline) == VK_SUCCESS) {
+                    m_importedTerrainTessNormalDepthPipeline = terrainPipeline;
+                } else {
+                    VOX_LOGW("render")
+                        << "imported terrain tessellation prepass pipeline creation failed";
+                }
+                destroyShaderModules(m_device, tessModules);
+            }
+        }
     }
 
     VkPipelineShaderStageCreateInfo importedWaterNormalDepthStageInfos[2]{};
@@ -1574,6 +1979,9 @@ bool RendererBackend::createAoPipelines() {
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipeline, nullptr);
     }
+    if (m_importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipelineTwoSided, nullptr);
+    }
     if (m_importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedWaterNormalDepthPipeline, nullptr);
     }
@@ -1581,6 +1989,7 @@ bool RendererBackend::createAoPipelines() {
     m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
     m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
+    m_importedStaticNormalDepthPipelineTwoSided = importedStaticNormalDepthPipelineTwoSided;
     m_importedWaterNormalDepthPipeline = importedWaterNormalDepthPipeline;
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
@@ -2505,6 +2914,64 @@ bool RendererBackend::createGraphicsPipeline() {
         // Not fatal: the shadow pass falls back to the full-stride pipeline.
     }
     m_importedStaticShadowCompactPipeline = importedStaticShadowCompactPipeline;
+
+    // Two-sided shadow casters. A thin DRAW_BOTH surface -- a sign, a fence
+    // panel, a foliage card -- has only one wound face, so with back-face
+    // culling on it casts a shadow from one side and nothing from the other,
+    // which reads as the shadow blinking out as the sun crosses it. Both vertex
+    // strides need their own variant because the shadow pass picks between them
+    // per cascade. Neither is fatal to miss: the draw falls back to the
+    // one-sided pipeline, which is exactly today's behaviour.
+    VkPipelineRasterizationStateCreateInfo importedShadowTwoSidedRasterizer = shadowRasterizer;
+    importedShadowTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
+    VkGraphicsPipelineCreateInfo importedShadowTwoSidedCreateInfo = importedShadowPipelineCreateInfo;
+    importedShadowTwoSidedCreateInfo.pRasterizationState = &importedShadowTwoSidedRasterizer;
+    VkPipeline importedStaticShadowPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult importedShadowTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &importedShadowTwoSidedCreateInfo,
+        nullptr,
+        &importedStaticShadowPipelineTwoSided
+    );
+    if (importedShadowTwoSidedResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedStaticShadowTwoSided)", importedShadowTwoSidedResult);
+        if (importedStaticShadowPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticShadowPipelineTwoSided, nullptr);
+            importedStaticShadowPipelineTwoSided = VK_NULL_HANDLE;
+        }
+    }
+    if (m_importedStaticShadowPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticShadowPipelineTwoSided, nullptr);
+    }
+    m_importedStaticShadowPipelineTwoSided = importedStaticShadowPipelineTwoSided;
+
+    VkGraphicsPipelineCreateInfo importedShadowCompactTwoSidedCreateInfo =
+        importedShadowCompactPipelineCreateInfo;
+    importedShadowCompactTwoSidedCreateInfo.pRasterizationState = &importedShadowTwoSidedRasterizer;
+    VkPipeline importedStaticShadowCompactPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult importedShadowCompactTwoSidedResult = vkCreateGraphicsPipelines(
+        m_device,
+        m_pipelineCache,
+        1,
+        &importedShadowCompactTwoSidedCreateInfo,
+        nullptr,
+        &importedStaticShadowCompactPipelineTwoSided
+    );
+    if (importedShadowCompactTwoSidedResult != VK_SUCCESS) {
+        logVkFailure(
+            "vkCreateGraphicsPipelines(importedStaticShadowCompactTwoSided)",
+            importedShadowCompactTwoSidedResult);
+        if (importedStaticShadowCompactPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, importedStaticShadowCompactPipelineTwoSided, nullptr);
+            importedStaticShadowCompactPipelineTwoSided = VK_NULL_HANDLE;
+        }
+    }
+    if (m_importedStaticShadowCompactPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticShadowCompactPipelineTwoSided, nullptr);
+    }
+    m_importedStaticShadowCompactPipelineTwoSided = importedStaticShadowCompactPipelineTwoSided;
 
     destroyShaderModules(m_device, importedShadowShaderModules);
     if (importedShadowPipelineResult != VK_SUCCESS) {

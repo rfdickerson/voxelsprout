@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -156,6 +157,7 @@ void RendererBackend::destroySkinningComputeResources() {
     // before the layout itself.
     for (SkinnedInstanceSlot& slot : m_skinningInstances) {
         destroyDescriptorBufferSet(slot.bufferSet);
+        destroyDescriptorBufferSet(slot.velocityBufferSet);
         m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
         slot.restPoseVertexBufferHandle = kInvalidBufferHandle;
         m_bufferAllocator.destroyBuffer(slot.indexBufferHandle);
@@ -166,6 +168,14 @@ void RendererBackend::destroySkinningComputeResources() {
         slot.boneCount = 0;
         slot.meshDraws.clear();
         slot.pendingBoneMatrices.clear();
+        slot.previousBoneMatrices.clear();
+        slot.currentBoneAddress = 0;
+        slot.previousBoneAddress = 0;
+        slot.boneBufferBytes = 0;
+        for (const std::uint32_t textureSlot : slot.textureSlots) {
+            releaseImportedTexture(textureSlot);
+        }
+        slot.textureSlots.clear();
     }
     if (m_skinningDescriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(m_device, m_skinningDescriptorSetLayout, nullptr);
@@ -348,6 +358,20 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             return false;
         }
     }
+    // Velocity set. Not fatal if it fails: the actor still renders, it just has
+    // no motion vector and its pixels fall back to depth reprojection.
+    if (!slot.velocityBufferSet.valid() && m_skinnedVelocityDescriptorSetLayout != VK_NULL_HANDLE) {
+        if (!createDescriptorBufferSet(
+                m_skinnedVelocityDescriptorSetLayout,
+                kMaxFramesInFlight,
+                VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT,
+                "renderer.descriptorBuffer.skinnedVelocity",
+                slot.velocityBufferSet
+            )) {
+            VOX_LOGW("render") << "skinned velocity descriptor set unavailable for instance "
+                               << instanceIndex;
+        }
+    }
 
     BufferHandle newRestPoseHandle = kInvalidBufferHandle;
     if (!uploadDeviceLocalBuffer(
@@ -398,12 +422,12 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         dst.position[0] = src.position[0];
         dst.position[1] = src.position[1];
         dst.position[2] = src.position[2];
-        dst.normal[0] = src.normal[0];
-        dst.normal[1] = src.normal[1];
-        dst.normal[2] = src.normal[2];
-        dst.color[0] = src.color[0];
-        dst.color[1] = src.color[1];
-        dst.color[2] = src.color[2];
+        dst.packedNormal = odai::importer::packImportedVertexNormal(src.normal);
+        // Opaque: ImportedSkinnedMeshVertex carries no authored alpha. The
+        // channel exists to feather placed world geometry (see
+        // ImportedSceneVertex::colorAlpha) and no skinned actor part uses it,
+        // so the skinned vertex is not widened for it.
+        dst.packedColor = odai::importer::packImportedVertexColor(src.color);
         dst.uv[0] = src.uv[0];
         dst.uv[1] = src.uv[1];
         dst.textureIndex = src.textureIndex;
@@ -457,6 +481,23 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         meshDraw.indexBufferHandle = slot.indexBufferHandle;
         meshDraw.firstIndex = draw.firstIndex;
         meshDraw.indexCount = draw.indexCount;
+        // Authored material state, carried through the same way the static and
+        // actor paths do it: the threshold off the packed draw, blend and
+        // two-sidedness off the draw's first vertex (per-vertex flags, but
+        // uniform across a draw because a draw is one NIF shape). Without this
+        // every skinned part alpha-tested at the default 0.5 and none was ever
+        // two-sided.
+        meshDraw.alphaThreshold = draw.alphaThreshold;
+        if (draw.firstIndex < meshTemplate.indices.size()) {
+            const std::uint32_t vertexIndex = meshTemplate.indices[draw.firstIndex];
+            if (vertexIndex < meshTemplate.vertices.size()) {
+                const std::uint32_t flags = meshTemplate.vertices[vertexIndex].flags;
+                meshDraw.blended =
+                    (flags & odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
+                meshDraw.twoSided =
+                    (flags & odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
+            }
+        }
         slot.meshDraws.push_back(meshDraw);
     }
 
@@ -472,6 +513,131 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         m_skinningMeshDraws.insert(m_skinningMeshDraws.end(), draws.begin(), draws.end());
     }
     return true;
+}
+
+// Uploads a skinned actor's textures into the shared bindless table and hands
+// back one slot per input, in order.
+//
+// A skinned actor cannot reach a texture the way imported world geometry does.
+// A chunk's textures are uploaded by addImportedSceneChunk, which remaps every
+// vertex's scene-local texture index onto a bindless slot on the way in; the
+// caller never sees the mapping and has no way to ask for it. A skinned
+// template's vertices are uploaded verbatim, so whatever
+// ImportedSkinnedMeshVertex::textureIndex holds has to ALREADY be a bindless
+// slot. This is how a caller gets one.
+//
+// The shape (transient command pool, acquire, submit on the render timeline,
+// defer the staging buffers to that value) is setWeatherClouds' -- the other
+// caller that uploads textures outside any scene. Slots are reference counted
+// by source path in the same table, so an actor sharing a texture with the
+// world costs nothing extra.
+std::vector<std::uint32_t> RendererBackend::uploadSkinnedActorTextures(
+    std::uint32_t instanceIndex, const std::vector<odai::importer::ImportedSceneTexture>& textures
+) {
+    std::vector<std::uint32_t> slots(textures.size(), kInvalidImportedTextureSlot);
+    if (instanceIndex >= kMaxSkinnedInstances || textures.empty()) {
+        return slots;
+    }
+    // Released only after the new acquires have run, so a texture shared
+    // between the old set and the new one keeps its reference and its image
+    // rather than being destroyed and re-uploaded.
+    SkinnedInstanceSlot& slot = m_skinningInstances[instanceIndex];
+    const std::vector<std::uint32_t> previousSlots = std::move(slot.textureSlots);
+    slot.textureSlots.clear();
+
+    // The same gate acquireImportedTexture applies; checking it up front avoids
+    // building a command pool only to have every acquire refuse.
+    if (!m_supportsBindlessDescriptors || !m_bindlessBufferSet.valid() ||
+        m_bindlessTextureCapacity <= kBindlessTextureStaticCount) {
+        for (const std::uint32_t previous : previousSlots) {
+            releaseImportedTexture(previous);
+        }
+        return slots;
+    }
+
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo commandPoolCreateInfo{};
+    commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    commandPoolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    if (vkCreateCommandPool(m_device, &commandPoolCreateInfo, nullptr, &commandPool) != VK_SUCCESS) {
+        VOX_LOGE("render") << "skinned actor texture upload command pool creation failed";
+        for (const std::uint32_t previous : previousSlots) {
+            releaseImportedTexture(previous);
+        }
+        return slots;
+    }
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = commandPool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkAllocateCommandBuffers(m_device, &allocateInfo, &commandBuffer) != VK_SUCCESS ||
+        vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+        VOX_LOGE("render") << "skinned actor texture upload command buffer setup failed";
+        scheduleCommandPoolRelease(commandPool, 0);
+        for (const std::uint32_t previous : previousSlots) {
+            releaseImportedTexture(previous);
+        }
+        return slots;
+    }
+
+    std::vector<BufferHandle> stagingBufferHandles;
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        const odai::importer::ImportedSceneTexture& texture = textures[i];
+        if (texture.rgba8.empty()) {
+            continue;
+        }
+        slots[i] = acquireImportedTexture(
+            normalizedImportedTextureKey(texture.sourcePath), texture, commandBuffer,
+            stagingBufferHandles);
+        if (slots[i] != kInvalidImportedTextureSlot) {
+            slot.textureSlots.push_back(slots[i]);
+        }
+    }
+
+    for (const std::uint32_t previous : previousSlots) {
+        releaseImportedTexture(previous);
+    }
+
+    std::uint64_t uploadTimelineValue = 0;
+    if (vkEndCommandBuffer(commandBuffer) == VK_SUCCESS) {
+        uploadTimelineValue = m_nextTimelineValue++;
+        VkSemaphoreSubmitInfo signalInfo{};
+        signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfo.semaphore = m_renderTimelineSemaphore;
+        signalInfo.value = uploadTimelineValue;
+        signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkCommandBufferSubmitInfo commandBufferInfo{};
+        commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        commandBufferInfo.commandBuffer = commandBuffer;
+        VkSubmitInfo2 submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submitInfo.commandBufferInfoCount = 1;
+        submitInfo.pCommandBufferInfos = &commandBufferInfo;
+        submitInfo.signalSemaphoreInfoCount = 1;
+        submitInfo.pSignalSemaphoreInfos = &signalInfo;
+        const VkResult submitResult =
+            vkQueueSubmit2(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            logVkFailure("vkQueueSubmit2(skinnedActorTextureUpload)", submitResult);
+            uploadTimelineValue = 0;
+        } else {
+            m_pendingTransferTimelineValue =
+                std::max(m_pendingTransferTimelineValue, uploadTimelineValue);
+        }
+    }
+    for (const BufferHandle stagingHandle : stagingBufferHandles) {
+        if (stagingHandle != kInvalidBufferHandle) {
+            scheduleBufferRelease(stagingHandle, uploadTimelineValue);
+        }
+    }
+    scheduleCommandPoolRelease(commandPool, uploadTimelineValue);
+    return slots;
 }
 
 // Public entry point (Renderer::setSkinnedActorPose), called by app code
@@ -552,6 +718,46 @@ void RendererBackend::uploadSkinnedActorPoseForFrame() {
             slot.bufferSet, m_currentFrame,
             descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 1),
             boneAddress, boneBufferSize);
+
+        // Last frame's pose, uploaded alongside this frame's so the velocity
+        // pass can skin the same rest vertex into both. On the very first frame
+        // for a slot there is no previous pose, so it reuses the current one --
+        // which yields a zero motion vector, i.e. "this actor did not move",
+        // which is the right answer for a pose that has only just appeared.
+        const std::vector<odai::math::Matrix4>& previousSource =
+            (slot.previousBoneMatrices.size() == slot.pendingBoneMatrices.size())
+                ? slot.previousBoneMatrices
+                : slot.pendingBoneMatrices;
+        const std::optional<FrameArenaSlice> previousSlice = m_frameArena.allocateUpload(
+            boneBufferSize, kBoneMatrixAlignment, FrameArenaUploadKind::Unknown);
+        if (previousSlice.has_value() && previousSlice->mapped != nullptr) {
+            auto* dstPrevious = static_cast<odai::math::Matrix4*>(previousSlice->mapped);
+            for (std::size_t m = 0; m < previousSource.size(); ++m) {
+                dstPrevious[m] = transpose(previousSource[m]);
+            }
+            slot.currentBoneAddress = boneAddress;
+            slot.previousBoneAddress =
+                m_bufferAllocator.getDeviceAddress(previousSlice->buffer) + previousSlice->offset;
+            slot.boneBufferBytes = boneBufferSize;
+        } else {
+            // No previous upload means no velocity draw this frame; the pixels
+            // fall back to depth reprojection rather than reading a stale pose.
+            slot.currentBoneAddress = 0;
+            slot.previousBoneAddress = 0;
+            slot.boneBufferBytes = 0;
+        }
+        if (slot.velocityBufferSet.valid() && slot.currentBoneAddress != 0 &&
+            m_skinnedVelocityDescriptorSetLayout != VK_NULL_HANDLE) {
+            writeDescriptorBufferStorage(
+                slot.velocityBufferSet, m_currentFrame,
+                descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 0),
+                slot.currentBoneAddress, slot.boneBufferBytes);
+            writeDescriptorBufferStorage(
+                slot.velocityBufferSet, m_currentFrame,
+                descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 1),
+                slot.previousBoneAddress, slot.boneBufferBytes);
+        }
+        slot.previousBoneMatrices = slot.pendingBoneMatrices;
     }
 }
 

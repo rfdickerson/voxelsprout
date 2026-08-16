@@ -29,8 +29,13 @@
 #include <vector>
 
 #include "import/fnv/esm_reader.h"
+#include "import/fnv/plugin_load_order.h"
 
 namespace odai::importer::fnv {
+
+inline constexpr std::uint16_t kCellFlagInterior = 0x0001u;
+inline constexpr std::uint16_t kCellFlagShowSky = 0x0040u;
+inline constexpr std::uint16_t kCellFlagUseSkyLighting = 0x0080u;
 
 // Height-post grid dimensions for one LAND record (one exterior cell).
 constexpr int kLandGridSize = 33;
@@ -248,14 +253,39 @@ struct FalloutRegionRecord {
     std::uint32_t formId = 0;
     std::string editorId;
     // RDMP. Empty for the 221 regions that are not player-facing.
+    //
+    // ON A LOCALIZED PLUGIN THIS IS NOT THE NAME. Skyrim stores RDMP as a
+    // four-byte string ID (see strings_table.h) and reading it as a zstring
+    // yields its low byte as a character -- Whiterun's region announces "h".
+    // Both fields are filled unconditionally because the parser does not see
+    // the TES4 header; whoever has the plugin's localized flag decides which to
+    // believe. FalloutWorldTables carries both for the same reason.
     std::string mapName;
+    // RDMP read as a string ID. Zero unless RDMP was exactly four bytes, which
+    // is what a localized plugin always writes and what a real map name never
+    // is (the shortest in FalloutNV.esm is "Goodsprings").
+    std::uint32_t mapNameStringId = 0;
 
-    [[nodiscard]] bool isDiscoverable() const { return !mapName.empty(); }
+    [[nodiscard]] bool isDiscoverable() const {
+        return !mapName.empty() || mapNameStringId != 0u;
+    }
 };
 
 struct FalloutPlacedReference {
     std::uint32_t formId = 0;
     std::uint32_t baseFormId = 0;  // NAME: the STAT (or other base record) this instance places
+    // MORROWIND NAMES ITS BASE BY STRING. TES3 has no formIDs at all, so a
+    // reference's NAME subrecord is the base record's own id text. Empty for
+    // every later generation; when it is set, baseFormId is 0 and the caller
+    // resolves the name through FalloutWorldTables::baseFormIdsByEditorId.
+    std::string baseEditorId;
+    // The record header's own flags. Bit 0x0800 is "Initially Disabled": the
+    // game does not render the reference until something enables it.
+    std::uint32_t recordFlags = 0;
+    // XESP: enabled state follows another reference's, optionally inverted.
+    bool hasEnableParent = false;
+    std::uint32_t enableParentFormId = 0;
+    bool enableParentOpposite = false;
     float position[3] = {};        // DATA, world units
     float rotationRadians[3] = {};  // DATA
     float scale = 1.0f;             // XSCL, defaults to 1 when absent
@@ -284,10 +314,21 @@ struct FalloutLandTextureLayer {
 
 struct FalloutLandRecord {
     std::uint32_t cellFormId = 0;
+    // Posts per side. 33 for TES4 onward, 65 for Morrowind -- and the arrays
+    // below are sized from it rather than fixed, because at 65 they are four
+    // times larger and a fixed worst case would cost every Fallout cell the
+    // Morrowind price. The world a cell covers is (gridSize - 1) *
+    // kLandPostSpacing, i.e. 4096 units at 33 posts and 8192 at 65: the SPACING
+    // is the same 128 units in both, it is the cell that is bigger.
+    int gridSize = kLandGridSize;
+    [[nodiscard]] int vertexCount() const { return gridSize * gridSize; }
+    [[nodiscard]] float cellWorldSize() const {
+        return kLandPostSpacing * static_cast<float>(gridSize - 1);
+    }
     bool hasHeights = false;
-    float heights[kLandVertexCount] = {};   // row-major [row * 33 + col], world Z units
+    std::vector<float> heights;   // row-major [row * gridSize + col], world Z units
     bool hasNormals = false;
-    float normals[kLandVertexCount * 3] = {};  // row-major, normalized
+    std::vector<float> normals;   // row-major, normalized
     // VCLR: per-post terrain tint, row-major RGB in [0,1]. This is the colour
     // the game actually shades landscape with -- baked ambient and the regional
     // palette that makes the Mojave read as sunbleached tan rather than the
@@ -295,7 +336,7 @@ struct FalloutLandRecord {
     // which case the neutral 1,1,1 default leaves the diffuse texture unmodified,
     // which is exactly what the game does too.
     bool hasColors = false;
-    float colors[kLandVertexCount * 3] = {};
+    std::vector<float> colors;
     // Base texture per quadrant (0=SW,1=SE... layout mirrors BTXT's own
     // quadrant index), 0 when the quadrant has no explicit BTXT record.
     std::uint32_t quadrantBaseTextureFormId[4] = {};
@@ -309,7 +350,25 @@ struct FalloutLandRecord {
     // lists the posts where the layer is actually present, and everything else
     // stays at zero opacity.
     std::vector<FalloutLandTextureLayer> textureLayers;
+
+    // MORROWIND HAS NO QUADRANTS AND NO LAYERS. Its VTEX is a 16x16 grid of
+    // land-texture indices over the whole cell, each covering 4x4 quads, so the
+    // terrain is textured by splatting whole blocks rather than by blending
+    // per-post opacities. Empty for every other game.
+    //
+    // Values are the LTEX index PLUS ONE, exactly as stored: 0 means "the
+    // worldspace default texture", which is why this is not simply an index.
+    std::vector<std::uint16_t> morrowindTextureGrid;
 };
+
+// Side of Morrowind's VTEX grid, and how many terrain quads one of its entries
+// covers. 16 * 4 = 64 quads = the 65-post grid.
+// Morrowind's LAND grid: 65 posts a side over an 8192-unit cell. The post
+// SPACING is the same 128 units every later game uses -- the cell is four times
+// the area, not four times the sampling.
+constexpr int kMorrowindLandGridSize = 65;
+constexpr int kMorrowindTextureGridSize = 16;
+constexpr int kMorrowindTextureBlockQuads = 4;
 
 // One navmesh triangle: three vertex indices, then the index of the triangle
 // sharing each edge (kNavMeshNoNeighbour where the edge is a border). The
@@ -354,10 +413,48 @@ struct FalloutCellRecord {
     std::uint32_t formId = 0;
     std::string editorId;
     bool isInterior = false;
+    // Complete CELL DATA flags. Skyrim interiors use Show Sky (0x40) and Use
+    // Sky Lighting (0x80) independently; collapsing DATA to isInterior loses
+    // the distinction that decides both the background and ambient policy.
+    std::uint16_t cellFlags = 0u;
     bool hasGridCoords = false;
     std::int32_t gridX = 0;
     std::int32_t gridZ = 0;
     std::uint32_t worldspaceFormId = 0;  // 0 for interior cells
+
+    // XCLL: how an INTERIOR is lit. An interior has no sun and, in Fallout's
+    // own data, usually no LIGH placements either -- Doc Mitchell's house has
+    // none at all -- so this subrecord is the whole lighting rig for the room,
+    // and a reader that skips it renders the interior pitch black or, worse,
+    // lets the exterior sun through the walls.
+    //
+    // 40 bytes in FO3/FNV: ambient RGBA, directional RGBA, fog-near RGBA, then
+    // fog near/far as floats. Measured on GSDocMitchellHouse: ambient
+    // (47,70,69), directional (0,0,0) -- black, i.e. the room is ambient-only --
+    // fog (77,62,32), near 100, far 1500.
+    bool hasLighting = false;
+    float ambientColor[3] = {};
+    float directionalColor[3] = {};
+    float fogColor[3] = {};
+    float fogNear = 0.0f;
+    float fogFar = 0.0f;
+
+    // XCLW: the height of this cell's water surface, in Bethesda Z.
+    //
+    // A cell with no water does NOT omit the subrecord in Fallout -- all 30497
+    // of FalloutNV.esm's cells carry one, and a dry cell writes the sentinel
+    // 0xCF000000, which is -2^31 as a float. So "has water" is a value test,
+    // not a presence test, and a reader that trusts presence floods the whole
+    // Mojave two billion units below the ground.
+    //
+    // Oblivion is the other way round: only 751 of Oblivion.esm's 35494 cells
+    // carry XCLW at all, and no WRLD record in the file has a DNAM (censused:
+    // 84 worldspaces, 0 DNAM), so there is no authored per-worldspace default
+    // to fall back to. Tamriel's sea is simply at Z=0, which is what the
+    // absent case resolves to.
+    bool hasWater = false;
+    float waterHeight = 0.0f;
+
     std::vector<FalloutPlacedReference> references;
     // XCLR: the regions this cell belongs to, by REGN formID. A cell can be in
     // several at once (measured: up to 6), and 4363 of FalloutNV.esm's 30497
@@ -376,19 +473,51 @@ struct FalloutCellRecord {
 };
 
 // A landscape texture. LAND's BTXT/ATXT subrecords name one of these by
-// formID; it in turn points (TNAM) at a texture set whose first slot is the
-// diffuse map. So the full chain from a terrain quadrant to a .dds is
-// LAND.BTXT -> LTEX -> LTEX.TNAM -> TXST -> TXST.TX00.
+// formID. How it reaches a .dds from there depends on the generation:
+//   Fallout 3 / New Vegas: LAND.BTXT -> LTEX -> LTEX.TNAM -> TXST -> TXST.TX00
+//   Oblivion:              LAND.BTXT -> LTEX -> LTEX.ICON  (a path, no TXST)
+// Both land in diffuseTexturePath, so nothing downstream has to know which.
 struct FalloutLandTextureRecord {
     std::uint32_t formId = 0;
     std::string editorId;
-    std::uint32_t textureSetFormId = 0;  // TNAM -> TXST
-    std::string diffuseTexturePath;      // resolved from that TXST's TX00
+    std::uint32_t textureSetFormId = 0;  // TNAM -> TXST; 0 on Oblivion
+    // From that TXST's TX00, or from Oblivion's own ICON with the
+    // "landscape\" folder it is relative to already prepended.
+    std::string diffuseTexturePath;
 };
 
 struct FalloutWorldspaceRecord {
     std::uint32_t formId = 0;
     std::string editorId;
+    // DNAM: the height the ground sits at in any cell of this worldspace that
+    // carries NO LAND record, and the height its water sits at when a cell
+    // states none.
+    //
+    // A cell without LAND is not a hole in the world -- it is FLAT GROUND at
+    // this height, which is how Bethesda avoids authoring a heightfield for a
+    // region that is entirely covered by architecture. Megaton is the case that
+    // makes it matter: cell (-2,-7) places 107 references and has no LAND, so an
+    // importer that draws nothing there hangs a third of the town over open sky.
+    //
+    // Present on 28 of Fallout 3's 32 worldspaces and absent from every Oblivion
+    // one (censused: 84 worldspaces, 0 DNAM), which is why this is optional
+    // rather than assumed.
+    bool hasDefaultHeights = false;
+    float defaultLandHeight = 0.0f;
+    float defaultWaterHeight = 0.0f;
+
+    // WNAM: the worldspace this one hangs off. A WALLED CITY INHERITS NEARLY
+    // EVERYTHING FROM ITS PARENT, and Skyrim leans on that far harder than the
+    // earlier games do. WhiterunWorld's whole record is an EDID and this one
+    // field: no CNAM, so it names no climate and nothing publishes a sky or a
+    // cloud layer for it, and no DNAM, so its implied water height falls back to
+    // ZERO -- which for a city standing at engine y -3120 is a full-cell water
+    // quad slicing through the houses. Tamriel, the parent, declares both
+    // (climate 0x812, default water -14000).
+    //
+    // So resolving this is not a nicety: unresolved, a Skyrim city renders with
+    // no sky and underwater. 0 when the record names no parent.
+    std::uint32_t parentWorldspaceFormId = 0;
 };
 
 // Everything extracted from one plugin pass. Populated by extractFalloutScene
@@ -442,8 +571,34 @@ struct FalloutExtractFilter {
 // bytes each this index is under 800 KB for the entire worldspace, and because
 // EsmReader memory-maps the plugin, going from an entry to that cell's actual
 // LAND/REFR/NAVM records is a pointer walk plus that one cell's decompression.
+// One plugin's contribution to a cell: where its children group sits in ITS
+// file. Offsets are positions in that plugin, so the plugin index is not
+// decoration -- reading a range against the wrong file is undefined.
+struct FalloutCellContribution {
+    std::size_t pluginIndex = 0;
+    std::uint64_t childrenGroupOffset = 0;
+    std::uint32_t childrenGroupSize = 0;
+};
+
 struct FalloutCellIndexEntry {
     std::uint32_t cellFormId = 0;
+    // XCLL, carried from the CELL record so extractFalloutCellAt can hand it
+    // back: that function rebuilds a cell from this entry plus the children
+    // GRUP and never re-reads the CELL's own subrecords, so anything living
+    // only on the record is invisible to every streaming caller. See the same
+    // fields on FalloutCellRecord for what they mean.
+    bool hasLighting = false;
+    float ambientColor[3] = {};
+    float directionalColor[3] = {};
+    float fogColor[3] = {};
+    float fogNear = 0.0f;
+    float fogFar = 0.0f;
+    // XCLW, carried for the same reason as the lighting above. Until it was,
+    // EVERY streamed cell reported no water -- rivers, lakes and the sea
+    // existed only in cooked scenes, because the cooker parses the CELL record
+    // in full while the streamer rebuilds it from this entry.
+    bool hasWater = false;
+    float waterHeight = 0.0f;
     // EDID, when the cell has one. Interiors are named ("GSDocMitchellHouse");
     // most exterior cells are not. This is what lets a caller ask for a place by
     // name instead of by grid coordinate.
@@ -453,20 +608,44 @@ struct FalloutCellIndexEntry {
     std::int32_t gridZ = 0;
     bool hasGridCoords = false;
     bool isInterior = false;
+    std::uint16_t cellFlags = 0u;
     // XCLR, carried through from the cell header so region lookup costs the
     // streamer nothing at runtime -- the index pass already walks these
     // subrecords for EDID and XCLC.
     std::vector<std::uint32_t> regionFormIds;
     // Byte offset of the CELL record's own header.
     std::uint64_t cellRecordOffset = 0;
+    // Every plugin that has something to say about this cell, in load order.
+    // A cell's contents are not owned by one file: an override plugin ships a
+    // children group holding ONLY the references it changes or adds, and the
+    // rest still come from the master. So the contents are the merge of these,
+    // later plugins winning per reference formID -- see extractFalloutCellMerged.
+    //
+    // The single-plugin builder fills exactly one of these, so both paths read
+    // the same way.
+    std::vector<FalloutCellContribution> contributions;
     // The cell-children GRUP that holds this cell's REFR/LAND/NAVM records.
     // Zero size means the cell has no children group at all (no contents).
     std::uint64_t childrenGroupOffset = 0;
     std::uint32_t childrenGroupSize = 0;
+    // MORROWIND KEEPS ITS TERRAIN IN A SIBLING RECORD. TES3 has no children
+    // group at all -- a CELL carries its references inline and its LAND is a
+    // separate top-level record joined by grid coordinate -- so the index has to
+    // remember where that record was. Zero size means the cell has no terrain.
+    std::uint64_t landRecordOffset = 0;
+    std::uint32_t landRecordSize = 0;
 };
 
 struct FalloutCellIndex {
+    // World units one exterior cell covers. 4096 from Oblivion onward, 8192 in
+    // Morrowind -- the post spacing is 128 in both, the cell is four times the
+    // area. Carried here because the streamer's residency grid is expressed in
+    // cells and would otherwise load a quarter of the world it thinks it is.
+    float cellWorldSize = kExteriorCellSize;
     std::vector<FalloutCellIndexEntry> cells;
+    // Indexed by FalloutCellContribution::pluginIndex, so a contribution can be
+    // read without carrying the load order alongside the index everywhere.
+    std::vector<std::filesystem::path> pluginPaths;
     std::vector<FalloutWorldspaceRecord> worldspaces;
     // Every placed reference's owning cell, by the reference's own formID --
     // built from record headers alone, exactly as extractFalloutScene does.
@@ -480,6 +659,26 @@ struct FalloutCellIndex {
 // (needed for EDID and the XCLC grid coordinates the streamer ranks by).
 bool buildFalloutCellIndex(
     const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError);
+
+// As above, across a whole load order. Cells are merged by their REMAPPED
+// formID, so the same cell described by several plugins becomes one entry with
+// several contributions, and a later plugin's CELL record replaces the earlier
+// one's metadata (editor ID, grid, regions). Every formID the index carries is
+// in the order's global space.
+bool buildFalloutCellIndex(
+    const FalloutLoadOrder& order, FalloutCellIndex& outIndex, std::string& outError);
+
+// Materializes one cell by merging every plugin that contributes to it, in load
+// order. References are keyed by formID with the later plugin winning, which is
+// how an override patch moves or deletes a placement; LAND and navmeshes are
+// replaced wholesale by the last plugin that supplies one. All formIDs come out
+// remapped into the order's global space, matching the world tables.
+bool extractFalloutCellMerged(
+    const FalloutCellIndex& index,
+    const FalloutLoadOrder& order,
+    const FalloutCellIndexEntry& entry,
+    FalloutCellRecord& outCell,
+    std::string& outError);
 
 // Materializes exactly one cell from an already-open reader, using an entry
 // from buildFalloutCellIndex. The reader must be open on the same plugin the

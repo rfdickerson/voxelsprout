@@ -107,6 +107,11 @@ void RendererBackend::buildDofDebugUi() {
     if (!m_debugUiVisible || !m_showFrameStatsPanel) {
         return;
     }
+    // Tuning consoles, not readouts: Stats mode is for watching numbers
+    // during play and these are all controls.
+    if (m_debugUiMode != DebugUiMode::Full) {
+        return;
+    }
 
     constexpr ImGuiWindowFlags kPanelFlags =
         ImGuiWindowFlags_AlwaysAutoResize |
@@ -126,6 +131,11 @@ void RendererBackend::buildDofDebugUi() {
 
 void RendererBackend::buildShadowDebugUi() {
     if (!m_debugUiVisible || !m_showShadowPanel) {
+        return;
+    }
+    // Tuning consoles, not readouts: Stats mode is for watching numbers
+    // during play and these are all controls.
+    if (m_debugUiMode != DebugUiMode::Full) {
         return;
     }
 
@@ -192,6 +202,11 @@ void RendererBackend::buildSunDebugUi() {
     if (!m_debugUiVisible || !m_showSunPanel) {
         return;
     }
+    // Tuning consoles, not readouts: Stats mode is for watching numbers
+    // during play and these are all controls.
+    if (m_debugUiMode != DebugUiMode::Full) {
+        return;
+    }
 
     if (!ImGui::Begin("Sun/Sky", &m_showSunPanel)) {
         ImGui::End();
@@ -202,7 +217,19 @@ void RendererBackend::buildSunDebugUi() {
         if (ImGui::BeginTabItem("Sun & Atmosphere")) {
             ImGui::SliderFloat("Sun Yaw", &m_skyDebugSettings.sunYawDegrees, -180.0f, 180.0f, "%.1f deg");
             ImGui::SliderFloat("Sun Pitch", &m_skyDebugSettings.sunPitchDegrees, -89.0f, 5.0f, "%.1f deg");
-            ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg");
+            // Dragging this takes FOV away from the game until "Follow app"
+            // gives it back. Without the handshake the slider would fight any
+            // game that animates FOV (a conversation dolly, an ADS zoom): one
+            // would win per frame and the value would visibly flicker.
+            if (ImGui::SliderFloat("Camera FOV", &m_debugCameraFovDegrees, 55.0f, 120.0f, "%.1f deg")) {
+                m_debugCameraFovOverride = true;
+            }
+            if (m_debugCameraFovOverride) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Follow app")) {
+                    m_debugCameraFovOverride = false;
+                }
+            }
             ImGui::SliderFloat("Sky Exposure", &m_skyDebugSettings.skyExposure, 0.25f, 3.0f, "%.2f");
             ImGui::SliderFloat("Sun Disk Intensity", &m_skyDebugSettings.sunDiskIntensity, 300.0f, 2200.0f, "%.0f");
             ImGui::SliderFloat("Sun Halo Intensity", &m_skyDebugSettings.sunHaloIntensity, 4.0f, 64.0f, "%.1f");

@@ -106,23 +106,9 @@ std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) 
     }
 }
 
-// Dedup key for an imported texture: its source path, lowercased with separators
-// unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
-// on both casing and slash direction for the same file, so a raw-string key
-// would upload "Textures\Landscape\Rock01.dds" and "textures/landscape/rock01.dds"
-// as two different images. An empty path stays empty, which disables dedup for
-// that texture rather than collapsing every unnamed texture onto one slot.
-std::string normalizedImportedTextureKey(std::string_view sourcePath) {
-    std::string key(sourcePath);
-    for (char& c : key) {
-        if (c == '\\') {
-            c = '/';
-        } else {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-    }
-    return key;
-}
+// normalizedImportedTextureKey moved to renderer_backend.h: the skinned-actor
+// texture upload acquires from the same reference-counted table and has to
+// normalize identically, which only one definition can guarantee.
 
 VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
     switch (format) {
@@ -508,6 +494,8 @@ void RendererBackend::clearGpuScene() {
     // Chunks and arenas go together: the buffers backing them were just
     // released above, so every recorded offset is now meaningless.
     m_importedSceneChunks.clear();
+    m_freeImportedSceneChunks.clear();
+    m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
     m_importedVertexArena.reset(0);
     m_importedIndexArena.reset(0);
     m_visibleImportedMeshDraws.clear();
@@ -517,11 +505,13 @@ void RendererBackend::clearGpuScene() {
     }
     m_visibleImportedPageScratch.clear();
     m_visibleImportedTerrainDrawCount = 0;
+    m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     m_importedGiTriangles.clear();
     m_debugImportedGiTriangleCount = 0;
     m_debugImportedGiVoxelizedCellCount = 0;
     m_importedLocalLights.clear();
+    m_importedParticleEmitters.clear();
     m_debugImportedLightSelectedCount = 0;
     m_importedIndexCount = 0;
     m_importedTerrainDrawCount = 0;
@@ -646,6 +636,7 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.textures = scene.renderCache.textures;
     compatibilityScene.waterPatches = scene.renderCache.waterPatches;
     compatibilityScene.lights = scene.renderCache.lights;
+    compatibilityScene.particleEmitters = scene.renderCache.particleEmitters;
     compatibilityScene.packedVertices = scene.renderCache.packedVertices;
     compatibilityScene.packedIndices = scene.renderCache.packedIndices;
     compatibilityScene.packedDraws = scene.renderCache.packedDraws;
@@ -655,6 +646,8 @@ bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene)
     compatibilityScene.sourceLandscapeCellCount = scene.renderCache.terrainDrawCount;
     compatibilityScene.sourceWaterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
     compatibilityScene.sourceLightCount = static_cast<std::uint32_t>(scene.lights.size());
+    compatibilityScene.sourceParticleEmitterCount =
+        static_cast<std::uint32_t>(scene.particleEmitters.size());
     compatibilityScene.boundsMin[0] = scene.sceneBounds.min[0];
     compatibilityScene.boundsMin[1] = scene.sceneBounds.min[1];
     compatibilityScene.boundsMin[2] = scene.sceneBounds.min[2];
@@ -669,15 +662,27 @@ bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& s
 }
 
 std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
-    const std::size_t chunkCountBefore = m_importedSceneChunks.size();
+    // Cleared first so a success that produced no chunk -- an empty scene, which
+    // returns true -- is distinguishable. Comparing the vector's size before and
+    // after used to serve for that, and stopped being able to once a chunk could
+    // land in a recycled slot without the vector growing at all.
+    m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
     if (!uploadImportedSceneInternal(scene, nullptr, /*appendChunk=*/true)) {
         return kInvalidImportedChunkIndex;
     }
-    if (m_importedSceneChunks.size() <= chunkCountBefore) {
-        // Upload reported success but produced no chunk -- an empty scene.
+    if (m_lastImportedChunkIndex == kInvalidImportedChunkIndex) {
         return kInvalidImportedChunkIndex;
     }
-    return m_importedSceneChunks.size() - 1u;
+    // When ANY resident chunk carries page ranges, per-frame draw selection is
+    // built from pages ONLY (see frame_run's importedPageCullingEnabled), so a
+    // chunk whose pages were dropped -- e.g. by the coverage check above --
+    // has every draw silently excluded. Worth a line at add time; that failure
+    // renders as "uploaded fine, never drawn".
+    rebuildImportedWaterBuffers();
+    const ImportedSceneChunk& added = m_importedSceneChunks[m_lastImportedChunkIndex];
+    VOX_LOGI("render") << "chunk " << m_lastImportedChunkIndex << " added: draws="
+                       << added.draws.size() << " pages=" << added.pageRanges.size();
+    return m_lastImportedChunkIndex;
 }
 
 void RendererBackend::removeImportedSceneChunkAt(std::size_t chunkIndex) {
@@ -909,13 +914,21 @@ bool RendererBackend::copyBufferRange(
 }
 
 bool RendererBackend::ensureImportedArenaCapacity(
-    std::uint64_t vertexCount, std::uint64_t indexCount) {
+    std::uint64_t vertexCount, std::uint64_t indexCount, bool pastCapacity) {
     // Vertex and index arenas grow independently; either may already be big
-    // enough. "Big enough" here is capacity, not free space -- the caller
-    // retries allocate() after this and grows again if fragmentation defeated
-    // the first attempt.
-    const std::uint64_t neededVertices = m_importedVertexArena.used() + vertexCount;
-    const std::uint64_t neededIndices = m_importedIndexArena.used() + indexCount;
+    // enough. "Big enough" is measured against used() normally and against
+    // capacity() when the caller is here BECAUSE an allocation already failed --
+    // see the header. Measuring a post-fragmentation retry against used() makes
+    // this function a no-op, which is exactly the bug the pastCapacity flag
+    // replaced: the caller then grew the suballocator by hand, the GPU buffer
+    // stayed its old size, and allocate() started handing back offsets past the
+    // end of it.
+    const std::uint64_t vertexBase =
+        pastCapacity ? m_importedVertexArena.capacity() : m_importedVertexArena.used();
+    const std::uint64_t indexBase =
+        pastCapacity ? m_importedIndexArena.capacity() : m_importedIndexArena.used();
+    const std::uint64_t neededVertices = vertexBase + vertexCount;
+    const std::uint64_t neededIndices = indexBase + indexCount;
     const bool growVertices = neededVertices > m_importedVertexArena.capacity();
     const bool growIndices = neededIndices > m_importedIndexArena.capacity();
     if (!growVertices && !growIndices) {
@@ -925,8 +938,14 @@ bool RendererBackend::ensureImportedArenaCapacity(
     // First fill is sized exactly; only *growth* doubles. Doubling from empty
     // would round a 3.29M-vertex scene up to 4.19M and cost ~110 MB across the
     // three arenas that a one-shot uploadImportedScene() never needs.
-    const auto nextCapacity = [](std::uint64_t current, std::uint64_t needed) {
-        if (current == 0) {
+    //
+    // A fragmentation retry is sized exactly too. Doubling is the right policy
+    // for a working set that is genuinely getting bigger, but this arena never
+    // shrinks, so paying it for a hole in the free list ratchets the buffer up
+    // permanently -- at ~100 bytes per vertex across the main and shadow streams,
+    // one doubling of an 8M-vertex arena is 800 MB the session never gives back.
+    const auto nextCapacity = [pastCapacity](std::uint64_t current, std::uint64_t needed) {
+        if (current == 0 || pastCapacity) {
             return needed;
         }
         std::uint64_t capacity = current;
@@ -1067,11 +1086,25 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     chunk.pageRanges.shrink_to_fit();
     chunk.textureSlots.clear();
     chunk.textureSlots.shrink_to_fit();
+    // Lights were being left on the dead chunk. rebuildImportedDrawTables skips
+    // dead chunks so they never reached the frame, but the storage stayed for the
+    // rest of the session -- and an interior cell carries a lot of them.
+    chunk.lights.clear();
+    chunk.lights.shrink_to_fit();
+    chunk.particleEmitters.clear();
+    chunk.particleEmitters.shrink_to_fit();
+    chunk.waterPatches.clear();
+    chunk.waterPatches.shrink_to_fit();
     chunk.vertexCount = 0;
     chunk.indexCount = 0;
     chunk.terrainDrawCount = 0;
+    // Recycle the slot. Without this the vector only ever grows: a session that
+    // streams thousands of cells leaves thousands of dead entries behind, and
+    // rebuildImportedDrawTables walks all of them on every single add and remove.
+    m_freeImportedSceneChunks.push_back(chunkIndex);
 
     rebuildImportedDrawTables();
+    rebuildImportedWaterBuffers();
 }
 
 void RendererBackend::rebuildImportedDrawTables() {
@@ -1083,6 +1116,7 @@ void RendererBackend::rebuildImportedDrawTables() {
     // Rebuilt, not appended to, so evicting a chunk drops its lights. This runs
     // on both add and remove, which is what makes that true in both directions.
     m_importedLocalLights.clear();
+    m_importedParticleEmitters.clear();
     std::uint32_t terrainDrawTotal = 0;
     std::uint32_t staticDrawTotal = 0;
     for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
@@ -1101,6 +1135,9 @@ void RendererBackend::rebuildImportedDrawTables() {
         }
         m_importedLocalLights.insert(
             m_importedLocalLights.end(), chunk.lights.begin(), chunk.lights.end());
+        m_importedParticleEmitters.insert(
+            m_importedParticleEmitters.end(), chunk.particleEmitters.begin(),
+            chunk.particleEmitters.end());
         terrainDrawTotal += chunk.terrainDrawCount;
         staticDrawTotal +=
             static_cast<std::uint32_t>(chunk.draws.size()) - chunk.terrainDrawCount;
@@ -1119,6 +1156,129 @@ void RendererBackend::rebuildImportedDrawTables() {
     m_importedIndexCount = static_cast<std::uint32_t>(liveIndexCount);
 }
 
+void RendererBackend::rebuildImportedWaterBuffers() {
+    // Bethesda authors no water geometry at all: a cell states one height and
+    // the engine fills that cell's 4096-unit footprint at it. So the entire
+    // resident water surface is four vertices per water-bearing cell -- 81 cells
+    // at the default load radius, and most of them dry. Regenerating the whole
+    // thing is cheaper than any scheme for patching it in place.
+    std::vector<ImportedWaterVertex> waterVertices;
+    std::vector<std::uint32_t> waterIndices;
+    for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+        if (!chunk.alive) {
+            continue;
+        }
+        for (const odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
+            const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
+            ImportedWaterVertex vertex{};
+            vertex.position[1] = patch.waterLevel;
+            vertex.position[0] = patch.originX;
+            vertex.position[2] = patch.originZ;
+            vertex.uv[0] = 0.0f;
+            vertex.uv[1] = 0.0f;
+            waterVertices.push_back(vertex);
+
+            vertex.position[0] = patch.originX + patch.sizeX;
+            vertex.position[2] = patch.originZ;
+            vertex.uv[0] = 1.0f;
+            waterVertices.push_back(vertex);
+
+            vertex.position[0] = patch.originX + patch.sizeX;
+            vertex.position[2] = patch.originZ + patch.sizeZ;
+            vertex.uv[1] = 1.0f;
+            waterVertices.push_back(vertex);
+
+            vertex.position[0] = patch.originX;
+            vertex.position[2] = patch.originZ + patch.sizeZ;
+            vertex.uv[0] = 0.0f;
+            waterVertices.push_back(vertex);
+
+            waterIndices.push_back(baseVertex + 0u);
+            waterIndices.push_back(baseVertex + 2u);
+            waterIndices.push_back(baseVertex + 1u);
+            waterIndices.push_back(baseVertex + 0u);
+            waterIndices.push_back(baseVertex + 3u);
+            waterIndices.push_back(baseVertex + 2u);
+        }
+    }
+
+    // The early-out is what keeps this affordable. Streaming across dry ground
+    // -- which is most of the Mojave and most of Tamriel -- adds and evicts
+    // cells constantly while the water set never changes, and the rebuild below
+    // stalls the device. Comparing the built vertices rather than the patch
+    // count catches a same-sized set at a different height too.
+    if (waterVertices.size() == m_importedWaterVerticesResident.size() &&
+        std::memcmp(
+            waterVertices.data(), m_importedWaterVerticesResident.data(),
+            waterVertices.size() * sizeof(ImportedWaterVertex)) == 0) {
+        return;
+    }
+
+    // Destroying a buffer the GPU may still be reading is the one real hazard
+    // here, and this takes the same way out the fog-map re-upload does: wait for
+    // idle first. Affordable only because of the early-out above -- crossing a
+    // shoreline is a handful of events in a session, not a per-cell cost.
+    if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle ||
+        m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
+        vkDeviceWaitIdle(m_device);
+        if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_importedWaterVertexBufferHandle);
+            m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
+        }
+        if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
+            m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
+            m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+        }
+    }
+    m_importedWaterIndexCount = 0;
+    m_importedWaterVerticesResident = waterVertices;
+    if (waterVertices.empty() || waterIndices.empty()) {
+        return;
+    }
+
+    // Host-visible rather than device-local with a staging copy: this is a few
+    // kilobytes read once per pass, so the transfer machinery would cost more
+    // than the slower reads ever will.
+    const auto createHostBuffer = [this](
+                                      const void* data,
+                                      VkDeviceSize bytes,
+                                      VkBufferUsageFlags usage) -> BufferHandle {
+        BufferCreateDesc desc{};
+        desc.size = bytes;
+        desc.usage = usage;
+        desc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        desc.initialData = data;
+        return m_bufferAllocator.createBuffer(desc);
+    };
+
+    const BufferHandle vertexHandle = createHostBuffer(
+        waterVertices.data(),
+        static_cast<VkDeviceSize>(waterVertices.size() * sizeof(ImportedWaterVertex)),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    if (vertexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "streamed water vertex buffer allocation failed";
+        m_importedWaterVerticesResident.clear();
+        return;
+    }
+    const BufferHandle indexHandle = createHostBuffer(
+        waterIndices.data(),
+        static_cast<VkDeviceSize>(waterIndices.size() * sizeof(std::uint32_t)),
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    if (indexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "streamed water index buffer allocation failed";
+        m_bufferAllocator.destroyBuffer(vertexHandle);
+        m_importedWaterVerticesResident.clear();
+        return;
+    }
+
+    m_importedWaterVertexBufferHandle = vertexHandle;
+    m_importedWaterIndexBufferHandle = indexHandle;
+    m_importedWaterIndexCount = static_cast<std::uint32_t>(waterIndices.size());
+    VOX_LOGI("render") << "streamed water: " << (waterVertices.size() / 4u)
+                       << " cell patch(es)";
+}
+
 bool RendererBackend::ensureImportedTextureSampler() {
     if (m_importedTextureSampler != VK_NULL_HANDLE) {
         return true;
@@ -1131,7 +1291,57 @@ bool RendererBackend::ensureImportedTextureSampler() {
     samplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerCreateInfo.mipLodBias = 0.0f;
+    // MIP BIAS FOR UPSCALING. Rendering at a fraction of the output resolution
+    // means every texture lookup picks a mip chosen for the SMALLER grid, so a
+    // surface that would have sampled mip 1 at native samples mip 2 -- and the
+    // upscaler is then asked to reconstruct detail that was never rasterized.
+    // The result reads as "low resolution" in a way no amount of temporal
+    // accumulation can recover, because the information is not in any frame.
+    //
+    // log2(renderScale) is the standard correction and is what Intel's XeSS
+    // guide means by "adjust mip bias": at 0.5 scale it is -1, restoring the mip
+    // the native-resolution frame would have picked. Clamped at -2 because
+    // beyond that the sampler is fetching detail the low-res grid genuinely
+    // cannot hold and it just aliases.
+    //
+    // 0 when not upscaling, so every other game and the native path are
+    // unaffected.
+    const float renderScaleForMip =
+        (m_swapchainExtent.width > 0u && m_renderExtent.width > 0u)
+            ? (static_cast<float>(m_renderExtent.width) /
+               static_cast<float>(m_swapchainExtent.width))
+            : 1.0f;
+    //
+    // ODAI_UPSCALE_MIPBIAS overrides the computed value. The full log2 bias is
+    // the textbook answer but it assumes the upscaler can resolve the extra
+    // detail temporally, and distant terrain is exactly where it cannot: a
+    // sub-pixel sliver of hillside is a different surface every jitter phase, so
+    // the restored detail arrives as aliasing that never converges. The right
+    // value is therefore a measured trade, not a derivation.
+    // -0.5 rather than the textbook log2(0.5) = -1, measured on the distant
+    // Goodsprings skyline against a native-resolution reference:
+    //
+    //   bias    far-band detail   error vs native
+    //    0.0        10.01              4.936
+    //   -0.5        10.87              4.824   <- best on both
+    //   -1.0        11.75              4.926
+    //
+    // The full bias does restore more high-frequency energy, but past -0.5 the
+    // extra is aliasing the temporal pass cannot resolve -- distant sub-pixel
+    // geometry is a different surface every jitter phase -- so error rises again
+    // even as "detail" does. Half the textbook value is where the restored
+    // detail is still real.
+    static const float s_mipBiasOverride = []() {
+        const char* env = std::getenv("ODAI_UPSCALE_MIPBIAS");
+        return (env != nullptr) ? static_cast<float>(std::atof(env)) : 1.0f;
+    }();
+    samplerCreateInfo.mipLodBias = (renderScaleForMip < 0.999f)
+        ? ((s_mipBiasOverride <= 0.5f) ? s_mipBiasOverride : -0.5f)
+        : 0.0f;
+    VOX_LOGI("render") << "imported texture sampler: mip bias " << samplerCreateInfo.mipLodBias
+                       << " (render " << m_renderExtent.width << "x" << m_renderExtent.height
+                       << ", swapchain " << m_swapchainExtent.width << "x"
+                       << m_swapchainExtent.height << ")";
     samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
         ? std::min(m_maxSamplerAnisotropy, 8.0f)
@@ -1174,8 +1384,11 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
         previousSlots[layer] = m_weatherCloudSlots[layer];
         m_weatherCloudSlots[layer] = kInvalidImportedTextureSlot;
-        m_weatherCloudScroll[layer] = clouds.scrollSpeed[layer];
-        m_weatherCloudDomeScale[layer] = clouds.domeScale[layer];
+        m_weatherCloudLayers[layer] = clouds.layers[layer];
+        // The pixels are already in the bindless table (or about to be); the
+        // copy here is only the drawing parameters, so drop the payload rather
+        // than keeping a second copy of every cloud texture alive per frame.
+        m_weatherCloudLayers[layer].texture = odai::importer::ImportedSceneTexture{};
     }
 
     // Same gate acquireImportedTexture applies; checking it here avoids
@@ -1189,8 +1402,8 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     }
 
     bool anyLayer = false;
-    for (const auto& texture : clouds.layers) {
-        anyLayer = anyLayer || !texture.rgba8.empty();
+    for (const auto& layer : clouds.layers) {
+        anyLayer = anyLayer || !layer.texture.rgba8.empty();
     }
     if (!anyLayer) {
         for (const std::uint32_t slot : previousSlots) {
@@ -1232,7 +1445,7 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
 
     std::vector<BufferHandle> stagingBufferHandles;
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
-        const odai::importer::ImportedSceneTexture& texture = clouds.layers[layer];
+        const odai::importer::ImportedSceneTexture& texture = clouds.layers[layer].texture;
         if (texture.rgba8.empty()) {
             continue;
         }
@@ -1554,6 +1767,35 @@ bool RendererBackend::uploadImportedSceneInternal(
     std::vector<std::uint32_t> importedTextureSlots(
         uploadScene.textures.size(),
         std::numeric_limits<std::uint32_t>::max());
+
+    // The chunk built at the bottom of this function is what OWNS these slots:
+    // ImportedSceneChunk::textureSlots is the only thing removeImportedSceneChunk
+    // can release from. Every return between the acquires below and that chunk
+    // existing therefore pins each acquired texture at refcount >= 1 for the rest
+    // of the process -- there is no other handle to it. Streaming makes that
+    // unbounded rather than merely untidy: a cell that fails to upload is marked
+    // evicted, not unavailable, so the planner offers it again, and each attempt
+    // leaves another reference behind. This guard undoes the acquires on any path
+    // that does not reach the chunk.
+    //
+    // Disarmed (committed) in two places: when the chunk takes the slots, and
+    // before clearImportedSceneMeshes(), which tears the whole table down and
+    // would otherwise be double-released.
+    struct TextureSlotAcquireGuard {
+        RendererBackend* backend = nullptr;
+        const std::vector<std::uint32_t>* slots = nullptr;
+        bool committed = false;
+        void commit() { committed = true; }
+        ~TextureSlotAcquireGuard() {
+            if (committed || backend == nullptr || slots == nullptr) {
+                return;
+            }
+            for (const std::uint32_t slot : *slots) {
+                backend->releaseImportedTexture(slot);
+            }
+        }
+    } textureSlotGuard{this, &importedTextureSlots, false};
+
     if (m_supportsBindlessDescriptors &&
         m_bindlessBufferSet.valid() &&
         m_bindlessTextureCapacity > kBindlessTextureStaticCount &&
@@ -1692,6 +1934,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         scheduleCommandPoolRelease(commandPool, textureUploadTimelineValue);
         commandPool = VK_NULL_HANDLE;
         if (textureUploadFailed) {
+            // Full teardown clears the slot table itself, so the guard must not
+            // also release into it.
+            textureSlotGuard.commit();
             clearImportedSceneMeshes();
             return false;
         }
@@ -1909,36 +2154,105 @@ bool RendererBackend::uploadImportedSceneInternal(
         light.color[2] = std::clamp(sceneLight.color[2], 0.0f, 8.0f);
         light.radius = sceneLight.radius;
         light.intensity = sceneLight.intensity;
+        light.flags = sceneLight.flags;
         chunkLights.push_back(light);
     }
 
-    for (const odai::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
-        ImportedMeshVertex dstVertex{};
-        std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-        std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
-        std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
-        std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
-        dstVertex.flags = srcVertex.flags;
-        if (srcVertex.textureIndex < importedTextureSlots.size()) {
-            dstVertex.textureIndex = importedTextureSlots[srcVertex.textureIndex];
+    // Packed-source -> GPU-vertex conversion, in parallel. This is pure
+    // per-vertex work -- an octahedral normal encode, an sRGB colour encode
+    // (three pow() calls), and the bindless-slot remaps -- and it was the
+    // single largest cost of applying a streamed chunk: measured with
+    // ODAI_DEBUG_CHUNK_TIMING on Skyrim's persistent cell (2.06M vertices),
+    // 85 ms of a 119 ms apply was this loop, run single-threaded on the
+    // render thread while the frame stalled. Plain std::thread rather than a
+    // job system on purpose: src/render/ has no job-system dependency, the
+    // fan-out is once per streamed cell, and every worker writes a disjoint
+    // range of a pre-sized vector, so there is nothing to synchronize but
+    // join().
+    core::Stopwatch subTimer;
+    vertices.resize(uploadScene.packedVertices.size());
+    std::vector<ImportedShadowVertex> shadowVertices(uploadScene.packedVertices.size());
+    const float subResizeMs = subTimer.elapsedMs();
+    subTimer.restart();
+    {
+        const auto convertRange = [&](std::size_t begin, std::size_t end) {
+            for (std::size_t v = begin; v < end; ++v) {
+                const odai::importer::ImportedScenePackedVertex& srcVertex =
+                    uploadScene.packedVertices[v];
+                ImportedMeshVertex dstVertex{};
+                std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
+                dstVertex.packedNormal =
+                    odai::importer::packImportedVertexNormal(srcVertex.normal);
+                dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color, srcVertex.colorAlpha);
+                std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
+                dstVertex.flags = srcVertex.flags;
+                if (srcVertex.textureIndex < importedTextureSlots.size()) {
+                    dstVertex.textureIndex = importedTextureSlots[srcVertex.textureIndex];
+                } else {
+                    dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+                }
+                // Terrain layer slots need the same scene-index -> bindless-slot
+                // remap as textureIndex above. An unmapped layer becomes the
+                // invalid slot and the shader skips it, rather than sampling
+                // whatever descriptor happens to sit at the unremapped index.
+                std::uint32_t remappedLayers[4] = {};
+                for (std::size_t layer = 0; layer < 4; ++layer) {
+                    const std::uint32_t sourceIndex = srcVertex.layerTextureIndex[layer];
+                    remappedLayers[layer] = sourceIndex < importedTextureSlots.size()
+                        ? importedTextureSlots[sourceIndex]
+                        : std::numeric_limits<std::uint32_t>::max();
+                }
+                dstVertex.packedLayerTexture01 = odai::importer::packImportedVertexLayerPair(
+                    remappedLayers[0], remappedLayers[1]);
+                dstVertex.packedLayerTexture23 = odai::importer::packImportedVertexLayerPair(
+                    remappedLayers[2], remappedLayers[3]);
+                dstVertex.layerWeights = srcVertex.layerWeights;
+                vertices[v] = dstVertex;
+                // The compact shadow stream is derived in the same pass: it is
+                // a strict projection of the vertex just built, and deriving it
+                // in a second 2M-iteration loop afterwards was measured inside
+                // the same phase this parallelism exists to shrink.
+                ImportedShadowVertex shadowVertex{};
+                shadowVertex.position[0] = dstVertex.position[0];
+                shadowVertex.position[1] = dstVertex.position[1];
+                shadowVertex.position[2] = dstVertex.position[2];
+                shadowVertex.uv[0] = dstVertex.uv[0];
+                shadowVertex.uv[1] = dstVertex.uv[1];
+                shadowVertex.textureIndex = dstVertex.textureIndex;
+                shadowVertex.flags = dstVertex.flags;
+                shadowVertices[v] = shadowVertex;
+            }
+        };
+        const std::size_t vertexCount = uploadScene.packedVertices.size();
+        // Fan out only when it can pay for the thread launches: a typical
+        // exterior cell is 30-70k vertices and converts in a few ms, and eight
+        // thread spawns cost real time on their own. The threshold is where the
+        // single-threaded loop starts to visibly outrun a frame.
+        constexpr std::size_t kParallelConvertThreshold = 200000u;
+        const std::size_t workerCount = std::min<std::size_t>(
+            {std::size_t{8},
+             std::max<std::size_t>(std::thread::hardware_concurrency(), 2u) - 1u,
+             vertexCount / (kParallelConvertThreshold / 2u)});
+        if (vertexCount >= kParallelConvertThreshold && workerCount >= 2u) {
+            std::vector<std::thread> workers;
+            workers.reserve(workerCount);
+            const std::size_t stride = (vertexCount + workerCount - 1u) / workerCount;
+            for (std::size_t worker = 0; worker < workerCount; ++worker) {
+                const std::size_t begin = worker * stride;
+                const std::size_t end = std::min(vertexCount, begin + stride);
+                if (begin < end) {
+                    workers.emplace_back(convertRange, begin, end);
+                }
+            }
+            for (std::thread& worker : workers) {
+                worker.join();
+            }
         } else {
-            dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+            convertRange(0u, vertexCount);
         }
-        // Terrain layer slots need the same scene-index -> bindless-slot remap
-        // as textureIndex above. An unmapped layer becomes the invalid slot and
-        // the shader skips it, rather than sampling whatever descriptor happens
-        // to sit at the unremapped index.
-        for (std::size_t layer = 0;
-             layer < std::size(dstVertex.layerTextureIndex);
-             ++layer) {
-            const std::uint32_t sourceIndex = srcVertex.layerTextureIndex[layer];
-            dstVertex.layerTextureIndex[layer] = sourceIndex < importedTextureSlots.size()
-                ? importedTextureSlots[sourceIndex]
-                : std::numeric_limits<std::uint32_t>::max();
-        }
-        dstVertex.layerWeights = srcVertex.layerWeights;
-        vertices.push_back(dstVertex);
     }
+    const float subConvertMs = subTimer.elapsedMs();
+    subTimer.restart();
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
     const bool importedSceneIsInterior =
         odai::importer::importedSceneSourceTagIsInterior(uploadScene.sourceTag);
@@ -2344,21 +2658,12 @@ bool RendererBackend::uploadImportedSceneInternal(
     // Compact shadow stream: the same vertices with only what the cascades read.
     // Allocated from the same vertex range as the main stream, so one
     // ImportedMeshDraw::vertexOffset addresses both despite the differing stride.
-    std::vector<ImportedShadowVertex> shadowVertices;
-    shadowVertices.reserve(vertices.size());
-    for (const ImportedMeshVertex& vertex : vertices) {
-        ImportedShadowVertex shadowVertex{};
-        shadowVertex.position[0] = vertex.position[0];
-        shadowVertex.position[1] = vertex.position[1];
-        shadowVertex.position[2] = vertex.position[2];
-        shadowVertex.uv[0] = vertex.uv[0];
-        shadowVertex.uv[1] = vertex.uv[1];
-        shadowVertex.textureIndex = vertex.textureIndex;
-        shadowVertex.flags = vertex.flags;
-        shadowVertices.push_back(shadowVertex);
-    }
-
     vertexMs = phaseTimer.elapsedMs();
+    if (logChunkTiming) {
+        VOX_LOGI("render") << "  vertexStreams sub (ms): resize=" << subResizeMs
+                           << " convert=" << subConvertMs
+                           << " rest=" << subTimer.elapsedMs();
+    }
     phaseTimer.restart();
 
     // Carve this scene's geometry out of the shared arenas. Growing first and
@@ -2371,16 +2676,20 @@ bool RendererBackend::uploadImportedSceneInternal(
     }
     std::uint64_t firstVertex = m_importedVertexArena.allocate(chunkVertexCount, 1);
     if (firstVertex == GpuArenaAllocator::kInvalidOffset && chunkVertexCount > 0) {
-        m_importedVertexArena.grow(m_importedVertexArena.capacity() + chunkVertexCount);
-        if (!ensureImportedArenaCapacity(chunkVertexCount, 0)) {
+        // Capacity was already sufficient (the call above saw to that), so this
+        // is fragmentation: no single free range fits. Grow PAST capacity so the
+        // arena gains a contiguous tail block, and grow the GPU buffer with it --
+        // ensureImportedArenaCapacity does both. Growing only the suballocator
+        // here, which is what this used to do, produced an offset the buffer did
+        // not actually reach.
+        if (!ensureImportedArenaCapacity(chunkVertexCount, 0, /*pastCapacity=*/true)) {
             return false;
         }
         firstVertex = m_importedVertexArena.allocate(chunkVertexCount, 1);
     }
     std::uint64_t firstIndexSlot = m_importedIndexArena.allocate(chunkIndexCount, 1);
     if (firstIndexSlot == GpuArenaAllocator::kInvalidOffset && chunkIndexCount > 0) {
-        m_importedIndexArena.grow(m_importedIndexArena.capacity() + chunkIndexCount);
-        if (!ensureImportedArenaCapacity(0, chunkIndexCount)) {
+        if (!ensureImportedArenaCapacity(0, chunkIndexCount, /*pastCapacity=*/true)) {
             return false;
         }
         firstIndexSlot = m_importedIndexArena.allocate(chunkIndexCount, 1);
@@ -2438,8 +2747,13 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.firstIndex = firstIndexSlot;
     chunk.indexCount = chunkIndexCount;
     chunk.terrainDrawCount = chunkTerrainDrawCount;
+    // Ownership of every acquired slot passes to the chunk here; from this point
+    // removeImportedSceneChunk is what releases them.
     chunk.textureSlots = importedTextureSlots;
+    textureSlotGuard.commit();
     chunk.lights = std::move(chunkLights);
+    chunk.particleEmitters = uploadScene.particleEmitters;
+    chunk.waterPatches = uploadScene.waterPatches;
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
         draw.vertexBufferHandle = m_importedVertexBufferHandle;
@@ -2451,8 +2765,22 @@ bool RendererBackend::uploadImportedSceneInternal(
         chunk.draws.push_back(draw);
     }
     chunk.pageRanges = std::move(pageDrawRanges);
-    m_importedSceneChunks.push_back(std::move(chunk));
+    // Reuse a slot an evicted chunk left behind, or append if there is none.
+    // Indices stay valid for the lifetime of a live chunk either way -- a caller
+    // holding one has already been told the chunk was removed.
+    if (!m_freeImportedSceneChunks.empty()) {
+        m_lastImportedChunkIndex = m_freeImportedSceneChunks.back();
+        m_freeImportedSceneChunks.pop_back();
+        m_importedSceneChunks[m_lastImportedChunkIndex] = std::move(chunk);
+    } else {
+        m_lastImportedChunkIndex = m_importedSceneChunks.size();
+        m_importedSceneChunks.push_back(std::move(chunk));
+    }
     rebuildImportedDrawTables();
+    // Point-light shadow maps cache static interior geometry. Any chunk upload
+    // changes the caster set and must force the six faces to be regenerated.
+    m_interiorPointShadowAtlasValid = false;
+    m_interiorPointShadowLightSourceCount = 0;
     drawBuildMs = phaseTimer.elapsedMs();
     phaseTimer.restart();
 
@@ -2464,6 +2792,8 @@ bool RendererBackend::uploadImportedSceneInternal(
                            << ", indexHandle=" << m_importedIndexBufferHandle << ")";
         // The arenas are shared state now, so tear them down as a unit rather
         // than destroying handles this call happens to be holding.
+        // As above: the teardown owns the slot table from here.
+        textureSlotGuard.commit();
         clearImportedSceneMeshes();
         return false;
     }
@@ -2473,15 +2803,16 @@ bool RendererBackend::uploadImportedSceneInternal(
     if (indexBuffer != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.importedScene.index");
     }
-    // Known limitation: water still lives in one exact-fit buffer pair rather
-    // than an arena, so an appended chunk cannot contribute water without
-    // discarding whatever is already resident. Exteriors cooked so far carry no
-    // water patches, so this is inert today -- but it must become arena-backed
-    // like the geometry before any water-bearing cell is streamed.
-    if (appendChunk && !waterVertices.empty() &&
-        m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
-        VOX_LOGW("render") << "appended imported chunk carries " << waterVertices.size()
-                           << " water vertices but water is not arena-backed yet; skipping them";
+    // A streamed chunk's water is not uploaded here. Its patches were stored on
+    // the chunk above and the whole buffer pair is regenerated from every live
+    // chunk by rebuildImportedWaterBuffers(), because one exact-fit pair cannot
+    // be appended to -- which is why this used to warn and drop them, and why
+    // every coast in every streamed worldspace was a hole.
+    //
+    // The whole-scene path below is unchanged: a cooked scene or a strategy map
+    // arrives complete, so it can size the buffers exactly once.
+    if (appendChunk) {
+        // Nothing to do; see above.
     } else if (!waterVertices.empty() && !waterIndices.empty()) {
         BufferHandle waterVertexHandle = kInvalidBufferHandle;
         if (!uploadDeviceLocalBuffer(

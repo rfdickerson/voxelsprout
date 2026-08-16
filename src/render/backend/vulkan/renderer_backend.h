@@ -4,6 +4,7 @@
 #include "import/gpu_scene.h"
 #include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
+#include "render/upscale/upscaler_backend.h"
 #include "render/backend/vulkan/buffer_helpers.h"
 #include "render/backend/vulkan/descriptor_manager.h"
 #include "render/bindless_slot_table.h"
@@ -40,6 +41,29 @@ namespace odai::render {
 
 class CoreFrameGraphOrderValidator;
 struct CoreFrameGraphPlan;
+
+// Dedup key for an imported texture: its source path, lowercased with separators
+// unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
+// on both casing and slash direction for the same file, so a raw-string key
+// would upload "Textures\Landscape\Rock01.dds" and "textures/landscape/rock01.dds"
+// as two different images. An empty path stays empty, which disables dedup for
+// that texture rather than collapsing every unnamed texture onto one slot.
+//
+// Shared by every acquireImportedTexture caller -- scene chunks, weather clouds,
+// skinned actors -- and it has to be ONE definition: reference counting is keyed
+// on this string, so two callers normalizing differently would upload the same
+// file twice and release the wrong slot.
+inline std::string normalizedImportedTextureKey(std::string_view sourcePath) {
+    std::string key(sourcePath);
+    for (char& c : key) {
+        if (c == '\\') {
+            c = '/';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return key;
+}
 
 struct RtVertex {
     float position[3];
@@ -161,7 +185,12 @@ public:
         [[nodiscard]] float activeAoBias() const {
             switch (aoMode) {
                 case AoMode::Hbao: return hbaoBias;
-                case AoMode::Gtao: return gtaoBias;
+                // XeGTAO marches the same ground-truth integral as GTAO, so it
+                // wants GTAO's bias. Falling through to ssaoBias -- which is
+                // what an unhandled enum did here -- silently tuned the new
+                // estimator with the old one's constant.
+                case AoMode::Gtao:
+                case AoMode::Xegtao: return gtaoBias;
                 case AoMode::Ssao:
                 case AoMode::Off:  break;
             }
@@ -298,6 +327,11 @@ public:
     // levels do not happen to match that fixed exposure renders uniformly too
     // dark or too bright with no way for the app to say otherwise.
     void setAutoExposureEnabled(bool enabled) { m_skyDebugSettings.autoExposureEnabled = enabled; }
+    // Whole-frame debug visualization. See DebugView in renderer_types.h for
+    // what each mode shows and why they are one enum rather than a set of
+    // toggles. Published to the shaders through CameraUniform::tonemapConfig2.y.
+    void setDebugView(DebugView view) { m_debugView = view; }
+    [[nodiscard]] DebugView debugView() const { return m_debugView; }
     // Collapses the post colour grade to identity: no saturation, vibrance,
     // contrast or white-balance push. The grading chain in tone_map.frag.slang
     // is applied unconditionally with no enable gate, so "off" has to mean
@@ -308,6 +342,26 @@ public:
     // and is wrong for a viewer whose point is matching Fallout's own art:
     // saturation and vibrance compound, and vibrance pushes the LEAST saturated
     // pixels hardest, so a dusty landscape comes out vivid.
+    void setColorGrading(const ColorGradingSettings& g) {
+        // postColorLookPreset 0 is "no baked preset on top of these values".
+        // Leaving it at its default is what made the neutral grade look like it
+        // had not been applied.
+        m_skyDebugSettings.postColorLookPreset = 0;
+        m_skyDebugSettings.colorGradingWhiteBalanceR = g.whiteBalance[0];
+        m_skyDebugSettings.colorGradingWhiteBalanceG = g.whiteBalance[1];
+        m_skyDebugSettings.colorGradingWhiteBalanceB = g.whiteBalance[2];
+        m_skyDebugSettings.colorGradingContrast = g.contrast;
+        m_skyDebugSettings.colorGradingSaturation = g.saturation;
+        m_skyDebugSettings.colorGradingVibrance = g.vibrance;
+        m_skyDebugSettings.colorGradingMidtoneContrast = g.midtoneContrast;
+        m_skyDebugSettings.colorGradingShadowDensity = g.shadowDensity;
+        m_skyDebugSettings.colorGradingShadowTintR = g.shadowTint[0];
+        m_skyDebugSettings.colorGradingShadowTintG = g.shadowTint[1];
+        m_skyDebugSettings.colorGradingShadowTintB = g.shadowTint[2];
+        m_skyDebugSettings.colorGradingHighlightTintR = g.highlightTint[0];
+        m_skyDebugSettings.colorGradingHighlightTintG = g.highlightTint[1];
+        m_skyDebugSettings.colorGradingHighlightTintB = g.highlightTint[2];
+    }
     void setNeutralColorGrading() {
         m_skyDebugSettings.postColorLookPreset = 0;
         m_skyDebugSettings.colorGradingWhiteBalanceR = 1.0f;
@@ -348,11 +402,17 @@ public:
     // to spend on an integrated GPU at a large window size -- 1x is a straight
     // ~2x cut to main-pass cost.
     void setRequestedMsaaSamples(uint32_t samples) { m_requestedMsaaSamples = samples; }
-    // Writes the last presented swapchain image to a binary PPM. Diagnostic
-    // only, and one-shot: everything it allocates is torn down before it
-    // returns. See frame_capture.cc for why this exists rather than relying on
-    // an external screenshot tool.
+    // Writes the last presented swapchain image to a binary PPM. See
+    // frame_capture.cc for why this exists rather than relying on an external
+    // screenshot tool.
     bool captureLastFrameToFile(const std::string& outputPath);
+    // The same readback, handed back as tightly packed RGB instead of written
+    // to a file -- what a video capture wants, so a sequence never touches the
+    // disk as stills. `outRgb` is resized to width*height*3.
+    bool captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
+                             std::uint32_t& outWidth,
+                             std::uint32_t& outHeight);
+    void destroyFrameCaptureResources();
     bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
@@ -385,6 +445,9 @@ public:
     // each slot owns its own template/pose/draws (see the SkinnedInstanceSlot
     // array below) -- sized for a small party, not a mass-battle crowd.
     bool uploadSkinnedMeshTemplate(std::uint32_t instanceIndex, const ImportedSkinnedMeshTemplate& meshTemplate);
+    std::vector<std::uint32_t> uploadSkinnedActorTextures(
+        std::uint32_t instanceIndex,
+        const std::vector<odai::importer::ImportedSceneTexture>& textures);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     // Debug bypass: when true, recordSkinningPass leaves the last-skinned (or
     // rest-pose, if never skinned) output untouched instead of dispatching --
@@ -433,8 +496,13 @@ public:
         std::span<const std::size_t> visibleChunkIndices,
         const odai::render::ImportedActorFrameData* importedActors = nullptr
     );
+    void setUpscalerSettings(const UpscalerSettings& settings);
+    [[nodiscard]] UpscalerStatus upscalerStatus() const;
     void setDebugUiVisible(bool visible);
     bool isDebugUiVisible() const;
+    void setDebugUiMode(DebugUiMode mode);
+    [[nodiscard]] DebugUiMode debugUiMode() const;
+    void setDebugStatGroups(std::vector<DebugStatGroup> groups);
     void setFrameStatsVisible(bool visible);
     bool isFrameStatsVisible() const;
     void setFramePacingSettings(const FramePacingSettings& settings);
@@ -479,16 +547,19 @@ public:
     // WeatherSkyParams instead.
     void setWeatherClouds(const WeatherCloudTextures& clouds);
     void setTonemapSettings(const TonemapSettings& settings) { m_tonemapSettings = settings; }
+    [[nodiscard]] TonemapSettings tonemapSettings() const { return m_tonemapSettings; }
     // Drives the same DoF state the sky debug panel edits; clamping happens
     // where the values feed the frame uniform.
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
-                         float maxRadiusPixels) {
+                         float maxRadiusPixels, float nearBlurScale = 0.0f) {
         m_skyDebugSettings.depthOfFieldEnabled = enabled;
         m_skyDebugSettings.depthOfFieldFocusDistance = focusDistance;
         m_skyDebugSettings.depthOfFieldFocusRange = focusRange;
         m_skyDebugSettings.depthOfFieldMaxRadiusPixels = maxRadiusPixels;
+        m_skyDebugSettings.depthOfFieldNearBlurScale = nearBlurScale;
     }
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,
@@ -499,6 +570,10 @@ public:
     ) const;
     float cameraFovDegrees() const;
     void shutdown();
+
+    // Reads the shadow atlas back and writes it as a PGM. Reverse-Z, so black
+    // is the cleared/far value: a uniformly black tile was never rendered into.
+    void dumpShadowAtlas(const char* outputPath);
 
 private:
     static constexpr uint32_t kMaxFramesInFlight = 2;
@@ -513,6 +588,14 @@ private:
     // 4096 atlas. main raised both together; taking only its atlas size here
     // would have left the image twice the size the rects address.
     static constexpr uint32_t kShadowAtlasSize = 4096;
+    // Mirrors renderer_shared.h's kInteriorPointShadowLightCount. This header
+    // deliberately does not include renderer_shared.h (several translation
+    // units include that file inside the render namespace).
+    static constexpr uint32_t kInteriorPointShadowLightCapacity = 35;
+    bool m_shadowAtlasDumped = false;
+    // Let the world stream in before dumping; an atlas from frame 1 is empty
+    // for reasons that have nothing to do with the bug being chased.
+    int m_shadowAtlasDumpCountdown = 60;
     static constexpr int kRtActiveChunkRadius = 1;
     static constexpr int kRtRetainedChunkRadius = 2;
     static constexpr std::size_t kChunkRemeshBudgetPerFrame = 6;
@@ -556,7 +639,30 @@ private:
     // this a minimal diff.
     static constexpr uint32_t kGpuTimestampQuerySkinningStart = 36;
     static constexpr uint32_t kGpuTimestampQuerySkinningEnd = 37;
-    static constexpr uint32_t kGpuTimestampQueryCount = 38;
+    // The temporal chain. These were the whole reason the named passes did not
+    // sum to `frame`: ~2 ms of every frame ran in the gap between main's end
+    // timestamp and post's start one, and no query covered it. "The frame got
+    // slower somewhere" is not a debuggable statement.
+    //
+    // prewrite is bracketed separately from main because it is a full extra
+    // rasterization of the visible set inside main's own window, and whether it
+    // pays for itself is exactly the question the AO-off measurement could not
+    // answer.
+    static constexpr uint32_t kGpuTimestampQueryPrewriteStart = 38;
+    static constexpr uint32_t kGpuTimestampQueryPrewriteEnd = 39;
+    static constexpr uint32_t kGpuTimestampQueryVelocityStart = 40;
+    static constexpr uint32_t kGpuTimestampQueryVelocityEnd = 41;
+    static constexpr uint32_t kGpuTimestampQueryTaaStart = 42;
+    static constexpr uint32_t kGpuTimestampQueryTaaEnd = 43;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowTraceStart = 44;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowTraceEnd = 45;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowResolveStart = 46;
+    static constexpr uint32_t kGpuTimestampQueryContactShadowResolveEnd = 47;
+    static constexpr uint32_t kGpuTimestampQueryScreenDepthStart = 48;
+    static constexpr uint32_t kGpuTimestampQueryScreenDepthEnd = 49;
+    static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiStart = 50;
+    static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiEnd = 51;
+    static constexpr uint32_t kGpuTimestampQueryCount = 52;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -604,6 +710,26 @@ public:
 
 private:
     bool createSunShaftResources();
+    // Clustered (Forward+) local-light culling. See
+    // src/render/shaders/light_clusters.slang for the scheme and
+    // light_clusters.cc for why the mask is fixed-size rather than an index
+    // list. Every one of these is a no-op when the shader is missing: the
+    // fragment shader keeps a full-array fallback, so this pass can only make
+    // lighting cheaper, never absent.
+    bool createLightClusterResources();
+    bool createLightClusterBuffer(VkExtent2D renderExtent);
+    void destroyLightClusterResources();
+    bool createContactShadowResources();
+    bool createContactShadowBuffers(VkExtent2D renderExtent);
+    void destroyContactShadowResources();
+    bool createScreenSpaceGiResources();
+    bool createScreenSpaceGiBuffers(VkExtent2D renderExtent);
+    void destroyScreenSpaceGiResources();
+    void computeLightClusterSliceParams(
+        float nearPlane, float farPlane, float& outScale, float& outBias) const;
+    static uint32_t lightClusterGridX(VkExtent2D extent);
+    static uint32_t lightClusterGridY(VkExtent2D extent);
+    static uint32_t lightClusterCount(VkExtent2D extent);
     bool createSsaoComputeResources();
     bool createSkinningComputeResources();
     bool createTimelineSemaphore();
@@ -613,15 +739,26 @@ private:
     bool createTransferResources();
     bool createPipeBuffers();
     bool createPipePipeline();
+    bool createImportedFireParticlePipeline();
     bool createAoPipelines();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
     bool createWaterNormalTextureResources();
     bool createDescriptorResources();
+    // cameraSliceOffset is the camera UBO's byte offset within the FrameArena
+    // upload ring. It is passed separately because the two descriptor paths
+    // need it in different places and cannot share one field: the classic path
+    // leaves cameraBufferInfo.offset at 0 and applies this as a DYNAMIC offset
+    // at bind time, while the descriptor-buffer path has no dynamic offset at
+    // all and must fold it into the device address instead. Reading
+    // cameraBufferInfo.offset there instead (which is always 0) aims every
+    // descriptor-buffer consumer at ring offset 0 rather than at this frame's
+    // camera slice.
     void updateFrameDescriptorSets(
         uint32_t aoFrameIndex,
         const VkDescriptorBufferInfo& cameraBufferInfo,
+        VkDeviceSize cameraSliceOffset,
         VkBuffer autoExposureHistogramBuffer,
         VkBuffer autoExposureStateBuffer,
         const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo = nullptr,
@@ -654,7 +791,17 @@ private:
     // contents across at the same offsets, so every live chunk's firstVertex /
     // firstIndex stays valid. Returns false if allocation or the copy fails, in
     // which case the existing arenas are left untouched.
-    bool ensureImportedArenaCapacity(std::uint64_t vertexCount, std::uint64_t indexCount);
+    // Grows the imported geometry arenas -- both the GPU buffers and the
+    // suballocator bookkeeping, which must never move apart -- until they can
+    // hold `vertexCount` more vertices and `indexCount` more indices.
+    //
+    // `pastCapacity` selects what "hold" means. Normally the test is against
+    // used(): capacity is enough if the bytes exist anywhere. After an allocate()
+    // has already failed, capacity was enough and FRAGMENTATION was the problem,
+    // so the request has to be measured against capacity() instead -- that is the
+    // only way to guarantee a contiguous tail block big enough for it.
+    bool ensureImportedArenaCapacity(
+        std::uint64_t vertexCount, std::uint64_t indexCount, bool pastCapacity = false);
 
     // Copies `byteSize` bytes into `destination` at `destinationByteOffset` via
     // a staging buffer, submitted on the graphics queue. Used for both the
@@ -682,6 +829,11 @@ private:
     // each chunk, which is the ordering the visibility pass and the
     // terrain/static draw split both rely on.
     void rebuildImportedDrawTables();
+    // Regenerates the single water vertex/index buffer pair from every live
+    // chunk's patches. Cheap and a no-op when the patch set is unchanged, which
+    // is the overwhelmingly common case: most cells carry no visible water, so
+    // streaming across dry ground never touches this.
+    void rebuildImportedWaterBuffers();
 
     // Evicts one resident chunk: returns its arena ranges, drops one reference
     // on each texture it acquired, and rebuilds the flat draw tables. Nothing
@@ -867,6 +1019,19 @@ private:
     void scheduleImageRelease(
         VkImage image, VmaAllocation allocation, VkImageView imageView, uint64_t timelineValue);
     void destroyImageResourceNow(VkImage image, VmaAllocation allocation, VkImageView imageView);
+    // XeGTAO: depth pyramid prefilter + the GTAO integral. Separate from
+    // createSsaoComputeResources because it owns its own layouts, pipelines and
+    // descriptor sets, and because it must degrade to "XeGTAO unavailable"
+    // rather than taking the other three estimators down with it.
+    // Motion vectors for skinned actors. Graphics pipeline, so it lives beside
+    // the other graphics pipelines rather than with the compute AO passes.
+    bool createSkinnedVelocityResources();
+    void destroySkinnedVelocityResources();
+    bool createXeGtaoResources();
+    void destroyXeGtaoResources();
+    void writeXeGtaoDescriptors(
+        uint32_t frameIndex, uint32_t aoFrameIndex, VkDeviceAddress cameraAddress,
+        VkDeviceSize cameraRange, const VkDescriptorImageInfo& normalDepthInfo);
     void collectCompletedBufferReleases();
     void refreshShadowStats();
     bool validateReleaseRuntimeAssets();
@@ -905,6 +1070,44 @@ private:
         std::uint32_t width = 1u;
         std::uint32_t height = 1u;
         float fineRadiusScale = 0.0f;
+        float pad = 0.0f;
+    };
+
+    // Mirrors LightClusterPushConstants in
+    // shaders/light_cluster_cull.comp.slang -- change both together.
+    struct LightClusterPushConstants {
+        std::uint32_t gridX = 1u;
+        std::uint32_t gridY = 1u;
+        std::uint32_t gridZ = 1u;
+        std::uint32_t tileSize = 64u;
+        float sliceScale = 1.0f;
+        float sliceBias = 0.0f;
+        std::uint32_t extentX = 1u;
+        std::uint32_t extentY = 1u;
+    };
+
+    struct XeGtaoPrefilterPushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float effectRadius = 1.0f;
+        float falloffRange = 0.615f;
+    };
+
+    struct XeGtaoMainPushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float effectRadius = 1.0f;
+        float falloffRange = 0.615f;
+        float sampleDistributionPower = 2.0f;
+        float thinOccluderCompensation = 0.0f;
+        float finalValuePower = 2.2f;
+        std::uint32_t temporalIndex = 0u;
+    };
+
+    struct XeGtaoDenoisePushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float blurAmount = 1.0f;
         float pad = 0.0f;
     };
 
@@ -1009,21 +1212,57 @@ private:
         std::uint32_t flags = 0u;
     };
 
+    // 48 bytes, down from 72.
+    //
+    // Position and UV stay full float and MUST: position feeds the clip-space
+    // transform that the merged depth prepass and the main pass have to agree on
+    // to the last bit (main tests GREATER_OR_EQUAL against the prepass's depth
+    // with writes off, so a divergence renders as holes), and UV drives an alpha
+    // test whose cutout silhouette both passes must reproduce identically.
+    // Everything else is shading data with slack in it:
+    //
+    //   normal  float3 -> octahedral snorm16x2.  Max error ~0.004 degrees.
+    //   color   float3 -> sRGB-encoded unorm8x4. Encoded rather than linear
+    //           because these values are authored as sRGB (hex literals on the
+    //           strategy map, LAND VCLR bytes in Fallout) and quantizing the
+    //           LINEAR value instead puts all 256 steps in the highlights and
+    //           bands the darks.
+    //   layer   4x u32 -> 4x u16. Bindless slots, capped at
+    //           kBindlessTargetTextureCapacity; the static_assert below is what
+    //           makes raising that cap a compile error rather than four
+    //           silently truncated texture indices.
+    //
+    // Declared as 32-bit scalars rather than int16_t/uint8_t arrays because
+    // skinning.comp.slang writes this exact struct through a StructuredBuffer,
+    // and sub-32-bit members there would need VK_KHR_8bit_storage /
+    // 16bit_storage. The vertex-attribute formats do the unpacking for the
+    // graphics pipelines; the compute shader packs by hand. See
+    // imported_vertex_pack.slang, which mirrors the four helpers below.
     struct ImportedMeshVertex {
         float position[3];
-        float normal[3];
-        float color[3];
+        std::uint32_t packedNormal = 0u;   // octahedral snorm16x2
+        std::uint32_t packedColor = 0xffffffffu;  // sRGB8 rgba, a=unused
         float uv[2];
         std::uint32_t textureIndex = 0xffffffffu;
         std::uint32_t flags = 0u;
         // Terrain layer blend (Fallout ATXT/VTXT). These are BINDLESS SLOTS, not
         // scene texture indices -- uploadImportedScene remaps them the same way
         // it remaps textureIndex. Live only when the vertex carries
-        // kImportedSceneMaterialFlagTerrainLayers.
-        std::uint32_t layerTextureIndex[4] = {
-            0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
+        // kImportedSceneMaterialFlagTerrainLayers. Two slots per word, low half
+        // first; 0xffff is "no layer".
+        std::uint32_t packedLayerTexture01 = 0xffffffffu;
+        std::uint32_t packedLayerTexture23 = 0xffffffffu;
         std::uint32_t layerWeights = 0u;
     };
+    static_assert(sizeof(ImportedMeshVertex) == 48,
+                  "ImportedMeshVertex is a GPU layout: pass_pipelines.cc's attribute offsets "
+                  "and skinning.comp.slang's SkinnedVertexOut mirror it byte for byte.");
+
+    static constexpr std::uint16_t kInvalidImportedLayerSlot = 0xffffu;
+
+    // The encoders are odai::importer::packImportedVertex{Normal,Color,LayerPair}
+    // in src/import/imported_scene.h -- beside packImportedSceneTerrainLayerWeights,
+    // and reachable from a Vulkan-free test, which is the point.
 
     struct ImportedWaterVertex {
         float position[3];
@@ -1107,6 +1346,7 @@ private:
         float color[3] = {1.0f, 1.0f, 1.0f};
         float radius = 0.0f;
         float intensity = 1.0f;
+        std::uint32_t flags = 0u;
     };
 
     struct ImportedSceneChunk {
@@ -1128,6 +1368,12 @@ private:
         // ever loaded, because removeImportedSceneChunk had no way to find them
         // again.
         std::vector<ImportedLocalLight> lights;
+        std::vector<odai::importer::ImportedSceneParticleEmitter> particleEmitters;
+        // This chunk's water surfaces, owned for the same reason the lights
+        // are: the single water buffer pair is rebuilt from the live chunks in
+        // rebuildImportedWaterBuffers(), so evicting a coastal cell takes its
+        // sea away again.
+        std::vector<odai::importer::ImportedSceneWaterPatch> waterPatches;
         std::uint32_t terrainDrawCount = 0;
         bool alive = false;
     };
@@ -1189,6 +1435,13 @@ private:
     };
 
     struct ShadowPassInputs {
+        // Enter the frame-graph stage and write a zero-length timestamp pair,
+        // but do not transition, clear, or draw the directional atlas.
+        bool skipDirectionalShadows = false;
+        // Interior point shadows occupy the same atlas while cascades are off.
+        // `render` is false when the cached six-face maps still match.
+        bool renderInteriorPointShadows = false;
+        std::uint32_t interiorPointShadowLightCount = 0;
         const FrameChunkDrawData* frameChunkDrawData = nullptr;
         const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
         const std::optional<FrameArenaSlice>* shadowChunkInstanceSliceOpt = nullptr;
@@ -1294,6 +1547,9 @@ private:
         VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
         VkDeviceSize importedActorIndexOffset = 0;
         std::span<const ImportedMeshDraw> importedActorMeshDraws;
+        // The same back-to-front order as importedBlendedDrawOrder above, but
+        // indexing importedActorMeshDraws.
+        std::span<const std::uint32_t> importedActorBlendedDrawOrder;
         // GPU-skinned actors (Dragon Age touchstone; see skinning_resources.cc).
         // Up to kMaxSkinnedInstances independent instance slots, each with its
         // own vertex/index buffer -- draws carry their own
@@ -1338,6 +1594,12 @@ private:
     void recordSsaoPasses(
         const FrameExecutionContext& context
     );
+    // Clustered light culling; declared here rather than beside its create/
+    // destroy siblings because FrameExecutionContext is not defined until now.
+    void recordLightClusterPass(const FrameExecutionContext& context);
+    void recordScreenSpaceDepthHierarchyPass(const FrameExecutionContext& context);
+    void recordContactShadowPass(const FrameExecutionContext& context);
+    void recordScreenSpaceGiPass(const FrameExecutionContext& context);
     // Uploads this frame's pending skinned-actor bone matrices (set via
     // setSkinnedActorPose) through the FrameArena. Must be called after
     // m_frameArena.beginFrame() for the current frame index and before
@@ -1350,6 +1612,7 @@ private:
     // m_skinningDebugBypass is set.
     void recordSkinningPass(const FrameExecutionContext& context);
     void recordMainScenePass(const FrameExecutionContext& context, const MainPassInputs& inputs);
+    void recordSkinnedVelocityPass(const FrameExecutionContext& context);
 
     GLFWwindow* m_window = nullptr;
 
@@ -1386,6 +1649,22 @@ private:
     // Swapchain index of the most recent successful present, so a capture knows
     // which image actually holds the frame the user is looking at.
     uint32_t m_lastPresentedImageIndex = UINT32_MAX;
+
+    // Frame-capture readback, kept alive between captures. This used to be
+    // one-shot -- a buffer, an allocation, a command pool and a
+    // vkDeviceWaitIdle per call -- which is fine for the single screenshot it
+    // was written for and ruinous for a video: a 360-frame capture spent about
+    // 1.3 s per frame in setup and teardown while the frame itself rendered in
+    // tens of milliseconds. Reused across captures and torn down at shutdown.
+    // Rebuilt whenever the swapchain extent changes.
+    VkBuffer m_captureBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_captureMemory = VK_NULL_HANDLE;
+    VkCommandPool m_captureCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer m_captureCommandBuffer = VK_NULL_HANDLE;
+    VkDeviceSize m_captureBufferBytes = 0;
+    // Cached-side copy of the mapping, so the channel swizzle reads normal
+    // memory rather than the device mapping. Held so it is allocated once.
+    std::vector<std::uint8_t> m_captureStaging;
     VkExtent2D m_swapchainExtent{};
     // Internal 3D rendering resolution. Every scene-resolution target (depth,
     // MSAA color, HDR resolve, TAA history, water refraction, and the half-res
@@ -1397,6 +1676,16 @@ private:
     // swapchain extent is (re)established.
     VkExtent2D m_renderExtent{};
     VkExtent2D m_aoExtent{};
+    // Resolution of the AO estimator's own output, m_aoExtent / m_aoDownscale.
+    // Only the raw target shrinks: the blur pass upsamples back to m_aoExtent,
+    // so nothing downstream knows this happened.
+    VkExtent2D m_ssaoRawExtent{};
+    // 1 reproduces the pre-2026-08 behaviour (estimator at m_aoExtent, i.e. half
+    // the render extent). 2 is the default and runs it at a quarter, which is
+    // where the cost actually is -- the horizon march is per output texel.
+    // ODAI_AO_DOWNSCALE overrides it; read once at init because the AO targets
+    // are sized from it and changing it means recreating them.
+    std::uint32_t m_aoDownscale = 2u;
     VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_shadowDepthFormat = VK_FORMAT_UNDEFINED;
     VkFormat m_normalDepthFormat = VK_FORMAT_UNDEFINED;
@@ -1427,6 +1716,13 @@ private:
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
     std::vector<VmaAllocation> m_depthImageAllocations;
+    // Where the normal-depth buffer is rendered. Equal to m_renderExtent under
+    // the merged depth prepass (see useMergedDepthPrepass) and to m_aoExtent
+    // otherwise -- a render pass cannot have a colour attachment smaller than
+    // its render area, so promoting the prepass to full resolution promotes
+    // this with it. Every consumer samples it by normalized UV, so nothing
+    // downstream has to know which one it got.
+    VkExtent2D m_normalDepthExtent{};
     std::vector<VkImage> m_normalDepthImages;
     std::vector<VkDeviceMemory> m_normalDepthImageMemories;
     std::vector<VkImageView> m_normalDepthImageViews;
@@ -1437,6 +1733,71 @@ private:
     std::vector<VkImageView> m_aoDepthImageViews;
     std::vector<TransientImageHandle> m_aoDepthTransientHandles;
     std::vector<bool> m_aoDepthImageInitialized;
+    // XeGTAO. The depth pyramid is five separate single-mip images rather than
+    // one mip-chained image: the AO targets come from the FrameArena's transient
+    // image pool, which creates exactly one view per image, and per-mip storage
+    // views would need new plumbing through it for no benefit -- XeGTAO point
+    // samples the pyramid, so hardware mip filtering was never in play.
+    static constexpr uint32_t kXeGtaoDepthMipCount = 5u;
+    std::array<std::vector<VkImage>, kXeGtaoDepthMipCount> m_xegtaoDepthImages;
+    std::array<std::vector<VkDeviceMemory>, kXeGtaoDepthMipCount> m_xegtaoDepthImageMemories;
+    std::array<std::vector<VkImageView>, kXeGtaoDepthMipCount> m_xegtaoDepthImageViews;
+    std::array<std::vector<TransientImageHandle>, kXeGtaoDepthMipCount> m_xegtaoDepthTransientHandles;
+    std::array<VkExtent2D, kXeGtaoDepthMipCount> m_xegtaoDepthExtents{};
+    std::vector<bool> m_xegtaoDepthInitialized;
+    // AO term as the march produced it, BEFORE denoising. The denoise pass reads
+    // this and writes m_ssaoRawImages, so everything downstream -- the joint
+    // bilateral upsample and every consumer of the blurred AO -- is unchanged.
+    // Motion vectors, render extent. See the creation site for the encoding.
+    VkFormat m_velocityFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+    std::vector<VkImage> m_velocityImages;
+    std::vector<VkDeviceMemory> m_velocityImageMemories;
+    std::vector<VkImageView> m_velocityImageViews;
+    std::vector<TransientImageHandle> m_velocityTransientHandles;
+    std::vector<bool> m_velocityImageInitialized;
+    VkDescriptorSetLayout m_skinnedVelocityDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_skinnedVelocityPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_skinnedVelocityPipeline = VK_NULL_HANDLE;
+    DescriptorBufferSet m_skinnedVelocityBufferSet{};
+    // Last frame's world->clip and jitter, for the velocity pass. Distinct from
+    // the TAA uniform's copy only in that this one is captured before the main
+    // pass rather than after.
+    odai::math::Matrix4 m_velocityPrevViewProj{};
+    odai::math::Matrix4 m_velocityCurrentViewProj{};
+    float m_velocityPrevJitter[2] = {0.0f, 0.0f};
+    float m_velocityCurrentJitter[2] = {0.0f, 0.0f};
+    bool m_velocityPrevValid = false;
+
+    std::vector<VkImage> m_xegtaoAoTermImages;
+    std::vector<VkDeviceMemory> m_xegtaoAoTermImageMemories;
+    std::vector<VkImageView> m_xegtaoAoTermImageViews;
+    std::vector<TransientImageHandle> m_xegtaoAoTermTransientHandles;
+    std::vector<bool> m_xegtaoAoTermInitialized;
+    std::vector<VkImage> m_xegtaoBentNormalImages;
+    std::vector<VkDeviceMemory> m_xegtaoBentNormalImageMemories;
+    std::vector<VkImageView> m_xegtaoBentNormalImageViews;
+    std::vector<TransientImageHandle> m_xegtaoBentNormalTransientHandles;
+    std::vector<bool> m_xegtaoBentNormalInitialized;
+    // Point sampler for the pyramid. Linear filtering across neighbouring depths
+    // on one level invents surfaces between real ones and puts false horizons
+    // into the march, so this is deliberately VK_FILTER_NEAREST.
+    VkSampler m_xegtaoPointSampler = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_xegtaoPrefilterDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_xegtaoMainDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_xegtaoDenoiseDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_xegtaoPrefilterPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_xegtaoMainPipelineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_xegtaoDenoisePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_xegtaoPrefilterPipeline = VK_NULL_HANDLE;
+    VkPipeline m_xegtaoMainPipeline = VK_NULL_HANDLE;
+    VkPipeline m_xegtaoDenoisePipeline = VK_NULL_HANDLE;
+    DescriptorBufferSet m_xegtaoPrefilterBufferSet{};
+    DescriptorBufferSet m_xegtaoMainBufferSet{};
+    DescriptorBufferSet m_xegtaoDenoiseBufferSet{};
+    // Advances only for the opt-in ODAI_XEGTAO_TEMPORAL diagnostic. Production
+    // AO uses a pixel-stable phase because it has no dedicated temporal history.
+    std::uint32_t m_xegtaoTemporalIndex = 0;
+
     std::vector<VkImage> m_ssaoRawImages;
     std::vector<VkDeviceMemory> m_ssaoRawImageMemories;
     std::vector<VkImageView> m_ssaoRawImageViews;
@@ -1452,6 +1813,9 @@ private:
     std::vector<VkImageView> m_sunShaftImageViews;
     std::vector<TransientImageHandle> m_sunShaftTransientHandles;
     std::vector<bool> m_sunShaftImageInitialized;
+    // True only after a shaft dispatch. A disabled interior clears stale
+    // content once, then leaves the already-black sampled image untouched.
+    std::vector<bool> m_sunShaftImageHasContent;
     VkSampler m_normalDepthSampler = VK_NULL_HANDLE;
     VkSampler m_ssaoSampler = VK_NULL_HANDLE;
 
@@ -1460,9 +1824,69 @@ private:
     // NOT FrameArena transients: the arena reclaims per frame, and history is
     // the one image in this renderer that must survive into the next one.
     bool m_taaEnabled = false;
+    // Sub-pixel projection jitter, the half of TAA that refines edges rather
+    // than just averaging texture shimmer. Only meaningful while m_taaEnabled.
+    //
+    // OFF until this pass grows a reconstruction filter, because on its own it
+    // is a net LOSS and the measurement is unambiguous: at a 0.6 render scale
+    // on a static Goodsprings frame, edge energy goes 377 -> 101 with jitter
+    // on, and the crops show real detail gone (tank rust, truss timbers), not
+    // aliasing removed.
+    //
+    // The reason is structural, not a bug in the jitter: accumulating jittered
+    // samples through a flat `lerp(current, history, 0.88)` averages samples
+    // spread over +/-0.5 px with EQUAL weight, which is a one-pixel box blur by
+    // construction. Two things were tried and neither is the cause -- taking
+    // the jitter back out of the view reconstruction, and rolling the previous
+    // frame's jitter with prevViewProj so the history is addressed on its own
+    // grid. Both are correct and both are kept; the image did not move (101 ->
+    // 101), which is what says the accumulation itself is the problem.
+    //
+    // What it needs, in the order it matters: weight the current sample by its
+    // sub-pixel distance from the pixel centre (tent / Blackman-Harris) instead
+    // of a constant, and sample the history with Catmull-Rom rather than
+    // bilinear so a reprojected resample does not soften each frame. Those are
+    // also exactly the pieces a temporal UPSAMPLE needs, so they are the first
+    // half of TAAU rather than a detour from it.
+    bool m_taaJitterEnabled = false;
+    std::uint32_t m_taaJitterPhase = 0u;
+    // This frame's jitter in NDC units. Published to the shaders so anything
+    // that maps a UV back to a view position can take it out again -- with a
+    // jittered projection the centre of a texel is no longer at ndc = uv*2-1.
+    std::array<float, 2> m_taaJitterNdc{0.0f, 0.0f};
+    // The previous frame's, paired with m_taaPrevViewProj: that matrix carries
+    // last frame's jitter, and the history image does not, so the shader has to
+    // subtract this to land on the history's own grid.
+    std::array<float, 2> m_taaPrevJitterNdc{0.0f, 0.0f};
     VkDescriptorSetLayout m_taaDescriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_taaPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_taaPipeline = VK_NULL_HANDLE;
+    // Same descriptor layout and uniform as TAA, selected in its place when the
+    // Temporal upscaler is active. See temporal_upscale.comp.slang.
+    VkPipeline m_temporalUpscalePipeline = VK_NULL_HANDLE;
+    // True when the Temporal backend is running as a real upscale: the pipeline
+    // exists, the backend resolved to Temporal, and the render extent is
+    // actually smaller than the output. At native resolution there is nothing to
+    // upscale and the plain TAA path is the right one.
+    [[nodiscard]] bool temporalUpscaleActive() const {
+        return m_temporalUpscalePipeline != VK_NULL_HANDLE &&
+               m_upscalerStatus.active == UpscalerBackend::Temporal &&
+               (m_renderExtent.width < m_swapchainExtent.width ||
+                m_renderExtent.height < m_swapchainExtent.height);
+    }
+    // Extent the TAA/upscale pass writes, and therefore the size of the history
+    // images. Output extent when upscaling, render extent otherwise.
+    [[nodiscard]] VkExtent2D temporalOutputExtent() const {
+        return temporalUpscaleActive() ? m_swapchainExtent : m_renderExtent;
+    }
+    // The upscaling TECHNIQUE, behind render/upscale's plug-in seam. This
+    // engine's temporal one today; XeSS, FSR or DLSS by swapping what
+    // createUpscaler() returns, with no change to the frame code around it.
+    // Null when the resolved backend is Off, which is how the pass is skipped.
+    std::unique_ptr<upscale::IUpscaler> m_upscaler;
+    [[nodiscard]] upscale::HostServices makeUpscalerHostServices();
+    bool createUpscalerBackend();
+
     DescriptorBufferSet m_taaBufferSet;
     std::array<VkImage, 2> m_taaImages{};
     std::array<VkDeviceMemory, 2> m_taaImageMemories{};
@@ -1484,6 +1908,16 @@ private:
         float invView[16];
         float prevViewProj[16];
         float params[4];
+        // xy = this frame's jitter in INPUT pixels, zw = input extent. Only the
+        // temporal upscaler reads it, but it lives in the shared uniform because
+        // both shaders bind the same descriptor set layout and a struct that
+        // differs between them would be read at the wrong offsets by one of them.
+        float jitterAndInputExtent[4];
+        // x = clamp width in sigma where nothing is moving, y = where motion is
+        // fast, z = maximum per-frame blend on a direct sample hit, w = spare.
+        // Tunable because the right values depend on the upscale ratio and on
+        // how noisy the input is, and neither is knowable from one scene.
+        float upscaleTuning[4];
     };
     struct TaaPushConstants {
         std::uint32_t width;
@@ -1499,12 +1933,56 @@ private:
     // Records sample->TAA->copy-back over hdrResolve mip0. Returns true when
     // it ran, which tells the caller the image is now in TRANSFER_DST rather
     // than COLOR_ATTACHMENT layout.
-    bool recordTaaPass(VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex);
+    // What the TAA/upscale pass left hdrResolve mip0 in.
+    //
+    // A bool was not enough and that was a real bug: the caller inferred
+    // "TAA ran, therefore hdrResolve is TRANSFER_DST because it was copied back
+    // into". The UPSCALING path does not copy back -- it leaves hdrResolve in
+    // SHADER_READ_ONLY -- so with the temporal upscaler on, the bloom barrier
+    // declared an oldLayout the image was not in. Validation catches it as
+    // VUID-VkImageMemoryBarrier2-oldLayout-01197; a driver is free to do
+    // anything with it. There are THREE outcomes here, not two.
+    struct TaaPassOutcome {
+        bool ran = false;
+        VkImageLayout hdrResolveLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkPipelineStageFlags2 hdrResolveStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkAccessFlags2 hdrResolveAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    };
+    // MERGED DEPTH PREPASS: one depth rasterization per frame instead of two.
+    //
+    // The frame used to lay depth twice. The normal-depth prepass rendered the
+    // visible set at HALF resolution into its own depth image and threw it away
+    // (storeOp DONT_CARE); the main pass then cleared its own depth and
+    // rasterized the same set AGAIN, depth-only, so its alpha-testing forward
+    // shader would get early-Z. Measured on Goodsprings: the prepass 2.8 ms and
+    // the prewrite 2.76 ms of main's 8.6.
+    //
+    // Merged, the prepass runs at full render extent and writes the REAL depth
+    // buffer, which main then loads and tests against without writing. The
+    // prepass is vertex-bound, not fill-bound -- it measured the same at native
+    // and at 44% of the pixels -- so making it bigger is nearly free, and the
+    // prewrite disappears entirely.
+    //
+    // Requires a 1-sample depth buffer: the normal-depth pipelines are built
+    // VK_SAMPLE_COUNT_1_BIT and cannot write a multisampled attachment. With
+    // MSAA on, the old two-rasterization structure is kept. ODAI_MERGED_PREPASS=0
+    // forces it off for A/B; both paths are valid Vulkan.
+    [[nodiscard]] bool useMergedDepthPrepass() const;
+
+    TaaPassOutcome recordTaaPass(
+        VkCommandBuffer commandBuffer,
+        std::uint32_t aoFrameIndex,
+        VkQueryPool gpuTimestampQueryPool);
     VkSampler m_sunShaftSampler = VK_NULL_HANDLE;
     VkImage m_shadowDepthImage = VK_NULL_HANDLE;
     VkImageView m_shadowDepthImageView = VK_NULL_HANDLE;
     VkSampler m_shadowDepthSampler = VK_NULL_HANDLE;
     bool m_shadowDepthInitialized = false;
+    bool m_interiorPointShadowAtlasValid = false;
+    std::uint64_t m_interiorPointShadowSignature = 0;
+    std::array<std::uint32_t, kInteriorPointShadowLightCapacity>
+        m_interiorPointShadowLightSourceIndices{};
+    std::uint32_t m_interiorPointShadowLightSourceCount = 0;
     // Cascade-interleave cache: the matrix each cascade's atlas tile was
     // actually rendered with, and whether that tile is reusable. Invalidated
     // whenever the caster set changes (chunk add/evict -> rebuild of the draw
@@ -1589,6 +2067,50 @@ private:
     VkPipelineLayout m_autoExposurePipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_autoExposureHistogramPipeline = VK_NULL_HANDLE;
     VkPipeline m_autoExposureUpdatePipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_lightClusterDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_lightClusterBufferSet{};
+    VkPipelineLayout m_lightClusterPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_lightClusterPipeline = VK_NULL_HANDLE;
+    BufferHandle m_lightClusterBufferHandle = kInvalidBufferHandle;
+    VkDeviceSize m_lightClusterBufferSize = 0;
+    uint32_t m_lightClusterGridX = 0;
+    uint32_t m_lightClusterGridY = 0;
+    float m_lightClusterSliceScale = 1.0f;
+    float m_lightClusterSliceBias = 0.0f;
+    // Pipeline and buffer exist.
+    bool m_lightClusterAvailable = false;
+    // ...AND there is something to cull this frame. Separate from the above so
+    // a frame with no local lights skips the dispatch entirely while leaving
+    // the resources alive for the next one.
+    bool m_lightClusterCullActive = false;
+    VkDescriptorSetLayout m_contactShadowDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_contactShadowBufferSet{};
+    VkPipelineLayout m_contactShadowPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_contactShadowDepthPipeline = VK_NULL_HANDLE;
+    VkPipeline m_contactShadowTracePipeline = VK_NULL_HANDLE;
+    VkPipeline m_contactShadowResolvePipeline = VK_NULL_HANDLE;
+    BufferHandle m_contactShadowDepthBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_contactShadowHalfBufferHandle = kInvalidBufferHandle;
+    BufferHandle m_contactShadowFullMaskBufferHandle = kInvalidBufferHandle;
+    VkDeviceSize m_contactShadowDepthBufferSize = 0;
+    VkDeviceSize m_contactShadowHalfBufferSize = 0;
+    VkDeviceSize m_contactShadowFullMaskBufferSize = 0;
+    VkExtent2D m_contactShadowHalfExtent{};
+    std::uint32_t m_contactShadowDepthMipCount = 0;
+    bool m_contactShadowAvailable = false;
+    bool m_contactShadowActive = false;
+    VkDescriptorSetLayout m_screenSpaceGiDescriptorSetLayout = VK_NULL_HANDLE;
+    DescriptorBufferSet m_screenSpaceGiBufferSet{};
+    VkPipelineLayout m_screenSpaceGiPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_screenSpaceGiPipeline = VK_NULL_HANDLE;
+    std::array<BufferHandle, 2> m_screenSpaceGiRecordBufferHandles{
+        kInvalidBufferHandle, kInvalidBufferHandle};
+    VkDeviceSize m_screenSpaceGiRecordBufferSize = 0;
+    VkExtent2D m_screenSpaceGiExtent{};
+    std::uint32_t m_screenSpaceGiHistoryIndex = 0u;
+    bool m_screenSpaceGiHistoryValid = false;
+    bool m_screenSpaceGiAvailable = false;
+    bool m_screenSpaceGiActive = false;
     VkDescriptorSetLayout m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
     DescriptorBufferSet m_sunShaftBufferSet{};
     VkPipelineLayout m_sunShaftPipelineLayout = VK_NULL_HANDLE;
@@ -1617,6 +2139,10 @@ private:
     // party (see docs/ROADMAP.md's out-of-scope note on mass-battle crowds).
     struct SkinnedInstanceSlot {
         DescriptorBufferSet bufferSet{};
+        // Second set, same per-slot shape, for the velocity pass's two bone
+        // matrix buffers. Per slot rather than one shared set because each actor
+        // has its own pose and the sets are written per frame, not per draw.
+        DescriptorBufferSet velocityBufferSet{};
         BufferHandle restPoseVertexBufferHandle = kInvalidBufferHandle;
         BufferHandle indexBufferHandle = kInvalidBufferHandle;
         BufferHandle outputVertexBufferHandle = kInvalidBufferHandle;
@@ -1627,6 +2153,23 @@ private:
         // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
         // FrameArena slot is actually active. See both functions' comments.
         std::vector<odai::math::Matrix4> pendingBoneMatrices;
+        // LAST frame's bone matrices, kept on the CPU and re-uploaded each frame
+        // beside the current ones so the velocity pass can pose the rest mesh
+        // twice. A CPU copy rather than reusing last frame's FrameArena slice:
+        // that slice is reclaimed on its own fence, and depending on it would
+        // make the motion vectors correct only while frames retire in the order
+        // this happens to assume.
+        std::vector<odai::math::Matrix4> previousBoneMatrices;
+        // Device addresses of this frame's current/previous bone matrix uploads,
+        // for the velocity pass's descriptor writes. Zero when this slot did not
+        // upload a pose this frame, which is what suppresses its velocity draw.
+        VkDeviceAddress currentBoneAddress = 0;
+        VkDeviceAddress previousBoneAddress = 0;
+        VkDeviceSize boneBufferBytes = 0;
+        // Bindless slots this slot holds a reference on, from
+        // uploadSkinnedActorTextures. Kept per instance so a re-upload (or
+        // teardown) releases exactly what it took.
+        std::vector<std::uint32_t> textureSlots;
     };
     std::array<SkinnedInstanceSlot, kMaxSkinnedInstances> m_skinningInstances{};
     // One past the highest instanceIndex ever uploaded via
@@ -1672,6 +2215,8 @@ private:
     VkPipeline& m_skyCloudPipeline = m_pipelineManager.skyCloudPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
+    VkPipeline& m_importedFireParticlePipeline =
+        m_pipelineManager.importedFireParticlePipeline;
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
@@ -1680,10 +2225,17 @@ private:
         m_pipelineManager.importedStaticPipelineBlendedTwoSided;
     VkPipeline& m_importedStaticPipelineTwoSided =
         m_pipelineManager.importedStaticPipelineTwoSided;
+    VkPipeline& m_importedStaticDepthPrewritePipeline =
+        m_pipelineManager.importedStaticDepthPrewritePipeline;
+    VkPipeline& m_importedStaticDepthPrewritePipelineTwoSided =
+        m_pipelineManager.importedStaticDepthPrewritePipelineTwoSided;
     VkPipeline& m_importedStaticPipelineRt = m_pipelineManager.importedStaticPipelineRt;
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
     VkPipeline& m_importedStaticNormalDepthPipeline = m_pipelineManager.importedStaticNormalDepthPipeline;
+    VkPipeline& m_importedTerrainTessPipeline = m_pipelineManager.importedTerrainTessPipeline;
+    VkPipeline& m_importedTerrainTessNormalDepthPipeline =
+        m_pipelineManager.importedTerrainTessNormalDepthPipeline;
     VkPipeline& m_importedWaterNormalDepthPipeline = m_pipelineManager.importedWaterNormalDepthPipeline;
     VkPipeline& m_importedStaticShadowPipeline = m_pipelineManager.importedStaticShadowPipeline;
     // Same shaders as above, differing only in vertex input: it reads the
@@ -1691,6 +2243,13 @@ private:
     // draws, which have no compact stream of their own.
     VkPipeline& m_importedStaticShadowCompactPipeline =
         m_pipelineManager.importedStaticShadowCompactPipeline;
+    // Cull-NONE variants of the three above, for DRAW_BOTH geometry.
+    VkPipeline& m_importedStaticNormalDepthPipelineTwoSided =
+        m_pipelineManager.importedStaticNormalDepthPipelineTwoSided;
+    VkPipeline& m_importedStaticShadowPipelineTwoSided =
+        m_pipelineManager.importedStaticShadowPipelineTwoSided;
+    VkPipeline& m_importedStaticShadowCompactPipelineTwoSided =
+        m_pipelineManager.importedStaticShadowCompactPipelineTwoSided;
     VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
     VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
@@ -1801,6 +2360,10 @@ private:
     BufferHandle m_hexInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
+    // What is currently in the buffer above, kept so rebuildImportedWaterBuffers
+    // can tell a changed water set from an unchanged one without touching the
+    // GPU. Empty on the whole-scene upload path, which never rebuilds.
+    std::vector<ImportedWaterVertex> m_importedWaterVerticesResident;
     BufferHandle m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
@@ -1814,6 +2377,16 @@ private:
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
     std::vector<ImportedSceneChunk> m_importedSceneChunks;
+    // Highest device-local heap usage seen this session, for the GPU Memory
+    // panel. Sampled only while that panel is open, which is enough: what it is
+    // there to show is whether the peak keeps moving while the player walks.
+    std::uint64_t m_debugDeviceMemoryPeakBytes = 0;
+    // Slots vacated by removeImportedSceneChunk, reused before the vector grows.
+    std::vector<std::size_t> m_freeImportedSceneChunks;
+    // Where uploadImportedSceneInternal placed the chunk it just built, since a
+    // recycled slot means the vector's size no longer says. kInvalid when the
+    // upload succeeded without producing one.
+    std::size_t m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
     // Suballocators over the shared geometry buffers, in vertex and index units.
     GpuArenaAllocator m_importedVertexArena;
     GpuArenaAllocator m_importedIndexArena;
@@ -1821,10 +2394,18 @@ private:
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
     std::vector<std::uint32_t> m_importedTextureSlots;
     std::vector<std::uint8_t> m_visibleImportedPageScratch;
+    // Indices of the pages that survived the clip test, in arena order. Member
+    // rather than local to keep it out of the per-frame allocator.
+    std::vector<std::uint32_t> m_visibleImportedPageOrder;
     std::uint32_t m_visibleImportedTerrainDrawCount = 0;
+    // The first N of those terrain draws come from pages within the
+    // tessellation ramp; only they go through the tessellated pipeline. See
+    // buildVisibleImportedDraws for why far terrain must not.
+    std::uint32_t m_visibleImportedNearTerrainDrawCount = 0;
     std::array<std::uint32_t, kShadowCascadeCount> m_visibleImportedShadowTerrainDrawCounts{};
     std::vector<ImportedGiTriangle> m_importedGiTriangles;
     std::vector<ImportedLocalLight> m_importedLocalLights;
+    std::vector<odai::importer::ImportedSceneParticleEmitter> m_importedParticleEmitters;
     std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
     std::vector<RtImportedSceneRecord> m_rtImportedSceneRecords;
     std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
@@ -1854,6 +2435,10 @@ private:
     // Reused every frame so the back-to-front sort of blended imported draws
     // does not allocate in the render loop.
     std::vector<std::uint32_t> m_importedBlendedDrawOrder;
+    // Actors live in their own vertex/index buffer and their own draw list, so
+    // their blended replay needs its own sorted order rather than sharing the
+    // static scene's -- one index list cannot address two buffers.
+    std::vector<std::uint32_t> m_importedActorBlendedDrawOrder;
     uint32_t m_importedStaticDrawCount = 0;
     uint32_t m_importedWaterIndexCount = 0;
     uint32_t m_skyCloudIndexCount = 0;
@@ -1919,6 +2504,10 @@ private:
     uint32_t m_currentFrame = 0;
     bool m_debugUiVisible = false;
     bool m_showFrameStatsPanel = false;
+    DebugUiMode m_debugUiMode = DebugUiMode::Full;
+    UpscalerSettings m_upscalerSettings{};
+    UpscalerStatus m_upscalerStatus{};
+    std::vector<DebugStatGroup> m_debugStatGroups;
     bool m_showMeshingPanel = false;
     bool m_showShadowPanel = false;
     bool m_showSunPanel = false;
@@ -1926,13 +2515,27 @@ private:
     UiRenderer m_uiRenderer;
     odai::ui::UiDrawData m_uiDrawData;
     float m_debugCameraFovDegrees = 90.0f;
-    bool m_debugCameraFovInitialized = false;
+    // False (the default) means the APP owns field of view: whatever
+    // RenderCameraState carries is used, every frame, so a game can animate it
+    // -- a conversation dolly, an aim-down-sights zoom, a stylistic push-in.
+    // Set true only when someone drags the debug slider, and cleared by its
+    // "Follow app" button.
+    //
+    // This replaced a first-frame latch that copied camera.fovDegrees once and
+    // ignored it forever after, which made every subsequent per-frame FOV an
+    // app set a silent no-op.
+    bool m_debugCameraFovOverride = false;
+    DebugView m_debugView = DebugView::Off;
     bool m_debugEnableVertexAo = true;
     bool m_debugEnableSsao = true;
     bool m_shadowCascadeSplitsLogged = false;
+    float m_loggedShadowCascadeFar = -1.0f;
     bool m_debugShowImportedTerrain = true;
     bool m_debugShowImportedStatics = true;
     bool m_debugShowImportedTextures = true;
+    // ODAI_DEBUG_UNTEXTURED_MAGENTA: paint surfaces whose diffuse never
+    // resolved, instead of letting them shade from the hashed pastel.
+    bool m_debugHighlightUntextured = false;
     bool m_debugImportedFlatShading = false;
     // Bounding sphere of the uploaded imported scene (terrain + statics), used to
     // fit shadow cascades for orthographic cameras where a perspective-frustum
@@ -1942,6 +2545,7 @@ private:
     bool m_importedSceneBoundsValid = false;
     bool m_debugImportedWaterSolid = false;
     bool m_importedSceneInteriorMode = false;
+    ImportedInteriorLighting m_importedInteriorLighting{};
     bool m_debugImportedLightsEnabled = true;
     float m_debugImportedLightIntensity = 1.65f;
     float m_debugImportedLightRadiusScale = 3.0f;
@@ -1964,8 +2568,9 @@ private:
     // both, holds the two together; this codebase has already been bitten once
     // by a silently drifting mirrored constant.
     std::uint32_t m_weatherCloudSlots[kWeatherCloudLayerCount] = {~0u, ~0u, ~0u, ~0u};
-    float m_weatherCloudScroll[kWeatherCloudLayerCount] = {};
-    float m_weatherCloudDomeScale[kWeatherCloudLayerCount] = {};
+    // Everything about the active weather's cloud layers except their pixels,
+    // which live in the bindless table under m_weatherCloudSlots.
+    WeatherCloudLayer m_weatherCloudLayers[kWeatherCloudLayerCount] = {};
     VoxelGiDebugSettings m_voxelGiDebugSettings{};
     struct SkyTuningRuntimeState {
         bool initialized = false;
@@ -1984,6 +2589,12 @@ private:
     float m_debugFrameTimeMs = 0.0f;
     float m_debugGpuFrameTimeMs = 0.0f;
     float m_debugGpuShadowTimeMs = 0.0f;
+    float m_debugGpuContactShadowTraceTimeMs = 0.0f;
+    float m_debugGpuContactShadowResolveTimeMs = 0.0f;
+    float m_debugGpuContactShadowP95Ms = 0.0f;
+    float m_debugGpuScreenDepthTimeMs = 0.0f;
+    float m_debugGpuScreenSpaceGiTimeMs = 0.0f;
+    float m_debugGpuScreenSpaceGiP95Ms = 0.0f;
     float m_debugGpuGiOccupancyTimeMs = 0.0f;
     float m_debugGpuGiSurfaceTimeMs = 0.0f;
     float m_debugGpuGiSurfaceCandidateTimeMs = 0.0f;
@@ -1998,6 +2609,10 @@ private:
     float m_debugGpuSsaoTimeMs = 0.0f;
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
+    // Inside main's window, not additional to it.
+    float m_debugGpuPrewriteTimeMs = 0.0f;
+    float m_debugGpuVelocityTimeMs = 0.0f;
+    float m_debugGpuTaaTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
     float m_debugGpuUiTimeMs = 0.0f;
     float m_debugResolvedExposure = 1.0f;
@@ -2037,6 +2652,8 @@ private:
     float m_debugCpuFrameEwmaMs = 0.0f;
     bool m_debugCpuFrameEwmaInitialized = false;
     odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuFrameTimingMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuContactShadowTimingMsHistory{};
+    odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugGpuScreenSpaceGiTimingMsHistory{};
     odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugPresentedFrameTimingMsHistory{};
     float m_debugFps = 0.0f;
     std::uint32_t m_debugLatePresentCount = 0;

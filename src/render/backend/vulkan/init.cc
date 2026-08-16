@@ -1,5 +1,7 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
+#include "render/upscale/upscale_policy.h"
+
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
 #include "core/log.h"
@@ -102,6 +104,15 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     // fixes and look identical in a screenshot.
     if (std::getenv("ODAI_DEBUG_NO_TEXTURES") != nullptr) {
         m_debugShowImportedTextures = false;
+    }
+    // Diagnostic: ODAI_DEBUG_UNTEXTURED_MAGENTA=1 paints any surface whose
+    // diffuse texture failed to resolve. It has to be asked for because the
+    // default is deliberately inconspicuous -- an unresolved texture falls back
+    // to a per-model hashed pastel plus a slope-based rock tint, which reads as
+    // ordinary weathered stone. That is the right default for a screenshot and
+    // exactly wrong for finding a missing asset.
+    if (std::getenv("ODAI_DEBUG_UNTEXTURED_MAGENTA") != nullptr) {
+        m_debugHighlightUntextured = true;
     }
     using Clock = std::chrono::steady_clock;
     const auto initStart = Clock::now();
@@ -229,6 +240,19 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
+    if (!runStep("createLightClusterResources", [&] { return createLightClusterResources(); })) {
+        VOX_LOGE("render") << "init failed at createLightClusterResources\n";
+        shutdown();
+        return false;
+    }
+    // Optional like clustered culling: mapped interior shadows remain a valid
+    // fallback if the contact compute shaders are absent on a developer build.
+    if (!createContactShadowResources()) {
+        VOX_LOGW("render") << "contact shadows unavailable; using cached point-shadow maps";
+    }
+    if (!createScreenSpaceGiResources()) {
+        VOX_LOGW("render") << "screen-space GI unavailable; using authored ambient only";
+    }
     if (!runStep("createTaaComputeResources", [&] { return createTaaComputeResources(); })) {
         return false;
     }
@@ -236,6 +260,17 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         VOX_LOGE("render") << "init failed at createSsaoComputeResources\n";
         shutdown();
         return false;
+    }
+    // Not a runStep: XeGTAO failing must not fail init. The other three
+    // estimators are already built at this point and stay usable.
+    if (!createXeGtaoResources()) {
+        VOX_LOGW("render") << "XeGTAO unavailable; other AO modes unaffected";
+    }
+    // Same treatment: motion vectors are an enhancement, and without them
+    // consumers fall back to the depth reprojection that predates this pass.
+    if (!createSkinnedVelocityResources()) {
+        VOX_LOGW("render") << "skinned motion vectors unavailable; TAA falls back to depth "
+                              "reprojection for animated geometry";
     }
     // Creates the descriptor-set-layout/buffer-set/pipeline up front so
     // they're ready before any uploadSkinnedMeshTemplate() call; that
@@ -274,6 +309,13 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     } else {
         if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
             VOX_LOGE("render") << "init failed at createPipePipeline\n";
+            shutdown();
+            return false;
+        }
+        if (!runStep("createImportedFireParticlePipeline", [&] {
+                return createImportedFireParticlePipeline();
+            })) {
+            VOX_LOGE("render") << "init failed at createImportedFireParticlePipeline\n";
             shutdown();
             return false;
         }
@@ -1875,7 +1917,31 @@ bool RendererBackend::createSwapchain() {
     m_swapchainFormat = surfaceFormat.format;
     m_swapchainExtent = extent;
     {
-        float renderScale = 1.0f;
+        // Resolved here, not at init, because the quality preset chooses the
+        // internal resolution and that sizes every render target -- so it has to
+        // be known before any of them are built, and re-resolved on a swapchain
+        // rebuild.
+        //
+        // XeSS runtime support is reported as false for now: the backend is not
+        // implemented past selection, so claiming the device supports it would
+        // make resolveUpscaler hand back Xess and the renderer would then run
+        // the Temporal path while reporting XeSS. Better to report the honest
+        // reason until there is something to run.
+        m_upscalerStatus = resolveUpscaler(m_upscalerSettings, /*runtimeSupportsXess=*/false);
+        if (m_upscalerStatus.requested != m_upscalerStatus.active) {
+            VOX_LOGW("render") << "upscaler: requested "
+                               << upscalerBackendName(m_upscalerStatus.requested) << " but running "
+                               << upscalerBackendName(m_upscalerStatus.active) << " -- "
+                               << m_upscalerStatus.reason;
+        } else if (m_upscalerStatus.active != UpscalerBackend::Off) {
+            VOX_LOGI("render") << "upscaler: " << upscalerBackendName(m_upscalerStatus.active)
+                               << " at " << upscalerQualityName(m_upscalerSettings.quality)
+                               << " (render scale " << m_upscalerStatus.renderScale << ")";
+        }
+
+        float renderScale = m_upscalerStatus.renderScale;
+        // ODAI_RENDER_SCALE still wins where it is set: it predates the upscaler
+        // and is what every measurement in this project's notes was taken with.
         if (const char* scaleEnv = std::getenv("ODAI_RENDER_SCALE")) {
             renderScale = static_cast<float>(std::atof(scaleEnv));
         }
@@ -1890,6 +1956,15 @@ bool RendererBackend::createSwapchain() {
                                << ", UI/present at " << m_swapchainExtent.width << "x"
                                << m_swapchainExtent.height;
         }
+    }
+    // Read here rather than at AO-target creation because it sizes those targets
+    // and this runs before them on every swapchain (re)build. 1 = estimator at
+    // the AO extent (what it did before), 2 = at a quarter of the render extent.
+    if (const char* aoDownscaleEnv = std::getenv("ODAI_AO_DOWNSCALE")) {
+        m_aoDownscale = static_cast<uint32_t>(std::clamp(std::atoi(aoDownscaleEnv), 1, 4));
+    }
+    if (const char* jitterEnv = std::getenv("ODAI_TAA_JITTER")) {
+        m_taaJitterEnabled = jitterEnv[0] != '0';
     }
 
     m_swapchainImageViews.resize(imageCount, VK_NULL_HANDLE);
@@ -1921,6 +1996,12 @@ bool RendererBackend::createSwapchain() {
     if (!createTaaTargets()) {
         return false;
     }
+    // After the extents are final and re-run on every resize: the backend's
+    // setup() is told the render and display sizes, and a reconstructing
+    // upscaler that was handed stale ones would dispatch over the wrong grid.
+    // createTaaComputeResources() has already built the pipeline layout its
+    // pipelines are created against -- it is an earlier init step.
+    createUpscalerBackend();
     if (!createHdrResolveTargets()) {
         VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
@@ -2102,6 +2183,11 @@ bool RendererBackend::recreateSwapchain() {
             VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
             return false;
         }
+        if (!createImportedFireParticlePipeline()) {
+            VOX_LOGE("render")
+                << "recreateSwapchain failed: createImportedFireParticlePipeline\n";
+            return false;
+        }
         if (!createAoPipelines()) {
             VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
             return false;
@@ -2246,6 +2332,7 @@ void RendererBackend::destroyImportedBuffers() {
     }
     m_visibleImportedPageScratch.clear();
     m_visibleImportedTerrainDrawCount = 0;
+    m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
@@ -2384,7 +2471,13 @@ void RendererBackend::shutdown() {
         destroyVoxelGiResources();
         destroyAutoExposureResources();
         destroySunShaftResources();
+        destroyLightClusterResources();
+        destroyContactShadowResources();
+        destroyScreenSpaceGiResources();
         destroyTaaComputeResources();
+        destroyFrameCaptureResources();
+        destroySkinnedVelocityResources();
+        destroyXeGtaoResources();
         destroySsaoComputeResources();
         destroySkinningComputeResources();
         destroyChunkBuffers();
@@ -2532,6 +2625,14 @@ void RendererBackend::shutdown() {
     m_gpuTimestampQuerySubmitted.fill(false);
     m_debugGpuFrameTimeMs = 0.0f;
     m_debugGpuShadowTimeMs = 0.0f;
+    m_debugGpuContactShadowTraceTimeMs = 0.0f;
+    m_debugGpuContactShadowResolveTimeMs = 0.0f;
+    m_debugGpuContactShadowP95Ms = 0.0f;
+    m_debugGpuContactShadowTimingMsHistory.clear();
+    m_debugGpuScreenDepthTimeMs = 0.0f;
+    m_debugGpuScreenSpaceGiTimeMs = 0.0f;
+    m_debugGpuScreenSpaceGiP95Ms = 0.0f;
+    m_debugGpuScreenSpaceGiTimingMsHistory.clear();
     m_debugGpuGiOccupancyTimeMs = 0.0f;
     m_debugGpuGiSurfaceTimeMs = 0.0f;
     m_debugGpuGiSurfaceCandidateTimeMs = 0.0f;

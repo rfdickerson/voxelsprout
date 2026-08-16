@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "import/fnv/asset_source.h"
+#include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
 #include "import/imported_scene.h"
@@ -48,8 +49,33 @@ struct FalloutWorldTables {
     // rather than present-with-an-empty-string, so a lookup miss means "do not
     // announce this" without the caller having to re-check.
     std::unordered_map<std::uint32_t, std::string> regionNamesByFormId;
+    // REGN formID -> its RDMP read as a localized string ID, for the plugins
+    // that store one instead of the text (Skyrim; see strings_table.h). The
+    // names above are the raw bytes in that case and are wrong -- Whiterun's
+    // reads "h" -- so a caller holding an asset source resolves these and
+    // overwrites regionNamesByFormId. Empty for every Fallout/Oblivion plugin,
+    // which makes that resolution a no-op rather than a special case.
+    std::unordered_map<std::uint32_t, std::uint32_t> regionNameStringIdsByFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
+    // Every worldspace by formID, with its DNAM default land/water heights
+    // already INHERITED down the WNAM parent chain by
+    // resolveWorldspaceInheritance(). hasDefaultHeights stays false only when
+    // neither the worldspace nor any ancestor declares any, which is every
+    // Oblivion one. See FalloutWorldspaceRecord::hasDefaultHeights for why a
+    // cell with no LAND needs this, and parentWorldspaceFormId for what a
+    // Skyrim city looks like without it.
+    std::unordered_map<std::uint32_t, FalloutWorldspaceRecord> worldspaceDefaultsByFormId;
+
+    [[nodiscard]] const FalloutWorldspaceRecord* findWorldspace(std::uint32_t formId) const {
+        const auto found = worldspaceDefaultsByFormId.find(formId);
+        return found == worldspaceDefaultsByFormId.end() ? nullptr : &found->second;
+    }
+    // MORROWIND REFERENCES NAME THEIR BASE BY STRING, so this is how a placed
+    // reference reaches its model. Lowercased id -> the synthetic formID the
+    // scan handed that record. Empty for every later generation, where a
+    // reference carries the formID directly.
+    std::unordered_map<std::string, std::uint32_t> baseFormIdsByEditorId;
     // LIGH formID -> its light parameters. A LIGH also appears in the maps
     // above when it carries a MODL (29 of 501 do), because the lamp mesh and
     // the light it casts are both wanted.
@@ -62,6 +88,15 @@ struct FalloutWorldTables {
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError);
 
+// As above, across a whole load order. Every plugin's records are rewritten from
+// its own local mod-index space into the order's global one, and a later plugin
+// REPLACES an earlier one's record with the same formID -- which is the whole
+// mechanism an override patch works by. A plugin that fails to read is skipped
+// with a warning rather than failing the build: losing a patch's records is a
+// degraded scene, losing the base game's is no scene.
+bool buildFalloutWorldTables(
+    const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError);
+
 // True for meshes that only make sense alpha-blended or additive: dust, glow
 // billboards, light beams, sand. The imported static path draws opaque, so
 // these render as solid pale sheets standing in the landscape.
@@ -71,6 +106,32 @@ bool buildFalloutWorldTables(
 // SandDust02, which signals its transparency some other way. Skipping is a
 // stopgap for whatever the blended pass does not pick up.
 bool isEffectOnlyModelPath(std::string_view modelPath);
+
+// Stationary Bethesda fire effects are authored as placed effect-only NIFs in
+// both TES4 and TES5. They cannot use the opaque static-mesh path, but their
+// REFR position is exactly the emitter origin a procedural renderer needs.
+bool isFireParticleEffectModelPath(std::string_view modelPath);
+
+// True for the game's own sky objects (Skyrim places sky\clouddistant*.nif and
+// friends as ordinary references in Tamriel's persistent cell). See the
+// definition: drawn as scenery they are a white plane over the landscape.
+bool isSkyOnlyModelPath(std::string_view modelPath);
+
+// Appends this cell's water surface to `outScene`, and reports whether it did.
+//
+// Free rather than a CellSceneBuilder member because the offline cooker builds
+// its ImportedScene directly and does not go through the builder -- the terrain
+// append is already duplicated between the two, and duplicating this as well is
+// how the cooked and streamed worlds drift apart.
+//
+// `worldspace` supplies the implied water height for a cell that states none --
+// resolved up the WNAM parent chain by resolveWorldspaceInheritance(). May be
+// null, which means "no default": a cell with neither an XCLW nor terrain then
+// contributes nothing, rather than a quad at height 0.
+bool appendCellWaterPatch(
+    odai::importer::ImportedScene& outScene,
+    const FalloutCellRecord& cell,
+    const FalloutWorldspaceRecord* worldspace = nullptr);
 
 struct CellBuildStats {
     std::size_t placedInstances = 0;
@@ -94,10 +155,45 @@ struct CellBuildStats {
     std::size_t nifsParsed = 0;
     std::size_t extremeUvShapes = 0;
     std::size_t effectMeshesSkipped = 0;
+    std::size_t particleEmittersPlaced = 0;
+    // Animated banner meshes settled into a deterministic gravity rest pose
+    // with Jolt before their vertices are packed into the scene cache.
+    std::size_t clothMeshesSettled = 0;
+    // REFR header flag 0x800: quest objects hidden until a script enables
+    // them. Skipped, because an unstarted game does not show them -- and some
+    // are worldspace-sized (Skyrim's MG07 blizzard barrier).
+    std::size_t disabledReferencesSkipped = 0;
     // LIGH references turned into ImportedScene lights, and those rejected for
     // having a zero radius (exactly one LIGH in FalloutNV.esm does).
     std::size_t lightsPlaced = 0;
     std::size_t lightsSkippedZeroRadius = 0;
+    // Cells that contributed a water surface. Zero across most of the Mojave
+    // and nonzero along any coast, lake or river.
+    std::size_t waterPatchesEmitted = 0;
+
+    // References that were placed in the cell and then drew nothing.
+    //
+    // Every one of these paths used to `continue` with no counter at all, so
+    // "this town has holes in it" had no way to be asked as a question. They are
+    // split by CAUSE because the causes have opposite fixes: a formID that
+    // resolves to no record is a load-order or remap problem, a record with no
+    // MODL is usually correct (a trigger, a marker, an activator with no mesh),
+    // and a MODL naming a file that is not there is a missing-asset problem.
+    //
+    // Counted per REFERENCE, not per base record, so a hundred placements of one
+    // missing rock read as a hundred holes -- which is what a hole in a town
+    // actually looks like.
+    //
+    // Deliberate skips (effect meshes, editor markers) are NOT counted here;
+    // they have their own counters above and folding them in would bury the
+    // signal in known-good noise.
+    std::size_t referencesDroppedBaseNotFound = 0;
+    std::size_t referencesDroppedBaseHasNoModel = 0;
+    std::size_t referencesDroppedMeshUnresolved = 0;
+    std::size_t referencesDroppedMeshUnreadable = 0;
+    // Base record type -> how many references it dropped, e.g. {"ACTI": 4}.
+    // "<base record not found>" for a formID with no record at all.
+    std::unordered_map<std::string, std::size_t> droppedReferencesByBaseType;
     bool textureBudgetExceeded = false;
 
     // Diagnostic name sets the cooker reports. Kept here rather than dropped in
@@ -128,6 +224,7 @@ public:
     // from addCellStatics, and additive to the lamp mesh rather than instead
     // of it.
     void addCellLight(const FalloutPlacedReference& ref, const FalloutLightRecord& light);
+    void addCellFireEmitter(const FalloutPlacedReference& ref, std::string_view modelPath);
 
     // Convenience for the single-cell (streaming) case.
     void addCell(const FalloutCellRecord& cell) {
@@ -183,7 +280,32 @@ private:
     std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
     std::unordered_set<std::string> m_failedTexturePaths;
     std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
-    std::unordered_set<std::uint32_t> m_failedStatics;
+public:
+    // Why a base record stopped producing geometry, so a REPEAT reference to it
+    // can be attributed to the same cause instead of only the first one being
+    // explained. kIntentional covers the deliberate skips, which are counted
+    // elsewhere and must not be counted again here. Public because
+    // failedStatics() below hands the map to diagnostics.
+    enum class StaticDropReason : std::uint8_t {
+        kIntentional,
+        kBaseNotFound,
+        kBaseHasNoModel,
+        kMeshUnresolved,
+        kMeshUnreadable,
+    };
+
+private:
+    void noteDroppedReference(std::uint32_t baseFormId, StaticDropReason reason);
+    std::unordered_map<std::uint32_t, StaticDropReason> m_failedStatics;
+
+public:
+    // Which base records produced no geometry, and why -- for diagnostics that
+    // want to name the culprits rather than only count them.
+    [[nodiscard]] const std::unordered_map<std::uint32_t, StaticDropReason>& failedStatics() const {
+        return m_failedStatics;
+    }
+
+private:
     std::uint32_t m_fallbackLandTexture = 0xFFFFFFFFu;
     std::size_t m_textureBudget = 1000u;
     std::uint32_t m_maxTextureSize = 512u;

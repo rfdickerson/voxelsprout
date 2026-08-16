@@ -78,3 +78,9 @@ assets/mods
 # is tracked because it is small and generated from data in this repo; these are
 # neither.
 /goodsprings*.bin
+# Agent worktrees (transient)
+.claude/worktrees/
+
+# Python bytecode
+__pycache__/
+*.pyc

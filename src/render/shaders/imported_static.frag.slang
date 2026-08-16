@@ -2,6 +2,7 @@ import camera_uniform;
 import chunk_push_constants;
 import pbr;
 import sh_lighting;
+import light_clusters;
 
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
@@ -21,6 +22,23 @@ Sampler3D<float4> voxelGiVolume;
 [[vk::binding(11, 0)]]
 Sampler3D<float4> voxelGiOccupancyVolume;
 
+// Clustered light culling: one 64-bit mask per cluster, written by
+// light_cluster_cull.comp. See light_clusters.slang.
+[[vk::binding(15, 0)]]
+StructuredBuffer<uint2> clusterLightMask;
+
+// One bit per uploaded local light, produced by the half-resolution contact
+// trace and bilateral full-resolution resolve. The camera flag keeps mapped,
+// RT and legacy scenes from reading stale data when the pass did not run.
+[[vk::binding(16, 0)]]
+StructuredBuffer<uint2> contactShadowMask;
+
+// Quarter-resolution incident radiance plus the representative receiver guide.
+// The main pass performs the bilateral gather so there is no full-resolution
+// GI resolve buffer or extra bandwidth pass.
+[[vk::binding(17, 0)]]
+StructuredBuffer<uint4> screenSpaceGiRecords;
+
 #ifdef ODAI_RT_SHADOWS
 [[vk::binding(12, 0)]]
 RaytracingAccelerationStructure shadowScene;
@@ -33,6 +51,15 @@ static const uint kImportedMaterialFlagAlphaTest = 1u;
 static const uint kImportedMaterialFlagPbr = 4u;
 static const uint kImportedMaterialFlagVertexColorTint = 8u;
 static const uint kImportedMaterialFlagTerrainLayers = 16u;
+// Bits 5 and 6 never affect shading -- the CPU resolves them into a pipeline
+// choice (blend state, cull mode) before the draw is issued, so nothing below
+// reads them. They are declared here only so the MaterialFlags debug view can
+// show what the importer decided, which is the whole question when a surface
+// renders as a black slab where it should be transparent.
+static const uint kImportedMaterialFlagAlphaBlend = 32u;
+static const uint kImportedMaterialFlagTwoSided = 64u;
+// kImportedSceneMaterialFlagUnlit -- BSShaderNoLightingProperty.
+static const uint kImportedMaterialFlagUnlit = 128u;
 static const uint kImportedMaterialRoughnessShift = 8u;
 static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
@@ -114,13 +141,39 @@ struct FragmentInput
     float4 inScreenPosition : SV_Position;
     float3 inWorldPosition : TEXCOORD0;
     float3 inWorldNormal : TEXCOORD1;
-    float3 inColor : TEXCOORD2;
+    // .rgb the authored linear tint, .a the authored vertex alpha. See
+    // ImportedSceneVertex::colorAlpha -- the alpha is what feathers a placed
+    // road into the ground under it, and it multiplies the texture's own alpha
+    // BEFORE the alpha test below.
+    float4 inColor : TEXCOORD2;
     float2 inUv : TEXCOORD3;
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
     nointerpolation uint4 inLayerTextures : TEXCOORD6;
     float4 inLayerWeights : TEXCOORD7;
 };
+
+// A two-sided surface's BACK face has the front face's normal, and nothing
+// downstream fixes it.
+//
+// Fallout marks a great deal of geometry DRAW_BOTH via NiStencilProperty --
+// fences, foliage cards, tent canvas, signs -- and the renderer honours it all
+// the way to a VK_CULL_MODE_NONE pipeline. What it never did was flip the
+// normal, so the back of every one of those surfaces shades with a normal
+// pointing away from the viewer: N.L clamps to zero for any sun in front of it,
+// and the face renders as flat ambient, i.e. near-black, regardless of where
+// the sun is. It reads as "that mesh has a black slab attached to it".
+//
+// Gated on the material flag rather than applied to every backface, because a
+// single-sided mesh only shows one when culling is switched off deliberately
+// (ODAI_DEBUG_NO_CULL) and flipping there would hide the very thing that
+// debug view exists to show.
+float3 resolveShadingNormal(float3 worldNormal, uint flags, bool isFrontFace)
+{
+    const float3 normal = normalize(worldNormal);
+    const bool flip = !isFrontFace && ((flags & kImportedMaterialFlagTwoSided) != 0u);
+    return flip ? -normal : normal;
+}
 
 // Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
 // this mirrors waterScreenUv() in imported_water.frag.slang so the two shaders derive the
@@ -177,7 +230,28 @@ float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDi
     // Distance at which roughly 1/e of the surface's own colour survives. ~15000
     // Bethesda units is a little over 200 m: far enough that near geometry is
     // untouched, close enough that the far ridges of a cooked region sit back.
-    const float kAerialEFoldDistance = 15000.0;
+    //
+    // An authored weather overrides it, because the record knows better: WTHR's
+    // fog-far is the distance the weather is meant to be seen through, and it
+    // ranges over an order of magnitude (25000 units for a toxic haze, 200000
+    // for a clear western sky). Held at the constant, a clear day put Goodsprings
+    // 1500 units away behind the same wall of air as a dust storm.
+    //
+    // The 1.4 pairs with tone_map.frag.slang's volumetric fog, which calibrates
+    // its density the same way: the two atmospheres compose, so each takes half
+    // the optical depth the record asks for at its fog-far distance.
+    const float weatherWeight = saturate(camera.weatherSkyUpper.w);
+    const float authoredFogFar = camera.weatherFog.w;
+    // The DISTANCE is taken from the record whenever one is published, without
+    // the weight -- unlike the colours below, which do lerp. A caller can then
+    // say "this world is seen through 200 km of clear air" while leaving the
+    // procedural sky gradient alone, which is what Oblivion's worldspaces need:
+    // they name no climate, so nothing sets a colour, and the 15000-unit
+    // fallback (~214 m, a dust-storm value) put Anvil behind a wall of milk.
+    // FNV publishes weight 1 whenever it publishes a fog-far at all, so this is
+    // byte-identical there.
+    const float kAerialEFoldDistance =
+        (authoredFogFar > 1.0) ? (authoredFogFar / 1.4) : 15000.0;
     const float3 cameraPosition = camera.shadowVoxelGridSize.xyz;
     const float viewDistance = length(worldPosition - cameraPosition);
     const float3 toSun = -normalize(camera.sunDirectionIntensity.xyz);
@@ -191,7 +265,13 @@ float3 applyAerialPerspective(float3 shaded, float3 worldPosition, float3 viewDi
     // it. pow(,6) keeps the effect close to the sun rather than tinting the
     // whole sky.
     const float sunAlignment = saturate(dot(viewDirection, toSun));
-    const float3 skyInscatter = float3(0.40, 0.56, 0.82);
+    // The haze has to be the colour of the sky it hangs under. This constant is
+    // a clear-blue-sky assumption, and under an authored weather it is simply
+    // the wrong colour -- it washed a sunset town blue-grey while the sky above
+    // it burned orange. WTHR's Fog channel is the authored answer, sampled at
+    // this hour, and weight 0 leaves every other game byte-identical.
+    const float3 skyInscatter =
+        lerp(float3(0.40, 0.56, 0.82), camera.weatherFog.xyz, weatherWeight);
     const float3 sunInscatter = float3(1.00, 0.86, 0.66);
     const float3 inscatterColor =
         lerp(skyInscatter, sunInscatter, pow(sunAlignment, 6.0) * 0.85);
@@ -211,9 +291,28 @@ float4 sampleImportedAlbedo(FragmentInput input)
     const bool disableTextures = chunkPc.cascadeData.z > 0.5;
     if (input.inTextureIndex == kInvalidImportedTextureIndex)
     {
-        return float4(input.inColor, 1.0);
+        // Untextured is not by itself a defect -- terrain quadrants and
+        // vertex-coloured geometry take this path deliberately -- so the
+        // highlight is opt-in rather than the default.
+        if (chunkPc.materialParams.z > 0.5)
+        {
+            return float4(1.0, 0.0, 1.0, 1.0);
+        }
+        return float4(input.inColor.rgb, input.inColor.a);
     }
     float4 sampled = bindlessTextures[input.inTextureIndex].Sample(input.inUv);
+    // VERTEX ALPHA MODULATES TEXTURE ALPHA, and it has to happen before the
+    // test rather than after it. Bethesda feathers a road, path or dirt patch
+    // into the ground with an alpha-TESTED overlay whose texture alpha is
+    // uniform and whose vertex alpha ramps across the fringe; applying it after
+    // the test would keep the hard cut and only fade what survived.
+    //
+    // Mirrored EXACTLY in imported_static_depthonly.frag.slang and
+    // imported_static_normaldepth.frag.slang. The merged depth prepass requires
+    // all three to discard the same fragments -- one of them keeping a fragment
+    // the others cut lays depth main then fails to shade, which renders as a
+    // hole rather than as a disagreement.
+    sampled.a *= input.inColor.a;
     // Fallout's NiAlphaProperty test mode is GREATER: a fragment survives when
     // its alpha is strictly above the authored threshold, so discard on <=.
     if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
@@ -260,11 +359,20 @@ float4 sampleImportedAlbedo(FragmentInput input)
         //
         // Both are no-ops where a layer is fully present or fully absent, so
         // large single-texture areas are untouched.
+        // Both scales come from the uniform (see renderer_shared.h). They were
+        // 220 and 70 world units, which is the trap: VTXT authors one opacity
+        // every 128 units, so noise finer than that displaces a boundary by only
+        // a few tens of units and cannot break up the lattice it is sitting on.
+        // The noise has to be COARSER than the data it is hiding.
         const float2 blendNoiseUv = input.inWorldPosition.xz;
+        const float coarseUnits = max(camera.terrainBlendConfig.y, 1.0);
+        const float fineUnits = max(camera.terrainBlendConfig.z, 1.0);
         const float blendNoise =
-            (terrainBlendNoise(blendNoiseUv * (1.0 / 220.0)) * 0.65) +
-            (terrainBlendNoise(blendNoiseUv * (1.0 / 70.0)) * 0.35);
+            (terrainBlendNoise(blendNoiseUv * (1.0 / coarseUnits)) * 0.65) +
+            (terrainBlendNoise(blendNoiseUv * (1.0 / fineUnits)) * 0.35);
         const float blendNoiseSigned = blendNoise - 0.5;
+        const float blendSharpness = saturate(camera.terrainBlendConfig.x);
+        const float blendNoiseAmount = max(camera.terrainBlendConfig.w, 0.0);
 
         for (uint layer = 0u; layer < 4u; ++layer)
         {
@@ -277,8 +385,22 @@ float4 sampleImportedAlbedo(FragmentInput input)
             // Scaled by how mid-transition the weight is, so the noise cannot
             // punch holes in a fully opaque layer or speckle a fully absent one.
             const float transitionAmount = 1.0 - abs((rawWeight * 2.0) - 1.0);
-            const float perturbed = saturate(rawWeight + (blendNoiseSigned * 0.55 * transitionAmount));
-            const float layerWeight = smoothstep(0.22, 0.78, perturbed);
+            const float perturbed =
+                saturate(rawWeight + (blendNoiseSigned * blendNoiseAmount * transitionAmount));
+            // Blended toward the raw value rather than always applying the
+            // smoothstep. At sharpness 0 this is exactly the authored weight,
+            // which is the control: the ONLY thing that separates "the wedges
+            // are in the LAND data" from "the wedges are this curve amplifying
+            // a piecewise-linear field" is being able to turn the curve off.
+            //
+            // Sharpening is why they appear. rawWeight is interpolated linearly
+            // across a triangle, so its iso-contours kink at every triangle
+            // edge; compressing the transition into a narrow band magnifies
+            // those kinks into visible facets, and the noise that should hide
+            // them is scaled by transitionAmount, which decays to zero exactly
+            // where the contour is sharpest.
+            const float layerWeight =
+                lerp(perturbed, smoothstep(0.22, 0.78, perturbed), blendSharpness);
             if (layerWeight <= 0.0)
             {
                 continue;
@@ -289,7 +411,7 @@ float4 sampleImportedAlbedo(FragmentInput input)
     }
     if (disableTextures)
     {
-        return float4(input.inColor, 1.0);
+        return float4(input.inColor.rgb, input.inColor.a);
     }
     // Vertex color modulates a textured surface only where the cooker says the
     // color is authored data (kImportedSceneMaterialFlagVertexColorTint). For
@@ -309,7 +431,7 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // albedo at the early-out above.
     if ((input.inFlags & kImportedMaterialFlagVertexColorTint) != 0u)
     {
-        return float4(sampled.rgb * input.inColor, sampled.a);
+        return float4(sampled.rgb * input.inColor.rgb, sampled.a);
     }
     return sampled;
 }
@@ -507,6 +629,81 @@ float sampleRayTracedDirectionalShadow(float3 worldPosition, float3 normal, floa
 }
 #endif
 
+int interiorPointShadowFace(float3 lightToReceiver)
+{
+    const float3 a = abs(lightToReceiver);
+    if (a.x >= a.y && a.x >= a.z)
+    {
+        return lightToReceiver.x >= 0.0 ? 0 : 1;
+    }
+    if (a.y >= a.z)
+    {
+        return lightToReceiver.y >= 0.0 ? 2 : 3;
+    }
+    return lightToReceiver.z >= 0.0 ? 4 : 5;
+}
+
+float sampleInteriorPointShadowMap(
+    int lightIndex,
+    float3 worldPosition,
+    float3 normal,
+    float3 lightPosition,
+    float lightRadius,
+    float ndotl)
+{
+    if (camera.interiorPointShadowParams.w < 0.5)
+    {
+        return 1.0;
+    }
+    const int slotCount = clamp(int(camera.interiorPointShadowParams.x + 0.5), 0, 35);
+    const int shadowSlot = int(
+        camera.interiorPointShadowLightIndices[lightIndex >> 2][lightIndex & 3] + 0.5);
+    if (shadowSlot < 0 || shadowSlot >= slotCount)
+    {
+        return 1.0;
+    }
+
+    const float receiverOffset = max(1.5, lightRadius * 0.0025) * (1.0 + (1.0 - ndotl));
+    const float3 samplePosition = worldPosition + (normal * receiverOffset);
+    const float3 lightToReceiver = samplePosition - lightPosition;
+    const int face = interiorPointShadowFace(lightToReceiver);
+    const int matrixIndex = (shadowSlot * 6) + face;
+    const float4 shadowClip = mul(
+        camera.interiorPointShadowViewProj[matrixIndex],
+        float4(samplePosition, 1.0));
+    if (shadowClip.w <= 0.0)
+    {
+        return 1.0;
+    }
+    const float3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    float2 localUv = (shadowNdc.xy * 0.5) + 0.5;
+    if (any(localUv <= 0.0) || any(localUv >= 1.0) ||
+        shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0)
+    {
+        return 1.0;
+    }
+
+    const float faceScale = camera.interiorPointShadowParams.y;
+    const float texel = camera.interiorPointShadowParams.z;
+    // Keep the compare footprint inside its face. Adjacent faces share the
+    // atlas image but not a projection, so crossing that edge is invalid.
+    const float localInset = texel / max(faceScale, 1e-6);
+    localUv = clamp(localUv, localInset, 1.0 - localInset);
+    // Five 3x2 cubemap tiles fit per row at 256px faces in a 4096 atlas.
+    // Derive the count from the published face scale so CPU and shader cannot
+    // silently disagree if the atlas or face size changes together.
+    const int cubesPerRow = max(1, int(1.0 / (3.0 * faceScale)));
+    const float2 tileOrigin = float2(
+        float(shadowSlot % cubesPerRow) * (3.0 * faceScale),
+        float(shadowSlot / cubesPerRow) * (2.0 * faceScale));
+    const float2 faceOrigin = float2(face % 3, face / 3) * faceScale;
+    const float2 atlasUv = tileOrigin + faceOrigin + (localUv * faceScale);
+    // Reverse-Z comparison: increasing the receiver reference moves it toward
+    // the light and suppresses self-shadowing acne.
+    const float depthBias = 0.0012 + ((1.0 - ndotl) * 0.0018);
+    return shadowMap.SampleCmpLevelZero(atlasUv, shadowNdc.z + depthBias);
+}
+
 // Diffuse contribution of the local point lights, and — for surfaces that opted
 // into a PBR material — their specular highlights accumulated into outSpecular.
 // Non-PBR surfaces pass applySpecular=false and get exactly the pre-PBR result.
@@ -517,6 +714,8 @@ float3 evaluateImportedLocalLights(
     float3 albedo,
     PbrSurface surface,
     bool applySpecular,
+    float2 screenPosition,
+    float viewDepth,
     inout float3 outSpecular)
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
@@ -526,11 +725,50 @@ float3 evaluateImportedLocalLights(
         return float3(0.0, 0.0, 0.0);
     }
 
+    // CLUSTERED (Forward+): iterate only the lights the cull pass says reach
+    // this fragment's cluster, found from SV_Position and view depth. The
+    // fallback walks all of them, and is what runs when the cull pass did not
+    // (grid dimensions zero -- see lightClustersActive) so a missing mask can
+    // only ever cost performance, never light.
+    uint2 mask;
+    if (lightClustersActive())
+    {
+        mask = clusterLightMask[lightClusterIndexForFragment(screenPosition, viewDepth)];
+    }
+    else
+    {
+        const uint low = (lightCount >= 32) ? 0xffffffffu : ((1u << uint(lightCount)) - 1u);
+        const uint high = (lightCount > 32) ? ((1u << uint(lightCount - 32)) - 1u) : 0u;
+        mask = uint2(low, high);
+    }
+
+    uint2 contactMask = uint2(0u, 0u);
+    if (camera.contactShadowConfig.z > 0.5)
+    {
+        const uint2 contactExtent = max(
+            uint2(camera.contactShadowConfig.xy + 0.5), uint2(1u, 1u));
+        const uint2 contactPixel = min(uint2(screenPosition), contactExtent - 1u);
+        contactMask = contactShadowMask[
+            contactPixel.y * contactExtent.x + contactPixel.x];
+    }
+
     float3 lighting = float3(0.0, 0.0, 0.0);
     [loop]
-    for (int lightIndex = 0; lightIndex < 64; ++lightIndex)
+    while ((mask.x | mask.y) != 0u)
     {
-        if (lightIndex >= lightCount) break;
+        // Lowest set bit first, then clear it: the loop runs exactly as many
+        // times as there are lights in this cluster, with no per-slot test.
+        int lightIndex;
+        if (mask.x != 0u)
+        {
+            lightIndex = int(firstbitlow(mask.x));
+            mask.x &= mask.x - 1u;
+        }
+        else
+        {
+            lightIndex = 32 + int(firstbitlow(mask.y));
+            mask.y &= mask.y - 1u;
+        }
         const float4 positionRadius = camera.importedLightPositionRadius[lightIndex];
         const float4 colorIntensity = camera.importedLightColorIntensity[lightIndex];
         const float3 toLight = positionRadius.xyz - worldPosition;
@@ -560,7 +798,22 @@ float3 evaluateImportedLocalLights(
             lightDirection,
             distanceToLight,
             ndotl);
+#else
+        visibility = sampleInteriorPointShadowMap(
+            lightIndex,
+            worldPosition,
+            normal,
+            positionRadius.xyz,
+            radius,
+            ndotl);
 #endif
+        const uint contactBit = lightIndex < 32
+            ? ((contactMask.x >> uint(lightIndex)) & 1u)
+            : ((contactMask.y >> uint(lightIndex - 32)) & 1u);
+        if (contactBit != 0u)
+        {
+            visibility = 0.0;
+        }
         // Left exactly as it was pre-PBR, factoring included: this expression is
         // the legacy path for every surface without a material, and a reassociation
         // here would shift existing scenes by an ULP for no reason.
@@ -619,7 +872,13 @@ int chooseShadowCascade(float viewDepth)
     return 3;
 }
 
-float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIndex, float ndotl)
+// `singleTap` takes ONE comparison instead of the 3x3. Only the cascade blend
+// passes it: that result is immediately lerped against the near cascade's full
+// kernel across a band that exists to hide the seam, so nine taps there buy a
+// softness nothing can see. Both call sites pass a literal, so the branch folds
+// away in each inlined copy.
+float sampleImportedShadowPcf(
+    float3 worldPosition, float3 normal, int cascadeIndex, float ndotl, bool singleTap)
 {
     const float cascadeT = float(cascadeIndex) / 3.0;
     const float normalOffset =
@@ -642,14 +901,21 @@ float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIn
         return 1.0;
     }
 
-    uint texW = 0;
-    uint texH = 0;
-    shadowMap.GetDimensions(texW, texH);
-    const float2 texelSize = 1.0 / float2(float(texW), float(texH));
+    // From the uniform, NOT shadowMap.GetDimensions(). That query lowers to a
+    // resinfo message the compiler will not hoist out of the fragment, and the
+    // cascade blend below calls this function twice: 1.79 ms of the main pass
+    // on Whiterun at 1080p, for a value that is a compile-time constant on the
+    // CPU. See CameraUniform::shadowAtlasConfig.
+    const float2 texelSize = float2(camera.shadowAtlasConfig.x, camera.shadowAtlasConfig.x);
     const float texelScale = max(texelSize.x, texelSize.y);
     const float bias =
         lerp(camera.shadowConfig0.z, camera.shadowConfig0.w, cascadeT) * texelScale +
         lerp(camera.shadowConfig1.x, camera.shadowConfig1.y, cascadeT) * texelScale * (1.0 - ndotl);
+    if (singleTap)
+    {
+        return shadowMap.SampleCmpLevelZero(shadowUv, shadowDepthRef + bias);
+    }
+
     const int kernelRadius = clamp(int(camera.shadowConfig3.w + 0.5), 1, 3);
 
     float visibility = 0.0;
@@ -703,7 +969,7 @@ float sampleImportedShadowPcf(float3 worldPosition, float3 normal, int cascadeIn
 float sampleImportedCascadedShadow(float3 worldPosition, float3 normal, float viewDepth, float ndotl)
 {
     const int primaryCascade = chooseShadowCascade(viewDepth);
-    float shadow = sampleImportedShadowPcf(worldPosition, normal, primaryCascade, ndotl);
+    float shadow = sampleImportedShadowPcf(worldPosition, normal, primaryCascade, ndotl, false);
     if (primaryCascade >= 3) return shadow;
 
     const float prevSplit = (primaryCascade == 0) ? 0.0 : camera.shadowCascadeSplits[primaryCascade - 1];
@@ -712,17 +978,276 @@ float sampleImportedCascadedShadow(float3 worldPosition, float3 normal, float vi
     const float blendT = smoothstep(split - blendRange, split, viewDepth);
     if (blendT <= 0.0) return shadow;
 
-    const float nextShadow = sampleImportedShadowPcf(worldPosition, normal, primaryCascade + 1, ndotl);
+    // Single tap: this is the whole cost of the blend band, and the band is a
+    // crossfade. Measured on Whiterun at 1080p, 9 taps -> 1 tap here took the
+    // main pass 17.15 -> 15.13 ms; removing the blend entirely reached only
+    // 14.41, i.e. this recovers three quarters of it and keeps the seam hidden.
+    const float nextShadow =
+        sampleImportedShadowPcf(worldPosition, normal, primaryCascade + 1, ndotl, true);
     return lerp(shadow, nextShadow, blendT);
 }
 
-float4 main(FragmentInput input) : SV_Target0
+// DebugView in src/render/renderer_types.h; change both together. Off is 0 and
+// LinearDepth (10) belongs to the post pass, so nothing here handles it.
+static const uint kDebugViewOff = 0u;
+static const uint kDebugViewAlbedo = 1u;
+static const uint kDebugViewNormal = 2u;
+static const uint kDebugViewAlpha = 3u;
+static const uint kDebugViewMaterialFlags = 4u;
+static const uint kDebugViewRoughness = 5u;
+static const uint kDebugViewMetallic = 6u;
+static const uint kDebugViewMipLevel = 7u;
+static const uint kDebugViewCascadeIndex = 8u;
+static const uint kDebugViewTextureId = 9u;
+static const uint kDebugViewShadow = 11u;
+static const uint kDebugViewDirectRatio = 12u;
+static const uint kDebugViewTerrainLayers = 13u;
+static const uint kDebugViewAmbientOcclusion = 14u;
+static const uint kDebugViewScreenSpaceGi = 15u;
+
+float3 unpackScreenSpaceGiNormal(uint packed)
 {
+    const uint2 encoded = uint2(packed & 0xffffu, packed >> 16u);
+    float2 oct = (float2(encoded) / 65535.0) * 2.0 - 1.0;
+    float3 decoded = float3(oct, 1.0 - abs(oct.x) - abs(oct.y));
+    if (decoded.z < 0.0)
+    {
+        decoded.xy = (1.0 - abs(decoded.yx)) *
+            select(decoded.xy >= 0.0, float2(1.0, 1.0), float2(-1.0, -1.0));
+    }
+    return normalize(decoded);
+}
+
+float3 unpackScreenSpaceGiIrradiance(uint2 packed)
+{
+    return float3(
+        f16tof32(packed.x & 0xffffu),
+        f16tof32(packed.x >> 16u),
+        f16tof32(packed.y & 0xffffu));
+}
+
+float3 sampleImportedScreenSpaceGi(
+    float2 screenPosition, float viewDepth, float3 worldNormal)
+{
+    if (camera.screenSpaceGiConfig.z <= 0.5)
+    {
+        return float3(0.0, 0.0, 0.0);
+    }
+    const uint2 extent = max(
+        uint2(camera.screenSpaceGiConfig.xy + 0.5), uint2(1u, 1u));
+    const float2 recordPosition = (screenPosition - 2.5) * 0.25;
+    const int2 base = int2(floor(recordPosition));
+    const float2 fraction = frac(recordPosition);
+    float3 accumulated = float3(0.0, 0.0, 0.0);
+    float weightSum = 0.0;
+    [unroll]
+    for (int y = 0; y < 2; ++y)
+    {
+        [unroll]
+        for (int x = 0; x < 2; ++x)
+        {
+            const int2 pixel = clamp(base + int2(x, y), int2(0, 0), int2(extent) - 1);
+            const uint4 record = screenSpaceGiRecords[
+                uint(pixel.y) * extent.x + uint(pixel.x)];
+            const float candidateDepth = asfloat(record.z);
+            if (candidateDepth <= 1e-4)
+            {
+                continue;
+            }
+            const float depthLimit = max(8.0, viewDepth * 0.01);
+            if (abs(candidateDepth - viewDepth) > depthLimit ||
+                dot(unpackScreenSpaceGiNormal(record.w), worldNormal) < 0.75)
+            {
+                continue;
+            }
+            const float weightX = x == 0 ? (1.0 - fraction.x) : fraction.x;
+            const float weightY = y == 0 ? (1.0 - fraction.y) : fraction.y;
+            const float weight = max(weightX * weightY, 1e-4);
+            accumulated += unpackScreenSpaceGiIrradiance(record.xy) * weight;
+            weightSum += weight;
+        }
+    }
+    return weightSum > 0.0 ? accumulated / weightSum : float3(0.0, 0.0, 0.0);
+}
+
+// A blue->green->yellow->red ramp for scalar views. Monotonic in luminance as
+// well as in hue, so it stays readable for someone who cannot separate the red
+// and green ends -- the value is legible from brightness alone.
+float3 debugRamp(float t)
+{
+    const float s = saturate(t);
+    const float3 cold = lerp(float3(0.05, 0.10, 0.55), float3(0.10, 0.75, 0.35), saturate(s * 2.0));
+    const float3 warm = lerp(float3(0.95, 0.85, 0.15), float3(0.85, 0.10, 0.10), saturate((s - 0.5) * 2.0));
+    return (s < 0.5) ? cold : warm;
+}
+
+// Every view returns a display-ready colour: the post pass skips exposure,
+// tonemapping and grading whenever a debug view is active, so what is returned
+// here reaches the screen through nothing but the sRGB encode.
+float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewDepth)
+{
+    const bool textured = input.inTextureIndex != kInvalidImportedTextureIndex;
+    // Sampled WITHOUT the alpha-test discard in sampleImportedAlbedo. That
+    // discard is exactly what these views exist to inspect, so running it first
+    // would throw away every texel worth looking at.
+    const float4 raw = textured
+        ? bindlessTextures[input.inTextureIndex].Sample(input.inUv)
+        : float4(input.inColor.rgb, input.inColor.a);
+
+    if (view == kDebugViewAlbedo)
+    {
+        return float4(raw.rgb, 1.0);
+    }
+    if (view == kDebugViewNormal)
+    {
+        return float4((normal * 0.5) + 0.5, 1.0);
+    }
+    if (view == kDebugViewAlpha)
+    {
+        // Untextured geometry has no alpha channel to show. Flat magenta rather
+        // than white, so "this surface cannot answer the question" never reads
+        // as "this surface is fully opaque".
+        if (!textured)
+        {
+            return float4(0.6, 0.0, 0.6, 1.0);
+        }
+        return float4(raw.aaa, 1.0);
+    }
+    if (view == kDebugViewTerrainLayers)
+    {
+        // Deliberately the RAW authored weights, with none of the noise
+        // perturbation or smoothstep the lit path applies below. That is what
+        // makes this an instrument: if a path boundary is wedge-shaped HERE it
+        // is in the LAND data, and if it is smooth here and faceted in the lit
+        // frame it is the stylization.
+        if ((input.inFlags & kImportedMaterialFlagTerrainLayers) == 0u)
+        {
+            // Not terrain, or terrain with a base texture and nothing painted
+            // over it. Near-black rather than black so it stays distinguishable
+            // from the background, exactly as the material-flags view does.
+            return float4(0.06, 0.06, 0.07, 1.0);
+        }
+        float3 color = float3(0.0, 0.0, 0.0);
+        float covered = 0.0;
+        for (uint layer = 0u; layer < 3u; ++layer)
+        {
+            if (input.inLayerTextures[layer] == kInvalidImportedTextureIndex)
+            {
+                continue;
+            }
+            const float weight = saturate(input.inLayerWeights[layer]);
+            color[layer] = weight;
+            covered = max(covered, weight);
+        }
+        // The BTXT base showing through, as grey: without it a post where every
+        // layer is absent and one where they are all present read the same.
+        const float baseVisible = 1.0 - covered;
+        color += float3(0.35, 0.35, 0.35) * baseVisible;
+        // A fourth layer exists in the format and has no channel left. Flag it
+        // rather than dropping it silently, since "the fourth layer is doing
+        // the thing I am looking at" is exactly the case this would hide.
+        if (input.inLayerTextures[3] != kInvalidImportedTextureIndex &&
+            input.inLayerWeights[3] > 0.0)
+        {
+            color = lerp(color, float3(1.0, 1.0, 0.0), saturate(input.inLayerWeights[3]));
+        }
+        return float4(saturate(color), 1.0);
+    }
+    if (view == kDebugViewMaterialFlags)
+    {
+        float3 color = float3(0.0, 0.0, 0.0);
+        if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u) { color.r += 0.9; }
+        if ((input.inFlags & kImportedMaterialFlagAlphaBlend) != 0u) { color.g += 0.9; }
+        if ((input.inFlags & kImportedMaterialFlagTwoSided) != 0u) { color.b += 0.9; }
+        if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u) { color.rg += 0.5; }
+        // Dark grey, not black: a surface with no material flags at all is the
+        // most important case this view reports, and it must be distinguishable
+        // from the background rather than blending into it.
+        if (all(color == float3(0.0, 0.0, 0.0))) { color = float3(0.12, 0.12, 0.14); }
+        return float4(saturate(color), 1.0);
+    }
+    if (view == kDebugViewRoughness || view == kDebugViewMetallic)
+    {
+        float3 tint = float3(1.0, 1.0, 1.0);
+        float3 emissive = float3(0.0, 0.0, 0.0);
+        const PbrSurface surface = resolveImportedMaterial(input.inFlags, tint, emissive);
+        const float value = (view == kDebugViewRoughness) ? surface.roughness : surface.metallic;
+        return float4(debugRamp(value), 1.0);
+    }
+    if (view == kDebugViewMipLevel)
+    {
+        if (!textured)
+        {
+            return float4(0.6, 0.0, 0.6, 1.0);
+        }
+        // Answers whether a blurry surface is a mip-selection problem or simply
+        // a low-resolution source. Ramped over 8 levels, which covers the whole
+        // chain of a 512-1024px Fallout texture.
+        const float lod = bindlessTextures[input.inTextureIndex].CalculateLevelOfDetail(input.inUv);
+        return float4(debugRamp(lod / 8.0), 1.0);
+    }
+    if (view == kDebugViewCascadeIndex)
+    {
+        const int cascade = chooseShadowCascade(viewDepth);
+        return float4(debugRamp(float(cascade) / 3.0), 1.0);
+    }
+    if (view == kDebugViewTextureId)
+    {
+        if (!textured)
+        {
+            return float4(0.6, 0.0, 0.6, 1.0);
+        }
+        // Hashed rather than ramped: adjacent bindless slots are unrelated
+        // surfaces, so neighbouring values must look different, not similar.
+        const uint h = (input.inTextureIndex * 2654435761u) ^ 0x9e3779b9u;
+        return float4(
+            float((h >> 0u) & 0xffu) / 255.0,
+            float((h >> 8u) & 0xffu) / 255.0,
+            float((h >> 16u) & 0xffu) / 255.0,
+            1.0);
+    }
+    return float4(1.0, 0.0, 1.0, 1.0);
+}
+
+float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
+{
+    // Debug views replace the frame outright and deliberately run before the
+    // unlit early-out and every lighting term below -- an "albedo" view that
+    // still went through the self-lit branch would not be albedo.
+    const uint debugView = uint(camera.tonemapConfig2.y + 0.5);
+    // Shadow and DirectRatio are the exceptions: their inputs do not exist yet,
+    // so they are handled further down instead of here. Without this they fall
+    // into debugViewColor(), which does not know them and returns its default --
+    // and two different views then render identically, which is exactly how
+    // that mistake presents.
+    if (debugView != kDebugViewOff && debugView != kDebugViewShadow &&
+        debugView != kDebugViewDirectRatio && debugView != kDebugViewAmbientOcclusion &&
+        debugView != kDebugViewScreenSpaceGi)
+    {
+        const float3 debugNormal =
+            resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
+        const float debugViewDepth =
+            max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
+        return debugViewColor(input, debugView, debugNormal, debugViewDepth);
+    }
     const float4 albedoFull = sampleImportedAlbedo(input);
     if (chunkPc.cascadeData.w > 0.5) {
         return float4(saturate(albedoFull.rgb * 1.25), 1.0);
     }
-    const float3 normal = normalize(input.inWorldNormal);
+    // Self-lit surfaces bypass shading entirely: a CRT screen or a neon tube
+    // is a light source, and running it through the diffuse chain leaves it as
+    // dark as whatever happens to be falling on it. Placed before the normal is
+    // even read, because none of the shading below applies to one.
+    //
+    // The albedo is authored display-referred, like every other Fallout
+    // texture, so it is scaled toward the exposure the rest of the scene sits
+    // at rather than emitted at 1.0 -- which on an auto-exposed HDR frame keyed
+    // to a sunlit desert would read as a dim grey card, not a lit screen.
+    if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u)
+    {
+        return float4(albedoFull.rgb * 3.0, albedoFull.a);
+    }
+    const float3 normal = resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
     // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)
     // read as exposed rock or lighter cliff stone; flat faces are unaffected.
     // The welded terrain's smooth normals make this correct at elevation transitions.
@@ -768,8 +1293,10 @@ float4 main(FragmentInput input) : SV_Target0
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
     const float wrappedNdotL = saturate((ndotl * 0.65) + 0.35);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
+    const bool interiorMode = chunkPc.cascadeData.y > 0.5;
+    const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;
     float shadowVisibility = 1.0;
-    if (ndotl > 0.0001)
+    if (!authoredInterior && ndotl > 0.0001)
     {
 #ifdef ODAI_RT_SHADOWS
         shadowVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, normal, ndotl);
@@ -777,11 +1304,11 @@ float4 main(FragmentInput input) : SV_Target0
         shadowVisibility = sampleImportedCascadedShadow(input.inWorldPosition, normal, viewDepth, ndotl);
 #endif
     }
-    const bool interiorMode = chunkPc.cascadeData.y > 0.5;
+
     const float3 skyProbeNormal = float3(0.0, 1.0, 0.0);
     const float skyProbeNdotL = max(dot(skyProbeNormal, -sunDirection), 0.25);
     float skyVisibility = 1.0;
-    if (interiorMode)
+    if (interiorMode && !authoredInterior)
     {
 #ifdef ODAI_RT_SHADOWS
         skyVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, skyProbeNormal, skyProbeNdotL);
@@ -794,11 +1321,27 @@ float4 main(FragmentInput input) : SV_Target0
     // to 1.0 here — see docs/stylized_low_poly.md). Scoped to ambient only, not direct
     // sun, so sunlit faces stay clean instead of muddying under an AO halo.
     const float ambientOcclusion =
-        (interiorMode ? lerp(0.28, 1.0, skyVisibility) : 1.0) * sampleSsaoAmbientFactor(input.inScreenPosition);
-    const float3 ambient =
-        (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.18, 0.19, 0.21)) +
+        ((interiorMode && !authoredInterior) ? lerp(0.28, 1.0, skyVisibility) : 1.0) *
+        sampleSsaoAmbientFactor(input.inScreenPosition);
+    // THE EXTERIOR FLOOR IS WHAT HID THE SHADOWS. It is added unconditionally,
+    // so it is light a shadow cannot take away: at 0.18-0.21 it set a floor no
+    // occluder could darken past, and putting EVERY pixel in full shadow moved
+    // the frame by only 3.9% RMSE. The shadow maps were correct the whole time
+    // (see the atlas dump); there was simply almost no direct light to remove.
+    //
+    // Kept nonzero deliberately -- a shadow that reaches pure black reads as a
+    // hole, and the Mojave's sky bounce is real -- but it is now small next to
+    // the sky irradiance that varies with the weather and the hour, rather than
+    // dominating it.
+    const float3 legacyAmbient =
+        (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.055, 0.060, 0.070)) +
         (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));
-    const float3 voxelGi = interiorMode
+    const float3 ambient = authoredInterior
+        ? camera.interiorAmbient.xyz +
+            ((camera.interiorDirectional.w > 0.5) ? ambientIrradiance * float3(0.92, 0.95, 1.00) * 0.22
+                                                   : float3(0.0, 0.0, 0.0))
+        : legacyAmbient;
+    const float3 voxelGi = (interiorMode && !authoredInterior)
         ? sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35
         : float3(0.0, 0.0, 0.0);
     const float3 voxelGiDebug = sampleImportedVoxelGiDebug(input.inWorldPosition, normal);
@@ -855,8 +1398,10 @@ float4 main(FragmentInput input) : SV_Target0
             albedo,
             surface,
             usePbr,
+            input.inScreenPosition.xy,
+            viewDepth,
             specular) *
-        (interiorMode ? 1.25 : 1.0);
+        ((interiorMode && !authoredInterior) ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
 
     // wrappedNdotL is ndotl*0.65 + 0.35: a true-cosine core plus a constant
@@ -872,19 +1417,72 @@ float4 main(FragmentInput input) : SV_Target0
     const float directCore = ndotl * 0.65;
     const float directFill = max(wrappedNdotL - directCore, 0.0);
     const float occludedWrap = directCore + (directFill * ambientOcclusion);
-    const float3 direct =
-        camera.sunColorShadow.xyz *
-        (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.62));
-    const float3 diffuseLight = (ambient * ambientOcclusion) + voxelGi + direct + importedLights;
+    const float3 direct = authoredInterior
+        ? camera.interiorDirectional.xyz * occludedWrap
+        : camera.sunColorShadow.xyz *
+            (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.95));
+    float3 screenSpaceGi = (authoredInterior &&
+        (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u)
+        ? sampleImportedScreenSpaceGi(input.inScreenPosition.xy, viewDepth, normal) *
+            camera.screenSpaceGiConfig.w
+        : float3(0.0, 0.0, 0.0);
+    const float3 directAndAmbient =
+        (ambient * ambientOcclusion) + direct + importedLights;
+    const float lightingLuma = dot(
+        directAndAmbient, float3(0.2126, 0.7152, 0.0722));
+    const float giLuma = dot(screenSpaceGi, float3(0.2126, 0.7152, 0.0722));
+    const float giLimit = 0.35 * (lightingLuma + 0.05);
+    screenSpaceGi *= min(1.0, giLimit / max(giLuma, 1e-5));
+    const float3 diffuseLight = directAndAmbient + voxelGi + screenSpaceGi;
+
+    // Lighting-balance views. Here rather than in debugViewColor() because
+    // neither input exists until this point.
+    // Ambient occlusion on its own, as a clay render: white is unoccluded, dark
+    // is occluded, and nothing else -- no albedo, no sun, no tonemap. Every
+    // other way of looking at AO measures it THROUGH the ambient term, which is
+    // albedo-weighted, so a bright texel darkens more than a dark one and the
+    // difference image comes out looking like the diffuse texture. That makes
+    // "is the AO wrong" and "is the texture busy" the same picture. This
+    // separates them.
+    //
+    // Computed here rather than in debugViewColor() for the same reason Shadow
+    // and DirectRatio are: the value does not exist until the ambient term has
+    // been evaluated, so a view that forgets the early-out exemption above
+    // falls through and renders as some other view entirely.
+    if (debugView == kDebugViewAmbientOcclusion)
+    {
+        const float ao = sampleSsaoAmbientFactor(input.inScreenPosition);
+        return float4(ao, ao, ao, 1.0);
+    }
+    if (debugView == kDebugViewScreenSpaceGi)
+    {
+        const float peak = max(max(screenSpaceGi.x, screenSpaceGi.y), screenSpaceGi.z);
+        const float3 hue = peak > 1e-5 ? screenSpaceGi / peak : float3(0.0, 0.0, 0.0);
+        const float intensity = saturate(log2(1.0 + peak * 16.0) * 0.25);
+        return float4(hue * intensity, 1.0);
+    }
+    if (debugView == kDebugViewShadow)
+    {
+        return float4(shadowVisibility, shadowVisibility, shadowVisibility, 1.0);
+    }
+    if (debugView == kDebugViewDirectRatio)
+    {
+        const float directLuma = dot(direct, float3(0.299, 0.587, 0.114));
+        const float ambientLuma =
+            dot(ambient * ambientOcclusion, float3(0.299, 0.587, 0.114));
+        const float ratio = directLuma / max(directLuma + ambientLuma, 1e-5);
+        return float4(ratio, ratio, ratio, 1.0);
+    }
 
     if (usePbr)
     {
         // Sun specular uses the same radiance and shadow term the diffuse sun
         // does, minus the wrapped-NdotL softening (that wrap is a diffuse
         // stylization; a specular lobe wrapped past the terminator reads wrong).
-        const float3 sunRadiance =
-            camera.sunColorShadow.xyz *
-            (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+        const float3 sunRadiance = authoredInterior
+            ? camera.interiorDirectional.xyz
+            : camera.sunColorShadow.xyz *
+                (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
         // kPbrDiffuseConventionScale converts pbrDirectSpecular's normalized BRDF
         // into the same units as the `direct` diffuse term above, which omits the
         // Lambert 1/pi. Without it a metal loses all of its diffuse to
@@ -920,6 +1518,13 @@ float4 main(FragmentInput input) : SV_Target0
     if (!interiorMode)
     {
         shaded = applyAerialPerspective(shaded, input.inWorldPosition, -viewDir);
+    }
+    else if (authoredInterior && camera.interiorFogRange.y > camera.interiorFogRange.x + 0.001)
+    {
+        const float fogFactor = saturate(
+            (viewDepth - camera.interiorFogRange.x) /
+            (camera.interiorFogRange.y - camera.interiorFogRange.x));
+        shaded = lerp(shaded, camera.interiorFog.xyz, fogFactor);
     }
 
     // Fog-of-war visibility blend. Only applied when the fog map is active

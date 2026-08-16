@@ -24,8 +24,19 @@ struct VertexOutput
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
-    const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
-    output.position = mul(camera.lightViewProj[cascadeIndex], float4(input.inPosition, 1.0));
+    const bool pointShadowFace = chunkPc.cascadeData.y > 0.5;
+    if (pointShadowFace)
+    {
+        const int faceIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 209);
+        output.position = mul(
+            camera.interiorPointShadowViewProj[faceIndex],
+            float4(input.inPosition, 1.0));
+    }
+    else
+    {
+        const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
+        output.position = mul(camera.lightViewProj[cascadeIndex], float4(input.inPosition, 1.0));
+    }
     output.outUv = input.inUv;
     output.outTextureIndex = input.inTextureIndex;
     output.outFlags = input.inFlags;

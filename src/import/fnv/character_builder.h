@@ -13,7 +13,9 @@
 // deliberately knows nothing about the engine's types, so it stays testable
 // against raw bytes alone. This file is where engine types enter.
 
+#include "anim/animation_clip.h"
 #include "anim/skeleton.h"
+#include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 #include "math/math.h"
@@ -36,6 +38,8 @@ struct FalloutCharacterPart {
     std::uint8_t alphaThreshold = 128;
     bool alphaBlend = false;
     bool twoSided = false;
+    // BSShaderNoLightingProperty -- see NifShape::unlit.
+    bool unlit = false;
 };
 
 // A character assembled and ready to upload. vertices/indices are one merged
@@ -93,6 +97,63 @@ bool buildFalloutSkeleton(const NifSkeleton& source, anim::Skeleton& outSkeleton
 // several calls share one skeleton and one bone-matrix array.
 bool appendFalloutCharacterMesh(
     const NifSkinnedModel& model, FalloutCharacter& character, std::string& outError);
+
+// Attaches a NON-skinned body part to the bone that shares its root node name.
+//
+// Not every body part in a creature's NIFZ list is weighted geometry. Fallout
+// parents rigid props to a bone instead -- Victor's face screen is one, and its
+// NIF's root node is literally called "Screen01Root", which is a bone in
+// creatures\NVSecuritron\Skeleton.nif. appendFalloutCharacterMesh rejects such
+// a part ("no skinned shapes") and it is simply never drawn, which is how a
+// Securitron ends up with an empty black box for a head.
+//
+// `rootNodeName` is the part NIF's own root node, which parseNifSkeleton
+// reports; `model` is the same bytes through parseNifStaticMesh.
+//
+// The vertices are weighted 1.0 to that bone, and baked through the INVERSE of
+// the bone's stored inverse-bind so the skinning product comes back out as
+// "rigidly parented to the bone" (the derivation is in the .cc). That reads the
+// shared inverseBindMatrices entry without writing it, so no skinned shape's
+// binding is disturbed.
+//
+// Emitting these unweighted instead -- which an earlier version did, on the
+// grounds that nothing animated yet -- is not a neutral choice: the skinning
+// shader passes an unweighted vertex through at its authored position, so the
+// part misses the actor's world placement as well as its pose and draws at the
+// world origin.
+bool appendFalloutCharacterRigidMesh(
+    const NifModel& model,
+    const std::string& rootNodeName,
+    FalloutCharacter& character,
+    std::string& outError);
+
+struct FalloutAnimationStats {
+    std::size_t tracks = 0;
+    // Tracks whose node name matched a bone in the skeleton.
+    std::size_t boundTracks = 0;
+    // Tracks naming a node this skeleton does not have. Normal in small
+    // numbers: a .kf targets weapon and accumulation nodes ("Bip01 NonAccum",
+    // "Bip01 MachineGunBarrel00") that a given creature's skeleton may omit.
+    std::size_t unresolvedNodes = 0;
+};
+
+// Converts a parsed .kf into an AnimationClip posed against `skeleton`.
+//
+// Two jobs, and both have to be done HERE rather than in the .kf reader. The
+// first is resolving node names to bone indices, which the file itself cannot
+// do -- a .kf names its targets and nothing else. The second is the basis
+// change: keys come out of the file in Bethesda's Z-up space, and a bone's
+// animated local transform is the same kind of quantity as its bind-pose local
+// transform, so it must go through exactly the conversion buildFalloutSkeleton
+// applies (translation (x,y,z) -> (x,z,-y); rotation R -> M R transpose(M)).
+// Converting one and not the other, or converting them differently, yields a
+// character whose bind pose is right and whose every animated frame is rotated
+// into the floor.
+bool buildFalloutAnimationClip(
+    const KfAnimation& source,
+    const anim::Skeleton& skeleton,
+    anim::AnimationClip& outClip,
+    FalloutAnimationStats& outStats);
 
 // Fills outMatrices with skeleton.bones.size() skinning matrices for the bind
 // pose: worldBoneTransform * inverseBindMatrix, exactly the product

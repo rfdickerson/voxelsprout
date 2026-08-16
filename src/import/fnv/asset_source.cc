@@ -79,8 +79,45 @@ std::string normalizeTexturePath(const std::string& path) {
         normalized = normalized.substr(5);
     }
 
+    // SKYRIM SHIPS SOMEONE'S BUILD MACHINE PATH in a few texture sets:
+    // "skyrimhd\build\pc\data\textures\plants\potato01.dds". Same failure as
+    // the LOD case above and same shape of fix, generalized -- cut to the FIRST
+    // "textures\" component wherever it appears, rather than matching each
+    // leading prefix that turns up. First rather than last so a legitimate
+    // "textures\...\textures\..." keeps its real root.
+    //
+    // Silent when wrong, again: these are Whiterun's potato, tundrashrub and
+    // yellowshrub, and unresolved they render as untextured pale blobs sitting
+    // where the shrubs should be.
+    {
+        const std::string lowered = toLowerAsciiCopy(normalized);
+        const std::size_t root = lowered.find("textures\\");
+        if (root != std::string::npos && root > 0u) {
+            normalized = normalized.substr(root);
+        }
+    }
+
     if (toLowerAsciiCopy(normalized).rfind("textures\\", 0) != 0) {
         normalized = "textures\\" + normalized;
+    }
+
+    // MORROWIND NAMES .tga AND SHIPS .dds. Bethesda converted the archives to
+    // DDS for load speed at some point and never updated the references, so
+    // every texture path inside a NetImmerse mesh and every LTEX filename still
+    // carries the original extension: measured over the architecture meshes in
+    // Morrowind.bsa, 3429 .tga and 125 .bmp, and not one .dds. The archive holds
+    // all of them as textures\<name>.dds.
+    //
+    // Rewritten here rather than at each call site because the same rule covers
+    // meshes, land textures and anything else that names a texture -- and doing
+    // it anywhere else means one of those quietly keeps resolving to nothing,
+    // which shades untextured rather than failing.
+    const std::string lowered = toLowerAsciiCopy(normalized);
+    for (const char* legacy : {".tga", ".bmp"}) {
+        if (lowered.size() > 4u && lowered.compare(lowered.size() - 4u, 4u, legacy) == 0) {
+            normalized.replace(normalized.size() - 4u, 4u, ".dds");
+            break;
+        }
     }
     return normalized;
 }
@@ -157,7 +194,7 @@ bool FalloutAssetSource::open(
         // failure mode would be a silently missing mesh rather than an error.
         std::uint32_t fileFlags = 0;
         if (!peekBsaContentFlags(path, fileFlags)) {
-            m_warnings.push_back("not a readable v104 BSA: " + path.string());
+            m_warnings.push_back("not a readable v103/v104 BSA: " + path.string());
             continue;
         }
         if (fileFlags != 0u && (fileFlags & contentMask) == 0u) {
@@ -253,7 +290,7 @@ bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory)
     for (const std::filesystem::path& path : archivePaths) {
         std::uint32_t fileFlags = 0;
         if (!peekBsaContentFlags(path, fileFlags)) {
-            m_warnings.push_back("not a readable v104 BSA: " + path.string());
+            m_warnings.push_back("not a readable v103/v104 BSA: " + path.string());
             continue;
         }
         // Same conservative test as the game's own archives: skip only an

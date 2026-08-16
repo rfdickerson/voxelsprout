@@ -39,6 +39,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const VkBuffer importedActorIndexBuffer = inputs.importedActorIndexBuffer;
     const VkDeviceSize importedActorIndexOffset = inputs.importedActorIndexOffset;
     const std::span<const ImportedMeshDraw> importedActorMeshDraws = inputs.importedActorMeshDraws;
+    const std::span<const std::uint32_t> importedActorBlendedDrawOrder =
+        inputs.importedActorBlendedDrawOrder;
     const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
     const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const bool useRtMainShadows =
@@ -94,7 +96,12 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexCount > 0;
 
-    if (!m_msaaColorImageInitialized[imageIndex]) {
+    // Null when the sample count is 1: createMsaaColorTargets skips the image
+    // entirely and the main pass targets hdrResolve directly. See there.
+    const bool msaaEnabled = m_colorSampleCount != VK_SAMPLE_COUNT_1_BIT &&
+                             imageIndex < m_msaaColorImages.size() &&
+                             m_msaaColorImages[imageIndex] != VK_NULL_HANDLE;
+    if (msaaEnabled && !m_msaaColorImageInitialized[imageIndex]) {
         transitionImageLayout(
             commandBuffer,
             m_msaaColorImages[imageIndex],
@@ -119,34 +126,48 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT
     );
-    transitionImageLayout(
-        commandBuffer,
-        m_depthImages[imageIndex],
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        VK_PIPELINE_STAGE_2_NONE,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT
-    );
+    // Merged, the prepass already wrote this depth and already put a dependency
+    // on it -- transitioning from UNDEFINED here would tell the driver the
+    // contents are expendable and it is free to discard exactly what the main
+    // pass is about to load.
+    const bool mergedDepthPrepass = useMergedDepthPrepass();
+    if (!mergedDepthPrepass) {
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    }
 
     VkClearValue clearValue{};
-    clearValue.color.float32[0] = 0.06f;
-    clearValue.color.float32[1] = 0.08f;
-    clearValue.color.float32[2] = 0.12f;
+    const bool renderImportedSky = shouldRenderImportedSky(m_importedInteriorLighting);
+    clearValue.color.float32[0] = renderImportedSky ? 0.06f : m_importedInteriorLighting.fogColor[0];
+    clearValue.color.float32[1] = renderImportedSky ? 0.08f : m_importedInteriorLighting.fogColor[1];
+    clearValue.color.float32[2] = renderImportedSky ? 0.12f : m_importedInteriorLighting.fogColor[2];
     clearValue.color.float32[3] = 1.0f;
 
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttachment.imageView = m_msaaColorImageViews[imageIndex];
+    colorAttachment.imageView =
+        msaaEnabled ? m_msaaColorImageViews[imageIndex] : m_hdrResolveImageViews[aoFrameIndex];
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttachment.clearValue = clearValue;
-    colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-    colorAttachment.resolveImageView = m_hdrResolveImageViews[aoFrameIndex];
-    colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (msaaEnabled) {
+        colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        colorAttachment.resolveImageView = m_hdrResolveImageViews[aoFrameIndex];
+        colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    } else {
+        colorAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
+        colorAttachment.resolveImageView = VK_NULL_HANDLE;
+    }
 
     VkClearValue depthClearValue{};
     depthClearValue.depthStencil.depth = 0.0f;
@@ -156,7 +177,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depthAttachment.imageView = m_depthImageViews[imageIndex];
     depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // LOAD under the merged prepass: that pass cleared and filled this buffer.
+    // Clearing here would throw the prepass away and leave main with nothing to
+    // early-Z against.
+    depthAttachment.loadOp =
+        mergedDepthPrepass ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAttachment.clearValue = depthClearValue;
 
@@ -304,6 +329,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             static const bool s_highlightAlphaTest =
                 std::getenv("ODAI_DEBUG_ALPHATEST_HIGHLIGHT") != nullptr;
             importedPushConstants.materialParams[1] = s_highlightAlphaTest ? 1.0f : 0.0f;
+            importedPushConstants.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
             vkCmdPushConstants(
                 commandBuffer,
                 m_pipelineLayout,
@@ -317,8 +343,47 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         // of them in the Mojave -- and they all share one vertex and one index
         // buffer, so the whole set collapses into one indirect call per
         // distinct threshold.
-        const auto includeDraw = [&](std::size_t drawIndex) {
+        // TERRAIN GOES THROUGH ITS OWN TESSELLATED PIPELINE when one exists.
+        // It is drawn first, as its own batch build, because
+        // buildImportedIndirectBatches reuses member scratch -- the terrain
+        // batches must be recorded before the statics build overwrites them.
+        // Patch-list assembly reads the same index buffer (three indices, one
+        // triangle patch), so the indirect commands need no translation.
+        const std::size_t tessTerrainDrawCount = std::min<std::size_t>(
+            m_visibleImportedNearTerrainDrawCount, terrainDrawCount);
+        const bool tessellateTerrain = mergedDepthPrepass &&
+            m_importedTerrainTessPipeline != VK_NULL_HANDLE && drawTerrain &&
+            tessTerrainDrawCount > 0u;
+        if (tessellateTerrain) {
+            const auto includeTerrainDraw = [&](std::size_t drawIndex) {
+                return drawIndex < tessTerrainDrawCount;
+            };
+            VkBuffer terrainIndirectBuffer = VK_NULL_HANDLE;
+            VkDeviceSize terrainIndirectBase = 0;
+            if (m_supportsMultiDrawIndirect &&
+                buildImportedIndirectBatches(
+                    importedMeshDraws, includeTerrainDraw, terrainIndirectBuffer,
+                    terrainIndirectBase)) {
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_importedTerrainTessPipeline);
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    pushAlphaThreshold(batch.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer, terrainIndirectBuffer,
+                        terrainIndirectBase + batch.bufferOffset, batch.drawCount,
+                        sizeof(VkDrawIndexedIndirectCommand));
+                }
+            }
+        }
+        const auto includeOpaqueDraw = [&](std::size_t drawIndex) {
             if (drawIndex < terrainDrawCount) {
+                // Far terrain (past the near prefix) always draws flat; the
+                // near prefix draws flat only when tessellation is off.
+                if (tessellateTerrain && drawIndex < tessTerrainDrawCount) {
+                    return false;
+                }
                 return drawTerrain;
             }
             return drawStatics;
@@ -326,8 +391,76 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         VkBuffer indirectBuffer = VK_NULL_HANDLE;
         VkDeviceSize indirectBase = 0;
         const bool useIndirect = m_supportsMultiDrawIndirect &&
-            buildImportedIndirectBatches(importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+            buildImportedIndirectBatches(
+                importedMeshDraws, includeOpaqueDraw, indirectBuffer, indirectBase);
         if (useIndirect) {
+            // DEPTH PREWRITE, in the same render pass instance as the shading
+            // draws below.
+            //
+            // The main pass clears its own depth (loadOp CLEAR) and the SSAO
+            // prepass writes into a different image at AO resolution with
+            // storeOp DONT_CARE, so nothing reaches this depth buffer before the
+            // shading draws do. Every occluded surface was therefore being run
+            // through a forward shader carrying cascaded PCF shadows, a 64-light
+            // loop, a four-layer terrain blend and PBR, only to fail the depth
+            // test afterwards. Measured: disabling the main pass's own depth
+            // writes -- removing what little rejection it had -- took main from
+            // 25.8 to 53.4 ms, i.e. roughly half the shaded fragments were
+            // already invisible.
+            //
+            // Laying depth first with a shader that does nothing but the alpha
+            // test lets the hardware kill those fragments before any of it runs.
+            // No barrier is needed: depth written by earlier draws in a render
+            // pass instance is visible to later draws in the same instance by
+            // rasterization order.
+            //
+            // The same indirect buffer is replayed, so the prewrite and the
+            // shading pass are drawing exactly the same primitives by
+            // construction -- there is no second culling path to drift.
+            // ODAI_MAIN_PREWRITE=0 skips it, for A/B measurement and as a kill
+            // switch if a driver ever disagrees about depth invariance between
+            // the two pipelines.
+            static const bool s_depthPrewriteEnabled = []() {
+                const char* env = std::getenv("ODAI_MAIN_PREWRITE");
+                return env == nullptr || (env[0] != '0');
+            }();
+            // Under the merged prepass this whole block is the thing being
+            // deleted: the depth it would lay is already in the buffer.
+            if (!mergedDepthPrepass && s_depthPrewriteEnabled &&
+                m_importedStaticDepthPrewritePipeline != VK_NULL_HANDLE) {
+                // Bracketed separately even though it is inside main's own
+                // window: this is a whole extra rasterization of the visible
+                // set, and "does laying depth first pay for itself" is not
+                // answerable while its cost is folded into the number it is
+                // supposed to be reducing.
+                writeGpuTimestampTop(kGpuTimestampQueryPrewriteStart);
+                VkPipeline boundPrewritePipeline = VK_NULL_HANDLE;
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    VkPipeline wantedPipeline =
+                        (batch.twoSided &&
+                         m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticDepthPrewritePipelineTwoSided
+                            : m_importedStaticDepthPrewritePipeline;
+                    if (wantedPipeline != boundPrewritePipeline) {
+                        vkCmdBindPipeline(
+                            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrewritePipeline = wantedPipeline;
+                    }
+                    // The alpha test must match the shading pass exactly, or a
+                    // cutout texel gets depth written for a surface that is meant
+                    // to be see-through.
+                    pushAlphaThreshold(batch.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer,
+                        indirectBuffer,
+                        indirectBase + batch.bufferOffset,
+                        batch.drawCount,
+                        sizeof(VkDrawIndexedIndirectCommand));
+                }
+                writeGpuTimestampBottom(kGpuTimestampQueryPrewriteEnd);
+            }
+
             // Two-sidedness is a pipeline switch, so the batch order (grouped
             // by it) is also the bind order -- at most one extra bind.
             VkPipeline boundOpaquePipeline = VK_NULL_HANDLE;
@@ -362,7 +495,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             // Direct fallback: no multiDrawIndirect, or the frame arena could
             // not serve the command buffer this frame.
             for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                if (!includeDraw(drawIndex)) {
+                if (!includeOpaqueDraw(drawIndex)) {
                     continue;
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
@@ -432,21 +565,73 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
         vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
         ChunkPushConstants importedPushConstants{};
-        // Neutral alpha-test threshold. Draws that carry an authored one
-        // overwrite this; leaving it zeroed would mean nothing cuts out.
-        importedPushConstants.materialParams[0] = 0.5f;
         importedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         importedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         importedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &importedPushConstants
-        );
-        for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
+        importedPushConstants.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
+        // Per-draw, exactly as the static block above does it. This used to push
+        // a single hardcoded 0.5 for every actor in the scene with a comment
+        // claiming the draws below overwrote it -- nothing did, so an actor's
+        // authored NiAlphaProperty threshold never reached the shader.
+        auto pushActorState = [&](std::uint8_t alphaThreshold) {
+            importedPushConstants.materialParams[0] =
+                static_cast<float>(alphaThreshold) / 255.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &importedPushConstants
+            );
+        };
+        const VkPipeline actorOpaqueDefaultPipeline =
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline;
+        VkPipeline boundActorPipeline = actorOpaqueDefaultPipeline;
+        for (std::size_t drawIndex = 0; drawIndex < importedActorMeshDraws.size(); ++drawIndex) {
+            const ImportedMeshDraw& importedDraw = importedActorMeshDraws[drawIndex];
+            // Blended actor parts are replayed sorted, after the opaque ones.
+            if (importedDraw.blended) {
+                continue;
+            }
+            const VkPipeline wantedPipeline =
+                (importedDraw.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                    ? m_importedStaticPipelineTwoSided
+                    : actorOpaqueDefaultPipeline;
+            if (wantedPipeline != boundActorPipeline) {
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                boundActorPipeline = wantedPipeline;
+            }
+            pushActorState(importedDraw.alphaThreshold);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDrawIndexed(
+                commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
+                importedDraw.vertexOffset, 0);
+        }
+        // Blended tail, farthest first -- the same treatment the static scene
+        // gets. Without it an actor's alpha-blended parts (hair cards, eye
+        // lashes, the glare quads on Victor's face screen) went through the
+        // opaque pipeline and rendered as solid slabs of whatever colour sits
+        // under their transparent texels, which for a Fallout texture is black.
+        VkPipeline boundActorBlendedPipeline = VK_NULL_HANDLE;
+        for (const std::uint32_t drawIndex : importedActorBlendedDrawOrder) {
+            if (drawIndex >= importedActorMeshDraws.size()) {
+                continue;
+            }
+            const ImportedMeshDraw& importedDraw = importedActorMeshDraws[drawIndex];
+            const VkPipeline wantedPipeline =
+                (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
+                    ? m_importedStaticPipelineBlendedTwoSided
+                    : m_importedStaticPipelineBlended;
+            if (wantedPipeline != VK_NULL_HANDLE && wantedPipeline != boundActorBlendedPipeline) {
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                boundActorBlendedPipeline = wantedPipeline;
+            }
+            pushActorState(importedDraw.alphaThreshold);
             countDrawCalls(m_debugDrawCallsMain, 1);
             vkCmdDrawIndexed(
                 commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -470,41 +655,89 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         bindGraphicsDescriptorBuffers(commandBuffer);
         ChunkPushConstants skinnedPushConstants{};
-        // Neutral alpha-test threshold. Draws that carry an authored one
-        // overwrite this; leaving it zeroed would mean nothing cuts out.
-        skinnedPushConstants.materialParams[0] = 0.5f;
         skinnedPushConstants.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
         skinnedPushConstants.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
         skinnedPushConstants.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &skinnedPushConstants
-        );
+        // Per draw, for the same reason as the actor block above. Skinned draws
+        // are not sorted into a blended tail: the skinning path produces one
+        // instance slot per actor and its parts are already filtered of the
+        // alpha-blended glare quads (see FalloutCharacter part selection), so
+        // there is nothing here to sort. Two-sidedness still applies -- a
+        // dust-mask or a coat flap is authored DRAW_BOTH like any other thin
+        // surface.
+        skinnedPushConstants.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
+        auto pushSkinnedState = [&](std::uint8_t alphaThreshold) {
+            skinnedPushConstants.materialParams[0] =
+                static_cast<float>(alphaThreshold) / 255.0f;
+            vkCmdPushConstants(
+                commandBuffer,
+                m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(ChunkPushConstants),
+                &skinnedPushConstants
+            );
+        };
+        const VkPipeline skinnedDefaultPipeline =
+            (useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                ? m_importedStaticPipelineRt
+                : m_importedStaticPipeline;
+        VkPipeline boundSkinnedPipeline = skinnedDefaultPipeline;
         VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
-        for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
-            const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
-            const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
-            if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
-                continue;
+        // Two passes over the same list: opaque parts, then blended ones after
+        // them so they composite over what they cover. Not distance-sorted, and
+        // deliberately so -- these are the parts of ONE actor, already in the
+        // NIF's own part order, and there is no camera-dependent answer to
+        // "which of a character's own hair cards is in front" that a per-draw
+        // AABB centre would get right anyway.
+        const auto drawSkinned = [&](bool wantBlended) {
+            for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                if (skinnedDraw.blended != wantBlended) {
+                    continue;
+                }
+                const VkBuffer drawVertexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
+                const VkBuffer drawIndexBuffer = m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
+                if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
+                    continue;
+                }
+                if (drawVertexBuffer != boundSkinnedVertexBuffer) {
+                    const VkBuffer skinnedVertexBuffers[1] = {drawVertexBuffer};
+                    const VkDeviceSize skinnedVertexOffsets[1] = {0};
+                    vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
+                    boundSkinnedVertexBuffer = drawVertexBuffer;
+                }
+                if (drawIndexBuffer != boundSkinnedIndexBuffer) {
+                    vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                    boundSkinnedIndexBuffer = drawIndexBuffer;
+                }
+                VkPipeline wantedPipeline = VK_NULL_HANDLE;
+                if (wantBlended) {
+                    wantedPipeline =
+                        (skinnedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticPipelineBlendedTwoSided
+                            : m_importedStaticPipelineBlended;
+                    if (wantedPipeline == VK_NULL_HANDLE) {
+                        wantedPipeline = skinnedDefaultPipeline;
+                    }
+                } else {
+                    wantedPipeline =
+                        (skinnedDraw.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticPipelineTwoSided
+                            : skinnedDefaultPipeline;
+                }
+                if (wantedPipeline != boundSkinnedPipeline) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundSkinnedPipeline = wantedPipeline;
+                }
+                pushSkinnedState(skinnedDraw.alphaThreshold);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }
-            if (drawVertexBuffer != boundSkinnedVertexBuffer) {
-                const VkBuffer skinnedVertexBuffers[1] = {drawVertexBuffer};
-                const VkDeviceSize skinnedVertexOffsets[1] = {0};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, skinnedVertexBuffers, skinnedVertexOffsets);
-                boundSkinnedVertexBuffer = drawVertexBuffer;
-            }
-            if (drawIndexBuffer != boundSkinnedIndexBuffer) {
-                vkCmdBindIndexBuffer(commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                boundSkinnedIndexBuffer = drawIndexBuffer;
-            }
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
-        }
+        };
+        drawSkinned(false);
+        drawSkinned(true);
     }
 
     // (removed) pipe / belt / transport instanced main-pass draws — legacy factory-sim
@@ -513,6 +746,56 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // (removed) grass billboard main-pass draw. The billboards contributed nothing legible
     // from the camera while their shadow casters scattered dark streaks across the ground;
     // chunk_upload.cc no longer scatters instances, so this had nothing left to draw.
+
+    // Imported looping effects. Fire is analytic and stateless on the GPU:
+    // SV_InstanceID identifies a lobe, the shared frame clock advances its age,
+    // and six generated vertices form its camera-facing quad. That keeps a
+    // whole hearth to one draw with no per-frame particle-buffer upload or
+    // transfer/graphics barrier. Additive blending is order independent, so
+    // emitters from several live Bethesda cells do not need a sort.
+    if (m_importedFireParticlePipeline != VK_NULL_HANDLE &&
+        !m_importedParticleEmitters.empty()) {
+        vkCmdBindPipeline(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_importedFireParticlePipeline);
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        if (m_supportsVrs && m_cmdSetFragmentShadingRate != nullptr) {
+            const VkExtent2D fineRate{1u, 1u};
+            const VkFragmentShadingRateCombinerOpKHR combinerOps[2] = {
+                VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+                VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+            };
+            m_cmdSetFragmentShadingRate(commandBuffer, &fineRate, combinerOps);
+        }
+        for (const odai::importer::ImportedSceneParticleEmitter& emitter :
+             m_importedParticleEmitters) {
+            if (emitter.effect != odai::importer::ImportedParticleEffect::Fire ||
+                emitter.particleCount == 0u || emitter.intensity <= 0.0f) {
+                continue;
+            }
+            ChunkPushConstants push{};
+            std::memcpy(push.chunkOffset, emitter.position, sizeof(emitter.position));
+            push.chunkOffset[3] = std::max(emitter.spawnRadius, 0.0f);
+            std::memcpy(push.cascadeData, emitter.color, sizeof(emitter.color));
+            push.cascadeData[3] = std::max(emitter.intensity, 0.0f);
+            push.materialParams[0] = std::max(emitter.particleLifetime, 0.05f);
+            push.materialParams[1] = std::max(emitter.upwardSpeed, 0.0f);
+            push.materialParams[2] = std::max(emitter.particleSize, 0.5f);
+            // Keep the seed small enough that adding SV_InstanceID remains
+            // exact in float. A 24-bit form-derived seed put many values near
+            // float's integer precision limit and collapsed adjacent lobes
+            // onto one billboard instead of spreading them across the fire.
+            push.materialParams[3] = static_cast<float>(emitter.seed & 0x00000fffu);
+            vkCmdPushConstants(
+                commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(push), &push);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDraw(
+                commandBuffer, 6u,
+                std::clamp(emitter.particleCount, 1u, 256u), 0u, 0u);
+        }
+    }
 
     const bool canCaptureWaterRefraction =
         canDrawImportedWater &&
@@ -604,7 +887,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
         transitionImageLayout(
             commandBuffer,
-            m_msaaColorImages[imageIndex],
+            msaaEnabled ? m_msaaColorImages[imageIndex] : m_hdrResolveImages[aoFrameIndex],
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -692,13 +975,14 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // prior game (cube/face brush + pipe ghost); the strategy map has no voxel editing.
 
     // Draw skybox last with depth-test so sun/sky only appears where no geometry wrote depth.
-    if (m_skyboxPipeline != VK_NULL_HANDLE) {
+    if (renderImportedSky && m_skyboxPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
         bindGraphicsDescriptorBuffers(commandBuffer);
         countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
-    if (m_skyCloudPipeline != VK_NULL_HANDLE &&
+    if (renderImportedSky &&
+        m_skyCloudPipeline != VK_NULL_HANDLE &&
         m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
         m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
         m_skyCloudIndexCount > 0 &&

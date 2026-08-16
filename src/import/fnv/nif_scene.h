@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace odai::importer::fnv {
@@ -47,6 +48,13 @@ struct NifShape {
     std::vector<float> positions;   // xyz per vertex, world space (parent transforms applied)
     std::vector<float> normals;     // xyz per vertex, world space; empty if the source had none
     std::vector<float> uvs;         // uv per vertex (set 0); empty if the source had none
+    // rgba per vertex, 0-1; empty if the source had none, which is the common
+    // case. The ALPHA is the load-bearing channel: Bethesda feathers a placed
+    // road, path or dirt patch into the ground beneath it with per-vertex
+    // alpha on an alpha-blended shape, and its diffuse texture is fully opaque,
+    // so nothing about the texture says the edges should fade. Without this a
+    // road renders as a hard-edged slab laid on the terrain.
+    std::vector<float> colors;
     std::vector<std::uint32_t> triangleIndices;  // 3 per triangle, indexes into positions/normals
     // Diffuse texture path as stored in the NIF, relative to Data\textures
     // and backslash-separated. Empty when the shape has no resolvable
@@ -62,6 +70,12 @@ struct NifShape {
     // foliage cards and awnings this way; drawn single-sided they lose
     // whichever face points away from the camera.
     bool twoSided = false;
+    // BSShaderNoLightingProperty: the surface is SELF-LIT and must not be
+    // shaded. Fallout uses it for anything that emits its own light -- CRT
+    // screens, neon, glow panels. Shaded like a normal surface, Victor's face
+    // screen renders as a black rectangle whenever the sun is not square on
+    // it, which is most of the day.
+    bool unlit = false;
     // NiAlphaProperty's blend bit. The imported static path draws opaque only,
     // so a blended shape (glass, an additive effect billboard) rendered through
     // it appears as a solid slab -- Goodsprings' window panes and dust effects
@@ -71,12 +85,30 @@ struct NifShape {
 
 struct NifModel {
     std::vector<NifShape> shapes;
+    // Embedded Gamebryo transform animation was present. Static geometry can
+    // still be extracted, but skinned cloth needs a deliberate rest pose when
+    // these controllers are not evaluated by the runtime.
+    bool hasEmbeddedTransformAnimation = false;
     // Count of geometry blocks that were dropped rather than emitted as
     // possibly-corrupt geometry: either the NiTriShapeData/NiTriStripsData
     // field layout did not parse cleanly, or a NiTriShape/NiTriStrips pointed
     // at a data block that could not be read. A nonzero count here means
     // geometry is missing from the model — it is not decorative.
     std::uint32_t skippedShapeCount = 0;
+    // Subtrees dropped because they hang under a NiNode named "EditorMarker".
+    // Unlike skippedShapeCount this is a CORRECT outcome, not a report of loss:
+    // the game does not draw them either. Counted because "this mesh renders
+    // nothing" and "this mesh is entirely editor furniture" look identical from
+    // the outside, and because a rule that quietly eats geometry needs a number
+    // on it.
+    std::uint32_t editorMarkerShapeCount = 0;
+    // Subtrees dropped because NiAVObject flag bit 0 (Hidden) is set. The same
+    // kind of correct outcome as editorMarkerShapeCount: the game does not draw
+    // these either. Particle emitter source meshes are the ones that matter --
+    // hidden BSTriShapes a NiPSysMeshEmitter spawns from, some of them tens of
+    // thousands of units across, which drawn literally are a white plane over
+    // the landscape.
+    std::uint32_t hiddenShapeCount = 0;
     // Blocks whose type name ends in "Node" but which this parser does not
     // know how to walk. Nonzero means geometry may be missing or, worse,
     // reparented to the origin — see isNodeTypeName in nif_scene.cc.
@@ -111,6 +143,22 @@ struct NifModel {
     // Shapes whose NiStencilProperty declared DRAW_CW (front face is the
     // clockwise winding, the reverse of this renderer's convention).
     std::uint32_t reversedWindingShapeCount = 0;
+    // Triangles rejected at parse for naming a vertex the block does not have,
+    // and for being degenerate (two indices equal).
+    //
+    // Out-of-range is the one that matters and it is NOT harmless. Shapes are
+    // merged into one vertex buffer downstream, so an index past this block's
+    // vertices does not fault -- it resolves to some other shape's vertex, and
+    // draws a triangle stretching from this mesh to wherever that vertex is.
+    // That is the "spike shooting out of the rock" signature, and nothing else
+    // in the pipeline would ever report it.
+    //
+    // Degenerates are cosmetic by comparison: zero-area triangles that cost
+    // rasterizer time and nothing else. The strip expander already drops them
+    // (they are how Bethesda stitches strips together); this covers the
+    // explicit-triangle-list path, which had no filter at all.
+    std::uint32_t outOfRangeTriangleCount = 0;
+    std::uint32_t degenerateTriangleCount = 0;
     // Census of NiStencilProperty draw modes seen, indexed by the 2-bit value:
     // 0 = DRAW_CCW_OR_BOTH, 1 = DRAW_CCW, 2 = DRAW_CW, 3 = DRAW_BOTH.
     std::uint32_t stencilDrawModeCounts[4] = {0, 0, 0, 0};
@@ -186,6 +234,8 @@ struct NifSkinnedShape {
     std::uint8_t alphaThreshold = 128;
     bool alphaBlend = false;
     bool twoSided = false;
+    // BSShaderNoLightingProperty -- see NifShape::unlit.
+    bool unlit = false;
 
     // Bone names this shape binds to, in the order its own skin data uses.
     // These index nothing on their own -- resolve them against a NifSkeleton.
@@ -226,6 +276,10 @@ struct NifSkinnedModel {
     // truncated. Nonzero is normal for FNV bodies; a very large value means the
     // truncation is doing visible work and is worth looking at.
     std::uint32_t truncatedInfluenceVertexCount = 0;
+    // See NifModel's fields of the same names. A skinned shape's vertices reach
+    // the GPU verbatim, so an out-of-range index here is if anything worse.
+    std::uint32_t outOfRangeTriangleCount = 0;
+    std::uint32_t degenerateTriangleCount = 0;
 };
 
 // Parses the NiNode hierarchy of a skeleton NIF into a flat bone array.
@@ -257,5 +311,10 @@ bool parseNifBlockSummary(
 
 bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outModel, std::string& outError);
 bool loadNifStaticMesh(const std::filesystem::path& path, NifModel& outModel, std::string& outError);
+
+// Bakes animated banner geometry into a gravity-rest pose for the static world
+// importer. Returns true when a model was recognized and changed. Bethesda's
+// Z-up model space is retained; only the wind displacement is collapsed.
+bool applyNifBannerGravityRestPose(std::string_view modelPath, NifModel& model);
 
 }  // namespace odai::importer::fnv

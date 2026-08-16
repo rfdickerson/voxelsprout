@@ -75,6 +75,22 @@ protected:
     // pipeline-creation time.
     virtual bool wantsStrategyMapTuning() const { return true; }
 
+    // Upscaler request, consumed by init() BEFORE renderer init for the same
+    // reason wantsStrategyMapTuning is: the quality preset chooses the internal
+    // render resolution, and that sizes every render target at swapchain build.
+    // Setting it from onInit() is too late -- the targets already exist, and the
+    // request is silently ignored.
+    //
+    // Defaults to Off (native), so every existing game is unaffected.
+    // ODAI_UPSCALER / ODAI_UPSCALER_QUALITY override whatever this returns.
+    virtual render::UpscalerSettings requestedUpscalerSettings() const { return {}; }
+
+    // Draw the software mouse cursor over the frame. Off is for a capture that
+    // is the product rather than a diagnostic: the cursor sits wherever the
+    // desktop left it and lands in the swapchain image like any other quad, so
+    // a headless screenshot run bakes a stray arrow into the corner.
+    void setCursorVisible(bool visible) { m_cursorVisible = visible; }
+
     // Initial audio volumes/mute state, passed to Audio::init() in init() before onInit()
     // runs. Default is AudioConfig{}'s built-in defaults (see audio/audio_types.h). Override
     // if a game wants different starting volumes; there is no persisted GameApp-level config
@@ -192,6 +208,11 @@ private:
     GameFrameProfiler m_frameProfiler;
     bool m_perfOverlayVisible = false;
     bool m_perfOverlayKeyPrev = false;
+    // F4's edge-trigger state. The visibility itself lives on the renderer
+    // (Renderer::isDebugUiVisible), not here, so nothing can drift out of sync
+    // with it.
+    bool m_rendererDebugUiKeyPrev = false;
+    bool m_cursorVisible = true;
 };
 
 } // namespace odai::engine

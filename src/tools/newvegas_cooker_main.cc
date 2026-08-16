@@ -26,7 +26,9 @@
 #include "import/dds.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
+#include "import/fnv/cell_builder.h"
 #include "import/fnv/fallout_records.h"
+#include "import/fnv/land_lod.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
@@ -300,44 +302,6 @@ void printUsage() {
 // terrain post sampled one corner texel of it, which is why the ground went
 // black. Always set this explicitly.
 constexpr std::uint32_t kNoTextureIndex = 0xffffffffu;
-
-// Per-post blend weights for the ATXT/VTXT layers covering one cell.
-//
-// A post on a quadrant boundary (col or row 16) is shared by two quadrants, and
-// the centre post by all four -- the cooked mesh keeps one vertex per post, so
-// those vertices have to reconcile layers from every quadrant they touch. Taking
-// the max weight per texture is what makes the seam disappear: a layer that runs
-// up to the boundary from one side keeps its opacity there instead of being
-// halved by a quadrant that never mentioned it.
-struct TerrainLayerCandidate {
-    std::uint32_t textureIndex = kNoTextureIndex;
-    float weight = 0.0f;
-    // ATXT's declared stacking order. Carried through selection because the
-    // shader composites slot 0, then 1, then 2, and a lerp chain is not
-    // commutative -- blending the same two layers in the other order gives a
-    // different colour. Selecting the strongest layers by weight and then
-    // storing them in weight order silently reordered the stack.
-    std::uint16_t layerIndex = 0;
-};
-
-void accumulateLayerWeight(
-    std::vector<TerrainLayerCandidate>& candidates,
-    std::uint32_t textureIndex,
-    float weight,
-    std::uint16_t layerIndex
-) {
-    if (textureIndex == kNoTextureIndex || weight <= 0.0f) {
-        return;
-    }
-    for (auto& candidate : candidates) {
-        if (candidate.textureIndex == textureIndex) {
-            candidate.weight = std::max(candidate.weight, weight);
-            candidate.layerIndex = std::min(candidate.layerIndex, layerIndex);
-            return;
-        }
-    }
-    candidates.push_back(TerrainLayerCandidate{textureIndex, weight, layerIndex});
-}
 
 // True when the shape is a flat sheet: its thinnest axis is negligible compared
 // to its own footprint.
@@ -686,6 +650,29 @@ int cookOne(
         return 1;
     }
     std::cout << "Cooking " << selectedCells.size() << " cell(s).\n";
+    // An interior's lighting is the whole rig for the room -- see XCLL in
+    // fallout_records.h -- so report it rather than letting a black interior be
+    // a mystery.
+    for (const auto* cell : selectedCells) {
+        if (cell == nullptr || !cell->isInterior) {
+            continue;
+        }
+        if (!cell->hasLighting) {
+            std::cout << "  " << cell->editorId << ": interior with NO XCLL lighting\n";
+            continue;
+        }
+        std::cout << "  " << cell->editorId << ": ambient ("
+                  << static_cast<int>(cell->ambientColor[0] * 255.0f) << ","
+                  << static_cast<int>(cell->ambientColor[1] * 255.0f) << ","
+                  << static_cast<int>(cell->ambientColor[2] * 255.0f) << ") directional ("
+                  << static_cast<int>(cell->directionalColor[0] * 255.0f) << ","
+                  << static_cast<int>(cell->directionalColor[1] * 255.0f) << ","
+                  << static_cast<int>(cell->directionalColor[2] * 255.0f) << ") fog ("
+                  << static_cast<int>(cell->fogColor[0] * 255.0f) << ","
+                  << static_cast<int>(cell->fogColor[1] * 255.0f) << ","
+                  << static_cast<int>(cell->fogColor[2] * 255.0f) << ") near " << cell->fogNear
+                  << " far " << cell->fogFar << "\n";
+    }
 
     std::unordered_map<std::uint32_t, const odai::importer::fnv::FalloutStaticRecord*> staticsByFormId;
     for (const auto& stat : scene.statics) {
@@ -847,12 +834,23 @@ int cookOne(
         ImportedSceneMesh& terrainMesh = outScene.meshes[terrainMeshIndex];
         std::size_t droppedLayerCount = 0;
         std::size_t totalLayerCount = 0;
+        std::size_t waterPatchCount = 0;
         for (const auto* cell : selectedCells) {
             if (cell->land != nullptr) {
                 totalLayerCount += cell->land->textureLayers.size();
             }
+            // Shared with the streaming path on purpose: this is the one piece
+            // of the terrain build that is NOT duplicated here, so a cooked
+            // coastline and a streamed one cannot disagree about where the
+            // water is.
+            if (odai::importer::fnv::appendCellWaterPatch(outScene, *cell)) {
+                ++waterPatchCount;
+            }
             appendTerrainCell(
                 terrainMesh, *cell, resolveLandTexture, resolveLandTextureExact, droppedLayerCount);
+        }
+        if (waterPatchCount != 0) {
+            std::cout << "Water: " << waterPatchCount << " cell(s) carry a visible water surface\n";
         }
         std::cout << "Terrain texture layers: " << totalLayerCount << " ATXT/VTXT layers across "
                   << selectedCells.size() << " cell(s)\n";
@@ -930,6 +928,8 @@ int cookOne(
                     failedStatics.insert(ref.baseFormId);
                     continue;
                 }
+                odai::importer::fnv::applyNifBannerGravityRestPose(
+                    statIt->second->modelPath, nifModel);
                 skippedGeometryShapes += nifModel.skippedShapeCount;
 
                 // A model's own most-used texture, for sub-shapes that carry no
@@ -1373,129 +1373,26 @@ int cookLodTier(
     ImportedScene scene;
     scene.sourceTag = "fnv_lod";
 
-    std::unordered_map<std::string, std::uint32_t> textureIndexByPath;
-    const auto resolveLodTexture = [&](const std::string& texturePath) -> std::uint32_t {
-        if (texturePath.empty()) {
-            return kNoTextureIndex;
-        }
-        const std::string key = toLowerAsciiCopy(texturePath);
-        const auto existing = textureIndexByPath.find(key);
-        if (existing != textureIndexByPath.end()) {
-            return existing->second;
-        }
-        std::vector<std::uint8_t> ddsBytes;
-        if (!assets.resolveTexture(texturePath, ddsBytes)) {
-            textureIndexByPath.emplace(key, kNoTextureIndex);
-            return kNoTextureIndex;
-        }
-        odai::importer::ImportedSceneTexture texture;
-        if (!odai::importer::loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
-            textureIndexByPath.emplace(key, kNoTextureIndex);
-            return kNoTextureIndex;
-        }
-        texture.sourcePath = texturePath;
-        const auto index = static_cast<std::uint32_t>(scene.textures.size());
-        scene.textures.push_back(std::move(texture));
-        textureIndexByPath.emplace(key, index);
-        return index;
-    };
-
-    const std::string loweredWorldspace = toLowerAsciiCopy(worldspaceEditorId);
-    std::size_t blocksFound = 0;
-    std::size_t blocksParsed = 0;
-    std::size_t blocksMissing = 0;
-    std::size_t totalTriangles = 0;
-
-    const std::int32_t step = tierCells;
-    for (std::int32_t bz = blockZ0; bz <= blockZ1; bz += step) {
-        for (std::int32_t bx = blockX0; bx <= blockX1; bx += step) {
-            const std::string tilePath = odai::importer::fnv::landLodTilePath(
-                loweredWorldspace, lodSet, tierCells, bx, bz);
-            std::vector<std::uint8_t> nifBytes;
-            if (!assets.resolveMesh(tilePath, nifBytes)) {
-                ++blocksMissing;
-                continue;  // the LOD grid is sparse; absent blocks are normal
-            }
-            ++blocksFound;
-
-            odai::importer::fnv::NifModel nifModel;
-            std::string nifError;
-            if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) ||
-                nifModel.shapes.empty()) {
-                std::cerr << "warning: LOD block " << bx << "," << bz << " failed to parse: "
-                          << nifError << "\n";
-                continue;
-            }
-
-            ImportedSceneMesh mesh;
-            mesh.name = "lod" + std::to_string(tierCells) + "_" + std::to_string(bx) + "_" +
-                        std::to_string(bz);
-            for (const auto& shape : nifModel.shapes) {
-                const auto baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
-                const auto partFirstIndex = static_cast<std::uint32_t>(mesh.indices.size());
-                for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
-                    ImportedSceneVertex vertex{};
-                    vertex.position[0] = shape.positions[v * 3u];
-                    vertex.position[1] = shape.positions[(v * 3u) + 1];
-                    vertex.position[2] = shape.positions[(v * 3u) + 2];
-                    if (!shape.normals.empty()) {
-                        vertex.normal[0] = shape.normals[v * 3u];
-                        vertex.normal[1] = shape.normals[(v * 3u) + 1];
-                        vertex.normal[2] = shape.normals[(v * 3u) + 2];
-                    }
-                    if ((v * 2u) + 1u < shape.uvs.size()) {
-                        vertex.uv[0] = shape.uvs[v * 2u];
-                        vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
-                    }
-                    mesh.vertices.push_back(vertex);
-                }
-                for (const std::uint32_t index : shape.triangleIndices) {
-                    mesh.indices.push_back(baseVertex + index);
-                }
-                const auto partIndexCount =
-                    static_cast<std::uint32_t>(mesh.indices.size()) - partFirstIndex;
-                if (partIndexCount == 0u) {
-                    continue;
-                }
-                ImportedSceneMeshPart part{};
-                part.firstIndex = partFirstIndex;
-                part.indexCount = partIndexCount;
-                part.textureIndex = resolveLodTexture(shape.diffuseTexturePath);
-                part.alphaTest = shape.alphaTest;
-                mesh.parts.push_back(part);
-                totalTriangles += partIndexCount / 3u;
-            }
-            if (mesh.indices.empty()) {
-                continue;
-            }
-
-            const auto meshIndex = static_cast<std::uint32_t>(scene.meshes.size());
-            scene.meshes.push_back(std::move(mesh));
-
-            // Identity placement: the vertices are already world-space, so the
-            // only thing the transform carries is the Z-up -> Y-up basis change.
-            ImportedSceneInstance instance{};
-            instance.meshIndex = meshIndex;
-            writeTransform(instance, Vec3{0.0f, 0.0f, 0.0f}, makeEngineInstanceRotation(Mat3{}), 1.0f);
-            scene.instances.push_back(instance);
-            ++blocksParsed;
-        }
-    }
-
-    if (scene.meshes.empty()) {
-        std::cerr << "error: no LOD blocks found for worldspace \"" << worldspaceEditorId
-                  << "\" in the requested block range\n";
+    // The tile walk itself lives in import/fnv/land_lod.cc so the runtime
+    // streamer builds these the same way. It used to live here, inside a
+    // function that also parsed argv and wrote a file, which is why there was
+    // no way to reach it from a game.
+    odai::importer::fnv::LandLodTierStats stats;
+    std::string error;
+    const bool ok = odai::importer::fnv::appendLandLodTier(
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveMesh(path, bytes);
+        },
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveTexture(path, bytes);
+        },
+        worldspaceEditorId, lodSet, tierCells, blockX0, blockZ0, blockX1, blockZ1,
+        /*sinkUnits=*/0.0f, scene, stats, error);
+    if (!ok) {
+        std::cerr << "error: " << error << "\n";
         return 1;
     }
 
-    // Same statement the streaming path makes in CellSceneBuilder::finish():
-    // every part's alpha mode came off its NiAlphaProperty, so the texture-
-    // content cutout guess must not run on load. Without it a cooked scene is
-    // written at v24 with the flag clear, applyTextureAlphaCutoutFlags() runs
-    // over it exactly as before, and `--scene` shows the ragged holes the
-    // streamed path no longer has -- the two paths disagreeing about the same
-    // geometry.
-    scene.alphaFlagsAuthored = true;
     odai::importer::buildImportedScenePackedRenderData(scene);
     odai::importer::buildImportedScenePageRanges(scene);
     if (!odai::importer::saveImportedScene(scene, outputPath)) {
@@ -1506,14 +1403,11 @@ int cookLodTier(
 
     const double totalMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - totalStart).count();
-    // blocksFound minus blocksParsed is the count that resolved out of the
-    // archives but failed to parse -- reported because it was being counted and
-    // then dropped, which made a parse failure look identical to a sparse-grid
-    // hole in the only summary this mode prints.
     std::cout << "LOD " << (lodSet == odai::importer::fnv::LandLodSet::Objects ? "objects" : "terrain")
-              << " level" << tierCells << ": " << blocksParsed << " tiles parsed of " << blocksFound
-              << " resolved (" << blocksMissing << " absent from the sparse grid), " << totalTriangles
-              << " triangles, " << scene.textures.size() << " textures\n";
+              << " level" << tierCells << ": " << stats.tilesParsed << " tiles parsed of "
+              << stats.tilesResolved << " resolved (" << stats.tilesMissing
+              << " absent from the sparse grid), " << stats.triangles << " triangles, "
+              << stats.textures << " textures\n";
     std::cout << "Wrote " << outputPath << " in " << totalMs << " ms\n";
     return 0;
 }

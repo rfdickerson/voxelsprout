@@ -67,8 +67,25 @@ public:
     // Terrain only, ignoring geometry. Mostly for diagnostics.
     [[nodiscard]] bool terrainHeight(float worldX, float worldZ, float& outHeight) const;
 
-    // Slides a horizontal move out of any wall it would end up inside.
+    // Slides a horizontal move out of any wall it would end up inside, using the
+    // PLAYER's capsule from the tuning above.
     void resolveHorizontal(float& worldX, float eyeY, float& worldZ) const;
+
+    // The same, for a body that is not the player's size. Actors need it: a
+    // townsperson, a bighorner and a Securitron are not one capsule, and reusing
+    // the player's silently gives a radroach a 34-unit girth and a head 120
+    // units up -- which blocks it on scenery it should walk under.
+    //
+    // feetY/headY are the vertical span a wall has to cross to count, and
+    // stepHeight is how much of that span is a kerb to be walked over rather
+    // than a wall to be stopped by.
+    void resolveHorizontalFor(
+        float& worldX,
+        float& worldZ,
+        float feetY,
+        float headY,
+        float radius,
+        float stepHeight) const;
 
     [[nodiscard]] std::size_t residentCellCount() const { return m_cells.size(); }
     [[nodiscard]] std::size_t triangleCount() const;

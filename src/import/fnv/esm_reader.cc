@@ -22,9 +22,12 @@ namespace odai::importer::fnv {
 namespace {
 
 constexpr std::uint32_t kRecordFlagCompressed = 0x00040000u;
-constexpr std::size_t kGroupHeaderSize = 24u;
-constexpr std::size_t kRecordHeaderSize = 24u;
-constexpr std::size_t kSubrecordHeaderSize = 6u;  // 4-char type + uint16 size
+// Both container headers grew by the same 4 bytes between the two generations,
+// so one pair of constants covers records and groups alike.
+constexpr std::size_t kTes3ContainerHeaderSize = 16u;    // Morrowind
+constexpr std::size_t kTes4ContainerHeaderSize = 20u;    // Oblivion
+constexpr std::size_t kFallout3ContainerHeaderSize = 24u;  // FO3 / FNV / Skyrim
+constexpr std::size_t kSubrecordHeaderSize = 6u;  // 4-char type + uint16 size — unchanged
 
 bool typeIs(const std::uint8_t* bytes, const char* fourCc) {
     return std::memcmp(bytes, fourCc, 4) == 0;
@@ -49,15 +52,32 @@ std::uint32_t readU32(const std::uint8_t* bytes) {
 // Splits a contiguous record-data buffer into subrecords, honoring the
 // "XXXX"-prefixed oversized-subrecord convention. Subrecord views point
 // directly into `data`, so `data` must outlive the returned vector.
-bool parseSubrecords(const std::uint8_t* data, std::size_t size, std::vector<EsmSubrecordView>& out) {
+bool parseSubrecords(
+    const std::uint8_t* data,
+    std::size_t size,
+    EsmPluginFormat format,
+    std::vector<EsmSubrecordView>& out) {
+    // TES3 SIZES ARE 32-BIT. Every later generation writes a uint16 here and
+    // relies on the XXXX escape for anything longer; Morrowind just used a full
+    // word and never needed the escape. Reading a TES3 subrecord as uint16
+    // takes the low half of the size and then treats the high half as the next
+    // subrecord's type, which desyncs on the first record whose payload is not
+    // a multiple of 65536 -- in practice the second one in the file.
+    // ...which also makes the subrecord HEADER 8 bytes rather than 6.
+    const bool wideSizes = format == EsmPluginFormat::kMorrowind;
+    const std::size_t headerSize = wideSizes ? 8u : kSubrecordHeaderSize;
     std::size_t pos = 0;
     std::int64_t pendingOverrideSize = -1;
-    while (pos + kSubrecordHeaderSize <= size) {
+    while (pos + headerSize <= size) {
         const std::string type = readFourCc(data + pos);
-        const std::uint16_t declaredSize = readU16(data + pos + 4);
-        pos += kSubrecordHeaderSize;
+        const std::uint32_t declaredSize =
+            wideSizes ? readU32(data + pos + 4) : static_cast<std::uint32_t>(readU16(data + pos + 4));
+        pos += headerSize;
 
-        if (type == "XXXX") {
+        // XXXX is a TES4-era escape for a payload too large for a uint16. It
+        // cannot occur in a TES3 plugin, and a four-byte subrecord that happens
+        // to be named XXXX there would be misread as one.
+        if (!wideSizes && type == "XXXX") {
             if (declaredSize != 4u || pos + 4u > size) {
                 return false;
             }
@@ -134,6 +154,43 @@ bool inflateRecordBody(
 
 }  // namespace
 
+std::size_t esmRecordHeaderSize(EsmPluginFormat format) {
+    switch (format) {
+        case EsmPluginFormat::kMorrowind: return kTes3ContainerHeaderSize;
+        case EsmPluginFormat::kOblivion:  return kTes4ContainerHeaderSize;
+        case EsmPluginFormat::kFallout3:  break;
+    }
+    return kFallout3ContainerHeaderSize;
+}
+
+// Byte offset of the record flags word. TES3 puts an unused word where TES4 and
+// later put the flags, so this is not derivable from the header size.
+std::size_t esmRecordFlagsOffset(EsmPluginFormat format) {
+    return format == EsmPluginFormat::kMorrowind ? 12u : 8u;
+}
+
+std::size_t esmGroupHeaderSize(EsmPluginFormat format) {
+    return esmRecordHeaderSize(format);
+}
+
+EsmPluginFormat detectEsmPluginFormat(const std::uint8_t* bytes, std::size_t size) {
+    // Needs the whole Fallout-era header plus the four bytes a subrecord type
+    // occupies past it, or there is nothing to compare and the default stands.
+    if (bytes == nullptr || size < kFallout3ContainerHeaderSize + 4u) {
+        return EsmPluginFormat::kFallout3;
+    }
+    if (!typeIs(bytes, "TES4") && !typeIs(bytes, "TES3")) {
+        return EsmPluginFormat::kFallout3;
+    }
+    if (typeIs(bytes, "TES3")) {
+        return EsmPluginFormat::kMorrowind;
+    }
+    if (typeIs(bytes + kTes4ContainerHeaderSize, "HEDR")) {
+        return EsmPluginFormat::kOblivion;
+    }
+    return EsmPluginFormat::kFallout3;
+}
+
 EsmReader::~EsmReader() {
     close();
 }
@@ -159,6 +216,7 @@ EsmReader& EsmReader::operator=(EsmReader&& other) noexcept {
         : m_ownedBytes.data();
     m_lastError = std::move(other.m_lastError);
     m_toleratedChecksumFailures = other.m_toleratedChecksumFailures;
+    m_pluginFormat = other.m_pluginFormat;
 
     other.m_mappingAddress = nullptr;
     other.m_mappingHandles[0] = 0;
@@ -192,6 +250,12 @@ void EsmReader::close() {
     m_ownedBytes.shrink_to_fit();
     m_data = nullptr;
     m_size = 0;
+    m_pluginFormat = EsmPluginFormat::kFallout3;
+}
+
+bool EsmReader::finishOpen() {
+    m_pluginFormat = detectEsmPluginFormat(m_data, m_size);
+    return true;
 }
 
 bool EsmReader::open(const std::filesystem::path& path) {
@@ -221,7 +285,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
                 m_mappingHandles[1] = reinterpret_cast<std::uint64_t>(mapping);
                 m_data = static_cast<const std::uint8_t*>(view);
                 m_size = fileSize;
-                return true;
+                return finishOpen();
             }
             ::CloseHandle(mapping);
         }
@@ -239,7 +303,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
             m_mappingHandles[0] = static_cast<std::uint64_t>(fd) + 1u;
             m_data = static_cast<const std::uint8_t*>(view);
             m_size = fileSize;
-            return true;
+            return finishOpen();
         }
         ::close(fd);
     }
@@ -260,7 +324,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
     }
     m_data = m_ownedBytes.data();
     m_size = fileSize;
-    return true;
+    return finishOpen();
 }
 
 bool EsmReader::walk(const Visitor& visitor) {
@@ -305,6 +369,11 @@ bool EsmReader::walkRange(
     // reallocate for every one in a large plugin.
     std::vector<std::uint8_t> decompressScratch;
 
+    // Hoisted out of the loop: the format is fixed for the whole file, and the
+    // walk consults these on every single record and group.
+    const std::size_t groupHeaderSize = esmGroupHeaderSize(m_pluginFormat);
+    const std::size_t recordHeaderSize = esmRecordHeaderSize(m_pluginFormat);
+
     while (!stack.empty()) {
         if (stack.back().pos >= stack.back().end) {
             Frame finished = std::move(stack.back());
@@ -322,13 +391,13 @@ bool EsmReader::walkRange(
         }
 
         if (typeIs(m_data + frame.pos, "GRUP")) {
-            if (frame.pos + kGroupHeaderSize > frame.end) {
+            if (frame.pos + groupHeaderSize > frame.end) {
                 m_lastError = "Truncated GRUP header";
                 return false;
             }
             const std::uint8_t* header = m_data + frame.pos;
             const std::uint32_t groupSize = readU32(header + 4);
-            if (groupSize < kGroupHeaderSize || frame.pos + groupSize > frame.end) {
+            if (groupSize < groupHeaderSize || frame.pos + groupSize > frame.end) {
                 m_lastError = "Malformed GRUP size";
                 return false;
             }
@@ -339,7 +408,7 @@ bool EsmReader::walkRange(
             group.fileOffset = static_cast<std::uint64_t>(frame.pos);
             group.groupSize = groupSize;
 
-            const std::size_t contentStart = frame.pos + kGroupHeaderSize;
+            const std::size_t contentStart = frame.pos + groupHeaderSize;
             const std::size_t contentEnd = frame.pos + groupSize;
             frame.pos = contentEnd;  // resume parent after this group once popped
 
@@ -353,15 +422,20 @@ bool EsmReader::walkRange(
         }
 
         // Regular record.
-        if (frame.pos + kRecordHeaderSize > frame.end) {
+        if (frame.pos + recordHeaderSize > frame.end) {
             m_lastError = "Truncated record header";
             return false;
         }
         const std::uint8_t* header = m_data + frame.pos;
         const std::uint32_t dataSize = readU32(header + 4);
-        const std::uint32_t flags = readU32(header + 8);
-        const std::uint32_t formId = readU32(header + 12);
-        const std::size_t dataStart = frame.pos + kRecordHeaderSize;
+        const std::uint32_t flags =
+            readU32(header + esmRecordFlagsOffset(m_pluginFormat));
+        // TES3 has no formID; its records are keyed by a string id carried in a
+        // subrecord. Reporting 0 rather than the bytes that happen to sit there
+        // keeps "formId == 0" meaning "this generation has none".
+        const std::uint32_t formId =
+            m_pluginFormat == EsmPluginFormat::kMorrowind ? 0u : readU32(header + 12);
+        const std::size_t dataStart = frame.pos + recordHeaderSize;
         const std::size_t dataEnd = dataStart + dataSize;
         if (dataEnd > frame.end) {
             m_lastError = "Truncated record data";
@@ -377,6 +451,7 @@ bool EsmReader::walkRange(
             headerView.formId = formId;
             headerView.flags = flags;
             headerView.fileOffset = static_cast<std::uint64_t>(frame.pos);
+            headerView.dataSize = dataSize;
             if (!visitor.onRecordHeader(headerView)) {
                 frame.pos = dataEnd;
                 continue;
@@ -407,7 +482,7 @@ bool EsmReader::walkRange(
             if (trailerFailed) {
                 ++m_toleratedChecksumFailures;
             }
-            if (!parseSubrecords(decompressScratch.data(), decompressScratch.size(), record.subrecords)) {
+            if (!parseSubrecords(decompressScratch.data(), decompressScratch.size(), m_pluginFormat, record.subrecords)) {
                 m_lastError = "Malformed subrecords in compressed record: " + record.type;
                 return false;
             }
@@ -415,7 +490,7 @@ bool EsmReader::walkRange(
                 visitor.onRecord(record);
             }
         } else {
-            if (!parseSubrecords(m_data + dataStart, dataSize, record.subrecords)) {
+            if (!parseSubrecords(m_data + dataStart, dataSize, m_pluginFormat, record.subrecords)) {
                 m_lastError = "Malformed subrecords in record: " + record.type;
                 return false;
             }

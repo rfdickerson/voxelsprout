@@ -1,4 +1,6 @@
 #include "engine/game_app.h"
+
+#include "render/upscale/upscale_policy.h"
 #include "core/log.h"
 #include "core/win_timer_resolution.h"
 #include "ui/ui_cursor.h"
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <string_view>
 
 namespace odai::engine {
 
@@ -116,6 +119,23 @@ bool GameApp::init(const char* title) {
             VOX_LOGW("engine") << "ignoring ODAI_MSAA=\"" << msaaEnv << "\" (expected 1, 2, 4 or 8)";
         }
     }
+    // Before renderer init: the preset sizes every render target. See
+    // requestedUpscalerSettings().
+    {
+        render::UpscalerSettings upscaler = requestedUpscalerSettings();
+        if (const char* backendEnv = std::getenv("ODAI_UPSCALER")) {
+            if (!render::parseUpscalerBackend(backendEnv, upscaler.backend)) {
+                VOX_LOGW("engine") << "ignoring ODAI_UPSCALER=\"" << backendEnv
+                                   << "\" (expected off|temporal|xess|fsr|dlss)";
+            }
+        }
+        if (const char* qualityEnv = std::getenv("ODAI_UPSCALER_QUALITY")) {
+            if (!render::parseUpscalerQuality(qualityEnv, upscaler.quality)) {
+                VOX_LOGW("engine") << "ignoring ODAI_UPSCALER_QUALITY=\"" << qualityEnv << "\"";
+            }
+        }
+        m_renderer.setUpscalerSettings(upscaler);
+    }
     if (!m_renderer.init(m_window, m_emptyGrid)) {
         VOX_LOGE("engine") << "renderer init failed";
         glfwDestroyWindow(m_window);
@@ -157,6 +177,25 @@ void GameApp::run() {
     }
     if (const char* overlayEnv = std::getenv("ODAI_PERF_OVERLAY")) {
         m_perfOverlayVisible = (overlayEnv[0] != '\0' && overlayEnv[0] != '0');
+    }
+    // ODAI_DEBUG_UI opens the renderer's ImGui surface at startup instead of
+    // waiting for F4. The GPU Memory readout is the reason: watching device
+    // memory across a long session means having it up from the first frame, and
+    // remembering to press a key is exactly what a leak hunt does not need.
+    //
+    //   1 / stats  -- readouts only (default): frame timings, GPU stages,
+    //                 memory, draw calls, plus whatever the game pushed through
+    //                 setDebugStatGroups
+    //   full       -- the whole tuning console as well
+    //
+    // Mode and visibility are separate, so F4 keeps toggling the panel without
+    // changing which one it toggles.
+    if (const char* debugUiEnv = std::getenv("ODAI_DEBUG_UI")) {
+        const std::string_view mode{debugUiEnv};
+        const bool enabled = !mode.empty() && mode != "0";
+        m_renderer.setDebugUiMode(
+            (mode == "full") ? render::DebugUiMode::Full : render::DebugUiMode::Stats);
+        m_renderer.setDebugUiVisible(enabled);
     }
 
     core::Stopwatch frameWatch;
@@ -224,6 +263,17 @@ void GameApp::run() {
                 m_perfOverlayVisible = !m_perfOverlayVisible;
             }
             m_perfOverlayKeyPrev = overlayKey;
+
+            // F4 opens the renderer's own ImGui panels (frame stats, shadows/AO,
+            // sun/sky/post, render debug views). F3 above is this engine's CPU
+            // timing overlay and is a different thing; both are edge-triggered
+            // for the same reason. ImGui installs its own GLFW callbacks at
+            // device init, so no input routing is needed here.
+            const bool rendererUiKey = glfwGetKey(m_window, GLFW_KEY_F4) == GLFW_PRESS;
+            if (rendererUiKey && !m_rendererDebugUiKeyPrev) {
+                m_renderer.setDebugUiVisible(!m_renderer.isDebugUiVisible());
+            }
+            m_rendererDebugUiKeyPrev = rendererUiKey;
 
             m_uiContext.setViewport({static_cast<float>(fbW), static_cast<float>(fbH)});
         }
@@ -428,8 +478,10 @@ void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlph
     drawPerfOverlay();
 
     // Custom cursor: drawn last so it renders above every widget. GameApp tools
-    // have no mouselook mode, so it's always shown.
-    odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, contentScale());
+    // have no mouselook mode, so it's shown unless a game suppresses it.
+    if (m_cursorVisible) {
+        odai::ui::drawCursor(m_uiDrawList, m_uiInput.mousePx, contentScale());
+    }
     m_renderer.setUiDrawData(m_uiDrawList.data());
 
     const world::ChunkGrid& grid = (worldContent && worldContent->chunkGrid)

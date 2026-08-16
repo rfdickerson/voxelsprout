@@ -46,15 +46,45 @@ public struct CameraUniform
     // Mirrored in MvpUniform in src/render/renderer_shared.h.
     public float4 weatherSkyUpper;
     public float4 weatherSkyLower;
+    // w: the weather's sun-glare scale, 1 when no weather is published.
     public float4 weatherHorizon;
     public float4 weatherFog;
-    // Four planar cloud layers: tint.rgb + opacity in w, then
-    // (bindless slot, scroll speed, tiling, unused).
+    // Four cloud layers: tint.rgb + opacity in w, then
+    // (bindless slot, drift u, scale, drift v), then
+    // (band low dir.y, band high dir.y, mapping mode, unused).
     public float4 weatherCloudTint[4];
     public float4 weatherCloudParams[4];
+    public float4 weatherCloudBand[4];
     // (mode, contrast, saturation, curve knee) and (overbright dampening, ...).
     public float4 tonemapConfig;
     public float4 tonemapConfig2;
+    // Terrain layer-blend shaping; see renderer_shared.h for the channel map.
+    // (sharpness, coarse noise units, fine noise units, noise amount).
+    public float4 terrainBlendConfig;
+    // (white point, shoulder strength, unused, unused); see renderer_shared.h.
+    public float4 hdrHighlightConfig;
+    // Clustered light culling; see light_clusters.slang.
+    // (grid x, grid y, grid z, tile size px) and (slice scale, slice bias, 0, 0).
+    public float4 lightClusterConfig0;
+    public float4 lightClusterConfig1;
+    // (one atlas texel in UV, unused x3). Replaces shadowMap.GetDimensions() at
+    // every PCF site -- see renderer_shared.h for the measurement.
+    public float4 shadowAtlasConfig;
+    // Authored imported-interior CELL lighting; see renderer_shared.h.
+    public float4 interiorAmbient;
+    public float4 interiorDirectional;
+    public float4 interiorFog;
+    public float4 interiorFogRange;
+    public float4x4 interiorPointShadowViewProj[210];
+    public float4 interiorPointShadowLightIndices[16];
+    // x = active slot count, y = face UV scale, z = atlas texel size,
+    // w = enabled.
+    public float4 interiorPointShadowParams;
+    public float4x4 contactShadowInvView;
+    // x/y = full-resolution contact mask extent, z = enabled, w = phase.
+    public float4 contactShadowConfig;
+    // x/y = quarter-resolution record extent, z = enabled, w = bounce scale.
+    public float4 screenSpaceGiConfig;
 };
 
 [[vk::binding(0, 0)]]

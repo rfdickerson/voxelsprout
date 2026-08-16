@@ -1,4 +1,5 @@
 #include "render/backend/vulkan/renderer_backend.h"
+#include "render/upscale/upscale_contract.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
@@ -13,6 +14,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +41,45 @@ namespace odai::render {
 #include "render/renderer_shared.h"
 
 namespace {
+
+// A per-channel multiplier for the renderer's own sun or ambient colour, from
+// a WTHR light channel. Returns (1,1,1) at weight 0, so a game that publishes
+// no weather lighting is unaffected down to the bit.
+//
+// The record's colour is display-referred sRGB. Its DIRECTION in colour space
+// is authored intent and is taken whole; its MAGNITUDE is not radiance and is
+// only used to derive a bounded gain, because this renderer's exposure is
+// calibrated against the intensity computeSunColor derives from the sun's
+// altitude and a record must not be able to overrule that.
+//
+// kReferenceLuminance is a bright overcast-to-clear daytime value (sRGB ~178,
+// which is what Skyrim's clear-day Sunlight and Ambient both sit near), so a
+// typical day is close to a no-op and the gain reads as a DEPARTURE from it.
+// The square root halves the departure in stops and the clamp bounds it: a
+// weather can take the world down to about a third and up by a third, which
+// covers overcast-to-clear without letting one black out the frame.
+odai::math::Vector3 weatherLightTint(const float linearColor[3], float weight) {
+    const float clampedWeight = std::clamp(weight, 0.0f, 1.0f);
+    if (clampedWeight <= 0.0f) {
+        return odai::math::Vector3{1.0f, 1.0f, 1.0f};
+    }
+    const float luminance = (0.2126f * linearColor[0]) + (0.7152f * linearColor[1]) +
+        (0.0722f * linearColor[2]);
+    if (luminance <= 1e-5f) {
+        return odai::math::Vector3{1.0f, 1.0f, 1.0f};
+    }
+    constexpr float kReferenceLuminance = 0.44f;  // linear(sRGB 178)
+    const float gain =
+        std::clamp(std::sqrt(luminance / kReferenceLuminance), 0.35f, 1.35f);
+    // Hue as a unit-luminance ratio, so the gain above is the only thing that
+    // moves brightness.
+    const float hue[3] = {linearColor[0] / luminance, linearColor[1] / luminance,
+                          linearColor[2] / luminance};
+    return odai::math::Vector3{
+        std::lerp(1.0f, hue[0] * gain, clampedWeight),
+        std::lerp(1.0f, hue[1] * gain, clampedWeight),
+        std::lerp(1.0f, hue[2] * gain, clampedWeight)};
+}
 
 const char* voxelGiSurfaceModeName(VoxelGiSurfaceMode mode) {
     switch (mode) {
@@ -129,9 +171,13 @@ void RendererBackend::renderFrame(
             (m_displayRefreshDurationNs * m_framePacingStats.cadenceDivisor) * 1.0e-6
         );
     }
-    if (!m_debugCameraFovInitialized) {
+    // The app's FOV is followed every frame unless the debug slider has been
+    // dragged. Tracking the app's value into m_debugCameraFovDegrees while it
+    // is NOT overriding is what makes the slider start from whatever the game
+    // is currently showing rather than snapping to a stale number the moment
+    // it is touched.
+    if (!m_debugCameraFovOverride) {
         m_debugCameraFovDegrees = camera.fovDegrees;
-        m_debugCameraFovInitialized = true;
     }
     m_debugCameraFovDegrees = std::clamp(m_debugCameraFovDegrees, 20.0f, 120.0f);
     const float activeFovDegrees = m_debugCameraFovDegrees;
@@ -244,6 +290,35 @@ void RendererBackend::renderFrame(
     m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
     collectCompletedBufferReleases();
     m_frameArena.beginFrame(m_currentFrame);
+    // ODAI_ARENA_POISON=<bytes> takes a slice here, before any pass allocates,
+    // and writes to it. It carries no data and nothing reads it: the point is
+    // purely to consume ring space at this exact moment, so that nothing else
+    // lands at ring offset 0.
+    //
+    // This is the regression probe for a bug that made the renderer look
+    // broken by adding a character to it. The camera UBO was published to the
+    // descriptor-buffer path at ring offset 0 rather than at its actual slice
+    // offset (see updateFrameDescriptorSets), which was survivable only while
+    // the camera happened to be the frame's FIRST allocation. The
+    // skinned-actor pose upload below is one earlier allocation, and it was
+    // enough: every pass then read a garbage view-projection and the whole 3-D
+    // frame collapsed to one flat colour with the UI still correct on top.
+    //
+    // With the fix in place, ANY value here must render identically to an
+    // unset one. It is worth keeping precisely because nothing else in the
+    // renderer notices the difference -- the failure is invisible until some
+    // unrelated feature happens to allocate first.
+    static const char* const poisonBytes = std::getenv("ODAI_ARENA_POISON");
+    if (poisonBytes != nullptr) {
+        const auto requested = static_cast<VkDeviceSize>(std::strtoull(poisonBytes, nullptr, 10));
+        if (requested > 0) {
+            const std::optional<FrameArenaSlice> poisonSlice =
+                m_frameArena.allocateUpload(requested, 256u, FrameArenaUploadKind::Unknown);
+            if (poisonSlice.has_value() && poisonSlice->mapped != nullptr) {
+                std::memset(poisonSlice->mapped, 0, static_cast<std::size_t>(requested));
+            }
+        }
+    }
     // Must run after beginFrame so this frame's bone-matrix FrameArena slice
     // belongs to the frame index recordSkinningPass will actually record for
     // -- see setSkinnedActorPose/uploadSkinnedActorPoseForFrame's comments.
@@ -464,6 +539,12 @@ void RendererBackend::renderFrame(
         ImGui::NewFrame();
         buildFrameStatsUi();
         buildDofDebugUi();
+        // These two were written but never called from anywhere in the frame
+        // path, which left the whole shadow/AO and sun/sky/post tuning surface
+        // built and unreachable. Both early-out on m_debugUiVisible exactly as
+        // the two above do, so this costs nothing while the debug UI is closed.
+        buildShadowDebugUi();
+        buildSunDebugUi();
         m_debugUiVisible = m_showFrameStatsPanel;
         ImGui::Render();
     }
@@ -479,19 +560,63 @@ void RendererBackend::renderFrame(
     m_debugDrawCallsPost = 0;
 
     const float aspectRatio = static_cast<float>(m_renderExtent.width) / static_cast<float>(m_renderExtent.height);
-    const float nearPlane = 0.1f;
+    // ODAI_RENDER_NEAR / ODAI_RENDER_FAR open up the view distance.
+    //
+    // The whole renderer is reverse-Z (perspectiveVulkanReverseZ, and every
+    // pipeline tests GREATER_OR_EQUAL), which is what makes a far plane this
+    // aggressive workable at all: depth precision under reverse-Z with a float
+    // depth buffer is governed almost entirely by the NEAR plane, so pushing far
+    // out costs very little and pulling near in costs a great deal. 0.1 Fallout
+    // units is 1.4 mm, far tighter than anything the player can stand next to,
+    // and it is the number to raise first if distant geometry z-fights.
+    //
+    // Shadows do NOT follow this out: the cascades are clamped separately by
+    // shadowDistanceLimit (ODAI_SHADOW_DISTANCE) below, so a large far plane
+    // does not spread the atlas over terrain nothing can see it on.
+    static const float s_nearPlaneOverride = []() {
+        const char* env = std::getenv("ODAI_RENDER_NEAR");
+        const float value = (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.0f;
+        return (value > 0.0f) ? value : 0.0f;
+    }();
+    static const float s_farPlaneOverride = []() {
+        const char* env = std::getenv("ODAI_RENDER_FAR");
+        const float value = (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.0f;
+        return (value > 0.0f) ? value : 0.0f;
+    }();
     const bool renderingImportedActors =
         importedActors != nullptr &&
         !importedActors->vertices.empty() &&
         !importedActors->indices.empty() &&
         !importedActors->draws.empty();
     const bool renderingImportedScene = !m_importedMeshDraws.empty() || renderingImportedActors;
+    const bool directionalShadowsForFrame =
+        shouldRenderImportedDirectionalShadows(m_importedInteriorLighting);
+    bool renderInteriorPointShadowsThisFrame = false;
+    std::uint32_t interiorPointShadowLightCount = 0;
+    const bool sunShaftsForFrame =
+        m_sunShaftsRequested && shouldRenderImportedSky(m_importedInteriorLighting);
     const bool legacyVoxelRenderingEnabled = !renderingImportedScene;
     const bool importedInteriorGiEnabled =
         m_importedSceneInteriorMode &&
+        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting) &&
         !m_importedGiTriangles.empty();
     const bool voxelGiSceneEnabled = legacyVoxelRenderingEnabled || importedInteriorGiEnabled;
-    const float farPlane = renderingImportedScene ? 50000.0f : 500.0f;
+    const float farPlane = (s_farPlaneOverride > 0.0f)
+        ? s_farPlaneOverride
+        : (renderingImportedScene ? 50000.0f : 500.0f);
+    // NEAR is what buys depth precision under reverse-Z, and it has to be paired
+    // with the far plane rather than picked once. 0.1 against a 50000 far plane
+    // is a ratio of 500,000:1; the voxel worlds it was chosen for run a 500 far
+    // plane, where the same 0.1 is only 5,000:1 and perfectly reasonable.
+    //
+    // A Fallout unit is about 1.42 cm, so 5 units is 7 cm -- far closer than the
+    // player's collision radius ever lets the camera get to a wall, and a 50x
+    // precision improvement over 0.1 across the whole depth range. This is the
+    // number to raise (not the far plane to lower) when distant coplanar
+    // geometry z-fights; ODAI_RENDER_NEAR overrides it.
+    const float nearPlane = (s_nearPlaneOverride > 0.0f)
+        ? s_nearPlaneOverride
+        : (renderingImportedScene ? 5.0f : 0.1f);
     // tanHalfFov feeds shadow cascade sphere sizing. In ortho mode approximate
     // from the view half-height so cascade coverage matches the visible area.
     const float tanHalfFov = camera.orthographic
@@ -513,6 +638,65 @@ void RendererBackend::renderFrame(
     } else {
         projection = perspectiveVulkan(odai::math::radians(activeFovDegrees), aspectRatio, nearPlane, farPlane);
     }
+    // SUB-PIXEL JITTER. Each frame the projection is nudged by a fraction of a
+    // pixel, so consecutive frames sample the scene on different sub-pixel
+    // grids and TAA's history accumulation becomes supersampling rather than
+    // just a temporal average. Without it TAA suppresses texture shimmer (what
+    // it was written for) but cannot refine an EDGE: every frame samples the
+    // same point inside the same pixel, so the edge is the same staircase each
+    // time and averaging identical staircases changes nothing.
+    //
+    // Halton(2,3) rather than random: it is low-discrepancy, so a short window
+    // of frames covers the pixel evenly instead of clumping the way white noise
+    // does. 8 phases, which is what the history weight below converges over.
+    //
+    // Gated on TAA being ON. Jitter with no temporal filter to resolve it is
+    // pure per-frame wobble -- strictly worse than not jittering.
+    // ODAI_TAA_JITTER=0 disables it while keeping TAA, which is the control for
+    // "is this artifact the jitter or the accumulation", and is also what a
+    // screenshot diff wants: jitter makes consecutive frames differ BY DESIGN.
+    // Snapshot last frame's jitter BEFORE this frame's overwrites it, exactly
+    // as prevViewProj is snapshotted below and for the same reason: the two
+    // describe the same past frame, and reading either one late silently makes
+    // it this frame's, which is not an error anything reports -- it just
+    // reprojects half a pixel wrong forever.
+    const std::array<float, 2> previousFrameJitterNdc = m_taaJitterNdc;
+    float jitterNdcX = 0.0f;
+    float jitterNdcY = 0.0f;
+    if (m_taaEnabled && m_taaJitterEnabled && !camera.orthographic) {
+        // THE JITTER SEQUENCE IS THE UPSCALER'S CONTRACT, NOT THIS PASS'S
+        // DETAIL, so it lives in render/upscale/upscale_contract.h alongside
+        // the quality->scale table and the mip-bias rule. Halton(2,3), a phase
+        // count that scales with the upscale ratio, centred on the pixel --
+        // stated once, where a vendor backend swapped in for the built-in one
+        // can rely on the host having honoured it.
+        const upscale::Extent2D renderExtentForJitter{
+            m_renderExtent.width, m_renderExtent.height};
+        const upscale::Extent2D displayExtentForJitter{
+            m_swapchainExtent.width, m_swapchainExtent.height};
+        const std::uint32_t jitterPhaseCount =
+            upscale::jitterPhaseCount(renderExtentForJitter, displayExtentForJitter);
+        // 1-based: Halton(0) is 0 in every base, so a 0-based sequence spends
+        // its first frame not jittering at all.
+        const std::uint32_t phase = (m_taaJitterPhase % jitterPhaseCount) + 1u;
+        const upscale::JitterOffset jitterNdc =
+            upscale::jitterOffsetNdc(phase, renderExtentForJitter);
+        jitterNdcX = jitterNdc.x;
+        jitterNdcY = jitterNdc.y;
+        // clip.w is -view.z here (perspectiveVulkan sets (3,2) = -1), so adding
+        // -jitter to the column that multiplies view.z shifts clip.xy by
+        // jitter*clip.w -- i.e. a constant offset in NDC at every depth, which
+        // is what a sub-pixel sample offset is. Doing it in the matrix rather
+        // than by offsetting UVs keeps depth, normals and colour all rasterized
+        // on the SAME jittered grid, which is what makes them reprojectable
+        // together.
+        projection(0, 2) += -jitterNdcX;
+        projection(1, 2) += -jitterNdcY;
+        ++m_taaJitterPhase;
+    }
+    m_taaJitterNdc[0] = jitterNdcX;
+    m_taaJitterNdc[1] = jitterNdcY;
+
     const odai::math::Matrix4 mvp = projection * view;
     const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
     // TAA reprojection inputs. The column-major copies go to the shader (same
@@ -525,6 +709,21 @@ void RendererBackend::renderFrame(
     }
     const bool taaPrevWasValid = m_taaPrevViewProjValid;
     (void)taaPrevWasValid;
+    // The velocity pass keeps its own copies because it must run whether or not
+    // TAA is enabled -- the motion vectors feed the upscaler too, and
+    // m_taaPrevViewProjColumnMajor above is only maintained under m_taaEnabled.
+    // Captured HERE, before m_taaPrevViewProj is overwritten below, for the same
+    // reason that one is: read it after and prevViewProj becomes this frame's.
+    m_velocityPrevViewProj = m_taaPrevViewProj;
+    m_velocityCurrentViewProj = mvp;
+    m_velocityPrevJitter[0] = previousFrameJitterNdc[0];
+    m_velocityPrevJitter[1] = previousFrameJitterNdc[1];
+    m_velocityCurrentJitter[0] = jitterNdcX;
+    m_velocityCurrentJitter[1] = jitterNdcY;
+    m_velocityPrevValid = m_taaPrevViewProjValid;
+
+    // Rolled with prevViewProj: the two describe the same past frame.
+    m_taaPrevJitterNdc = previousFrameJitterNdc;
     m_taaPrevViewProj = mvp;
     m_taaPrevViewProjValid = true;
     const odai::math::Matrix4 viewColumnMajor = transpose(view);
@@ -619,9 +818,25 @@ void RendererBackend::renderFrame(
         effectiveSkySettings.sunHaloIntensity = 0.0f;
     }
 
-    const odai::math::Vector3 sunColor = isNight
+    odai::math::Vector3 sunColor = isNight
         ? odai::math::Vector3{0.0f, 0.0f, 0.0f}
         : computeSunColor(effectiveSkySettings, sunDirection);
+    // A WEATHER RECORD LIGHTS THE GROUND, NOT ONLY THE SKY. WTHR's Sunlight and
+    // Ambient channels are what make an overcast read as overcast on the
+    // terrain rather than only overhead; before this they were read and thrown
+    // away, so a storm rendered as a dark sky over a sunlit desert.
+    //
+    // Only the HUE is taken from the record. Its colours are display-referred
+    // sRGB authored for a renderer that used them literally, and this one is
+    // HDR with auto-exposure -- decoding one and using it as radiance changes
+    // the frame's whole calibration. So the record supplies direction in colour
+    // space and a BOUNDED gain from its own luminance, and the renderer keeps
+    // the intensity it derived from the sun's altitude.
+    const odai::math::Vector3 weatherSunlight = weatherLightTint(
+        m_weatherSky.sunlightColor, m_weatherSky.lightingWeight);
+    sunColor = odai::math::Vector3{
+        sunColor.x * weatherSunlight.x, sunColor.y * weatherSunlight.y,
+        sunColor.z * weatherSunlight.z};
 
     // Shadows stop well before the camera's far plane.
     //
@@ -638,7 +853,35 @@ void RendererBackend::renderFrame(
     // kShadowSplitNear is inside cascade 0 regardless, so using it as the
     // distribution's near end costs nothing and restores the logarithmic term
     // that makes cascade 0 tight.
-    float shadowDistanceLimit = renderingImportedScene ? 6000.0f : farPlane;
+    // 6000 was tuned for a camera standing ON the ground in Goodsprings. It is
+    // far too short for a camera that LOOKS ACROSS a landscape: the flythroughs
+    // fly 2000-3600 units up, so nothing on screen is ever within cascade 0's
+    // few hundred units and the whole frame sits in the last cascade -- or past
+    // it. Rendered as a shadow-visibility view with a low sun, that is a hard
+    // horizontal line across the middle of the frame with cast shadows below it
+    // and nothing at all above.
+    //
+    // Note this is invisible at midday. A 37-degree sun over rounded terrain
+    // casts almost nothing to begin with, so the A/B that matters is a LOW sun
+    // (ODAI_FNV_HOUR=17.5); at hour 16 the same change moves the shadowed
+    // fraction of the frame by 0.8 points and looks like it did nothing.
+    // 50000 is the imported-scene far plane, so this cap is now effectively
+    // "shadow everything the frustum can see" rather than a budget.
+    //
+    // It was 24000, which still left the far third of a high-camera shot
+    // unshadowed: from 7000 units up the distant peaks and the whole horizon
+    // ridge came through pure white while the near and mid ground had full
+    // shadow detail. Going to the far plane is cheaper than it sounds because
+    // the near cascades are almost fully logarithmic now -- cascade 0 widens
+    // from 517 units to 886, which is 0.66 -> 1.13 world units per texel and
+    // measured 1.06/255 mean difference on a ground-level frame, i.e. not
+    // visible. Cascade 3 lands at 64 units per texel, coarse but present, and
+    // terrain 30km out subtends little enough that a soft blob is the right
+    // answer anyway.
+    //
+    // Cost, interleaved A/B over the same moving camera: shadow pass
+    // 1.03 -> 1.77 ms, with frame time unchanged inside run-to-run noise.
+    float shadowDistanceLimit = renderingImportedScene ? 50000.0f : farPlane;
     if (const char* shadowDistanceEnv = std::getenv("ODAI_SHADOW_DISTANCE")) {
         const float requested = static_cast<float>(std::atof(shadowDistanceEnv));
         if (requested > 1.0f) {
@@ -646,12 +889,53 @@ void RendererBackend::renderFrame(
         }
     }
     const float shadowFarPlane = std::min(farPlane, shadowDistanceLimit);
-    const float shadowSplitNear = std::min(std::max(nearPlane, shadowFarPlane * 0.008f), shadowFarPlane);
-    constexpr float kCascadeLambda = 0.70f;
+    // The distribution's near end, and it is an ABSOLUTE distance rather than a
+    // fraction of the far one.
+    //
+    // It used to be shadowFarPlane * 0.008, which quietly made the two
+    // inseparable: pushing shadows further out dragged the near end out with
+    // them and coarsened cascade 0 in proportion. Measured on Vvardenfell,
+    // raising ODAI_SHADOW_DISTANCE from 6000 to 45000 took cascade 0 from a
+    // 573-unit range at 0.73 units per texel to a 4298-unit range at 5.50 --
+    // 7.5x blurrier up close, which is the half of the picture that already
+    // looked right. "More shadow distance" should not be a trade against "the
+    // shadows near me".
+    //
+    // The number answers a different question anyway: how close geometry gets
+    // to the camera. Anything nearer is inside cascade 0 regardless.
+    //
+    // 48 is what 6000 * 0.008 evaluated to, so this is EXACTLY the old
+    // behaviour at the old default and changes nothing until the distance moves.
+    constexpr float kShadowDistributionNear = 48.0f;
+    const float shadowSplitNear =
+        std::min(std::max(nearPlane, kShadowDistributionNear), shadowFarPlane * 0.25f);
+    // How far the splits lean logarithmic (1.0) versus uniform (0.0). The
+    // logarithmic term is the one that keeps cascade 0 tight over a long range,
+    // so a range this is not tuned for shows up as a fat first cascade: the
+    // uniform term at p=0.25 is a QUARTER OF THE WHOLE DISTANCE, and at 0.30
+    // weight that alone is 1811 units of a 24000-unit range.
+    // 0.70 is right for a 6000-unit range and wrong for a 24000-unit one: the
+    // uniform term at p=0.25 is a quarter of the WHOLE distance, so at 0.30
+    // weight it alone puts 1811 units into cascade 0 and blurs the near
+    // shadows that already looked right. Leaning almost fully logarithmic keeps
+    // cascade 0 tight no matter how far the far end goes -- measured, cascade 0
+    // at 24000/0.95 is 517 units at 0.66 per texel, against 573 at 0.73 for the
+    // old 6000/0.70. Four times the range AND a slightly sharper near cascade.
+    //
+    // Only the imported-scene path moves; the voxel games keep 0.70 with their
+    // own far plane, because nothing here measured them.
+    float cascadeLambda = renderingImportedScene ? 0.95f : 0.70f;
+    if (const char* lambdaEnv = std::getenv("ODAI_SHADOW_LAMBDA")) {
+        cascadeLambda = std::clamp(static_cast<float>(std::atof(lambdaEnv)), 0.0f, 1.0f);
+    }
+    const float kCascadeLambda = cascadeLambda;
     constexpr float kCascadeSplitQuantization = 0.5f;
     constexpr float kCascadeSplitUpdateThreshold = 0.5f;
     std::array<float, kShadowCascadeCount> cascadeDistances{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if (!directionalShadowsForFrame) {
+            break;
+        }
         const float p = static_cast<float>(cascadeIndex + 1) / static_cast<float>(kShadowCascadeCount);
         const float logarithmicSplit = shadowSplitNear * std::pow(shadowFarPlane / shadowSplitNear, p);
         const float uniformSplit = shadowSplitNear + ((shadowFarPlane - shadowSplitNear) * p);
@@ -672,7 +956,16 @@ void RendererBackend::renderFrame(
         cascadeDistances[cascadeIndex] = split;
     }
 
-    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && !m_shadowCascadeSplitsLogged) {
+    // Logged whenever the set CHANGES, not once. Once meant frame 0 -- before a
+    // streaming game has uploaded any geometry, so renderingImportedScene is
+    // still false and the far plane is the 500-unit fallback. The numbers that
+    // printed described a frame nobody was looking at, which is worse than not
+    // printing them.
+    const bool cascadeSplitsChanged = directionalShadowsForFrame &&
+        std::abs(cascadeDistances[kShadowCascadeCount - 1] - m_loggedShadowCascadeFar) >
+        std::max(1.0f, m_loggedShadowCascadeFar * 0.02f);
+    if (std::getenv("ODAI_GPU_TIMINGS") != nullptr && cascadeSplitsChanged) {
+        m_loggedShadowCascadeFar = cascadeDistances[kShadowCascadeCount - 1];
         m_shadowCascadeSplitsLogged = true;
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             const float cascadeFar = cascadeDistances[cascadeIndex];
@@ -689,6 +982,9 @@ void RendererBackend::renderFrame(
 
     std::array<odai::math::Matrix4, kShadowCascadeCount> lightViewProjMatrices{};
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if (!directionalShadowsForFrame) {
+            break;
+        }
         const float cascadeFar = cascadeDistances[cascadeIndex];
         const float farHalfHeight = cascadeFar * tanHalfFov;
         const float farHalfWidth = farHalfHeight * aspectRatio;
@@ -844,17 +1140,20 @@ void RendererBackend::renderFrame(
     //
     // A skipped cascade samples with the matrix its tile was RENDERED with
     // (cached), never this frame's -- content and matrix must agree or far
-    // shadows swim. Skinned actors would break the exact-skip (they move
-    // without moving the matrix), so any skinned draws disable skipping
-    // entirely; the Fallout viewer currently has none.
+    // shadows swim. Skinned actors break the exact-skip (they move without
+    // moving the matrix); see the note below for why that does not also rule
+    // out deferring the far cascades.
     std::uint32_t shadowSkipCascadeMask = 0;
     static const bool s_shadowInterleaveDisabled =
         std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
         std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
     m_shadowInterleaveParity ^= 1u;
     const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
-    if (!s_shadowInterleaveDisabled && !anySkinnedShadowCasters) {
+    if (!s_shadowInterleaveDisabled) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            if (!directionalShadowsForFrame) {
+                break;
+            }
             if (!m_shadowRenderedValid[cascadeIndex]) {
                 continue;
             }
@@ -863,15 +1162,35 @@ void RendererBackend::renderFrame(
                     m_shadowRenderedMatrices[cascadeIndex].m,
                     lightViewProjMatrices[cascadeIndex].m,
                     sizeof(lightViewProjMatrices[cascadeIndex].m)) == 0;
+            // THE EXACT-SKIP AND THE PARITY DEFERRAL ARE DIFFERENT CLAIMS, and
+            // conflating them is what made a single skinned actor cost the
+            // whole atlas.
+            //
+            // The exact-skip says "nothing in this cascade moved", which a
+            // skinned actor falsifies: it animates without moving the light
+            // matrix, so its shadow would freeze while it walked out of it.
+            //
+            // The parity deferral says only "this cascade may be one frame
+            // stale", which is a bound on ERROR rather than a claim of
+            // stillness -- and it is only applied to cascades 2 and 3, which
+            // start 107 world units out and have texels 0.75 and 3.4 units
+            // across. An actor covers a fraction of one of those texels per
+            // frame. Refusing it whenever any skinned actor exists anywhere was
+            // free when the Fallout viewer had none; with a populated town it
+            // means every cascade re-renders every frame forever.
+            const bool canExactSkip = matrixUnchanged && !anySkinnedShadowCasters;
             const bool parityDefersFarCascade =
                 cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
-            if (matrixUnchanged || parityDefersFarCascade) {
+            if (canExactSkip || parityDefersFarCascade) {
                 shadowSkipCascadeMask |= (1u << cascadeIndex);
                 lightViewProjMatrices[cascadeIndex] = m_shadowRenderedMatrices[cascadeIndex];
             }
         }
     }
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+        if (!directionalShadowsForFrame) {
+            break;
+        }
         if ((shadowSkipCascadeMask & (1u << cascadeIndex)) == 0u) {
             m_shadowRenderedMatrices[cascadeIndex] = lightViewProjMatrices[cascadeIndex];
             m_shadowRenderedValid[cascadeIndex] = true;
@@ -890,6 +1209,19 @@ void RendererBackend::renderFrame(
         const odai::math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
         shIrradiance[0] = nightAmbientIrradiance * (1.0f / kShY00);
     }
+    // The same treatment for the sky's fill light, and applied to the WHOLE SH
+    // set rather than only its DC term: tinting the constant term alone leaves
+    // the directional terms carrying the old hue, so a surface facing up and a
+    // surface facing sideways end up lit by two different weathers.
+    {
+        const odai::math::Vector3 weatherAmbient = weatherLightTint(
+            m_weatherSky.ambientColor, m_weatherSky.lightingWeight);
+        for (odai::math::Vector3& coefficient : shIrradiance) {
+            coefficient = odai::math::Vector3{coefficient.x * weatherAmbient.x,
+                                              coefficient.y * weatherAmbient.y,
+                                              coefficient.z * weatherAmbient.z};
+        }
+    }
 
     const std::optional<FrameArenaSlice> mvpSliceOpt =
         m_frameArena.allocateUpload(
@@ -906,6 +1238,11 @@ void RendererBackend::renderFrame(
     std::memcpy(mvpUniform.mvp, mvpColumnMajor.m, sizeof(mvpUniform.mvp));
     std::memcpy(mvpUniform.view, viewColumnMajor.m, sizeof(mvpUniform.view));
     std::memcpy(mvpUniform.proj, projectionColumnMajor.m, sizeof(mvpUniform.proj));
+    const odai::math::Matrix4 inverseViewColumnMajor =
+        transpose(odai::math::inverse(view));
+    std::memcpy(mvpUniform.contactShadowInvView,
+                inverseViewColumnMajor.m,
+                sizeof(mvpUniform.contactShadowInvView));
     for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
         const odai::math::Matrix4 lightViewProjColumnMajor = transpose(lightViewProjMatrices[cascadeIndex]);
         const odai::math::Matrix4 inverseLightViewProjColumnMajor =
@@ -1029,8 +1366,86 @@ void RendererBackend::renderFrame(
         ? 0.0f
         : std::clamp(m_skyDebugSettings.volumetricFogDensity, 0.0f, 1.0f);
     mvpUniform.skyConfig4[1] = std::clamp(m_skyDebugSettings.volumetricFogHeightFalloff, 0.0f, 1.0f);
-    mvpUniform.skyConfig4[2] = m_skyDebugSettings.volumetricFogBaseHeight;
+    // VOLUMETRIC FOG BASE HEIGHT IS AN ABSOLUTE WORLD Y, which cannot be one
+    // constant across games at different scales. The 42.0 default suits a
+    // voxel world whose ground is near the origin; Fallout's terrain sits at
+    // y 8700-13000, so `worldPos.y - 42` is ~9000 and the marcher's
+    // exp(-relativeHeight * falloff) underflows to zero at every step. The
+    // pass ran, cost its 1.9 ms, and produced nothing.
+    //
+    // For an imported scene, anchor it to the camera instead: fog is a local
+    // effect and the interesting band is the few hundred units around the
+    // viewer, not an altitude fixed at world build time.
+    float fogBaseHeight = m_skyDebugSettings.volumetricFogBaseHeight;
+    if (renderingImportedScene &&
+        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting)) {
+        fogBaseHeight = eye.y - 240.0f;
+    }
+    // An authored weather says how far it can be seen through, and that beats
+    // any constant density here. WTHR's fog-far is in world units, so deriving
+    // the density from it makes the haze correct at Bethesda's ~70 units/metre
+    // without a scene-specific tuning pass.
+    //
+    // Two things about the height term have to change with it, and both were
+    // visible whitewash before:
+    //
+    //  - `exp(-(h - base) * falloff)` GROWS below the base, up to the shader's
+    //    e^7 clamp -- a thousandfold. With the base pinned 240 units under the
+    //    eye, standing on Goodsprings' hill put the whole valley floor below it
+    //    and rendered a solid white lake over the town.
+    //  - A desert vista is aerial perspective, not ground fog: near-uniform
+    //    density with a very slow falloff over thousands of units.
+    //
+    // An imported scene with NO weather record takes the same treatment against
+    // a default distance. It has the same problem for the same reason -- the
+    // constant density and the growing height term are both authored for a
+    // world at the origin -- and leaving it out meant an unmodded run, the one
+    // with no weather plugin loaded, was the only configuration still rendering
+    // the white lake.
+    constexpr float kDefaultFogFarDistance = 60000.0f;  // ~850 m, a clear day
+    if (renderingImportedScene &&
+        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting)) {
+        // Distance only, NOT gated on weight -- matching applyAerialPerspective
+        // in imported_static.frag.slang, which the comment above says these two
+        // atmospheres are calibrated against each other by. A caller publishing
+        // a fog-far with weight 0 is saying "leave my sky colours procedural,
+        // but this is how far you can see"; gating the density on weight here
+        // and not there made the two disagree by 2.7x on an Oblivion worldspace.
+        const bool authored = m_weatherSky.fogFarDistance > 1.0f;
+        const float fogFarDistance =
+            authored ? m_weatherSky.fogFarDistance : kDefaultFogFarDistance;
+        // Mean of fogExtinctionCoefficient() in tone_map.frag.slang, which is
+        // what the density is multiplied by before it reaches transmittance.
+        constexpr float kMeanExtinction = 0.20f;
+        // Leave ~6% of the far surface visible at the authored distance rather
+        // than driving it to zero: the record's fog-far is where the game hid
+        // its draw distance, and a wall of opaque haze there is worse than the
+        // horizon reading through faintly.
+        //
+        // Half of that 2.8, because this is not the only atmosphere in the
+        // frame: imported_static.frag.slang's aerial perspective calibrates
+        // itself against the same fog-far and the two compose multiplicatively.
+        constexpr float kOpticalDepthAtFogFar = 1.4f;
+        const float density = kOpticalDepthAtFogFar / (fogFarDistance * kMeanExtinction);
+        mvpUniform.skyConfig4[0] = std::clamp(density, 1.0e-5f, 0.02f);
+        mvpUniform.skyConfig4[1] = 0.00012f;  // ~20% thinner per 2000 units up
+        fogBaseHeight = eye.y;
+    }
+    // Tuning knobs -- these are look values and want sweeping per scene.
+    if (const char* env = std::getenv("ODAI_FOG_BASE")) {
+        fogBaseHeight = static_cast<float>(std::atof(env));
+    }
+    if (const char* env = std::getenv("ODAI_FOG_DENSITY")) {
+        mvpUniform.skyConfig4[0] = std::clamp(static_cast<float>(std::atof(env)), 0.0f, 1.0f);
+    }
+    if (const char* env = std::getenv("ODAI_FOG_FALLOFF")) {
+        mvpUniform.skyConfig4[1] = std::clamp(static_cast<float>(std::atof(env)), 0.0f, 1.0f);
+    }
+    mvpUniform.skyConfig4[2] = fogBaseHeight;
     mvpUniform.skyConfig4[3] = std::clamp(m_skyDebugSettings.volumetricSunScattering, 0.0f, 8.0f);
+    if (const char* env = std::getenv("ODAI_FOG_SCATTER")) {
+        mvpUniform.skyConfig4[3] = std::clamp(static_cast<float>(std::atof(env)), 0.0f, 8.0f);
+    }
     const uint32_t autoExposureUpdateIntervalFrames = std::max(
         1u,
         static_cast<uint32_t>(std::max(1, m_skyDebugSettings.autoExposureUpdateIntervalFrames))
@@ -1051,7 +1466,10 @@ void RendererBackend::renderFrame(
         mvpUniform.weatherFog[channel] = m_weatherSky.fogColor[channel];
     }
     mvpUniform.weatherSkyLower[3] = 0.0f;
-    mvpUniform.weatherHorizon[3] = 0.0f;
+    // Spare channel: the weather's sun-glare scale. 1 when no weather is
+    // published, which is the look every other game has.
+    mvpUniform.weatherHorizon[3] =
+        (m_weatherSky.weight > 0.0f) ? std::clamp(m_weatherSky.sunGlare, 0.0f, 1.0f) : 1.0f;
     mvpUniform.weatherFog[3] = m_weatherSky.fogFarDistance;
 
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
@@ -1066,9 +1484,14 @@ void RendererBackend::renderFrame(
             hasSlot ? std::clamp(m_weatherSky.cloudOpacity[layer], 0.0f, 1.0f) : 0.0f;
         mvpUniform.weatherCloudParams[layer][0] =
             hasSlot ? static_cast<float>(m_weatherCloudSlots[layer]) : -1.0f;
-        mvpUniform.weatherCloudParams[layer][1] = m_weatherCloudScroll[layer];
-        mvpUniform.weatherCloudParams[layer][2] = m_weatherCloudDomeScale[layer];
-        mvpUniform.weatherCloudParams[layer][3] = 0.0f;
+        mvpUniform.weatherCloudParams[layer][1] = m_weatherCloudLayers[layer].scrollU;
+        mvpUniform.weatherCloudParams[layer][2] = m_weatherCloudLayers[layer].scale;
+        mvpUniform.weatherCloudParams[layer][3] = m_weatherCloudLayers[layer].scrollV;
+        mvpUniform.weatherCloudBand[layer][0] = m_weatherCloudLayers[layer].bandLow;
+        mvpUniform.weatherCloudBand[layer][1] = m_weatherCloudLayers[layer].bandHigh;
+        mvpUniform.weatherCloudBand[layer][2] =
+            static_cast<float>(m_weatherCloudLayers[layer].mapping);
+        mvpUniform.weatherCloudBand[layer][3] = 0.0f;
     }
 
     mvpUniform.tonemapConfig[0] =
@@ -1077,9 +1500,65 @@ void RendererBackend::renderFrame(
     mvpUniform.tonemapConfig[2] = m_tonemapSettings.saturation;
     mvpUniform.tonemapConfig[3] = m_tonemapSettings.curve;
     mvpUniform.tonemapConfig2[0] = m_tonemapSettings.overbrightDampening;
-    mvpUniform.tonemapConfig2[1] = 0.0f;
-    mvpUniform.tonemapConfig2[2] = 0.0f;
-    mvpUniform.tonemapConfig2[3] = 0.0f;
+    mvpUniform.tonemapConfig2[1] = static_cast<float>(static_cast<std::uint32_t>(m_debugView));
+    mvpUniform.tonemapConfig2[2] = m_taaJitterNdc[0];
+    mvpUniform.tonemapConfig2[3] = m_taaJitterNdc[1];
+    mvpUniform.hdrHighlightConfig[0] = m_tonemapSettings.whitePoint;
+    mvpUniform.hdrHighlightConfig[1] = m_tonemapSettings.highlightShoulder;
+    mvpUniform.hdrHighlightConfig[2] = 0.0f;
+    mvpUniform.hdrHighlightConfig[3] = 0.0f;
+    // See renderer_shared.h: this is what the PCF sites use instead of asking
+    // the sampler for the atlas size once (twice, in the cascade blend) per
+    // fragment. kShadowAtlasSize is one of the mirrored atlas constants -- if
+    // it moves, this follows it for free.
+    mvpUniform.shadowAtlasConfig[0] = 1.0f / static_cast<float>(kShadowAtlasSize);
+    mvpUniform.shadowAtlasConfig[1] = 0.0f;
+    mvpUniform.shadowAtlasConfig[2] = 0.0f;
+    mvpUniform.shadowAtlasConfig[3] = 0.0f;
+    for (int channel = 0; channel < 3; ++channel) {
+        mvpUniform.interiorAmbient[channel] = m_importedInteriorLighting.ambientColor[channel];
+        mvpUniform.interiorDirectional[channel] = m_importedInteriorLighting.directionalColor[channel];
+        mvpUniform.interiorFog[channel] = m_importedInteriorLighting.fogColor[channel];
+    }
+    mvpUniform.interiorAmbient[3] = m_importedInteriorLighting.hasAuthoredLighting ? 1.0f : 0.0f;
+    mvpUniform.interiorDirectional[3] = m_importedInteriorLighting.useSkyLighting ? 1.0f : 0.0f;
+    mvpUniform.interiorFog[3] = m_importedInteriorLighting.showSky ? 1.0f : 0.0f;
+    mvpUniform.interiorFogRange[0] = m_importedInteriorLighting.fogNear;
+    mvpUniform.interiorFogRange[1] = m_importedInteriorLighting.fogFar;
+    mvpUniform.interiorFogRange[2] =
+        shouldRenderImportedDirectionalShadows(m_importedInteriorLighting) ? 1.0f : 0.0f;
+    mvpUniform.interiorFogRange[3] = m_importedInteriorLighting.enabled ? 1.0f : 0.0f;
+    // Terrain layer-blend shaping, exposed so it can be turned OFF.
+    //
+    // The defaults are the values this was hardcoded to and render identically
+    // to before, deliberately. They were suspected of producing the hard,
+    // wedge-shaped boundaries visible on Goodsprings ground -- sharpening a
+    // per-vertex weight that is interpolated linearly across a triangle does
+    // magnify the triangulation -- and that suspicion is WRONG: at
+    // ODAI_FNV_TERRAIN_BLEND=0,520,170,0, which is a plain lerp of the authored
+    // weight with no noise at all, the wedges are unchanged. So is the terrain-
+    // layer debug view, which shows those weights as a smooth field. Whatever
+    // draws them is not this, and retuning it would be a look change with no
+    // defect behind it.
+    //
+    // ODAI_FNV_TERRAIN_BLEND=<sharpness>,<coarseUnits>,<fineUnits>,<amount>.
+    // Sharpness 0 is the control any future attempt at this should start from.
+    static const std::array<float, 4> s_terrainBlend = []() {
+        std::array<float, 4> values{1.0f, 220.0f, 70.0f, 0.55f};
+        if (const char* env = std::getenv("ODAI_FNV_TERRAIN_BLEND")) {
+            std::array<float, 4> parsed{};
+            const int count = std::sscanf(
+                env, "%f,%f,%f,%f", &parsed[0], &parsed[1], &parsed[2], &parsed[3]);
+            for (int i = 0; i < count && i < 4; ++i) {
+                values[static_cast<std::size_t>(i)] = parsed[static_cast<std::size_t>(i)];
+            }
+        }
+        return values;
+    }();
+    mvpUniform.terrainBlendConfig[0] = s_terrainBlend[0];
+    mvpUniform.terrainBlendConfig[1] = s_terrainBlend[1];
+    mvpUniform.terrainBlendConfig[2] = s_terrainBlend[2];
+    mvpUniform.terrainBlendConfig[3] = s_terrainBlend[3];
     mvpUniform.colorGrading0[0] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceR, 0.0f, 4.0f);
     mvpUniform.colorGrading0[1] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceG, 0.0f, 4.0f);
     mvpUniform.colorGrading0[2] = std::clamp(m_skyDebugSettings.colorGradingWhiteBalanceB, 0.0f, 4.0f);
@@ -1116,13 +1595,74 @@ void RendererBackend::renderFrame(
     };
     std::array<SelectedImportedLight, kImportedLocalLightCapacity> selectedImportedLights{};
     std::size_t selectedImportedLightCount = 0;
-    const float importedLightRadiusScale = std::clamp(m_debugImportedLightRadiusScale, 0.25f, 8.0f);
+    // XCLL interiors use the LIGH records at authored radius/intensity. The
+    // viewer's historical 3x radius / 1.65x intensity are outdoor readability
+    // knobs; applying them inside made overlapping chandeliers bleach the hall
+    // even after the exterior sun had correctly been removed.
+    const bool authoredInteriorLighting =
+        useAuthoredImportedInteriorLighting(m_importedInteriorLighting);
+    const float importedLightRadiusScale = authoredInteriorLighting
+        ? 1.0f
+        : std::clamp(m_debugImportedLightRadiusScale, 0.25f, 8.0f);
+    // THE SHADER LOOP IS BOUNDED BY HOW MANY LIGHTS WE UPLOAD, and a light that
+    // cannot reach a visible pixel still costs every fragment a full iteration.
+    // The scoring below keeps the best 64 by distance from the VIEW AXIS, which
+    // is not the same as being in the frustum: a torch inside a building behind
+    // the camera scores ~0 and takes a slot. Measured on Whiterun at 4K,
+    // capping the loop at 16 instead of 64 moved the main pass 17.15 -> 14.03,
+    // i.e. the surplus lights cost ~0.065 ms each in pure rejection.
+    //
+    // The four SIDE planes come straight out of the row-major view-projection
+    // (Gribb-Hartmann: plane = row3 +/- rowN). Near/far are done separately
+    // against the view axis rather than from rows 2/3, because those two depend
+    // on the depth convention and this renderer is reverse-Z -- getting them
+    // backwards would cull lights that are plainly visible, which is a far
+    // worse failure than keeping a few extra.
+    struct FrustumPlane {
+        odai::math::Vector3 normal;
+        float distance = 0.0f;
+    };
+    std::array<FrustumPlane, 4> sidePlanes{};
+    {
+        const float* m = mvp.m;  // row-major: m[(row * 4) + col]
+        const auto makePlane = [](float a, float b, float c, float d) {
+            const float length = std::sqrt((a * a) + (b * b) + (c * c));
+            const float inverseLength = (length > 1e-6f) ? (1.0f / length) : 0.0f;
+            return FrustumPlane{
+                odai::math::Vector3{a * inverseLength, b * inverseLength, c * inverseLength},
+                d * inverseLength};
+        };
+        for (int axis = 0; axis < 2; ++axis) {
+            const int row = axis * 4;
+            sidePlanes[static_cast<std::size_t>(axis * 2)] = makePlane(
+                m[12] + m[row + 0], m[13] + m[row + 1], m[14] + m[row + 2], m[15] + m[row + 3]);
+            sidePlanes[static_cast<std::size_t>((axis * 2) + 1)] = makePlane(
+                m[12] - m[row + 0], m[13] - m[row + 1], m[14] - m[row + 2], m[15] - m[row + 3]);
+        }
+    }
+    std::size_t importedLightsFrustumCulled = 0;
     if (m_debugImportedLightsEnabled && !m_importedLocalLights.empty()) {
         for (const ImportedLocalLight& light : m_importedLocalLights) {
             const odai::math::Vector3 lightPosition{light.position[0], light.position[1], light.position[2]};
             const odai::math::Vector3 cameraToLight = lightPosition - eye;
             const float influenceRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
             const float alongView = odai::math::dot(cameraToLight, forward);
+            // Conservative on purpose: a sphere is only rejected when it is
+            // wholly outside a plane, so a light grazing the screen edge is
+            // kept. Over-inclusion costs a loop iteration; under-inclusion
+            // makes a lamp go out when the camera turns, which is worse.
+            bool outsideFrustum = alongView > (farPlane + influenceRadius);
+            for (const FrustumPlane& plane : sidePlanes) {
+                if (outsideFrustum) {
+                    break;
+                }
+                outsideFrustum =
+                    (odai::math::dot(plane.normal, lightPosition) + plane.distance) < -influenceRadius;
+            }
+            if (outsideFrustum) {
+                ++importedLightsFrustumCulled;
+                continue;
+            }
             const odai::math::Vector3 closestViewPoint = eye + (forward * std::max(alongView, 0.0f));
             const odai::math::Vector3 lightToViewRay = lightPosition - closestViewPoint;
             const float viewRayDistanceSquared = odai::math::lengthSquared(lightToViewRay);
@@ -1160,8 +1700,17 @@ void RendererBackend::renderFrame(
             });
     }
     m_debugImportedLightSelectedCount = static_cast<std::uint32_t>(selectedImportedLightCount);
-    const float importedLightGlobalIntensity =
-        std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
+    if (std::getenv("ODAI_DRAW_COUNTS") != nullptr) {
+        static std::uint64_t s_lightLogFrame = 0;
+        if ((s_lightLogFrame++ % 60u) == 0u) {
+            VOX_LOGI("render") << "local lights: uploaded=" << selectedImportedLightCount
+                               << " of " << m_importedLocalLights.size()
+                               << " (frustum culled " << importedLightsFrustumCulled << ")";
+        }
+    }
+    const float importedLightGlobalIntensity = authoredInteriorLighting
+        ? 1.0f
+        : std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
     auto mixImportedLightSignature = [](std::uint64_t hash, std::uint64_t value) {
         hash ^= value;
         hash *= 1099511628211ull;
@@ -1181,9 +1730,32 @@ void RendererBackend::renderFrame(
         static_cast<std::uint64_t>(selectedImportedLightCount));
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightGlobalIntensity);
     importedLightSignature = mixImportedLightFloat(importedLightSignature, importedLightRadiusScale);
+    const auto animatedImportedLightIntensity = [&](const ImportedLocalLight& light) {
+        const float phase =
+            (light.position[0] * 0.0131f) + (light.position[1] * 0.0173f) +
+            (light.position[2] * 0.0117f);
+        float modulation = 1.0f;
+        if ((light.flags & 0x08u) != 0u) {  // flicker
+            const float a = std::sin((flowTimeSeconds * 12.7f) + phase);
+            const float b = std::sin((flowTimeSeconds * 19.1f) + (phase * 1.73f));
+            modulation = 0.82f + (0.18f * (0.5f + (0.5f * a * b)));
+        } else if ((light.flags & 0x40u) != 0u) {  // flicker slow
+            const float a = std::sin((flowTimeSeconds * 4.1f) + phase);
+            const float b = std::sin((flowTimeSeconds * 6.7f) + (phase * 1.37f));
+            modulation = 0.84f + (0.16f * (0.5f + (0.5f * a * b)));
+        } else if ((light.flags & 0x80u) != 0u) {  // pulse
+            modulation = 0.78f + (0.22f * (0.5f + 0.5f * std::sin(
+                (flowTimeSeconds * 5.5f) + phase)));
+        } else if ((light.flags & 0x100u) != 0u) {  // pulse slow
+            modulation = 0.80f + (0.20f * (0.5f + 0.5f * std::sin(
+                (flowTimeSeconds * 2.2f) + phase)));
+        }
+        return light.intensity * modulation;
+    };
     for (std::size_t lightIndex = 0; lightIndex < selectedImportedLightCount; ++lightIndex) {
         const ImportedLocalLight& light = *selectedImportedLights[lightIndex].light;
         const float lightRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
+        const float animatedIntensity = animatedImportedLightIntensity(light);
         mvpUniform.importedLightPositionRadius[lightIndex][0] = light.position[0];
         mvpUniform.importedLightPositionRadius[lightIndex][1] = light.position[1];
         mvpUniform.importedLightPositionRadius[lightIndex][2] = light.position[2];
@@ -1191,7 +1763,7 @@ void RendererBackend::renderFrame(
         mvpUniform.importedLightColorIntensity[lightIndex][0] = light.color[0];
         mvpUniform.importedLightColorIntensity[lightIndex][1] = light.color[1];
         mvpUniform.importedLightColorIntensity[lightIndex][2] = light.color[2];
-        mvpUniform.importedLightColorIntensity[lightIndex][3] = light.intensity;
+        mvpUniform.importedLightColorIntensity[lightIndex][3] = animatedIntensity;
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[0]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[1]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.position[2]);
@@ -1201,10 +1773,192 @@ void RendererBackend::renderFrame(
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.color[2]);
         importedLightSignature = mixImportedLightFloat(importedLightSignature, light.intensity);
     }
+    for (std::uint32_t lightIndex = 0; lightIndex < kImportedLocalLightCapacity; ++lightIndex) {
+        mvpUniform.interiorPointShadowLightIndices[lightIndex / 4u][lightIndex % 4u] = -1.0f;
+    }
+    const bool useInteriorPointShadowMaps =
+        shouldUseImportedPointShadowMaps(m_importedInteriorLighting);
+    if (useInteriorPointShadowMaps) {
+        if (!m_interiorPointShadowAtlasValid ||
+            m_interiorPointShadowLightSourceCount == 0) {
+            m_interiorPointShadowLightSourceCount = 0;
+            const auto appendShadowSource = [&](std::uint32_t sourceIndex) {
+                if (sourceIndex >= m_importedLocalLights.size() ||
+                    m_interiorPointShadowLightSourceCount >= kInteriorPointShadowLightCount) {
+                    return;
+                }
+                const auto first = m_interiorPointShadowLightSourceIndices.begin();
+                const auto last = first + static_cast<std::ptrdiff_t>(
+                    m_interiorPointShadowLightSourceCount);
+                if (std::find(first, last, sourceIndex) != last) {
+                    return;
+                }
+                m_interiorPointShadowLightSourceIndices[
+                    m_interiorPointShadowLightSourceCount++] = sourceIndex;
+            };
+            // Seed with the entry-view relevance order, then use the remaining
+            // capacity for off-camera lights. The old code stopped after the
+            // visible seed (16 in the fixed Dragonsreach view), so those
+            // unshadowed lights still filled table and contact shadows even
+            // though the atlas had room for the complete 34-light interior.
+            for (std::size_t selectedIndex = 0;
+                 selectedIndex < selectedImportedLightCount;
+                 ++selectedIndex) {
+                appendShadowSource(static_cast<std::uint32_t>(
+                    selectedImportedLights[selectedIndex].light -
+                    m_importedLocalLights.data()));
+            }
+            for (std::uint32_t sourceIndex = 0;
+                 sourceIndex < static_cast<std::uint32_t>(m_importedLocalLights.size());
+                 ++sourceIndex) {
+                appendShadowSource(sourceIndex);
+            }
+        }
+        interiorPointShadowLightCount = m_interiorPointShadowLightSourceCount;
+        std::array<const ImportedLocalLight*, kInteriorPointShadowLightCount> shadowLights{};
+        for (std::uint32_t slot = 0; slot < interiorPointShadowLightCount; ++slot) {
+            const std::uint32_t sourceIndex =
+                m_interiorPointShadowLightSourceIndices[slot];
+            if (sourceIndex < m_importedLocalLights.size()) {
+                shadowLights[slot] = &m_importedLocalLights[sourceIndex];
+            }
+        }
+        // The lighting list remains camera-selected. Publish an atlas slot for
+        // any of those lights that belonged to the entry-view selection; newly
+        // visible lights still illuminate, but do not force a depth rebuild.
+        for (std::uint32_t lightIndex = 0;
+             lightIndex < static_cast<std::uint32_t>(selectedImportedLightCount);
+             ++lightIndex) {
+            for (std::uint32_t slot = 0; slot < interiorPointShadowLightCount; ++slot) {
+                if (selectedImportedLights[lightIndex].light == shadowLights[slot]) {
+                    mvpUniform.interiorPointShadowLightIndices[lightIndex / 4u][lightIndex % 4u] =
+                        static_cast<float>(slot);
+                    break;
+                }
+            }
+        }
+        constexpr std::array<odai::math::Vector3, kInteriorPointShadowFaceCount> kFaceDirections = {{
+            {1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f},
+            {0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+        }};
+        constexpr std::array<odai::math::Vector3, kInteriorPointShadowFaceCount> kFaceUps = {{
+            {0.0f, -1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f},
+            {0.0f, -1.0f, 0.0f}, {0.0f, -1.0f, 0.0f},
+        }};
+        std::uint64_t pointShadowSignature = 1469598103934665603ull;
+        pointShadowSignature = mixImportedLightSignature(
+            pointShadowSignature, interiorPointShadowLightCount);
+        for (std::uint32_t slot = 0; slot < interiorPointShadowLightCount; ++slot) {
+            if (shadowLights[slot] == nullptr) {
+                continue;
+            }
+            const ImportedLocalLight& light = *shadowLights[slot];
+            const odai::math::Vector3 lightPosition{
+                light.position[0], light.position[1], light.position[2]};
+            const float lightRadius = std::max(light.radius * importedLightRadiusScale, 1.0f);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, light.position[0]);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, light.position[1]);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, light.position[2]);
+            pointShadowSignature = mixImportedLightFloat(pointShadowSignature, lightRadius);
+            const float shadowNear = std::max(2.0f, lightRadius * 0.003f);
+            const odai::math::Matrix4 pointProjection = perspectiveVulkan(
+                odai::math::radians(91.0f), 1.0f, shadowNear, lightRadius);
+            for (std::uint32_t face = 0; face < kInteriorPointShadowFaceCount; ++face) {
+                const odai::math::Matrix4 pointView = lookAt(
+                    lightPosition,
+                    lightPosition + kFaceDirections[face],
+                    kFaceUps[face]);
+                const odai::math::Matrix4 pointViewProj = pointProjection * pointView;
+                const odai::math::Matrix4 pointViewProjColumnMajor = transpose(pointViewProj);
+                std::memcpy(
+                    mvpUniform.interiorPointShadowViewProj[
+                        (slot * kInteriorPointShadowFaceCount) + face],
+                    pointViewProjColumnMajor.m,
+                    sizeof(pointViewProjColumnMajor.m));
+            }
+        }
+        mvpUniform.interiorPointShadowParams[0] =
+            static_cast<float>(interiorPointShadowLightCount);
+        mvpUniform.interiorPointShadowParams[1] =
+            static_cast<float>(kInteriorPointShadowFaceSize) /
+            static_cast<float>(kShadowAtlasSize);
+        mvpUniform.interiorPointShadowParams[2] =
+            1.0f / static_cast<float>(kShadowAtlasSize);
+        mvpUniform.interiorPointShadowParams[3] =
+            interiorPointShadowLightCount > 0 ? 1.0f : 0.0f;
+        renderInteriorPointShadowsThisFrame =
+            interiorPointShadowLightCount > 0 &&
+            (!m_interiorPointShadowAtlasValid ||
+             m_interiorPointShadowSignature != pointShadowSignature);
+        m_interiorPointShadowSignature = pointShadowSignature;
+    } else {
+        m_interiorPointShadowAtlasValid = false;
+        m_interiorPointShadowSignature = 0;
+        m_interiorPointShadowLightSourceCount = 0;
+    }
     mvpUniform.importedLightConfig[0] = static_cast<float>(selectedImportedLightCount);
     mvpUniform.importedLightConfig[1] = importedLightGlobalIntensity;
     mvpUniform.importedLightConfig[2] = m_debugImportedLightsEnabled ? 1.0f : 0.0f;
     mvpUniform.importedLightConfig[3] = static_cast<float>(m_importedLocalLights.size());
+
+    // Clustered (Forward+) light culling. The grid is published to the shader
+    // ONLY when the pass will actually run this frame; a zero grid is how the
+    // fragment shader knows to walk the full light array instead of reading a
+    // mask nothing wrote. That direction is the safe one -- the fallback costs
+    // performance, a stale mask would cost light.
+    //
+    // ODAI_LIGHT_CLUSTERS=0 forces the fallback. The two paths must render
+    // identically -- the cull only decides which lights are ITERATED, never how
+    // they shade -- so this is the control that says whether a lighting
+    // difference came from the culling or from something else.
+    static const bool s_lightClustersEnabled = []() {
+        const char* env = std::getenv("ODAI_LIGHT_CLUSTERS");
+        return env == nullptr || (env[0] != '0');
+    }();
+    m_lightClusterCullActive =
+        s_lightClustersEnabled && m_lightClusterAvailable &&
+        m_lightClusterBufferHandle != kInvalidBufferHandle &&
+        selectedImportedLightCount > 0 && importedLightGlobalIntensity > 0.0f;
+    computeLightClusterSliceParams(
+        nearPlane, farPlane, m_lightClusterSliceScale, m_lightClusterSliceBias);
+    if (m_lightClusterCullActive) {
+        mvpUniform.lightClusterConfig0[0] = static_cast<float>(m_lightClusterGridX);
+        mvpUniform.lightClusterConfig0[1] = static_cast<float>(m_lightClusterGridY);
+        mvpUniform.lightClusterConfig0[2] = static_cast<float>(kLightClusterSliceCount);
+        mvpUniform.lightClusterConfig0[3] = static_cast<float>(kLightClusterTileSize);
+    } else {
+        mvpUniform.lightClusterConfig0[0] = 0.0f;
+        mvpUniform.lightClusterConfig0[1] = 0.0f;
+        mvpUniform.lightClusterConfig0[2] = 0.0f;
+        mvpUniform.lightClusterConfig0[3] = 0.0f;
+    }
+    mvpUniform.lightClusterConfig1[0] = m_lightClusterSliceScale;
+    mvpUniform.lightClusterConfig1[1] = m_lightClusterSliceBias;
+    mvpUniform.lightClusterConfig1[2] = 0.0f;
+    mvpUniform.lightClusterConfig1[3] = 0.0f;
+
+    m_contactShadowActive =
+        shouldUseImportedContactShadows(m_importedInteriorLighting) &&
+        m_contactShadowAvailable && m_lightClusterCullActive &&
+        m_contactShadowDepthBufferHandle != kInvalidBufferHandle &&
+        m_contactShadowHalfBufferHandle != kInvalidBufferHandle &&
+        m_contactShadowFullMaskBufferHandle != kInvalidBufferHandle;
+    m_screenSpaceGiActive =
+        shouldUseImportedScreenSpaceGi(m_importedInteriorLighting) &&
+        m_screenSpaceGiAvailable && m_taaEnabled && useMergedDepthPrepass() &&
+        m_contactShadowDepthBufferHandle != kInvalidBufferHandle &&
+        m_screenSpaceGiRecordBufferHandles[0] != kInvalidBufferHandle &&
+        m_screenSpaceGiRecordBufferHandles[1] != kInvalidBufferHandle;
+    mvpUniform.contactShadowConfig[0] = static_cast<float>(m_renderExtent.width);
+    mvpUniform.contactShadowConfig[1] = static_cast<float>(m_renderExtent.height);
+    mvpUniform.contactShadowConfig[2] = m_contactShadowActive ? 1.0f : 0.0f;
+    mvpUniform.contactShadowConfig[3] = static_cast<float>(m_taaJitterPhase & 3u);
+    mvpUniform.screenSpaceGiConfig[0] = static_cast<float>(m_screenSpaceGiExtent.width);
+    mvpUniform.screenSpaceGiConfig[1] = static_cast<float>(m_screenSpaceGiExtent.height);
+    mvpUniform.screenSpaceGiConfig[2] = m_screenSpaceGiActive ? 1.0f : 0.0f;
+    mvpUniform.screenSpaceGiConfig[3] = 0.18f;
 
     mvpUniform.fogMapConfig[0] = m_fogMapInvExtentX;
     mvpUniform.fogMapConfig[1] = m_fogMapInvExtentZ;
@@ -1713,6 +2467,7 @@ void RendererBackend::renderFrame(
     updateFrameDescriptorSets(
         aoFrameIndex,
         bufferInfo,
+        mvpSliceOpt->offset,
         autoExposureHistogramBuffer,
         autoExposureStateBuffer,
         voxelGiChunkMetaDescriptorInfo.has_value() ? &(*voxelGiChunkMetaDescriptorInfo) : nullptr,
@@ -1895,8 +2650,8 @@ void RendererBackend::renderFrame(
         for (const odai::importer::ImportedScenePackedVertex& srcVertex : importedActors->vertices) {
             ImportedMeshVertex dstVertex{};
             std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-            std::memcpy(dstVertex.normal, srcVertex.normal, sizeof(dstVertex.normal));
-            std::memcpy(dstVertex.color, srcVertex.color, sizeof(dstVertex.color));
+            dstVertex.packedNormal = odai::importer::packImportedVertexNormal(srcVertex.normal);
+            dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color, srcVertex.colorAlpha);
             std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
             dstVertex.flags = srcVertex.flags;
             if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
@@ -1928,6 +2683,64 @@ void RendererBackend::renderFrame(
             importedActorVertexBuffer = m_bufferAllocator.getBuffer(importedActorVertexSliceOpt->buffer);
             importedActorIndexBuffer = m_bufferAllocator.getBuffer(importedActorIndexSliceOpt->buffer);
             importedActorMeshDraws.reserve(importedActors->draws.size());
+            // Per-draw material state, derived exactly as the static scene path
+            // does it in chunk_upload.cc: the authored alpha-test threshold off
+            // the packed draw, and blend/two-sidedness off the draw's first
+            // vertex (they are per-vertex flags but uniform across a draw,
+            // because a draw is one NIF shape's triangles).
+            //
+            // This used to fill in firstIndex and indexCount alone and leave
+            // everything else at its default, which meant every actor was
+            // alpha-tested at 0.5 whatever its NIF said, no actor part was ever
+            // two-sided, and an alpha-BLENDED part rendered through the opaque
+            // pipeline -- showing the black that sits under its transparent
+            // texels instead of the background.
+            auto actorDrawFlags = [&](const odai::importer::ImportedScenePackedDraw& srcDraw) {
+                if (srcDraw.firstIndex >= importedActors->indices.size()) {
+                    return 0u;
+                }
+                const std::uint32_t vertexIndex = importedActors->indices[srcDraw.firstIndex];
+                if (vertexIndex >= importedActors->vertices.size()) {
+                    return 0u;
+                }
+                return importedActors->vertices[vertexIndex].flags;
+            };
+            // AABB centre over the draw's own vertices, for the back-to-front
+            // blended sort. Computed only for blended draws, for the same
+            // reason the static path does: it exists purely to sort them.
+            auto actorDrawCenter = [&](const odai::importer::ImportedScenePackedDraw& srcDraw,
+                                       float (&outCenter)[3]) {
+                float boundsMin[3] = {
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max(),
+                    std::numeric_limits<float>::max()};
+                float boundsMax[3] = {
+                    std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::lowest(),
+                    std::numeric_limits<float>::lowest()};
+                const std::size_t lastIndex = std::min<std::size_t>(
+                    static_cast<std::size_t>(srcDraw.firstIndex) + srcDraw.indexCount,
+                    importedActors->indices.size());
+                bool sawVertex = false;
+                for (std::size_t i = srcDraw.firstIndex; i < lastIndex; ++i) {
+                    const std::uint32_t vertexIndex = importedActors->indices[i];
+                    if (vertexIndex >= importedActors->vertices.size()) {
+                        continue;
+                    }
+                    const auto& position = importedActors->vertices[vertexIndex].position;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        boundsMin[axis] = std::min(boundsMin[axis], position[axis]);
+                        boundsMax[axis] = std::max(boundsMax[axis], position[axis]);
+                    }
+                    sawVertex = true;
+                }
+                if (!sawVertex) {
+                    return;
+                }
+                for (int axis = 0; axis < 3; ++axis) {
+                    outCenter[axis] = (boundsMin[axis] + boundsMax[axis]) * 0.5f;
+                }
+            };
             for (const odai::importer::ImportedScenePackedDraw& srcDraw : importedActors->draws) {
                 if (srcDraw.indexCount == 0u ||
                     srcDraw.firstIndex >= importedActors->indices.size()) {
@@ -1938,6 +2751,15 @@ void RendererBackend::renderFrame(
                 draw.indexCount = std::min<std::uint32_t>(
                     srcDraw.indexCount,
                     static_cast<std::uint32_t>(importedActors->indices.size() - srcDraw.firstIndex));
+                const std::uint32_t flags = actorDrawFlags(srcDraw);
+                draw.alphaThreshold = srcDraw.alphaThreshold;
+                draw.blended =
+                    (flags & odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
+                draw.twoSided =
+                    (flags & odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
+                if (draw.blended) {
+                    actorDrawCenter(srcDraw, draw.center);
+                }
                 importedActorMeshDraws.push_back(draw);
             }
         }
@@ -1946,6 +2768,9 @@ void RendererBackend::renderFrame(
         m_importedMeshDraws.data(),
         m_importedMeshDraws.size());
     std::uint32_t importedTerrainDrawCountForFrame = m_importedTerrainDrawCount;
+    // Without page culling there is no near/far split to compute, so the whole
+    // terrain prefix counts as near -- a cooked scene is a bounded region.
+    m_visibleImportedNearTerrainDrawCount = m_importedTerrainDrawCount;
     const bool importedPageCullingEnabled = !m_importedPageDrawRanges.empty();
     auto importedPageIntersectsClip = [](
                                           const ImportedScenePageDrawRange& pageRange,
@@ -2016,11 +2841,24 @@ void RendererBackend::renderFrame(
         if (outDraws.capacity() < m_importedMeshDraws.size()) {
             outDraws.reserve(m_importedMeshDraws.size());
         }
+        // Page order is arena order, i.e. the order cells happened to stream in.
+        //
+        // Sorting these front-to-back was tried and REMOVED. It was worth ~2 ms
+        // while the main pass rejected occluded fragments using only its own
+        // progressive depth writes, but the depth prewrite (frame_pass_main.cc)
+        // lays all opaque depth before any shading draw, so submission order no
+        // longer decides what gets rejected. Measured with the prewrite in
+        // place: 11.4 ms unsorted against 11.9 ms sorted, and 0.0019% of pixels
+        // different -- below the 0.048% run-to-run noise floor. It bought
+        // nothing and cost a sort per cull pass per frame.
         m_visibleImportedPageScratch.assign(m_importedPageDrawRanges.size(), 0u);
+        m_visibleImportedPageOrder.clear();
         for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            if (importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
-                m_visibleImportedPageScratch[pageIndex] = 1u;
+            if (!importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
+                continue;
             }
+            m_visibleImportedPageScratch[pageIndex] = 1u;
+            m_visibleImportedPageOrder.push_back(static_cast<std::uint32_t>(pageIndex));
         }
 
         auto appendDrawRange = [&](std::uint32_t firstDraw, std::uint32_t drawCount) -> std::uint32_t {
@@ -2037,19 +2875,52 @@ void RendererBackend::renderFrame(
             return clampedDrawCount;
         };
 
+        // Terrain stays a prefix of the visible list -- callers read
+        // m_visibleImportedTerrainDrawCount as "the first N draws are terrain" --
+        // so the sort applies WITHIN each group rather than across the two.
+        //
+        // The terrain prefix is itself partitioned NEAR-FIRST. The tessellated
+        // terrain pipeline pays hull/domain invocations for every patch it
+        // touches even at factor 1, and routing ALL terrain through it measured
+        // ~3.5 ms on the LNL iGPU while everything past the tessellation ramp
+        // subdivides to nothing anyway. Only pages whose bounds come within the
+        // ramp go in the near prefix; the passes draw [0, near) tessellated and
+        // [near, terrainCount) through the flat pipeline.
         std::uint32_t visibleTerrainDrawCount = 0;
-        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            if (m_visibleImportedPageScratch[pageIndex] == 0u) {
+        std::uint32_t visibleNearTerrainDrawCount = 0;
+        const auto pageWithinTessRange = [&](const ImportedScenePageDrawRange& pageRange) {
+            // Conservative point-to-AABB distance against the tessellation
+            // ramp's far end (imported_terrain.tesc stops at 10000).
+            constexpr float kTessRangeUnits = 10500.0f;
+            float distanceSq = 0.0f;
+            const float eyePosition[3] = {eye.x, eye.y, eye.z};
+            for (int axis = 0; axis < 3; ++axis) {
+                const float clamped = std::clamp(
+                    eyePosition[axis], pageRange.boundsMin[axis], pageRange.boundsMax[axis]);
+                const float delta = eyePosition[axis] - clamped;
+                distanceSq += delta * delta;
+            }
+            return distanceSq < (kTessRangeUnits * kTessRangeUnits);
+        };
+        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
+            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
+            if (!pageWithinTessRange(pageRange)) {
                 continue;
             }
+            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
+            visibleNearTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
+        }
+        visibleTerrainDrawCount = visibleNearTerrainDrawCount;
+        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
+            if (pageWithinTessRange(pageRange)) {
+                continue;
+            }
             const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
             visibleTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
         }
-        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            if (m_visibleImportedPageScratch[pageIndex] == 0u) {
-                continue;
-            }
+        m_visibleImportedNearTerrainDrawCount = visibleNearTerrainDrawCount;
+        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
             const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
             appendDrawRange(pageRange.firstDraw + terrainDrawCount, pageRange.drawCount - terrainDrawCount);
@@ -2070,6 +2941,24 @@ void RendererBackend::renderFrame(
             static int s_visFrame = 0;
             ++s_visFrame;
             if (s_visFrame % 240 == 0) {
+                std::size_t chunk0Visible = 0;
+                std::size_t chunk0Total = 0;
+                if (!m_importedSceneChunks.empty()) {
+                    const std::int32_t chunk0VertexOffset =
+                        static_cast<std::int32_t>(m_importedSceneChunks.front().firstVertex);
+                    for (const ImportedMeshDraw& visibleDraw : m_visibleImportedMeshDraws) {
+                        if (visibleDraw.vertexOffset == chunk0VertexOffset) {
+                            ++chunk0Visible;
+                        }
+                    }
+                    for (const ImportedMeshDraw& tableDraw : m_importedMeshDraws) {
+                        if (tableDraw.vertexOffset == chunk0VertexOffset) {
+                            ++chunk0Total;
+                        }
+                    }
+                }
+                VOX_LOGI("render") << "imported visibility: chunk0 draws " << chunk0Visible
+                                   << "/" << chunk0Total << " visible";
                 VOX_LOGI("render") << "imported visibility: totalDraws=" << m_importedMeshDraws.size()
                                    << " pages=" << m_importedPageDrawRanges.size()
                                    << " visibleDraws=" << m_visibleImportedMeshDraws.size()
@@ -2137,20 +3026,24 @@ void RendererBackend::renderFrame(
     // own triangles overlap still composites in index order. That is the
     // standard limitation of a sorted-draw transparency pass and is not worth
     // an OIT scheme for the amount of glass Fallout places.
-    m_importedBlendedDrawOrder.clear();
-    for (std::size_t drawIndex = 0; drawIndex < importedMeshDrawsForFrame.size(); ++drawIndex) {
-        if (importedMeshDrawsForFrame[drawIndex].blended) {
-            m_importedBlendedDrawOrder.push_back(static_cast<std::uint32_t>(drawIndex));
+    const odai::math::Vector3 blendSortEye = eye;
+    auto buildBlendedDrawOrder = [&](std::span<const ImportedMeshDraw> draws,
+                                     std::vector<std::uint32_t>& outOrder) {
+        outOrder.clear();
+        for (std::size_t drawIndex = 0; drawIndex < draws.size(); ++drawIndex) {
+            if (draws[drawIndex].blended) {
+                outOrder.push_back(static_cast<std::uint32_t>(drawIndex));
+            }
         }
-    }
-    if (m_importedBlendedDrawOrder.size() > 1u) {
-        const odai::math::Vector3 blendSortEye = eye;
+        if (outOrder.size() <= 1u) {
+            return;
+        }
         std::sort(
-            m_importedBlendedDrawOrder.begin(),
-            m_importedBlendedDrawOrder.end(),
+            outOrder.begin(),
+            outOrder.end(),
             [&](std::uint32_t lhs, std::uint32_t rhs) {
                 auto distanceSquared = [&](std::uint32_t index) {
-                    const float* center = importedMeshDrawsForFrame[index].center;
+                    const float* center = draws[index].center;
                     const float dx = center[0] - blendSortEye.x;
                     const float dy = center[1] - blendSortEye.y;
                     const float dz = center[2] - blendSortEye.z;
@@ -2158,7 +3051,14 @@ void RendererBackend::renderFrame(
                 };
                 return distanceSquared(lhs) > distanceSquared(rhs);
             });
-    }
+    };
+    buildBlendedDrawOrder(importedMeshDrawsForFrame, m_importedBlendedDrawOrder);
+    // Actors get the same treatment. They are a separate vertex/index buffer and
+    // a separate draw list, so they need their own order -- one list cannot
+    // index into two buffers.
+    buildBlendedDrawOrder(
+        std::span<const ImportedMeshDraw>(importedActorMeshDraws.data(), importedActorMeshDraws.size()),
+        m_importedActorBlendedDrawOrder);
 
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
@@ -2178,6 +3078,10 @@ void RendererBackend::renderFrame(
     recordSkinningPass(frameExecutionContext);
 
     ShadowPassInputs shadowPassInputs{};
+    shadowPassInputs.skipDirectionalShadows =
+        !shouldRenderImportedDirectionalShadows(m_importedInteriorLighting);
+    shadowPassInputs.renderInteriorPointShadows = renderInteriorPointShadowsThisFrame;
+    shadowPassInputs.interiorPointShadowLightCount = interiorPointShadowLightCount;
     shadowPassInputs.frameChunkDrawData = &frameChunkDrawData;
     shadowPassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
     shadowPassInputs.shadowChunkInstanceSliceOpt = &shadowChunkInstanceSliceOpt;
@@ -2188,8 +3092,24 @@ void RendererBackend::renderFrame(
     shadowPassInputs.canDrawMagica = canDrawMagica;
     shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
     shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
+    // ODAI_FAT_SHADOW_STREAM=1 puts the shadow pass back on the 72-byte main
+    // vertex stream instead of the 28-byte compact one.
+    //
+    // This is the measuring stick for "how much does vertex WIDTH cost a
+    // vertex-bound pass here", and it is the cheapest one in the tree because
+    // both streams and both pipelines already exist over identical geometry.
+    // Measured on Goodsprings, interleaved A/B: cutting 44 of 72 bytes -- 61%,
+    // and from a tightly packed dedicated buffer rather than a strided read, so
+    // an upper bound -- moves the shadow pass 2.12 -> 1.76 ms and 2.00 -> 1.87
+    // ms. That is 7-17% of the pass for the most aggressive cut available on
+    // the pass most sensitive to it.
+    //
+    // Worth knowing before slimming ImportedMeshVertex on the strength of an
+    // estimate: these passes are bound by geometry submission and primitive
+    // throughput far more than by attribute fetch.
+    static const bool s_fatShadowStream = std::getenv("ODAI_FAT_SHADOW_STREAM") != nullptr;
     shadowPassInputs.importedShadowVertexBuffer =
-        m_importedShadowVertexBufferHandle != kInvalidBufferHandle
+        (!s_fatShadowStream && m_importedShadowVertexBufferHandle != kInvalidBufferHandle)
             ? m_bufferAllocator.getBuffer(m_importedShadowVertexBufferHandle)
             : VK_NULL_HANDLE;
     shadowPassInputs.importedIndexBuffer = importedIndexBuffer;
@@ -2488,20 +3408,41 @@ void RendererBackend::renderFrame(
         VK_IMAGE_ASPECT_COLOR_BIT
     );
 
-    const bool aoDepthInitialized = m_aoDepthImageInitialized[imageIndex];
-    transitionImageLayout(
-        commandBuffer,
-        m_aoDepthImages[imageIndex],
-        aoDepthInitialized ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        aoDepthInitialized
-            ? (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
-            : VK_PIPELINE_STAGE_2_NONE,
-        aoDepthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT
-    );
+    // The merged prepass has no ao.depth image to transition -- it depth-tests
+    // against m_depthImages, which the main pass owns and the prepass hands
+    // over with its own barrier. But it is the prepass that now touches that
+    // image FIRST, so the transition the main pass used to do has to move here
+    // with it. UNDEFINED as the old layout is correct and cheap: the prepass
+    // clears depth, so last frame's contents are expendable by definition.
+    if (useMergedDepthPrepass()) {
+        transitionImageLayout(
+            commandBuffer,
+            m_depthImages[imageIndex],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_NONE,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    } else {
+        const bool aoDepthInitialized = m_aoDepthImageInitialized[imageIndex];
+        transitionImageLayout(
+            commandBuffer,
+            m_aoDepthImages[imageIndex],
+            aoDepthInitialized ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            aoDepthInitialized
+                ? (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
+                : VK_PIPELINE_STAGE_2_NONE,
+            aoDepthInitialized ? VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        );
+    }
 
     VkViewport aoViewport{};
     aoViewport.x = 0.0f;
@@ -2514,11 +3455,27 @@ void RendererBackend::renderFrame(
     VkRect2D aoScissor{};
     aoScissor.offset = {0, 0};
     aoScissor.extent = aoExtent;
+    // Built here rather than after the prepass: the merged prepass renders at
+    // the main pass's resolution and needs these.
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = static_cast<float>(m_renderExtent.width);
+    viewport.height = static_cast<float>(m_renderExtent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+
     frameExecutionContext.aoFrameIndex = aoFrameIndex;
     frameExecutionContext.imageIndex = imageIndex;
     frameExecutionContext.aoExtent = aoExtent;
     frameExecutionContext.aoViewport = aoViewport;
     frameExecutionContext.aoScissor = aoScissor;
+    frameExecutionContext.viewport = viewport;
+
+    VkRect2D scissor{};
+    scissor.offset = {0, 0};
+    scissor.extent = m_renderExtent;
+    frameExecutionContext.scissor = scissor;
 
 
     PrepassInputs prepassInputs{};
@@ -2553,7 +3510,9 @@ void RendererBackend::renderFrame(
     // re-render of its geometry every frame.
     prepassInputs.normalDepthNeeded =
         m_debugEnableSsao ||
-        (m_sunShaftsRequested && m_sunShaftComputeAvailable) ||
+        m_contactShadowActive ||
+        m_screenSpaceGiActive ||
+        (sunShaftsForFrame && m_sunShaftComputeAvailable) ||
         m_importedWaterIndexCount > 0u;
     recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
@@ -2561,22 +3520,20 @@ void RendererBackend::renderFrame(
         recordSsaoPasses(frameExecutionContext);
     }
 
+    // Before main, after the prepass. It depends on neither -- the clusters are
+    // pure geometry, not scene depth -- so it sits here only to keep the
+    // compute dispatch off the critical path between prepass and main.
+    recordLightClusterPass(frameExecutionContext);
+    recordScreenSpaceDepthHierarchyPass(frameExecutionContext);
+    recordContactShadowPass(frameExecutionContext);
+    recordScreenSpaceGiPass(frameExecutionContext);
+
     m_normalDepthImageInitialized[aoFrameIndex] = true;
     m_aoDepthImageInitialized[imageIndex] = true;
 
-    VkViewport viewport{};
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = static_cast<float>(m_renderExtent.width);
-    viewport.height = static_cast<float>(m_renderExtent.height);
-    viewport.minDepth = 0.0f;
-    viewport.maxDepth = 1.0f;
 
-    VkRect2D scissor{};
-    scissor.offset = {0, 0};
-    scissor.extent = m_renderExtent;
-    frameExecutionContext.viewport = viewport;
-    frameExecutionContext.scissor = scissor;
+
+
 
     MainPassInputs mainPassInputs{};
     mainPassInputs.frameChunkDrawData = &frameChunkDrawData;
@@ -2599,6 +3556,8 @@ void RendererBackend::renderFrame(
     mainPassInputs.importedActorIndexOffset =
         importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
     mainPassInputs.importedActorMeshDraws = importedActorMeshDraws;
+    mainPassInputs.importedActorBlendedDrawOrder = std::span<const std::uint32_t>(
+        m_importedActorBlendedDrawOrder.data(), m_importedActorBlendedDrawOrder.size());
     mainPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     mainPassInputs.pipeInstanceCount = pipeInstanceCount;
     mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
@@ -2608,21 +3567,25 @@ void RendererBackend::renderFrame(
     mainPassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
     mainPassInputs.preview = &preview;
     recordMainScenePass(frameExecutionContext, mainPassInputs);
+    // After the main pass so it can depth-test against what actually ended up
+    // visible, and before anything that consumes motion vectors.
+    recordSkinnedVelocityPass(frameExecutionContext);
 
     // TAA runs on the resolved HDR image before bloom mips are cut from it, so
     // bloom blooms the stabilized frame rather than the shimmering one. When it
     // ran, mip0 is left in TRANSFER_DST (the copy-back) instead of
     // COLOR_ATTACHMENT -- the transitions below take the matching source.
-    const bool taaRan = recordTaaPass(commandBuffer, aoFrameIndex);
+    const TaaPassOutcome taaOutcome = recordTaaPass(
+        commandBuffer, aoFrameIndex, frameExecutionContext.gpuTimestampQueryPool);
 
     if (m_hdrResolveMipLevels > 1u) {
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaOutcome.hdrResolveLayout,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaOutcome.hdrResolveStage,
+            taaOutcome.hdrResolveAccess,
             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             VK_ACCESS_2_TRANSFER_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2725,10 +3688,10 @@ void RendererBackend::renderFrame(
         transitionImageLayout(
             commandBuffer,
             m_hdrResolveImages[aoFrameIndex],
-            taaRan ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            taaOutcome.hdrResolveLayout,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            taaRan ? VK_PIPELINE_STAGE_2_TRANSFER_BIT : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            taaRan ? VK_ACCESS_2_TRANSFER_WRITE_BIT : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            taaOutcome.hdrResolveStage,
+            taaOutcome.hdrResolveAccess,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
             VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2903,7 +3866,7 @@ void RendererBackend::renderFrame(
         wroteSunShaftTimestamps = true;
         writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
         const bool sunShaftInitialized = m_sunShaftImageInitialized[aoFrameIndex];
-        if (m_sunShaftsRequested &&
+        if (sunShaftsForFrame &&
             m_sunShaftComputeAvailable &&
             m_sunShaftPipelineLayout != VK_NULL_HANDLE &&
             m_sunShaftPipeline != VK_NULL_HANDLE &&
@@ -2955,31 +3918,32 @@ void RendererBackend::renderFrame(
                 (sunShaftPushConstants.height + (kSunShaftWorkgroupSize - 1u)) / kSunShaftWorkgroupSize;
             vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1u);
 
-            transitionImageLayout(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                VK_IMAGE_LAYOUT_GENERAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
+            transitionImageLayout(commandBuffer, m_sunShaftImages[aoFrameIndex],
+                                  VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT);
             m_sunShaftImageInitialized[aoFrameIndex] = true;
+            m_sunShaftImageHasContent[aoFrameIndex] = true;
             endDebugLabel(commandBuffer);
         } else {
+          const bool clearDisabledShafts =
+              !sunShaftInitialized || m_sunShaftImageHasContent[aoFrameIndex];
+          if (clearDisabledShafts) {
             transitionImageLayout(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                sunShaftInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                commandBuffer, m_sunShaftImages[aoFrameIndex],
+                sunShaftInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                    : VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                sunShaftInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
-                sunShaftInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_NONE,
+                sunShaftInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                                    : VK_PIPELINE_STAGE_2_NONE,
+                sunShaftInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                                    : VK_ACCESS_2_NONE,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
             const VkClearColorValue clearValue = {{0.0f, 0.0f, 0.0f, 1.0f}};
             VkImageSubresourceRange clearRange{};
             clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -2987,45 +3951,37 @@ void RendererBackend::renderFrame(
             clearRange.levelCount = 1u;
             clearRange.baseArrayLayer = 0u;
             clearRange.layerCount = 1u;
-            vkCmdClearColorImage(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                &clearValue,
-                1,
-                &clearRange
-            );
-            transitionImageLayout(
-                commandBuffer,
-                m_sunShaftImages[aoFrameIndex],
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT
-            );
+            vkCmdClearColorImage(commandBuffer, m_sunShaftImages[aoFrameIndex],
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                 &clearValue, 1, &clearRange);
+            transitionImageLayout(commandBuffer, m_sunShaftImages[aoFrameIndex],
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                  VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  VK_IMAGE_ASPECT_COLOR_BIT);
             m_sunShaftImageInitialized[aoFrameIndex] = true;
+            m_sunShaftImageHasContent[aoFrameIndex] = false;
+          }
         }
         writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
     }
     if (!wroteSunShaftTimestamps) {
-        writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
-        writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
+      writeGpuTimestampTop(kGpuTimestampQuerySunShaftStart);
+      writeGpuTimestampBottom(kGpuTimestampQuerySunShaftEnd);
     }
 
     transitionImageLayout(
-        commandBuffer,
-        m_swapchainImages[imageIndex],
-        m_swapchainImageInitialized[imageIndex] ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        commandBuffer, m_swapchainImages[imageIndex],
+        m_swapchainImageInitialized[imageIndex]
+            ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+            : VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_NONE,
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT
-    );
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
     VkRenderingAttachmentInfo toneMapColorAttachment{};
     toneMapColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -3247,7 +4203,9 @@ void RendererBackend::renderFrame(
     m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
     m_shadowDepthInitialized = true;
     m_swapchainImageInitialized[imageIndex] = true;
-    m_msaaColorImageInitialized[imageIndex] = true;
+    if (imageIndex < m_msaaColorImageInitialized.size()) {
+        m_msaaColorImageInitialized[imageIndex] = true;
+    }
     m_hdrResolveImageInitialized[aoFrameIndex] = true;
 
     if (

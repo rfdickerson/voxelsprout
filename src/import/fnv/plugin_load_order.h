@@ -34,6 +34,13 @@ struct FalloutPluginHeader {
     std::vector<std::string> masters;  // MAST subrecords, in declared order
     std::uint32_t recordCount = 0;     // HEDR
     bool isMaster = false;             // TES4 flag 0x1: an .esm-style master
+    // TES4 flag 0x80: the plugin's player-facing text lives in side files under
+    // `Strings\` and every lstring subrecord (FULL, RDMP, DESC, NAM1) holds a
+    // four-byte string ID instead of the text. Set for Skyrim.esm and clear for
+    // every Fallout 3 / New Vegas / Oblivion plugin. See strings_table.h --
+    // reading one of those IDs as a zstring succeeds and returns a plausible
+    // one-character name, so nothing downstream can detect this on its own.
+    bool isLocalized = false;
 };
 
 // Reads just the TES4 record at the front of `path`. Returns false if the file

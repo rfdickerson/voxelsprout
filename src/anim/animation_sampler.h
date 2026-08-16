@@ -18,6 +18,19 @@ public:
     // clip authored against that same skeleton without rebinding.
     void bindSkeleton(const Skeleton& skeleton);
 
+    // Binds with inverse bind matrices the caller already holds, instead of
+    // deriving them from the skeleton's own bind pose.
+    //
+    // The two are not interchangeable wherever an importer records them
+    // explicitly. A Fallout skinned NIF stores its vertices in "skin space" and
+    // NiSkinData carries the only record of how that space relates to each bone
+    // (see FalloutCharacter::inverseBindMatrices); deriving them from the
+    // skeleton instead assumes skin space is the skeleton root's space, which is
+    // close enough to look nearly right and be consistently wrong. Sized
+    // shorter than the skeleton, the missing tail falls back to identity, same
+    // as sample() already does.
+    void bindSkeleton(const Skeleton& skeleton, std::vector<odai::math::Matrix4> inverseBindMatrices);
+
     // Evaluates clip at timeSeconds (looped or clamped per clip.loop) and
     // writes skeleton.bones.size() skinning matrices into outMatrices, one
     // per bone in Skeleton::bones order: worldBoneTransform * inverseBindPose.

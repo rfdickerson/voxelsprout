@@ -59,6 +59,12 @@ constexpr uint32_t kBindlessTextureStaticCount = 11;
 constexpr uint32_t kInvalidImportedTextureSlot = 0xFFFFFFFFu;
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kImportedLocalLightCapacity = 64;
+// Clustered (Forward+) light culling grid. MIRRORED in
+// src/render/shaders/light_clusters.slang -- change both together. A mismatch
+// does not fail: the compute pass and the fragment shader simply disagree about
+// which cluster a pixel is in, and lights switch off in bands across the screen.
+constexpr uint32_t kLightClusterTileSize = 64;
+constexpr uint32_t kLightClusterSliceCount = 24;
 // The three shadow-atlas constants below are one layout expressed three ways and
 // must be edited together: kShadowCascadeResolution feeds the texel-snapping math
 // (frame_run.cc), kShadowAtlasRects places each cascade in the atlas and derives
@@ -74,7 +80,17 @@ constexpr uint32_t kImportedLocalLightCapacity = 64;
 // ~0.5 to ~1.0 world units (~1.5 cm at Fallout scale), and TAA now averages
 // the shadow edges temporally, which is what makes the coarser maps
 // acceptable where they were not before it existed.
-constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 1024u, 1024u, 512u};
+// AND THE 4096 ATLAS WAS ONLY 39% ALLOCATED. 2048/1024/1024/512 occupies
+// 6.55M of 16.78M texels; the image was already paying for all of it. Worse,
+// the cascade covering the LARGEST area got the SMALLEST tile, so the far field
+// -- which is most of the screen on any camera looking out across a landscape
+// -- was resolved four times more coarsely than the ground under your feet.
+//
+// Four equal 2048 tiles fill the atlas exactly (a 2x2 grid) and take cascade 3
+// from 512 to 2048 texels. What that is worth, measured on a Vvardenfell flight
+// at 24000 units of shadow distance: cascade 3's texel goes from 122.8 world
+// units to 30.7, i.e. the far cascade now resolves what the NEAR one used to.
+constexpr std::array<uint32_t, kShadowCascadeCount> kShadowCascadeResolution = {2048u, 2048u, 2048u, 2048u};
 struct ShadowAtlasRect {
     uint32_t x;
     uint32_t y;
@@ -82,11 +98,30 @@ struct ShadowAtlasRect {
 };
 constexpr std::array<ShadowAtlasRect, kShadowCascadeCount> kShadowAtlasRects = {
     ShadowAtlasRect{0u, 0u, 2048u},
-    ShadowAtlasRect{2048u, 0u, 1024u},
-    ShadowAtlasRect{3072u, 0u, 1024u},
-    ShadowAtlasRect{2048u, 1024u, 512u}
+    ShadowAtlasRect{2048u, 0u, 2048u},
+    ShadowAtlasRect{0u, 2048u, 2048u},
+    ShadowAtlasRect{2048u, 2048u, 2048u}
 };
 constexpr uint32_t kShadowAtlasSize = 4096u;
+// Authored interiors reuse the directional atlas for up to 35 local lights.
+// Every cubemap uses six 256x256 faces arranged as a 3x2 tile. Five tiles per
+// row by seven rows occupy 3840x3584 of the 4096 atlas. Dragonsreach has 34
+// active lights (28 authored plus the fire emitters), so every light that can
+// fill a table/contact shadow now has a map. This is also less raster work than
+// the old 8x512 + 8x256 split (13.76M vs 15.73M depth texels).
+// The selection stays frozen until geometry residency changes, so camera
+// motion cannot trigger an atlas rebuild.
+constexpr uint32_t kInteriorPointShadowLightCount = 35u;
+constexpr uint32_t kInteriorPointShadowFaceCount = 6u;
+constexpr uint32_t kInteriorPointShadowFaceSize = 256u;
+constexpr uint32_t kInteriorPointShadowCubesPerRow = 5u;
+constexpr uint32_t kInteriorPointShadowMatrixCount =
+    kInteriorPointShadowLightCount * kInteriorPointShadowFaceCount;
+static_assert(
+    kInteriorPointShadowCubesPerRow * 3u * kInteriorPointShadowFaceSize <= kShadowAtlasSize);
+static_assert(
+    ((kInteriorPointShadowLightCount + kInteriorPointShadowCubesPerRow - 1u) /
+     kInteriorPointShadowCubesPerRow) * 2u * kInteriorPointShadowFaceSize <= kShadowAtlasSize);
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
 constexpr uint32_t kVoxelGiPropagationIterations = 8u;
@@ -172,20 +207,115 @@ struct alignas(16) CameraUniform {
     // moves. Mirrored in src/render/shaders/camera_uniform.slang.
     float weatherSkyUpper[4];  // [0..2]=linear rgb at zenith, [3]=blend weight 0..1
     float weatherSkyLower[4];  // [0..2]=linear rgb above the horizon band, [3]=unused
-    float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=unused
+    float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=sun-glare scale
     float weatherFog[4];       // [0..2]=linear fog rgb, [3]=fog far distance in world units
-    // Four planar cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
+    // Four cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
     float weatherCloudTint[4][4];
-    // [0]=bindless texture slot as a float, [1]=rotation rad/s, [2]=dome scale,
-    // [3]=unused. Slot is carried as a float because the whole block is floats;
-    // the shader rounds it back to an index.
+    // [0]=bindless texture slot as a float, [1]=drift u, [2]=scale (dome scale
+    // for a fisheye, tiling count otherwise), [3]=drift v. Slot is carried as a
+    // float because the whole block is floats; the shader rounds it to an index.
     float weatherCloudParams[4][4];
+    // [0..1]=the dir.y window this layer covers, [2]=WeatherCloudMapping as a
+    // float, [3]=unused. Skyrim stacks an overhead deck and a horizon bank in
+    // one sky; they need different projections and different slices of it.
+    float weatherCloudBand[4][4];
     // Tonemap selection and parameters.
     // [0] = mode: 0 = the ACES fit, 1 = the ENB/Enhanced Shaders curve
     // [1] = contrast, [2] = saturation, [3] = curve knee (ENB's "ToneMapping Curve")
     float tonemapConfig[4];
-    // [0] = overbright dampening (ENB's "Overbright Dampening"), [1..3] spare.
+    // [0] = overbright dampening (ENB's "Overbright Dampening")
+    // [1] = DebugView (renderer_types.h), 0 = off. Carried as a float because
+    //       the whole block is floats; the shader rounds it back to an index.
+    // [2..3] = this frame's TAA sub-pixel jitter in NDC units, 0 when TAA or
+    //       jitter is off. Anything mapping a UV back to a view position must
+    //       subtract it: a jittered projection moves the NDC of a texel centre
+    //       off the usual uv*2-1.
     float tonemapConfig2[4];
+    // Terrain layer-blend shaping, for the ATXT/VTXT weights in
+    // imported_static.frag.slang.
+    //
+    // Tunable rather than baked because these numbers decide whether a painted
+    // road reads as an organic edge or as a set of hard triangular wedges, and
+    // that judgement needs one round trip through a render per value. The
+    // defaults live in the renderer, not here.
+    //
+    // [0] = sharpness in 0..1. 0 is a PLAIN LERP of the authored weight and is
+    //       the control any comparison needs; 1 is the full smoothstep.
+    // [1] = world units per coarse noise cell, [2] = per fine noise cell.
+    //       Bigger than the 128-unit LAND post spacing or the noise cannot move
+    //       a boundary far enough to break the lattice it sits on.
+    // [3] = how far the noise may displace a boundary, in weight units.
+    float terrainBlendConfig[4];
+    // HDR highlight shaping for the ACES path.
+    //
+    // [0] = white point, in post-exposure scene-linear units. The scene value
+    //       that should map to display white. 0 DISABLES the normalization and
+    //       renders the plain fit byte-identically, which is what keeps every
+    //       other game unaffected.
+    // [1] = shoulder strength in 0..1, how much of the normalization to apply.
+    // [2..3] = unused.
+    //
+    // Why this exists: the Narkowicz ACES fit reaches 1.0 only asymptotically,
+    // so with auto-exposure holding the scene near middle grey NOTHING in the
+    // frame reaches display white. Measured across a Morrowind flight, the 99th
+    // percentile of luma sat at 0.64-0.70 in every single frame and moved by
+    // less than 0.02 under every existing knob -- fog distance, ENB curve, the
+    // stylized colour look. The top third of the display range was simply never
+    // addressed, which is what "flat" looked like.
+    float hdrHighlightConfig[4];
+    // Clustered (Forward+) local-light culling. See
+    // src/render/shaders/light_clusters.slang for the scheme.
+    //
+    // config0 = (grid x, grid y, grid z, tile size in pixels)
+    // config1 = (slice scale, slice bias, unused, unused)
+    //
+    // A ZERO GRID MEANS THE PASS DID NOT RUN and every consumer falls back to
+    // walking the full light array. That is the safe direction: a stale mask
+    // would silently unlight geometry, and "no lights this frame" is not
+    // distinguishable from "the cull pass was skipped" at the shader.
+    float lightClusterConfig0[4];
+    float lightClusterConfig1[4];
+    // Shadow atlas geometry the fragment shaders need per PCF tap.
+    //
+    // [0] = one atlas texel in UV, i.e. 1/kShadowAtlasSize. [1..3] unused.
+    //
+    // THIS EXISTS BECAUSE `shadowMap.GetDimensions()` IS NOT FREE. Every PCF
+    // site asked the sampler for the atlas size, and the cascade blend asks
+    // twice; on the LNL iGPU that lowers to a real resinfo message the compiler
+    // will not hoist out of the fragment. Measured on Whiterun at 1080p:
+    // replacing the two queries with this constant took the main pass from
+    // 17.15 ms to 15.36 ms -- 1.79 ms, for byte-identical output.
+    //
+    // Appended at the end of the block so no existing field's offset moves.
+    // Mirrored in src/render/shaders/camera_uniform.slang.
+    float shadowAtlasConfig[4];
+    // Authored imported-interior CELL lighting. Appended to preserve every
+    // existing offset; mirrored in camera_uniform.slang.
+    // ambient.w = has authored XCLL
+    float interiorAmbient[4];
+    // directional.w = use sky lighting
+    float interiorDirectional[4];
+    // fog.w = show sky
+    float interiorFog[4];
+    // x/y = fog near/far, z = directional shadows enabled, w = interior enabled
+    float interiorFogRange[4];
+    // Interior point lights x six cubemap faces. These matrices are used both to
+    // rasterize the atlas and to project a receiver into the matching face.
+    float interiorPointShadowViewProj[kInteriorPointShadowMatrixCount][16];
+    // Selected imported-light index for atlas slots 0..3; -1 means unused.
+    // Indexed by uploaded/clustered light, value is the stable atlas slot.
+    float interiorPointShadowLightIndices[kImportedLocalLightCapacity / 4u][4];
+    // x = active slot count, y = face UV scale, z = atlas texel size,
+    // w = enabled. Appended to keep every pre-existing uniform offset stable.
+    float interiorPointShadowParams[4];
+    // Contact-shadow reconstruction and main-pass lookup. invView maps the
+    // normal/depth prepass's reconstructed view position back to world space.
+    // config = (full width, full height, enabled, four-frame phase).
+    float contactShadowInvView[16];
+    float contactShadowConfig[4];
+    // Quarter-resolution diffuse GI. x/y are record extent, z is enabled,
+    // w is the receiver bounce scale. Appended to preserve existing offsets.
+    float screenSpaceGiConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -752,11 +882,14 @@ odai::math::Vector3 computeSunColor(
     return sunTint * (scatteringScale * twilightBoost);
 }
 
+// includeSunDirect=false drops the sun disk and its glow, leaving the SKY only.
+// See computeIrradianceShCoefficients for why that distinction exists.
 odai::math::Vector3 proceduralSkyRadiance(
     const odai::math::Vector3& direction,
     const odai::math::Vector3& sunDirection,
     const odai::math::Vector3& sunColor,
-    const RendererBackend::SkyDebugSettings& settings
+    const RendererBackend::SkyDebugSettings& settings,
+    bool includeSunDirect = true
 ) {
     const odai::math::Vector3 dir = odai::math::normalize(direction);
     const odai::math::Vector3 toSun = -odai::math::normalize(sunDirection);
@@ -812,8 +945,10 @@ odai::math::Vector3 proceduralSkyRadiance(
     const float phaseBoost = (phaseRayleigh * rayleigh) + (phaseMie * mie * 1.4f);
 
     const float aboveHorizon = saturate(dir.y * 4.0f + 0.2f);
-    const odai::math::Vector3 sky = (baseSky * aboveHorizon)
-        + (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)));
+    const odai::math::Vector3 sunTerm = includeSunDirect
+        ? (sunColor * (((sunDisk * 5.0f) + (sunGlow * 1.2f)) * (1.0f + phaseBoost)))
+        : odai::math::Vector3{};
+    const odai::math::Vector3 sky = (baseSky * aboveHorizon) + sunTerm;
 
     const odai::math::Vector3 groundColor{0.05f, 0.06f, 0.07f};
     const float belowHorizon = saturate(-dir.y);
@@ -875,7 +1010,23 @@ std::array<odai::math::Vector3, 9> computeIrradianceShCoefficients(
                 std::sin(phi) * sinTheta
             };
 
-            const odai::math::Vector3 radiance = proceduralSkyRadiance(dir, sunDirection, sunColor, settings);
+            // SKY ONLY -- THE SUN IS DELIBERATELY EXCLUDED, and this is what
+            // makes shadows visible at all.
+            //
+            // These coefficients become `ambient` in imported_static.frag,
+            // which is UNSHADOWED by construction. Integrating a sky that still
+            // contains the sun disk and its pow(sunDot, 24) glow therefore
+            // delivers most of the sun's energy a second time, omnidirectionally
+            // and with no occlusion -- so putting a surface in shadow removed
+            // only the small remainder. Measured on Goodsprings at an hour with
+            // a low sun: disabling the shadow pass entirely moved the frame by
+            // 0.61/255, i.e. the shadows were already doing nothing.
+            //
+            // The sun's contribution is the `direct` term, which IS shadowed.
+            // Counting it here as well was double-counting it, and the copy
+            // that won was the one no occluder could touch.
+            const odai::math::Vector3 radiance = proceduralSkyRadiance(
+                dir, sunDirection, sunColor, settings, /*includeSunDirect=*/false);
             const float sampleWeight = sinTheta;
             for (int basisIndex = 0; basisIndex < 9; ++basisIndex) {
                 const float basisValue = shBasis(basisIndex, dir);

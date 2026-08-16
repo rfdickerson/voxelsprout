@@ -17,6 +17,7 @@ public:
     VkPipeline skyCloudPipeline = VK_NULL_HANDLE;
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
+    VkPipeline importedFireParticlePipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     // Same shaders as importedStaticPipeline, with alpha blending on and depth
     // writes off — used for the blended tail of each imported chunk's draws.
@@ -29,18 +30,40 @@ public:
     // variant, so opaque DRAW_BOTH geometry was back-face culled and went
     // see-through from one side.
     VkPipeline importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+    // Depth-only prewrite for the opaque imported pass. Same vertex shader and
+    // vertex layout as importedStaticPipeline -- that is what makes the depth it
+    // writes bit-identical to what the shading pass computes -- paired with a
+    // fragment shader that does nothing but the alpha test, and a zero colour
+    // write mask.
+    VkPipeline importedStaticDepthPrewritePipeline = VK_NULL_HANDLE;
+    VkPipeline importedStaticDepthPrewritePipelineTwoSided = VK_NULL_HANDLE;
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedWaterPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterPipelineRt = VK_NULL_HANDLE;
     VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+    // Cull-NONE variant, for the same DRAW_BOTH geometry the main pass draws
+    // two-sided. Without it the depth/normal prepass and the lit pass disagree
+    // about the silhouette of every thin surface, and SSAO occludes against the
+    // wrong one.
+    VkPipeline importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
+    // Tessellated terrain variants of the lit pass and the merged prepass.
+    // They exist only under the merged prepass, because they must lay and test
+    // IDENTICAL depth -- see pass_pipelines.cc where they are built.
+    VkPipeline importedTerrainTessPipeline = VK_NULL_HANDLE;
+    VkPipeline importedTerrainTessNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
     VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
     // Same shaders, 28-byte compact vertex stream instead of the full vertex.
     VkPipeline importedStaticShadowCompactPipeline = VK_NULL_HANDLE;
+    // Cull-NONE variants of both. A thin DRAW_BOTH caster has one wound face,
+    // so back-face culling makes its shadow appear and disappear depending on
+    // which way the sun happens to face it.
+    VkPipeline importedStaticShadowPipelineTwoSided = VK_NULL_HANDLE;
+    VkPipeline importedStaticShadowCompactPipelineTwoSided = VK_NULL_HANDLE;
     // One pipeline per AO estimator (see ODAI_AO_MODE in ssao.comp.slang). All three
     // share the ssao pipeline layout and descriptor set -- only the shader differs.
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
@@ -87,6 +110,14 @@ public:
             vkDestroyPipeline(device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
         }
+        if (importedTerrainTessPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedTerrainTessPipeline, nullptr);
+            importedTerrainTessPipeline = VK_NULL_HANDLE;
+        }
+        if (importedTerrainTessNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedTerrainTessNormalDepthPipeline, nullptr);
+            importedTerrainTessNormalDepthPipeline = VK_NULL_HANDLE;
+        }
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedWaterNormalDepthPipeline, nullptr);
             importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
@@ -123,6 +154,18 @@ public:
             vkDestroyPipeline(device, importedStaticShadowPipeline, nullptr);
             importedStaticShadowPipeline = VK_NULL_HANDLE;
         }
+        if (importedStaticShadowCompactPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticShadowCompactPipelineTwoSided, nullptr);
+            importedStaticShadowCompactPipelineTwoSided = VK_NULL_HANDLE;
+        }
+        if (importedStaticShadowPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticShadowPipelineTwoSided, nullptr);
+            importedStaticShadowPipelineTwoSided = VK_NULL_HANDLE;
+        }
+        if (importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticNormalDepthPipelineTwoSided, nullptr);
+            importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
+        }
         if (previewRemovePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, previewRemovePipeline, nullptr);
             previewRemovePipeline = VK_NULL_HANDLE;
@@ -139,6 +182,10 @@ public:
             vkDestroyPipeline(device, pipePipeline, nullptr);
             pipePipeline = VK_NULL_HANDLE;
         }
+        if (importedFireParticlePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedFireParticlePipeline, nullptr);
+            importedFireParticlePipeline = VK_NULL_HANDLE;
+        }
         if (importedStaticPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipeline, nullptr);
             importedStaticPipeline = VK_NULL_HANDLE;
@@ -150,6 +197,14 @@ public:
         if (importedStaticPipelineTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineTwoSided, nullptr);
             importedStaticPipelineTwoSided = VK_NULL_HANDLE;
+        }
+        if (importedStaticDepthPrewritePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticDepthPrewritePipeline, nullptr);
+            importedStaticDepthPrewritePipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticDepthPrewritePipelineTwoSided, nullptr);
+            importedStaticDepthPrewritePipelineTwoSided = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlendedTwoSided, nullptr);

@@ -313,6 +313,7 @@ bool buildGpuSceneAssetFromImportedScene(const ImportedScene& scene, GpuSceneAss
     outAsset.textures = scene.textures;
     outAsset.waterPatches = scene.waterPatches;
     outAsset.lights = scene.lights;
+    outAsset.particleEmitters = scene.particleEmitters;
     outAsset.sceneBounds = makeEmptyBounds();
     // Same veto as applyTextureAlphaCutoutFlags in imported_scene.cc: a scene
     // whose importer authored per-shape alpha modes never gets the content
@@ -503,6 +504,7 @@ void buildGpuSceneRenderCache(GpuSceneAsset& scene) {
     scene.renderCache.textures = scene.textures;
     scene.renderCache.waterPatches = scene.waterPatches;
     scene.renderCache.lights = scene.lights;
+    scene.renderCache.particleEmitters = scene.particleEmitters;
     scene.renderCache.packedVertices.reserve(scene.vertices.size() + (scene.instances.objectIndices.size() * 64u));
     scene.renderCache.packedIndices.reserve(scene.indices.size() + (scene.instances.objectIndices.size() * 128u));
 

@@ -76,7 +76,7 @@ constexpr uint32_t kAutoExposureHistogramBins = 64u;
 bool RendererBackend::createDescriptorResources() {
     if (m_descriptorSetLayout == VK_NULL_HANDLE) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(14);
+        bindings.reserve(15);
 
         VkDescriptorSetLayoutBinding mvpBinding{};
         mvpBinding.binding = 0;
@@ -159,6 +159,16 @@ bool RendererBackend::createDescriptorResources() {
         sunShaftBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings.push_back(sunShaftBinding);
 
+        // Bloom source: always the mip-chained render-resolution HDR target. See
+        // the note in tone_map.frag.slang for why this cannot share the scene
+        // binding once an upscaler is in the chain.
+        VkDescriptorSetLayoutBinding bloomSourceBinding{};
+        bloomSourceBinding.binding = 14;
+        bloomSourceBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bloomSourceBinding.descriptorCount = 1;
+        bloomSourceBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(bloomSourceBinding);
+
         VkDescriptorSetLayoutBinding voxelGiOccupancyDebugBinding{};
         voxelGiOccupancyDebugBinding.binding = 11;
         voxelGiOccupancyDebugBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -186,6 +196,32 @@ bool RendererBackend::createDescriptorResources() {
         // Pushed unconditionally, after the conditional binding 12 above. The
         // hole when ray tracing is off is fine — descriptorBufferBindingOffset()
         // resolves offsets per binding rather than by position.
+        // Clustered light culling: the per-cluster 64-bit mask the cull compute
+        // pass writes. See src/render/shaders/light_clusters.slang.
+        VkDescriptorSetLayoutBinding lightClusterBinding{};
+        lightClusterBinding.binding = 15;
+        lightClusterBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        lightClusterBinding.descriptorCount = 1;
+        lightClusterBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(lightClusterBinding);
+
+        // Full-resolution 64-bit per-pixel mask produced by the contact-shadow
+        // resolve compute pass. It is a buffer so the main shader pays one
+        // coherent load and no sampler state per fragment.
+        VkDescriptorSetLayoutBinding contactShadowBinding{};
+        contactShadowBinding.binding = 16;
+        contactShadowBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        contactShadowBinding.descriptorCount = 1;
+        contactShadowBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(contactShadowBinding);
+
+        VkDescriptorSetLayoutBinding screenSpaceGiBinding{};
+        screenSpaceGiBinding.binding = 17;
+        screenSpaceGiBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        screenSpaceGiBinding.descriptorCount = 1;
+        screenSpaceGiBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(screenSpaceGiBinding);
+
         VkDescriptorSetLayoutBinding materialTableBinding{};
         materialTableBinding.binding = 13;
         materialTableBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -269,23 +305,53 @@ bool RendererBackend::createDescriptorResources() {
 void RendererBackend::updateFrameDescriptorSets(
     uint32_t aoFrameIndex,
     const VkDescriptorBufferInfo& cameraBufferInfo,
+    VkDeviceSize cameraSliceOffset,
     VkBuffer autoExposureHistogramBuffer,
     VkBuffer autoExposureStateBuffer,
     const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo,
     const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo
 ) {
     // Camera UBO device address (frame-arena slice) for descriptor-buffer writes.
+    //
+    // cameraSliceOffset, NOT cameraBufferInfo.offset -- the latter is always 0.
+    // (It is left at 0 for a classic descriptor-set path that would carry the
+    // slice as a dynamic offset; no 3-D pass takes that path any more, which is
+    // why FrameExecutionContext::mvpDynamicOffset is now unread.)
+    // Adding 0 here pointed every descriptor-buffer consumer of the camera --
+    // main, voxel GI, sun shafts, SSAO -- at ring offset 0 rather than at this
+    // frame's camera slice. That was survivable only for as long as the camera
+    // UBO happened to be the first allocation of every frame: the first
+    // allocation taken ahead of it (the skinned-actor bone matrices) shifted
+    // the camera slice, left ring offset 0 holding those matrices, and every
+    // pass then read a garbage view-projection -- which renders as a flat
+    // single-colour frame with the UI still correct on top of it, because the
+    // UI does not go through this camera.
     VkBufferDeviceAddressInfo cameraAddressInfo{};
     cameraAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     cameraAddressInfo.buffer = cameraBufferInfo.buffer;
     const VkDeviceAddress cameraDeviceAddress =
         (cameraBufferInfo.buffer != VK_NULL_HANDLE)
-            ? vkGetBufferDeviceAddress(m_device, &cameraAddressInfo) + cameraBufferInfo.offset
+            ? vkGetBufferDeviceAddress(m_device, &cameraAddressInfo) + cameraSliceOffset
             : 0;
 
     VkDescriptorImageInfo hdrSceneImageInfo{};
     hdrSceneImageInfo.sampler = m_hdrResolveSampler;
-    hdrSceneImageInfo.imageView = m_hdrResolveSampleImageViews[aoFrameIndex];
+    // The tonemap pass's scene input. When the temporal upscaler ran, that is
+    // its output -- already at swapchain resolution -- rather than hdrResolve,
+    // which is still at render resolution and would be stretched by a bilinear
+    // fetch. Sampling the upscaled image is what makes the reconstruction
+    // actually reach the screen instead of being resolved and then thrown away.
+    // m_taaHistoryIndex ^ 1, not m_taaHistoryIndex.
+    //
+    // These descriptors are written BEFORE recordTaaPass runs, and at that point
+    // m_taaHistoryIndex still names the image the pass is about to read as
+    // HISTORY -- it only advances to the freshly written image at the end of the
+    // pass. Sampling it here displays last frame's accumulation instead of this
+    // frame's, which is a frame of latency plus one accumulation step of
+    // staleness on every pixel.
+    hdrSceneImageInfo.imageView = temporalUpscaleActive()
+        ? m_taaImageViews[m_taaHistoryIndex ^ 1u]
+        : m_hdrResolveSampleImageViews[aoFrameIndex];
     hdrSceneImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo diffuseTextureImageInfo{};
@@ -436,11 +502,147 @@ void RendererBackend::updateFrameDescriptorSets(
         sampler(8, ssaoRawImageInfo);
         sampler(9, voxelGiVolumeImageInfo);
         sampler(10, sunShaftImageInfo);
+        // Bloom always reads the mip-chained hdrResolve, even when the scene
+        // above came from the upscaler's output.
+        VkDescriptorImageInfo bloomSourceImageInfo{};
+        bloomSourceImageInfo.sampler = m_hdrResolveSampler;
+        bloomSourceImageInfo.imageView = m_hdrResolveSampleImageViews[aoFrameIndex];
+        bloomSourceImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        sampler(14, bloomSourceImageInfo);
         sampler(11, voxelGiOccupancyDebugImageInfo);
         // Ray-traced scene acceleration structure (binding 12) when RT is live.
         if (hasRayTracingSceneDescriptor) {
             writeDescriptorBufferAccelerationStructure(m_mainBufferSet, region, mainOffset(12), m_rtTlas.deviceAddress);
         }
+
+        // Cluster light mask (binding 15). Written unconditionally when the
+        // buffer exists: the descriptor must be valid even on a frame where the
+        // cull pass is skipped, because the fragment shader's fallback branch
+        // is decided by a uniform, not by the descriptor, and a null descriptor
+        // in a bound set is undefined behaviour whether or not it is read.
+        const VkBuffer clusterBuffer = m_bufferAllocator.getBuffer(m_lightClusterBufferHandle);
+        if (clusterBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo clusterAddrInfo{};
+            clusterAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            clusterAddrInfo.buffer = clusterBuffer;
+            const VkDeviceAddress clusterAddress = vkGetBufferDeviceAddress(m_device, &clusterAddrInfo);
+            writeDescriptorBufferStorage(
+                m_mainBufferSet, region, mainOffset(15), clusterAddress, m_lightClusterBufferSize);
+        }
+        const VkBuffer contactMaskBuffer =
+            m_bufferAllocator.getBuffer(m_contactShadowFullMaskBufferHandle);
+        if (contactMaskBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = contactMaskBuffer;
+            writeDescriptorBufferStorage(
+                m_mainBufferSet, region, mainOffset(16),
+                vkGetBufferDeviceAddress(m_device, &addressInfo),
+                m_contactShadowFullMaskBufferSize);
+        }
+        const std::uint32_t screenSpaceGiCurrent = m_screenSpaceGiHistoryIndex ^ 1u;
+        BufferHandle screenSpaceGiHandle =
+            m_screenSpaceGiRecordBufferHandles[screenSpaceGiCurrent];
+        VkDeviceSize screenSpaceGiSize = m_screenSpaceGiRecordBufferSize;
+        if (screenSpaceGiHandle == kInvalidBufferHandle) {
+            screenSpaceGiHandle = m_contactShadowHalfBufferHandle;
+            screenSpaceGiSize = m_contactShadowHalfBufferSize;
+        }
+        const VkBuffer screenSpaceGiBuffer =
+            m_bufferAllocator.getBuffer(screenSpaceGiHandle);
+        if (screenSpaceGiBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = screenSpaceGiBuffer;
+            writeDescriptorBufferStorage(
+                m_mainBufferSet, region, mainOffset(17),
+                vkGetBufferDeviceAddress(m_device, &addressInfo), screenSpaceGiSize);
+        }
+    }
+
+    if (m_lightClusterAvailable && m_lightClusterBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_lightClusterDescriptorSetLayout;
+        writeDescriptorBufferUniform(
+            m_lightClusterBufferSet, region, descriptorBufferBindingOffset(layout, 0),
+            cameraDeviceAddress, cameraBufferInfo.range);
+        const VkBuffer clusterBuffer = m_bufferAllocator.getBuffer(m_lightClusterBufferHandle);
+        if (clusterBuffer != VK_NULL_HANDLE) {
+            VkBufferDeviceAddressInfo clusterAddrInfo{};
+            clusterAddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            clusterAddrInfo.buffer = clusterBuffer;
+            const VkDeviceAddress clusterAddress = vkGetBufferDeviceAddress(m_device, &clusterAddrInfo);
+            writeDescriptorBufferStorage(
+                m_lightClusterBufferSet, region, descriptorBufferBindingOffset(layout, 1),
+                clusterAddress, m_lightClusterBufferSize);
+        }
+    }
+
+    if (m_contactShadowAvailable && m_contactShadowBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_contactShadowDescriptorSetLayout;
+        const auto offset = [&](uint32_t binding) {
+            return descriptorBufferBindingOffset(layout, binding);
+        };
+        writeDescriptorBufferUniform(
+            m_contactShadowBufferSet, region, offset(0),
+            cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(
+            m_contactShadowBufferSet, region, offset(1), 0u,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler,
+            normalDepthImageInfo.imageLayout);
+        const auto storage = [&](uint32_t binding, BufferHandle handle, VkDeviceSize size) {
+            const VkBuffer buffer = m_bufferAllocator.getBuffer(handle);
+            if (buffer == VK_NULL_HANDLE) {
+                return;
+            }
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = buffer;
+            writeDescriptorBufferStorage(
+                m_contactShadowBufferSet, region, offset(binding),
+                vkGetBufferDeviceAddress(m_device, &addressInfo), size);
+        };
+        storage(2u, m_lightClusterBufferHandle, m_lightClusterBufferSize);
+        storage(3u, m_contactShadowDepthBufferHandle, m_contactShadowDepthBufferSize);
+        storage(4u, m_contactShadowHalfBufferHandle, m_contactShadowHalfBufferSize);
+        storage(5u, m_contactShadowFullMaskBufferHandle, m_contactShadowFullMaskBufferSize);
+    }
+
+    if (m_screenSpaceGiAvailable && m_screenSpaceGiBufferSet.valid()) {
+        const uint32_t region = m_currentFrame;
+        const VkDescriptorSetLayout layout = m_screenSpaceGiDescriptorSetLayout;
+        const auto offset = [&](uint32_t binding) {
+            return descriptorBufferBindingOffset(layout, binding);
+        };
+        writeDescriptorBufferUniform(
+            m_screenSpaceGiBufferSet, region, offset(0),
+            cameraDeviceAddress, cameraBufferInfo.range);
+        writeDescriptorBufferCombinedImageSampler(
+            m_screenSpaceGiBufferSet, region, offset(1), 0u,
+            normalDepthImageInfo.imageView, normalDepthImageInfo.sampler,
+            normalDepthImageInfo.imageLayout);
+        writeDescriptorBufferCombinedImageSampler(
+            m_screenSpaceGiBufferSet, region, offset(2), 0u,
+            m_taaImageViews[m_taaHistoryIndex], m_ssaoSampler,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        const auto storage = [&](uint32_t binding, BufferHandle handle, VkDeviceSize size) {
+            const VkBuffer buffer = m_bufferAllocator.getBuffer(handle);
+            if (buffer == VK_NULL_HANDLE) {
+                return;
+            }
+            VkBufferDeviceAddressInfo addressInfo{};
+            addressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            addressInfo.buffer = buffer;
+            writeDescriptorBufferStorage(
+                m_screenSpaceGiBufferSet, region, offset(binding),
+                vkGetBufferDeviceAddress(m_device, &addressInfo), size);
+        };
+        storage(3u, m_contactShadowDepthBufferHandle, m_contactShadowDepthBufferSize);
+        storage(4u, m_screenSpaceGiRecordBufferHandles[m_screenSpaceGiHistoryIndex],
+                m_screenSpaceGiRecordBufferSize);
+        storage(5u, m_screenSpaceGiRecordBufferHandles[m_screenSpaceGiHistoryIndex ^ 1u],
+                m_screenSpaceGiRecordBufferSize);
     }
 
     if (m_voxelGiComputeAvailable && m_voxelGiBufferSet.valid()) {
@@ -576,8 +778,58 @@ void RendererBackend::updateFrameDescriptorSets(
             sizeof(uniformData.prevViewProj));
         // History weight 0.88: high enough to converge shimmer in ~8 frames,
         // low enough that the clamp can pull a stale region back quickly.
-        uniformData.params[0] = 0.88f;
+        // ODAI_UPSCALE_HISTORY overrides it. 0 isolates the spatial
+        // reconstruction with no temporal accumulation at all, which is the
+        // control that separates "the filter is wrong" from "the accumulation is
+        // wrong" -- they look identical in a finished frame.
+        static const float s_historyWeight = []() {
+            const char* env = std::getenv("ODAI_UPSCALE_HISTORY");
+            if (env == nullptr) {
+                return 0.88f;
+            }
+            return std::clamp(static_cast<float>(std::atof(env)), 0.0f, 0.99f);
+        }();
+        uniformData.params[0] = s_historyWeight;
         uniformData.params[1] = (m_taaHistoryValid && m_taaPrevViewProjValid) ? 1.0f : 0.0f;
+        // THIS frame's jitter, in input PIXELS, plus the input extent. The
+        // upscaler needs the jitter in pixels rather than NDC because it works
+        // on the input sample grid -- it has to know where each low-res texel
+        // actually landed to weight it. m_taaJitterNdc is NDC (2 units across
+        // the extent), so the conversion is the inverse of the one that
+        // produced it.
+        const float inputWidth = static_cast<float>(std::max(1u, m_renderExtent.width));
+        const float inputHeight = static_cast<float>(std::max(1u, m_renderExtent.height));
+        uniformData.jitterAndInputExtent[0] = (m_taaJitterNdc[0] * inputWidth) * 0.5f;
+        uniformData.jitterAndInputExtent[1] = (m_taaJitterNdc[1] * inputHeight) * 0.5f;
+        uniformData.jitterAndInputExtent[2] = inputWidth;
+        uniformData.jitterAndInputExtent[3] = inputHeight;
+        // ODAI_UPSCALE_CLAMP / ODAI_UPSCALE_BLEND, for sweeping the two values
+        // that trade sharpness against ghosting. Defaults are the measured ones.
+        static const float s_clampStatic = []() {
+            const char* env = std::getenv("ODAI_UPSCALE_CLAMP");
+            return (env != nullptr) ? static_cast<float>(std::atof(env)) : 4.0f;
+        }();
+        static const float s_maxBlend = []() {
+            const char* env = std::getenv("ODAI_UPSCALE_BLEND");
+            return (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.5f;
+        }();
+        uniformData.upscaleTuning[0] = s_clampStatic;
+        uniformData.upscaleTuning[1] = 1.25f;
+        uniformData.upscaleTuning[2] = s_maxBlend;
+        uniformData.upscaleTuning[3] = 0.0f;
+        // LAST frame's jitter, which the shader takes back out of the
+        // reprojected UV. prevViewProj is the matrix that frame actually
+        // rendered with, so it carries that frame's jitter -- but the history
+        // TEXTURE is the resolved image on the fixed output grid, which carries
+        // none. Sampling it at a UV that still has the jitter in it lands
+        // ~half a pixel off, every frame, in a direction that changes every
+        // frame; the bilinear resample that results compounds into a blur that
+        // looks exactly like a soft mip and gets worse the longer the camera
+        // holds still. Measured before this correction: jitter made a static
+        // 0.6-scale frame visibly softer than no jitter at all, which is the
+        // opposite of what jitter is for.
+        uniformData.params[2] = m_taaPrevJitterNdc[0];
+        uniformData.params[3] = m_taaPrevJitterNdc[1];
         const std::optional<FrameArenaSlice> uniformSlice = m_frameArena.allocateUpload(
             sizeof(TaaUniformData), 256u, FrameArenaUploadKind::Unknown);
         if (uniformSlice.has_value() && uniformSlice->mapped != nullptr) {
@@ -617,6 +869,19 @@ void RendererBackend::updateFrameDescriptorSets(
                 m_taaBufferSet, region,
                 descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 5),
                 uniformAddress, sizeof(TaaUniformData));
+            // Binding 6: motion vectors. Written whether or not the active
+            // pipeline reads them -- a descriptor the layout declares must be
+            // valid even for a shader that ignores it. Falls back to the
+            // normal-depth view when the velocity target does not exist, so the
+            // binding is never null.
+            const bool hasVelocity = aoFrameIndex < m_velocityImageViews.size() &&
+                m_velocityImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+                m_velocityImageInitialized[aoFrameIndex];
+            writeDescriptorBufferCombinedImageSampler(
+                m_taaBufferSet, region,
+                descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 6), 0,
+                hasVelocity ? m_velocityImageViews[aoFrameIndex] : normalDepthImageInfo.imageView,
+                m_ssaoSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
     }
 
@@ -636,6 +901,12 @@ void RendererBackend::updateFrameDescriptorSets(
             m_ssaoBufferSet, region, outputOffset,
             m_ssaoRawImageViews[aoFrameIndex], VK_IMAGE_LAYOUT_GENERAL);
     }
+
+    // XeGTAO shares the same per-frame inputs as the other estimators; its sets
+    // are separate only because its bindings are.
+    writeXeGtaoDescriptors(
+        m_currentFrame, aoFrameIndex, cameraDeviceAddress, cameraBufferInfo.range,
+        normalDepthImageInfo);
 
     if (m_ssaoBlurBufferSet.valid() &&
         aoFrameIndex < m_ssaoBlurImageViews.size() &&

@@ -2404,7 +2404,11 @@ bool RendererBackend::createShadowResources() {
     imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // TRANSFER_SRC so the atlas can be read back and looked at. An empty atlas
+    // and a correctly-sampled-but-wrong one produce the same picture on screen
+    // -- everything lit -- so the only way to tell them apart is to dump it.
+    imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (m_vmaAllocator != VK_NULL_HANDLE) {
@@ -2524,6 +2528,9 @@ bool RendererBackend::createShadowResources() {
     );
 
     m_shadowDepthInitialized = false;
+    m_interiorPointShadowAtlasValid = false;
+    m_interiorPointShadowSignature = 0;
+    m_interiorPointShadowLightSourceCount = 0;
     m_shadowRenderedValid = {};
     VOX_LOGI("render") << "shadow resources ready (atlas " << kShadowAtlasSize << "x" << kShadowAtlasSize
               << ", cascades=" << kShadowCascadeCount << ")\n";
@@ -3717,6 +3724,9 @@ void RendererBackend::destroyShadowResources() {
         m_shadowDepthMemory = VK_NULL_HANDLE;
     }
     m_shadowDepthInitialized = false;
+    m_interiorPointShadowAtlasValid = false;
+    m_interiorPointShadowSignature = 0;
+    m_interiorPointShadowLightSourceCount = 0;
     m_shadowRenderedValid = {};
 }
 

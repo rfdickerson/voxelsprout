@@ -1,0 +1,7 @@
+# Fixed Dragonsreach contact-shadow camera beside the throne, looking down
+# toward the central firepit and dining table.
+# px py pz            lx ly lz
+-430 250 -2825       -220 75 -1150
+-430 250 -2825       -220 75 -1150
+-430 250 -2825       -220 75 -1150
+-430 250 -2825       -220 75 -1150
