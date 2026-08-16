@@ -1,0 +1,43 @@
+# Dragonsreach great hall (Skyrim SE) -- the interior showcase for clustered
+# lighting. Load it with --interior, which builds the cell as one scene:
+#
+#   odai_game_newvegas --stream "<SSE Data>" --plugin Skyrim.esm \
+#     --worldspace WhiterunWorld --interior WhiterunDragonsreach \
+#     --tour-file assets/tours/dragonsreach.txt --flythrough 30 \
+#     --capture-video dragonsreach.mp4 30 18
+#
+# WHY THIS CELL. An interior is where clustered light culling earns its keep:
+# Dragonsreach carries 28 local lights (braziers, sconces, the firepit) in a
+# room 4525 x 2765 x 5396 units, and any one pixel is reached by a handful of
+# them. The exterior worldspace has 24 lights ALL of which are in frustum, so
+# it cannot show the difference -- measured there, the frustum pre-cull rejects
+# nothing, while standing in this hall it rejects 14 to 21 of the 28.
+#
+# SKYRIM INTERIORS HAVE NO SPAWN OF THEIR OWN. buildInteriorScene picks the
+# middle of the largest navmesh triangle, and Skyrim's NAVM is a TES5-layout
+# record this reader does not parse -- so the fallback is the scene's bounding
+# box, reported in the streamer log:
+#
+#   interior WhiterunDragonsreach: 1431 refs, 588599 verts, ambient (91,80,64),
+#     spawn from geometry bounds (no navmesh) at engine (-565, -177, -2058)
+#     bounds engine x[-2828, 1697] y[-592, 2173] z[-4755, 640]
+#
+# The long axis is z, so this path runs the length of the hall. Height -180 is
+# eye level over a floor near -300; the bounds' own y minimum (-592) is the
+# cellar under it, not this room, which is why the height here is authored
+# rather than taken from the box.
+#
+# px py pz            lx ly lz
+# HEIGHT 260, NOT THE BOUNDING BOX'S OWN FLOOR. The box's y minimum is -592,
+# which is the cellar and the great porch below the hall, not this room; a
+# camera authored there looks UP through the hall floor at the ceiling with sky
+# under it, which reads as inverted geometry rather than as a wrong height.
+# 260 is eye level on the hall floor. The default --interior spawn survives it
+# only because gravity and collision settle the camera; a tour camera has
+# neither and has to be authored on the floor it means.
+-565 260 -3300      -565 240 -2400
+-565 260 -2800      -565 240 -1900
+-565 260 -2300      -565 240 -1400
+-565 260 -1800      -565 240 -900
+-565 260 -1300      -565 240 -400
+-565 260 -800       -565 240 100

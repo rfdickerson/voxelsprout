@@ -225,6 +225,12 @@ public:
         bool hasSpawn = false;
         float spawnPosition[3] = {};
         float spawnYawDegrees = 0.0f;
+        // True when spawnPosition came from the scene's bounding box rather than
+        // from a navmesh triangle. Skyrim's NAVM is a TES5-layout record this
+        // reader does not parse, so this is the path EVERY Skyrim interior
+        // takes; it is reported because "centre of the bounding box" can land
+        // in a wall where "middle of the largest floor" cannot.
+        bool spawnFromBounds = false;
     };
 
     // Builds one INTERIOR cell into a scene, synchronously -- interiors are one

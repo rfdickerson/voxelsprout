@@ -771,12 +771,48 @@ bool CellStreamer::buildInteriorScene(
         outInterior.hasSpawn = true;
     }
 
+    // NO NAVMESH IS THE NORMAL CASE FOR SKYRIM, not an error. The search above
+    // wants the largest navmesh triangle -- the middle of the biggest walkable
+    // floor -- but Skyrim's NAVM is a TES5-layout record this reader does not
+    // parse, so `record.navMeshes` is empty for every Skyrim interior. With no
+    // spawn the caller keeps whatever camera it had, which means "--interior
+    // WhiterunDragonsreach" loads Dragonsreach and leaves you standing outside
+    // it in the worldspace, looking at sky. That reads as "the interior did not
+    // load" when in fact 1431 references and 588599 vertices did.
+    //
+    // The fallback is the built geometry's own bounds: horizontally centred,
+    // and low in the vertical span so the camera starts near the ground floor
+    // rather than up in the rafters. Gravity and collision are already running
+    // on the interior cell, so the exact height only has to be inside the room
+    // -- the player settles onto the floor on the first tick.
+    if (!outInterior.hasSpawn && !outScene.packedVertices.empty()) {
+        outInterior.spawnPosition[0] = (outScene.boundsMin[0] + outScene.boundsMax[0]) * 0.5f;
+        outInterior.spawnPosition[2] = (outScene.boundsMin[2] + outScene.boundsMax[2]) * 0.5f;
+        outInterior.spawnPosition[1] =
+            outScene.boundsMin[1] + ((outScene.boundsMax[1] - outScene.boundsMin[1]) * 0.15f);
+        outInterior.hasSpawn = true;
+        outInterior.spawnFromBounds = true;
+    }
+
     VOX_LOGI("streamer") << "interior " << interiorEditorId << ": " << record.references.size()
                          << " refs, " << outScene.packedVertices.size() << " verts, ambient ("
                          << static_cast<int>(outInterior.ambientColor[0] * 255.0f) << ","
                          << static_cast<int>(outInterior.ambientColor[1] * 255.0f) << ","
                          << static_cast<int>(outInterior.ambientColor[2] * 255.0f) << ")"
-                         << (outInterior.hasSpawn ? "" : ", NO teleport door to stand by");
+                         << (outInterior.hasSpawn
+                                 ? (outInterior.spawnFromBounds
+                                        ? ", spawn from geometry bounds (no navmesh)"
+                                        : ", spawn from navmesh")
+                                 : ", NO spawn -- camera left where it was")
+                         << (outInterior.hasSpawn
+                                 ? (" at engine (" + std::to_string(outInterior.spawnPosition[0]) +
+                                    ", " + std::to_string(outInterior.spawnPosition[1]) + ", " +
+                                    std::to_string(outInterior.spawnPosition[2]) + ")")
+                                 : std::string())
+                         << " bounds engine x[" << outScene.boundsMin[0] << ", "
+                         << outScene.boundsMax[0] << "] y[" << outScene.boundsMin[1] << ", "
+                         << outScene.boundsMax[1] << "] z[" << outScene.boundsMin[2] << ", "
+                         << outScene.boundsMax[2] << "]";
     return true;
 }
 

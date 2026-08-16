@@ -3044,10 +3044,19 @@ bool NewVegasApp::initStreaming() {
             m_yawDegrees = interior.spawnYawDegrees;
             m_pitchDegrees = 0.0f;
         }
+        // THE ROOM HAS TO BE TOLD IT IS A ROOM. Interior mode was set only on
+        // the cooked --scene path (from the scene's source tag), so a STREAMED
+        // interior was shaded by the full outdoor rig: sun at 0.95 instead of
+        // 0.24, sky irradiance at 0.58 instead of 0.22, no sky-visibility term
+        // and no voxel GI. Dragonsreach rendered as a sunlit pavilion -- flat,
+        // bright, and with none of the contact darkening the interior path gets
+        // from lerp(0.28, 1.0, skyVisibility). It reads as "AO is broken"
+        // rather than as "this scene never said it was indoors".
+        m_renderer.setImportedSceneInteriorMode(true);
         // XCLL is read and reported but not yet APPLIED: the renderer has no
-        // ambient override to hand it to, so the room is lit by the outdoor rig
-        // with the roof shadowing it. Stated here so the gap is visible rather
-        // than looking like the values were wrong.
+        // ambient override to hand it to, so the room takes the interior rig's
+        // fixed ambient rather than the one the cell authored. Stated here so
+        // the gap is visible rather than looking like the values were wrong.
         VOX_LOGI("newvegas") << "started inside " << m_startInsideInterior
                              << (interior.hasLighting
                                      ? " (XCLL read; not applied -- no ambient override yet)"
