@@ -830,6 +830,78 @@ bool RendererBackend::createPipePipeline() {
         logVkFailure("vkCreateGraphicsPipelines(importedStatic)", importedPipelineResult);
         return false;
     }
+    // Tessellated terrain variant: same vertex shader, same fragment shader,
+    // same everything except a hull/domain pair between them and patch-list
+    // assembly. Optional the same way the prewrite shaders are -- if slangc was
+    // absent when the tree built, terrain simply stays flat.
+    //
+    // Created only when the merged depth prepass is on: main depth-tests
+    // GREATER_OR_EQUAL against depth the prepass laid, and the prepass has its
+    // own copy of these stages (createNormalDepthPipelines) so the two
+    // rasterize identical geometry. Without the merged prepass the flat and
+    // tessellated surfaces would be depth-compared against each other, and the
+    // Phong offset reads as speckled z-fighting across every hillside.
+    {
+        constexpr const char* kImportedTerrainTescPath =
+            "../src/render/shaders/imported_terrain.tesc.slang.spv";
+        constexpr const char* kImportedTerrainTesePath =
+            "../src/render/shaders/imported_terrain.tese.slang.spv";
+        static const bool s_terrainTessEnabled = []() {
+            const char* env = std::getenv("ODAI_TERRAIN_TESS");
+            return env == nullptr || (env[0] != '0');
+        }();
+        if (s_terrainTessEnabled && useMergedDepthPrepass() &&
+            std::filesystem::exists(kImportedTerrainTescPath) &&
+            std::filesystem::exists(kImportedTerrainTesePath)) {
+            std::array<VkShaderModule, 2> tessModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            const std::array<ShaderModuleLoadSpec, 2> tessLoadSpecs = {{
+                {kImportedTerrainTescPath, "imported_terrain.tesc"},
+                {kImportedTerrainTesePath, "imported_terrain.tese"},
+            }};
+            if (createShaderModulesFromFiles(m_device, tessLoadSpecs, tessModules)) {
+                VkPipelineShaderStageCreateInfo tessControlStage{};
+                tessControlStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessControlStage.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+                tessControlStage.module = tessModules[0];
+                tessControlStage.pName = "main";
+                VkPipelineShaderStageCreateInfo tessEvalStage{};
+                tessEvalStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessEvalStage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+                tessEvalStage.module = tessModules[1];
+                tessEvalStage.pName = "main";
+                const std::array<VkPipelineShaderStageCreateInfo, 4> terrainTessStages = {
+                    importedVertexShaderStage,
+                    tessControlStage,
+                    tessEvalStage,
+                    importedFragmentShaderStage,
+                };
+                VkPipelineInputAssemblyStateCreateInfo terrainInputAssembly = inputAssembly;
+                terrainInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+                VkPipelineTessellationStateCreateInfo terrainTessState{};
+                terrainTessState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+                terrainTessState.patchControlPoints = 3;
+                VkGraphicsPipelineCreateInfo terrainTessCreateInfo = importedPipelineCreateInfo;
+                terrainTessCreateInfo.stageCount =
+                    static_cast<uint32_t>(terrainTessStages.size());
+                terrainTessCreateInfo.pStages = terrainTessStages.data();
+                terrainTessCreateInfo.pInputAssemblyState = &terrainInputAssembly;
+                terrainTessCreateInfo.pTessellationState = &terrainTessState;
+                VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
+                if (vkCreateGraphicsPipelines(
+                        m_device, m_pipelineCache, 1, &terrainTessCreateInfo, nullptr,
+                        &terrainTessPipeline) == VK_SUCCESS) {
+                    m_importedTerrainTessPipeline = terrainTessPipeline;
+                    VOX_LOGI("render") << "imported terrain tessellation pipeline ready";
+                } else {
+                    VOX_LOGW("render")
+                        << "imported terrain tessellation pipeline creation failed; "
+                           "terrain stays flat";
+                }
+                destroyShaderModules(m_device, tessModules);
+            }
+        }
+    }
+
     // Alpha-blended variant of the same shaders.
     //
     // Fallout places glass, dust, light beams and vulture billboards as ordinary
@@ -1657,6 +1729,71 @@ bool RendererBackend::createAoPipelines() {
         destroyNewPipelines();
         destroyShaderModules(m_device, shaderModules);
         return false;
+    }
+
+    // Tessellated terrain variant of the normal-depth prepass, matching the
+    // main pass's terrain pipeline stage for stage. The two MUST tessellate
+    // identically -- main depth-tests EQUAL-ish (GREATER_OR_EQUAL, write off)
+    // against depth this pass lays, so a factor or displacement that differs
+    // between them punches holes in the ground.
+    {
+        constexpr const char* kImportedTerrainTescPath =
+            "../src/render/shaders/imported_terrain.tesc.slang.spv";
+        constexpr const char* kImportedTerrainTesePath =
+            "../src/render/shaders/imported_terrain.tese.slang.spv";
+        static const bool s_terrainTessEnabled = []() {
+            const char* env = std::getenv("ODAI_TERRAIN_TESS");
+            return env == nullptr || (env[0] != '0');
+        }();
+        if (s_terrainTessEnabled && useMergedDepthPrepass() &&
+            std::filesystem::exists(kImportedTerrainTescPath) &&
+            std::filesystem::exists(kImportedTerrainTesePath)) {
+            std::array<VkShaderModule, 2> tessModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            const std::array<ShaderModuleLoadSpec, 2> tessLoadSpecs = {{
+                {kImportedTerrainTescPath, "imported_terrain.tesc"},
+                {kImportedTerrainTesePath, "imported_terrain.tese"},
+            }};
+            if (createShaderModulesFromFiles(m_device, tessLoadSpecs, tessModules)) {
+                VkPipelineShaderStageCreateInfo tessControlStage{};
+                tessControlStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessControlStage.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+                tessControlStage.module = tessModules[0];
+                tessControlStage.pName = "main";
+                VkPipelineShaderStageCreateInfo tessEvalStage{};
+                tessEvalStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                tessEvalStage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+                tessEvalStage.module = tessModules[1];
+                tessEvalStage.pName = "main";
+                const std::array<VkPipelineShaderStageCreateInfo, 4> terrainStages = {
+                    importedNormalDepthStageInfos[0],
+                    tessControlStage,
+                    tessEvalStage,
+                    importedNormalDepthStageInfos[1],
+                };
+                VkPipelineInputAssemblyStateCreateInfo terrainInputAssembly = inputAssembly;
+                terrainInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+                VkPipelineTessellationStateCreateInfo terrainTessState{};
+                terrainTessState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+                terrainTessState.patchControlPoints = 3;
+                VkGraphicsPipelineCreateInfo terrainCreateInfo = pipelineCreateInfo;
+                terrainCreateInfo.stageCount = static_cast<uint32_t>(terrainStages.size());
+                terrainCreateInfo.pStages = terrainStages.data();
+                terrainCreateInfo.pInputAssemblyState = &terrainInputAssembly;
+                terrainCreateInfo.pTessellationState = &terrainTessState;
+                terrainCreateInfo.pVertexInputState = &importedVertexInputInfo;
+                terrainCreateInfo.pRasterizationState = &rasterizer;
+                VkPipeline terrainPipeline = VK_NULL_HANDLE;
+                if (vkCreateGraphicsPipelines(
+                        m_device, m_pipelineCache, 1, &terrainCreateInfo, nullptr,
+                        &terrainPipeline) == VK_SUCCESS) {
+                    m_importedTerrainTessNormalDepthPipeline = terrainPipeline;
+                } else {
+                    VOX_LOGW("render")
+                        << "imported terrain tessellation prepass pipeline creation failed";
+                }
+                destroyShaderModules(m_device, tessModules);
+            }
+        }
     }
 
     VkPipelineShaderStageCreateInfo importedWaterNormalDepthStageInfos[2]{};

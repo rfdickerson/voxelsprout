@@ -208,6 +208,41 @@ interpolation type EVEN WITH ZERO KEYS (the one place key groups differ, and exa
 retail morph base targets hit), and `bhkPackedNiTriStripsShape`'s subshape list is counted
 by a **uint16** where every neighbouring count is a uint32.
 
+**THE CELL INDEX IS THE STREAMER'S ONLY VIEW OF A CELL RECORD, AND ANYTHING NOT
+COPIED INTO IT DOES NOT EXIST.** `extractFalloutCellAt` rebuilds a streamed cell
+from `FalloutCellIndexEntry` plus the children GRUP and never re-reads the CELL's
+own subrecords -- the struct even says so. XCLL (lighting) was carried; XCLW
+(water height) was not, so EVERY streamed river, lake and sea was missing in
+every TES4/5 game, while the cooked path -- which parses the record in full --
+had water and made the feature look done. Corroborating tell: `waterCells=0` in
+every streamer log. Second trap in the same field: Skyrim writes FLT_MAX
+(`0x7F7FFFFF`) in XCLW to mean "use the worldspace default", and a
+lower-bound-only sentinel check reads that as water 3.4e38 units up. Both
+sentinels are value tests now; cells bump to v27.
+
+**IMPORTED TERRAIN TESSELLATES (Phong + a small world-noise bump), and the
+merged depth prepass is what makes it possible.** `imported_terrain.tesc/tese`
+run in BOTH the prepass and the main pass with identical inputs, because main
+depth-tests against prepass depth -- the pipelines exist only under
+`useMergedDepthPrepass()` for exactly that reason. Three load-bearing details:
+edge factors are computed from each edge's own endpoints only (shared edges get
+identical factors from both triangles, which is what keeps it watertight); a
+factor-1 patch with corner-faded displacement is bit-identical to the flat
+triangle, so the near/far handoff cannot crack; and only the NEAR terrain pages
+go through it (`m_visibleImportedNearTerrainDrawCount`) -- hull/domain stages
+cost per patch even at factor 1, and routing all terrain through them measured
+~3.5 ms on the LNL iGPU against ~1 ms for the near-only split.
+`ODAI_TERRAIN_TESS=0` disables.
+
+**A STREAMED CHUNK'S VERTEX CONVERSION IS PARALLEL** (plain std::thread, once
+per cell -- src/render/ deliberately has no job system). Skyrim's persistent
+cell (2.06M vertices) spent 85 ms of a 119 ms apply in the packed-to-GPU vertex
+loop on the render thread; the fan-out takes it to ~11 ms, with
+`ODAI_DEBUG_CHUNK_TIMING=1` printing the per-phase breakdown that found it. The
+remaining startup cost is the 157 MB zero-fill of the destination vectors and
+the staging memcpy -- fixing those means writing conversions straight into
+mapped staging memory, which is buffer-allocator surgery left undone.
+
 **A TEMPLATE ACTOR'S SKELETON IS NOT ON THE RECORD THAT NAMES IT.** An actor whose ACBS
 template flags borrow the model (`0x0040`, Use Model/Animation) stores `marker_creature.nif` as
 its own MODL -- a real, parseable NIF carrying none of the bones a body is weighted to. Taking

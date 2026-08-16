@@ -342,8 +342,47 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         // of them in the Mojave -- and they all share one vertex and one index
         // buffer, so the whole set collapses into one indirect call per
         // distinct threshold.
-        const auto includeDraw = [&](std::size_t drawIndex) {
+        // TERRAIN GOES THROUGH ITS OWN TESSELLATED PIPELINE when one exists.
+        // It is drawn first, as its own batch build, because
+        // buildImportedIndirectBatches reuses member scratch -- the terrain
+        // batches must be recorded before the statics build overwrites them.
+        // Patch-list assembly reads the same index buffer (three indices, one
+        // triangle patch), so the indirect commands need no translation.
+        const std::size_t tessTerrainDrawCount = std::min<std::size_t>(
+            m_visibleImportedNearTerrainDrawCount, terrainDrawCount);
+        const bool tessellateTerrain = mergedDepthPrepass &&
+            m_importedTerrainTessPipeline != VK_NULL_HANDLE && drawTerrain &&
+            tessTerrainDrawCount > 0u;
+        if (tessellateTerrain) {
+            const auto includeTerrainDraw = [&](std::size_t drawIndex) {
+                return drawIndex < tessTerrainDrawCount;
+            };
+            VkBuffer terrainIndirectBuffer = VK_NULL_HANDLE;
+            VkDeviceSize terrainIndirectBase = 0;
+            if (m_supportsMultiDrawIndirect &&
+                buildImportedIndirectBatches(
+                    importedMeshDraws, includeTerrainDraw, terrainIndirectBuffer,
+                    terrainIndirectBase)) {
+                vkCmdBindPipeline(
+                    commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    m_importedTerrainTessPipeline);
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    pushAlphaThreshold(batch.alphaThreshold);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer, terrainIndirectBuffer,
+                        terrainIndirectBase + batch.bufferOffset, batch.drawCount,
+                        sizeof(VkDrawIndexedIndirectCommand));
+                }
+            }
+        }
+        const auto includeOpaqueDraw = [&](std::size_t drawIndex) {
             if (drawIndex < terrainDrawCount) {
+                // Far terrain (past the near prefix) always draws flat; the
+                // near prefix draws flat only when tessellation is off.
+                if (tessellateTerrain && drawIndex < tessTerrainDrawCount) {
+                    return false;
+                }
                 return drawTerrain;
             }
             return drawStatics;
@@ -351,7 +390,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         VkBuffer indirectBuffer = VK_NULL_HANDLE;
         VkDeviceSize indirectBase = 0;
         const bool useIndirect = m_supportsMultiDrawIndirect &&
-            buildImportedIndirectBatches(importedMeshDraws, includeDraw, indirectBuffer, indirectBase);
+            buildImportedIndirectBatches(
+                importedMeshDraws, includeOpaqueDraw, indirectBuffer, indirectBase);
         if (useIndirect) {
             // DEPTH PREWRITE, in the same render pass instance as the shading
             // draws below.
@@ -454,7 +494,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             // Direct fallback: no multiDrawIndirect, or the frame arena could
             // not serve the command buffer this frame.
             for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                if (!includeDraw(drawIndex)) {
+                if (!includeOpaqueDraw(drawIndex)) {
                     continue;
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];

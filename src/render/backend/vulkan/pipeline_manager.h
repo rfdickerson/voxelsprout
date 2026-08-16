@@ -47,6 +47,11 @@ public:
     // about the silhouette of every thin surface, and SSAO occludes against the
     // wrong one.
     VkPipeline importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
+    // Tessellated terrain variants of the lit pass and the merged prepass.
+    // They exist only under the merged prepass, because they must lay and test
+    // IDENTICAL depth -- see pass_pipelines.cc where they are built.
+    VkPipeline importedTerrainTessPipeline = VK_NULL_HANDLE;
+    VkPipeline importedTerrainTessNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipeline = VK_NULL_HANDLE;
     VkPipeline magicaPipelineRt = VK_NULL_HANDLE;
@@ -103,6 +108,14 @@ public:
         if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
+        }
+        if (importedTerrainTessPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedTerrainTessPipeline, nullptr);
+            importedTerrainTessPipeline = VK_NULL_HANDLE;
+        }
+        if (importedTerrainTessNormalDepthPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedTerrainTessNormalDepthPipeline, nullptr);
+            importedTerrainTessNormalDepthPipeline = VK_NULL_HANDLE;
         }
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedWaterNormalDepthPipeline, nullptr);

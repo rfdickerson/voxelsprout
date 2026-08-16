@@ -2116,6 +2116,9 @@ private:
     VkPipeline& m_importedWaterPipeline = m_pipelineManager.importedWaterPipeline;
     VkPipeline& m_importedWaterPipelineRt = m_pipelineManager.importedWaterPipelineRt;
     VkPipeline& m_importedStaticNormalDepthPipeline = m_pipelineManager.importedStaticNormalDepthPipeline;
+    VkPipeline& m_importedTerrainTessPipeline = m_pipelineManager.importedTerrainTessPipeline;
+    VkPipeline& m_importedTerrainTessNormalDepthPipeline =
+        m_pipelineManager.importedTerrainTessNormalDepthPipeline;
     VkPipeline& m_importedWaterNormalDepthPipeline = m_pipelineManager.importedWaterNormalDepthPipeline;
     VkPipeline& m_importedStaticShadowPipeline = m_pipelineManager.importedStaticShadowPipeline;
     // Same shaders as above, differing only in vertex input: it reads the
@@ -2278,6 +2281,10 @@ private:
     // rather than local to keep it out of the per-frame allocator.
     std::vector<std::uint32_t> m_visibleImportedPageOrder;
     std::uint32_t m_visibleImportedTerrainDrawCount = 0;
+    // The first N of those terrain draws come from pages within the
+    // tessellation ramp; only they go through the tessellated pipeline. See
+    // buildVisibleImportedDraws for why far terrain must not.
+    std::uint32_t m_visibleImportedNearTerrainDrawCount = 0;
     std::array<std::uint32_t, kShadowCascadeCount> m_visibleImportedShadowTerrainDrawCounts{};
     std::vector<ImportedGiTriangle> m_importedGiTriangles;
     std::vector<ImportedLocalLight> m_importedLocalLights;

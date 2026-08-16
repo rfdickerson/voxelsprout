@@ -2307,6 +2307,7 @@ void RendererBackend::destroyImportedBuffers() {
     }
     m_visibleImportedPageScratch.clear();
     m_visibleImportedTerrainDrawCount = 0;
+    m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
         m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);

@@ -362,6 +362,8 @@ if(SLANGC_EXECUTABLE)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.vert.slang" vertex)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/pipe_instanced.frag.slang" fragment)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.vert.slang" vertex)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_terrain.tesc.slang" hull)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_terrain.tese.slang" domain)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.frag.slang" fragment)
     add_slang_shader_variant(
         "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_static.frag.slang"

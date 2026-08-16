@@ -2446,6 +2446,9 @@ void RendererBackend::renderFrame(
         m_importedMeshDraws.data(),
         m_importedMeshDraws.size());
     std::uint32_t importedTerrainDrawCountForFrame = m_importedTerrainDrawCount;
+    // Without page culling there is no near/far split to compute, so the whole
+    // terrain prefix counts as near -- a cooked scene is a bounded region.
+    m_visibleImportedNearTerrainDrawCount = m_importedTerrainDrawCount;
     const bool importedPageCullingEnabled = !m_importedPageDrawRanges.empty();
     auto importedPageIntersectsClip = [](
                                           const ImportedScenePageDrawRange& pageRange,
@@ -2553,12 +2556,48 @@ void RendererBackend::renderFrame(
         // Terrain stays a prefix of the visible list -- callers read
         // m_visibleImportedTerrainDrawCount as "the first N draws are terrain" --
         // so the sort applies WITHIN each group rather than across the two.
+        //
+        // The terrain prefix is itself partitioned NEAR-FIRST. The tessellated
+        // terrain pipeline pays hull/domain invocations for every patch it
+        // touches even at factor 1, and routing ALL terrain through it measured
+        // ~3.5 ms on the LNL iGPU while everything past the tessellation ramp
+        // subdivides to nothing anyway. Only pages whose bounds come within the
+        // ramp go in the near prefix; the passes draw [0, near) tessellated and
+        // [near, terrainCount) through the flat pipeline.
         std::uint32_t visibleTerrainDrawCount = 0;
+        std::uint32_t visibleNearTerrainDrawCount = 0;
+        const auto pageWithinTessRange = [&](const ImportedScenePageDrawRange& pageRange) {
+            // Conservative point-to-AABB distance against the tessellation
+            // ramp's far end (imported_terrain.tesc stops at 10000).
+            constexpr float kTessRangeUnits = 10500.0f;
+            float distanceSq = 0.0f;
+            const float eyePosition[3] = {eye.x, eye.y, eye.z};
+            for (int axis = 0; axis < 3; ++axis) {
+                const float clamped = std::clamp(
+                    eyePosition[axis], pageRange.boundsMin[axis], pageRange.boundsMax[axis]);
+                const float delta = eyePosition[axis] - clamped;
+                distanceSq += delta * delta;
+            }
+            return distanceSq < (kTessRangeUnits * kTessRangeUnits);
+        };
         for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
+            if (!pageWithinTessRange(pageRange)) {
+                continue;
+            }
+            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
+            visibleNearTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
+        }
+        visibleTerrainDrawCount = visibleNearTerrainDrawCount;
+        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
+            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
+            if (pageWithinTessRange(pageRange)) {
+                continue;
+            }
             const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
             visibleTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
         }
+        m_visibleImportedNearTerrainDrawCount = visibleNearTerrainDrawCount;
         for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
             const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);

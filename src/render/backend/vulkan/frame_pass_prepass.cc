@@ -209,10 +209,48 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            // Tessellated terrain, mirroring frame_pass_main exactly -- this
+            // pass lays the depth the main pass tests against, so if main
+            // tessellates and this does not, the ground develops holes. Drawn
+            // first because buildImportedIndirectBatches reuses member scratch.
+            const std::size_t tessTerrainDrawCount = std::min<std::size_t>(
+                m_visibleImportedNearTerrainDrawCount, terrainDrawCount);
+            const bool tessellateTerrain =
+                m_importedTerrainTessNormalDepthPipeline != VK_NULL_HANDLE &&
+                m_debugShowImportedTerrain && tessTerrainDrawCount > 0u;
+            if (tessellateTerrain) {
+                const auto includeTerrainDraw = [&](std::size_t drawIndex) {
+                    return drawIndex < tessTerrainDrawCount;
+                };
+                VkBuffer terrainIndirectBuffer = VK_NULL_HANDLE;
+                VkDeviceSize terrainIndirectBase = 0;
+                if (m_supportsMultiDrawIndirect &&
+                    buildImportedIndirectBatches(
+                        importedMeshDraws, includeTerrainDraw, terrainIndirectBuffer,
+                        terrainIndirectBase)) {
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_importedTerrainTessNormalDepthPipeline);
+                    for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                        pushAlphaThreshold(batch.alphaThreshold);
+                        countDrawCalls(m_debugDrawCallsPrepass, 1);
+                        vkCmdDrawIndexedIndirect(
+                            commandBuffer, terrainIndirectBuffer,
+                            terrainIndirectBase + batch.bufferOffset, batch.drawCount,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        m_importedStaticNormalDepthPipeline);
+                }
+            }
             // Same indirect batching as the main pass: one call per distinct
             // alpha-test threshold instead of one per draw.
             const auto includeDraw = [&](std::size_t drawIndex) {
                 if (drawIndex < terrainDrawCount) {
+                    if (tessellateTerrain && drawIndex < tessTerrainDrawCount) {
+                        return false;
+                    }
                     return m_debugShowImportedTerrain;
                 }
                 return m_debugShowImportedStatics;
