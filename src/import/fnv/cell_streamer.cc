@@ -113,7 +113,18 @@ std::string cellAxisToken(std::int32_t value) {
 // names one texture per 512-unit block and nothing else, so the blend between
 // blocks has to be invented at build time -- and it lives in the packed vertex,
 // which means cached cells keep the hard-edged version until this bumps.
-constexpr int kCellBuildVersion = 18;
+// 19: EditorMarker subtrees are no longer drawn
+// 20: BSTriShape (Skyrim) geometry, and build-machine texture paths resolve
+// 21: no implied sea level in a worldspace with no LAND record
+// 22: skinned BSTriShape geometry (NiSkinPartition) -- banners, cloth
+// 23: the game's own sky meshes are no longer placed as world geometry
+// 24: initially-disabled references (REFR flag 0x800) are no longer drawn
+// 25: NiAVObject-hidden subtrees (flag bit 0) are no longer drawn -- particle
+//     emitter source meshes were rendering as a plane over the landscape
+// 26: ~760 more Oblivion meshes parse (Havok, skinning and animation blocks
+//     the no-size-table walk could not size), so cells containing them stop
+//     dropping that geometry
+constexpr int kCellBuildVersion = 26;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

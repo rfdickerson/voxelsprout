@@ -25,6 +25,7 @@
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
+#include "import/fnv/weather_records.h"
 
 namespace {
 
@@ -918,6 +919,39 @@ void testCellWaterPatch() {
         cell.waterHeight = 100.0f;
         expectTrue(!appendCellWaterPatch(scene, cell) && scene.waterPatches.empty(),
                    "Interior cells contribute no water patch");
+    }
+
+    // THE IMPLIED HEIGHT IS THE WORLDSPACE'S, NOT ZERO. Skyrim's WhiterunWorld
+    // states no water height and no DNAM; Tamriel, its WNAM parent, declares
+    // -14000, and resolveWorldspaceInheritance has already pushed that down by
+    // the time this runs. Defaulting to 0 instead put a full-cell quad 14000
+    // units up, through the roofs of a city standing at y -3120.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(5, -2);
+        FalloutWorldspaceRecord worldspace{};
+        worldspace.hasDefaultHeights = true;
+        worldspace.defaultWaterHeight = -14000.0f;
+        expectTrue(appendCellWaterPatch(scene, cell, &worldspace) &&
+                       scene.waterPatches.size() == 1u,
+                   "A landless cell still gets water from the worldspace default");
+        if (scene.waterPatches.size() == 1u) {
+            expectNear(scene.waterPatches.front().waterLevel, -14000.0f, 1e-3f,
+                       "an absent XCLW resolves to the worldspace's default water height");
+        }
+    }
+
+    // And that default is what the terrain is compared against, so a city whose
+    // ground sits far above it stays dry.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(6, -1);
+        giveFlatLand(cell, -3120.0f);
+        FalloutWorldspaceRecord worldspace{};
+        worldspace.hasDefaultHeights = true;
+        worldspace.defaultWaterHeight = -14000.0f;
+        expectTrue(!appendCellWaterPatch(scene, cell, &worldspace) && scene.waterPatches.empty(),
+                   "Terrain far above the worldspace default water height stays dry");
     }
 }
 
@@ -2698,6 +2732,394 @@ void testModDirectoryOverridesArchives() {
 //
 // Synthetic plugins only -- a TES4 header is small enough to write by hand, and
 // the point is the index arithmetic, not any real game data.
+// A WTHR record is not one format across these games, and both differences are
+// silent -- they produce a plausible-looking weather rather than an error.
+//
+//   FNAM is SIX floats in Fallout and FOUR in Oblivion: the day/night fog POWER
+//   pair arrived with Fallout 3. Sizing the read at 24 left every Oblivion
+//   weather with fogDayFar = 0, which a forced weather then publishes as the
+//   aerial-perspective distance and fogs the frame flat from the near plane.
+//
+//   PNAM does not exist in Oblivion at all. Its cloud tints are the two NAM0
+//   channels the Fallout docs call unused and the Oblivion CS calls
+//   Clouds-Lower and Clouds-Upper. The tint IS the layer colour, so the zero
+//   default does not render "untinted" -- it renders the clouds pure black.
+//
+// Both directions are asserted: the Fallout record must keep reading its own
+// PNAM and its fog powers, or this fix trades one game's sky for the other's.
+void testOblivionWeatherFogAndCloudTints() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr auto kDay = static_cast<std::size_t>(FalloutWeatherTimeSlot::Day);
+    constexpr auto kNoon = static_cast<std::size_t>(FalloutWeatherTimeSlot::Noon);
+
+    const fs::path dataDir = fs::temp_directory_path() / "odai_fnv_weather_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDir, cleanupError);
+    fs::create_directories(dataDir, cleanupError);
+
+    // NAM0 rows are [color][slot]; `slots` is 4 for Oblivion/FO3 and 6 for NV.
+    const auto buildColorTable = [](std::size_t rows, std::size_t slots,
+                                    const std::vector<std::uint8_t>& redPerRow) {
+        std::vector<std::uint8_t> out(rows * slots * 4u, 0u);
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t slot = 0; slot < slots; ++slot) {
+                const std::size_t offset = ((row * slots) + slot) * 4u;
+                // Red identifies the ROW, green the SLOT, so a read that lands
+                // on the wrong channel or the wrong time of day is legible in
+                // the failure rather than merely wrong.
+                out[offset + 0u] = redPerRow[row];
+                out[offset + 1u] = static_cast<std::uint8_t>(10u + slot);
+                out[offset + 2u] = 0u;
+            }
+        }
+        return out;
+    };
+
+    constexpr std::size_t kColorRows = static_cast<std::size_t>(FalloutWeatherColor::Count);
+    std::vector<std::uint8_t> reds(kColorRows, 0u);
+    for (std::size_t row = 0; row < kColorRows; ++row) {
+        reds[row] = static_cast<std::uint8_t>(100u + row);
+    }
+    constexpr std::uint8_t kCloudsLowerRed = 102u;  // FalloutWeatherColor::CloudsLower
+    constexpr std::uint8_t kCloudsUpperRed = 109u;  // FalloutWeatherColor::CloudsUpper
+
+    // --- The Oblivion shape: 20-byte headers, 4 time slots, 16-byte FNAM, no PNAM.
+    {
+        constexpr auto kFormat = EsmPluginFormat::kOblivion;
+        std::vector<std::uint8_t> body = buildSubrecord("EDID", stringPayload("TestOvercast"));
+        const auto append = [&body](const std::vector<std::uint8_t>& part) {
+            body.insert(body.end(), part.begin(), part.end());
+        };
+        append(buildSubrecord("DNAM", stringPayload("Sky\\CloudsUpper.dds")));
+        append(buildSubrecord("CNAM", stringPayload("Sky\\CloudsLower.dds")));
+        append(buildSubrecord("NAM0", buildColorTable(kColorRows, 4u, reds)));
+        std::vector<std::uint8_t> fnam;
+        appendPod(fnam, 2048.0f);    // fog day near
+        appendPod(fnam, 150000.0f);  // fog day far
+        appendPod(fnam, 2048.0f);    // fog night near
+        appendPod(fnam, 130000.0f);  // fog night far
+        append(buildSubrecord("FNAM", fnam));
+        append(buildSubrecord("DATA", std::vector<std::uint8_t>(15, 0u)));
+
+        std::vector<std::uint8_t> file = buildTes4Record({}, kFormat);
+        const auto record = buildRecord("WTHR", 0x00038EECu, 0u, body, kFormat);
+        const auto group = buildGroup("WTHR", 0, record, kFormat);
+        file.insert(file.end(), group.begin(), group.end());
+        std::ofstream out(dataDir / "Oblivion.esm", std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(file.data()),
+                  static_cast<std::streamsize>(file.size()));
+    }
+
+    // --- The Fallout shape: 24-byte headers, 6 time slots, 24-byte FNAM, real PNAM.
+    {
+        constexpr auto kFormat = EsmPluginFormat::kFallout3;
+        std::vector<std::uint8_t> body = buildSubrecord("EDID", stringPayload("TestMojave"));
+        const auto append = [&body](const std::vector<std::uint8_t>& part) {
+            body.insert(body.end(), part.begin(), part.end());
+        };
+        append(buildSubrecord("DNAM", stringPayload("Sky\\Layer0.dds")));
+        // Layer 1 is the transparent placeholder nearly every real record uses
+        // for an unused layer, so the emitted list has a HOLE in its indices.
+        append(buildSubrecord("CNAM", stringPayload("Sky\\Alpha.dds")));
+        append(buildSubrecord("ANAM", stringPayload("Sky\\Layer2.dds")));
+        append(buildSubrecord("NAM0", buildColorTable(kColorRows, 6u, reds)));
+        // PNAM: four layers x six slots. Red 200 + layer, so it cannot be
+        // confused with any NAM0 row.
+        std::vector<std::uint8_t> pnamReds(FalloutWeatherRecord::kCloudLayerCount, 0u);
+        for (std::size_t layer = 0; layer < pnamReds.size(); ++layer) {
+            pnamReds[layer] = static_cast<std::uint8_t>(200u + layer);
+        }
+        append(buildSubrecord(
+            "PNAM", buildColorTable(FalloutWeatherRecord::kCloudLayerCount, 6u, pnamReds)));
+        std::vector<std::uint8_t> fnam;
+        appendPod(fnam, 1024.0f);    // fog day near
+        appendPod(fnam, 90000.0f);   // fog day far
+        appendPod(fnam, 512.0f);     // fog night near
+        appendPod(fnam, 40000.0f);   // fog night far
+        appendPod(fnam, 1.5f);       // fog day power
+        appendPod(fnam, 2.5f);       // fog night power
+        append(buildSubrecord("FNAM", fnam));
+        append(buildSubrecord("DATA", std::vector<std::uint8_t>(15, 0u)));
+
+        std::vector<std::uint8_t> file = buildTes4Record({}, kFormat);
+        const auto record = buildRecord("WTHR", 0x00100200u, 0u, body, kFormat);
+        const auto group = buildGroup("WTHR", 0, record, kFormat);
+        file.insert(file.end(), group.begin(), group.end());
+        std::ofstream out(dataDir / "FalloutNV.esm", std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(file.data()),
+                  static_cast<std::streamsize>(file.size()));
+    }
+
+    const auto readTables = [&](const char* fileName, FalloutWeatherTables& tables) {
+        FalloutLoadOrder order;
+        std::string error;
+        if (!order.open(dataDir, {fileName}, error)) {
+            expectTrue(false, ("a weather fixture load order opens: " + error).c_str());
+            return false;
+        }
+        if (!buildFalloutWeatherTables(order, tables, error)) {
+            expectTrue(false, ("weather tables build: " + error).c_str());
+            return false;
+        }
+        return true;
+    };
+
+    {
+        FalloutWeatherTables tables;
+        if (readTables("Oblivion.esm", tables)) {
+            const FalloutWeatherRecord* weather = tables.findWeatherByEditorId("TestOvercast");
+            expectTrue(weather != nullptr, "the Oblivion WTHR is found by editor ID");
+            if (weather != nullptr) {
+                expectTrue(weather->fogDayFar == 150000.0f,
+                           "a 16-byte FNAM still yields fogDayFar (the >= 24 guard zeroed it)");
+                expectTrue(weather->fogNightFar == 130000.0f, "and fogNightFar");
+                expectTrue(weather->fogDayPower == 0.0f && weather->fogNightPower == 0.0f,
+                           "fog powers stay zero -- Oblivion authors no bytes for them");
+                expectTrue(weather->cloudLayers.size() == 2u,
+                           "only the two cloud layers Oblivion authors are emitted");
+                expectTrue(weather->cloudMapping == FalloutCloudMapping::DomeFisheye,
+                           "and they are dome fisheye maps, not tiling sheets");
+                if (weather->cloudLayers.size() == 2u) {
+                    // Layer 0 is DNAM, which the file names as the upper layer.
+                    expectTrue(weather->cloudLayers[0].texture == "Sky\\CloudsUpper.dds",
+                               "layer 0 is DNAM");
+                    expectTrue(weather->cloudLayers[0].tint[kDay].r == kCloudsUpperRed,
+                               "with no PNAM, cloud layer 0 is tinted from NAM0 Clouds-Upper");
+                    expectTrue(weather->cloudLayers[1].tint[kDay].r == kCloudsLowerRed,
+                               "and cloud layer 1 from NAM0 Clouds-Lower");
+                    expectTrue(weather->cloudLayers[0].tint[kDay].r != 0u &&
+                                   weather->cloudLayers[1].tint[kDay].r != 0u,
+                               "neither layer keeps the zero tint that renders clouds pure black");
+                    // Oblivion's four slots are widened to six on the way in, so
+                    // a caller asking for Noon must not fall off the end into
+                    // black.
+                    expectTrue(weather->cloudLayers[0].tint[kNoon].r == kCloudsUpperRed,
+                               "the four-slot table widens to six, so Noon is tinted too");
+                    expectTrue(weather->cloudLayers[0].alpha[kDay] == 1.0f,
+                               "a record with no JNAM leaves every layer fully opaque");
+                }
+            }
+        }
+    }
+
+    {
+        FalloutWeatherTables tables;
+        if (readTables("FalloutNV.esm", tables)) {
+            const FalloutWeatherRecord* weather = tables.findWeatherByEditorId("TestMojave");
+            expectTrue(weather != nullptr, "the Fallout WTHR is found by editor ID");
+            if (weather != nullptr) {
+                expectTrue(weather->fogDayFar == 90000.0f, "a 24-byte FNAM still reads its fog far");
+                expectTrue(weather->fogDayPower == 1.5f && weather->fogNightPower == 2.5f,
+                           "and still reads the two fog powers past the first sixteen bytes");
+                expectTrue(weather->cloudLayers.size() == 2u,
+                           "the two layers Fallout names are emitted; the alpha placeholder is not");
+                if (weather->cloudLayers.size() == 2u) {
+                    expectTrue(weather->cloudLayers[0].tint[kDay].r == 200u,
+                               "a record WITH PNAM keeps its own tints rather than the NAM0 fallback");
+                    // The gap is the point: layer 1 is sky\alpha.dds, the
+                    // transparent placeholder, so the SECOND emitted layer is
+                    // record layer 2 -- and it must carry layer 2's tint, not
+                    // the tint of the slot it happens to land in. This is the
+                    // pairing that, broken, painted Skyrim's sky solid black.
+                    expectTrue(weather->cloudLayers[1].index == 2,
+                               "an unused layer is skipped rather than renumbering the rest");
+                    expectTrue(weather->cloudLayers[1].tint[kDay].r == 202u,
+                               "and the layer that survives keeps its OWN tint, not the slot's");
+                    expectTrue(
+                        weather->cloudLayers[0].tint[kNoon].g == static_cast<std::uint8_t>(10u + kNoon),
+                        "six authored slots are not collapsed into four");
+                }
+            }
+        }
+    }
+
+    fs::remove_all(dataDir, cleanupError);
+}
+
+// SKYRIM'S CLOUD BLOCK IS A DIFFERENT SHAPE, AND READING IT AS FALLOUT'S PAINTS
+// THE WHOLE SKY BLACK.
+//
+// It authors up to 29 layers in subrecords named chr('0' + layer) + "0TX",
+// picks which are live with a bitfield in NAM1, tints them from a 32-row PNAM,
+// and gives each a per-slot opacity in JNAM. Taking the first four TEXTURES and
+// the first four PNAM ROWS independently -- which is what four DNAM/CNAM/ANAM/
+// BNAM slots invite -- pairs a live layer's texture with a DEAD layer's tint,
+// and Skyrim authors a black daytime tint on exactly the layers it disables.
+// The result is a fully opaque black sky that looks like a broken shader.
+//
+// This pins the pairing rather than the parse: the assertion that matters is
+// that the surviving layer carries the tint and alpha of ITS OWN index.
+void testSkyrimWeatherCloudLayers() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr auto kDay = static_cast<std::size_t>(FalloutWeatherTimeSlot::Day);
+    constexpr auto kSlots = 4u;         // Skyrim authors four time slots
+    constexpr auto kSkyrimLayers = 32u; // and 32-wide cloud tables
+
+    const fs::path dataDir = fs::temp_directory_path() / "odai_skyrim_weather_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDir, cleanupError);
+    fs::create_directories(dataDir, cleanupError);
+
+    constexpr auto kFormat = EsmPluginFormat::kFallout3;  // Skyrim shares the container
+    std::vector<std::uint8_t> body = buildSubrecord("EDID", stringPayload("TestSkyrimCloudy"));
+    const auto append = [&body](const std::vector<std::uint8_t>& part) {
+        body.insert(body.end(), part.begin(), part.end());
+    };
+    // Layer 0 is an Upper-band leftover that Skyrim disables; layer 9 is a live
+    // Lower deck; layer 20 a live Horizon bank. Subrecord names are the layer
+    // index offset from '0', so layer 20 is 'D' + "0TX".
+    const auto cloudSubrecord = [](int layer, const char* path) {
+        std::string type;
+        type.push_back(static_cast<char>('0' + layer));
+        type += "0TX";
+        return buildSubrecord(type.c_str(), stringPayload(path));
+    };
+    append(cloudSubrecord(0, "Sky\\DeadUpper.dds"));
+    append(cloudSubrecord(9, "Sky\\SkyrimCloudsLower01.dds"));
+    append(cloudSubrecord(20, "Sky\\SkyrimCloudsHorizon01.dds"));
+
+    // NAM1: 1 = DISABLED. Everything but 9 and 20.
+    std::uint32_t disabled = 0xFFFFFFFFu;
+    disabled &= ~(1u << 9);
+    disabled &= ~(1u << 20);
+    {
+        std::vector<std::uint8_t> nam1;
+        appendPod(nam1, disabled);
+        append(buildSubrecord("NAM1", nam1));
+    }
+
+    // PNAM: 32 layers x 4 slots x RGBA. Red identifies the layer. The DISABLED
+    // layers get the black daytime tint the real records have, so a reader that
+    // takes tints by slot instead of by layer produces a black sky here too.
+    {
+        std::vector<std::uint8_t> pnam(kSkyrimLayers * kSlots * 4u, 0u);
+        for (std::uint32_t layer = 0; layer < kSkyrimLayers; ++layer) {
+            const bool live = ((disabled >> layer) & 1u) == 0u;
+            for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+                const std::size_t offset = ((layer * kSlots) + slot) * 4u;
+                pnam[offset + 0u] = live ? static_cast<std::uint8_t>(100u + layer) : 0u;
+                pnam[offset + 1u] = live ? static_cast<std::uint8_t>(10u + slot) : 0u;
+            }
+        }
+        append(buildSubrecord("PNAM", pnam));
+    }
+    // JNAM: 128 floats, layer-major. Layer 20 is held at 0.4, the way the real
+    // records hold a horizon bank and the fill swatch back.
+    {
+        std::vector<std::uint8_t> jnam;
+        for (std::uint32_t layer = 0; layer < kSkyrimLayers; ++layer) {
+            for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+                appendPod(jnam, layer == 20u ? 0.4f : 1.0f);
+            }
+        }
+        append(buildSubrecord("JNAM", jnam));
+    }
+    // NAM0: 17 rows x 4 slots. Row 12 is Fog Far, which is the channel aerial
+    // perspective must use -- row 1 is the NEAR fog and is a saturated tint.
+    {
+        constexpr std::uint32_t kSkyrimColorRows = 17u;
+        std::vector<std::uint8_t> nam0(kSkyrimColorRows * kSlots * 4u, 0u);
+        for (std::uint32_t row = 0; row < kSkyrimColorRows; ++row) {
+            for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+                const std::size_t offset = ((row * kSlots) + slot) * 4u;
+                nam0[offset + 0u] = static_cast<std::uint8_t>(50u + row);
+            }
+        }
+        append(buildSubrecord("NAM0", nam0));
+    }
+    // FNAM is EIGHT floats in Skyrim; the first six are laid out as Fallout's.
+    {
+        std::vector<std::uint8_t> fnam;
+        appendPod(fnam, 0.0f);
+        appendPod(fnam, 100000.0f);
+        appendPod(fnam, 1000.0f);
+        appendPod(fnam, 50000.0f);
+        appendPod(fnam, 0.4f);
+        appendPod(fnam, 0.3f);
+        appendPod(fnam, 0.875f);
+        appendPod(fnam, 0.875f);
+        append(buildSubrecord("FNAM", fnam));
+    }
+    append(buildSubrecord("DATA", std::vector<std::uint8_t>(19, 0u)));
+
+    std::vector<std::uint8_t> file = buildTes4Record({}, kFormat);
+    const auto record = buildRecord("WTHR", 0x00012F89u, 0u, body, kFormat);
+    const auto group = buildGroup("WTHR", 0, record, kFormat);
+    file.insert(file.end(), group.begin(), group.end());
+    {
+        std::ofstream out(dataDir / "Skyrim.esm", std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(file.data()),
+                  static_cast<std::streamsize>(file.size()));
+    }
+
+    FalloutLoadOrder order;
+    std::string error;
+    if (!order.open(dataDir, {"Skyrim.esm"}, error)) {
+        expectTrue(false, ("the Skyrim weather fixture opens: " + error).c_str());
+        fs::remove_all(dataDir, cleanupError);
+        return;
+    }
+    FalloutWeatherTables tables;
+    if (!buildFalloutWeatherTables(order, tables, error)) {
+        expectTrue(false, ("Skyrim weather tables build: " + error).c_str());
+        fs::remove_all(dataDir, cleanupError);
+        return;
+    }
+
+    const FalloutWeatherRecord* weather = tables.findWeatherByEditorId("TestSkyrimCloudy");
+    expectTrue(weather != nullptr, "the Skyrim WTHR is found by editor ID");
+    if (weather == nullptr) {
+        fs::remove_all(dataDir, cleanupError);
+        return;
+    }
+
+    expectTrue(weather->cloudMapping == FalloutCloudMapping::TilingPlane,
+               "an x0TX cloud block marks the record's textures as tiling sheets");
+    expectTrue(weather->cloudLayers.size() == 2u,
+               "NAM1's disabled bit drops the dead layer, leaving the two live ones");
+    if (weather->cloudLayers.size() != 2u) {
+        fs::remove_all(dataDir, cleanupError);
+        return;
+    }
+
+    expectTrue(weather->cloudLayers[0].index == 9 && weather->cloudLayers[1].index == 20,
+               "the surviving layers keep their own record indices");
+    expectTrue(weather->cloudLayers[0].texture == "Sky\\SkyrimCloudsLower01.dds",
+               "and their own textures");
+    // THE ASSERTION THIS TEST EXISTS FOR. Reading PNAM row 0 for the first
+    // emitted layer gives 0 here -- the black tint of a disabled layer -- and
+    // that is exactly the bug: a fully opaque black sky.
+    expectTrue(weather->cloudLayers[0].tint[kDay].r == 109u,
+               "layer 9's tint comes from PNAM ROW 9, not from the slot it lands in");
+    expectTrue(weather->cloudLayers[1].tint[kDay].r == 120u,
+               "and layer 20's from row 20");
+    expectTrue(weather->cloudLayers[0].tint[kDay].r != 0u &&
+                   weather->cloudLayers[1].tint[kDay].r != 0u,
+               "neither live layer inherits a disabled layer's black daytime tint");
+
+    expectTrue(weather->cloudLayers[0].alpha[kDay] == 1.0f,
+               "JNAM gives layer 9 full opacity");
+    expectTrue(weather->cloudLayers[1].alpha[kDay] == 0.4f,
+               "and holds layer 20 back at 0.4, as the records hold a horizon bank");
+
+    expectTrue(weather->cloudLayers[0].band == FalloutCloudBand::Lower,
+               "layer 9 is an overhead deck");
+    expectTrue(weather->cloudLayers[1].band == FalloutCloudBand::Horizon,
+               "layer 20 is a horizon bank, which is drawn with a different projection");
+
+    expectTrue(weather->hasFogFarColor, "a 17-row NAM0 carries Skyrim's separate far fog");
+    expectTrue(weather->fogFarColors[kDay].r == 62u,
+               "and it is row 12 -- row 1 is the NEAR fog, and using it tints a whole city cyan");
+    expectTrue(weather->fogDayFar == 100000.0f && weather->fogNightFar == 50000.0f,
+               "an eight-float FNAM still reads the four distances");
+
+    fs::remove_all(dataDir, cleanupError);
+}
+
 void testPluginLoadOrderRemapsFormIds() {
     namespace fs = std::filesystem;
     using namespace odai::importer::fnv;
@@ -4047,6 +4469,8 @@ int main() {
     testActorRaceAndWardrobeAssembly();
     testDialogueAttributionByActorAndVoiceType();
     testTemplateSkeletonThroughNestedLeveledLists();
+    testOblivionWeatherFogAndCloudTints();
+    testSkyrimWeatherCloudLayers();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

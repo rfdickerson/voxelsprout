@@ -51,11 +51,19 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, std::string> regionNamesByFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
-    // Worldspace formID -> its DNAM default land/water heights. Absent for a
-    // worldspace that declares none, which is every Oblivion one. See
-    // FalloutWorldspaceRecord::hasDefaultHeights for why a cell with no LAND
-    // needs this.
+    // Every worldspace by formID, with its DNAM default land/water heights
+    // already INHERITED down the WNAM parent chain by
+    // resolveWorldspaceInheritance(). hasDefaultHeights stays false only when
+    // neither the worldspace nor any ancestor declares any, which is every
+    // Oblivion one. See FalloutWorldspaceRecord::hasDefaultHeights for why a
+    // cell with no LAND needs this, and parentWorldspaceFormId for what a
+    // Skyrim city looks like without it.
     std::unordered_map<std::uint32_t, FalloutWorldspaceRecord> worldspaceDefaultsByFormId;
+
+    [[nodiscard]] const FalloutWorldspaceRecord* findWorldspace(std::uint32_t formId) const {
+        const auto found = worldspaceDefaultsByFormId.find(formId);
+        return found == worldspaceDefaultsByFormId.end() ? nullptr : &found->second;
+    }
     // MORROWIND REFERENCES NAME THEIR BASE BY STRING, so this is how a placed
     // reference reaches its model. Lowercased id -> the synthetic formID the
     // scan handed that record. Empty for every later generation, where a
@@ -92,14 +100,26 @@ bool buildFalloutWorldTables(
 // stopgap for whatever the blended pass does not pick up.
 bool isEffectOnlyModelPath(std::string_view modelPath);
 
+// True for the game's own sky objects (Skyrim places sky\clouddistant*.nif and
+// friends as ordinary references in Tamriel's persistent cell). See the
+// definition: drawn as scenery they are a white plane over the landscape.
+bool isSkyOnlyModelPath(std::string_view modelPath);
+
 // Appends this cell's water surface to `outScene`, and reports whether it did.
 //
 // Free rather than a CellSceneBuilder member because the offline cooker builds
 // its ImportedScene directly and does not go through the builder -- the terrain
 // append is already duplicated between the two, and duplicating this as well is
 // how the cooked and streamed worlds drift apart.
+//
+// `worldspace` supplies the implied water height for a cell that states none --
+// resolved up the WNAM parent chain by resolveWorldspaceInheritance(). May be
+// null, which means "no default": a cell with neither an XCLW nor terrain then
+// contributes nothing, rather than a quad at height 0.
 bool appendCellWaterPatch(
-    odai::importer::ImportedScene& outScene, const FalloutCellRecord& cell);
+    odai::importer::ImportedScene& outScene,
+    const FalloutCellRecord& cell,
+    const FalloutWorldspaceRecord* worldspace = nullptr);
 
 struct CellBuildStats {
     std::size_t placedInstances = 0;
@@ -123,6 +143,10 @@ struct CellBuildStats {
     std::size_t nifsParsed = 0;
     std::size_t extremeUvShapes = 0;
     std::size_t effectMeshesSkipped = 0;
+    // REFR header flag 0x800: quest objects hidden until a script enables
+    // them. Skipped, because an unstarted game does not show them -- and some
+    // are worldspace-sized (Skyrim's MG07 blizzard barrier).
+    std::size_t disabledReferencesSkipped = 0;
     // LIGH references turned into ImportedScene lights, and those rejected for
     // having a zero radius (exactly one LIGH in FalloutNV.esm does).
     std::size_t lightsPlaced = 0;

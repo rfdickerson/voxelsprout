@@ -484,6 +484,19 @@ struct FalloutWorldspaceRecord {
     bool hasDefaultHeights = false;
     float defaultLandHeight = 0.0f;
     float defaultWaterHeight = 0.0f;
+
+    // WNAM: the worldspace this one hangs off. A WALLED CITY INHERITS NEARLY
+    // EVERYTHING FROM ITS PARENT, and Skyrim leans on that far harder than the
+    // earlier games do. WhiterunWorld's whole record is an EDID and this one
+    // field: no CNAM, so it names no climate and nothing publishes a sky or a
+    // cloud layer for it, and no DNAM, so its implied water height falls back to
+    // ZERO -- which for a city standing at engine y -3120 is a full-cell water
+    // quad slicing through the houses. Tamriel, the parent, declares both
+    // (climate 0x812, default water -14000).
+    //
+    // So resolving this is not a nicety: unresolved, a Skyrim city renders with
+    // no sky and underwater. 0 when the record names no parent.
+    std::uint32_t parentWorldspaceFormId = 0;
 };
 
 // Everything extracted from one plugin pass. Populated by extractFalloutScene

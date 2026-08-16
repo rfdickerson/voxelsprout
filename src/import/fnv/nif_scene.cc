@@ -490,7 +490,79 @@ struct AvObjectFields {
     std::int32_t dataRef = -1;           // only meaningful for NiTriShape/NiTriStrips
     std::int32_t nameRef = -1;           // index into the header's string table
     std::vector<std::int32_t> properties;  // NiProperty refs (shader, alpha, material)
+    // The block's own name. 20.0.0.4 and 4.0.0.2 store it inline here; the
+    // Fallout generations store an index into the header string table instead,
+    // so a caller wanting a name has to try this first and `nameRef` second.
+    // Kept because one node name is load-bearing -- see kEditorMarkerNodeName.
+    std::string name;
+    // NiAVObject::flags, whichever width the generation stores. Bit 0 is
+    // HIDDEN: the game does not draw the object or anything under it. Emitter
+    // source meshes are the load-bearing case -- a particle system's emitter
+    // SHAPE (emit*, pStripEmitter*, OrderedAlphaBound) is authored hidden and
+    // referenced by the NiPSysMeshEmitter, and drawn literally some of them are
+    // tens of thousands of units across.
+    std::uint32_t flags = 0;
+    // BSTriShape's skin ref (NiSkinInstance), -1 when the shape is not skinned.
+    // A SKINNED BSTriShape CARRIES NO VERTICES OF ITS OWN -- its dataSize is 0
+    // and the geometry lives in the NiSkinPartition two hops away, so this is
+    // the only route to it. See linkSkinnedShapesToPartitions.
+    std::int32_t skinRef = -1;
 };
+
+// A NiNode named "EditorMarker" holds geometry the Construction Set draws and
+// the game does not. It is a NAME, not a type or a flag: the block is a bare
+// NiNode, and its flags word (0x0010 on dungeons\misc\collisionbox01.nif) does
+// not distinguish it from any other node.
+constexpr std::string_view kEditorMarkerNodeName = "EditorMarker";
+
+// SKYRIM DROPPED NiAVObject'S PROPERTY ARRAY. Up to and including New Vegas,
+// every NiAVObject carries `numProperties` + refs between `scale` and the
+// collision-object ref. Skyrim removed it -- BSTriShape names its shader and
+// alpha properties directly instead -- and nif.xml conditions the array on NOT
+// (version 20.2.0.7 AND BSVersion > 34).
+//
+// The BSVersion alone decides it here because every generation with a BSVersion
+// above 34 is 20.2.0.7: Oblivion is 11, Fallout 3 and New Vegas are 34, Skyrim
+// SE is 100. Verified against a Whiterun BSFadeNode, where the collision ref
+// (block 6) sits exactly where numProperties would be.
+//
+// Reading it wrongly does not fail loudly. `numChildren` is the next field, so
+// a Skyrim NiNode would take its CHILD COUNT for a property count and then
+// consume its children as property refs.
+constexpr bool niAvObjectHasProperties(std::uint32_t userVersion2) {
+    return userVersion2 <= 34u;
+}
+
+// Half-precision float, IEEE 754 binary16. Skyrim packs UVs (and, when the
+// vertex is not full precision, positions) this way.
+float decodeHalfFloat(std::uint16_t bits) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(bits & 0x8000u) << 16;
+    const std::uint32_t exponent = (bits >> 10) & 0x1Fu;
+    const std::uint32_t mantissa = bits & 0x03FFu;
+    std::uint32_t out = 0;
+    if (exponent == 0u) {
+        if (mantissa == 0u) {
+            out = sign;  // signed zero
+        } else {
+            // Subnormal: renormalize into a float32 normal.
+            std::uint32_t shifted = mantissa;
+            std::uint32_t e = 0;
+            while ((shifted & 0x0400u) == 0u) {
+                shifted <<= 1u;
+                ++e;
+            }
+            shifted &= 0x03FFu;
+            out = sign | ((127u - 15u - e + 1u) << 23u) | (shifted << 13u);
+        }
+    } else if (exponent == 0x1Fu) {
+        out = sign | 0x7F800000u | (mantissa << 13u);  // inf / NaN
+    } else {
+        out = sign | ((exponent + 127u - 15u) << 23u) | (mantissa << 13u);
+    }
+    float result = 0.0f;
+    std::memcpy(&result, &out, sizeof(result));
+    return result;
+}
 
 // One BSShaderTextureSet: an array of texture paths, diffuse first, normal
 // second, glow third. Paths are relative to Data\textures.
@@ -926,6 +998,7 @@ bool readAvObjectPrefix(
         if (!cursor.readSizedString<std::uint32_t>(name)) {
             return false;
         }
+        out.name = std::move(name);
         out.nameRef = -1;
         if (!cursor.skip(4u) || !cursor.skip(4u)) {  // extra-data ref, controller ref
             return false;
@@ -935,6 +1008,7 @@ bool readAvObjectPrefix(
             !cursor.read(out.rotation) || !cursor.read(out.scale) || !cursor.skip(12u)) {
             return false;
         }
+        out.flags = flags16;
         std::uint32_t numProperties = 0;
         if (!cursor.read(numProperties)) {
             return false;
@@ -965,6 +1039,7 @@ bool readAvObjectPrefix(
         if (!cursor.readSizedString<std::uint32_t>(name)) {
             return false;
         }
+        out.name = std::move(name);
         out.nameRef = -1;
     } else if (!cursor.read(out.nameRef)) {
         return false;
@@ -997,11 +1072,13 @@ bool readAvObjectPrefix(
         if (!cursor.read(flags32)) {
             return false;
         }
+        out.flags = flags32;
     } else {
         std::uint16_t flags16 = 0;
         if (!cursor.read(flags16)) {
             return false;
         }
+        out.flags = flags16;
     }
     if (!cursor.read(out.translation)) {
         return false;
@@ -1012,18 +1089,20 @@ bool readAvObjectPrefix(
     if (!cursor.read(out.scale)) {
         return false;
     }
-    std::uint32_t numProperties = 0;
-    if (!cursor.read(numProperties)) {
-        return false;
-    }
-    // Kept, not discarded: these refs are how a shape reaches its
-    // BSShaderPPLightingProperty (-> BSShaderTextureSet) and NiAlphaProperty.
-    for (std::uint32_t i = 0; i < numProperties; ++i) {
-        std::int32_t ref = 0;
-        if (!cursor.read(ref)) {
+    if (niAvObjectHasProperties(userVersion2)) {
+        std::uint32_t numProperties = 0;
+        if (!cursor.read(numProperties)) {
             return false;
         }
-        out.properties.push_back(ref);
+        // Kept, not discarded: these refs are how a shape reaches its
+        // BSShaderPPLightingProperty (-> BSShaderTextureSet) and NiAlphaProperty.
+        for (std::uint32_t i = 0; i < numProperties; ++i) {
+            std::int32_t ref = 0;
+            if (!cursor.read(ref)) {
+                return false;
+            }
+            out.properties.push_back(ref);
+        }
     }
     std::int32_t collisionRef = 0;
     if (!cursor.read(collisionRef)) {
@@ -1147,6 +1226,317 @@ void rejectUnusableTriangles(GeometryBlock& out) {
     // A trailing partial triangle is not a triangle; the loop above already
     // leaves it out, and keeping it would hand the renderer two thirds of one.
     out.triangleIndices = std::move(kept);
+}
+
+// Unpacks one BSVertexData array -- the format BSTriShape and NiSkinPartition
+// both use. See readBsTriShape for how the descriptor is laid out and why
+// position precision is taken from the stride rather than from the flag.
+bool readPackedVertexData(
+    ByteCursor& cursor, std::uint64_t descriptor, std::size_t vertexSize,
+    std::size_t vertexCount, GeometryBlock& outGeometry) {
+    const auto nibbleBytes = [descriptor](unsigned shift) {
+        return static_cast<std::size_t>((descriptor >> shift) & 0xFull) * 4u;
+    };
+    const std::size_t uvOffset = nibbleBytes(8u);
+    const std::size_t normalOffset = nibbleBytes(16u);
+    const std::uint32_t vertexFlags = static_cast<std::uint32_t>((descriptor >> 44u) & 0xFFFull);
+    constexpr std::uint32_t kHasVertices = 0x0001u;
+    constexpr std::uint32_t kHasUvs = 0x0002u;
+    constexpr std::uint32_t kHasNormals = 0x0008u;
+    if ((vertexFlags & kHasVertices) == 0u || vertexCount == 0u) {
+        return false;
+    }
+    const bool fullPrecision = (vertexSize >= 28u);
+    const std::size_t positionBytes = fullPrecision ? 12u : 6u;
+    if (positionBytes > vertexSize) {
+        return false;
+    }
+    const bool hasUvs = (vertexFlags & kHasUvs) != 0u && uvOffset + 4u <= vertexSize;
+    const bool hasNormals = (vertexFlags & kHasNormals) != 0u && normalOffset + 3u <= vertexSize;
+
+    std::vector<std::uint8_t> vertexBytes(vertexCount * vertexSize);
+    if (!cursor.readBytes(vertexBytes.data(), vertexBytes.size())) {
+        return false;
+    }
+    outGeometry.positions.resize(vertexCount * 3u);
+    if (hasNormals) {
+        outGeometry.normals.resize(vertexCount * 3u);
+    }
+    if (hasUvs) {
+        outGeometry.uvs.resize(vertexCount * 2u);
+    }
+    for (std::size_t v = 0; v < vertexCount; ++v) {
+        const std::uint8_t* vertex = vertexBytes.data() + (v * vertexSize);
+        for (int axis = 0; axis < 3; ++axis) {
+            float value = 0.0f;
+            if (fullPrecision) {
+                std::memcpy(&value, vertex + (axis * 4), sizeof(value));
+            } else {
+                std::uint16_t half = 0;
+                std::memcpy(&half, vertex + (axis * 2), sizeof(half));
+                value = decodeHalfFloat(half);
+            }
+            outGeometry.positions[(v * 3u) + static_cast<std::size_t>(axis)] = value;
+        }
+        if (hasNormals) {
+            for (int axis = 0; axis < 3; ++axis) {
+                // Unsigned byte over [-1, 1], the packing Bethesda uses for
+                // normals everywhere else too.
+                const float encoded = static_cast<float>(vertex[normalOffset + axis]) / 255.0f;
+                outGeometry.normals[(v * 3u) + static_cast<std::size_t>(axis)] =
+                    (encoded * 2.0f) - 1.0f;
+            }
+        }
+        if (hasUvs) {
+            for (int axis = 0; axis < 2; ++axis) {
+                std::uint16_t half = 0;
+                std::memcpy(&half, vertex + uvOffset + (axis * 2), sizeof(half));
+                outGeometry.uvs[(v * 2u) + static_cast<std::size_t>(axis)] = decodeHalfFloat(half);
+            }
+        }
+    }
+    return true;
+}
+
+// BSTriShape: Skyrim's merger of NiTriShape and NiTriShapeData into one block,
+// with the vertex data packed behind a descriptor instead of stored as parallel
+// arrays. It is the ONE block that stood between this reader and Skyrim static
+// geometry -- everything downstream (CellSceneBuilder, ImportedScene, the render
+// path, DDS) is already generation-independent.
+//
+// Layout after the NiAVObject prefix, verified byte-by-byte against
+// architecture\whiterun\wrinteriors\wrcastle\wrintcastlepiece02.nif:
+//
+//   bounding sphere   center vec3 + radius float
+//   skin / shader / alpha   three refs; the shader ref is how this shape reaches
+//                           its BSLightingShaderProperty, since Skyrim removed
+//                           NiAVObject's property array
+//   vertex descriptor uint64
+//   numTriangles      uint16
+//   numVertices       uint16
+//   dataSize          uint32   -- equals numVertices*vertexSize + numTriangles*6
+//   vertex data       numVertices * vertexSize
+//   triangles         numTriangles * 3 uint16
+//
+// The DESCRIPTOR is the part worth stating plainly, because reading it wrongly
+// yields plausible garbage rather than a failure. Its low nibbles are byte
+// offsets DIVIDED BY FOUR: bits 0-3 the vertex stride, 8-11 the UV offset,
+// 16-19 the normal, 20-23 the tangent, 24-27 the colour. Bits 44-55 are the
+// field-presence flags.
+//
+// POSITION PRECISION IS TAKEN FROM THE STRIDE, NOT FROM THE FULL-PRECISION
+// FLAG, and that was a correction. Censused over 107 BSTriShape blocks in 40
+// Whiterun meshes, every one has flags 0x1b or 0x3b -- neither sets the
+// documented Full_Precision bit (0x400) -- and every one nevertheless stores
+// three full floats: vertex 0 read as float3 lands inside the block's own
+// declared bounding sphere, and the declared dataSize only balances at a 28- or
+// 32-byte stride. Trusting the flag would have halved every position.
+//
+// The oracle for the whole walk is the triangle bounds check, per this
+// project's usual rule: 10838 triangles across those 107 shapes, zero
+// out-of-range and zero degenerate.
+bool readBsTriShape(
+    ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
+    AvObjectFields& outFields, GeometryBlock& outGeometry) {
+    if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, morrowind, outFields)) {
+        return false;
+    }
+    if (!cursor.skip(16u)) {  // bounding sphere: center + radius
+        return false;
+    }
+    std::int32_t skinRef = 0;
+    std::int32_t shaderRef = 0;
+    std::int32_t alphaRef = 0;
+    if (!cursor.read(skinRef) || !cursor.read(shaderRef) || !cursor.read(alphaRef)) {
+        return false;
+    }
+    // Fed into the same list the older generations fill from NiAVObject, so the
+    // caller's property-resolution loop needs no Skyrim branch at all.
+    if (shaderRef >= 0) {
+        outFields.properties.push_back(shaderRef);
+    }
+    if (alphaRef >= 0) {
+        outFields.properties.push_back(alphaRef);
+    }
+    outFields.skinRef = skinRef;
+
+    std::uint64_t descriptor = 0;
+    std::uint16_t numTriangles = 0;
+    std::uint16_t numVertices = 0;
+    std::uint32_t dataSize = 0;
+    if (!cursor.read(descriptor) || !cursor.read(numTriangles) || !cursor.read(numVertices) ||
+        !cursor.read(dataSize)) {
+        return false;
+    }
+    const std::size_t vertexSize = static_cast<std::size_t>(descriptor & 0xFull) * 4u;
+    // A SKINNED SHAPE STORES NOTHING HERE. dataSize 0 with a skin ref is not a
+    // stripped shape, it is a banner or a cloth whose vertices live in the
+    // NiSkinPartition; report success with no geometry so the shape survives to
+    // be linked up later. Genuinely empty and unskinned is still a drop.
+    if (dataSize == 0u || numVertices == 0u || vertexSize < 12u) {
+        return skinRef >= 0;
+    }
+    // The declared size has to balance, or the descriptor was misread and every
+    // offset inside it is nonsense. Checked rather than trusted, for the same
+    // reason the triangle bounds are.
+    const std::size_t expected =
+        (static_cast<std::size_t>(numVertices) * vertexSize) +
+        (static_cast<std::size_t>(numTriangles) * 6u);
+    if (expected != static_cast<std::size_t>(dataSize)) {
+        return false;
+    }
+    if (!readPackedVertexData(cursor, descriptor, vertexSize, numVertices, outGeometry)) {
+        return false;
+    }
+
+    outGeometry.triangleIndices.reserve(static_cast<std::size_t>(numTriangles) * 3u);
+    for (std::size_t t = 0; t < numTriangles; ++t) {
+        std::uint16_t a = 0;
+        std::uint16_t b = 0;
+        std::uint16_t c = 0;
+        if (!cursor.read(a) || !cursor.read(b) || !cursor.read(c)) {
+            return false;
+        }
+        outGeometry.triangleIndices.push_back(a);
+        outGeometry.triangleIndices.push_back(b);
+        outGeometry.triangleIndices.push_back(c);
+    }
+    rejectUnusableTriangles(outGeometry);
+    outGeometry.valid = true;
+    return true;
+}
+
+// NiSkinInstance: the hop from a skinned BSTriShape to its geometry. Only the
+// second field is wanted here -- data(4), SKIN PARTITION(4), skeleton root(4),
+// bone count + bone refs.
+bool readNiSkinInstancePartitionRef(ByteCursor& cursor, std::int32_t& outPartitionRef) {
+    std::int32_t dataRef = 0;
+    return cursor.read(dataRef) && cursor.read(outPartitionRef);
+}
+
+// NiSkinPartition, Skyrim's layout: ONE shared vertex buffer for the whole
+// block, in exactly the BSVertexData packing BSTriShape uses, followed by the
+// partitions -- which in this generation each carry their own trailing triangle
+// list indexing that shared buffer.
+//
+// Verified against clutter\banners\genericbannerred01.nif: 35 vertices at a
+// 44-byte stride, one partition of 48 triangles, and the trailing list lands
+// exactly on the block's last byte (288 needed, 288 left). That exact fit is the
+// check that the variable-length walk in between -- bone list, vertex map,
+// per-vertex weights, strips, faces, bone indices, each behind its own presence
+// byte -- came out on the right offset. The file also stores the same triangles
+// EARLIER, before the bone indices, and both copies agree: zero out-of-range and
+// zero degenerate either way.
+bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry) {
+    std::uint32_t partitionCount = 0;
+    std::uint32_t dataSize = 0;
+    std::uint32_t vertexSize = 0;
+    std::uint64_t descriptor = 0;
+    if (!cursor.read(partitionCount) || !cursor.read(dataSize) || !cursor.read(vertexSize) ||
+        !cursor.read(descriptor)) {
+        return false;
+    }
+    if (vertexSize < 12u || dataSize == 0u || (dataSize % vertexSize) != 0u) {
+        return false;
+    }
+    const std::size_t vertexCount = dataSize / vertexSize;
+    if (!readPackedVertexData(cursor, descriptor, vertexSize, vertexCount, outGeometry)) {
+        return false;
+    }
+
+    for (std::uint32_t partition = 0; partition < partitionCount; ++partition) {
+        std::uint16_t header[5] = {0, 0, 0, 0, 0};
+        for (std::uint16_t& field : header) {
+            if (!cursor.read(field)) {
+                return false;
+            }
+        }
+        const std::uint16_t triangleCount = header[1];
+        const std::uint16_t boneCount = header[2];
+        const std::uint16_t stripCount = header[3];
+        const std::uint16_t weightsPerVertex = header[4];
+        const std::size_t partitionVertices = header[0];
+        if (!cursor.skip(static_cast<std::size_t>(boneCount) * 2u)) {
+            return false;
+        }
+        // Each of these is a presence byte followed by the array it guards.
+        std::uint8_t present = 0;
+        if (!cursor.read(present)) {
+            return false;
+        }
+        if (present != 0u && !cursor.skip(partitionVertices * 2u)) {  // vertex map
+            return false;
+        }
+        if (!cursor.read(present)) {
+            return false;
+        }
+        if (present != 0u &&
+            !cursor.skip(partitionVertices * weightsPerVertex * 4u)) {  // vertex weights
+            return false;
+        }
+        if (!cursor.skip(static_cast<std::size_t>(stripCount) * 2u)) {  // strip lengths
+            return false;
+        }
+        if (!cursor.read(present)) {  // has faces
+            return false;
+        }
+        if (present != 0u && stripCount == 0u &&
+            !cursor.skip(static_cast<std::size_t>(triangleCount) * 6u)) {
+            return false;
+        }
+        if (!cursor.read(present)) {
+            return false;
+        }
+        if (present != 0u && !cursor.skip(partitionVertices * weightsPerVertex)) {  // bone indices
+            return false;
+        }
+        // Skyrim's tail: an unknown short, the vertex descriptor again, then the
+        // triangles this partition actually draws.
+        if (!cursor.skip(2u + 8u)) {
+            return false;
+        }
+        for (std::uint16_t triangle = 0; triangle < triangleCount; ++triangle) {
+            std::uint16_t a = 0;
+            std::uint16_t b = 0;
+            std::uint16_t c = 0;
+            if (!cursor.read(a) || !cursor.read(b) || !cursor.read(c)) {
+                return false;
+            }
+            outGeometry.triangleIndices.push_back(a);
+            outGeometry.triangleIndices.push_back(b);
+            outGeometry.triangleIndices.push_back(c);
+        }
+    }
+    rejectUnusableTriangles(outGeometry);
+    outGeometry.valid = !outGeometry.triangleIndices.empty();
+    return outGeometry.valid;
+}
+
+// BSLightingShaderProperty: Skyrim's replacement for BSShaderPPLightingProperty
+// as the thing that points at a BSShaderTextureSet. The texture set block
+// itself is unchanged, so this is the pointer, not the payload.
+//
+// SHADER TYPE COMES FIRST, BEFORE THE NAME -- it is not part of NiObjectNET and
+// it is easy to miss, because skipping it still lands on plausible values. Read
+// off wrintcastlepiece02.nif's block 8: shaderType(4) name(4) numExtraData(4)
+// [refs] controller(4) shaderFlags1(4) shaderFlags2(4) uvOffset(8) uvScale(8),
+// then the texture set ref -- which for that block is 9, the file's own
+// BSShaderTextureSet.
+bool readBsLightingShaderTextureSetRef(ByteCursor& cursor, std::int32_t& outTextureSetRef) {
+    std::uint32_t shaderType = 0;
+    std::int32_t nameRef = 0;
+    std::uint32_t numExtraData = 0;
+    if (!cursor.read(shaderType) || !cursor.read(nameRef) || !cursor.read(numExtraData)) {
+        return false;
+    }
+    if (!cursor.skip(static_cast<std::size_t>(numExtraData) * 4u)) {
+        return false;
+    }
+    // controller, shader flags 1 and 2, UV offset (2 floats), UV scale (2 floats)
+    if (!cursor.skip(4u + 4u + 4u + 8u + 8u)) {
+        return false;
+    }
+    return cursor.read(outTextureSetRef);
 }
 
 // Expands one triangle strip into an indexed triangle list.
@@ -1589,6 +1979,69 @@ bool consumeNiGeometryData(ByteCursor& cursor, std::uint16_t& outNumVertices,
     return version < kAdditionalDataMinVersion || consumeSkip(cursor, 4u);
 }
 
+// One animation key group: u32 count, then (only when count > 0) a u32
+// interpolation type and the keys. Sizes per nifkey: linear/constant keys are
+// time + value; quadratic adds forward and backward tangents (except
+// quaternions, which carry none); TCB adds tension/bias/continuity. Type 4
+// (XYZ) is legal only on a rotation group and is followed by three FLOAT key
+// groups rather than by quaternion keys -- the caller handles that, because
+// only it knows it is reading rotations.
+bool consumeKeyGroup(ByteCursor& cursor, std::size_t valueBytes, bool isQuaternion,
+                     std::uint32_t& outInterpolation) {
+    outInterpolation = 0;
+    std::uint32_t count = 0;
+    if (!cursor.read(count)) {
+        return false;
+    }
+    if (count == 0u) {
+        return true;
+    }
+    if (!cursor.read(outInterpolation)) {
+        return false;
+    }
+    std::size_t keyBytes = 0;
+    switch (outInterpolation) {
+        case 1u:  // linear
+        case 5u:  // constant
+            keyBytes = 4u + valueBytes;
+            break;
+        case 2u:  // quadratic
+            keyBytes = isQuaternion ? (4u + valueBytes) : (4u + (3u * valueBytes));
+            break;
+        case 3u:  // TCB
+            keyBytes = 4u + valueBytes + 12u;
+            break;
+        case 4u:  // XYZ: no keys of its own
+            return true;
+        default:
+            return false;
+    }
+    return consumeSkip(cursor, static_cast<std::size_t>(count) * keyBytes);
+}
+
+// NiKeyframeData's whole layout: a quaternion rotation group (XYZ meaning three
+// float groups instead), a float3 translation group, a float scale group. An
+// XYZ rotation carries an axis-order dword before its three groups up to
+// 10.1.0.0 -- which is Morrowind and nothing later.
+bool consumeKeyframeData(ByteCursor& cursor, bool xyzHasAxisOrder) {
+    std::uint32_t interpolation = 0;
+    if (!consumeKeyGroup(cursor, 16u, /*isQuaternion=*/true, interpolation)) {
+        return false;
+    }
+    if (interpolation == 4u) {
+        if (xyzHasAxisOrder && !consumeSkip(cursor, 4u)) {
+            return false;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!consumeKeyGroup(cursor, 4u, false, interpolation)) {
+                return false;
+            }
+        }
+    }
+    return consumeKeyGroup(cursor, 12u, false, interpolation) &&
+           consumeKeyGroup(cursor, 4u, false, interpolation);
+}
+
 // Consumes exactly one block of `typeName`. False means "this reader does not
 // know how long that block is", which fails the file.
 bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
@@ -1631,6 +2084,362 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
     if (typeName == "bhkListShape") {
         return consumeCountedArray(cursor, 4u) && consumeSkip(cursor, 4u + 12u + 12u) &&
                consumeCountedArray(cursor, 4u);
+    }
+    if (typeName == "bhkPackedNiTriStripsShape") {
+        // Verified against OpenMW's bhkPackedNiTriStripsShape::read and
+        // hkSubPartData::read at this generation: a UINT16-counted subshape
+        // array whose entries are HavokFilter(4) + numVertices(4) +
+        // HavokMaterial(4) = 12 bytes, then userData(4), unused(4), radius(4),
+        // unused(4), scale float4(16), duplicates of radius+scale(20), and the
+        // hkPackedNiTriStripsData ref(4).
+        std::uint16_t subShapeCount = 0;
+        if (!cursor.read(subShapeCount)) {
+            return false;
+        }
+        return consumeSkip(cursor, static_cast<std::size_t>(subShapeCount) * 12u) &&
+               consumeSkip(cursor, 4u + 4u + 4u + 4u + 16u + 20u + 4u);
+    }
+    if (typeName == "hkPackedNiTriStripsData") {
+        // The collision-geometry payload behind bhkPackedNiTriStripsShape, and
+        // the single most common unsized block in retail Oblivion. Layout per
+        // OpenMW's hkPackedNiTriStripsData::read at this generation: a counted
+        // triangle array whose entries are 3 x u16 indices + u16 welding info +
+        // a float3 normal (Oblivion still stores the normal; Fallout dropped
+        // it), then a counted float3 vertex array. No compression flag and no
+        // subshape list -- both arrive with the BGS generation.
+        return consumeCountedArray(cursor, 20u) && consumeCountedArray(cursor, 12u);
+    }
+    if (typeName == "bhkHingeConstraint") {
+        // bhkConstraint prefix: entity count u32 + two refs + priority u32,
+        // then Oblivion's hinge descriptor: pivotA, perp1, perp2, pivotB,
+        // axleB -- five float4s. (The eight-vector layout is Fallout's.)
+        return consumeSkip(cursor, 16u) && consumeSkip(cursor, 5u * 16u);
+    }
+    if (typeName == "bhkLimitedHingeConstraint") {
+        // Same prefix; Oblivion's limited-hinge descriptor is SEVEN float4s
+        // (pivotA, axleA, perp1A, perp2A, pivotB, axleB, perp2B) plus
+        // minAngle/maxAngle/maxFriction. The motor arrived with Fallout.
+        return consumeSkip(cursor, 16u) && consumeSkip(cursor, (7u * 16u) + 12u);
+    }
+    if (typeName == "bhkRagdollConstraint") {
+        // Same prefix; Oblivion's ragdoll descriptor: pivotA/planeA/twistA +
+        // pivotB/planeB/twistB (six float4s), then coneMaxAngle,
+        // planeMin/planeMax, twistMin/twistMax, maxFriction -- six floats.
+        return consumeSkip(cursor, 16u) && consumeSkip(cursor, (6u * 16u) + 24u);
+    }
+    if (typeName == "bhkPrismaticConstraint") {
+        // Same prefix; Oblivion: pivotA + rotation + plane + sliding, sliding B
+        // + pivotB + rotationB + planeB (eight float4s), then min/max distance
+        // and friction (12 bytes).
+        return consumeSkip(cursor, 16u) && consumeSkip(cursor, (8u * 16u) + 12u);
+    }
+    if (typeName == "bhkStiffSpringConstraint") {
+        // Same prefix; two float4 pivots and the rest length.
+        return consumeSkip(cursor, 16u) && consumeSkip(cursor, (2u * 16u) + 4u);
+    }
+
+    // --- Skinning and animation. Not read for geometry here (Oblivion skinned
+    // meshes still lack a partition path); sized so the files that CONTAIN them
+    // stop failing wholesale -- a creature mesh usually carries plenty of
+    // unskinned geometry alongside. ---
+    if (typeName == "NiSkinInstance") {
+        // data ref + (partition ref, 10.1.0.101+ which is all of 10.x/20.x) +
+        // skeleton-root ptr, then a counted bone-ref array. Per OpenMW's
+        // NiSkinInstance::read.
+        return consumeSkip(cursor, 12u) && consumeCountedArray(cursor, 4u);
+    }
+    if (typeName == "NiSkinData") {
+        // Per OpenMW's NiSkinData::read at this generation: overall transform
+        // (3x3 rotation + translation + scale = 52 bytes), u32 bone count, u8
+        // has-vertex-weights (the partition ref left at 10.1.0.0, below every
+        // version this walk accepts), then per bone a transform + bounding
+        // sphere (52 + 16) and a u16-counted weight list of (u16 index, float
+        // weight) pairs -- stored only when the flag says so.
+        std::uint32_t boneCount = 0;
+        std::uint8_t hasVertexWeights = 0;
+        if (!consumeSkip(cursor, 52u) || !cursor.read(boneCount) ||
+            !cursor.read(hasVertexWeights)) {
+            return false;
+        }
+        for (std::uint32_t bone = 0; bone < boneCount; ++bone) {
+            std::uint16_t weightCount = 0;
+            if (!consumeSkip(cursor, 52u + 16u) || !cursor.read(weightCount)) {
+                return false;
+            }
+            if (hasVertexWeights != 0u &&
+                !consumeSkip(cursor, static_cast<std::size_t>(weightCount) * 6u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiControllerSequence") {
+        // Only the 10.1.0.106+ layout; the handful of older files keep failing
+        // as they did. Per OpenMW's NiSequence/NiControllerSequence::read:
+        // sized-string name, u32 block count, u32 arrayGrowBy, then per
+        // controlled block interpolator+controller refs, a priority byte
+        // (Bethesda), a string-palette ref and five palette offsets -- 33
+        // bytes -- then weight, text-keys ref, extrapolation, frequency,
+        // start, stop (24), the manager ptr (4), the accum-root name, and a
+        // string-palette ref at 10.1.0.113+.
+        constexpr std::uint32_t kSequenceModernMinVersion = 0x0a01006au;  // 10.1.0.106
+        constexpr std::uint32_t kSequencePaletteMinVersion = 0x0a010071u; // 10.1.0.113
+        if (version < kSequenceModernMinVersion) {
+            return false;
+        }
+        std::uint32_t blockCount = 0;
+        if (!consumeSizedString(cursor) || !cursor.read(blockCount) ||
+            !consumeSkip(cursor, 4u)) {
+            return false;
+        }
+        if (!consumeSkip(cursor, static_cast<std::size_t>(blockCount) * 33u)) {
+            return false;
+        }
+        if (!consumeSkip(cursor, 24u + 4u)) {
+            return false;
+        }
+        if (!consumeSizedString(cursor)) {
+            return false;
+        }
+        return version < kSequencePaletteMinVersion || consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiSkinPartition") {
+        // u32 partition count, then per partition (per OpenMW's
+        // NiSkinPartition::Partition::read; no Bethesda tail below FO3's
+        // userVersion2): five u16 counts, u16 bones[numBones], then vertex
+        // map / weights / faces each behind a presence byte, strip lengths
+        // between weights and faces, and bone indices behind a final byte.
+        std::uint32_t partitionCount = 0;
+        if (!cursor.read(partitionCount)) {
+            return false;
+        }
+        for (std::uint32_t partition = 0; partition < partitionCount; ++partition) {
+            std::uint16_t numVertices = 0;
+            std::uint16_t numTriangles = 0;
+            std::uint16_t numBones = 0;
+            std::uint16_t numStrips = 0;
+            std::uint16_t bonesPerVertex = 0;
+            if (!cursor.read(numVertices) || !cursor.read(numTriangles) ||
+                !cursor.read(numBones) || !cursor.read(numStrips) ||
+                !cursor.read(bonesPerVertex)) {
+                return false;
+            }
+            if (!consumeSkip(cursor, static_cast<std::size_t>(numBones) * 2u)) {
+                return false;
+            }
+            std::uint8_t present = 0;
+            if (!cursor.read(present)) {
+                return false;
+            }
+            if (present != 0u &&
+                !consumeSkip(cursor, static_cast<std::size_t>(numVertices) * 2u)) {
+                return false;
+            }
+            if (!cursor.read(present)) {
+                return false;
+            }
+            if (present != 0u &&
+                !consumeSkip(
+                    cursor, static_cast<std::size_t>(numVertices) * bonesPerVertex * 4u)) {
+                return false;
+            }
+            std::size_t stripIndexTotal = 0;
+            for (std::uint16_t strip = 0; strip < numStrips; ++strip) {
+                std::uint16_t stripLength = 0;
+                if (!cursor.read(stripLength)) {
+                    return false;
+                }
+                stripIndexTotal += stripLength;
+            }
+            if (!cursor.read(present)) {
+                return false;
+            }
+            if (present != 0u) {
+                const std::size_t faceIndexCount = (numStrips != 0u)
+                    ? stripIndexTotal
+                    : static_cast<std::size_t>(numTriangles) * 3u;
+                if (!consumeSkip(cursor, faceIndexCount * 2u)) {
+                    return false;
+                }
+            }
+            if (!cursor.read(present)) {
+                return false;
+            }
+            if (present != 0u &&
+                !consumeSkip(cursor, static_cast<std::size_t>(numVertices) * bonesPerVertex)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // The plain interpolators are a default value and a data ref. Per OpenMW's
+    // TypedNiInterpolator; NiQuatTransform's per-component valid flags left at
+    // 10.1.0.110, below which none of these files sit in practice -- gated
+    // anyway so an older one fails loudly rather than desynchronizing.
+    if (typeName == "NiTransformInterpolator") {
+        constexpr std::uint32_t kQuatTransformFlagsBelow = 0x0a01006eu;  // 10.1.0.110
+        return version >= kQuatTransformFlagsBelow && consumeSkip(cursor, 12u + 16u + 4u + 4u);
+    }
+    if (typeName == "NiFloatInterpolator") {
+        return consumeSkip(cursor, 4u + 4u);
+    }
+    if (typeName == "NiBoolInterpolator") {
+        return consumeSkip(cursor, 1u + 4u);
+    }
+    if (typeName == "NiPoint3Interpolator") {
+        return consumeSkip(cursor, 12u + 4u);
+    }
+    if (typeName == "NiGeomMorpherController") {
+        // NiInterpController prefix, u16 extra flags, data ref, u8 always
+        // active, then (this generation) a counted interpolator-ref list and a
+        // Bethesda-only counted u32 array.
+        return consumeSkip(cursor, 26u + 2u + 4u + 1u) && consumeCountedArray(cursor, 4u) &&
+               consumeCountedArray(cursor, 4u);
+    }
+    if (typeName == "NiBSBoneLODController") {
+        // NiTimeController prefix, u32 LOD, u32 group count, u32 group size,
+        // then per group a counted node-ref list. No Bethesda tail.
+        std::uint32_t groupCount = 0;
+        if (!consumeSkip(cursor, 26u + 4u) || !cursor.read(groupCount) ||
+            !consumeSkip(cursor, 4u)) {
+            return false;
+        }
+        for (std::uint32_t group = 0; group < groupCount; ++group) {
+            if (!consumeCountedArray(cursor, 4u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiTransformData" || typeName == "NiKeyframeData") {
+        return consumeKeyframeData(cursor, /*xyzHasAxisOrder=*/false);
+    }
+    if (typeName == "NiBoolData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 1u, false, interpolation);
+    }
+    if (typeName == "NiFloatData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 4u, false, interpolation);
+    }
+    if (typeName == "NiPosData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 12u, false, interpolation);
+    }
+    if (typeName == "NiMorphData") {
+        // u32 morphs, u32 vertices, u8 relative-targets, then per morph a
+        // frame-name string (the key list left this generation's morph groups;
+        // Bethesda's legacy weight left at userVersion2 10) and the vertex
+        // deltas.
+        std::uint32_t morphCount = 0;
+        std::uint32_t vertexCount = 0;
+        if (!cursor.read(morphCount) || !cursor.read(vertexCount) || !consumeSkip(cursor, 1u)) {
+            return false;
+        }
+        for (std::uint32_t morph = 0; morph < morphCount; ++morph) {
+            if (!consumeSizedString(cursor) ||
+                !consumeSkip(cursor, static_cast<std::size_t>(vertexCount) * 12u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiStringPalette") {
+        // The whole buffer as one u32-sized string, then its length again.
+        return consumeCountedArray(cursor, 1u) && consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiVisController") {
+        return consumeSkip(cursor, 26u + 4u);  // controller prefix + interpolator
+    }
+    if (typeName == "bhkBlendController") {
+        return consumeSkip(cursor, 26u + 4u);  // controller prefix + key count (0)
+    }
+    if (typeName == "NiTextureTransformController") {
+        // Prefix + interpolator, u8 shader map, u32 texture slot, u32 member.
+        return consumeSkip(cursor, 26u + 4u + 1u + 4u + 4u);
+    }
+    if (typeName == "NiPSysEmitterCtlr") {
+        // NiPSysModifierCtlr (prefix + interpolator + modifier name), then the
+        // visibility interpolator ref.
+        return consumeSkip(cursor, 26u + 4u) && consumeSizedString(cursor) &&
+               consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiDefaultAVObjectPalette") {
+        // Scene ptr, then a u32-counted list of (sized string, object ref).
+        std::uint32_t objectCount = 0;
+        if (!consumeSkip(cursor, 4u) || !cursor.read(objectCount)) {
+            return false;
+        }
+        for (std::uint32_t object = 0; object < objectCount; ++object) {
+            if (!consumeSizedString(cursor) || !consumeSkip(cursor, 4u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiMaterialColorController") {
+        // NiPoint3InterpController (prefix + interpolator) + u16 target colour.
+        return consumeSkip(cursor, 26u + 4u + 2u);
+    }
+    if (typeName == "NiPSysUpdateCtlr" || typeName == "NiPSysResetOnLoopCtlr") {
+        return consumeSkip(cursor, 26u);  // a bare NiTimeController
+    }
+    if (typeName == "NiBlendTransformInterpolator" || typeName == "NiBlendBoolInterpolator" ||
+        typeName == "NiBlendFloatInterpolator" || typeName == "NiBlendPoint3Interpolator") {
+        // NiBlendInterpolator at 10.1.0.112+: u8 flags, u8 item count, f32
+        // weight threshold; unless flag bit 0 (manager-controlled), four more
+        // bytes of indices, four floats, and item-count entries of ref + two
+        // weights + a priority byte + an ease spinner (17 bytes). The typed
+        // variants append their default value; the transform one appends a
+        // NiQuatTransform, whose per-component flags left at 10.1.0.110.
+        constexpr std::uint32_t kBlendModernMinVersion = 0x0a010070u;  // 10.1.0.112
+        if (version < kBlendModernMinVersion) {
+            return false;
+        }
+        std::uint8_t blendFlags = 0;
+        std::uint8_t itemCount = 0;
+        if (!cursor.read(blendFlags) || !cursor.read(itemCount) || !consumeSkip(cursor, 4u)) {
+            return false;
+        }
+        if ((blendFlags & 0x1u) == 0u) {
+            if (!consumeSkip(cursor, 4u + 16u) ||
+                !consumeSkip(cursor, static_cast<std::size_t>(itemCount) * 17u)) {
+                return false;
+            }
+        }
+        std::size_t valueBytes = 0;
+        if (typeName == "NiBlendTransformInterpolator") {
+            valueBytes = 32u;
+        } else if (typeName == "NiBlendBoolInterpolator") {
+            valueBytes = 1u;
+        } else if (typeName == "NiBlendFloatInterpolator") {
+            valueBytes = 4u;
+        } else {
+            valueBytes = 12u;
+        }
+        return consumeSkip(cursor, valueBytes);
+    }
+    if (typeName == "NiControllerManager") {
+        // NiTimeController prefix: next ref, u16 flags, frequency/phase/start/
+        // stop floats, target ptr -- 26 bytes -- then cumulative bool(1), a
+        // counted sequence-ref array, and the object-palette ref.
+        return consumeSkip(cursor, 26u + 1u) && consumeCountedArray(cursor, 4u) &&
+               consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiTransformController") {
+        // NiSingleInterpController: the NiTimeController prefix + one
+        // interpolator ref.
+        return consumeSkip(cursor, 26u + 4u);
+    }
+    if (typeName == "NiMultiTargetTransformController") {
+        // NiInterpController carries NO interpolator ref of its own; the
+        // prefix is followed directly by a u16-counted target-ptr array. Per
+        // OpenMW's NiMultiTargetTransformController::read.
+        std::uint16_t extraTargets = 0;
+        if (!consumeSkip(cursor, 26u) || !cursor.read(extraTargets)) {
+            return false;
+        }
+        return consumeSkip(cursor, static_cast<std::size_t>(extraTargets) * 4u);
     }
 
     // --- Extra data. These derive from NiObject, so name ONLY: no extra-data
@@ -1932,6 +2741,128 @@ bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
     }
     if (typeName == "NiTriStripsData") {
         return consumeMorrowindGeometryData(cursor, /*strips=*/true, nullptr);
+    }
+    if (typeName == "NiRotatingParticles" || typeName == "NiAutoNormalParticles" ||
+        typeName == "NiParticles") {
+        // Particle GEOMETRY blocks share NiTriShape's tail: data ref + skin
+        // ref. Their data and controller blocks are still unsized, so a file
+        // whose only failure was the shape itself now gets one block further.
+        return consumeMorrowindAvObject(cursor) && cursor.skip(8u);
+    }
+    if (typeName == "NiKeyframeController") {
+        // NiTimeController (26 bytes: next ref, u16 flags, four floats, target
+        // ptr) + the NiKeyframeData ref.
+        return cursor.skip(26u + 4u);
+    }
+    if (typeName == "NiKeyframeData") {
+        return consumeKeyframeData(cursor, /*xyzHasAxisOrder=*/true);
+    }
+    if (typeName == "NiSkinInstance") {
+        // Below 10.1.0.101 there is no partition ref: data ref + skeleton root
+        // + a counted bone-ref list.
+        return cursor.skip(8u) && consumeCountedArray(cursor, 4u);
+    }
+    if (typeName == "NiSkinData") {
+        // Transform (52), u32 bone count, the partition ref this generation
+        // still carries, then per bone transform + sphere + u16-counted
+        // (u16, float) weights -- the has-weights flag arrived at 4.2.1.0.
+        std::uint32_t boneCount = 0;
+        if (!cursor.skip(52u) || !cursor.read(boneCount) || !cursor.skip(4u)) {
+            return false;
+        }
+        for (std::uint32_t bone = 0; bone < boneCount; ++bone) {
+            std::uint16_t weightCount = 0;
+            if (!cursor.skip(52u + 16u) || !cursor.read(weightCount)) {
+                return false;
+            }
+            if (!cursor.skip(static_cast<std::size_t>(weightCount) * 6u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiGeomMorpherController") {
+        // NiTimeController + data ref + the always-active byte 4.0.0.2 has.
+        return cursor.skip(26u + 4u + 1u);
+    }
+    if (typeName == "NiMorphData") {
+        // u32 morphs, u32 vertices, u8 relative-targets, then per morph a FULL
+        // float key group (the key list left morph groups after 10.1.0.0) and
+        // the vertex deltas.
+        std::uint32_t morphCount = 0;
+        std::uint32_t vertexCount = 0;
+        if (!cursor.read(morphCount) || !cursor.read(vertexCount) || !cursor.skip(1u)) {
+            return false;
+        }
+        for (std::uint32_t morph = 0; morph < morphCount; ++morph) {
+            // A MORPH key group reads its interpolation type EVEN WITH ZERO
+            // KEYS -- the one place the key-group layout differs, and exactly
+            // the case retail morphs hit: base targets carry no keys. The
+            // shared consumer early-outs at zero, so this is spelled out.
+            std::uint32_t keyCount = 0;
+            std::uint32_t interpolation = 0;
+            if (!cursor.read(keyCount) || !cursor.read(interpolation)) {
+                return false;
+            }
+            std::size_t keyBytes = 0;
+            switch (interpolation) {
+                case 1u:
+                case 5u: keyBytes = 8u; break;
+                case 2u: keyBytes = 16u; break;
+                case 3u: keyBytes = 20u; break;
+                default:
+                    if (keyCount != 0u) {
+                        return false;
+                    }
+                    break;
+            }
+            if (!cursor.skip(static_cast<std::size_t>(keyCount) * keyBytes) ||
+                !cursor.skip(static_cast<std::size_t>(vertexCount) * 12u)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiAlphaController") {
+        return cursor.skip(26u + 4u);  // controller + data ref
+    }
+    if (typeName == "NiUVController") {
+        return cursor.skip(26u + 2u + 4u);  // controller + u16 texture set + data ref
+    }
+    if (typeName == "NiUVData") {
+        for (int channel = 0; channel < 4; ++channel) {
+            std::uint32_t interpolation = 0;
+            if (!consumeKeyGroup(cursor, 4u, false, interpolation)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (typeName == "NiVisController") {
+        return cursor.skip(26u + 4u);  // controller + data ref
+    }
+    if (typeName == "NiVisData") {
+        return consumeCountedArray(cursor, 5u);  // (float time, u8 value) pairs
+    }
+    if (typeName == "NiFloatData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 4u, false, interpolation);
+    }
+    if (typeName == "NiPosData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 12u, false, interpolation);
+    }
+    if (typeName == "NiColorData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 16u, false, interpolation);
+    }
+    if (typeName == "NiTextureEffect") {
+        // NiDynamicEffect: the AV prefix plus a counted affected-node list (no
+        // switch state below 10.1.0.106), then projection matrix + position,
+        // filter/clamp/type/coord-gen dwords, the texture ref, a WIDE bool for
+        // the clip plane, the plane itself, and the PS2 shorts.
+        return consumeMorrowindAvObject(cursor) && consumeCountedArray(cursor, 4u) &&
+               cursor.skip(36u + 12u + 4u + 4u + 4u + 4u + 4u + 4u + 16u + 4u);
     }
     if (typeName == "NiSourceTexture") {
         if (!consumeMorrowindObjectNet(cursor)) {
@@ -2321,6 +3252,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<TextureSetBlock> textureSets(numBlocks);
     // Per shader-property block, the texture set it names (-1 when absent).
     std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
+    // Per NiSkinInstance block, the NiSkinPartition holding its geometry.
+    std::vector<std::int32_t> skinPartitionRefs(numBlocks, -1);
     // Diffuse paths reached through the older NiTexturingProperty ->
     // NiSourceTexture chain instead of BSShaderTextureSet.
     std::vector<std::string> sourceTexturePaths(numBlocks);
@@ -2385,6 +3318,43 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             if (readNiTriBasedGeom(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
                 nodeFields[i] = std::move(fields);
                 isTriShape[i] = true;
+            }
+        } else if (typeName == "BSTriShape" || typeName == "BSDynamicTriShape" ||
+                   typeName == "BSSubIndexTriShape" || typeName == "BSMeshLODTriShape") {
+            // Skyrim's merged shape+data block. The three variants share this
+            // block's whole layout and only append a tail, which is never read:
+            // the block-size table means an unread tail costs nothing here,
+            // where in Oblivion the same situation cost a resynchronization.
+            //
+            // dataRef points at the block ITSELF, because in this generation a
+            // shape and its data ARE one block. Everything downstream indexes
+            // geometry[dataRef], so that is the whole join between the two
+            // generations at this seam.
+            AvObjectFields fields;
+            GeometryBlock geom;
+            if (readBsTriShape(blockCursor, header.userVersion2, header.inlineNames,
+                               header.inlineBlockTypes, fields, geom)) {
+                fields.dataRef = static_cast<std::int32_t>(i);
+                nodeFields[i] = std::move(fields);
+                geometry[i] = std::move(geom);
+                isTriShape[i] = true;
+            } else {
+                ++outModel.skippedShapeCount;
+            }
+        } else if (typeName == "NiSkinInstance" || typeName == "BSDismemberSkinInstance") {
+            std::int32_t partitionRef = -1;
+            if (readNiSkinInstancePartitionRef(blockCursor, partitionRef)) {
+                skinPartitionRefs[i] = partitionRef;
+            }
+        } else if (typeName == "NiSkinPartition") {
+            GeometryBlock geom;
+            if (readNiSkinPartitionGeometry(blockCursor, geom)) {
+                geometry[i] = std::move(geom);
+            }
+        } else if (typeName == "BSLightingShaderProperty") {
+            std::int32_t textureSetRef = -1;
+            if (readBsLightingShaderTextureSetRef(blockCursor, textureSetRef)) {
+                shaderTextureSetRefs[i] = textureSetRef;
             }
         } else if (typeName == "BSShaderPPLightingProperty") {
             std::int32_t textureSetRef = -1;
@@ -2489,6 +3459,32 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         }
     }
 
+    // A SKINNED SHAPE'S GEOMETRY IS TWO HOPS AWAY. Its own dataSize is 0; the
+    // vertices are in the NiSkinPartition that its NiSkinInstance names. Both of
+    // those blocks come AFTER the shape in file order, so the link can only be
+    // made once every block has been classified -- which is here.
+    //
+    // Rendered in BIND POSE: the partition's vertices are the authored rest
+    // shape, and Skyrim's animation is Havok .hkx rather than Gamebryo .kf, so
+    // there is nothing to pose them with. For the world's hanging cloth --
+    // banners, tapestries, the things a walled city is covered in -- the bind
+    // pose IS what they look like, so this is most of the value.
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        if (!isTriShape[i] || geometry[i].valid) {
+            continue;
+        }
+        const std::int32_t skinRef = nodeFields[i].skinRef;
+        if (skinRef < 0 || static_cast<std::size_t>(skinRef) >= numBlocks) {
+            continue;
+        }
+        const std::int32_t partitionRef = skinPartitionRefs[static_cast<std::size_t>(skinRef)];
+        if (partitionRef < 0 || static_cast<std::size_t>(partitionRef) >= numBlocks ||
+            !geometry[static_cast<std::size_t>(partitionRef)].valid) {
+            continue;
+        }
+        nodeFields[i].dataRef = partitionRef;
+    }
+
     // Gamebryo properties INHERIT down the scene graph: a NiAlphaProperty or
     // NiStencilProperty on a NiNode applies to every shape beneath it, not just
     // to the node itself. Walking only a shape's own property list therefore
@@ -2547,6 +3543,59 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // transform and property accumulation.
         if (blockIndex < header.blockTypeIndex.size() &&
             header.blockTypeNames[header.blockTypeIndex[blockIndex]] == "RootCollisionNode") {
+            continue;
+        }
+
+        // AN EDITOR MARKER IS INSIDE THE MESH, NOT ONLY IN ITS FILE NAME.
+        //
+        // cell_builder already drops whole models whose path looks like a
+        // marker (marker_*.nif, \markers\). That rule cannot see this one:
+        // dungeons\misc\collisionbox01.nif is an ordinary static, placed by
+        // name, whose geometry hangs under a NiNode called "EditorMarker" --
+        // one NiTriStrips, 48 triangles, no UVs, no texture set, a bhkBoxShape
+        // beside it. It is an invisible collision wall a level designer stood
+        // around a building; the Construction Set draws it and the game does
+        // not. Drawn here it is an untextured WHITE SLAB, and the several of
+        // them around one building read as scaffolding erected over it. Skingrad
+        // has them by the Chapel of Julianos.
+        //
+        // The name is the whole semantics, exactly as with RootCollisionNode
+        // above: on disk the block is a bare NiNode, and its flags word (0x0010
+        // here) is not distinguishable from any other node's. NiAVObject does
+        // carry a hidden bit, but this mesh does not set it -- checking that
+        // instead skips nothing, which was measured before this was written.
+        //
+        // Skipped by not descending: the subtree is marker geometry all the way
+        // down, and stopping here also drops its transform and properties.
+        // Both name storages have to be consulted: Oblivion and Morrowind write
+        // the name inline in the block, the Fallout generations write an index
+        // into the header string table. Fallout ships EditorMarker nodes too.
+        {
+            const AvObjectFields& fields = nodeFields[blockIndex];
+            const std::string* blockName = &fields.name;
+            if (blockName->empty() && fields.nameRef >= 0 &&
+                static_cast<std::size_t>(fields.nameRef) < header.strings.size()) {
+                blockName = &header.strings[static_cast<std::size_t>(fields.nameRef)];
+            }
+            if (*blockName == kEditorMarkerNodeName) {
+                ++outModel.editorMarkerShapeCount;
+                continue;
+            }
+        }
+        // NiAVObject bit 0 is HIDDEN, and the game honours it: nothing under a
+        // hidden node draws. The load-bearing case is particle EMITTER SOURCE
+        // meshes -- shrineofboethiah01.nif's "emit2", "pStripEmitter07" and
+        // "OrderedAlphaBound" are BSTriShapes a NiPSysMeshEmitter spawns from,
+        // authored hidden, with no UVs and no shader, and vertices tens of
+        // thousands of units across. Drawn literally, ONE such shape is a flat
+        // near-white plane over several cells of landscape -- it appears a beat
+        // after the terrain (its cell builds slowly) and reads as a renderer
+        // bug rather than as a flag nobody checked.
+        //
+        // Skipped by not descending, exactly like EditorMarker above: hidden
+        // applies to the whole subtree.
+        if ((nodeFields[blockIndex].flags & 0x1u) != 0u) {
+            ++outModel.hiddenShapeCount;
             continue;
         }
         if (isNiNode[blockIndex]) {

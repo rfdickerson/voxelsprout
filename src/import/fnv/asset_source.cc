@@ -79,6 +79,24 @@ std::string normalizeTexturePath(const std::string& path) {
         normalized = normalized.substr(5);
     }
 
+    // SKYRIM SHIPS SOMEONE'S BUILD MACHINE PATH in a few texture sets:
+    // "skyrimhd\build\pc\data\textures\plants\potato01.dds". Same failure as
+    // the LOD case above and same shape of fix, generalized -- cut to the FIRST
+    // "textures\" component wherever it appears, rather than matching each
+    // leading prefix that turns up. First rather than last so a legitimate
+    // "textures\...\textures\..." keeps its real root.
+    //
+    // Silent when wrong, again: these are Whiterun's potato, tundrashrub and
+    // yellowshrub, and unresolved they render as untextured pale blobs sitting
+    // where the shrubs should be.
+    {
+        const std::string lowered = toLowerAsciiCopy(normalized);
+        const std::size_t root = lowered.find("textures\\");
+        if (root != std::string::npos && root > 0u) {
+            normalized = normalized.substr(root);
+        }
+    }
+
     if (toLowerAsciiCopy(normalized).rfind("textures\\", 0) != 0) {
         normalized = "textures\\" + normalized;
     }

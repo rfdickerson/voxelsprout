@@ -83,6 +83,20 @@ struct NifModel {
     // at a data block that could not be read. A nonzero count here means
     // geometry is missing from the model — it is not decorative.
     std::uint32_t skippedShapeCount = 0;
+    // Subtrees dropped because they hang under a NiNode named "EditorMarker".
+    // Unlike skippedShapeCount this is a CORRECT outcome, not a report of loss:
+    // the game does not draw them either. Counted because "this mesh renders
+    // nothing" and "this mesh is entirely editor furniture" look identical from
+    // the outside, and because a rule that quietly eats geometry needs a number
+    // on it.
+    std::uint32_t editorMarkerShapeCount = 0;
+    // Subtrees dropped because NiAVObject flag bit 0 (Hidden) is set. The same
+    // kind of correct outcome as editorMarkerShapeCount: the game does not draw
+    // these either. Particle emitter source meshes are the ones that matter --
+    // hidden BSTriShapes a NiPSysMeshEmitter spawns from, some of them tens of
+    // thousands of units across, which drawn literally are a white plane over
+    // the landscape.
+    std::uint32_t hiddenShapeCount = 0;
     // Blocks whose type name ends in "Node" but which this parser does not
     // know how to walk. Nonzero means geometry may be missing or, worse,
     // reparented to the origin — see isNodeTypeName in nif_scene.cc.

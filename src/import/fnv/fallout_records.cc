@@ -174,6 +174,8 @@ void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene)
             entry.hasDefaultHeights = true;
             entry.defaultLandHeight = readF32(sub.data);
             entry.defaultWaterHeight = readF32(sub.data + 4);
+        } else if (sub.type == "WNAM" && sub.size >= 4u) {
+            entry.parentWorldspaceFormId = readU32(sub.data);
         }
     }
     scene.worldspaces.push_back(std::move(entry));

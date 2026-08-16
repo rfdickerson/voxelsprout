@@ -1034,6 +1034,16 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
         std::cout << "resolve failed: " << error << "\n";
         return 1;
     }
+    // Same escape hatch --nif has, for the same reason: these files live inside
+    // a BSA, so nothing outside this tool can look at one. A cloud layer's
+    // LAYOUT -- fisheye dome map or tiling plane -- is not a number this mode
+    // can print, and getting it wrong renders a seam rather than an error.
+    if (const char* dumpPath = std::getenv("ODAI_NIF_DUMP")) {
+        std::ofstream out(dumpPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(ddsBytes.data()),
+                  static_cast<std::streamsize>(ddsBytes.size()));
+        std::cout << "wrote " << ddsBytes.size() << " bytes to " << dumpPath << "\n";
+    }
     ImportedSceneTexture texture;
     if (!loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
         std::cout << "DDS decode failed\n";
@@ -1373,7 +1383,8 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         std::string error;
         const bool ok = odai::importer::fnv::parseNifStaticMesh(bytes, model, error);
         std::cout << "parse " << (ok ? "ok" : "FAILED") << (error.empty() ? "" : (": " + error)) << "\n"
-                  << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount << "\n";
+                  << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount
+                  << ", editor markers " << model.editorMarkerShapeCount << "\n";
         for (const odai::importer::fnv::NifShape& shape : model.shapes) {
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
@@ -1864,6 +1875,26 @@ int probeBuildCell(
     // none falls back to the cell set's dominant texture -- which is itself
     // nothing when no quadrant anywhere named one.
     if (cell.land != nullptr) {
+        // VNML, as decoded. Printed because a terrain that shades flat and
+        // white is almost never a texture problem: it is the surface being lit
+        // as though it faced sideways, and nothing else in this output would
+        // say so. Bethesda space here, so a level post reads (0, 0, 1).
+        std::cout << "  land normals: " << (cell.land->hasNormals ? "present" : "ABSENT");
+        if (cell.land->hasNormals && cell.land->normals.size() >= 9u) {
+            const int centre = (cell.land->gridSize / 2) * cell.land->gridSize +
+                (cell.land->gridSize / 2);
+            const auto show = [&](const char* label, int post) {
+                const std::size_t base = static_cast<std::size_t>(post) * 3u;
+                if (base + 2u < cell.land->normals.size()) {
+                    std::cout << " " << label << "(" << cell.land->normals[base] << ","
+                              << cell.land->normals[base + 1] << ","
+                              << cell.land->normals[base + 2] << ")";
+                }
+            };
+            show("post0", 0);
+            show("centre", centre);
+        }
+        std::cout << "\n";
         std::cout << "  land base textures (BTXT) per quadrant:";
         for (const std::uint32_t formId : cell.land->quadrantBaseTextureFormId) {
             std::cout << " ";
@@ -1911,6 +1942,84 @@ int probeBuildCell(
               << " packedIndices=" << scene.packedIndices.size()
               << " packedDraws=" << scene.packedDraws.size()
               << " terrainParts=" << stats.terrainPartsEmitted << "\n";
+    // The terrain mesh's normals AFTER the basis change, in engine space, where
+    // a level post must read (0, 1, 0). Printed next to the raw VNML above so a
+    // terrain that shades like a wall can be blamed on the decode or on the
+    // basis change without guessing which.
+    for (const auto& mesh : scene.meshes) {
+        if (mesh.name != "terrain" || mesh.vertices.empty()) {
+            continue;
+        }
+        double sum[3] = {0.0, 0.0, 0.0};
+        for (const auto& vertex : mesh.vertices) {
+            for (int axis = 0; axis < 3; ++axis) {
+                sum[axis] += vertex.normal[axis];
+            }
+        }
+        const double count = static_cast<double>(mesh.vertices.size());
+        std::cout << "  terrain normals (engine space, mean over " << mesh.vertices.size()
+                  << " posts): (" << (sum[0] / count) << "," << (sum[1] / count) << ","
+                  << (sum[2] / count) << ")\n";
+        break;
+    }
+    // And the same normals once they have been through the PACKED stream, which
+    // is what the renderer actually uploads. The mesh above is the builder's
+    // output; anything that goes wrong between the two shows up as a difference
+    // here and nowhere else.
+    {
+        double packedSum[3] = {0.0, 0.0, 0.0};
+        std::size_t packedCount = 0;
+        for (const auto& vertex : scene.packedVertices) {
+            if ((vertex.flags & odai::importer::kImportedSceneMaterialFlagTerrainLayers) == 0u) {
+                continue;
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                packedSum[axis] += vertex.normal[axis];
+            }
+            ++packedCount;
+        }
+        if (packedCount > 0u) {
+            const double count = static_cast<double>(packedCount);
+            std::cout << "  packed terrain normals (mean over " << packedCount << " verts): ("
+                      << (packedSum[0] / count) << "," << (packedSum[1] / count) << ","
+                      << (packedSum[2] / count) << ")\n";
+        } else {
+            std::cout << "  packed terrain normals: no packed vertex carries the terrain-layer"
+                      << " flag\n";
+        }
+    }
+    // The widest meshes in the built scene, in world units. A single object
+    // spanning several cells is almost always the answer to "what is this
+    // plane over the landscape", and nothing else in this output names it.
+    {
+        struct Footprint {
+            float extentX;
+            float extentZ;
+            std::string name;
+        };
+        std::vector<Footprint> footprints;
+        for (const auto& mesh : scene.meshes) {
+            if (mesh.vertices.empty()) {
+                continue;
+            }
+            float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
+            for (const auto& vertex : mesh.vertices) {
+                minX = std::min(minX, vertex.position[0]);
+                maxX = std::max(maxX, vertex.position[0]);
+                minZ = std::min(minZ, vertex.position[2]);
+                maxZ = std::max(maxZ, vertex.position[2]);
+            }
+            footprints.push_back({maxX - minX, maxZ - minZ, mesh.name});
+        }
+        std::sort(footprints.begin(), footprints.end(), [](const auto& a, const auto& b) {
+            return std::max(a.extentX, a.extentZ) > std::max(b.extentX, b.extentZ);
+        });
+        std::cout << "  widest meshes (XZ extent, world units):\n";
+        for (std::size_t i = 0; i < footprints.size() && i < 8u; ++i) {
+            std::cout << "    " << footprints[i].extentX << " x " << footprints[i].extentZ
+                      << "  " << footprints[i].name << "\n";
+        }
+    }
     std::cout << "  shapes=" << stats.totalShapes
               << " untextured=" << stats.untexturedShapes
               << " placed=" << stats.placedInstances

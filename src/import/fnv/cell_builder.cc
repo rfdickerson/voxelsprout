@@ -615,6 +615,40 @@ bool isEffectOnlyModelPath(std::string_view modelPath) {
     return baseName.rfind("fx", 0) == 0;
 }
 
+// THE SKY IS NOT WORLD GEOMETRY, AND SKYRIM PLACES IT AS IF IT WERE.
+//
+// Tamriel's persistent cell (0,0) holds 14643 references, and among them are
+// the game's own sky objects: sky\clouddistant01.nif and its ten siblings, the
+// aurora, the cloud shapes. Those are sky-dome scale -- tens of thousands of
+// units across -- and Skyrim's own renderer draws them on the sky dome, keyed
+// to the weather, never as scenery.
+//
+// Imported literally they become enormous opaque quads hanging over the
+// landscape. The symptom is not "a floating mesh": it is a flat, near-white
+// plane covering the ground with the real terrain visible only where it pokes
+// out at the edges, appearing a moment AFTER the terrain because the persistent
+// cell is slow to build. The material-flags and untextured-highlight views both
+// call it ordinary geometry, because that is exactly what it now is. The
+// giveaway is the NORMAL view: one uniform up-facing normal across a region
+// that ought to be a hillside.
+//
+// This engine draws its own sky from the WTHR record (see
+// src/import/fnv/weather_records.h), so these meshes have no job here at all.
+bool isSkyOnlyModelPath(std::string_view modelPath) {
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        if (c == '/') {
+            c = '\\';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    // Anchored at the model root rather than matched anywhere in the path: a
+    // "sky" component deeper in a path is a building's skylight or an interior
+    // named for one, not the firmament.
+    return lowered.rfind("sky\\", 0) == 0 || lowered.rfind("meshes\\sky\\", 0) == 0;
+}
+
 namespace {
 
 // Fills `outTables` from one plugin's records, rewriting every formID from that
@@ -623,6 +657,9 @@ namespace {
 // `laterWins` is what makes an override plugin work. The single-plugin path
 // keeps first-wins (emplace) because it is the same either way with one file,
 // and changing it would be a behaviour change for no reason.
+// Defined below; declared here because mergeWorldTablesFromScene calls it.
+void resolveWorldspaceInheritance(FalloutWorldTables& outTables);
+
 void mergeWorldTablesFromScene(
     const FalloutSceneData& data,
     const FalloutLoadOrder& order,
@@ -671,10 +708,46 @@ void mergeWorldTablesFromScene(
             put(outTables.worldspaceFormIdsByEditorId, toLowerAsciiCopy(entry.editorId),
                 remap(entry.formId));
         }
-        if (entry.hasDefaultHeights) {
-            FalloutWorldspaceRecord remapped = entry;
-            remapped.formId = remap(entry.formId);
-            put(outTables.worldspaceDefaultsByFormId, remapped.formId, remapped);
+        // Every worldspace, not only the ones carrying DNAM: a child inherits
+        // its defaults from its WNAM parent, and the parent has to be in the
+        // map to be found. resolveWorldspaceInheritance() pushes them down.
+        FalloutWorldspaceRecord remapped = entry;
+        remapped.formId = remap(entry.formId);
+        if (remapped.parentWorldspaceFormId != 0u) {
+            remapped.parentWorldspaceFormId = remap(entry.parentWorldspaceFormId);
+        }
+        put(outTables.worldspaceDefaultsByFormId, remapped.formId, remapped);
+    }
+    resolveWorldspaceInheritance(outTables);
+}
+
+// Pushes DNAM defaults down the WNAM parent chain, so a child worldspace that
+// declares none answers with its parent's.
+//
+// Skyrim needs this and the earlier games do not: WhiterunWorld's entire WRLD
+// record is an EDID plus a WNAM, and every walled city is the same shape. The
+// chain is walked with a visit cap rather than a visited set because it is
+// two or three links long in practice and a cycle must not hang a load.
+void resolveWorldspaceInheritance(FalloutWorldTables& outTables) {
+    constexpr int kMaxParentHops = 8;
+    for (auto& entry : outTables.worldspaceDefaultsByFormId) {
+        FalloutWorldspaceRecord& worldspace = entry.second;
+        if (worldspace.hasDefaultHeights) {
+            continue;
+        }
+        std::uint32_t parentFormId = worldspace.parentWorldspaceFormId;
+        for (int hop = 0; hop < kMaxParentHops && parentFormId != 0u; ++hop) {
+            const auto found = outTables.worldspaceDefaultsByFormId.find(parentFormId);
+            if (found == outTables.worldspaceDefaultsByFormId.end()) {
+                break;
+            }
+            if (found->second.hasDefaultHeights) {
+                worldspace.hasDefaultHeights = true;
+                worldspace.defaultLandHeight = found->second.defaultLandHeight;
+                worldspace.defaultWaterHeight = found->second.defaultWaterHeight;
+                break;
+            }
+            parentFormId = found->second.parentWorldspaceFormId;
         }
     }
 }
@@ -773,10 +846,9 @@ bool buildFalloutWorldTables(
             outTables.worldspaceFormIdsByEditorId.emplace(
                 toLowerAsciiCopy(entry.editorId), entry.formId);
         }
-        if (entry.hasDefaultHeights) {
-            outTables.worldspaceDefaultsByFormId.emplace(entry.formId, entry);
-        }
+        outTables.worldspaceDefaultsByFormId.emplace(entry.formId, entry);
     }
+    resolveWorldspaceInheritance(outTables);
     return true;
 }
 
@@ -914,13 +986,40 @@ std::uint32_t CellSceneBuilder::dominantLandTexture(
 // missing ocean occupies the left third of the frame and reads as "the terrain
 // just ends into a grey void", which is a very convincing impression of a
 // streaming bug. It is not: the sea was never imported.
-bool appendCellWaterPatch(ImportedScene& outScene, const FalloutCellRecord& cell) {
+bool appendCellWaterPatch(
+    ImportedScene& outScene, const FalloutCellRecord& cell,
+    const FalloutWorldspaceRecord* worldspace) {
     if (cell.isInterior || !cell.hasGridCoords) {
         return false;
     }
     // See FalloutCellRecord::hasWater: an absent XCLW is Oblivion's "sea level",
     // not "no water". The dry case is a sentinel VALUE and was rejected at parse.
-    const float waterHeight = cell.hasWater ? cell.waterHeight : 0.0f;
+    //
+    // BUT "SEA LEVEL" IS ONLY MEANINGFUL WHERE THERE IS A SEA TO BE LEVEL WITH.
+    // A CITY WORLDSPACE HAS NO LAND RECORD AT ALL -- WhiterunWorld, and every
+    // Imperial City district -- so the lowest-post guard below cannot run, and
+    // the implied height of 0 was emitted unconditionally. Whiterun's ground is
+    // placed statics sitting at engine y about -3120, which put a full-cell
+    // alpha-blended water quad 3120 units ABOVE the city, slicing through the
+    // houses. On screen it is a flat grey wedge across the frame that reads as
+    // broken geometry rather than as water in the wrong place.
+    //
+    // So an absent XCLW needs land to mean sea level. An EXPLICIT XCLW is still
+    // honoured with or without land, because that is authored intent -- which is
+    // what keeps a landless open-water cell wet.
+    // The implied height is the WORLDSPACE's default water height, resolved up
+    // the WNAM parent chain -- not zero. Tamriel declares -14000; WhiterunWorld
+    // declares nothing at all and inherits it. Falling back to 0 put the sea
+    // 14000 units too high, which in a city standing at y -3120 is a full-cell
+    // quad through the rooftops.
+    // A LANDLESS CELL IS STILL EMITTED. Tamriel (0,0) has no LAND and is open
+    // ocean; requiring terrain would drop the sea exactly where there is
+    // nothing else to draw. Oblivion declares no DNAM on any of its 84
+    // worldspaces, so there the implied height stays 0 -- its sea level -- and
+    // this changes nothing. It is Skyrim that needed the lookup.
+    const bool hasImpliedHeight = worldspace != nullptr && worldspace->hasDefaultHeights;
+    const float impliedHeight = hasImpliedHeight ? worldspace->defaultWaterHeight : 0.0f;
+    const float waterHeight = cell.hasWater ? cell.waterHeight : impliedHeight;
     if (cell.land != nullptr && cell.land->hasHeights) {
         // Water strictly below every post in the cell is water under a solid
         // floor -- true of most of the Mojave, where sea level sits far beneath
@@ -983,7 +1082,7 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     // Before the LAND guard: a cell can be open ocean with no terrain at all.
     // Tamriel (0,0) is exactly that, so gating water on terrain would drop the
     // sea precisely where there is nothing else to draw.
-    if (appendCellWaterPatch(m_scene, cell)) {
+    if (appendCellWaterPatch(m_scene, cell, m_tables.findWorldspace(cell.worldspaceFormId))) {
         ++m_stats.waterPatchesEmitted;
     }
     if (cell.land == nullptr) {
@@ -1064,6 +1163,26 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             refPtr = &resolvedRef;
         }
         const FalloutPlacedReference& ref = *refPtr;
+        // INITIALLY DISABLED REFERENCES DO NOT RENDER, and nothing here had
+        // ever checked. These are quest objects waiting for a script -- and
+        // some are enormous: Skyrim's MG07 blizzard barrier is a dome measured
+        // at 246723 x 341884 units, parked in Tamriel's persistent cell. Drawn
+        // literally it is a flat near-white plane over the whole landscape,
+        // appearing a beat after the terrain because the persistent cell is
+        // slow to build -- which reads as a renderer bug, not as a flag.
+        //
+        // XESP (enable-parent) state is NOT resolved: the parent can live in
+        // any cell, and its runtime state does not exist in a viewer with no
+        // quest engine. The flag alone is the authored "hidden until story
+        // says otherwise", and honouring just it matches what an unstarted
+        // save shows. A ref that is enable-parented to a disabled parent
+        // WITHOUT carrying the flag itself still draws; measured across the
+        // Skyrim spawn cells that is scenery (ferns under a bridge), not
+        // barriers.
+        if ((ref.recordFlags & 0x00000800u) != 0u) {
+            ++m_stats.disabledReferencesSkipped;
+            continue;
+        }
             // Lights first, and deliberately ahead of the m_failedStatics gate:
             // only 29 of 501 LIGH records carry a MODL, so the other 472 have no
             // model path, land in m_failedStatics on first sight, and would be
@@ -1102,7 +1221,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 const std::string& staticModelPath = statIt->second;
                 std::vector<std::uint8_t> nifBytes;
-                if (isEffectOnlyModelPath(staticModelPath)) {
+                if (isEffectOnlyModelPath(staticModelPath) ||
+                    isSkyOnlyModelPath(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
