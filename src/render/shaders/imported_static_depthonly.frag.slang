@@ -34,7 +34,8 @@ struct FragmentInput
 {
     float3 inWorldPosition : TEXCOORD0;
     float3 inWorldNormal : TEXCOORD1;
-    float3 inColor : TEXCOORD2;
+    // .a is authored vertex alpha; see imported_static.frag.slang.
+    float4 inColor : TEXCOORD2;
     float2 inUv : TEXCOORD3;
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
@@ -47,7 +48,8 @@ void main(FragmentInput input)
 {
     if (input.inTextureIndex != kInvalidImportedTextureIndex &&
         (input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
-        bindlessTextures[input.inTextureIndex].Sample(input.inUv).a <= chunkPc.materialParams.x)
+        (bindlessTextures[input.inTextureIndex].Sample(input.inUv).a * input.inColor.a) <=
+            chunkPc.materialParams.x)
     {
         discard;
     }

@@ -21,7 +21,11 @@ struct ControlPoint
     float4 position : SV_Position;
     float3 worldPosition : TEXCOORD0;
     float3 worldNormal : TEXCOORD1;
-    float3 color : TEXCOORD2;
+    // .rgb tint, .a authored vertex alpha. Must match
+    // imported_static.vert's VertexOutput -- this stage sits between it and
+    // the fragment shaders, so a narrower type here drops the alpha the
+    // alpha test needs.
+    float4 color : TEXCOORD2;
     float2 uv : TEXCOORD3;
     nointerpolation uint textureIndex : TEXCOORD4;
     nointerpolation uint flags : TEXCOORD5;
@@ -40,7 +44,11 @@ struct DomainOutput
     float4 position : SV_Position;
     float3 worldPosition : TEXCOORD0;
     float3 worldNormal : TEXCOORD1;
-    float3 color : TEXCOORD2;
+    // .rgb tint, .a authored vertex alpha. Must match
+    // imported_static.vert's VertexOutput -- this stage sits between it and
+    // the fragment shaders, so a narrower type here drops the alpha the
+    // alpha test needs.
+    float4 color : TEXCOORD2;
     float2 uv : TEXCOORD3;
     nointerpolation uint textureIndex : TEXCOORD4;
     nointerpolation uint flags : TEXCOORD5;

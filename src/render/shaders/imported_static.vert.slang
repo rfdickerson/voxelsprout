@@ -6,7 +6,9 @@ struct VertexInput
     [[vk::location(0)]] float3 inPosition : TEXCOORD0;
     // Octahedral snorm16x2; the fetch hands it over as float2 in [-1,1].
     [[vk::location(1)]] float2 inNormalOct : TEXCOORD1;
-    // sRGB-encoded unorm8x4; .a is unused padding.
+    // sRGB-encoded unorm8x3 plus a LINEAR alpha byte. The alpha is authored
+    // vertex alpha (see ImportedSceneVertex::colorAlpha) and is not sRGB: it is
+    // a coverage fraction, not a colour, so it passes through undecoded.
     [[vk::location(2)]] float4 inColorSrgb : TEXCOORD2;
     [[vk::location(3)]] float2 inUv : TEXCOORD3;
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
@@ -28,7 +30,8 @@ struct VertexOutput
     float4 position : SV_Position;
     float3 outWorldPosition : TEXCOORD0;
     float3 outWorldNormal : TEXCOORD1;
-    float3 outColor : TEXCOORD2;
+    // .rgb the decoded linear tint, .a the authored vertex alpha.
+    float4 outColor : TEXCOORD2;
     float2 outUv : TEXCOORD3;
     nointerpolation uint outTextureIndex : TEXCOORD4;
     nointerpolation uint outFlags : TEXCOORD5;
@@ -44,7 +47,7 @@ VertexOutput main(VertexInput input)
     VertexOutput output;
     output.outWorldPosition = input.inPosition;
     output.outWorldNormal = decodeImportedVertexNormal(input.inNormalOct);
-    output.outColor = decodeImportedVertexColor(input.inColorSrgb);
+    output.outColor = float4(decodeImportedVertexColor(input.inColorSrgb), input.inColorSrgb.a);
     output.outUv = input.inUv;
     output.outTextureIndex = input.inTextureIndex;
     output.outFlags = input.inFlags;

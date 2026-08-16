@@ -47,6 +47,13 @@ struct NifShape {
     std::vector<float> positions;   // xyz per vertex, world space (parent transforms applied)
     std::vector<float> normals;     // xyz per vertex, world space; empty if the source had none
     std::vector<float> uvs;         // uv per vertex (set 0); empty if the source had none
+    // rgba per vertex, 0-1; empty if the source had none, which is the common
+    // case. The ALPHA is the load-bearing channel: Bethesda feathers a placed
+    // road, path or dirt patch into the ground beneath it with per-vertex
+    // alpha on an alpha-blended shape, and its diffuse texture is fully opaque,
+    // so nothing about the texture says the edges should fade. Without this a
+    // road renders as a hard-edged slab laid on the terrain.
+    std::vector<float> colors;
     std::vector<std::uint32_t> triangleIndices;  // 3 per triangle, indexes into positions/normals
     // Diffuse texture path as stored in the NIF, relative to Data\textures
     // and backslash-separated. Empty when the shape has no resolvable

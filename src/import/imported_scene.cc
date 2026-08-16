@@ -51,7 +51,13 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v23 -> v24: a trailing alphaFlagsAuthored byte (see ImportedScene). Appended
 // and version-gated like the doors section; older files read false and keep
 // running the content inference they were cooked under.
-constexpr std::uint32_t kImportedSceneVersion = 24u;
+// v24 -> v25: both vertex structs gained a `colorAlpha` float (authored vertex
+// alpha; see ImportedSceneVertex::colorAlpha). Unlike the doors and
+// alphaFlagsAuthored sections this widens the raw-blit arrays AGAIN, so it gets
+// the same treatment every previous widening did: a legacy stride and a
+// field-by-field expansion, which leaves older files reading alpha 1.0 and
+// therefore shading exactly as they did.
+constexpr std::uint32_t kImportedSceneVersion = 25u;
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 15u;
 // The pre-v19 ImportedSceneVertex: position[3], normal[3], uv[2].
 constexpr std::size_t kImportedSceneVertexFloatsV18 = 8;
@@ -66,6 +72,12 @@ constexpr std::size_t kImportedScenePackedVertexWordsV19 = 13;
 constexpr std::size_t kImportedSceneVertexFloatsV20 = 17;
 constexpr std::size_t kImportedScenePackedVertexWordsV20 = 17;
 constexpr int kImportedSceneMaxTerrainLayersV20 = 3;
+// The v21-v24 layouts, before colorAlpha: ImportedSceneVertex was position[3],
+// normal[3], uv[2], color[3] then 4 layer indices and 4 weights;
+// ImportedScenePackedVertex was position[3], normal[3], color[3], uv[2],
+// textureIndex, flags, 4 layer indices and one packed weight word.
+constexpr std::size_t kImportedSceneVertexFloatsV21 = 19;
+constexpr std::size_t kImportedScenePackedVertexWordsV21 = 18;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
     static_cast<std::uint8_t>(TextureFormat::BC2);
 
@@ -77,12 +89,15 @@ static_assert(sizeof(ImportedScenePageRange) == 36u);
 // widens the struct to go and add the next legacy branch, rather than shipping
 // a reader that quietly mis-strides. Was 52 through v19; v20 added three layer
 // texture indices and a packed weight word.
-static_assert(sizeof(ImportedScenePackedVertex) == 72u);
+static_assert(sizeof(ImportedScenePackedVertex) == 76u);
+static_assert(sizeof(ImportedSceneVertex) == 80u);
 // The pre-v20 width readPackedVertexArray expands from must stay in step with
 // the layout it decodes field by field.
 static_assert(kImportedScenePackedVertexWordsV19 * sizeof(std::uint32_t) == 52u);
 static_assert(kImportedScenePackedVertexWordsV20 * sizeof(std::uint32_t) == 68u);
 static_assert(kImportedSceneVertexFloatsV20 * sizeof(float) == 68u);
+static_assert(kImportedScenePackedVertexWordsV21 * sizeof(std::uint32_t) == 72u);
+static_assert(kImportedSceneVertexFloatsV21 * sizeof(float) == 76u);
 
 // Materials are NOT raw-blitted -- ImportedSceneMaterial holds a std::string --
 // so they are written field by field. Both loaders must stay in step with this.
@@ -611,8 +626,11 @@ bool readString(std::istream& input, std::string& out) {
 // after the array, so all three sites go through here.
 
 std::size_t legacyMeshVertexStride(std::uint32_t version) {
-    if (version >= 21u) {
+    if (version >= 25u) {
         return sizeof(ImportedSceneVertex);
+    }
+    if (version >= 21u) {
+        return kImportedSceneVertexFloatsV21 * sizeof(float);
     }
     if (version >= 20u) {
         return kImportedSceneVertexFloatsV20 * sizeof(float);
@@ -624,8 +642,11 @@ std::size_t legacyMeshVertexStride(std::uint32_t version) {
 }
 
 std::size_t legacyPackedVertexStride(std::uint32_t version) {
-    if (version >= 21u) {
+    if (version >= 25u) {
         return sizeof(ImportedScenePackedVertex);
+    }
+    if (version >= 21u) {
+        return kImportedScenePackedVertexWordsV21 * sizeof(std::uint32_t);
     }
     if (version >= 20u) {
         return kImportedScenePackedVertexWordsV20 * sizeof(std::uint32_t);
@@ -671,7 +692,7 @@ bool readMeshVertexArray(
     if (out.empty()) {
         return true;
     }
-    if (version >= 21u) {
+    if (version >= 25u) {
         return readExact(input, out.data(), out.size() * sizeof(ImportedSceneVertex));
     }
     const std::size_t floatsPerVertex = legacyMeshVertexStride(version) / sizeof(float);
@@ -703,6 +724,15 @@ bool readMeshVertexArray(
             for (int layer = 0; layer < kImportedSceneMaxTerrainLayersV20; ++layer) {
                 std::memcpy(&dst.layerTextureIndex[layer], &src[11 + layer], sizeof(std::uint32_t));
                 dst.layerWeight[layer] = src[14 + layer];
+            }
+        }
+        if (floatsPerVertex >= kImportedSceneVertexFloatsV21) {
+            // v21 widened the layer budget to four and moved the weights along
+            // with it. colorAlpha does not exist in this layout and keeps its
+            // 1.0 default, which is what makes an older file shade unchanged.
+            for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
+                std::memcpy(&dst.layerTextureIndex[layer], &src[11 + layer], sizeof(std::uint32_t));
+                dst.layerWeight[layer] = src[15 + layer];
             }
         }
     }
@@ -744,7 +774,7 @@ bool readPackedVertexArray(
     if (out.empty()) {
         return true;
     }
-    if (version >= 21u) {
+    if (version >= 25u) {
         return readExact(input, out.data(), out.size() * sizeof(ImportedScenePackedVertex));
     }
     const std::size_t wordsPerVertex = legacyPackedVertexStride(version) / sizeof(std::uint32_t);
@@ -776,6 +806,14 @@ bool readPackedVertexArray(
                 dst.layerTextureIndex[layer] = src[13 + layer];
             }
             dst.layerWeights = src[16];
+        }
+        if (wordsPerVertex >= kImportedScenePackedVertexWordsV21) {
+            // v21's fourth layer slot pushed the weight word out by one.
+            // colorAlpha is absent here and keeps its 1.0 default.
+            for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
+                dst.layerTextureIndex[layer] = src[13 + layer];
+            }
+            dst.layerWeights = src[17];
         }
     }
     return true;
@@ -884,6 +922,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             dstVertex.color[0] = color.r;
             dstVertex.color[1] = color.g;
             dstVertex.color[2] = color.b;
+            // Carried through even though the RGB above is a per-model
+            // stand-in: alpha is authored data whether or not the colour beside
+            // it is. See ImportedSceneVertex::colorAlpha.
+            dstVertex.colorAlpha = srcVertex.colorAlpha;
             dstVertex.uv[0] = srcVertex.uv[0];
             dstVertex.uv[1] = srcVertex.uv[1];
             dstVertex.textureIndex = textureIndex;
@@ -1022,6 +1064,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         dstVertex.color[0] = color.r;
                         dstVertex.color[1] = color.g;
                         dstVertex.color[2] = color.b;
+                        dstVertex.colorAlpha = srcVertex.colorAlpha;
                         dstVertex.uv[0] = srcVertex.uv[0];
                         dstVertex.uv[1] = srcVertex.uv[1];
                         dstVertex.textureIndex = part.textureIndex;

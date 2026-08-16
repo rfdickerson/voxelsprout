@@ -1184,6 +1184,17 @@ struct GeometryBlock {
     std::vector<float> positions;
     std::vector<float> normals;
     std::vector<float> uvs;  // UV set 0 only, 2 floats per vertex
+    // RGBA per vertex, 0-1. Empty when the source stored none, which is the
+    // common case -- most meshes carry no vertex colour at all.
+    //
+    // THE ALPHA IS THE POINT. Bethesda feathers a placed road, path or dirt
+    // patch into the ground beneath it with per-vertex alpha on an
+    // alpha-blended shape; the diffuse texture is fully opaque, so nothing
+    // about the TEXTURE says the edges should fade. Dropping this channel
+    // renders every such mesh as a hard-edged slab sitting on the terrain,
+    // which reads as a z-fighting or decal problem rather than as a missing
+    // vertex attribute.
+    std::vector<float> colors;
     std::vector<std::uint32_t> triangleIndices;
     std::uint32_t outOfRangeTriangles = 0;
     std::uint32_t degenerateTriangles = 0;
@@ -1239,10 +1250,12 @@ bool readPackedVertexData(
     };
     const std::size_t uvOffset = nibbleBytes(8u);
     const std::size_t normalOffset = nibbleBytes(16u);
+    const std::size_t colorOffset = nibbleBytes(24u);
     const std::uint32_t vertexFlags = static_cast<std::uint32_t>((descriptor >> 44u) & 0xFFFull);
     constexpr std::uint32_t kHasVertices = 0x0001u;
     constexpr std::uint32_t kHasUvs = 0x0002u;
     constexpr std::uint32_t kHasNormals = 0x0008u;
+    constexpr std::uint32_t kHasColors = 0x0020u;
     if ((vertexFlags & kHasVertices) == 0u || vertexCount == 0u) {
         return false;
     }
@@ -1253,6 +1266,10 @@ bool readPackedVertexData(
     }
     const bool hasUvs = (vertexFlags & kHasUvs) != 0u && uvOffset + 4u <= vertexSize;
     const bool hasNormals = (vertexFlags & kHasNormals) != 0u && normalOffset + 3u <= vertexSize;
+    // Four unsigned bytes, RGBA. The offset nibble is only meaningful when the
+    // flag is set -- a shape without colours leaves that nibble at whatever the
+    // exporter wrote, so the flag is checked first and the bound second.
+    const bool hasColors = (vertexFlags & kHasColors) != 0u && colorOffset + 4u <= vertexSize;
 
     std::vector<std::uint8_t> vertexBytes(vertexCount * vertexSize);
     if (!cursor.readBytes(vertexBytes.data(), vertexBytes.size())) {
@@ -1264,6 +1281,9 @@ bool readPackedVertexData(
     }
     if (hasUvs) {
         outGeometry.uvs.resize(vertexCount * 2u);
+    }
+    if (hasColors) {
+        outGeometry.colors.resize(vertexCount * 4u);
     }
     for (std::size_t v = 0; v < vertexCount; ++v) {
         const std::uint8_t* vertex = vertexBytes.data() + (v * vertexSize);
@@ -1292,6 +1312,12 @@ bool readPackedVertexData(
                 std::uint16_t half = 0;
                 std::memcpy(&half, vertex + uvOffset + (axis * 2), sizeof(half));
                 outGeometry.uvs[(v * 2u) + static_cast<std::size_t>(axis)] = decodeHalfFloat(half);
+            }
+        }
+        if (hasColors) {
+            for (int channel = 0; channel < 4; ++channel) {
+                outGeometry.colors[(v * 4u) + static_cast<std::size_t>(channel)] =
+                    static_cast<float>(vertex[colorOffset + channel]) / 255.0f;
             }
         }
     }
@@ -1670,8 +1696,21 @@ bool readNiTriBasedGeomDataPrefix(ByteCursor& cursor, GeometryBlock& out,
         return false;
     }
     if (hasVertexColors != 0u) {
-        const std::size_t skipBytes = static_cast<std::size_t>(numVertices) * 4u * sizeof(float);
-        cursor.seekAbsolute(cursor.pos() + skipBytes);
+        // Four floats per vertex here, unlike BSVertexData's four bytes. Read
+        // rather than stepped over: the alpha channel is how Bethesda feathers
+        // a placed road or dirt patch into the ground under it, and dropping it
+        // renders those as hard-edged slabs. See GeometryBlock::colors.
+        out.colors.resize(static_cast<std::size_t>(numVertices) * 4u);
+        for (std::uint16_t i = 0; i < numVertices; ++i) {
+            float rgba[4];
+            if (!cursor.read(rgba)) {
+                return false;
+            }
+            for (int channel = 0; channel < 4; ++channel) {
+                out.colors[(static_cast<std::size_t>(i) * 4u) + static_cast<std::size_t>(channel)] =
+                    rgba[channel];
+            }
+        }
     }
 
     // UV set 0 is kept; any further sets are skipped. Without UVs nothing
@@ -3738,6 +3777,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
 
             shape.uvs = src.uvs;
+            shape.colors = src.colors;
             shape.positions.resize(src.positions.size());
             for (std::size_t v = 0; v * 3u < src.positions.size(); ++v) {
                 const float local[3] = {src.positions[v * 3u], src.positions[(v * 3u) + 1], src.positions[(v * 3u) + 2]};

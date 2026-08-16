@@ -39,6 +39,26 @@ struct ImportedSceneVertex {
     std::uint32_t layerTextureIndex[4] = {
         0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
     float layerWeight[4] = {};
+    // Authored vertex ALPHA, multiplied into the diffuse texture's alpha before
+    // the alpha test and before blending. Separate from `color` because it is
+    // not a tint and is not gated on kImportedSceneMaterialFlagVertexColorTint:
+    // 1.0 is the neutral default, so geometry that never sets it is unchanged
+    // and no opt-in bit is needed.
+    //
+    // THIS IS HOW BETHESDA FEATHERS A ROAD INTO THE GROUND. Whiterun's
+    // WRMainRoadPlains lays a grass/moss overlay over the stone with an
+    // alpha-TESTED shape whose diffuse alpha is uniform and whose VERTEX alpha
+    // ramps 0->1 across the fringe (108 of 238 vertices on one shape, 269 of
+    // 613 on another). Drop the channel and the test sees full alpha
+    // everywhere: the overlay renders as a hard-edged uniform sheet instead of
+    // thinning out, which reads as a decal or z-fighting problem rather than as
+    // a missing vertex attribute.
+    //
+    // APPENDED, not inserted beside `color`. Both structs are blitted to disk
+    // and the legacy readers index the older layouts POSITIONALLY, so a new
+    // field in the middle shifts every index after it; at the end the historic
+    // prefix stays valid and each widening stays a pure append.
+    float colorAlpha = 1.0f;
 };
 
 // Four rather than three: at three, a 169-cell Mojave cook dropped 535 layer
@@ -144,6 +164,9 @@ struct ImportedScenePackedVertex {
     std::uint32_t layerTextureIndex[4] = {
         0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
     std::uint32_t layerWeights = 0u;  // 4x 8-bit, layer 0 in the low byte
+    // See ImportedSceneVertex::colorAlpha. Rides in packedColor's alpha byte
+    // on the GPU, which was already reserved and always written 0xff.
+    float colorAlpha = 1.0f;
 };
 
 // Quantization for ImportedScenePackedVertex::layerWeights. Byte n holds layer
@@ -212,7 +235,7 @@ inline std::uint32_t packImportedVertexNormal(const float normal[3]) {
 // Fallout): quantizing the linear value instead spends all 256 steps on the
 // highlights and bands the darks. Every one of the 256 sRGB source bytes
 // round-trips exactly through this and the shader's inverse.
-inline std::uint32_t packImportedVertexColor(const float color[3]) {
+inline std::uint32_t packImportedVertexColor(const float color[3], float alpha) {
     const auto encode = [](float linear) -> std::uint32_t {
         const float clamped = linear < 0.0f ? 0.0f : (linear > 1.0f ? 1.0f : linear);
         const float encoded = (clamped <= 0.0031308f)
@@ -220,8 +243,20 @@ inline std::uint32_t packImportedVertexColor(const float color[3]) {
             : ((1.055f * std::pow(clamped, 1.0f / 2.4f)) - 0.055f);
         return static_cast<std::uint32_t>(std::lround(encoded * 255.0f)) & 0xffu;
     };
+    // ALPHA IS QUANTIZED LINEARLY, not through the sRGB curve above. It is a
+    // coverage fraction, not a colour: running it through the transfer function
+    // would lift a 0.5 fringe to 0.74 and push the whole feather one way.
+    const float clampedAlpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+    const std::uint32_t alphaByte =
+        static_cast<std::uint32_t>(std::lround(clampedAlpha * 255.0f)) & 0xffu;
     return encode(color[0]) | (encode(color[1]) << 8) | (encode(color[2]) << 16) |
-           (0xffu << 24);
+           (alphaByte << 24);
+}
+
+// Opaque overload for the callers that have no authored alpha. Kept so a call
+// site that genuinely has none reads as such rather than passing a magic 1.0f.
+inline std::uint32_t packImportedVertexColor(const float color[3]) {
+    return packImportedVertexColor(color, 1.0f);
 }
 
 // Two 16-bit bindless slots per word, low half first. 0xffff is "no layer" --

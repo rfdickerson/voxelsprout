@@ -2172,7 +2172,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                 std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
                 dstVertex.packedNormal =
                     odai::importer::packImportedVertexNormal(srcVertex.normal);
-                dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color);
+                dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color, srcVertex.colorAlpha);
                 std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
                 dstVertex.flags = srcVertex.flags;
                 if (srcVertex.textureIndex < importedTextureSlots.size()) {

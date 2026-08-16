@@ -123,7 +123,11 @@ struct FragmentInput
     float4 inScreenPosition : SV_Position;
     float3 inWorldPosition : TEXCOORD0;
     float3 inWorldNormal : TEXCOORD1;
-    float3 inColor : TEXCOORD2;
+    // .rgb the authored linear tint, .a the authored vertex alpha. See
+    // ImportedSceneVertex::colorAlpha -- the alpha is what feathers a placed
+    // road into the ground under it, and it multiplies the texture's own alpha
+    // BEFORE the alpha test below.
+    float4 inColor : TEXCOORD2;
     float2 inUv : TEXCOORD3;
     nointerpolation uint inTextureIndex : TEXCOORD4;
     nointerpolation uint inFlags : TEXCOORD5;
@@ -276,9 +280,21 @@ float4 sampleImportedAlbedo(FragmentInput input)
         {
             return float4(1.0, 0.0, 1.0, 1.0);
         }
-        return float4(input.inColor, 1.0);
+        return float4(input.inColor.rgb, input.inColor.a);
     }
     float4 sampled = bindlessTextures[input.inTextureIndex].Sample(input.inUv);
+    // VERTEX ALPHA MODULATES TEXTURE ALPHA, and it has to happen before the
+    // test rather than after it. Bethesda feathers a road, path or dirt patch
+    // into the ground with an alpha-TESTED overlay whose texture alpha is
+    // uniform and whose vertex alpha ramps across the fringe; applying it after
+    // the test would keep the hard cut and only fade what survived.
+    //
+    // Mirrored EXACTLY in imported_static_depthonly.frag.slang and
+    // imported_static_normaldepth.frag.slang. The merged depth prepass requires
+    // all three to discard the same fragments -- one of them keeping a fragment
+    // the others cut lays depth main then fails to shade, which renders as a
+    // hole rather than as a disagreement.
+    sampled.a *= input.inColor.a;
     // Fallout's NiAlphaProperty test mode is GREATER: a fragment survives when
     // its alpha is strictly above the authored threshold, so discard on <=.
     if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
@@ -377,7 +393,7 @@ float4 sampleImportedAlbedo(FragmentInput input)
     }
     if (disableTextures)
     {
-        return float4(input.inColor, 1.0);
+        return float4(input.inColor.rgb, input.inColor.a);
     }
     // Vertex color modulates a textured surface only where the cooker says the
     // color is authored data (kImportedSceneMaterialFlagVertexColorTint). For
@@ -397,7 +413,7 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // albedo at the early-out above.
     if ((input.inFlags & kImportedMaterialFlagVertexColorTint) != 0u)
     {
-        return float4(sampled.rgb * input.inColor, sampled.a);
+        return float4(sampled.rgb * input.inColor.rgb, sampled.a);
     }
     return sampled;
 }
@@ -843,7 +859,7 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
     // would throw away every texel worth looking at.
     const float4 raw = textured
         ? bindlessTextures[input.inTextureIndex].Sample(input.inUv)
-        : float4(input.inColor, 1.0);
+        : float4(input.inColor.rgb, input.inColor.a);
 
     if (view == kDebugViewAlbedo)
     {

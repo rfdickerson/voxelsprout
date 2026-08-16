@@ -1395,6 +1395,28 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                       << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
+            // Vertex-alpha census. This is the channel that feathers a placed
+            // road into the ground under it, so "does this shape have one, and
+            // is it actually varying" is the question a hard-edged road asks.
+            // A constant 1.0 is not a feather; a spread is.
+            if (!shape.colors.empty()) {
+                float minAlpha = 1.0F;
+                float maxAlpha = 0.0F;
+                std::size_t fadedVertices = 0;
+                for (std::size_t v = 3u; v < shape.colors.size(); v += 4u) {
+                    const float alpha = shape.colors[v];
+                    minAlpha = std::min(minAlpha, alpha);
+                    maxAlpha = std::max(maxAlpha, alpha);
+                    if (alpha < 0.99F) {
+                        ++fadedVertices;
+                    }
+                }
+                std::cout << "      vertex color: yes, alpha [" << minAlpha << ", " << maxAlpha
+                          << "] faded=" << fadedVertices << "/" << (shape.colors.size() / 4u)
+                          << "\n";
+            } else {
+                std::cout << "      vertex color: none\n";
+            }
             // Winding orientation: signed volume via the divergence theorem,
             // plus the fraction of faces whose geometric normal agrees with
             // the shape's authored vertex normals. A closed shell wound

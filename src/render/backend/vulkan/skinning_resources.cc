@@ -423,6 +423,10 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         dst.position[1] = src.position[1];
         dst.position[2] = src.position[2];
         dst.packedNormal = odai::importer::packImportedVertexNormal(src.normal);
+        // Opaque: ImportedSkinnedMeshVertex carries no authored alpha. The
+        // channel exists to feather placed world geometry (see
+        // ImportedSceneVertex::colorAlpha) and no skinned actor part uses it,
+        // so the skinned vertex is not widened for it.
         dst.packedColor = odai::importer::packImportedVertexColor(src.color);
         dst.uv[0] = src.uv[0];
         dst.uv[1] = src.uv[1];
