@@ -634,6 +634,20 @@ bool isEffectOnlyModelPath(std::string_view modelPath) {
 //
 // This engine draws its own sky from the WTHR record (see
 // src/import/fnv/weather_records.h), so these meshes have no job here at all.
+// True for Bethesda's distant-LOD stand-in meshes, which are named by suffix:
+// wrcastlemainbuilding01LOD.nif, wrjorvaskr01lod.nif, wrskyforge01lod.nif.
+// Matched on the stem rather than anywhere in the path so a directory called
+// "lod" full of real geometry is not swept up.
+bool isDistantLodModelPath(std::string_view modelPath) {
+    std::string lowered(modelPath);
+    for (char& c : lowered) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    constexpr std::string_view kSuffix = "lod.nif";
+    return lowered.size() > kSuffix.size() &&
+        lowered.compare(lowered.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+}
+
 bool isSkyOnlyModelPath(std::string_view modelPath) {
     std::string lowered(modelPath);
     for (char& c : lowered) {
@@ -1365,7 +1379,25 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         part.alphaTest = shape.alphaTest;
                         part.alphaBlend = shape.alphaBlend;
                         part.unlit = shape.unlit;
-                        part.twoSided = shape.twoSided;
+                        // A DISTANT-LOD SHELL IS A HOLLOW, SINGLE-SIDED HULL,
+                        // and back-face culling eats half of it.
+                        //
+                        // Bethesda places `*LOD.nif` stand-ins in the PARENT
+                        // worldspace for anything whose real geometry lives in
+                        // a child one: Dragonsreach in Tamriel is
+                        // WRCastleMainBuilding01LOD, the whole building in 1324
+                        // triangles off a shared LOD atlas, with no interior
+                        // faces because the game only ever shows it from far
+                        // outside. Drawn one-sided here, every angle that looks
+                        // along a wall sees straight through it, and the
+                        // symptom is exactly "half of Dragonsreach is missing"
+                        // -- with nothing dropped and no reference unresolved,
+                        // which is what makes it so hard to place.
+                        //
+                        // Forcing them two-sided costs nothing (the shell is
+                        // tiny) and makes the silhouette solid from every
+                        // angle, which is all a stand-in has to be.
+                        part.twoSided = shape.twoSided || isDistantLodModelPath(staticModelPath);
                         part.alphaThreshold = shape.alphaThreshold;
                         // ODAI_FNV_LOG_ALPHATEST=1 names every surface that will
                         // run the discard, with the threshold and texture it

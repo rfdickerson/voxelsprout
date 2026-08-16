@@ -129,7 +129,9 @@ std::string cellAxisToken(std::int32_t value) {
 // 28: FLOR records place (Whiterun's garlic braids), and TES5 ARMO world
 //     models come from MOD2 -- its MODL is a binary armature list that was
 //     being read as a path made of formID bytes
-constexpr int kCellBuildVersion = 28;
+// 29: distant-LOD shells (*LOD.nif) draw two-sided -- they are hollow
+//     single-sided hulls, and culling ate half of Dragonsreach
+constexpr int kCellBuildVersion = 29;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
