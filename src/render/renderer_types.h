@@ -277,22 +277,83 @@ struct WeatherSkyParams {
     // the shader skips it.
     float cloudTint[kWeatherCloudLayerCount][3] = {};
     float cloudOpacity[kWeatherCloudLayerCount] = {};
+
+    // What the weather says the GROUND should be lit by: NAM0's Sunlight (the
+    // direct sun) and Ambient (the sky's fill), linear.
+    //
+    // These are display-referred sRGB in the record, authored for a renderer
+    // that used them directly, so only their HUE is taken at face value. The
+    // renderer keeps its own physically-derived intensity and applies a bounded
+    // gain from the record's own luminance -- enough that an overcast reads
+    // dimmer and a sunset reads warm, without a weather being able to blow out
+    // or black out an exposure the rest of the frame is calibrated against.
+    //
+    // lightingWeight 0 is the default and leaves the procedural sun and sky
+    // ambient EXACTLY as they were, which is the state every game that does not
+    // read WTHR records is in.
+    float sunlightColor[3] = {0.0f, 0.0f, 0.0f};
+    float ambientColor[3] = {0.0f, 0.0f, 0.0f};
+    float lightingWeight = 0.0f;
+
+    // How much of the sun's HALO and haze bloom this weather lets through, from
+    // WTHR's Sun Glare byte. 1 is the default and the unmodified look; the sun
+    // DISC is not scaled, because a weather that hides the sun does it with
+    // cloud cover and this would only make a visible sun look wrong.
+    float sunGlare = 1.0f;
 };
 
-// The textures behind those layers. Separate from WeatherSkyParams because
-// uploading is expensive and only happens when the weather changes, while the
-// tints above move every frame.
+// How a cloud texture covers the sky. These are different projections, not
+// different scales of one -- drawing a layer with the wrong one does not look
+// mistuned, it looks broken, and no amount of scale tuning recovers it. Which
+// one is right is a property of how the ART WAS DRAWN, so it is per layer.
+enum class WeatherCloudMapping : std::uint32_t {
+    // Fallout and Oblivion: one fisheye image of the whole sky, zenith at the
+    // centre and horizon on the rim of the inscribed circle. Sampled exactly
+    // once, so it must never wrap, and it drifts by ROTATING about the zenith.
+    DomeFisheye = 0,
+    // Skyrim's overhead decks (SkyrimCloudsUpper*, SkyrimCloudsLower*): a
+    // seamlessly tiling cloud field with no radial structure at all, sampled
+    // many times across a dome with wrap addressing, drifting by translation.
+    TilingPlane = 1,
+    // Skyrim's horizon banks (SkyrimCloudsHorizon*): the texture is four
+    // HORIZONTAL STRIPES of cloud tops, drawn to be seen edge-on around the
+    // skyline. Compass bearing is u and elevation is v, so the stripes stack
+    // upward and wrap around the sky. Under the plane projection above the same
+    // art becomes stripes running across the sky in one compass direction,
+    // which is the giveaway that the mapping, not the tuning, is wrong.
+    Cylindrical = 2,
+};
+
+// One uploaded cloud layer and how to draw it.
+struct WeatherCloudLayer {
+    // Decoded DDS exactly as it comes out of the game's or a mod's archive. An
+    // empty texture disables the layer.
+    odai::importer::ImportedSceneTexture texture;
+    WeatherCloudMapping mapping = WeatherCloudMapping::DomeFisheye;
+    // Drift. What a unit means depends on the mapping: radians per second about
+    // the zenith for a fisheye (which uses scrollU alone), texture units per
+    // second otherwise.
+    float scrollU = 0.0f;
+    float scrollV = 0.0f;
+    // For a fisheye this is a DOME scale and never a tiling count: 1.0 puts the
+    // horizon on the texture's inscribed circle, and above 1 pushes the rim
+    // past the horizon and out of the texture. For the other two it is exactly
+    // a tiling count, and above 1 is the normal case.
+    float scale = 1.0f;
+    // The elevation window this layer occupies, as dir.y, feathered at both
+    // ends. Skyrim stacks an overhead deck and a horizon bank in the same sky
+    // and they are not the same size of thing -- drawing both across the whole
+    // hemisphere is a whiteout. 0..1 is the whole sky and is what every
+    // Fallout and Oblivion layer uses, so their look is unchanged.
+    float bandLow = 0.0f;
+    float bandHigh = 1.0f;
+};
+
+// The layers behind a weather. Separate from WeatherSkyParams because uploading
+// is expensive and only happens when the weather changes, while the tints there
+// move every frame.
 struct WeatherCloudTextures {
-    // A layer with an empty texture (no pixels) is disabled. Textures are
-    // decoded DDS exactly as they come out of the mod's archive.
-    odai::importer::ImportedSceneTexture layers[kWeatherCloudLayerCount];
-    // Texture units per second, from the WTHR DATA block's cloud speeds.
-    float scrollSpeed[kWeatherCloudLayerCount] = {};
-    // Dome scale. These textures are fisheye maps of the whole sky, so this is
-    // NOT a tiling count: 1.0 puts the horizon on the texture's inscribed
-    // circle, and values above 1 push the rim past the horizon (and out of the
-    // texture). Never a reason to tile one of these.
-    float domeScale[kWeatherCloudLayerCount] = {};
+    WeatherCloudLayer layers[kWeatherCloudLayerCount];
 };
 
 // Which tone curve the post pass runs, and its parameters.

@@ -182,14 +182,18 @@ struct alignas(16) CameraUniform {
     // moves. Mirrored in src/render/shaders/camera_uniform.slang.
     float weatherSkyUpper[4];  // [0..2]=linear rgb at zenith, [3]=blend weight 0..1
     float weatherSkyLower[4];  // [0..2]=linear rgb above the horizon band, [3]=unused
-    float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=unused
+    float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=sun-glare scale
     float weatherFog[4];       // [0..2]=linear fog rgb, [3]=fog far distance in world units
-    // Four planar cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
+    // Four cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
     float weatherCloudTint[4][4];
-    // [0]=bindless texture slot as a float, [1]=rotation rad/s, [2]=dome scale,
-    // [3]=unused. Slot is carried as a float because the whole block is floats;
-    // the shader rounds it back to an index.
+    // [0]=bindless texture slot as a float, [1]=drift u, [2]=scale (dome scale
+    // for a fisheye, tiling count otherwise), [3]=drift v. Slot is carried as a
+    // float because the whole block is floats; the shader rounds it to an index.
     float weatherCloudParams[4][4];
+    // [0..1]=the dir.y window this layer covers, [2]=WeatherCloudMapping as a
+    // float, [3]=unused. Skyrim stacks an overhead deck and a horizon bank in
+    // one sky; they need different projections and different slices of it.
+    float weatherCloudBand[4][4];
     // Tonemap selection and parameters.
     // [0] = mode: 0 = the ACES fit, 1 = the ENB/Enhanced Shaders curve
     // [1] = contrast, [2] = saturation, [3] = curve knee (ENB's "ToneMapping Curve")

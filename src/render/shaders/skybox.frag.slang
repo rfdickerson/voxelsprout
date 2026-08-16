@@ -17,22 +17,32 @@ float smoothStep(float edge0, float edge1, float x)
     return t * t * (3.0 - (2.0 * t));
 }
 
-// Fallout's cloud layers are SKY DOME MAPS, not tiling planes: each texture is
-// a fisheye of the whole sky, zenith at the centre of the image and horizon at
+// TWO GENERATIONS, TWO PROJECTIONS, AND THEY ARE NOT INTERCHANGEABLE.
+//
+// Fallout and Oblivion cloud layers are SKY DOME MAPS: each texture is a
+// fisheye of the whole sky, zenith at the centre of the image and horizon at
 // the rim of an inscribed circle. Nevada Skies' WesternSky1.dds is unmistakable
 // about it -- a bright cloud disc with sun rays radiating into the dark corners.
 //
-// This was first written as a plane projection, dir.xz/(dir.y+k), with wrap
-// addressing. That maps the visible sky into roughly [-0.76, 0.76] of UV space,
+// That was first written as a plane projection, dir.xz/(dir.y+k), with wrap
+// addressing. It maps the visible sky into roughly [-0.76, 0.76] of UV space,
 // so it crosses zero and the sampler wraps -- which tiles the entire circular
 // image and puts a hard seam where it crosses. The symptom is a vertical seam
 // with the sky visibly repeating from it, and no amount of tuning the scale
-// fixes it, because tiling a fisheye is meaningless.
+// fixes it, because tiling a fisheye is meaningless. The right mapping sends
+// the hemisphere onto the unit disc exactly once: angle from the zenith becomes
+// radius, compass direction becomes angle, and every UV lands inside one copy.
 //
-// The right mapping sends the hemisphere onto the unit disc exactly once:
-// angle from the zenith becomes radius, compass direction becomes angle. Every
-// UV then lands inside one copy of the texture, so there is nothing to wrap and
-// no seam to find.
+// SKYRIM'S ARE THE OPPOSITE. Sky\SkyrimCloudsLower01.dds has no radial
+// structure at all: it is a seamlessly tileable cloud field whose shape is in
+// its alpha, meant to be repeated across a dome many times over. Drawn through
+// the fisheye mapping it is one enormous smeared copy of a cloud field, which
+// looks like a rendering bug rather than like the wrong projection.
+//
+// The dome projection for a tiling sheet is dir.xz / (dir.y + k). k is what
+// keeps it finite: without it the horizon diverges into radial streaks, and at
+// k = 0.35 the UV radius tops out around 2.9 sheets, which is a plausible
+// perspective compression rather than an asymptote.
 float3 applyWeatherClouds(float3 sky, float3 dir, float time)
 {
     if (dir.y <= 0.0)
@@ -48,9 +58,11 @@ float3 applyWeatherClouds(float3 sky, float3 dir, float time)
     const float compassLength = max(length(compass), 1e-5);
     const float2 compassDir = compass / compassLength;
 
-    // Fade the last of it out at the horizon: the dome map's own rim is a hard
-    // edge, and the projection compresses hardest right there.
-    const float horizonFade = 1.0 - smoothStep(0.86, 1.0, radius);
+    // The dome-plane coordinate the tiling mapping repeats across, before its
+    // per-layer tiling count.
+    const float2 planeUv = dir.xz / (dir.y + 0.35);
+    // Compass bearing, 0..1 around the sky, for the cylindrical mapping.
+    const float bearing = atan2(compassDir.y, compassDir.x) * (0.5 / 3.14159265);
 
     float3 result = sky;
     for (int layer = 0; layer < 4; ++layer)
@@ -67,21 +79,69 @@ float3 applyWeatherClouds(float3 sky, float3 dir, float time)
         {
             continue;
         }
+        const float4 band = camera.weatherCloudBand[layer];
+        const int mapping = int(band.z + 0.5);
 
-        // A dome map cannot scroll by translating UV -- that would slide the
-        // fisheye off its own centre. It ROTATES about the zenith, which is
-        // what a cloud layer drifting overhead actually looks like.
-        const float angle = time * params.y;
-        const float sinA = sin(angle);
-        const float cosA = cos(angle);
-        const float2 rotated = float2(
-            (compassDir.x * cosA) - (compassDir.y * sinA),
-            (compassDir.x * sinA) + (compassDir.y * cosA));
+        // The elevation window this layer occupies, feathered at both ends so a
+        // deck fades out rather than ending on a line. A layer that covers the
+        // whole sky takes no mask at all rather than a mask that rounds to one:
+        // that is every Fallout and Oblivion layer, and their horizon fade is
+        // already the one below.
+        const float bandLow = band.x;
+        const float bandHigh = band.y;
+        //
+        // Each end is feathered only where it is actually an end: a band that
+        // reaches the zenith must not fade OUT at the zenith, which is what a
+        // symmetric mask does and it reads as a hole in the sky directly
+        // overhead.
+        const float feather = max(0.12 * (bandHigh - bandLow), 0.02);
+        const float fadeIn = (bandLow <= 0.0) ? 1.0 : smoothStep(bandLow, bandLow + feather, dir.y);
+        const float fadeOut =
+            (bandHigh >= 1.0) ? 1.0 : (1.0 - smoothStep(bandHigh - feather, bandHigh, dir.y));
+        const float bandMask = fadeIn * fadeOut;
 
-        // params.z scales the dome: 1.0 puts the horizon exactly on the
-        // inscribed circle. Staying at or under 1 keeps every sample inside the
-        // texture, so wrap addressing never comes into play.
-        const float2 uv = float2(0.5, 0.5) + (0.5 * radius * params.z) * rotated;
+        float2 uv;
+        float horizonFade;
+        if (mapping == 2)
+        {
+            // Cylindrical: bearing across, elevation up. The band's own window
+            // IS the v range, so the whole texture is spent on the slice of sky
+            // the art was drawn for rather than stretched over the hemisphere.
+            const float elevation =
+                saturate01((dir.y - bandLow) / max(bandHigh - bandLow, 1e-4));
+            // No v drift: a bank of cloud drifts around the sky, not up it.
+            uv = float2((bearing * params.z) + (time * params.y), 1.0 - elevation);
+            horizonFade = 1.0;  // the band mask already owns both ends
+        }
+        else if (mapping == 1)
+        {
+            // A tiling sheet drifts by translating, which is what a cloud
+            // field blowing across the sky actually does.
+            uv = (planeUv * params.z) + float2(time * params.y, time * params.w);
+            // Compressing hardest at the horizon, where it aliases into mush.
+            horizonFade = 1.0 - smoothStep(0.94, 1.0, radius);
+        }
+        else
+        {
+            // A dome map cannot scroll by translating UV -- that would slide the
+            // fisheye off its own centre. It ROTATES about the zenith, which is
+            // what a cloud layer drifting overhead actually looks like.
+            const float angle = time * params.y;
+            const float sinA = sin(angle);
+            const float cosA = cos(angle);
+            const float2 rotated = float2(
+                (compassDir.x * cosA) - (compassDir.y * sinA),
+                (compassDir.x * sinA) + (compassDir.y * cosA));
+
+            // params.z scales the dome: 1.0 puts the horizon exactly on the
+            // inscribed circle. Staying at or under 1 keeps every sample inside
+            // the texture, so wrap addressing never comes into play.
+            uv = float2(0.5, 0.5) + (0.5 * radius * params.z) * rotated;
+            // The dome map's own rim is a hard edge, and the projection
+            // compresses hardest right there.
+            horizonFade = 1.0 - smoothStep(0.86, 1.0, radius);
+        }
+        horizonFade *= bandMask;
         const float4 sampled = bindlessTextures[slot].Sample(uv);
 
         // FNV cloud textures carry the cloud SHAPE in alpha; rgb is shading
@@ -215,7 +275,11 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     const float hazeMask = 1.0 - smoothStep(hazeRadius * 0.55, hazeRadius, sunAngle);
     const float hazeBloom = hazeCore * hazeMask * (1.6 * haloIntensity * lowSunHaze);
 
-    sky += sunColor * (disk + halo + hazeBloom) * (1.0 + phaseBoost);
+    // WTHR's Sun Glare byte scales the halo and the low-sun bloom. The DISC is
+    // left alone: a weather dims the sun by putting cloud in front of it, and
+    // fading the disc itself instead reads as the sun burning out.
+    const float sunGlareScale = camera.weatherHorizon.w;
+    sky += sunColor * (disk + ((halo + hazeBloom) * sunGlareScale)) * (1.0 + phaseBoost);
 
     // After the sun, so a cloud layer covers the disk instead of the disk
     // burning through it.

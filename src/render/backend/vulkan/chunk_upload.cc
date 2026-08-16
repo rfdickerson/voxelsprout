@@ -1373,8 +1373,11 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
         previousSlots[layer] = m_weatherCloudSlots[layer];
         m_weatherCloudSlots[layer] = kInvalidImportedTextureSlot;
-        m_weatherCloudScroll[layer] = clouds.scrollSpeed[layer];
-        m_weatherCloudDomeScale[layer] = clouds.domeScale[layer];
+        m_weatherCloudLayers[layer] = clouds.layers[layer];
+        // The pixels are already in the bindless table (or about to be); the
+        // copy here is only the drawing parameters, so drop the payload rather
+        // than keeping a second copy of every cloud texture alive per frame.
+        m_weatherCloudLayers[layer].texture = odai::importer::ImportedSceneTexture{};
     }
 
     // Same gate acquireImportedTexture applies; checking it here avoids
@@ -1388,8 +1391,8 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     }
 
     bool anyLayer = false;
-    for (const auto& texture : clouds.layers) {
-        anyLayer = anyLayer || !texture.rgba8.empty();
+    for (const auto& layer : clouds.layers) {
+        anyLayer = anyLayer || !layer.texture.rgba8.empty();
     }
     if (!anyLayer) {
         for (const std::uint32_t slot : previousSlots) {
@@ -1431,7 +1434,7 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
 
     std::vector<BufferHandle> stagingBufferHandles;
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
-        const odai::importer::ImportedSceneTexture& texture = clouds.layers[layer];
+        const odai::importer::ImportedSceneTexture& texture = clouds.layers[layer].texture;
         if (texture.rgba8.empty()) {
             continue;
         }

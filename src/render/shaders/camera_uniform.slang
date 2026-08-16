@@ -46,12 +46,15 @@ public struct CameraUniform
     // Mirrored in MvpUniform in src/render/renderer_shared.h.
     public float4 weatherSkyUpper;
     public float4 weatherSkyLower;
+    // w: the weather's sun-glare scale, 1 when no weather is published.
     public float4 weatherHorizon;
     public float4 weatherFog;
-    // Four planar cloud layers: tint.rgb + opacity in w, then
-    // (bindless slot, scroll speed, tiling, unused).
+    // Four cloud layers: tint.rgb + opacity in w, then
+    // (bindless slot, drift u, scale, drift v), then
+    // (band low dir.y, band high dir.y, mapping mode, unused).
     public float4 weatherCloudTint[4];
     public float4 weatherCloudParams[4];
+    public float4 weatherCloudBand[4];
     // (mode, contrast, saturation, curve knee) and (overbright dampening, ...).
     public float4 tonemapConfig;
     public float4 tonemapConfig2;

@@ -42,6 +42,45 @@ namespace odai::render {
 
 namespace {
 
+// A per-channel multiplier for the renderer's own sun or ambient colour, from
+// a WTHR light channel. Returns (1,1,1) at weight 0, so a game that publishes
+// no weather lighting is unaffected down to the bit.
+//
+// The record's colour is display-referred sRGB. Its DIRECTION in colour space
+// is authored intent and is taken whole; its MAGNITUDE is not radiance and is
+// only used to derive a bounded gain, because this renderer's exposure is
+// calibrated against the intensity computeSunColor derives from the sun's
+// altitude and a record must not be able to overrule that.
+//
+// kReferenceLuminance is a bright overcast-to-clear daytime value (sRGB ~178,
+// which is what Skyrim's clear-day Sunlight and Ambient both sit near), so a
+// typical day is close to a no-op and the gain reads as a DEPARTURE from it.
+// The square root halves the departure in stops and the clamp bounds it: a
+// weather can take the world down to about a third and up by a third, which
+// covers overcast-to-clear without letting one black out the frame.
+odai::math::Vector3 weatherLightTint(const float linearColor[3], float weight) {
+    const float clampedWeight = std::clamp(weight, 0.0f, 1.0f);
+    if (clampedWeight <= 0.0f) {
+        return odai::math::Vector3{1.0f, 1.0f, 1.0f};
+    }
+    const float luminance = (0.2126f * linearColor[0]) + (0.7152f * linearColor[1]) +
+        (0.0722f * linearColor[2]);
+    if (luminance <= 1e-5f) {
+        return odai::math::Vector3{1.0f, 1.0f, 1.0f};
+    }
+    constexpr float kReferenceLuminance = 0.44f;  // linear(sRGB 178)
+    const float gain =
+        std::clamp(std::sqrt(luminance / kReferenceLuminance), 0.35f, 1.35f);
+    // Hue as a unit-luminance ratio, so the gain above is the only thing that
+    // moves brightness.
+    const float hue[3] = {linearColor[0] / luminance, linearColor[1] / luminance,
+                          linearColor[2] / luminance};
+    return odai::math::Vector3{
+        std::lerp(1.0f, hue[0] * gain, clampedWeight),
+        std::lerp(1.0f, hue[1] * gain, clampedWeight),
+        std::lerp(1.0f, hue[2] * gain, clampedWeight)};
+}
+
 const char* voxelGiSurfaceModeName(VoxelGiSurfaceMode mode) {
     switch (mode) {
     case VoxelGiSurfaceMode::Legacy: return "legacy";
@@ -772,9 +811,25 @@ void RendererBackend::renderFrame(
         effectiveSkySettings.sunHaloIntensity = 0.0f;
     }
 
-    const odai::math::Vector3 sunColor = isNight
+    odai::math::Vector3 sunColor = isNight
         ? odai::math::Vector3{0.0f, 0.0f, 0.0f}
         : computeSunColor(effectiveSkySettings, sunDirection);
+    // A WEATHER RECORD LIGHTS THE GROUND, NOT ONLY THE SKY. WTHR's Sunlight and
+    // Ambient channels are what make an overcast read as overcast on the
+    // terrain rather than only overhead; before this they were read and thrown
+    // away, so a storm rendered as a dark sky over a sunlit desert.
+    //
+    // Only the HUE is taken from the record. Its colours are display-referred
+    // sRGB authored for a renderer that used them literally, and this one is
+    // HDR with auto-exposure -- decoding one and using it as radiance changes
+    // the frame's whole calibration. So the record supplies direction in colour
+    // space and a BOUNDED gain from its own luminance, and the renderer keeps
+    // the intensity it derived from the sun's altitude.
+    const odai::math::Vector3 weatherSunlight = weatherLightTint(
+        m_weatherSky.sunlightColor, m_weatherSky.lightingWeight);
+    sunColor = odai::math::Vector3{
+        sunColor.x * weatherSunlight.x, sunColor.y * weatherSunlight.y,
+        sunColor.z * weatherSunlight.z};
 
     // Shadows stop well before the camera's far plane.
     //
@@ -1135,6 +1190,19 @@ void RendererBackend::renderFrame(
         const odai::math::Vector3 nightAmbientIrradiance{0.050f, 0.078f, 0.155f};
         shIrradiance[0] = nightAmbientIrradiance * (1.0f / kShY00);
     }
+    // The same treatment for the sky's fill light, and applied to the WHOLE SH
+    // set rather than only its DC term: tinting the constant term alone leaves
+    // the directional terms carrying the old hue, so a surface facing up and a
+    // surface facing sideways end up lit by two different weathers.
+    {
+        const odai::math::Vector3 weatherAmbient = weatherLightTint(
+            m_weatherSky.ambientColor, m_weatherSky.lightingWeight);
+        for (odai::math::Vector3& coefficient : shIrradiance) {
+            coefficient = odai::math::Vector3{coefficient.x * weatherAmbient.x,
+                                              coefficient.y * weatherAmbient.y,
+                                              coefficient.z * weatherAmbient.z};
+        }
+    }
 
     const std::optional<FrameArenaSlice> mvpSliceOpt =
         m_frameArena.allocateUpload(
@@ -1372,7 +1440,10 @@ void RendererBackend::renderFrame(
         mvpUniform.weatherFog[channel] = m_weatherSky.fogColor[channel];
     }
     mvpUniform.weatherSkyLower[3] = 0.0f;
-    mvpUniform.weatherHorizon[3] = 0.0f;
+    // Spare channel: the weather's sun-glare scale. 1 when no weather is
+    // published, which is the look every other game has.
+    mvpUniform.weatherHorizon[3] =
+        (m_weatherSky.weight > 0.0f) ? std::clamp(m_weatherSky.sunGlare, 0.0f, 1.0f) : 1.0f;
     mvpUniform.weatherFog[3] = m_weatherSky.fogFarDistance;
 
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
@@ -1387,9 +1458,14 @@ void RendererBackend::renderFrame(
             hasSlot ? std::clamp(m_weatherSky.cloudOpacity[layer], 0.0f, 1.0f) : 0.0f;
         mvpUniform.weatherCloudParams[layer][0] =
             hasSlot ? static_cast<float>(m_weatherCloudSlots[layer]) : -1.0f;
-        mvpUniform.weatherCloudParams[layer][1] = m_weatherCloudScroll[layer];
-        mvpUniform.weatherCloudParams[layer][2] = m_weatherCloudDomeScale[layer];
-        mvpUniform.weatherCloudParams[layer][3] = 0.0f;
+        mvpUniform.weatherCloudParams[layer][1] = m_weatherCloudLayers[layer].scrollU;
+        mvpUniform.weatherCloudParams[layer][2] = m_weatherCloudLayers[layer].scale;
+        mvpUniform.weatherCloudParams[layer][3] = m_weatherCloudLayers[layer].scrollV;
+        mvpUniform.weatherCloudBand[layer][0] = m_weatherCloudLayers[layer].bandLow;
+        mvpUniform.weatherCloudBand[layer][1] = m_weatherCloudLayers[layer].bandHigh;
+        mvpUniform.weatherCloudBand[layer][2] =
+            static_cast<float>(m_weatherCloudLayers[layer].mapping);
+        mvpUniform.weatherCloudBand[layer][3] = 0.0f;
     }
 
     mvpUniform.tonemapConfig[0] =

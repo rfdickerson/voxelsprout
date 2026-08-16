@@ -2442,8 +2442,9 @@ private:
     // both, holds the two together; this codebase has already been bitten once
     // by a silently drifting mirrored constant.
     std::uint32_t m_weatherCloudSlots[kWeatherCloudLayerCount] = {~0u, ~0u, ~0u, ~0u};
-    float m_weatherCloudScroll[kWeatherCloudLayerCount] = {};
-    float m_weatherCloudDomeScale[kWeatherCloudLayerCount] = {};
+    // Everything about the active weather's cloud layers except their pixels,
+    // which live in the bindless table under m_weatherCloudSlots.
+    WeatherCloudLayer m_weatherCloudLayers[kWeatherCloudLayerCount] = {};
     VoxelGiDebugSettings m_voxelGiDebugSettings{};
     struct SkyTuningRuntimeState {
         bool initialized = false;

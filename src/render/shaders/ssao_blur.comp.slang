@@ -43,6 +43,19 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float4 centerNd = normalDepthTexture.SampleLevel(uv, 0.0);
     const float3 centerNormal = decodeViewNormal(centerNd.xyz);
     const float centerDepth = centerNd.w;
+    // Depth here is view distance in WORLD UNITS (imported_static_normaldepth
+    // writes -view.z), and at Bethesda scale -- ~70 units to the metre, depths
+    // out to 50000 -- an absolute falloff like exp(-|d| * 4.0) is zero for
+    // every tap on any surface that is not parallel to the screen. What that
+    // renders as is not a halo but BANDING: with all depth weights collapsed,
+    // the quotient is decided by which raw row happens to sit nearest in
+    // depth, and on oblique terrain that alternates per output row.
+    //
+    // So the tolerance is RELATIVE (3% of the centre depth), with a floor so
+    // near geometry keeps a usable acceptance band. A grazing slope moves a
+    // few percent of depth per raw texel and is accepted; a fence against the
+    // ground behind it differs by 10x the tolerance and is still rejected.
+    const float depthTolerance = max(centerDepth * 0.03, 4.0);
     if (centerDepth <= 0.0001)
     {
         ssaoBlurTexture[dispatchThreadId.xy] = 1.0;
@@ -92,7 +105,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
             const float3 sampleNormal = decodeViewNormal(sampleNd.xyz);
             const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);
-            const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 4.0);
+            const float depthWeight = exp(-abs(sampleDepth - centerDepth) / depthTolerance);
             const float weight = max(bilinear, 1e-3) * normalWeight * depthWeight;
 
             weightedAo += ssaoRawTexture.SampleLevel(suv, 0.0).x * weight;
@@ -121,7 +134,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
             const float3 sampleNormal = decodeViewNormal(sampleNd.xyz);
             const float normalWeight = pow(max(dot(centerNormal, sampleNormal), 0.0), 8.0);
-            const float depthWeight = exp(-abs(sampleDepth - centerDepth) * 4.0);
+            const float depthWeight = exp(-abs(sampleDepth - centerDepth) / depthTolerance);
             const float weight = spatialWeight * normalWeight * depthWeight;
 
             weightedAo += ssaoRawTexture.SampleLevel(suv, 0.0).x * weight;
