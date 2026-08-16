@@ -7,23 +7,19 @@ only what is Skyrim-specific and what was measured.
 
 ## The filter that decides whether a mod is worth installing
 
-**Asset replacement works. Record changes do not.** `CellStreamer` reads the
-world tables, the cell index and every reference from the single `--plugin`
-file; a mod's `.esp` is not consulted for placements. So:
+**Assets replace on `--mod` alone. Records need `--plugin-add` as well.**
 
-| Mod ships | Result |
-|---|---|
-| a mesh at a path the game already uses | replaces it, everywhere it appears |
-| a texture at a path the game already uses | replaces it |
-| a NEW mesh + an `.esp` that places it | **inert** — nothing references the new path |
-| record edits (placements, levelled lists, stats) | **inert** |
+| Mod ships | `--mod` only | `--mod` + `--plugin-add` |
+|---|---|---|
+| a mesh/texture at a path the game already uses | replaces it | replaces it |
+| a NEW mesh placed by REFR records | nothing references it | **placed** |
+| base-record edits (models, land textures, trees) | ignored | **applied**, later plugin wins |
+| grass (GRAS assigned to a land texture) | — | **still nothing** — needs a grass scatter, see `docs/SKYRIM_GRASS_AND_DISTANCE.md` |
 
-Weather (WTHR/CLMT) is the one record class read across the load order, which
-is why Nevada Skies works for Fallout. There is no Skyrim equivalent yet.
-
-That table is not a hypothetical: it is exactly the split measured on the two
-mods below, and it is why one of them transforms the landscape and the other
-half-lands.
+Passing `--plugin-add` switches `CellStreamer` onto the merged path: base
+records and cell contents come from every plugin in the order, formIDs are
+remapped out of each plugin's local mod-index space, and the order's
+fingerprint joins the cell-cache key.
 
 ## Installed here
 
@@ -58,11 +54,14 @@ belongs to a different mod's shader hook and does nothing here.
 the vanilla tree and grass meshes (`treepineforest*`, `ferngrass01`,
 `fieldgrass01`, `tundragrass01`…), and they carry most of what the mod is for.
 
-The other 65 meshes are `vurt_*` — new grass and plant assets that only the
-mod's own `.esp` places. They are installed and unreachable. Do not read a
-sparse meadow as a broken install: that is the record limitation above, and
-fixing it means teaching the cell streamer to read placements across a load
-order.
+The other 65 meshes are `vurt_*` grass billboards, and they stay unreachable
+even with `--plugin-add`, because **Skyrim does not place grass as
+references**. The plugin is 66 GRAS, 16 TREE, 14 LTEX and exactly ONE REFR:
+grass is scattered procedurally from the land texture painted on the terrain.
+`docs/SKYRIM_GRASS_AND_DISTANCE.md` has the record chain and the DATA layout.
+
+The 16 TREE records DO apply with `--plugin-add`, which is worth having on its
+own.
 
 ## Measured
 
