@@ -505,6 +505,7 @@ void RendererBackend::clearGpuScene() {
     }
     m_visibleImportedPageScratch.clear();
     m_visibleImportedTerrainDrawCount = 0;
+    m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     m_importedGiTriangles.clear();
     m_debugImportedGiTriangleCount = 0;
@@ -2146,36 +2147,101 @@ bool RendererBackend::uploadImportedSceneInternal(
         chunkLights.push_back(light);
     }
 
-    for (const odai::importer::ImportedScenePackedVertex& srcVertex : uploadScene.packedVertices) {
-        ImportedMeshVertex dstVertex{};
-        std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-        dstVertex.packedNormal = odai::importer::packImportedVertexNormal(srcVertex.normal);
-        dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color);
-        std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
-        dstVertex.flags = srcVertex.flags;
-        if (srcVertex.textureIndex < importedTextureSlots.size()) {
-            dstVertex.textureIndex = importedTextureSlots[srcVertex.textureIndex];
+    // Packed-source -> GPU-vertex conversion, in parallel. This is pure
+    // per-vertex work -- an octahedral normal encode, an sRGB colour encode
+    // (three pow() calls), and the bindless-slot remaps -- and it was the
+    // single largest cost of applying a streamed chunk: measured with
+    // ODAI_DEBUG_CHUNK_TIMING on Skyrim's persistent cell (2.06M vertices),
+    // 85 ms of a 119 ms apply was this loop, run single-threaded on the
+    // render thread while the frame stalled. Plain std::thread rather than a
+    // job system on purpose: src/render/ has no job-system dependency, the
+    // fan-out is once per streamed cell, and every worker writes a disjoint
+    // range of a pre-sized vector, so there is nothing to synchronize but
+    // join().
+    core::Stopwatch subTimer;
+    vertices.resize(uploadScene.packedVertices.size());
+    std::vector<ImportedShadowVertex> shadowVertices(uploadScene.packedVertices.size());
+    const float subResizeMs = subTimer.elapsedMs();
+    subTimer.restart();
+    {
+        const auto convertRange = [&](std::size_t begin, std::size_t end) {
+            for (std::size_t v = begin; v < end; ++v) {
+                const odai::importer::ImportedScenePackedVertex& srcVertex =
+                    uploadScene.packedVertices[v];
+                ImportedMeshVertex dstVertex{};
+                std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
+                dstVertex.packedNormal =
+                    odai::importer::packImportedVertexNormal(srcVertex.normal);
+                dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color);
+                std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
+                dstVertex.flags = srcVertex.flags;
+                if (srcVertex.textureIndex < importedTextureSlots.size()) {
+                    dstVertex.textureIndex = importedTextureSlots[srcVertex.textureIndex];
+                } else {
+                    dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+                }
+                // Terrain layer slots need the same scene-index -> bindless-slot
+                // remap as textureIndex above. An unmapped layer becomes the
+                // invalid slot and the shader skips it, rather than sampling
+                // whatever descriptor happens to sit at the unremapped index.
+                std::uint32_t remappedLayers[4] = {};
+                for (std::size_t layer = 0; layer < 4; ++layer) {
+                    const std::uint32_t sourceIndex = srcVertex.layerTextureIndex[layer];
+                    remappedLayers[layer] = sourceIndex < importedTextureSlots.size()
+                        ? importedTextureSlots[sourceIndex]
+                        : std::numeric_limits<std::uint32_t>::max();
+                }
+                dstVertex.packedLayerTexture01 = odai::importer::packImportedVertexLayerPair(
+                    remappedLayers[0], remappedLayers[1]);
+                dstVertex.packedLayerTexture23 = odai::importer::packImportedVertexLayerPair(
+                    remappedLayers[2], remappedLayers[3]);
+                dstVertex.layerWeights = srcVertex.layerWeights;
+                vertices[v] = dstVertex;
+                // The compact shadow stream is derived in the same pass: it is
+                // a strict projection of the vertex just built, and deriving it
+                // in a second 2M-iteration loop afterwards was measured inside
+                // the same phase this parallelism exists to shrink.
+                ImportedShadowVertex shadowVertex{};
+                shadowVertex.position[0] = dstVertex.position[0];
+                shadowVertex.position[1] = dstVertex.position[1];
+                shadowVertex.position[2] = dstVertex.position[2];
+                shadowVertex.uv[0] = dstVertex.uv[0];
+                shadowVertex.uv[1] = dstVertex.uv[1];
+                shadowVertex.textureIndex = dstVertex.textureIndex;
+                shadowVertex.flags = dstVertex.flags;
+                shadowVertices[v] = shadowVertex;
+            }
+        };
+        const std::size_t vertexCount = uploadScene.packedVertices.size();
+        // Fan out only when it can pay for the thread launches: a typical
+        // exterior cell is 30-70k vertices and converts in a few ms, and eight
+        // thread spawns cost real time on their own. The threshold is where the
+        // single-threaded loop starts to visibly outrun a frame.
+        constexpr std::size_t kParallelConvertThreshold = 200000u;
+        const std::size_t workerCount = std::min<std::size_t>(
+            {std::size_t{8},
+             std::max<std::size_t>(std::thread::hardware_concurrency(), 2u) - 1u,
+             vertexCount / (kParallelConvertThreshold / 2u)});
+        if (vertexCount >= kParallelConvertThreshold && workerCount >= 2u) {
+            std::vector<std::thread> workers;
+            workers.reserve(workerCount);
+            const std::size_t stride = (vertexCount + workerCount - 1u) / workerCount;
+            for (std::size_t worker = 0; worker < workerCount; ++worker) {
+                const std::size_t begin = worker * stride;
+                const std::size_t end = std::min(vertexCount, begin + stride);
+                if (begin < end) {
+                    workers.emplace_back(convertRange, begin, end);
+                }
+            }
+            for (std::thread& worker : workers) {
+                worker.join();
+            }
         } else {
-            dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
+            convertRange(0u, vertexCount);
         }
-        // Terrain layer slots need the same scene-index -> bindless-slot remap
-        // as textureIndex above. An unmapped layer becomes the invalid slot and
-        // the shader skips it, rather than sampling whatever descriptor happens
-        // to sit at the unremapped index.
-        std::uint32_t remappedLayers[4] = {};
-        for (std::size_t layer = 0; layer < 4; ++layer) {
-            const std::uint32_t sourceIndex = srcVertex.layerTextureIndex[layer];
-            remappedLayers[layer] = sourceIndex < importedTextureSlots.size()
-                ? importedTextureSlots[sourceIndex]
-                : std::numeric_limits<std::uint32_t>::max();
-        }
-        dstVertex.packedLayerTexture01 =
-            odai::importer::packImportedVertexLayerPair(remappedLayers[0], remappedLayers[1]);
-        dstVertex.packedLayerTexture23 =
-            odai::importer::packImportedVertexLayerPair(remappedLayers[2], remappedLayers[3]);
-        dstVertex.layerWeights = srcVertex.layerWeights;
-        vertices.push_back(dstVertex);
     }
+    const float subConvertMs = subTimer.elapsedMs();
+    subTimer.restart();
     indices.assign(uploadScene.packedIndices.begin(), uploadScene.packedIndices.end());
     const bool importedSceneIsInterior =
         odai::importer::importedSceneSourceTagIsInterior(uploadScene.sourceTag);
@@ -2581,21 +2647,12 @@ bool RendererBackend::uploadImportedSceneInternal(
     // Compact shadow stream: the same vertices with only what the cascades read.
     // Allocated from the same vertex range as the main stream, so one
     // ImportedMeshDraw::vertexOffset addresses both despite the differing stride.
-    std::vector<ImportedShadowVertex> shadowVertices;
-    shadowVertices.reserve(vertices.size());
-    for (const ImportedMeshVertex& vertex : vertices) {
-        ImportedShadowVertex shadowVertex{};
-        shadowVertex.position[0] = vertex.position[0];
-        shadowVertex.position[1] = vertex.position[1];
-        shadowVertex.position[2] = vertex.position[2];
-        shadowVertex.uv[0] = vertex.uv[0];
-        shadowVertex.uv[1] = vertex.uv[1];
-        shadowVertex.textureIndex = vertex.textureIndex;
-        shadowVertex.flags = vertex.flags;
-        shadowVertices.push_back(shadowVertex);
-    }
-
     vertexMs = phaseTimer.elapsedMs();
+    if (logChunkTiming) {
+        VOX_LOGI("render") << "  vertexStreams sub (ms): resize=" << subResizeMs
+                           << " convert=" << subConvertMs
+                           << " rest=" << subTimer.elapsedMs();
+    }
     phaseTimer.restart();
 
     // Carve this scene's geometry out of the shared arenas. Growing first and
