@@ -403,6 +403,14 @@ void CellStreamer::update(
                         result.cacheLoadMs = cacheTimer.elapsedMs();
                         result.buildMs = buildTimer.elapsedMs();
                         result.blendedParts = countBlendedDraws(result.scene);
+                        // Counted from the loaded scene, like blendedParts
+                        // above: this stat is the log line's whole evidence
+                        // that water exists, and counting it only on the build
+                        // path made every warm-cache run report waterCells=0
+                        // while the water rendered fine -- which reads as the
+                        // fix having regressed, twenty minutes after it
+                        // demonstrably worked.
+                        result.waterPatches = result.scene.waterPatches.size();
                         std::lock_guard<std::mutex> lock(pending->mutex);
                         pending->completed.push_back(std::move(result));
                         if (pending->inFlight > 0u) {
