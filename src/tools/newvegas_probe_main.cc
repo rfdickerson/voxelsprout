@@ -1960,6 +1960,17 @@ int probeBuildCell(
         std::cout << "  terrain normals (engine space, mean over " << mesh.vertices.size()
                   << " posts): (" << (sum[0] / count) << "," << (sum[1] / count) << ","
                   << (sum[2] / count) << ")\n";
+        // VCLR, which MULTIPLIES the sampled texture. A dark mean here is the
+        // difference between "the land texture is wrong" and "the land texture
+        // is fine and something is multiplying it to black".
+        double colorSum[3] = {0.0, 0.0, 0.0};
+        for (const auto& vertex : mesh.vertices) {
+            for (int channel = 0; channel < 3; ++channel) {
+                colorSum[channel] += vertex.color[channel];
+            }
+        }
+        std::cout << "  terrain vertex colour (VCLR, mean): (" << (colorSum[0] / count) << ","
+                  << (colorSum[1] / count) << "," << (colorSum[2] / count) << ")\n";
         break;
     }
     // And the same normals once they have been through the PACKED stream, which
@@ -2060,6 +2071,40 @@ int probeBuildCell(
               << " baseHasNoModel=" << stats.referencesDroppedBaseHasNoModel
               << " meshUnresolved=" << stats.referencesDroppedMeshUnresolved
               << " meshUnreadable=" << stats.referencesDroppedMeshUnreadable << ")\n";
+    // Name the dropped bases, not only count them: "STAT=21 baseHasNoModel"
+    // says a fifth of Whiterun is missing and nothing else; the formIDs are
+    // what --formid can then answer for.
+    if (!builder.failedStatics().empty()) {
+        std::cout << "  dropped base records (formID reason [type] editorID/model):\n";
+        std::size_t shown = 0;
+        for (const auto& [baseFormId, reason] : builder.failedStatics()) {
+            if (reason == CellSceneBuilder::StaticDropReason::kIntentional) {
+                continue;
+            }
+            if (++shown > 24u) {
+                std::cout << "    ...\n";
+                break;
+            }
+            const char* reasonName = "?";
+            switch (reason) {
+                case CellSceneBuilder::StaticDropReason::kBaseNotFound: reasonName = "baseNotFound"; break;
+                case CellSceneBuilder::StaticDropReason::kBaseHasNoModel: reasonName = "baseHasNoModel"; break;
+                case CellSceneBuilder::StaticDropReason::kMeshUnresolved: reasonName = "meshUnresolved"; break;
+                case CellSceneBuilder::StaticDropReason::kMeshUnreadable: reasonName = "meshUnreadable"; break;
+                case CellSceneBuilder::StaticDropReason::kIntentional: break;
+            }
+            const auto typeIt = tables.staticRecordTypes.find(baseFormId);
+            const auto editorIt = tables.staticEditorIds.find(baseFormId);
+            const auto modelIt = tables.staticModelPaths.find(baseFormId);
+            std::cout << "    0x" << std::hex << baseFormId << std::dec << "  " << reasonName
+                      << "  [" << (typeIt != tables.staticRecordTypes.end() ? typeIt->second : "?")
+                      << "]  "
+                      << (editorIt != tables.staticEditorIds.end() ? editorIt->second : "")
+                      << "  "
+                      << (modelIt != tables.staticModelPaths.end() ? modelIt->second : "<no model>")
+                      << "\n";
+        }
+    }
     if (!stats.droppedReferencesByBaseType.empty()) {
         // Sorted so two runs can be diffed, and by count so the one worth
         // chasing is first.

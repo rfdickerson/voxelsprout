@@ -263,10 +263,12 @@ private:
     std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
     std::unordered_set<std::string> m_failedTexturePaths;
     std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
+public:
     // Why a base record stopped producing geometry, so a REPEAT reference to it
     // can be attributed to the same cause instead of only the first one being
     // explained. kIntentional covers the deliberate skips, which are counted
-    // elsewhere and must not be counted again here.
+    // elsewhere and must not be counted again here. Public because
+    // failedStatics() below hands the map to diagnostics.
     enum class StaticDropReason : std::uint8_t {
         kIntentional,
         kBaseNotFound,
@@ -274,8 +276,19 @@ private:
         kMeshUnresolved,
         kMeshUnreadable,
     };
+
+private:
     void noteDroppedReference(std::uint32_t baseFormId, StaticDropReason reason);
     std::unordered_map<std::uint32_t, StaticDropReason> m_failedStatics;
+
+public:
+    // Which base records produced no geometry, and why -- for diagnostics that
+    // want to name the culprits rather than only count them.
+    [[nodiscard]] const std::unordered_map<std::uint32_t, StaticDropReason>& failedStatics() const {
+        return m_failedStatics;
+    }
+
+private:
     std::uint32_t m_fallbackLandTexture = 0xFFFFFFFFu;
     std::size_t m_textureBudget = 1000u;
     std::uint32_t m_maxTextureSize = 512u;

@@ -126,7 +126,10 @@ std::string cellAxisToken(std::int32_t value) {
 //     dropping that geometry
 // 27: streamed cells carry their water again -- the cell index never held
 //     XCLW, so every river, lake and sea existed only in cooked scenes
-constexpr int kCellBuildVersion = 27;
+// 28: FLOR records place (Whiterun's garlic braids), and TES5 ARMO world
+//     models come from MOD2 -- its MODL is a binary armature list that was
+//     being read as a path made of formID bytes
+constexpr int kCellBuildVersion = 28;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

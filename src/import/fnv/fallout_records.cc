@@ -90,10 +90,37 @@ bool isModelBearingBaseType(std::string_view type) {
            type == "TERM" || type == "LIGH" || type == "BOOK" || type == "KEYM" ||
            type == "ALCH" || type == "AMMO" || type == "WEAP" || type == "ARMO" ||
            type == "NOTE" || type == "IMOD" || type == "CCRD" || type == "CHIP" ||
-           type == "CMNY" || type == "SCOL";
+           type == "CMNY" || type == "SCOL" ||
+           // FLOR is the TES harvestable-plant record (Skyrim hangs Whiterun's
+           // garlic braids and gourds from it; Oblivion uses it for every
+           // ingredient plant). It is an ordinary MODL carrier, and leaving it
+           // out of this list read as "plants randomly missing" rather than as
+           // a type filter.
+           type == "FLOR";
     // PWAT (placeable water) is deliberately excluded: it belongs to the water
     // render path, and going through the opaque static path draws it as a solid
     // pale slab lying across the scene.
+}
+
+// True when the bytes read as a model path a filesystem could hold: printable
+// ASCII, NUL-terminated or not. SKYRIM'S ARMO REPURPOSED "MODL" -- in TES5 that
+// subrecord holds the ARMA armature formID LIST, four binary bytes per entry,
+// and the world model moved to MOD2/MOD4. Reading it as a string hands the
+// asset source a path made of formID bytes, which fails with a warning whose
+// "name" is line noise -- memorable, but only after an evening of staring at
+// it. FNV's ARMO MODL is a real string, so the discriminator has to be the
+// SHAPE of the payload, not the record type.
+bool looksLikeModelPath(const std::string& text) {
+    if (text.empty()) {
+        return false;
+    }
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte < 0x20u || byte >= 0x7fu) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
@@ -104,7 +131,18 @@ void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
         } else if (sub.type == "MODL") {
-            entry.modelPath = subrecordString(sub);
+            const std::string candidate = subrecordString(sub);
+            if (looksLikeModelPath(candidate)) {
+                entry.modelPath = candidate;
+            }
+        } else if (sub.type == "MOD2" && entry.modelPath.empty()) {
+            // TES5 ARMO's male world model. Taken only when MODL yielded
+            // nothing, so every earlier generation -- where MOD2 does not
+            // exist on the records this reads -- is untouched.
+            const std::string candidate = subrecordString(sub);
+            if (looksLikeModelPath(candidate)) {
+                entry.modelPath = candidate;
+            }
         }
     }
     scene.statics.push_back(std::move(entry));
