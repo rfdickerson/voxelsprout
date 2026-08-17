@@ -106,6 +106,11 @@ struct NifModel {
     // ignore them; Bethesda environmental machinery selects one clip and
     // turns its targeted shape groups into runtime rigid animations.
     std::vector<KfAnimation> embeddedAnimations;
+    // A pre-10.0 NiBSAnimationNode requested frame-time playback. Morrowind
+    // animated statics carry independent NiKeyframeController tracks rather
+    // than a named controller sequence, so this is the selection signal the
+    // cell builder uses to play all of those tracks.
+    bool autoPlayEmbeddedAnimations = false;
     // Embedded Gamebryo transform animation was present. Static geometry can
     // still be extracted, but skinned cloth needs a deliberate rest pose when
     // these controllers are not evaluated by the runtime.

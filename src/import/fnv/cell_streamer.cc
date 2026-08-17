@@ -159,7 +159,9 @@ std::string cellAxisToken(std::int32_t value) {
 //     instead of covering boardwalks with a full-cell cyan rectangle.
 // 41: Skyrim's embedded rigid machinery tracks survive cell packing/cache and
 //     animate water wheels plus the sawmill work cycle at runtime.
-constexpr int kCellBuildVersion = 41;
+// 42: Morrowind NiBSAnimationNode statics promote their direct keyframe
+//     controllers into the same runtime rigid-animation path.
+constexpr int kCellBuildVersion = 42;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

@@ -37,6 +37,7 @@ public:
 
     bool readU32(std::uint32_t& out) { return readRaw(&out, 4); }
     bool readI32(std::int32_t& out) { return readRaw(&out, 4); }
+    bool readU16(std::uint16_t& out) { return readRaw(&out, 2); }
     bool readU8(std::uint8_t& out) { return readRaw(&out, 1); }
     bool readFloat(float& out) { return readRaw(&out, 4); }
 
@@ -414,7 +415,8 @@ bool readKeyGroup(
 // rather than in a KeyGroup, and XYZ_ROTATION_KEY replaces the quaternion keys
 // with three separate float KeyGroups), then translation, then scale.
 bool readTransformData(
-    const std::uint8_t* blockData, std::size_t blockSize, KfBoneTrack& track, std::string& outError
+    const std::uint8_t* blockData, std::size_t blockSize, KfBoneTrack& track, std::string& outError,
+    bool xyzHasAxisOrder = false
 ) {
     BlockCursor cursor(blockData, blockSize);
     std::uint32_t rotationKeyCount = 0;
@@ -434,6 +436,11 @@ bool readTransformData(
         // need not match across axes, so the merge is by axis at its own key
         // times -- and rather than resample, this reader takes the union of the
         // three time sets, which for Bethesda's exports are identical anyway.
+        std::uint32_t axisOrder = 0u;
+        if (xyzHasAxisOrder && (!cursor.readU32(axisOrder) || axisOrder > 8u)) {
+            outError = "NiTransformData XYZ axis order unreadable";
+            return false;
+        }
         std::vector<KfVector3Key> eulerByAxis[3];
         for (int axis = 0; axis < 3; ++axis) {
             std::size_t count = 0;
@@ -492,19 +499,45 @@ bool readTransformData(
             const float rx = sampleAxis(eulerByAxis[0], 0, time);
             const float ry = sampleAxis(eulerByAxis[1], 1, time);
             const float rz = sampleAxis(eulerByAxis[2], 2, time);
-            // NIF applies X, then Y, then Z, each about the parent's axes.
+            // Pre-10.1 NIFs carry an explicit Euler axis order. Newer files
+            // omit it and use XYZ.
             const float halfX = rx * 0.5f;
             const float halfY = ry * 0.5f;
             const float halfZ = rz * 0.5f;
             const float sx = std::sin(halfX), cx = std::cos(halfX);
             const float sy = std::sin(halfY), cy = std::cos(halfY);
             const float sz = std::sin(halfZ), cz = std::cos(halfZ);
+            const Quaternion qx{sx, 0.0f, 0.0f, cx};
+            const Quaternion qy{0.0f, sy, 0.0f, cy};
+            const Quaternion qz{0.0f, 0.0f, sz, cz};
+            const auto multiplyQuaternion = [](const Quaternion& a, const Quaternion& b) {
+                return Quaternion{
+                    (a.w * b.x) + (a.x * b.w) + (a.y * b.z) - (a.z * b.y),
+                    (a.w * b.y) - (a.x * b.z) + (a.y * b.w) + (a.z * b.x),
+                    (a.w * b.z) + (a.x * b.y) - (a.y * b.x) + (a.z * b.w),
+                    (a.w * b.w) - (a.x * b.x) - (a.y * b.y) - (a.z * b.z)};
+            };
+            Quaternion first = qx;
+            Quaternion second = qy;
+            Quaternion third = qz;
+            switch (axisOrder) {
+                case 1u: first = qx; second = qz; third = qy; break;  // XZY
+                case 2u: first = qy; second = qz; third = qx; break;  // YZX
+                case 3u: first = qy; second = qx; third = qz; break;  // YXZ
+                case 4u: first = qz; second = qx; third = qy; break;  // ZXY
+                case 5u: first = qz; second = qy; third = qx; break;  // ZYX
+                case 6u: first = qx; second = qy; third = qx; break;  // XYX
+                case 7u: first = qy; second = qz; third = qy; break;  // YZY
+                case 8u: first = qz; second = qx; third = qz; break;  // ZXZ
+                default: break;                                      // XYZ
+            }
             KfQuaternionKey key{};
             key.time = time;
-            key.value.w = (cx * cy * cz) + (sx * sy * sz);
-            key.value.x = (sx * cy * cz) - (cx * sy * sz);
-            key.value.y = (cx * sy * cz) + (sx * cy * sz);
-            key.value.z = (cx * cy * sz) - (sx * sy * cz);
+            // Matrices apply the first authored axis first, so Hamilton
+            // quaternions compose in reverse order. For XYZ this is
+            // qz*qy*qx, exactly the closed-form expression used here before
+            // Morrowind's explicit order field was supported.
+            key.value = multiplyQuaternion(third, multiplyQuaternion(second, first));
             track.rotationKeys.push_back(key);
         }
     } else if (rotationKeyCount != 0) {
@@ -780,6 +813,15 @@ bool parseNifEmbeddedAnimations(
     std::vector<KfAnimation>& outAnimations,
     std::string& outError
 ) {
+    return parseNifEmbeddedAnimations(bytes, {}, outAnimations, outError);
+}
+
+bool parseNifEmbeddedAnimations(
+    const std::vector<std::uint8_t>& bytes,
+    const std::vector<std::string>& targetNamesByBlock,
+    std::vector<KfAnimation>& outAnimations,
+    std::string& outError
+) {
     outAnimations.clear();
     NifBlockSummary summary;
     if (!parseNifBlockSummary(bytes, summary, outError)) {
@@ -795,6 +837,100 @@ bool parseNifEmbeddedAnimations(
             return false;
         }
         outAnimations.push_back(std::move(animation));
+    }
+
+    // Morrowind predates NiControllerSequence. An animated static instead
+    // points directly from each NiAVObject to a NiKeyframeController, whose
+    // target ref points back to that object and whose final ref names a
+    // NiKeyframeData block. NiBSAnimationNode's autoplay flag is handled by
+    // the geometry reader; this layer only turns the independent controllers
+    // into the same named-track representation newer embedded clips use.
+    if (!targetNamesByBlock.empty()) {
+        for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+            if (summary.blockTypeNames[i] != "NiKeyframeController") {
+                continue;
+            }
+            BlockCursor cursor(
+                bytes.data() + summary.blockStarts[i], summary.blockSizes[i]);
+            std::int32_t nextController = -1;
+            std::uint16_t flags = 0u;
+            float frequency = 1.0f;
+            float phase = 0.0f;
+            float startTime = 0.0f;
+            float stopTime = 0.0f;
+            std::int32_t targetRef = -1;
+            std::int32_t dataRef = -1;
+            if (!cursor.readI32(nextController) || !cursor.readU16(flags) ||
+                !cursor.readFloat(frequency) || !cursor.readFloat(phase) ||
+                !cursor.readFloat(startTime) || !cursor.readFloat(stopTime) ||
+                !cursor.readI32(targetRef) || !cursor.readI32(dataRef)) {
+                outError = "NiKeyframeController truncated";
+                outAnimations.clear();
+                return false;
+            }
+            (void)nextController;
+            if (!std::isfinite(frequency) || frequency <= 0.0f ||
+                !std::isfinite(phase) || !std::isfinite(startTime) ||
+                !std::isfinite(stopTime) || stopTime < startTime) {
+                outError = "NiKeyframeController has implausible timing";
+                outAnimations.clear();
+                return false;
+            }
+            if (targetRef < 0 || static_cast<std::size_t>(targetRef) >= targetNamesByBlock.size() ||
+                targetNamesByBlock[static_cast<std::size_t>(targetRef)].empty()) {
+                continue;
+            }
+            if (dataRef < 0 || static_cast<std::size_t>(dataRef) >= summary.blockTypeNames.size() ||
+                summary.blockTypeNames[static_cast<std::size_t>(dataRef)] != "NiKeyframeData") {
+                outError = "NiKeyframeController data ref is not NiKeyframeData";
+                outAnimations.clear();
+                return false;
+            }
+
+            KfAnimation animation;
+            animation.name = targetNamesByBlock[static_cast<std::size_t>(targetRef)];
+            animation.startTime = startTime;
+            animation.stopTime = stopTime;
+            switch (flags & 0x6u) {
+                case 0u: animation.cycleType = 0u; break;  // cycle
+                case 2u: animation.cycleType = 1u; break;  // reverse
+                default: animation.cycleType = 2u; break;  // constant/clamp
+            }
+            KfBoneTrack track;
+            track.nodeName = animation.name;
+            const std::size_t keyBlock = static_cast<std::size_t>(dataRef);
+            if (!readTransformData(
+                    bytes.data() + summary.blockStarts[keyBlock], summary.blockSizes[keyBlock],
+                    track, outError, /*xyzHasAxisOrder=*/true)) {
+                outAnimations.clear();
+                return false;
+            }
+
+            // Runtime time is in seconds. Vurt's controllers use frequency 1
+            // and phase 0; scaling here also preserves any non-unit frequency.
+            // ImportedScene's rigid sampler has no phase field. Keep the clip
+            // relative to its authored start; this is exact for these assets
+            // and gives a deterministic start pose for unusual phased files.
+            const float inverseFrequency = 1.0f / frequency;
+            (void)phase;
+            const float keyOrigin = startTime;
+            const auto rebaseVectorKeys = [&](std::vector<KfVector3Key>& keys) {
+                for (KfVector3Key& key : keys) {
+                    key.time = (key.time - keyOrigin) * inverseFrequency;
+                }
+            };
+            rebaseVectorKeys(track.translationKeys);
+            for (KfQuaternionKey& key : track.rotationKeys) {
+                key.time = (key.time - keyOrigin) * inverseFrequency;
+            }
+            rebaseVectorKeys(track.scaleKeys);
+            animation.startTime = 0.0f;
+            animation.stopTime = (stopTime - startTime) * inverseFrequency;
+            animation.stats.controlledBlocks = 1u;
+            animation.stats.transformInterpolators = 1u;
+            animation.tracks.push_back(std::move(track));
+            outAnimations.push_back(std::move(animation));
+        }
     }
     return true;
 }

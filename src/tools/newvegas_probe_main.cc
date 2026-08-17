@@ -1990,6 +1990,25 @@ int probeBuildCell(
         std::cout << "asset source FAILED to open " << dataPath << "\n";
         return 1;
     }
+    // Match the runtime streamer's asset override path so --buildcell can
+    // verify a loose replacer in the actual scene it changes. This is the same
+    // colon-separated convention used by odai_game_newvegas.
+    if (const char* mods = std::getenv("ODAI_FNV_MODS")) {
+        std::string root;
+        for (const char* cursor = mods; ; ++cursor) {
+            if (*cursor == ':' || *cursor == '\0') {
+                if (!root.empty()) {
+                    assets.addModDirectory(std::filesystem::path(root));
+                    root.clear();
+                }
+                if (*cursor == '\0') {
+                    break;
+                }
+            } else {
+                root.push_back(*cursor);
+            }
+        }
+    }
 
     // Per-quadrant BASE texture, which is what an untextured-looking terrain
     // comes down to: BTXT names an LTEX per quadrant, and a quadrant naming

@@ -2991,7 +2991,10 @@ bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
         return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 4u + 4u);
     }
     if (typeName == "NiStencilProperty") {
-        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 1u + 4u * 6u);
+        // flags + enabled byte, then test function, stencil ref, mask, fail,
+        // z-fail, pass and draw mode. The last field used to be omitted here,
+        // leaving the no-size-table walk four bytes before the next block.
+        return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 1u + 4u * 7u);
     }
     if (typeName == "NiFogProperty") {
         return consumeMorrowindObjectNet(cursor) && cursor.skip(2u + 4u + 12u);
@@ -3368,7 +3371,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
         if (typeName == "NiControllerManager" || typeName == "NiControllerSequence" ||
             typeName == "NiTransformController" ||
-            typeName == "NiMultiTargetTransformController") {
+            typeName == "NiMultiTargetTransformController" ||
+            typeName == "NiKeyframeController") {
             outModel.hasEmbeddedTransformAnimation = true;
         }
         ByteCursor blockCursor(
@@ -3393,6 +3397,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
                 nodeFields[i] = std::move(fields);
                 isNiNode[i] = true;
+                if (typeName == "NiBSAnimationNode" &&
+                    (nodeFields[i].flags & 0x20u) != 0u) {
+                    outModel.autoPlayEmbeddedAnimations = true;
+                }
                 for (const std::int32_t child : nodeFields[i].children) {
                     referencedAsChild.insert(child);
                 }
@@ -3513,8 +3521,19 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
 
     std::unordered_set<std::string> animatedNodeNames;
     if (outModel.hasEmbeddedTransformAnimation) {
+        std::vector<std::string> targetNamesByBlock(numBlocks);
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            if (!nodeFields[i].name.empty()) {
+                targetNamesByBlock[i] = nodeFields[i].name;
+            } else if (nodeFields[i].nameRef >= 0 &&
+                       static_cast<std::size_t>(nodeFields[i].nameRef) < header.strings.size()) {
+                targetNamesByBlock[i] =
+                    header.strings[static_cast<std::size_t>(nodeFields[i].nameRef)];
+            }
+        }
         std::string animationError;
-        if (parseNifEmbeddedAnimations(bytes, outModel.embeddedAnimations, animationError)) {
+        if (parseNifEmbeddedAnimations(
+                bytes, targetNamesByBlock, outModel.embeddedAnimations, animationError)) {
             for (const KfAnimation& animation : outModel.embeddedAnimations) {
                 for (const KfBoneTrack& track : animation.tracks) {
                     if (!track.nodeName.empty()) {
@@ -3762,7 +3781,9 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             const GeometryBlock& src = geometry[dataRef];
             NifShape shape;
             const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
-            if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+            if (!nodeFields[blockIndex].name.empty()) {
+                shape.name = nodeFields[blockIndex].name;
+            } else if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                 shape.name = header.strings[static_cast<std::size_t>(nameRef)];
             }
             if (animationOwner >= 0) {

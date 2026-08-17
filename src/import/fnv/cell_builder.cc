@@ -1730,9 +1730,25 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         selectedMachineryClip = &*clipIt;
                     }
                 }
+                std::vector<const KfAnimation*> selectedRigidClips;
+                if (nifModel.autoPlayEmbeddedAnimations) {
+                    selectedRigidClips.reserve(nifModel.embeddedAnimations.size());
+                    for (const KfAnimation& animation : nifModel.embeddedAnimations) {
+                        selectedRigidClips.push_back(&animation);
+                    }
+                }
+                if (selectedMachineryClip != nullptr &&
+                    std::find(
+                        selectedRigidClips.begin(), selectedRigidClips.end(),
+                        selectedMachineryClip) == selectedRigidClips.end()) {
+                    selectedRigidClips.push_back(selectedMachineryClip);
+                }
                 std::unordered_map<std::string, std::uint32_t> rigidAnimationByNode;
-                if (selectedMachineryClip != nullptr) {
-                    for (const KfBoneTrack& track : selectedMachineryClip->tracks) {
+                for (const KfAnimation* selectedClip : selectedRigidClips) {
+                    for (const KfBoneTrack& track : selectedClip->tracks) {
+                        if (rigidAnimationByNode.contains(track.nodeName)) {
+                            continue;
+                        }
                         const auto shapeIt = std::find_if(
                             nifModel.shapes.begin(), nifModel.shapes.end(),
                             [&](const NifShape& shape) {
@@ -1743,10 +1759,13 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         }
                         ImportedSceneRigidAnimation animation;
                         animation.nodeName = track.nodeName;
-                        animation.duration = selectedMachineryClip->duration();
-                        // The scripted Activate cycle is intentionally repeated
-                        // by this renderer-only showcase; Idle already loops.
-                        animation.cycleType = 0u;
+                        animation.duration = selectedClip->duration();
+                        // The scripted Skyrim Activate cycle is intentionally
+                        // repeated by this renderer-only showcase. Morrowind's
+                        // direct controllers keep their authored cycle mode.
+                        animation.cycleType = selectedClip == selectedMachineryClip
+                            ? 0u
+                            : selectedClip->cycleType;
                         std::memcpy(
                             animation.parentTransform, shapeIt->animationParentTransform,
                             sizeof(animation.parentTransform));

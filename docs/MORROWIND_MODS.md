@@ -22,7 +22,43 @@ Keep the BAIN directory names. The runtime uses these three roots:
 MW="/home/rfdickerson/.local/share/Steam/steamapps/common/Morrowind/Data Files"
 TD="/home/rfdickerson/.local/share/odai/morrowind/Tamriel_Data_25.05/00 Data Files"
 TR="/home/rfdickerson/.local/share/odai/morrowind/Tamriel_Rebuilt_25.08.12"
+VURT="/home/rfdickerson/.local/share/odai/morrowind/mods/vurt-animated-bc-trees-0.99a/Data Files"
 ```
+
+## Vurt's Animated Bitter Coast trees
+
+The pack is a loose-asset replacer, so it needs no plugin. Extract it once,
+preserving the archive's `Data Files` directory:
+
+```bash
+VURT_ROOT=/home/rfdickerson/.local/share/odai/morrowind/mods/vurt-animated-bc-trees-0.99a
+mkdir -p "$VURT_ROOT"
+unzip -q "/home/rfdickerson/Downloads/Animated BC Trees-56332-0-99a-1746709573.zip" \
+  -d "$VURT_ROOT"
+```
+
+Then place `--mod "$VURT"` after the other asset roots. The four animated
+tree variants use Morrowind's inline `NiKeyframeController` format: their branch
+groups autoplay the authored 6.25-second loop, including animated shadows. The
+other tree and shelf-fungus replacements remain static as authored.
+
+For the Seyda Neen-to-Balmora tour:
+
+```bash
+cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
+ODAI_FNV_TEX_SIZE=1024 ./odai_game_newvegas \
+  --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
+  --mod "$VURT" \
+  --tour-file ../assets/tours/seyda_neen_to_balmora.txt --flythrough 30
+```
+
+The `1024` texture ceiling preserves the pack's foliage atlas beyond the
+viewer's conservative 512-pixel default; lower it first if texture memory is
+tight on an integrated GPU.
+
+The cell cache key includes the mod fingerprint, and cell build version 42
+invalidates older static-tree cells, so enabling the pack does not reuse a
+pre-animation cache.
 
 ## Stream Tamriel Rebuilt
 
@@ -33,6 +69,7 @@ cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
 ./odai_game_newvegas \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
+  --mod "$VURT" \
   --plugin-add TR_Factions.esp
 ```
 

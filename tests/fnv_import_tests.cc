@@ -4908,6 +4908,102 @@ void testMorrowindNifLodNodeSubtypeTail() {
         "NiLODNode includes its switch index, centre and range array in its derived size");
 }
 
+void testMorrowindDirectKeyframeAndStencilSizing() {
+    using namespace odai::importer::fnv;
+
+    std::vector<std::uint8_t> controller;
+    appendPod(controller, static_cast<std::int32_t>(-1));  // next controller
+    appendPod(controller, static_cast<std::uint16_t>(8));  // active + cycle
+    appendPod(controller, 1.0f);                           // frequency
+    appendPod(controller, 0.0f);                           // phase
+    appendPod(controller, 0.0f);                           // start
+    appendPod(controller, 1.0f);                           // stop
+    appendPod(controller, static_cast<std::int32_t>(0));   // target block
+    appendPod(controller, static_cast<std::int32_t>(1));   // NiKeyframeData
+
+    std::vector<std::uint8_t> keyData;
+    appendPod(keyData, static_cast<std::uint32_t>(2));  // quaternion keys
+    appendPod(keyData, static_cast<std::uint32_t>(1));  // linear
+    appendPod(keyData, 0.0f);
+    appendPod(keyData, 1.0f);  // w, x, y, z
+    appendPod(keyData, 0.0f);
+    appendPod(keyData, 0.0f);
+    appendPod(keyData, 0.0f);
+    appendPod(keyData, 1.0f);
+    appendPod(keyData, 0.9238795f);
+    appendPod(keyData, 0.0f);
+    appendPod(keyData, 0.0f);
+    appendPod(keyData, 0.3826834f);
+    appendPod(keyData, static_cast<std::uint32_t>(0));  // translations
+    appendPod(keyData, static_cast<std::uint32_t>(0));  // scales
+
+    std::vector<std::uint8_t> animationFile;
+    const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
+    animationFile.insert(animationFile.end(), header.begin(), header.end());
+    appendPod(animationFile, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(animationFile, static_cast<std::uint32_t>(2));
+    appendSizedString32(animationFile, "NiKeyframeController");
+    animationFile.insert(animationFile.end(), controller.begin(), controller.end());
+    appendSizedString32(animationFile, "NiKeyframeData");
+    animationFile.insert(animationFile.end(), keyData.begin(), keyData.end());
+
+    std::vector<KfAnimation> animations;
+    std::string error;
+    expectTrue(
+        parseNifEmbeddedAnimations(
+            animationFile, std::vector<std::string>{"branch", ""}, animations, error),
+        ("Morrowind direct keyframe parses: " + error).c_str());
+    expectTrue(
+        animations.size() == 1u && animations[0].name == "branch" &&
+            animations[0].loops() && animations[0].tracks.size() == 1u &&
+            animations[0].tracks[0].rotationKeys.size() == 2u,
+        "Morrowind direct controller becomes one named looping rigid track");
+
+    // NiStencilProperty has seven trailing u32 fields in 4.0.0.2. Omitting
+    // drawMode leaves the unsized walk four bytes before the next type name.
+    std::vector<std::uint8_t> stencil;
+    appendPod(stencil, static_cast<std::uint32_t>(0));   // name
+    appendPod(stencil, static_cast<std::int32_t>(-1));   // extra data
+    appendPod(stencil, static_cast<std::int32_t>(-1));   // controller
+    appendPod(stencil, static_cast<std::uint16_t>(0));   // flags
+    stencil.push_back(1u);                               // enabled
+    for (int i = 0; i < 7; ++i) appendPod(stencil, static_cast<std::uint32_t>(0));
+
+    std::vector<std::uint8_t> node;
+    appendPod(node, static_cast<std::uint32_t>(0));      // name
+    appendPod(node, static_cast<std::int32_t>(-1));      // extra data
+    appendPod(node, static_cast<std::int32_t>(-1));      // controller
+    appendPod(node, static_cast<std::uint16_t>(0));      // flags
+    for (int i = 0; i < 3; ++i) appendPod(node, 0.0f);
+    const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    for (float value : identity) appendPod(node, value);
+    appendPod(node, 1.0f);
+    for (int i = 0; i < 3; ++i) appendPod(node, 0.0f);
+    appendPod(node, static_cast<std::uint32_t>(0));      // properties
+    appendPod(node, static_cast<std::uint32_t>(0));      // bounds
+    appendPod(node, static_cast<std::uint32_t>(0));      // children
+    appendPod(node, static_cast<std::uint32_t>(0));      // effects
+
+    std::vector<std::uint8_t> sizingFile;
+    sizingFile.insert(sizingFile.end(), header.begin(), header.end());
+    appendPod(sizingFile, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(sizingFile, static_cast<std::uint32_t>(2));
+    appendSizedString32(sizingFile, "NiStencilProperty");
+    sizingFile.insert(sizingFile.end(), stencil.begin(), stencil.end());
+    appendSizedString32(sizingFile, "NiNode");
+    sizingFile.insert(sizingFile.end(), node.begin(), node.end());
+
+    NifBlockSummary summary;
+    error.clear();
+    expectTrue(
+        parseNifBlockSummary(sizingFile, summary, error),
+        ("Morrowind stencil keeps the next block aligned: " + error).c_str());
+    expectTrue(
+        summary.blockSizes.size() == 2u && summary.blockSizes[0] == stencil.size() &&
+            summary.blockTypeNames[1] == "NiNode",
+        "Morrowind stencil sizing includes its draw-mode field");
+}
+
 void testLandLayerOpacityReconstruction() {
     using namespace odai::importer::fnv;
 
@@ -4978,6 +5074,7 @@ int main() {
     testBethesdaFireParticleEffectClassification();
     testAnimatedBannerSettlesUnderJoltGravity();
     testMorrowindNifLodNodeSubtypeTail();
+    testMorrowindDirectKeyframeAndStencilSizing();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

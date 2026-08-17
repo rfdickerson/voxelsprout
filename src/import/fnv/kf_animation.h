@@ -111,4 +111,13 @@ bool parseNifEmbeddedAnimations(
     std::vector<KfAnimation>& outAnimations,
     std::string& outError);
 
+// As above, plus pre-10.0 inline NiKeyframeController tracks. Morrowind names
+// its target NiAVObjects inside their blocks rather than in a header string
+// table, so the geometry reader supplies one target name per block.
+bool parseNifEmbeddedAnimations(
+    const std::vector<std::uint8_t>& bytes,
+    const std::vector<std::string>& targetNamesByBlock,
+    std::vector<KfAnimation>& outAnimations,
+    std::string& outError);
+
 }  // namespace odai::importer::fnv
