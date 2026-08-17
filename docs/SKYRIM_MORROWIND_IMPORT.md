@@ -2,7 +2,7 @@
 
 Two more Bethesda generations, one on each side of the three this engine already
 reads. Everything below was **measured** against retail installs on 2026-08-14
-using `odai_newvegas_probe` plus byte-level dumps; where a claim is an inference
+using `odai_bethesda_probe` plus byte-level dumps; where a claim is an inference
 rather than something a tool printed, it says so.
 
 The rule from `docs/OBLIVION_IMPORT.md` still holds and matters more with every
@@ -36,7 +36,7 @@ Note Morrowind's is `Data Files`, with a space, not `Data`.
 `Skyrim.esm` walks today, with no code written for it:
 
 ```
-odai_newvegas_probe <SSE Data> --plugin Skyrim.esm
+odai_bethesda_probe <SSE Data> --plugin Skyrim.esm
   Walked 869688 records of 119 types.
     693333  REFR      15966  NAVM
      31465  INFO      15564  LAND
@@ -65,7 +65,7 @@ right for Skyrim.
 Measured after the archive work in section 2 landed:
 
 ```
-odai_newvegas_probe <SSE Data> --nifs 4000
+odai_bethesda_probe <SSE Data> --nifs 4000
   Found 22091 .nif entries across 3 archive(s).
   extract failures  0
   parse failures    0
@@ -108,9 +108,9 @@ than the version, so a v105 archive holding a zlib entry still decodes.
 Result, measured:
 
 ```
-odai_newvegas_probe <SSE Data> --archives
+odai_bethesda_probe <SSE Data> --archives
   Archives: 172918 files indexed, 0 failure(s).     # was: 0 indexed, 23 failures
-odai_newvegas_probe <FNV Data> --archives
+odai_bethesda_probe <FNV Data> --archives
   Archives: 182177 files indexed, 0 failure(s).     # unchanged
 ```
 
@@ -312,11 +312,11 @@ Oblivion's ground or animations without a deliberate mapping.
 SSE="$HOME/.steam/steam/steamapps/common/Skyrim Special Edition/Data"
 MW="$HOME/.steam/steam/steamapps/common/Morrowind/Data Files"
 
-cmake-build-app/odai_newvegas_probe "$SSE" --archives          # 172918 files, 0 failures
-cmake-build-app/odai_newvegas_probe "$SSE" --plugin Skyrim.esm # 869688 records
-cmake-build-app/odai_newvegas_probe "$SSE" --nifs 4000         # 0 failures, 0 shapes
-cmake-build-app/odai_newvegas_probe "$MW"  --archives          # 3 failures, bad magic
-cmake-build-app/odai_newvegas_probe "$MW"  --plugin Morrowind.esm  # Malformed TES3
+cmake-build-app/odai_bethesda_probe "$SSE" --archives          # 172918 files, 0 failures
+cmake-build-app/odai_bethesda_probe "$SSE" --plugin Skyrim.esm # 869688 records
+cmake-build-app/odai_bethesda_probe "$SSE" --nifs 4000         # 0 failures, 0 shapes
+cmake-build-app/odai_bethesda_probe "$MW"  --archives          # 3 failures, bad magic
+cmake-build-app/odai_bethesda_probe "$MW"  --plugin Morrowind.esm  # Malformed TES3
 ctest --test-dir cmake-build-linux --output-on-failure
 ```
 

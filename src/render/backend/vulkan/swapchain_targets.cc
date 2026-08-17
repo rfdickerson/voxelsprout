@@ -735,6 +735,19 @@ bool RendererBackend::createHdrResolveTargets() {
     m_waterRefractionImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
     m_waterRefractionTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
     m_waterRefractionImageInitialized.assign(frameTargetCount, false);
+    m_waterReflectionExtent = {
+        std::max(1u, (m_renderExtent.width + 1u) / 2u),
+        std::max(1u, (m_renderExtent.height + 1u) / 2u),
+    };
+    m_waterReflectionImages.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_waterReflectionImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_waterReflectionTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+    m_waterReflectionImageInitialized.assign(frameTargetCount, false);
+    m_waterReflectionDepthImages.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_waterReflectionDepthImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
+    m_waterReflectionDepthTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
+    m_waterReflectionDepthImageInitialized.assign(frameTargetCount, false);
+    m_waterReflectionDepthSampled.assign(frameTargetCount, false);
 
     for (uint32_t i = 0; i < frameTargetCount; ++i) {
         TransientImageDesc hdrResolveDesc{};
@@ -852,6 +865,92 @@ bool RendererBackend::createHdrResolveTargets() {
             vkHandleToUint64(m_waterRefractionImages[i]),
             waterRefractionDesc.debugName.c_str()
         );
+
+        // Planar reflections are deliberately half resolution: their projected
+        // sample is normal-distorted by the water surface, so full-resolution
+        // raster cost does not survive to the final pixel. These targets are
+        // single-sampled and the pass is enabled only when the main pipelines
+        // are single-sampled too (the viewer/showcase default).
+        TransientImageDesc waterReflectionDesc{};
+        waterReflectionDesc.imageType = VK_IMAGE_TYPE_2D;
+        waterReflectionDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        waterReflectionDesc.format = m_hdrColorFormat;
+        waterReflectionDesc.extent = {
+            m_waterReflectionExtent.width, m_waterReflectionExtent.height, 1u};
+        waterReflectionDesc.usage =
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        waterReflectionDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        waterReflectionDesc.mipLevels = 1;
+        waterReflectionDesc.arrayLayers = 1;
+        waterReflectionDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        waterReflectionDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        waterReflectionDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        waterReflectionDesc.firstPass = FrameArenaPass::Main;
+        waterReflectionDesc.lastPass = FrameArenaPass::Main;
+        waterReflectionDesc.debugName =
+            "water.reflection.planar[" + std::to_string(i) + "]";
+        const TransientImageHandle waterReflectionHandle =
+            m_frameArena.createTransientImage(
+                waterReflectionDesc, FrameArenaImageLifetime::Persistent);
+        if (waterReflectionHandle == kInvalidTransientImageHandle) {
+            VOX_LOGE("render") << "failed creating planar water reflection image\n";
+            return false;
+        }
+        const TransientImageInfo* waterReflectionInfo =
+            m_frameArena.getTransientImage(waterReflectionHandle);
+        if (waterReflectionInfo == nullptr ||
+            waterReflectionInfo->image == VK_NULL_HANDLE ||
+            waterReflectionInfo->view == VK_NULL_HANDLE) {
+            VOX_LOGE("render") << "failed creating planar water reflection image\n";
+            return false;
+        }
+        m_waterReflectionTransientHandles[i] = waterReflectionHandle;
+        m_waterReflectionImages[i] = waterReflectionInfo->image;
+        m_waterReflectionImageViews[i] = waterReflectionInfo->view;
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE,
+            vkHandleToUint64(m_waterReflectionImages[i]),
+            waterReflectionDesc.debugName.c_str());
+
+        TransientImageDesc waterReflectionDepthDesc{};
+        waterReflectionDepthDesc.imageType = VK_IMAGE_TYPE_2D;
+        waterReflectionDepthDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        waterReflectionDepthDesc.format = m_depthFormat;
+        waterReflectionDepthDesc.extent = waterReflectionDesc.extent;
+        waterReflectionDepthDesc.usage =
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        waterReflectionDepthDesc.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        waterReflectionDepthDesc.mipLevels = 1;
+        waterReflectionDepthDesc.arrayLayers = 1;
+        waterReflectionDepthDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        waterReflectionDepthDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        waterReflectionDepthDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        waterReflectionDepthDesc.firstPass = FrameArenaPass::Main;
+        waterReflectionDepthDesc.lastPass = FrameArenaPass::Main;
+        waterReflectionDepthDesc.debugName =
+            "water.reflection.depth[" + std::to_string(i) + "]";
+        const TransientImageHandle waterReflectionDepthHandle =
+            m_frameArena.createTransientImage(
+                waterReflectionDepthDesc, FrameArenaImageLifetime::Persistent);
+        if (waterReflectionDepthHandle == kInvalidTransientImageHandle) {
+            VOX_LOGE("render") << "failed creating planar water reflection depth image\n";
+            return false;
+        }
+        const TransientImageInfo* waterReflectionDepthInfo =
+            m_frameArena.getTransientImage(waterReflectionDepthHandle);
+        if (waterReflectionDepthInfo == nullptr ||
+            waterReflectionDepthInfo->image == VK_NULL_HANDLE ||
+            waterReflectionDepthInfo->view == VK_NULL_HANDLE) {
+            VOX_LOGE("render") << "failed creating planar water reflection depth image\n";
+            return false;
+        }
+        m_waterReflectionDepthTransientHandles[i] = waterReflectionDepthHandle;
+        m_waterReflectionDepthImages[i] = waterReflectionDepthInfo->image;
+        m_waterReflectionDepthImageViews[i] = waterReflectionDepthInfo->view;
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE,
+            vkHandleToUint64(m_waterReflectionDepthImages[i]),
+            waterReflectionDepthDesc.debugName.c_str());
     }
 
     if (m_hdrResolveSampler != VK_NULL_HANDLE) {
@@ -886,6 +985,97 @@ bool RendererBackend::createHdrResolveTargets() {
     );
 
     return true;
+}
+
+bool RendererBackend::createWaterReflectionHistoryTargets() {
+    destroyWaterReflectionHistoryTargets();
+    if (m_renderExtent.width == 0u || m_renderExtent.height == 0u) {
+        return false;
+    }
+
+    for (std::uint32_t i = 0; i < 2u; ++i) {
+        TransientImageDesc colorDesc{};
+        colorDesc.imageType = VK_IMAGE_TYPE_2D;
+        colorDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        colorDesc.format = m_hdrColorFormat;
+        colorDesc.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
+        colorDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        colorDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        colorDesc.mipLevels = 1;
+        colorDesc.arrayLayers = 1;
+        colorDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorDesc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        colorDesc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorDesc.firstPass = FrameArenaPass::Main;
+        colorDesc.lastPass = FrameArenaPass::Main;
+        colorDesc.debugName =
+            "water.reflection.history.color[" + std::to_string(i) + "]";
+        const TransientImageHandle colorHandle = m_frameArena.createTransientImage(
+            colorDesc, FrameArenaImageLifetime::Persistent);
+        const TransientImageInfo* colorInfo = m_frameArena.getTransientImage(colorHandle);
+        if (colorHandle == kInvalidTransientImageHandle || colorInfo == nullptr ||
+            colorInfo->image == VK_NULL_HANDLE || colorInfo->view == VK_NULL_HANDLE) {
+            VOX_LOGE("render") << "failed creating water reflection color history\n";
+            destroyWaterReflectionHistoryTargets();
+            return false;
+        }
+        m_waterReflectionHistoryTransientHandles[i] = colorHandle;
+        m_waterReflectionHistoryImages[i] = colorInfo->image;
+        m_waterReflectionHistoryImageViews[i] = colorInfo->view;
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(colorInfo->image),
+            colorDesc.debugName.c_str());
+
+        TransientImageDesc depthDesc = colorDesc;
+        depthDesc.format = VK_FORMAT_R32_SFLOAT;
+        depthDesc.debugName =
+            "water.reflection.history.depth[" + std::to_string(i) + "]";
+        const TransientImageHandle depthHandle = m_frameArena.createTransientImage(
+            depthDesc, FrameArenaImageLifetime::Persistent);
+        const TransientImageInfo* depthInfo = m_frameArena.getTransientImage(depthHandle);
+        if (depthHandle == kInvalidTransientImageHandle || depthInfo == nullptr ||
+            depthInfo->image == VK_NULL_HANDLE || depthInfo->view == VK_NULL_HANDLE) {
+            VOX_LOGE("render") << "failed creating water reflection depth history\n";
+            destroyWaterReflectionHistoryTargets();
+            return false;
+        }
+        m_waterReflectionHistoryDepthTransientHandles[i] = depthHandle;
+        m_waterReflectionHistoryDepthImages[i] = depthInfo->image;
+        m_waterReflectionHistoryDepthImageViews[i] = depthInfo->view;
+        setObjectName(
+            VK_OBJECT_TYPE_IMAGE, vkHandleToUint64(depthInfo->image),
+            depthDesc.debugName.c_str());
+    }
+    m_waterReflectionHistoryImageInitialized = {false, false};
+    m_waterReflectionHistoryDepthInitialized = {false, false};
+    m_waterReflectionHistoryIndex = 0u;
+    m_waterReflectionHistoryValid = false;
+    m_waterReflectionPreviousAvailable = false;
+    m_waterReflectionPreviousPlaneValid = false;
+    return true;
+}
+
+void RendererBackend::destroyWaterReflectionHistoryTargets() {
+    for (std::uint32_t i = 0; i < 2u; ++i) {
+        if (m_waterReflectionHistoryTransientHandles[i] != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(m_waterReflectionHistoryTransientHandles[i]);
+        }
+        if (m_waterReflectionHistoryDepthTransientHandles[i] != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(m_waterReflectionHistoryDepthTransientHandles[i]);
+        }
+        m_waterReflectionHistoryTransientHandles[i] = kInvalidTransientImageHandle;
+        m_waterReflectionHistoryDepthTransientHandles[i] = kInvalidTransientImageHandle;
+        m_waterReflectionHistoryImages[i] = VK_NULL_HANDLE;
+        m_waterReflectionHistoryImageViews[i] = VK_NULL_HANDLE;
+        m_waterReflectionHistoryDepthImages[i] = VK_NULL_HANDLE;
+        m_waterReflectionHistoryDepthImageViews[i] = VK_NULL_HANDLE;
+        m_waterReflectionHistoryImageInitialized[i] = false;
+        m_waterReflectionHistoryDepthInitialized[i] = false;
+    }
+    m_waterReflectionHistoryIndex = 0u;
+    m_waterReflectionHistoryValid = false;
+    m_waterReflectionPreviousAvailable = false;
+    m_waterReflectionPreviousPlaneValid = false;
 }
 
 bool RendererBackend::useMergedDepthPrepass() const {
@@ -1126,6 +1316,28 @@ void RendererBackend::destroyHdrResolveTargets() {
         vkDestroySampler(m_device, m_hdrResolveSampler, nullptr);
         m_hdrResolveSampler = VK_NULL_HANDLE;
     }
+
+    for (TransientImageHandle handle : m_waterReflectionDepthTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
+        }
+    }
+    m_waterReflectionDepthImageViews.clear();
+    m_waterReflectionDepthImages.clear();
+    m_waterReflectionDepthTransientHandles.clear();
+    m_waterReflectionDepthImageInitialized.clear();
+    m_waterReflectionDepthSampled.clear();
+
+    for (TransientImageHandle handle : m_waterReflectionTransientHandles) {
+        if (handle != kInvalidTransientImageHandle) {
+            m_frameArena.destroyTransientImage(handle);
+        }
+    }
+    m_waterReflectionImageViews.clear();
+    m_waterReflectionImages.clear();
+    m_waterReflectionTransientHandles.clear();
+    m_waterReflectionImageInitialized.clear();
+    m_waterReflectionExtent = {};
 
     for (TransientImageHandle handle : m_waterRefractionTransientHandles) {
         if (handle != kInvalidTransientImageHandle) {

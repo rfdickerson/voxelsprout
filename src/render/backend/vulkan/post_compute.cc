@@ -927,6 +927,193 @@ void RendererBackend::destroySsaoComputeResources() {
 // camera-only. The pass samples hdrResolve mip0, blends clamped history, and
 // copies the result back over mip0 so bloom and tonemap stay untouched.
 
+bool RendererBackend::createWaterReflectionResolveResources() {
+    constexpr const char* kShaderPath =
+        "../src/render/shaders/water_reflection_resolve.comp.slang.spv";
+    const char* temporalEnv = std::getenv("ODAI_WATER_REFLECTION_TAA");
+    m_waterReflectionTemporalEnabled = temporalEnv == nullptr || temporalEnv[0] != '0';
+
+    if (m_waterReflectionResolveDescriptorSetLayout == VK_NULL_HANDLE) {
+        std::array<VkDescriptorSetLayoutBinding, 7> bindings{};
+        for (std::uint32_t binding = 0; binding < 4u; ++binding) {
+            bindings[binding].binding = binding;
+            bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[binding].descriptorCount = 1;
+            bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        for (std::uint32_t binding = 4u; binding < 6u; ++binding) {
+            bindings[binding].binding = binding;
+            bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            bindings[binding].descriptorCount = 1;
+            bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        bindings[6].binding = 6u;
+        bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[6].descriptorCount = 1;
+        bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        if (!createDescriptorSetLayout(
+                bindings, m_waterReflectionResolveDescriptorSetLayout,
+                "vkCreateDescriptorSetLayout(waterReflectionResolve)",
+                "renderer.descriptorSetLayout.waterReflectionResolve", nullptr,
+                VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT)) {
+            destroyWaterReflectionResolveResources();
+            return false;
+        }
+    }
+    if (!m_waterReflectionResolveBufferSet.valid() &&
+        !createDescriptorBufferSet(
+            m_waterReflectionResolveDescriptorSetLayout, kMaxFramesInFlight,
+            VK_BUFFER_USAGE_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+                VK_BUFFER_USAGE_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT,
+            "renderer.descriptorBuffer.waterReflectionResolve",
+            m_waterReflectionResolveBufferSet)) {
+        destroyWaterReflectionResolveResources();
+        return false;
+    }
+    if (m_waterReflectionResolvePipeline != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (!createShaderModuleFromFile(
+            m_device, kShaderPath, "water_reflection_resolve.comp", module)) {
+        destroyWaterReflectionResolveResources();
+        return false;
+    }
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0u;
+    pushRange.size = sizeof(WaterReflectionResolvePushConstants);
+    const std::array<VkPushConstantRange, 1> pushRanges = {pushRange};
+    const bool layoutCreated = createComputePipelineLayout(
+        m_waterReflectionResolveDescriptorSetLayout, pushRanges,
+        m_waterReflectionResolvePipelineLayout,
+        "vkCreatePipelineLayout(waterReflectionResolve)",
+        "renderer.pipelineLayout.waterReflectionResolve");
+    const bool pipelineCreated = layoutCreated && createComputePipeline(
+        m_waterReflectionResolvePipelineLayout, module,
+        m_waterReflectionResolvePipeline,
+        "vkCreateComputePipelines(waterReflectionResolve)",
+        "pipeline.waterReflectionResolve",
+        VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT);
+    vkDestroyShaderModule(m_device, module, nullptr);
+    if (!pipelineCreated) {
+        destroyWaterReflectionResolveResources();
+        return false;
+    }
+    return true;
+}
+
+void RendererBackend::destroyWaterReflectionResolveResources() {
+    if (m_waterReflectionResolvePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_waterReflectionResolvePipeline, nullptr);
+        m_waterReflectionResolvePipeline = VK_NULL_HANDLE;
+    }
+    if (m_waterReflectionResolvePipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_waterReflectionResolvePipelineLayout, nullptr);
+        m_waterReflectionResolvePipelineLayout = VK_NULL_HANDLE;
+    }
+    destroyDescriptorBufferSet(m_waterReflectionResolveBufferSet);
+    if (m_waterReflectionResolveDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(
+            m_device, m_waterReflectionResolveDescriptorSetLayout, nullptr);
+        m_waterReflectionResolveDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+}
+
+bool RendererBackend::recordWaterReflectionResolve(
+    VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex) {
+    if (!m_waterReflectionTemporalEnabled ||
+        m_waterReflectionResolvePipeline == VK_NULL_HANDLE ||
+        !m_waterReflectionResolveBufferSet.valid() ||
+        aoFrameIndex >= m_waterReflectionImages.size() ||
+        aoFrameIndex >= m_waterReflectionDepthImages.size()) {
+        return false;
+    }
+    const std::uint32_t current = m_waterReflectionHistoryIndex ^ 1u;
+    const std::uint32_t history = m_waterReflectionHistoryIndex;
+    if (m_waterReflectionHistoryImages[current] == VK_NULL_HANDLE ||
+        m_waterReflectionHistoryImages[history] == VK_NULL_HANDLE ||
+        m_waterReflectionHistoryDepthImages[current] == VK_NULL_HANDLE ||
+        m_waterReflectionHistoryDepthImages[history] == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    beginDebugLabel(
+        commandBuffer, "Pass: Water Reflection Temporal Resolve",
+        0.08f, 0.45f, 0.55f, 1.0f);
+    taaTransitionImage(
+        commandBuffer, m_waterReflectionHistoryImages[current],
+        m_waterReflectionHistoryImageInitialized[current]
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL,
+        m_waterReflectionHistoryImageInitialized[current]
+            ? (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+               VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)
+            : VK_PIPELINE_STAGE_2_NONE,
+        m_waterReflectionHistoryImageInitialized[current]
+            ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+            : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    taaTransitionImage(
+        commandBuffer, m_waterReflectionHistoryDepthImages[current],
+        m_waterReflectionHistoryDepthInitialized[current]
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL,
+        m_waterReflectionHistoryDepthInitialized[current]
+            ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+            : VK_PIPELINE_STAGE_2_NONE,
+        m_waterReflectionHistoryDepthInitialized[current]
+            ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+            : VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    vkCmdBindPipeline(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+        m_waterReflectionResolvePipeline);
+    bindDescriptorBuffer(
+        commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+        m_waterReflectionResolvePipelineLayout, 0u,
+        m_waterReflectionResolveBufferSet, m_currentFrame);
+    WaterReflectionResolvePushConstants push{};
+    push.width = m_renderExtent.width;
+    push.height = m_renderExtent.height;
+    vkCmdPushConstants(
+        commandBuffer, m_waterReflectionResolvePipelineLayout,
+        VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
+    vkCmdDispatch(
+        commandBuffer,
+        (m_renderExtent.width + 7u) / 8u,
+        (m_renderExtent.height + 7u) / 8u,
+        1u);
+
+    taaTransitionImage(
+        commandBuffer, m_waterReflectionHistoryImages[current],
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    taaTransitionImage(
+        commandBuffer, m_waterReflectionHistoryDepthImages[current],
+        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    m_waterReflectionHistoryImageInitialized[current] = true;
+    m_waterReflectionHistoryDepthInitialized[current] = true;
+    m_waterReflectionHistoryIndex = current;
+    m_waterReflectionHistoryValid = true;
+    endDebugLabel(commandBuffer);
+    return true;
+}
+
 bool RendererBackend::createTaaComputeResources() {
     constexpr const char* kTaaShaderPath = "../src/render/shaders/taa.comp.slang.spv";
 

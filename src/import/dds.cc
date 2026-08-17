@@ -10,6 +10,7 @@ namespace {
 
 constexpr std::uint32_t kDdsMagic      = 0x20534444u; // "DDS "
 constexpr std::uint32_t kDdpfFourCC    = 0x4u;
+constexpr std::uint32_t kDdpfRgb       = 0x40u;
 constexpr std::uint32_t kDdsdCaps      = 0x1u;
 constexpr std::uint32_t kDdsdHeight    = 0x2u;
 constexpr std::uint32_t kDdsdWidth     = 0x4u;
@@ -81,6 +82,7 @@ static_assert(sizeof(DdsHeaderDxt10)  == 20);
 std::uint32_t ddsBlockBytes(TextureFormat format) {
     switch (format) {
         case TextureFormat::BC1:
+        case TextureFormat::BC1Linear:
         case TextureFormat::BC4: return 8u;
         case TextureFormat::BC2:
         case TextureFormat::BC3:
@@ -104,10 +106,44 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
     DdsHeader hdr{};
     std::memcpy(&hdr, data + 4u, sizeof(DdsHeader));
     if (hdr.size != 124u || hdr.width == 0u || hdr.height == 0u) return false;
-    if (!(hdr.ddspf.flags & kDdpfFourCC)) return false; // uncompressed not supported
-
     TextureFormat  fmt        = TextureFormat::RGBA8;
     std::size_t    dataOffset = 4u + sizeof(DdsHeader);
+
+    // Skyrim's per-cell water flow fields are legacy 32-bit ARGB DDS files,
+    // not block-compressed textures. Decode their complete mip chain to RGBA8;
+    // the masks are checked explicitly so this cannot reinterpret unrelated
+    // legacy DDS layouts by accident.
+    if ((hdr.ddspf.flags & kDdpfRgb) != 0u &&
+        hdr.ddspf.rgbBitCnt == 32u &&
+        hdr.ddspf.rMask == 0x00ff0000u &&
+        hdr.ddspf.gMask == 0x0000ff00u &&
+        hdr.ddspf.bMask == 0x000000ffu &&
+        hdr.ddspf.aMask == 0xff000000u) {
+        const std::uint32_t mipCount = std::max(1u, hdr.mipMapCount);
+        std::size_t chainBytes = 0u;
+        std::uint32_t mw = hdr.width;
+        std::uint32_t mh = hdr.height;
+        for (std::uint32_t m = 0; m < mipCount; ++m) {
+            chainBytes += static_cast<std::size_t>(mw) * mh * 4u;
+            mw = std::max(1u, mw >> 1u);
+            mh = std::max(1u, mh >> 1u);
+        }
+        if (fileSize < dataOffset + chainBytes) return false;
+        out.width = hdr.width;
+        out.height = hdr.height;
+        out.mipLevelCount = mipCount;
+        out.format = TextureFormat::RGBA8;
+        out.rgba8.resize(chainBytes);
+        for (std::size_t offset = 0u; offset < chainBytes; offset += 4u) {
+            // Stored byte order is BGRA on little-endian hosts.
+            out.rgba8[offset + 0u] = data[dataOffset + offset + 2u];
+            out.rgba8[offset + 1u] = data[dataOffset + offset + 1u];
+            out.rgba8[offset + 2u] = data[dataOffset + offset + 0u];
+            out.rgba8[offset + 3u] = data[dataOffset + offset + 3u];
+        }
+        return true;
+    }
+    if (!(hdr.ddspf.flags & kDdpfFourCC)) return false;
 
     const std::uint32_t fcc = hdr.ddspf.fourCC;
     if      (fcc == kFourCCDxt1) { fmt = TextureFormat::BC1; }
@@ -206,6 +242,7 @@ bool writeDds(const std::filesystem::path& path,
     } else {
         switch (format) {
             case TextureFormat::BC1: fourCC = kFourCCDxt1; break;
+            case TextureFormat::BC1Linear: fourCC = kFourCCDxt1; break;
             case TextureFormat::BC2: fourCC = kFourCCDxt3; break;
             case TextureFormat::BC3: fourCC = kFourCCDxt5; break;
             case TextureFormat::BC4: fourCC = kFourCCAti1; break;

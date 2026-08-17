@@ -51,7 +51,7 @@ constexpr float kLandTextureTilesPerCell = 8.0f;
 constexpr float kExteriorCellSize = kLandPostSpacing * static_cast<float>(kLandGridSize - 1);  // 4096
 
 // Distant-landscape LOD layout, MEASURED from retail archives with
-// `odai_newvegas_probe --find`, not taken from documentation.
+// `odai_bethesda_probe --find`, not taken from documentation.
 //
 // There are TWO separate LOD sets under meshes\landscape\lod\<ws>\, and an
 // earlier reading of this directory conflated them. They are:
@@ -194,7 +194,7 @@ struct FalloutStaticRecord {
 //
 // LIGH.DATA is 32 bytes in every one of the 501 records in FalloutNV.esm (the
 // FO3/FNV split on whether falloff and FOV are present does NOT bite here).
-// Layout read off the file with `odai_newvegas_probe --record FalloutNV.esm
+// Layout read off the file with `odai_bethesda_probe --record FalloutNV.esm
 // LIGH`, then cross-checked against editor IDs rather than assumed:
 //
 //   @0   i32  time              -1 everywhere (unlimited)
@@ -282,6 +282,10 @@ struct FalloutPlacedReference {
     // The record header's own flags. Bit 0x0800 is "Initially Disabled": the
     // game does not render the reference until something enables it.
     std::uint32_t recordFlags = 0;
+    // TES4 uses the record-header Deleted flag; TES3 uses a DELE subrecord
+    // inside the FRMR block. Merged extraction retains the tombstone until all
+    // contributions have been applied, then removes the placement.
+    bool isDeleted = false;
     // XESP: enabled state follows another reference's, optionally inverted.
     bool hasEnableParent = false;
     std::uint32_t enableParentFormId = 0;
@@ -314,6 +318,9 @@ struct FalloutLandTextureLayer {
 
 struct FalloutLandRecord {
     std::uint32_t cellFormId = 0;
+    // The TES3 plugin whose LTEX palette the raw VTEX indices address. Those
+    // indices are local to the source file and cannot be remapped as formIDs.
+    std::size_t sourcePluginIndex = 0;
     // Posts per side. 33 for TES4 onward, 65 for Morrowind -- and the arrays
     // below are sized from it rather than fixed, because at 65 they are four
     // times larger and a fixed worst case would cost every Fallout cell the
@@ -578,6 +585,10 @@ struct FalloutCellContribution {
     std::size_t pluginIndex = 0;
     std::uint64_t childrenGroupOffset = 0;
     std::uint32_t childrenGroupSize = 0;
+    // TES3 LAND is a top-level sibling rather than part of the CELL range.
+    // Later LAND contributions replace earlier terrain independently of CELL.
+    std::uint64_t landRecordOffset = 0;
+    std::uint32_t landRecordSize = 0;
 };
 
 struct FalloutCellIndexEntry {
@@ -660,8 +671,9 @@ struct FalloutCellIndex {
 bool buildFalloutCellIndex(
     const std::filesystem::path& esmPath, FalloutCellIndex& outIndex, std::string& outError);
 
-// As above, across a whole load order. Cells are merged by their REMAPPED
-// formID, so the same cell described by several plugins becomes one entry with
+// As above, across a whole load order. TES4+ cells are merged by their remapped
+// formID; TES3 exteriors merge by grid and interiors by case-insensitive name.
+// The same logical cell described by several plugins becomes one entry with
 // several contributions, and a later plugin's CELL record replaces the earlier
 // one's metadata (editor ID, grid, regions). Every formID the index carries is
 // in the order's global space.

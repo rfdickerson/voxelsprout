@@ -259,6 +259,9 @@ public:
     // silently resetting the rest to struct defaults -- which is exactly what
     // `setTonemapSettings(TonemapSettings{})` does to an ENB configuration.
     [[nodiscard]] TonemapSettings tonemapSettings() const;
+    // Supplies metallic/roughness only when an imported surface has no authored
+    // PBR material. Intended for renderer presets over legacy TES3/TES4 art.
+    void setImportedPbrDefaults(const ImportedPbrDefaults& defaults);
     // Post-process depth of field. Focus is a view distance in world units;
     // blur ramps to maxRadiusPixels over focusRange BEHIND the focal plane and,
     // scaled by nearBlurScale, over focusRange/nearBlurScale IN FRONT of it.

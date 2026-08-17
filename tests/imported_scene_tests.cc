@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "import/gpu_scene.h"
+#include "import/dds.h"
 #include "import/imported_scene.h"
 #include "import/imported_scene_query.h"
 
@@ -98,6 +99,8 @@ void testImportedSceneSerialization() {
     waterPatch.sizeX = 128.0f;
     waterPatch.sizeZ = 64.0f;
     waterPatch.waterLevel = 4.0f;
+    waterPatch.normalTextureIndex = 3u;
+    waterPatch.flowTextureIndex = 5u;
     scene.waterPatches.push_back(waterPatch);
 
     ImportedSceneLight light{};
@@ -162,6 +165,9 @@ void testImportedSceneSerialization() {
     expectNear(loaded.unresolvedRefs.front().scale, unresolved.scale, 1e-6f, "Imported scene unresolved ref scale round-trips");
     expectTrue(loaded.waterPatches.size() == 1u, "Imported scene water patch count round-trips");
     expectNear(loaded.waterPatches.front().waterLevel, waterPatch.waterLevel, 1e-6f, "Imported scene water patch level round-trips");
+    expectTrue(loaded.waterPatches.front().normalTextureIndex == 3u &&
+                   loaded.waterPatches.front().flowTextureIndex == 5u,
+               "Imported scene water texture indices round-trip");
     expectTrue(loaded.lights.size() == 1u, "Imported scene light count round-trips");
     expectTrue(loaded.lights.front().sourceId == light.sourceId, "Imported scene light id round-trips");
     expectNear(loaded.lights.front().position[1], light.position[1], 1e-6f, "Imported scene light position round-trips");
@@ -463,6 +469,46 @@ void testTextureFormatRoundTrip() {
                "Texture format survives the runtime load path");
 
     fs::remove(scenePath);
+}
+
+void testLegacyArgbWaterFlowDds() {
+    using odai::importer::ImportedSceneTexture;
+    using odai::importer::TextureFormat;
+
+    // Minimal 1x1 legacy DDS matching Skyrim's per-cell flow maps: 32-bit
+    // ARGB masks, stored as BGRA bytes. No filesystem or retail data required.
+    std::vector<std::uint8_t> dds(132u, 0u);
+    const auto putU32 = [&](std::size_t offset, std::uint32_t value) {
+        std::memcpy(dds.data() + offset, &value, sizeof(value));
+    };
+    putU32(0u, 0x20534444u);   // "DDS "
+    putU32(4u, 124u);
+    putU32(8u, 0x0000100fu);
+    putU32(12u, 1u);           // height
+    putU32(16u, 1u);           // width
+    putU32(20u, 4u);           // pitch
+    putU32(28u, 1u);           // mip count
+    putU32(76u, 32u);          // pixel format size
+    putU32(80u, 0x41u);        // RGB | alpha pixels
+    putU32(88u, 32u);
+    putU32(92u, 0x00ff0000u);
+    putU32(96u, 0x0000ff00u);
+    putU32(100u, 0x000000ffu);
+    putU32(104u, 0xff000000u);
+    putU32(108u, 0x1000u);     // texture caps
+    dds[128u] = 11u;           // B
+    dds[129u] = 22u;           // G
+    dds[130u] = 33u;           // R
+    dds[131u] = 44u;           // A
+
+    ImportedSceneTexture texture{};
+    expectTrue(odai::importer::loadDdsFromMemory(dds.data(), dds.size(), texture),
+               "Skyrim legacy ARGB water-flow DDS decodes");
+    expectTrue(texture.width == 1u && texture.height == 1u &&
+                   texture.format == TextureFormat::RGBA8,
+               "Legacy water-flow DDS keeps dimensions and becomes RGBA8");
+    expectTrue(texture.rgba8 == std::vector<std::uint8_t>({33u, 22u, 11u, 44u}),
+               "Legacy water-flow DDS swizzles BGRA storage to RGBA sampling");
 }
 
 void testBlockCompressedAlphaCutoutDetection() {
@@ -958,6 +1004,8 @@ void testVertexColorTintFlag() {
     expectTrue(!scene.packedVertices.empty(), "tinted terrain packs vertices");
     if (!scene.packedVertices.empty()) {
         const ImportedScenePackedVertex& packed = scene.packedVertices[0];
+        expectTrue((packed.flags & kImportedSceneMaterialFlagTerrainSlopeBlend) != 0u,
+                   "terrain packing marks terrain for runtime material presets");
         expectNear(packed.color[0], 0.5f, 1e-5f, "authored vertex colour reaches the packed stream");
         expectNear(packed.color[2], 0.125f, 1e-5f, "authored vertex colour keeps its blue channel");
         expectTrue((packed.flags & kImportedSceneMaterialFlagVertexColorTint) != 0u,
@@ -1235,6 +1283,7 @@ int main() {
     testImportedSceneSourceTagInteriorClassification();
     testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
     testTextureFormatRoundTrip();
+    testLegacyArgbWaterFlowDds();
     testBlockCompressedAlphaCutoutDetection();
     testPageRangeBuildAndRoundTrip();
     testMaterialLibraryRoundTrip();

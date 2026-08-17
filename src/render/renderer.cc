@@ -376,6 +376,10 @@ TonemapSettings Renderer::tonemapSettings() const {
     return m_backend->tonemapSettings();
 }
 
+void Renderer::setImportedPbrDefaults(const ImportedPbrDefaults& defaults) {
+    m_backend->setImportedPbrDefaults(defaults);
+}
+
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,
                                float maxRadiusPixels, float nearBlurScale) {
     m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels, nearBlurScale);

@@ -256,6 +256,11 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
     if (!runStep("createTaaComputeResources", [&] { return createTaaComputeResources(); })) {
         return false;
     }
+    if (!runStep("createWaterReflectionResolveResources", [&] {
+            return createWaterReflectionResolveResources();
+        })) {
+        return false;
+    }
     if (!runStep("createSsaoComputeResources", [&] { return createSsaoComputeResources(); })) {
         VOX_LOGE("render") << "init failed at createSsaoComputeResources\n";
         shutdown();
@@ -2006,6 +2011,10 @@ bool RendererBackend::createSwapchain() {
         VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
     }
+    if (!createWaterReflectionHistoryTargets()) {
+        VOX_LOGE("render") << "water reflection history target creation failed\n";
+        return false;
+    }
     if (!createMsaaColorTargets()) {
         VOX_LOGE("render") << "MSAA color target creation failed\n";
         return false;
@@ -2204,6 +2213,7 @@ bool RendererBackend::recreateSwapchain() {
 void RendererBackend::destroySwapchain() {
     resetDisplayTimingTracking();
     destroyTaaTargets();
+    destroyWaterReflectionHistoryTargets();
     destroyHdrResolveTargets();
     destroyMsaaColorTargets();
     destroyDepthTargets();
@@ -2474,6 +2484,7 @@ void RendererBackend::shutdown() {
         destroyLightClusterResources();
         destroyContactShadowResources();
         destroyScreenSpaceGiResources();
+        destroyWaterReflectionResolveResources();
         destroyTaaComputeResources();
         destroyFrameCaptureResources();
         destroySkinnedVelocityResources();

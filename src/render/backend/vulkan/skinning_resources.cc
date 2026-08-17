@@ -593,7 +593,7 @@ std::vector<std::uint32_t> RendererBackend::uploadSkinnedActorTextures(
             continue;
         }
         slots[i] = acquireImportedTexture(
-            normalizedImportedTextureKey(texture.sourcePath), texture, commandBuffer,
+            normalizedImportedTextureKey(texture.sourcePath, texture.format), texture, commandBuffer,
             stagingBufferHandles);
         if (slots[i] != kInvalidImportedTextureSlot) {
             slot.textureSlots.push_back(slots[i]);

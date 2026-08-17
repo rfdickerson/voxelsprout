@@ -44,6 +44,9 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, std::string> staticRecordTypes;
     // LTEX formID -> diffuse texture path, already resolved through TXST.
     std::unordered_map<std::uint32_t, std::string> landTexturePaths;
+    // TES3 VTEX palette entries are scoped to the plugin that authored LAND.
+    // Key: (source plugin index << 32) | stored LTEX index-plus-one.
+    std::unordered_map<std::uint64_t, std::string> morrowindLandTexturePaths;
     // REGN formID -> the name to show the player (RDMP). Only discoverable
     // regions are in here: a region with no map name is deliberately absent
     // rather than present-with-an-empty-string, so a lookup miss means "do not
@@ -132,6 +135,15 @@ bool appendCellWaterPatch(
     odai::importer::ImportedScene& outScene,
     const FalloutCellRecord& cell,
     const FalloutWorldspaceRecord* worldspace = nullptr);
+
+// Samples a TES4/TES5 LAND overlay at a fractional quadrant-post coordinate.
+// The source VTXT lattice is only 17x17 (128 world units between posts); a
+// small reconstruction filter plus smooth bilinear interpolation prevents its
+// triangle diagonals from becoming visible as saw teeth along roads. Public so
+// the filter's boundedness and edge behaviour can be pinned with synthetic
+// records rather than judged only from retail screenshots.
+float sampleLandLayerOpacity(
+    const FalloutLandTextureLayer& layer, float quadrantRow, float quadrantCol);
 
 struct CellBuildStats {
     std::size_t placedInstances = 0;
@@ -242,7 +254,7 @@ public:
 
     // Resolves a texture path to a scene texture index, decoding and caching on
     // first use. Public because the LOD cooker needs the same behaviour.
-    std::uint32_t resolveTextureIndex(const std::string& texturePath);
+    std::uint32_t resolveTextureIndex(const std::string& texturePath, bool linearData = false);
 
     // Most-used BTXT base texture across `cells`, as a scene texture index, for
     // feeding back into setFallbackLandTexture(). Resolves (and so caches) the

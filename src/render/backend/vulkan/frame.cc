@@ -359,6 +359,9 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuVelocityTimeMs =
         durationMs(kGpuTimestampQueryVelocityStart, kGpuTimestampQueryVelocityEnd);
     m_debugGpuTaaTimeMs = durationMs(kGpuTimestampQueryTaaStart, kGpuTimestampQueryTaaEnd);
+    m_debugGpuWaterReflectionResolveTimeMs = durationMs(
+        kGpuTimestampQueryWaterReflectionResolveStart,
+        kGpuTimestampQueryWaterReflectionResolveEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
     // Per-pass GPU breakdown. Everything above was already measured and then
@@ -400,6 +403,7 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
                 << " (prewrite=" << m_debugGpuPrewriteTimeMs << ")"
                 << " velocity=" << m_debugGpuVelocityTimeMs
                 << " taa=" << m_debugGpuTaaTimeMs
+                << " waterReflectionResolve=" << m_debugGpuWaterReflectionResolveTimeMs
                 << " post=" << m_debugGpuPostTimeMs
                 << " ui=" << m_debugGpuUiTimeMs
                 << " autoExposure=" << m_debugGpuAutoExposureTimeMs

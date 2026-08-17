@@ -46,11 +46,11 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v26 appends placed particle emitters after the alpha-authored byte. They are
 // field-written (not raw-blitted) so the renderer-facing preset can evolve
 // without inheriting a platform ABI.
-constexpr std::uint32_t kImportedSceneVersion = 26u;
+constexpr std::uint32_t kImportedSceneVersion = 27u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
-    static_cast<std::uint8_t>(TextureFormat::BC2);
+    static_cast<std::uint8_t>(TextureFormat::BC1Linear);
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
@@ -249,7 +249,8 @@ bool collectTextureAlphaBands(const ImportedSceneTexture& texture, AlphaBandCoun
             }
             return true;
         }
-        case TextureFormat::BC1: {
+        case TextureFormat::BC1:
+        case TextureFormat::BC1Linear: {
             if (texture.rgba8.size() < baseBlockCount * 8u) {
                 return false;
             }
@@ -932,9 +933,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         dstVertex.uv[0] = srcVertex.uv[0];
                         dstVertex.uv[1] = srcVertex.uv[1];
                         dstVertex.textureIndex = part.textureIndex;
-                        dstVertex.flags = hasAuthoredColor
-                            ? kImportedSceneMaterialFlagVertexColorTint
-                            : 0u;
+                        dstVertex.flags = kImportedSceneMaterialFlagTerrainSlopeBlend;
+                        if (hasAuthoredColor) {
+                            dstVertex.flags |= kImportedSceneMaterialFlagVertexColorTint;
+                        }
                         // Terrain layers ride through untouched; the flag opts
                         // in only when a layer is actually present, so a scene
                         // whose cooker never filled these reads exactly as

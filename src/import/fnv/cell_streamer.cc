@@ -150,7 +150,11 @@ std::string cellAxisToken(std::int32_t value) {
 // 33: animated banner skin partitions are settled under Jolt soft-body gravity
 //     with their authored top attachment pinned, instead of freezing in the
 //     sideways wind-blown bind pose.
-constexpr int kCellBuildVersion = 33;
+// 34: TES3 NiLODNode children are selected and flattened instead of dropping
+//     the whole model when its classic NIF has no block-size table.
+// 35: packed terrain vertices carry an explicit terrain marker so runtime PBR
+//     presets can choose a different terrain roughness from placed objects.
+constexpr int kCellBuildVersion = 38;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -869,13 +873,13 @@ bool CellStreamer::spawnAtInteriorDoorEngineSpace(
         return false;
     }
 
-    EsmReader reader;
-    if (!reader.open(m_esmPath)) {
-        return false;
-    }
     FalloutCellRecord record;
     std::string error;
-    if (!extractFalloutCellAt(reader, *interior, record, error)) {
+    EsmReader reader;
+    const bool extracted = m_useLoadOrder
+        ? extractFalloutCellMerged(m_cellIndex, m_loadOrder, *interior, record, error)
+        : (reader.open(m_esmPath) && extractFalloutCellAt(reader, *interior, record, error));
+    if (!extracted) {
         VOX_LOGW("streamer") << "spawn: could not read " << interiorEditorId << ": " << error;
         return false;
     }
@@ -942,7 +946,7 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
     // the height fell back to a guess while the surrounding cells were
     // thousands of units higher.
     EsmReader reader;
-    const bool readerOpen = reader.open(m_esmPath);
+    const bool readerOpen = m_useLoadOrder || reader.open(m_esmPath);
     if (!readerOpen) {
         VOX_LOGW("streamer") << "spawn: cannot open plugin: " << reader.lastError();
     }
@@ -972,7 +976,12 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
                 }
                 FalloutCellRecord record;
                 std::string error;
-                if (!extractFalloutCellAt(reader, m_cellIndex.cells[found->second], record, error) ||
+                const bool extracted = m_useLoadOrder
+                    ? extractFalloutCellMerged(
+                          m_cellIndex, m_loadOrder, m_cellIndex.cells[found->second], record, error)
+                    : extractFalloutCellAt(
+                          reader, m_cellIndex.cells[found->second], record, error);
+                if (!extracted ||
                     record.land == nullptr || !record.land->hasHeights) {
                     continue;
                 }

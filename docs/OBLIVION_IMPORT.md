@@ -7,7 +7,7 @@ needs proving, and the staged plan for getting one Tamriel cell's geometry into 
 
 Everything below was measured on
 `/home/rfdickerson/.local/share/Steam/steamapps/common/Oblivion` (Steam, Linux) using
-`odai_newvegas_probe` plus byte-level dumps of the retail files. Where a claim is an
+`odai_bethesda_probe` plus byte-level dumps of the retail files. Where a claim is an
 inference from layout rather than something a tool printed, it says so.
 
 **Nothing in `src/import/fnv/` was renamed or re-namespaced.** Fallout 3 already runs
@@ -67,9 +67,9 @@ path it always did. Pinned by `testBsaArchiveReadsOblivionV103` in
 Result, measured:
 
 ```
-odai_newvegas_probe <Oblivion/Data> --archives
+odai_bethesda_probe <Oblivion/Data> --archives
   Archives: 147629 files indexed, 0 failure(s).     # was: 0 indexed, 17 failures
-odai_newvegas_probe <FNV/Data> --archives
+odai_bethesda_probe <FNV/Data> --archives
   Archives: 182177 files indexed, 0 failure(s).     # unchanged
 ```
 
@@ -214,7 +214,7 @@ constexpr std::string_view kHeaderMagicPrefix = "Gamebryo File Format, Version 2
 Rejected at `nif_scene.cc:208-211`. Measured over all 9612 NIFs the probe now finds:
 
 ```
-odai_newvegas_probe <Oblivion/Data> --nifs 60000
+odai_bethesda_probe <Oblivion/Data> --nifs 60000
   Found 9612 .nif entries across 9 archive(s).
   extract failures  0
   parse failures    9612
@@ -555,11 +555,11 @@ cmake -S . -B cmake-build-tools -G Ninja \
 cmake --build cmake-build-tools -j
 
 OB="$HOME/.local/share/Steam/steamapps/common/Oblivion/Data"
-cmake-build-tools/odai_newvegas_probe "$OB" --archives
-cmake-build-tools/odai_newvegas_probe "$OB" --nifs 60000                 # fails: Stage 2
-cmake-build-tools/odai_newvegas_probe "$OB" --plugin Oblivion.esm
-cmake-build-tools/odai_newvegas_probe "$OB" --cellindex Oblivion.esm Tamriel 5
-cmake-build-tools/odai_newvegas_probe "$OB" --buildcell Oblivion.esm Tamriel 1 7
+cmake-build-tools/odai_bethesda_probe "$OB" --archives
+cmake-build-tools/odai_bethesda_probe "$OB" --nifs 60000                 # fails: Stage 2
+cmake-build-tools/odai_bethesda_probe "$OB" --plugin Oblivion.esm
+cmake-build-tools/odai_bethesda_probe "$OB" --cellindex Oblivion.esm Tamriel 5
+cmake-build-tools/odai_bethesda_probe "$OB" --buildcell Oblivion.esm Tamriel 1 7
 ctest --test-dir cmake-build-tools --output-on-failure
 ```
 

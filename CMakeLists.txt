@@ -392,6 +392,7 @@ if(SLANGC_EXECUTABLE)
     # Ambient occlusion: one source, three estimators. ODAI_AO_MODE picks which
     # estimateVisibility() compiles in, so each pipeline's sample loop is branch-free.
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang" compute)
+    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/water_reflection_resolve.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/light_cluster_cull.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/contact_shadow_depth.comp.slang" compute)
     add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/contact_shadow_trace.comp.slang" compute)
@@ -1849,14 +1850,15 @@ if(ODAI_BUILD_TOOLS)
         target_compile_options(odai_newvegas_cooker PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 
-    # New Vegas probe — real-data harness for the BSA/ESM/NIF readers.
+    # Bethesda probe — real-data harness for the TES3/TES4/TES5 archive,
+    # plugin, terrain, and NIF readers.
     # odai_fnv_import_tests is synthetic-fixture-only by design, so it cannot
     # catch a wrong assumption about the retail format; this is the tool that
     # can. Deliberately NOT registered with add_test: it needs an installed
     # copy of the game.
-    #   odai_newvegas_probe <DataFilesPath> --archives | --nifs [limit] |
-    #                                       --nif <path> | --plugin <Plugin.esm>
-    add_executable(odai_newvegas_probe
+    #   odai_bethesda_probe <DataFilesPath> --archives | --nifs [limit] |
+    #                                      --nif <path> | --plugin <Plugin.esm>
+    add_executable(odai_bethesda_probe
         src/tools/newvegas_probe_main.cc
         src/import/dds.cc
         src/import/imported_scene.cc
@@ -1878,13 +1880,19 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/character_builder.cc
         src/import/fnv/kf_animation.cc
     )
-    target_include_directories(odai_newvegas_probe PRIVATE src)
-    target_link_libraries(odai_newvegas_probe PRIVATE ZLIB::ZLIB Jolt::Jolt)
+    target_include_directories(odai_bethesda_probe PRIVATE src)
+    target_link_libraries(odai_bethesda_probe PRIVATE ZLIB::ZLIB Jolt::Jolt)
     if(MSVC)
-        target_compile_options(odai_newvegas_probe PRIVATE ${ODAI_WARN_FLAGS_MSVC})
+        target_compile_options(odai_bethesda_probe PRIVATE ${ODAI_WARN_FLAGS_MSVC})
     else()
-        target_compile_options(odai_newvegas_probe PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(odai_bethesda_probe PRIVATE -Wall -Wextra -Wpedantic)
     endif()
+    # Keep the old build target and binary during the command-name transition.
+    add_custom_command(TARGET odai_bethesda_probe POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:odai_bethesda_probe>
+            $<TARGET_FILE_DIR:odai_bethesda_probe>/odai_newvegas_probe$<TARGET_FILE_SUFFIX:odai_bethesda_probe>)
+    add_custom_target(odai_newvegas_probe DEPENDS odai_bethesda_probe)
 endif()
 
 if(BUILD_TESTING)

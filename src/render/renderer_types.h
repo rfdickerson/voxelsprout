@@ -470,6 +470,18 @@ struct TonemapSettings {
     float highlightShoulder = 0.7f;
 };
 
+// Runtime PBR defaults for legacy imported surfaces whose source format did
+// not author metallic/roughness data. Authored PBR materials always win. This
+// lives in the frame uniform rather than in ImportedScenePackedVertex so, once
+// the cache carries the terrain marker added in cell build v35, a visual preset
+// can be toggled without another rebuild or cache-key variant.
+struct ImportedPbrDefaults {
+    bool enabled = false;
+    float objectRoughness = 0.84f;
+    float terrainRoughness = 0.92f;
+    float metallic = 0.0f;
+};
+
 // The post colour grade, as one value instead of fourteen scattered fields on
 // the debug-settings blob.
 //

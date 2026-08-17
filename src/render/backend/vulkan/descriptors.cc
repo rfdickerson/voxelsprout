@@ -124,6 +124,13 @@ bool RendererBackend::createDescriptorResources() {
         waterRefractionBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         bindings.push_back(waterRefractionBinding);
 
+        VkDescriptorSetLayoutBinding waterReflectionBinding{};
+        waterReflectionBinding.binding = 18;
+        waterReflectionBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        waterReflectionBinding.descriptorCount = 1;
+        waterReflectionBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings.push_back(waterReflectionBinding);
+
         VkDescriptorSetLayoutBinding normalDepthBinding{};
         normalDepthBinding.binding = 6;
         normalDepthBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -404,6 +411,21 @@ void RendererBackend::updateFrameDescriptorSets(
         (aoFrameIndex < m_waterRefractionImageViews.size()) ? m_waterRefractionImageViews[aoFrameIndex] : VK_NULL_HANDLE;
     waterRefractionImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    VkDescriptorImageInfo waterReflectionImageInfo{};
+    waterReflectionImageInfo.sampler = m_hdrResolveSampler;
+    const std::uint32_t waterReflectionResolveOutput =
+        m_waterReflectionHistoryIndex ^ 1u;
+    const bool useResolvedWaterReflection =
+        m_waterReflectionTemporalEnabled &&
+        m_waterReflectionResolvePipeline != VK_NULL_HANDLE &&
+        m_waterReflectionHistoryImageViews[waterReflectionResolveOutput] != VK_NULL_HANDLE;
+    waterReflectionImageInfo.imageView = useResolvedWaterReflection
+        ? m_waterReflectionHistoryImageViews[waterReflectionResolveOutput]
+        : ((aoFrameIndex < m_waterReflectionImageViews.size())
+            ? m_waterReflectionImageViews[aoFrameIndex]
+            : VK_NULL_HANDLE);
+    waterReflectionImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     VkDescriptorImageInfo normalDepthImageInfo{};
     normalDepthImageInfo.sampler = m_normalDepthSampler;
     normalDepthImageInfo.imageView = m_normalDepthImageViews[aoFrameIndex];
@@ -497,6 +519,7 @@ void RendererBackend::updateFrameDescriptorSets(
         sampler(3, hdrSceneImageInfo);
         sampler(4, shadowMapImageInfo);
         sampler(5, waterRefractionImageInfo);
+        sampler(18, waterReflectionImageInfo);
         sampler(6, normalDepthImageInfo);
         sampler(7, ssaoBlurImageInfo);
         sampler(8, ssaoRawImageInfo);
@@ -882,6 +905,101 @@ void RendererBackend::updateFrameDescriptorSets(
                 descriptorBufferBindingOffset(m_taaDescriptorSetLayout, 6), 0,
                 hasVelocity ? m_velocityImageViews[aoFrameIndex] : normalDepthImageInfo.imageView,
                 m_ssaoSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
+    if (m_waterReflectionTemporalEnabled &&
+        m_waterReflectionResolveBufferSet.valid() &&
+        aoFrameIndex < m_waterReflectionImageViews.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageViews.size() &&
+        m_waterReflectionImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionDepthImageViews[aoFrameIndex] != VK_NULL_HANDLE) {
+        WaterReflectionResolveUniform uniformData{};
+        std::memcpy(
+            uniformData.invViewProj,
+            m_waterReflectionInvViewProjColumnMajor.m,
+            sizeof(uniformData.invViewProj));
+        std::memcpy(
+            uniformData.invView,
+            m_waterReflectionInvViewColumnMajor.m,
+            sizeof(uniformData.invView));
+        std::memcpy(
+            uniformData.view,
+            m_waterReflectionViewColumnMajor.m,
+            sizeof(uniformData.view));
+        std::memcpy(
+            uniformData.prevView,
+            m_waterReflectionPrevViewColumnMajor.m,
+            sizeof(uniformData.prevView));
+        std::memcpy(
+            uniformData.prevViewProj,
+            m_waterReflectionPrevViewProjColumnMajor.m,
+            sizeof(uniformData.prevViewProj));
+        uniformData.temporalParams[0] = 0.88f;
+        uniformData.temporalParams[1] = 0.80f;
+        uniformData.temporalParams[2] =
+            (m_waterReflectionHistoryValid &&
+             m_waterReflectionPrevMatricesValid) ? 1.0f : 0.0f;
+        uniformData.temporalParams[3] = m_waterReflectionPlaneHeight;
+        uniformData.jitterParams[0] = m_taaJitterNdc[0];
+        uniformData.jitterParams[1] = m_taaJitterNdc[1];
+        uniformData.jitterParams[2] = m_taaPrevJitterNdc[0];
+        uniformData.jitterParams[3] = m_taaPrevJitterNdc[1];
+        uniformData.extentParams[0] =
+            static_cast<float>(m_waterReflectionExtent.width);
+        uniformData.extentParams[1] =
+            static_cast<float>(m_waterReflectionExtent.height);
+        uniformData.extentParams[2] = static_cast<float>(m_renderExtent.width);
+        uniformData.extentParams[3] = static_cast<float>(m_renderExtent.height);
+        uniformData.projectionParams[0] = m_waterReflectionProjection[0];
+        uniformData.projectionParams[1] = m_waterReflectionProjection[1];
+
+        const std::optional<FrameArenaSlice> uniformSlice =
+            m_frameArena.allocateUpload(
+                sizeof(WaterReflectionResolveUniform), 256u,
+                FrameArenaUploadKind::Unknown);
+        if (uniformSlice.has_value() && uniformSlice->mapped != nullptr) {
+            std::memcpy(
+                uniformSlice->mapped, &uniformData, sizeof(uniformData));
+            const VkDeviceAddress uniformAddress =
+                m_bufferAllocator.getDeviceAddress(uniformSlice->buffer) +
+                uniformSlice->offset;
+            const std::uint32_t region = m_currentFrame;
+            const auto offset = [&](std::uint32_t binding) {
+                return descriptorBufferBindingOffset(
+                    m_waterReflectionResolveDescriptorSetLayout, binding);
+            };
+            const std::uint32_t current =
+                m_waterReflectionHistoryIndex ^ 1u;
+            const std::uint32_t history = m_waterReflectionHistoryIndex;
+            writeDescriptorBufferCombinedImageSampler(
+                m_waterReflectionResolveBufferSet, region, offset(0), 0u,
+                m_waterReflectionImageViews[aoFrameIndex],
+                m_hdrResolveSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            writeDescriptorBufferCombinedImageSampler(
+                m_waterReflectionResolveBufferSet, region, offset(1), 0u,
+                m_waterReflectionDepthImageViews[aoFrameIndex],
+                m_normalDepthSampler,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+            writeDescriptorBufferCombinedImageSampler(
+                m_waterReflectionResolveBufferSet, region, offset(2), 0u,
+                m_waterReflectionHistoryImageViews[history],
+                m_hdrResolveSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            writeDescriptorBufferCombinedImageSampler(
+                m_waterReflectionResolveBufferSet, region, offset(3), 0u,
+                m_waterReflectionHistoryDepthImageViews[history],
+                m_normalDepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            writeDescriptorBufferStorageImage(
+                m_waterReflectionResolveBufferSet, region, offset(4),
+                m_waterReflectionHistoryImageViews[current],
+                VK_IMAGE_LAYOUT_GENERAL);
+            writeDescriptorBufferStorageImage(
+                m_waterReflectionResolveBufferSet, region, offset(5),
+                m_waterReflectionHistoryDepthImageViews[current],
+                VK_IMAGE_LAYOUT_GENERAL);
+            writeDescriptorBufferUniform(
+                m_waterReflectionResolveBufferSet, region, offset(6),
+                uniformAddress, sizeof(WaterReflectionResolveUniform));
         }
     }
 

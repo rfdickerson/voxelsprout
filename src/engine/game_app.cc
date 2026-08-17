@@ -61,16 +61,28 @@ bool GameApp::init(const char* title) {
     // enough to blow past the driver's hang-check timeout on an integrated GPU and
     // take a VK_ERROR_DEVICE_LOST. Override with ODAI_WINDOW_SIZE=WxH.
     int winW = 1600, winH = 900;
+    bool explicitWindowSize = false;
     if (const char* sizeEnv = std::getenv("ODAI_WINDOW_SIZE")) {
         int envW = 0, envH = 0;
         if (std::sscanf(sizeEnv, "%dx%d", &envW, &envH) == 2 && envW > 0 && envH > 0) {
             winW = envW;
             winH = envH;
+            explicitWindowSize = true;
         } else {
             VOX_LOGW("engine") << "ignoring malformed ODAI_WINDOW_SIZE=\"" << sizeEnv
                                << "\" (expected WxH, e.g. 1600x900)";
         }
     }
+#ifdef GLFW_SCALE_FRAMEBUFFER
+    // An explicit size is a render-size contract, not a logical-point request.
+    // On a 2x Wayland display a 1920x1080 window otherwise creates a 3840x2160
+    // swapchain, quadrupling every full-resolution pass and producing a 4K
+    // capture despite the caller asking for 1080p. Leave platform-native HiDPI
+    // behavior alone for the default interactive window.
+    if (explicitWindowSize) {
+        glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
+    }
+#endif
     // Never open larger than the monitor's logical (content-scaled) size.
     if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
         float xs = 1.0f, ys = 1.0f;

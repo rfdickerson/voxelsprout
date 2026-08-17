@@ -1,0 +1,39 @@
+# Whiterun (Skyrim SE) -- an approach up the hill to Dragonsreach.
+#
+# Engine space: x east, y height, z south. This flies the WHITERUNWORLD
+# worldspace, not Tamriel -- Skyrim keeps its walled cities in their own
+# worldspaces exactly as Oblivion does with the Imperial City districts, so
+# looking for Whiterun in Tamriel finds the hill and none of the city.
+#
+# `--cellindex Skyrim.esm WhiterunWorld` puts it at grid x [0,10] z [-5,2],
+# 57 occupied cells, densest at (0,0), (5,-2) and (6,-2). Grid (x,y) is engine
+# x [x*4096, (x+1)*4096] and engine z [-(y+1)*4096, -y*4096], so the dense
+# cluster around (5,-2)/(6,-2) is engine x 20480..28672, z 4096..8192.
+#
+# WHITERUNWORLD HAS NO LAND RECORD AT ALL, and no DNAM default land height:
+# the ground is placed STATICS, the same as the Imperial City districts. So
+# there is no terrain to sample a height from, and the heights here are NOT
+# near zero -- the city sits at engine y about -3120. The streamer prints it
+# on the way up, which is the cheap way to find it:
+#
+#   spawn: cell 6,-2 peak terrain height -2856, median placed height -3120
+#
+# Guessing a positive height puts the camera a kilometre above the rooftops
+# looking at empty sky, which reads as "nothing rendered" rather than as a
+# camera in the wrong place.
+#
+#   odai_game_newvegas --stream "<SSE Data>" --plugin Skyrim.esm \
+#     --worldspace WhiterunWorld --tour-file assets/tours/whiterun.txt \
+#     --flythrough 30 --capture-video whiterun.mp4 30 18
+#
+# ODAI_FNV_DEBUGVIEW=ao renders it as clay, which is what the ambient-occlusion
+# pass alone looks like -- note the debug views cover imported_static only, so
+# sky and water come through untouched.
+#
+# px py pz            lx ly lz
+33000 -1500 13500    26600 -2900 6200
+31200 -1650 12200    26500 -2900 6150
+29400 -1800 10900    26400 -2900 6100
+27700 -1950 9700     26300 -2900 6050
+26100 -2100 8600     26200 -2900 6000
+24700 -2250 7600     26100 -2900 5950

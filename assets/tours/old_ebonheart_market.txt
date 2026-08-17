@@ -1,0 +1,10 @@
+# Old Ebonheart merchant-quarter roofline, engine space (X, height, Z).
+# A deliberately short, steady dolly keeps the half-timbered roofs, Ebon Tower
+# and the rebuilt market landmark layered like the historical TR reference.
+53000 2500 153900   54780 1200 151210
+53170 2470 153770   54800 1180 151180
+53340 2440 153640   54820 1160 151150
+53510 2410 153510   54830 1135 151115
+53680 2375 153375   54820 1110 151080
+53840 2340 153240   54800 1080 151040
+54000 2300 153100   54780 1050 151000

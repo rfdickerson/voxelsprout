@@ -97,6 +97,7 @@ VkDeviceSize importedTextureMipOffset(
 std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) {
     switch (format) {
         case odai::importer::TextureFormat::BC1:
+        case odai::importer::TextureFormat::BC1Linear:
         case odai::importer::TextureFormat::BC4: return 8u;
         case odai::importer::TextureFormat::BC2:
         case odai::importer::TextureFormat::BC3:
@@ -118,6 +119,7 @@ VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
         // and terrain renders as washed-out pastel. BC4/BC5 are data (single/dual
         // channel — e.g. the water normal map) and must stay UNORM/linear.
         case odai::importer::TextureFormat::BC1: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC1Linear: return VK_FORMAT_BC1_RGB_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC2: return VK_FORMAT_BC2_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC3: return VK_FORMAT_BC3_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
@@ -1171,6 +1173,8 @@ void RendererBackend::rebuildImportedWaterBuffers() {
         for (const odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
             const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
             ImportedWaterVertex vertex{};
+            vertex.normalTextureSlot = patch.normalTextureIndex;
+            vertex.flowTextureSlot = patch.flowTextureIndex;
             vertex.position[1] = patch.waterLevel;
             vertex.position[0] = patch.originX;
             vertex.position[2] = patch.originZ;
@@ -1450,7 +1454,7 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
             continue;
         }
         m_weatherCloudSlots[layer] = acquireImportedTexture(
-            normalizedImportedTextureKey(texture.sourcePath), texture, commandBuffer,
+            normalizedImportedTextureKey(texture.sourcePath, texture.format), texture, commandBuffer,
             stagingBufferHandles);
     }
 
@@ -1854,7 +1858,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         for (std::size_t textureIndex = 0; textureIndex < uploadScene.textures.size(); ++textureIndex) {
             const odai::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
             const std::uint32_t slot = acquireImportedTexture(
-                normalizedImportedTextureKey(srcTexture.sourcePath),
+                normalizedImportedTextureKey(srcTexture.sourcePath, srcTexture.format),
                 srcTexture,
                 commandBuffer,
                 stagingBufferHandles);
@@ -2502,6 +2506,12 @@ bool RendererBackend::uploadImportedSceneInternal(
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
         ImportedWaterVertex vertex{};
+        vertex.normalTextureSlot = patch.normalTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.normalTextureIndex]
+            : kInvalidImportedTextureSlot;
+        vertex.flowTextureSlot = patch.flowTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.flowTextureIndex]
+            : kInvalidImportedTextureSlot;
         vertex.position[0] = patch.originX;
         vertex.position[1] = patch.waterLevel;
         vertex.position[2] = patch.originZ;
@@ -2754,6 +2764,14 @@ bool RendererBackend::uploadImportedSceneInternal(
     chunk.lights = std::move(chunkLights);
     chunk.particleEmitters = uploadScene.particleEmitters;
     chunk.waterPatches = uploadScene.waterPatches;
+    for (odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
+        patch.normalTextureIndex = patch.normalTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.normalTextureIndex]
+            : kInvalidImportedTextureSlot;
+        patch.flowTextureIndex = patch.flowTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.flowTextureIndex]
+            : kInvalidImportedTextureSlot;
+    }
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
         draw.vertexBufferHandle = m_importedVertexBufferHandle;

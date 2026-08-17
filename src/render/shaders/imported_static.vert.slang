@@ -1,4 +1,5 @@
 import camera_uniform;
+import chunk_push_constants;
 import imported_vertex_pack;
 
 struct VertexInput
@@ -62,6 +63,15 @@ VertexOutput main(VertexInput input)
         float((input.inLayerWeights >> 8) & 0xffu) / 255.0,
         float((input.inLayerWeights >> 16) & 0xffu) / 255.0,
         float((input.inLayerWeights >> 24) & 0xffu) / 255.0);
-    output.position = mul(camera.mvp, float4(input.inPosition, 1.0));
+    float3 rasterPosition = input.inPosition;
+    // A camera mirrored across y=h is equivalent to reflecting every world
+    // point across that plane and rendering it through the original camera.
+    // Keeping outWorldPosition unreflected preserves authored lighting and
+    // shadow lookups; only rasterization sees the mirrored point.
+    if (chunkPc.cascadeData.x > 0.5)
+    {
+        rasterPosition.y = (2.0 * chunkPc.materialParams.w) - rasterPosition.y;
+    }
+    output.position = mul(camera.mvp, float4(rasterPosition, 1.0));
     return output;
 }

@@ -17,7 +17,7 @@
 // changeRotationBasis.
 //
 // The ControlledBlock layout is the one genuinely version-conditional part of
-// the format, and it is MEASURED, not assumed (odai_newvegas_probe --kf dumps
+// the format, and it is MEASURED, not assumed (odai_bethesda_probe --kf dumps
 // it). At New Vegas's NIF 20.2.0.7 a ControlledBlock is 29 bytes and NOT
 // 4-byte aligned, because a one-byte priority sits between two string indices:
 //

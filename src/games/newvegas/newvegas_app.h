@@ -318,6 +318,7 @@ private:
     // The streaming load order, kept so actor discovery and dialogue can use the
     // same one the cell streamer does. Empty when no extra plugins were loaded.
     importer::fnv::FalloutLoadOrder m_streamLoadOrder;
+    bool m_streamIsMorrowind = false;
     // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
     // does not only magnify, it throws the background out — the two arriving
     // together is what makes the shot read as a lens rather than as a crop.
@@ -354,6 +355,7 @@ private:
     float m_captureVideoFps = 30.0f;
     int m_captureFrames = 0;
     int m_captureWritten = 0;
+    bool m_captureStarted = false;
     float m_captureFixedDt = 0.0f;
     // Frames to render before the first is kept. Streaming, auto-exposure and
     // TAA all need a few: recording from frame 0 opens on a half-loaded town

@@ -30,7 +30,7 @@
 //
 // Originally written against public Gamebryo/NIF format documentation with no
 // Data Files to check it against; that caveat is obsolete. Every layout here
-// has since been verified on retail archives with odai_newvegas_probe, and
+// has since been verified on retail archives with odai_bethesda_probe, and
 // several of the documented layouts turned out to be wrong -- see the
 // per-reader comments, which record what was measured rather than what was
 // documented.
@@ -132,7 +132,7 @@ struct NifModel {
     // shader property of a type the parser has no branch for, in which case it
     // silently ends up with no diffuse path and shades from the per-model hashed
     // colour -- grey patches on an otherwise textured model. Populated for
-    // diagnostics (odai_newvegas_probe --nif) so those types can be identified
+    // diagnostics (odai_bethesda_probe --nif) so those types can be identified
     // rather than guessed at.
     std::vector<std::string> unresolvedPropertyTypes;
     // Shapes whose node transform was a reflection (negative determinant) and
@@ -294,7 +294,7 @@ bool parseNifSkeleton(
 bool parseNifSkinnedMesh(
     const std::vector<std::uint8_t>& bytes, NifSkinnedModel& outModel, std::string& outError);
 
-// Raw block/string inventory of a NIF, for diagnostics only (odai_newvegas_probe
+// Raw block/string inventory of a NIF, for diagnostics only (odai_bethesda_probe
 // --nifblocks). Nothing in the import path consumes this; it exists so questions
 // like "what type is this shape's property, and where does its texture path
 // actually live" get answered by reading the file instead of guessing at field

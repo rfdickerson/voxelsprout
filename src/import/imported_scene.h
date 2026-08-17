@@ -137,6 +137,10 @@ enum class TextureFormat : std::uint8_t {
     // renumbering the existing entries would silently reinterpret every
     // already-cooked scene's textures as the wrong format.
     BC2   = 6,  // DXT3 — 16 bytes per block (RGBA, 4-bit explicit alpha)
+    // Same bytes as BC1, but sampled as linear data. Water normals are shipped
+    // as DXT1 even though they are vectors, and an sRGB image view bends those
+    // vectors before the shader can decode them.
+    BC1Linear = 7,
 };
 
 struct ImportedSceneTexture {
@@ -276,7 +280,7 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 // src/render/shaders/imported_static.frag.slang; change both together.
 //
 //   bit 0      alpha test
-//   bit 1      reserved — terrain slope blend (docs/stylized_low_poly.md §1)
+//   bit 1      terrain geometry marker / optional slope blend
 //   bit 2      PBR material present: bits 8..23 carry metallic/roughness
 //   bit 3      modulate the diffuse texture by the vertex colour
 //   bit 4      terrain layer blend: layerTextureIndex/layerWeights are live
@@ -290,6 +294,9 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 // Bit 2 is the opt-in that makes that work: scenes cooked before materials
 // existed decode as a fully rough dielectric and shade exactly as before.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u << 0;
+// Every packed terrain vertex carries this bit. It remains the opt-in for a
+// future textured slope blend, and also lets runtime material presets choose a
+// terrain roughness without baking that preset into the scene cache.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainSlopeBlend = 1u << 1;
 inline constexpr std::uint32_t kImportedSceneMaterialFlagPbr = 1u << 2;
 // Opt-in for the same reason bit 2 is: untextured geometry has always used the
@@ -458,6 +465,11 @@ struct ImportedSceneWaterPatch {
     float sizeX = 0.0f;
     float sizeZ = 0.0f;
     float waterLevel = 0.0f;
+    // Scene-local texture indices while importing, remapped to bindless slots
+    // when the resident chunk is created. Skyrim's surface normal is a normal
+    // map referenced by WATR; its exterior flow field is authored per cell.
+    std::uint32_t normalTextureIndex = 0xffffffffu;
+    std::uint32_t flowTextureIndex = 0xffffffffu;
 };
 
 struct ImportedSceneLight {

@@ -85,6 +85,10 @@ public struct CameraUniform
     public float4 contactShadowConfig;
     // x/y = quarter-resolution record extent, z = enabled, w = bounce scale.
     public float4 screenSpaceGiConfig;
+    // x/y = legacy object/terrain roughness, z = metallic, w = enabled.
+    public float4 importedPbrConfig;
+    // x = dominant horizontal water plane in world Y, y = planar target valid.
+    public float4 waterReflectionConfig;
 };
 
 [[vk::binding(0, 0)]]
