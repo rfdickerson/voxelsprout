@@ -1839,6 +1839,7 @@ if(ODAI_BUILD_TOOLS)
         src/import/fnv/weather_records.cc
         src/import/fnv/fallout_records.cc
         src/import/fnv/nif_scene.cc
+        src/import/fnv/kf_animation.cc
         src/import/imported_scene.cc
             src/import/imported_scene_query.cc
     )
