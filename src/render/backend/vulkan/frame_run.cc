@@ -699,6 +699,46 @@ void RendererBackend::renderFrame(
 
     const odai::math::Matrix4 mvp = projection * view;
     const odai::math::Matrix4 mvpColumnMajor = transpose(mvp);
+    // The planar temporal resolve reconstructs the reflected world position
+    // from the raw hardware depth and reprojects it into the preceding camera.
+    // Capture the old matrices before rolling them forward, exactly as TAA does.
+    m_waterReflectionInvViewProjColumnMajor =
+        transpose(odai::math::inverse(mvp));
+    m_waterReflectionInvViewColumnMajor =
+        transpose(odai::math::inverse(view));
+    m_waterReflectionViewColumnMajor = transpose(view);
+    m_waterReflectionPrevViewColumnMajor =
+        transpose(m_waterReflectionPrevView);
+    m_waterReflectionPrevViewProjColumnMajor =
+        transpose(m_waterReflectionPrevViewProj);
+    const float currentReflectionProjectionX = projection(0, 0);
+    const float currentReflectionProjectionY = projection(1, 1);
+    if (m_waterReflectionPrevMatricesValid) {
+        const odai::math::Vector3 cameraDelta = eye - m_waterReflectionPrevEye;
+        float viewRotationDeltaSquared = 0.0f;
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                const float delta = view(row, column) -
+                    m_waterReflectionPrevView(row, column);
+                viewRotationDeltaSquared += delta * delta;
+            }
+        }
+        const bool projectionCut =
+            std::abs(currentReflectionProjectionX - m_waterReflectionProjection[0]) > 0.01f ||
+            std::abs(currentReflectionProjectionY - m_waterReflectionProjection[1]) > 0.01f;
+        if (dot(cameraDelta, cameraDelta) > (256.0f * 256.0f) ||
+            viewRotationDeltaSquared > 0.25f || projectionCut) {
+            m_waterReflectionHistoryValid = false;
+        }
+    } else {
+        m_waterReflectionHistoryValid = false;
+    }
+    m_waterReflectionPrevView = view;
+    m_waterReflectionPrevViewProj = mvp;
+    m_waterReflectionPrevEye = eye;
+    m_waterReflectionPrevMatricesValid = true;
+    m_waterReflectionProjection[0] = currentReflectionProjectionX;
+    m_waterReflectionProjection[1] = currentReflectionProjectionY;
     // TAA reprojection inputs. The column-major copies go to the shader (same
     // transpose convention as the camera UBO); prevViewProj must be read
     // BEFORE it is overwritten with this frame's matrix, or reprojection
@@ -1140,15 +1180,16 @@ void RendererBackend::renderFrame(
     //
     // A skipped cascade samples with the matrix its tile was RENDERED with
     // (cached), never this frame's -- content and matrix must agree or far
-    // shadows swim. Skinned actors break the exact-skip (they move without
-    // moving the matrix); see the note below for why that does not also rule
-    // out deferring the far cascades.
+    // shadows swim. Animated actors and rigid imported machinery break the
+    // exact-skip (they move without moving the matrix); see the note below for
+    // why that does not also rule out deferring the far cascades.
     std::uint32_t shadowSkipCascadeMask = 0;
     static const bool s_shadowInterleaveDisabled =
         std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
         std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
     m_shadowInterleaveParity ^= 1u;
-    const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
+    const bool anyAnimatedShadowCasters =
+        !m_skinningMeshDraws.empty() || !m_importedRigidAnimations.empty();
     if (!s_shadowInterleaveDisabled) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             if (!directionalShadowsForFrame) {
@@ -1167,8 +1208,8 @@ void RendererBackend::renderFrame(
             // whole atlas.
             //
             // The exact-skip says "nothing in this cascade moved", which a
-            // skinned actor falsifies: it animates without moving the light
-            // matrix, so its shadow would freeze while it walked out of it.
+            // animated caster falsifies: it animates without moving the light
+            // matrix, so its shadow would freeze while the caster moved.
             //
             // The parity deferral says only "this cascade may be one frame
             // stale", which is a bound on ERROR rather than a claim of
@@ -1178,7 +1219,7 @@ void RendererBackend::renderFrame(
             // frame. Refusing it whenever any skinned actor exists anywhere was
             // free when the Fallout viewer had none; with a populated town it
             // means every cascade re-renders every frame forever.
-            const bool canExactSkip = matrixUnchanged && !anySkinnedShadowCasters;
+            const bool canExactSkip = matrixUnchanged && !anyAnimatedShadowCasters;
             const bool parityDefersFarCascade =
                 cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
             if (canExactSkip || parityDefersFarCascade) {
@@ -1349,7 +1390,11 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig0[2] = effectiveSkySettings.mieAnisotropy;
     mvpUniform.skyConfig0[3] = effectiveSkySettings.skyExposure;
 
-    const float flowTimeSeconds = static_cast<float>(std::fmod(frameNowSeconds, 4096.0));
+    const double visualTimeSeconds = m_visualTimeSeconds >= 0.0f
+        ? static_cast<double>(m_visualTimeSeconds)
+        : frameNowSeconds;
+    const float flowTimeSeconds = static_cast<float>(std::fmod(visualTimeSeconds, 4096.0));
+    m_importedRigidAnimationTimeSeconds = flowTimeSeconds;
     mvpUniform.skyConfig1[0] = effectiveSkySettings.sunDiskIntensity;
     mvpUniform.skyConfig1[1] = effectiveSkySettings.sunHaloIntensity;
     mvpUniform.skyConfig1[2] = flowTimeSeconds;
@@ -1530,21 +1575,16 @@ void RendererBackend::renderFrame(
     mvpUniform.interiorFogRange[3] = m_importedInteriorLighting.enabled ? 1.0f : 0.0f;
     // Terrain layer-blend shaping, exposed so it can be turned OFF.
     //
-    // The defaults are the values this was hardcoded to and render identically
-    // to before, deliberately. They were suspected of producing the hard,
-    // wedge-shaped boundaries visible on Goodsprings ground -- sharpening a
-    // per-vertex weight that is interpolated linearly across a triangle does
-    // magnify the triangulation -- and that suspicion is WRONG: at
-    // ODAI_FNV_TERRAIN_BLEND=0,520,170,0, which is a plain lerp of the authored
-    // weight with no noise at all, the wedges are unchanged. So is the terrain-
-    // layer debug view, which shows those weights as a smooth field. Whatever
-    // draws them is not this, and retuning it would be a look change with no
-    // defect behind it.
+    // VTXT is now reconstructed on a filtered, 2x-denser grid in cell_builder.
+    // The old full-strength smoothstep would simply sharpen that improved field
+    // back into a narrow, visibly faceted band. Keep a little shaping and
+    // world-space breakup, but let most of the authored/reconstructed ramp
+    // survive. Whiterun's DirtPath01 approach is the pinned real-data case.
     //
     // ODAI_FNV_TERRAIN_BLEND=<sharpness>,<coarseUnits>,<fineUnits>,<amount>.
     // Sharpness 0 is the control any future attempt at this should start from.
     static const std::array<float, 4> s_terrainBlend = []() {
-        std::array<float, 4> values{1.0f, 220.0f, 70.0f, 0.55f};
+        std::array<float, 4> values{0.2f, 520.0f, 170.0f, 0.2f};
         if (const char* env = std::getenv("ODAI_FNV_TERRAIN_BLEND")) {
             std::array<float, 4> parsed{};
             const int count = std::sscanf(
@@ -1583,11 +1623,103 @@ void RendererBackend::renderFrame(
     mvpUniform.dofConfig2[1] = std::clamp(m_skyDebugSettings.waterRefractionStrength, 0.0f, 3.0f);
     mvpUniform.dofConfig2[2] =
         std::clamp(m_skyDebugSettings.waterRefractionDistortionPixels, 0.0f, 160.0f);
-    mvpUniform.dofConfig2[3] = static_cast<float>(std::clamp(m_skyDebugSettings.waterDebugMode, 0, 6));
+    int waterDebugMode = std::clamp(m_skyDebugSettings.waterDebugMode, 0, 9);
+    if (const char* waterDebugOverride = std::getenv("ODAI_WATER_DEBUG")) {
+        char* end = nullptr;
+        const long parsed = std::strtol(waterDebugOverride, &end, 10);
+        if (end != waterDebugOverride && *end == '\0') {
+            waterDebugMode = std::clamp(static_cast<int>(parsed), 0, 9);
+        }
+    }
+    mvpUniform.dofConfig2[3] = static_cast<float>(waterDebugMode);
     mvpUniform.waterConfig[0] = std::clamp(m_skyDebugSettings.waterAnimationSpeed, 0.25f, 4.0f);
     mvpUniform.waterConfig[1] = std::clamp(m_skyDebugSettings.waterNormalStrength, 0.25f, 2.5f);
     mvpUniform.waterConfig[2] = std::clamp(m_skyDebugSettings.waterReflectionStrength, 0.25f, 4.0f);
     mvpUniform.waterConfig[3] = std::clamp(m_skyDebugSettings.waterRefractionDecay, 0.25f, 5.0f);
+
+    // One planar reflection target represents one horizontal plane. Select the
+    // water patch nearest the camera in XZ (distance to the patch rectangle,
+    // not its centre, so a 4096-unit cell directly under the camera wins).
+    // This is stable along a river whose cells all share a level and prevents a
+    // distant lake at another height from replacing the river reflection.
+    static const bool s_planarWaterReflections = []() {
+        const char* env = std::getenv("ODAI_WATER_PLANAR_REFLECTIONS");
+        return env == nullptr || env[0] != '0';
+    }();
+    m_waterReflectionPlaneValid = false;
+    float nearestWaterDistanceSquared = std::numeric_limits<float>::max();
+    if (s_planarWaterReflections &&
+        !m_importedSceneInteriorMode &&
+        m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT) {
+        for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
+            if (!chunk.alive) {
+                continue;
+            }
+            for (const odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
+                // A camera below the plane is in the underwater case; the
+                // mirrored above-water pass is not the right optical source.
+                if (eye.y < patch.waterLevel - 0.5f) {
+                    continue;
+                }
+                const float minX = std::min(patch.originX, patch.originX + patch.sizeX);
+                const float maxX = std::max(patch.originX, patch.originX + patch.sizeX);
+                const float minZ = std::min(patch.originZ, patch.originZ + patch.sizeZ);
+                const float maxZ = std::max(patch.originZ, patch.originZ + patch.sizeZ);
+                const float nearestX = std::clamp(eye.x, minX, maxX);
+                const float nearestZ = std::clamp(eye.z, minZ, maxZ);
+                const float dx = eye.x - nearestX;
+                const float dz = eye.z - nearestZ;
+                const float distanceSquared = (dx * dx) + (dz * dz);
+                if (distanceSquared < nearestWaterDistanceSquared) {
+                    nearestWaterDistanceSquared = distanceSquared;
+                    m_waterReflectionPlaneHeight = patch.waterLevel;
+                    m_waterReflectionPlaneValid = true;
+                }
+            }
+        }
+    }
+    mvpUniform.waterReflectionConfig[0] = m_waterReflectionPlaneHeight;
+    mvpUniform.waterReflectionConfig[1] = m_waterReflectionPlaneValid ? 1.0f : 0.0f;
+    mvpUniform.waterReflectionConfig[2] = 0.0f;
+    mvpUniform.waterReflectionConfig[3] = 0.0f;
+    const bool reflectionPlaneChanged =
+        m_waterReflectionPlaneValid != m_waterReflectionPreviousPlaneValid ||
+        (m_waterReflectionPlaneValid &&
+         std::abs(m_waterReflectionPlaneHeight -
+                  m_waterReflectionPreviousPlaneHeight) > 0.25f);
+    if (reflectionPlaneChanged) {
+        m_waterReflectionHistoryValid = false;
+    }
+    m_waterReflectionPreviousPlaneHeight = m_waterReflectionPlaneHeight;
+    m_waterReflectionPreviousPlaneValid = m_waterReflectionPlaneValid;
+    const bool reflectionResourcesAvailable =
+        m_waterReflectionPlaneValid &&
+        m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT &&
+        m_importedWaterPipeline != VK_NULL_HANDLE &&
+        m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
+        m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
+        m_importedWaterIndexCount > 0u &&
+        !m_waterReflectionImages.empty() &&
+        !m_waterReflectionImageViews.empty() &&
+        !m_waterReflectionImageInitialized.empty() &&
+        !m_waterReflectionDepthImages.empty() &&
+        !m_waterReflectionDepthImageViews.empty() &&
+        !m_waterReflectionDepthImageInitialized.empty() &&
+        aoFrameIndex < m_waterReflectionImages.size() &&
+        aoFrameIndex < m_waterReflectionImageViews.size() &&
+        aoFrameIndex < m_waterReflectionImageInitialized.size() &&
+        aoFrameIndex < m_waterReflectionDepthImages.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageViews.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageInitialized.size() &&
+        m_waterReflectionImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionDepthImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionDepthImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_importedStaticPipelineTwoSided != VK_NULL_HANDLE &&
+        m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE &&
+        m_bufferAllocator.getBuffer(m_importedVertexBufferHandle) != VK_NULL_HANDLE &&
+        m_bufferAllocator.getBuffer(m_importedIndexBufferHandle) != VK_NULL_HANDLE &&
+        !m_importedMeshDraws.empty();
 
     struct SelectedImportedLight {
         const ImportedLocalLight* light = nullptr;
@@ -1959,6 +2091,10 @@ void RendererBackend::renderFrame(
     mvpUniform.screenSpaceGiConfig[1] = static_cast<float>(m_screenSpaceGiExtent.height);
     mvpUniform.screenSpaceGiConfig[2] = m_screenSpaceGiActive ? 1.0f : 0.0f;
     mvpUniform.screenSpaceGiConfig[3] = 0.18f;
+    mvpUniform.importedPbrConfig[0] = m_importedPbrDefaults.objectRoughness;
+    mvpUniform.importedPbrConfig[1] = m_importedPbrDefaults.terrainRoughness;
+    mvpUniform.importedPbrConfig[2] = m_importedPbrDefaults.metallic;
+    mvpUniform.importedPbrConfig[3] = m_importedPbrDefaults.enabled ? 1.0f : 0.0f;
 
     mvpUniform.fogMapConfig[0] = m_fogMapInvExtentX;
     mvpUniform.fogMapConfig[1] = m_fogMapInvExtentZ;
@@ -2127,8 +2263,6 @@ void RendererBackend::renderFrame(
         mvpUniform.voxelBaseColorPalette[colorIndex][3] = static_cast<float>((rgba >> 24u) & 0xFFu) / 255.0f;
     }
     mvpUniform.voxelGiRestirConfig0[3] = m_voxelGiRestirHistoryValid ? 1.0f : 0.0f;
-    std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
-
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = m_bufferAllocator.getBuffer(mvpSliceOpt->buffer);
     bufferInfo.offset = 0;
@@ -3059,6 +3193,18 @@ void RendererBackend::renderFrame(
     buildBlendedDrawOrder(
         std::span<const ImportedMeshDraw>(importedActorMeshDraws.data(), importedActorMeshDraws.size()),
         m_importedActorBlendedDrawOrder);
+
+    // Page culling happens after descriptor setup, but before the first GPU
+    // pass. Keep the UBO flag aligned with the exact main-pass gate so water
+    // never samples a temporal target that this frame cannot produce.
+    const bool reflectionAvailable =
+        reflectionResourcesAvailable && !importedMeshDrawsForFrame.empty();
+    if (reflectionAvailable != m_waterReflectionPreviousAvailable) {
+        m_waterReflectionHistoryValid = false;
+    }
+    m_waterReflectionPreviousAvailable = reflectionAvailable;
+    mvpUniform.waterReflectionConfig[1] = reflectionAvailable ? 1.0f : 0.0f;
+    std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;

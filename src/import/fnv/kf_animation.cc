@@ -566,27 +566,14 @@ bool readTransformData(
 
 }  // namespace
 
-bool parseKfAnimation(
-    const std::vector<std::uint8_t>& bytes, KfAnimation& outAnimation, std::string& outError
+static bool parseAnimationAtBlock(
+    const std::vector<std::uint8_t>& bytes,
+    const NifBlockSummary& summary,
+    std::size_t sequenceBlock,
+    KfAnimation& outAnimation,
+    std::string& outError
 ) {
     outAnimation = KfAnimation{};
-
-    NifBlockSummary summary;
-    if (!parseNifBlockSummary(bytes, summary, outError)) {
-        return false;
-    }
-
-    std::size_t sequenceBlock = summary.blockTypeNames.size();
-    for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
-        if (summary.blockTypeNames[i] == "NiControllerSequence") {
-            sequenceBlock = i;
-            break;
-        }
-    }
-    if (sequenceBlock == summary.blockTypeNames.size()) {
-        outError = "no NiControllerSequence block (not an animation .kf?)";
-        return false;
-    }
 
     const auto stringAt = [&](std::int32_t index) -> const std::string* {
         if (index < 0 || static_cast<std::size_t>(index) >= summary.strings.size()) {
@@ -768,6 +755,46 @@ bool parseKfAnimation(
         }
         outAnimation.stopTime -= startTime;
         outAnimation.startTime = 0.0f;
+    }
+    return true;
+}
+
+bool parseKfAnimation(
+    const std::vector<std::uint8_t>& bytes, KfAnimation& outAnimation, std::string& outError
+) {
+    NifBlockSummary summary;
+    if (!parseNifBlockSummary(bytes, summary, outError)) {
+        return false;
+    }
+    for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+        if (summary.blockTypeNames[i] == "NiControllerSequence") {
+            return parseAnimationAtBlock(bytes, summary, i, outAnimation, outError);
+        }
+    }
+    outError = "no NiControllerSequence block (not an animation .kf?)";
+    return false;
+}
+
+bool parseNifEmbeddedAnimations(
+    const std::vector<std::uint8_t>& bytes,
+    std::vector<KfAnimation>& outAnimations,
+    std::string& outError
+) {
+    outAnimations.clear();
+    NifBlockSummary summary;
+    if (!parseNifBlockSummary(bytes, summary, outError)) {
+        return false;
+    }
+    for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
+        if (summary.blockTypeNames[i] != "NiControllerSequence") {
+            continue;
+        }
+        KfAnimation animation;
+        if (!parseAnimationAtBlock(bytes, summary, i, animation, outError)) {
+            outAnimations.clear();
+            return false;
+        }
+        outAnimations.push_back(std::move(animation));
     }
     return true;
 }

@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
+#include <stb_image.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -287,6 +289,31 @@ bool loadUncompressedRgbaDdsFile(const std::filesystem::path& path, DdsRgbaImage
     return true;
 }
 
+bool loadRgbaImageFile(const std::filesystem::path& path, DdsRgbaImage& outImage) {
+    if (loadUncompressedRgbaDdsFile(path, outImage)) {
+        return true;
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+    if (pixels == nullptr || width <= 0 || height <= 0) {
+        if (pixels != nullptr) {
+            stbi_image_free(pixels);
+        }
+        return false;
+    }
+
+    const std::size_t byteCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+    outImage.width = static_cast<std::uint32_t>(width);
+    outImage.height = static_cast<std::uint32_t>(height);
+    outImage.pixelData.assign(pixels, pixels + byteCount);
+    stbi_image_free(pixels);
+    return true;
+}
+
 std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& relativePath) {
     std::vector<std::filesystem::path> baseCandidates;
     baseCandidates.reserve(6);
@@ -432,7 +459,12 @@ bool RendererBackend::createWaterNormalTextureResources() {
         m_waterNormalTextureAllocation = VK_NULL_HANDLE;
     };
 
-    const std::filesystem::path waterNormalPath = resolveRendererAssetPath("assets/water.dds");
+    const char* waterNormalOverride = std::getenv("ODAI_WATER_NORMAL");
+    const bool hasWaterNormalOverride =
+        waterNormalOverride != nullptr && waterNormalOverride[0] != '\0';
+    const std::filesystem::path waterNormalPath = hasWaterNormalOverride
+        ? std::filesystem::path{waterNormalOverride}
+        : resolveRendererAssetPath("assets/water.dds");
     if (supportsBc5WaterNormalTexture(m_physicalDevice)) {
         DdsCompressedImage ddsImage{};
         if (loadCompressedDdsFile(
@@ -750,21 +782,37 @@ bool RendererBackend::createWaterNormalTextureResources() {
                 VOX_LOGW("render") << "failed to upload DDS water normal texture " << waterNormalPath.string()
                                    << "; falling back to generated normal";
             }
-        } else if (!waterNormalPath.empty()) {
-            VOX_LOGW("render") << "failed to parse DDS water normal texture " << waterNormalPath.string()
-                               << "; falling back to generated normal";
         }
-    } else {
+    } else if (!hasWaterNormalOverride) {
         VOX_LOGW("render") << "BC5 water normal textures unsupported on this GPU; falling back to generated normal";
     }
 
-    const std::vector<std::uint8_t> pixelData = generateWaterNormalTexturePixels();
+    DdsRgbaImage rgbaWaterNormal{};
+    const bool loadedRgbaWaterNormal =
+        loadRgbaImageFile(waterNormalPath, rgbaWaterNormal);
+    std::vector<std::uint8_t> pixelData = loadedRgbaWaterNormal
+        ? std::move(rgbaWaterNormal.pixelData)
+        : generateWaterNormalTexturePixels();
+    const std::uint32_t waterNormalWidth = loadedRgbaWaterNormal
+        ? rgbaWaterNormal.width
+        : kGeneratedWaterNormalTextureSize;
+    const std::uint32_t waterNormalHeight = loadedRgbaWaterNormal
+        ? rgbaWaterNormal.height
+        : kGeneratedWaterNormalTextureSize;
+    if (loadedRgbaWaterNormal) {
+        VOX_LOGI("render") << "external RGBA water normal texture ready: "
+                           << waterNormalPath.string() << " ("
+                           << waterNormalWidth << "x" << waterNormalHeight << ")";
+    } else if (hasWaterNormalOverride) {
+        VOX_LOGW("render") << "failed to read ODAI_WATER_NORMAL as BC5 DDS or RGBA image: "
+                           << waterNormalPath.string() << "; falling back to generated normal";
+    }
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-    imageCreateInfo.extent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+    imageCreateInfo.extent = {waterNormalWidth, waterNormalHeight, 1u};
     imageCreateInfo.mipLevels = 1;
     imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -860,7 +908,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
         copyRegion.imageSubresource.mipLevel = 0;
         copyRegion.imageSubresource.baseArrayLayer = 0;
         copyRegion.imageSubresource.layerCount = 1;
-        copyRegion.imageExtent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+        copyRegion.imageExtent = {waterNormalWidth, waterNormalHeight, 1u};
 
         VkCopyMemoryToImageInfoEXT copyInfo{};
         copyInfo.sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT;
@@ -967,7 +1015,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
 
                     VkBufferImageCopy copyRegion{};
                     copyRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    copyRegion.imageExtent = {kGeneratedWaterNormalTextureSize, kGeneratedWaterNormalTextureSize, 1u};
+                    copyRegion.imageExtent = {waterNormalWidth, waterNormalHeight, 1u};
                     vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, m_waterNormalTextureImage,
                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
@@ -1030,8 +1078,10 @@ bool RendererBackend::createWaterNormalTextureResources() {
         return false;
     }
     setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_waterNormalTextureSampler), "water.normal.sampler");
-    VOX_LOGI("render") << "generated subtle water normal texture ready: "
-                       << kGeneratedWaterNormalTextureSize << "x" << kGeneratedWaterNormalTextureSize;
+    if (!loadedRgbaWaterNormal) {
+        VOX_LOGI("render") << "generated subtle water normal texture ready: "
+                           << waterNormalWidth << "x" << waterNormalHeight;
+    }
     return true;
 }
 

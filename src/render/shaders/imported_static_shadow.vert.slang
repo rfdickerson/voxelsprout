@@ -24,18 +24,27 @@ struct VertexOutput
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
+    float3 worldPosition = input.inPosition;
+    if (chunkPc.rigidAnimationParams.x > 0.5)
+    {
+        const float4 p = float4(worldPosition, 1.0);
+        worldPosition = float3(
+            dot(chunkPc.rigidAnimationTransform[0], p),
+            dot(chunkPc.rigidAnimationTransform[1], p),
+            dot(chunkPc.rigidAnimationTransform[2], p));
+    }
     const bool pointShadowFace = chunkPc.cascadeData.y > 0.5;
     if (pointShadowFace)
     {
         const int faceIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 209);
         output.position = mul(
             camera.interiorPointShadowViewProj[faceIndex],
-            float4(input.inPosition, 1.0));
+            float4(worldPosition, 1.0));
     }
     else
     {
         const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
-        output.position = mul(camera.lightViewProj[cascadeIndex], float4(input.inPosition, 1.0));
+        output.position = mul(camera.lightViewProj[cascadeIndex], float4(worldPosition, 1.0));
     }
     output.outUv = input.inUv;
     output.outTextureIndex = input.inTextureIndex;

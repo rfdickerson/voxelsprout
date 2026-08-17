@@ -46,11 +46,11 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v26 appends placed particle emitters after the alpha-authored byte. They are
 // field-written (not raw-blitted) so the renderer-facing preset can evolve
 // without inheriting a platform ABI.
-constexpr std::uint32_t kImportedSceneVersion = 26u;
+constexpr std::uint32_t kImportedSceneVersion = 28u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
-    static_cast<std::uint8_t>(TextureFormat::BC2);
+    static_cast<std::uint8_t>(TextureFormat::BC1Linear);
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
@@ -62,6 +62,7 @@ static_assert(sizeof(ImportedScenePageRange) == 36u);
 // kCellBuildVersion together, and these numbers are what force the question.
 static_assert(sizeof(ImportedScenePackedVertex) == 76u);
 static_assert(sizeof(ImportedSceneVertex) == 80u);
+static_assert(sizeof(ImportedScenePackedDraw) == 16u);
 
 // Materials are NOT raw-blitted -- ImportedSceneMaterial holds a std::string --
 // so they are written field by field. Both loaders must stay in step with this.
@@ -73,6 +74,10 @@ void writeSceneParticleEmitters(
     std::ostream& output, const std::vector<ImportedSceneParticleEmitter>& emitters);
 bool readSceneParticleEmitters(
     std::istream& input, std::vector<ImportedSceneParticleEmitter>& out);
+void writeSceneRigidAnimations(
+    std::ostream& output, const std::vector<ImportedSceneRigidAnimation>& animations);
+bool readSceneRigidAnimations(
+    std::istream& input, std::vector<ImportedSceneRigidAnimation>& out);
 bool readSceneMaterials(std::istream& input, std::vector<ImportedSceneMaterial>& out);
 
 std::string g_lastImportedSceneError;
@@ -249,7 +254,8 @@ bool collectTextureAlphaBands(const ImportedSceneTexture& texture, AlphaBandCoun
             }
             return true;
         }
-        case TextureFormat::BC1: {
+        case TextureFormat::BC1:
+        case TextureFormat::BC1Linear: {
             if (texture.rgba8.size() < baseBlockCount * 8u) {
                 return false;
             }
@@ -620,6 +626,86 @@ bool readSceneParticleEmitters(
     return true;
 }
 
+void writeSceneRigidAnimations(
+    std::ostream& output, const std::vector<ImportedSceneRigidAnimation>& animations) {
+    writeValue(output, static_cast<std::uint32_t>(animations.size()));
+    for (const ImportedSceneRigidAnimation& animation : animations) {
+        writeString(output, animation.nodeName);
+        writeValue(output, animation.duration);
+        writeValue(output, animation.cycleType);
+        output.write(
+            reinterpret_cast<const char*>(animation.parentTransform),
+            sizeof(animation.parentTransform));
+        output.write(
+            reinterpret_cast<const char*>(animation.bindTransform),
+            sizeof(animation.bindTransform));
+        writeValue(output, static_cast<std::uint32_t>(animation.translationKeys.size()));
+        writeValue(output, static_cast<std::uint32_t>(animation.rotationKeys.size()));
+        writeValue(output, static_cast<std::uint32_t>(animation.scaleKeys.size()));
+        if (!animation.translationKeys.empty()) {
+            output.write(
+                reinterpret_cast<const char*>(animation.translationKeys.data()),
+                static_cast<std::streamsize>(
+                    animation.translationKeys.size() * sizeof(ImportedSceneVectorKey)));
+        }
+        if (!animation.rotationKeys.empty()) {
+            output.write(
+                reinterpret_cast<const char*>(animation.rotationKeys.data()),
+                static_cast<std::streamsize>(
+                    animation.rotationKeys.size() * sizeof(ImportedSceneQuaternionKey)));
+        }
+        if (!animation.scaleKeys.empty()) {
+            output.write(
+                reinterpret_cast<const char*>(animation.scaleKeys.data()),
+                static_cast<std::streamsize>(
+                    animation.scaleKeys.size() * sizeof(ImportedSceneVectorKey)));
+        }
+    }
+}
+
+bool readSceneRigidAnimations(
+    std::istream& input, std::vector<ImportedSceneRigidAnimation>& out) {
+    std::uint32_t count = 0u;
+    if (!readValue(input, count) || count > 65536u) {
+        return false;
+    }
+    out.resize(count);
+    for (ImportedSceneRigidAnimation& animation : out) {
+        std::uint32_t translationCount = 0u;
+        std::uint32_t rotationCount = 0u;
+        std::uint32_t scaleCount = 0u;
+        if (!readString(input, animation.nodeName) ||
+            !readValue(input, animation.duration) ||
+            !readValue(input, animation.cycleType) ||
+            !readExact(input, animation.parentTransform, sizeof(animation.parentTransform)) ||
+            !readExact(input, animation.bindTransform, sizeof(animation.bindTransform)) ||
+            !readValue(input, translationCount) ||
+            !readValue(input, rotationCount) ||
+            !readValue(input, scaleCount) || translationCount > 100000u ||
+            rotationCount > 100000u || scaleCount > 100000u) {
+            return false;
+        }
+        animation.translationKeys.resize(translationCount);
+        animation.rotationKeys.resize(rotationCount);
+        animation.scaleKeys.resize(scaleCount);
+        if ((translationCount != 0u &&
+             !readExact(
+                 input, animation.translationKeys.data(),
+                 animation.translationKeys.size() * sizeof(ImportedSceneVectorKey))) ||
+            (rotationCount != 0u &&
+             !readExact(
+                 input, animation.rotationKeys.data(),
+                 animation.rotationKeys.size() * sizeof(ImportedSceneQuaternionKey))) ||
+            (scaleCount != 0u &&
+             !readExact(
+                 input, animation.scaleKeys.data(),
+                 animation.scaleKeys.size() * sizeof(ImportedSceneVectorKey)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool readString(std::istream& input, std::string& out) {
     std::uint32_t size = 0;
     if (!readValue(input, size)) {
@@ -713,6 +799,54 @@ std::array<float, 3> transformDirection(
     };
 }
 
+std::array<float, 16> multiplyMatrix(
+    const std::array<float, 16>& a,
+    const float b[16]
+) {
+    std::array<float, 16> out{};
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            for (int k = 0; k < 4; ++k) {
+                out[(row * 4) + col] += a[(row * 4) + k] * b[(k * 4) + col];
+            }
+        }
+    }
+    return out;
+}
+
+bool invertAffineMatrix(const float matrix[16], std::array<float, 16>& out) {
+    const float a = matrix[0], b = matrix[1], c = matrix[2];
+    const float d = matrix[4], e = matrix[5], f = matrix[6];
+    const float g = matrix[8], h = matrix[9], i = matrix[10];
+    const float det =
+        (a * ((e * i) - (f * h))) -
+        (b * ((d * i) - (f * g))) +
+        (c * ((d * h) - (e * g)));
+    if (std::fabs(det) < 1.0e-8f) {
+        return false;
+    }
+    const float invDet = 1.0f / det;
+    out = {
+        ((e * i) - (f * h)) * invDet,
+        ((c * h) - (b * i)) * invDet,
+        ((b * f) - (c * e)) * invDet,
+        0.0f,
+        ((f * g) - (d * i)) * invDet,
+        ((a * i) - (c * g)) * invDet,
+        ((c * d) - (a * f)) * invDet,
+        0.0f,
+        ((d * h) - (e * g)) * invDet,
+        ((b * g) - (a * h)) * invDet,
+        ((a * e) - (b * d)) * invDet,
+        0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f};
+    const float tx = matrix[3], ty = matrix[7], tz = matrix[11];
+    out[3] = -((out[0] * tx) + (out[1] * ty) + (out[2] * tz));
+    out[7] = -((out[4] * tx) + (out[5] * ty) + (out[6] * tz));
+    out[11] = -((out[8] * tx) + (out[9] * ty) + (out[10] * tz));
+    return true;
+}
+
 std::array<float, 3> normalizeVector(std::array<float, 3> value) {
     const float length = std::sqrt(
         (value[0] * value[0]) +
@@ -728,6 +862,181 @@ std::array<float, 3> normalizeVector(std::array<float, 3> value) {
 
 }  // namespace
 
+bool sampleImportedSceneRigidAnimation(
+    const ImportedSceneRigidAnimation& animation,
+    float timeSeconds,
+    float outDeltaTransform[16]
+) {
+    if (animation.duration <= 0.0f) {
+        return false;
+    }
+    std::array<float, 16> inverseParent{};
+    std::array<float, 16> inverseBind{};
+    if (!invertAffineMatrix(animation.parentTransform, inverseParent) ||
+        !invertAffineMatrix(animation.bindTransform, inverseBind)) {
+        return false;
+    }
+    std::array<float, 16> parent{};
+    std::copy(
+        std::begin(animation.parentTransform), std::end(animation.parentTransform),
+        parent.begin());
+    const std::array<float, 16> baseLocal =
+        multiplyMatrix(inverseParent, animation.bindTransform);
+
+    float localTime = std::max(timeSeconds, 0.0f);
+    if (animation.cycleType == 0u) {
+        localTime = std::fmod(localTime, animation.duration);
+    } else {
+        localTime = std::min(localTime, animation.duration);
+    }
+
+    const auto sampleVector = [&](const std::vector<ImportedSceneVectorKey>& keys,
+                                  const float fallback[3], float out[3]) {
+        if (keys.empty()) {
+            std::copy(fallback, fallback + 3, out);
+            return;
+        }
+        if (keys.size() == 1u || localTime <= keys.front().time) {
+            std::copy(std::begin(keys.front().value), std::end(keys.front().value), out);
+            return;
+        }
+        if (localTime >= keys.back().time) {
+            std::copy(std::begin(keys.back().value), std::end(keys.back().value), out);
+            return;
+        }
+        const auto upper = std::lower_bound(
+            keys.begin() + 1, keys.end(), localTime,
+            [](const ImportedSceneVectorKey& key, float time) { return key.time < time; });
+        const auto lower = upper - 1;
+        const float span = upper->time - lower->time;
+        const float alpha = span > 0.0f ? (localTime - lower->time) / span : 0.0f;
+        for (int axis = 0; axis < 3; ++axis) {
+            out[axis] = std::lerp(lower->value[axis], upper->value[axis], alpha);
+        }
+    };
+
+    float baseTranslation[3] = {baseLocal[3], baseLocal[7], baseLocal[11]};
+    float baseScale[3] = {
+        std::sqrt((baseLocal[0] * baseLocal[0]) + (baseLocal[4] * baseLocal[4]) +
+                  (baseLocal[8] * baseLocal[8])),
+        std::sqrt((baseLocal[1] * baseLocal[1]) + (baseLocal[5] * baseLocal[5]) +
+                  (baseLocal[9] * baseLocal[9])),
+        std::sqrt((baseLocal[2] * baseLocal[2]) + (baseLocal[6] * baseLocal[6]) +
+                  (baseLocal[10] * baseLocal[10]))};
+    for (float& value : baseScale) {
+        value = value > 1.0e-6f ? value : 1.0f;
+    }
+
+    // Matrix -> quaternion after removing scale. Standard row-major branch.
+    const float r00 = baseLocal[0] / baseScale[0];
+    const float r01 = baseLocal[1] / baseScale[1];
+    const float r02 = baseLocal[2] / baseScale[2];
+    const float r10 = baseLocal[4] / baseScale[0];
+    const float r11 = baseLocal[5] / baseScale[1];
+    const float r12 = baseLocal[6] / baseScale[2];
+    const float r20 = baseLocal[8] / baseScale[0];
+    const float r21 = baseLocal[9] / baseScale[1];
+    const float r22 = baseLocal[10] / baseScale[2];
+    float rotation[4] = {};
+    const float trace = r00 + r11 + r22;
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        rotation[3] = 0.25f * s;
+        rotation[0] = (r21 - r12) / s;
+        rotation[1] = (r02 - r20) / s;
+        rotation[2] = (r10 - r01) / s;
+    } else if (r00 > r11 && r00 > r22) {
+        const float s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;
+        rotation[3] = (r21 - r12) / s;
+        rotation[0] = 0.25f * s;
+        rotation[1] = (r01 + r10) / s;
+        rotation[2] = (r02 + r20) / s;
+    } else if (r11 > r22) {
+        const float s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;
+        rotation[3] = (r02 - r20) / s;
+        rotation[0] = (r01 + r10) / s;
+        rotation[1] = 0.25f * s;
+        rotation[2] = (r12 + r21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
+        rotation[3] = (r10 - r01) / s;
+        rotation[0] = (r02 + r20) / s;
+        rotation[1] = (r12 + r21) / s;
+        rotation[2] = 0.25f * s;
+    }
+
+    if (!animation.rotationKeys.empty()) {
+        const auto& keys = animation.rotationKeys;
+        const ImportedSceneQuaternionKey* a = &keys.front();
+        const ImportedSceneQuaternionKey* b = a;
+        float alpha = 0.0f;
+        if (keys.size() > 1u && localTime > keys.front().time) {
+            if (localTime >= keys.back().time) {
+                a = b = &keys.back();
+            } else {
+                const auto upper = std::lower_bound(
+                    keys.begin() + 1, keys.end(), localTime,
+                    [](const ImportedSceneQuaternionKey& key, float time) {
+                        return key.time < time;
+                    });
+                b = &*upper;
+                a = &*(upper - 1);
+                const float span = b->time - a->time;
+                alpha = span > 0.0f ? (localTime - a->time) / span : 0.0f;
+            }
+        }
+        float bx = b->value[0], by = b->value[1], bz = b->value[2], bw = b->value[3];
+        float dot = (a->value[0] * bx) + (a->value[1] * by) +
+                    (a->value[2] * bz) + (a->value[3] * bw);
+        if (dot < 0.0f) {
+            dot = -dot;
+            bx = -bx; by = -by; bz = -bz; bw = -bw;
+        }
+        float wa = 1.0f - alpha;
+        float wb = alpha;
+        if (dot < 0.9995f) {
+            const float angle = std::acos(std::clamp(dot, -1.0f, 1.0f));
+            const float invSin = 1.0f / std::sin(angle);
+            wa = std::sin((1.0f - alpha) * angle) * invSin;
+            wb = std::sin(alpha * angle) * invSin;
+        }
+        rotation[0] = (wa * a->value[0]) + (wb * bx);
+        rotation[1] = (wa * a->value[1]) + (wb * by);
+        rotation[2] = (wa * a->value[2]) + (wb * bz);
+        rotation[3] = (wa * a->value[3]) + (wb * bw);
+        const float length = std::sqrt(
+            (rotation[0] * rotation[0]) + (rotation[1] * rotation[1]) +
+            (rotation[2] * rotation[2]) + (rotation[3] * rotation[3]));
+        if (length > 1.0e-6f) {
+            for (float& value : rotation) {
+                value /= length;
+            }
+        }
+    }
+
+    float translation[3] = {};
+    float scale[3] = {};
+    sampleVector(animation.translationKeys, baseTranslation, translation);
+    sampleVector(animation.scaleKeys, baseScale, scale);
+    const float x = rotation[0], y = rotation[1], z = rotation[2], w = rotation[3];
+    const float rotationMatrix[9] = {
+        1.0f - (2.0f * ((y * y) + (z * z))), 2.0f * ((x * y) - (z * w)),
+        2.0f * ((x * z) + (y * w)),
+        2.0f * ((x * y) + (z * w)), 1.0f - (2.0f * ((x * x) + (z * z))),
+        2.0f * ((y * z) - (x * w)),
+        2.0f * ((x * z) - (y * w)), 2.0f * ((y * z) + (x * w)),
+        1.0f - (2.0f * ((x * x) + (y * y)))};
+    float local[16] = {
+        rotationMatrix[0] * scale[0], rotationMatrix[1] * scale[1], rotationMatrix[2] * scale[2], translation[0],
+        rotationMatrix[3] * scale[0], rotationMatrix[4] * scale[1], rotationMatrix[5] * scale[2], translation[1],
+        rotationMatrix[6] * scale[0], rotationMatrix[7] * scale[1], rotationMatrix[8] * scale[2], translation[2],
+        0.0f, 0.0f, 0.0f, 1.0f};
+    const std::array<float, 16> animatedWorld = multiplyMatrix(parent, local);
+    const std::array<float, 16> delta = multiplyMatrix(animatedWorld, inverseBind.data());
+    std::copy(delta.begin(), delta.end(), outDeltaTransform);
+    return true;
+}
+
 void buildImportedScenePackedRenderData(ImportedScene& scene) {
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
@@ -738,6 +1047,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
     scene.packedVertices.clear();
     scene.packedIndices.clear();
     scene.packedDraws.clear();
+    scene.rigidAnimations.clear();
     scene.boundsMin[0] = std::numeric_limits<float>::max();
     scene.boundsMin[1] = std::numeric_limits<float>::max();
     scene.boundsMin[2] = std::numeric_limits<float>::max();
@@ -761,6 +1071,20 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             return;
         }
         const std::uint32_t firstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
+        std::vector<std::uint32_t> packedAnimationIndices;
+        packedAnimationIndices.reserve(mesh.rigidAnimations.size());
+        for (const ImportedSceneRigidAnimation& source : mesh.rigidAnimations) {
+            ImportedSceneRigidAnimation placed = source;
+            const std::array<float, 16> placedParent =
+                multiplyMatrix(transform, source.parentTransform);
+            const std::array<float, 16> placedBind =
+                multiplyMatrix(transform, source.bindTransform);
+            std::copy(placedParent.begin(), placedParent.end(), placed.parentTransform);
+            std::copy(placedBind.begin(), placedBind.end(), placed.bindTransform);
+            packedAnimationIndices.push_back(
+                static_cast<std::uint32_t>(scene.rigidAnimations.size()));
+            scene.rigidAnimations.push_back(std::move(placed));
+        }
         const auto appendVertex = [&](const ImportedSceneVertex& srcVertex,
                                       std::uint32_t textureIndex,
                                       std::uint32_t flags) {
@@ -812,7 +1136,9 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
         // adjacent draws that agree on every piece of state it cares about, so
         // parts that genuinely match are recombined there, and only parts that
         // actually differ stay apart.
-        const auto emitDraw = [&](std::uint32_t drawFirstIndex, std::uint8_t alphaThreshold) {
+        const auto emitDraw = [&](std::uint32_t drawFirstIndex,
+                                  std::uint8_t alphaThreshold,
+                                  std::uint32_t rigidAnimationIndex) {
             const std::uint32_t indexCount =
                 static_cast<std::uint32_t>(scene.packedIndices.size() - drawFirstIndex);
             if (indexCount == 0u) {
@@ -822,6 +1148,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             draw.firstIndex = drawFirstIndex;
             draw.indexCount = indexCount;
             draw.alphaThreshold = alphaThreshold;
+            draw.rigidAnimationIndex = rigidAnimationIndex;
             scene.packedDraws.push_back(draw);
         };
 
@@ -842,7 +1169,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             }
             // No part, so no authored alpha mode; the neutral default applies
             // and this draw never alpha-tests anyway.
-            emitDraw(firstIndex, 128u);
+            emitDraw(firstIndex, 128u, 0xffffffffu);
         } else {
             for (const ImportedSceneMeshPart& part : mesh.parts) {
                 if (part.indexCount == 0u || part.firstIndex >= mesh.indices.size()) {
@@ -873,7 +1200,11 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     }
                     scene.packedIndices.push_back(remappedIndex);
                 }
-                emitDraw(partDrawFirstIndex, part.alphaThreshold);
+                const std::uint32_t animationIndex =
+                    part.rigidAnimationIndex < packedAnimationIndices.size()
+                        ? packedAnimationIndices[part.rigidAnimationIndex]
+                        : 0xffffffffu;
+                emitDraw(partDrawFirstIndex, part.alphaThreshold, animationIndex);
             }
         }
     };
@@ -932,9 +1263,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         dstVertex.uv[0] = srcVertex.uv[0];
                         dstVertex.uv[1] = srcVertex.uv[1];
                         dstVertex.textureIndex = part.textureIndex;
-                        dstVertex.flags = hasAuthoredColor
-                            ? kImportedSceneMaterialFlagVertexColorTint
-                            : 0u;
+                        dstVertex.flags = kImportedSceneMaterialFlagTerrainSlopeBlend;
+                        if (hasAuthoredColor) {
+                            dstVertex.flags |= kImportedSceneMaterialFlagVertexColorTint;
+                        }
                         // Terrain layers ride through untouched; the flag opts
                         // in only when a layer is actually present, so a scene
                         // whose cooker never filled these reads exactly as
@@ -1339,6 +1671,8 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     writeValue(output, static_cast<std::uint8_t>(scene.alphaFlagsAuthored ? 1u : 0u));
     // v26: lightweight procedural effect emitters (fire today).
     writeSceneParticleEmitters(output, scene.particleEmitters);
+    // v28: placed rigid environmental machinery tracks.
+    writeSceneRigidAnimations(output, scene.rigidAnimations);
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -1543,7 +1877,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
 
     if (!countFitsInStream(input, packedVertexCount, 32u) ||
         !countFitsInStream(input, packedIndexCount, 4u) ||
-        !countFitsInStream(input, packedDrawCount, 12u)) {
+        !countFitsInStream(input, packedDrawCount, sizeof(ImportedScenePackedDraw))) {
         return false;
     }
     scene.packedVertices.resize(packedVertexCount);
@@ -1597,6 +1931,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     }
     scene.sourceParticleEmitterCount =
         static_cast<std::uint32_t>(scene.particleEmitters.size());
+    if (!readSceneRigidAnimations(input, scene.rigidAnimations)) {
+        setLastImportedSceneError(
+            "Failed to read imported-scene rigid animations: " + inputPath.string());
+        return false;
+    }
 
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
@@ -1791,7 +2130,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
 
     if (!countFitsInStream(input, packedVertexCount, 32u) ||
         !countFitsInStream(input, packedIndexCount, 4u) ||
-        !countFitsInStream(input, packedDrawCount, 12u)) {
+        !countFitsInStream(input, packedDrawCount, sizeof(ImportedScenePackedDraw))) {
         return false;
     }
     scene.packedVertices.resize(packedVertexCount);
@@ -1840,6 +2179,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     }
     scene.sourceParticleEmitterCount =
         static_cast<std::uint32_t>(scene.particleEmitters.size());
+    if (!readSceneRigidAnimations(input, scene.rigidAnimations)) {
+        setLastImportedSceneError(
+            "Failed to read imported-scene rigid animations: " + inputPath.string());
+        return false;
+    }
 
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was

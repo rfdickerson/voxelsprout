@@ -1871,29 +1871,6 @@ bool readGeometryData(ByteCursor& cursor, std::size_t blockEnd, bool isStrips, b
 
 }  // namespace
 
-bool parseNifBlockSummary(
-    const std::vector<std::uint8_t>& bytes, NifBlockSummary& outSummary, std::string& outError
-) {
-    outSummary = NifBlockSummary{};
-    ByteCursor cursor(bytes.data(), bytes.size());
-    NifHeader header;
-    if (!parseHeader(cursor, header, outError)) {
-        return false;
-    }
-    outSummary.blockTypeNames.reserve(header.blockTypeIndex.size());
-    for (const std::uint16_t typeIndex : header.blockTypeIndex) {
-        outSummary.blockTypeNames.push_back(header.blockTypeNames[typeIndex]);
-    }
-    outSummary.blockSizes = header.blockSize;
-    outSummary.strings = header.strings;
-    std::size_t offset = cursor.pos();
-    for (const std::uint32_t size : header.blockSize) {
-        outSummary.blockStarts.push_back(offset);
-        offset += size;
-    }
-    return true;
-}
-
 // ---------------------------------------------------------------------------
 // Sequential block walk for 20.0.0.4 (Oblivion)
 // ---------------------------------------------------------------------------
@@ -2782,8 +2759,27 @@ bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
         typeName == "NiBillboardNode" || typeName == "NiCollisionSwitch" ||
         typeName == "NiSortAdjustNode" || typeName == "NiLODNode" ||
         typeName == "NiSwitchNode" || typeName == "NiFltAnimationNode") {
-        return consumeMorrowindAvObject(cursor) && consumeMorrowindRefList(cursor) &&
-               consumeMorrowindRefList(cursor);  // children, effects
+        if (!consumeMorrowindAvObject(cursor) || !consumeMorrowindRefList(cursor) ||
+            !consumeMorrowindRefList(cursor)) {  // children, effects
+            return false;
+        }
+        // These types inherit NiNode but are not byte-identical to it. Missing
+        // the subtype tail does not fail at this block: the next four bytes are
+        // read as a type-name length, so the error points one block late.
+        if (typeName == "NiSwitchNode") {
+            return cursor.skip(4u);  // initial child index; switch flags arrive in 10.1
+        }
+        if (typeName == "NiFltAnimationNode") {
+            return cursor.skip(4u + 4u);  // initial child index, duration
+        }
+        if (typeName == "NiLODNode") {
+            // NiSwitchNode tail, centre, then u32-counted (near, far) float pairs.
+            return cursor.skip(4u + 12u) && consumeCountedArray(cursor, 8u);
+        }
+        if (typeName == "NiSortAdjustNode") {
+            return cursor.skip(4u + 4u);  // sorting mode, sub-sorter ref
+        }
+        return true;
     }
     if (typeName == "NiTriShape" || typeName == "NiTriStrips" || typeName == "NiLines") {
         // NiGeometry tail: data ref + skin-instance ref. MaterialData does not
@@ -3196,9 +3192,11 @@ bool computeMorrowindBlockBounds(
     blockEnd.assign(blockCount, 0u);
     std::unordered_map<std::string, std::uint16_t> typeIds;
     for (std::size_t i = 0; i < blockCount; ++i) {
+        const std::size_t typeOffset = cursor.pos();
         std::string typeName;
         if (!cursor.readSizedString<std::uint32_t>(typeName) || typeName.empty()) {
-            outError = "Truncated NIF 4.0.0.2 block type name";
+            outError = "Truncated NIF 4.0.0.2 block type name at block " +
+                       std::to_string(i) + " offset " + std::to_string(typeOffset);
             return false;
         }
         const auto inserted =
@@ -3210,7 +3208,8 @@ bool computeMorrowindBlockBounds(
         blockStart[i] = cursor.pos();
         if (!consumeMorrowindBlock(cursor, typeName)) {
             outError = "Unsupported NIF 4.0.0.2 block type '" + typeName +
-                       "' (no size is derivable without it)";
+                       "' at block " + std::to_string(i) + " offset " +
+                       std::to_string(typeOffset) + " (no size is derivable without it)";
             return false;
         }
         blockEnd[i] = cursor.pos();
@@ -3259,6 +3258,53 @@ bool computeSequentialBlockBounds(
             return false;
         }
     }
+    return true;
+}
+
+bool parseNifBlockSummary(
+    const std::vector<std::uint8_t>& bytes, NifBlockSummary& outSummary, std::string& outError
+) {
+    outSummary = NifBlockSummary{};
+    ByteCursor cursor(bytes.data(), bytes.size());
+    NifHeader header;
+    if (!parseHeader(cursor, header, outError)) {
+        return false;
+    }
+
+    const std::size_t numBlocks = header.blockTypeIndex.size();
+    std::vector<std::size_t> blockStart(numBlocks);
+    std::vector<std::size_t> blockEnd(numBlocks);
+    if (header.inlineBlockTypes) {
+        if (!computeMorrowindBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
+            return false;
+        }
+    } else if (header.sequentialBlocks) {
+        if (!computeSequentialBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
+            return false;
+        }
+    } else {
+        std::size_t offset = cursor.pos();
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            blockStart[i] = offset;
+            blockEnd[i] = offset + header.blockSize[i];
+            if (blockEnd[i] > bytes.size()) {
+                outError = "NIF block size table overruns the file";
+                return false;
+            }
+            offset = blockEnd[i];
+        }
+    }
+
+    outSummary.blockTypeNames.reserve(numBlocks);
+    outSummary.blockSizes.reserve(numBlocks);
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        outSummary.blockTypeNames.push_back(header.blockTypeNames[header.blockTypeIndex[i]]);
+        outSummary.blockSizes.push_back(static_cast<std::uint32_t>(blockEnd[i] - blockStart[i]));
+    }
+    outSummary.blockStarts = std::move(blockStart);
+    outSummary.strings = header.strings;
     return true;
 }
 
@@ -3465,6 +3511,20 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // anything) was read here.
     }
 
+    std::unordered_set<std::string> animatedNodeNames;
+    if (outModel.hasEmbeddedTransformAnimation) {
+        std::string animationError;
+        if (parseNifEmbeddedAnimations(bytes, outModel.embeddedAnimations, animationError)) {
+            for (const KfAnimation& animation : outModel.embeddedAnimations) {
+                for (const KfBoneTrack& track : animation.tracks) {
+                    if (!track.nodeName.empty()) {
+                        animatedNodeNames.insert(track.nodeName);
+                    }
+                }
+            }
+        }
+    }
+
     // Second pass over NiTexturingProperty: a NiSourceTexture can appear after
     // the property that references it, so this cannot fold into the loop above.
     for (std::size_t i = 0; i < numBlocks; ++i) {
@@ -3491,6 +3551,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     // not drawn, which is a diagnosable outcome rather than a wrong one.
     std::vector<std::size_t> stack;
     std::vector<Mat4> transformStack;
+    std::vector<std::int32_t> animationOwnerStack;
     std::vector<std::int32_t> footerRoots;
     if (readFooterRoots(bytes, blockEnd, footerRoots)) {
         for (const std::int32_t root : footerRoots) {
@@ -3501,6 +3562,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 isNiNode[static_cast<std::size_t>(root)]) {
                 stack.push_back(static_cast<std::size_t>(root));
                 transformStack.push_back(Mat4{});
+                animationOwnerStack.push_back(-1);
             }
         }
         outModel.usedFooterRoots = !stack.empty();
@@ -3514,6 +3576,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 referencedAsChild.find(static_cast<std::int32_t>(i)) == referencedAsChild.end()) {
                 stack.push_back(i);
                 transformStack.push_back(Mat4{});
+                animationOwnerStack.push_back(-1);
             }
         }
     }
@@ -3561,14 +3624,18 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     // the same code it handles its own with.
     std::vector<std::vector<std::int32_t>> inheritedPropertyStack;
     inheritedPropertyStack.assign(stack.size(), std::vector<std::int32_t>{});
+    std::vector<Mat4> animationParentTransforms(numBlocks);
+    std::vector<Mat4> animationBindTransforms(numBlocks);
 
     std::vector<bool> visited(numBlocks, false);
     while (!stack.empty()) {
         const std::size_t blockIndex = stack.back();
         const Mat4 parentTransform = transformStack.back();
+        std::int32_t animationOwner = animationOwnerStack.back();
         std::vector<std::int32_t> inheritedProperties = std::move(inheritedPropertyStack.back());
         stack.pop_back();
         transformStack.pop_back();
+        animationOwnerStack.pop_back();
         inheritedPropertyStack.pop_back();
 
         if (blockIndex >= numBlocks || visited[blockIndex]) {
@@ -3579,6 +3646,18 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         const Mat4 localTransform = makeTrs(
             nodeFields[blockIndex].translation, nodeFields[blockIndex].rotation, nodeFields[blockIndex].scale);
         const Mat4 worldTransform = multiply(parentTransform, localTransform);
+
+        const AvObjectFields& currentFields = nodeFields[blockIndex];
+        const std::string* currentName = &currentFields.name;
+        if (currentName->empty() && currentFields.nameRef >= 0 &&
+            static_cast<std::size_t>(currentFields.nameRef) < header.strings.size()) {
+            currentName = &header.strings[static_cast<std::size_t>(currentFields.nameRef)];
+        }
+        if (!currentName->empty() && animatedNodeNames.contains(*currentName)) {
+            animationOwner = static_cast<std::int32_t>(blockIndex);
+            animationParentTransforms[blockIndex] = parentTransform;
+            animationBindTransforms[blockIndex] = worldTransform;
+        }
 
         // COLLISION GEOMETRY IS REAL GEOMETRY, and it must not be drawn.
         //
@@ -3667,6 +3746,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 if (child >= 0 && static_cast<std::size_t>(child) < numBlocks) {
                     stack.push_back(static_cast<std::size_t>(child));
                     transformStack.push_back(worldTransform);
+                    animationOwnerStack.push_back(animationOwner);
                     inheritedPropertyStack.push_back(childInherited);
                 }
             }
@@ -3684,6 +3764,25 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
             if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                 shape.name = header.strings[static_cast<std::size_t>(nameRef)];
+            }
+            if (animationOwner >= 0) {
+                const auto ownerIndex = static_cast<std::size_t>(animationOwner);
+                const AvObjectFields& ownerFields = nodeFields[ownerIndex];
+                if (!ownerFields.name.empty()) {
+                    shape.animationNodeName = ownerFields.name;
+                } else if (ownerFields.nameRef >= 0 &&
+                           static_cast<std::size_t>(ownerFields.nameRef) < header.strings.size()) {
+                    shape.animationNodeName =
+                        header.strings[static_cast<std::size_t>(ownerFields.nameRef)];
+                }
+                std::memcpy(
+                    shape.animationParentTransform,
+                    animationParentTransforms[ownerIndex].m,
+                    sizeof(shape.animationParentTransform));
+                std::memcpy(
+                    shape.animationBindTransform,
+                    animationBindTransforms[ownerIndex].m,
+                    sizeof(shape.animationBindTransform));
             }
             // Resolve this shape's material properties. A shader property
             // (BSShaderPPLightingProperty / BSShaderNoLightingProperty) points

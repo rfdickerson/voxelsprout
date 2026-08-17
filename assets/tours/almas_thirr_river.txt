@@ -1,0 +1,10 @@
+# Almas Thirr from the Thirr River, engine space (X, height, Z).
+# Seven points, held low over the water. The aim begins between the two
+# southern lighthouses and eases west to the main tower for the final reveal.
+50500 220 243000   50352 1280 229177
+50800 250 241200   50352 1200 229177
+51100 300 239400   50352 1120 229177
+51200 360 237800   50352 1080 229177
+51200 430 236800   50000 1180 228200
+51000 500 235800   49000 1240 227400
+50500 560 235000   48000 1263 226600

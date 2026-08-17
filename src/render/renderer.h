@@ -246,6 +246,10 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    // Optional game/simulation clock for shader animation. Negative restores
+    // the backend wall clock. Fixed-step captures publish their own time so
+    // water, rigid machinery, and future foliage advance at the encoded rate.
+    void setVisualTimeSeconds(float seconds);
     // Authored sky from a Fallout WTHR record. Default-constructed params
     // (weight 0) restore the procedural sky.
     void setWeatherSky(const WeatherSkyParams& params);
@@ -259,6 +263,9 @@ public:
     // silently resetting the rest to struct defaults -- which is exactly what
     // `setTonemapSettings(TonemapSettings{})` does to an ENB configuration.
     [[nodiscard]] TonemapSettings tonemapSettings() const;
+    // Supplies metallic/roughness only when an imported surface has no authored
+    // PBR material. Intended for renderer presets over legacy TES3/TES4 art.
+    void setImportedPbrDefaults(const ImportedPbrDefaults& defaults);
     // Post-process depth of field. Focus is a view distance in world units;
     // blur ramps to maxRadiusPixels over focusRange BEHIND the focal plane and,
     // scaled by nearBlurScale, over focusRange/nearBlurScale IN FRONT of it.

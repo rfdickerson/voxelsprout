@@ -21,7 +21,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const uint32_t imageIndex = context.imageIndex;
     const VkViewport& viewport = context.viewport;
     const VkRect2D& scissor = context.scissor;
-    const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     // Voxel chunk inputs: consumed by the chunk draw below (VoxelCraft). The magica/pipe
     // inputs are still present on MainPassInputs but remain unconsumed here.
     const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
@@ -95,6 +94,252 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexCount > 0;
+
+    // Render a real planar reflection before the main scene. The transform in
+    // imported_static.vert reflects world points across the selected water
+    // plane, which is exactly equivalent to mirroring the camera, while the
+    // fragment shader clips geometry below the plane. The existing pipelines
+    // are single-sample in the showcase configuration, so the half-resolution
+    // target needs no resolve image of its own.
+    const bool canRenderPlanarWaterReflection =
+        canDrawImportedWater &&
+        m_waterReflectionPlaneValid &&
+        m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT &&
+        aoFrameIndex < m_waterReflectionImages.size() &&
+        aoFrameIndex < m_waterReflectionImageViews.size() &&
+        aoFrameIndex < m_waterReflectionImageInitialized.size() &&
+        aoFrameIndex < m_waterReflectionDepthImages.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageViews.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageInitialized.size() &&
+        m_waterReflectionImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionDepthImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_importedStaticPipelineTwoSided != VK_NULL_HANDLE &&
+        m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE &&
+        importedVertexBuffer != VK_NULL_HANDLE &&
+        importedIndexBuffer != VK_NULL_HANDLE &&
+        !importedMeshDraws.empty();
+    const bool useWaterReflectionTemporalResolve =
+        m_waterReflectionTemporalEnabled &&
+        m_waterReflectionResolvePipeline != VK_NULL_HANDLE &&
+        m_waterReflectionResolveBufferSet.valid();
+    if (canRenderPlanarWaterReflection) {
+        beginDebugLabel(commandBuffer, "Pass: Planar Water Reflection", 0.08f, 0.34f, 0.42f, 1.0f);
+        transitionImageLayout(
+            commandBuffer,
+            m_waterReflectionImages[aoFrameIndex],
+            m_waterReflectionImageInitialized[aoFrameIndex]
+                ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            m_waterReflectionImageInitialized[aoFrameIndex]
+                ? (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)
+                : VK_PIPELINE_STAGE_2_NONE,
+            m_waterReflectionImageInitialized[aoFrameIndex]
+                ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        transitionImageLayout(
+            commandBuffer,
+            m_waterReflectionDepthImages[aoFrameIndex],
+            m_waterReflectionDepthImageInitialized[aoFrameIndex]
+                ? (m_waterReflectionDepthSampled[aoFrameIndex]
+                    ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                    : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            m_waterReflectionDepthImageInitialized[aoFrameIndex]
+                ? (m_waterReflectionDepthSampled[aoFrameIndex]
+                    ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                    : (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                       VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT))
+                : VK_PIPELINE_STAGE_2_NONE,
+            m_waterReflectionDepthImageInitialized[aoFrameIndex]
+                ? (m_waterReflectionDepthSampled[aoFrameIndex]
+                    ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                    : VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+                : VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT);
+        m_waterReflectionDepthSampled[aoFrameIndex] = false;
+
+        VkClearValue reflectionClear{};
+        const bool reflectionHasSky = shouldRenderImportedSky(m_importedInteriorLighting);
+        reflectionClear.color.float32[0] = reflectionHasSky ? 0.06f : m_importedInteriorLighting.fogColor[0];
+        reflectionClear.color.float32[1] = reflectionHasSky ? 0.08f : m_importedInteriorLighting.fogColor[1];
+        reflectionClear.color.float32[2] = reflectionHasSky ? 0.12f : m_importedInteriorLighting.fogColor[2];
+        reflectionClear.color.float32[3] = 1.0f;
+        VkRenderingAttachmentInfo reflectionColorAttachment{};
+        reflectionColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        reflectionColorAttachment.imageView = m_waterReflectionImageViews[aoFrameIndex];
+        reflectionColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        reflectionColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        reflectionColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        reflectionColorAttachment.clearValue = reflectionClear;
+        VkClearValue reflectionDepthClear{};
+        reflectionDepthClear.depthStencil.depth = 0.0f;
+        VkRenderingAttachmentInfo reflectionDepthAttachment{};
+        reflectionDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        reflectionDepthAttachment.imageView = m_waterReflectionDepthImageViews[aoFrameIndex];
+        reflectionDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        reflectionDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        reflectionDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        reflectionDepthAttachment.clearValue = reflectionDepthClear;
+        VkRenderingInfo reflectionRenderingInfo{};
+        reflectionRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        reflectionRenderingInfo.renderArea.extent = m_waterReflectionExtent;
+        reflectionRenderingInfo.layerCount = 1;
+        reflectionRenderingInfo.colorAttachmentCount = 1;
+        reflectionRenderingInfo.pColorAttachments = &reflectionColorAttachment;
+        reflectionRenderingInfo.pDepthAttachment = &reflectionDepthAttachment;
+        vkCmdBeginRendering(commandBuffer, &reflectionRenderingInfo);
+
+        VkViewport reflectionViewport{};
+        reflectionViewport.width = static_cast<float>(m_waterReflectionExtent.width);
+        reflectionViewport.height = static_cast<float>(m_waterReflectionExtent.height);
+        reflectionViewport.minDepth = 0.0f;
+        reflectionViewport.maxDepth = 1.0f;
+        VkRect2D reflectionScissor{};
+        reflectionScissor.extent = m_waterReflectionExtent;
+        vkCmdSetViewport(commandBuffer, 0, 1, &reflectionViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &reflectionScissor);
+
+        vkCmdBindPipeline(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_importedStaticPipelineTwoSided);
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        const VkBuffer reflectionVertexBuffers[1] = {importedVertexBuffer};
+        const VkDeviceSize reflectionVertexOffsets[1] = {0};
+        vkCmdBindVertexBuffers(
+            commandBuffer, 0, 1, reflectionVertexBuffers, reflectionVertexOffsets);
+        vkCmdBindIndexBuffer(
+            commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        ChunkPushConstants reflectionPush{};
+        reflectionPush.cascadeData[0] = 1.0f;
+        reflectionPush.cascadeData[1] = m_importedSceneInteriorMode ? 1.0f : 0.0f;
+        reflectionPush.cascadeData[2] = m_debugShowImportedTextures ? 0.0f : 1.0f;
+        reflectionPush.cascadeData[3] = m_debugImportedFlatShading ? 1.0f : 0.0f;
+        reflectionPush.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
+        reflectionPush.materialParams[3] = m_waterReflectionPlaneHeight;
+        const std::size_t reflectionTerrainCount = std::min<std::size_t>(
+            importedTerrainDrawCount, importedMeshDraws.size());
+        const auto includeReflectionDraw = [&](std::size_t drawIndex) {
+            return drawIndex < reflectionTerrainCount
+                ? m_debugShowImportedTerrain
+                : m_debugShowImportedStatics;
+        };
+        VkBuffer reflectionIndirectBuffer = VK_NULL_HANDLE;
+        VkDeviceSize reflectionIndirectBase = 0;
+        const bool reflectionUsesIndirect = m_supportsMultiDrawIndirect &&
+            buildImportedIndirectBatches(
+                importedMeshDraws, includeReflectionDraw,
+                reflectionIndirectBuffer, reflectionIndirectBase);
+        const auto drawReflectionGeometry = [&](VkPipeline pipeline) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            const auto pushReflectionDraw = [&](const ImportedMeshDraw& draw) {
+                reflectionPush.materialParams[0] =
+                    static_cast<float>(draw.alphaThreshold) / 255.0f;
+                reflectionPush.rigidAnimationParams[0] =
+                    sampleImportedRigidAnimationTransform(
+                        draw.rigidAnimationIndex,
+                        reflectionPush.rigidAnimationTransform)
+                        ? 1.0f
+                        : 0.0f;
+                vkCmdPushConstants(
+                    commandBuffer, m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(reflectionPush), &reflectionPush);
+            };
+            if (reflectionUsesIndirect) {
+                reflectionPush.rigidAnimationParams[0] = 0.0f;
+                for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
+                    reflectionPush.materialParams[0] =
+                        static_cast<float>(batch.alphaThreshold) / 255.0f;
+                    vkCmdPushConstants(
+                        commandBuffer, m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(reflectionPush), &reflectionPush);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexedIndirect(
+                        commandBuffer, reflectionIndirectBuffer,
+                        reflectionIndirectBase + batch.bufferOffset,
+                        batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                }
+            }
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                if (draw.blended || !includeReflectionDraw(drawIndex) ||
+                    (reflectionUsesIndirect && draw.rigidAnimationIndex == 0xffffffffu)) {
+                    continue;
+                }
+                pushReflectionDraw(draw);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                    draw.vertexOffset, 0);
+            }
+        };
+        // The normal imported pipeline is configured for the merged depth
+        // prepass: depth test on, writes off. The reflection owns a separate
+        // depth image, so replay the exact same batches through the depth-only
+        // pipeline first or the sky's EQUAL-to-clear test would paint over all
+        // reflected geometry.
+        drawReflectionGeometry(m_importedStaticDepthPrewritePipelineTwoSided);
+        drawReflectionGeometry(m_importedStaticPipelineTwoSided);
+
+        if (reflectionHasSky && m_skyboxPipeline != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(
+                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
+            bindGraphicsDescriptorBuffers(commandBuffer);
+            vkCmdPushConstants(
+                commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(reflectionPush), &reflectionPush);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        }
+        vkCmdEndRendering(commandBuffer);
+        transitionImageLayout(
+            commandBuffer,
+            m_waterReflectionImages[aoFrameIndex],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            useWaterReflectionTemporalResolve
+                ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        if (useWaterReflectionTemporalResolve) {
+            transitionImageLayout(
+                commandBuffer,
+                m_waterReflectionDepthImages[aoFrameIndex],
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                    VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_IMAGE_ASPECT_DEPTH_BIT);
+            m_waterReflectionDepthSampled[aoFrameIndex] = true;
+            writeGpuTimestampTop(kGpuTimestampQueryWaterReflectionResolveStart);
+            if (!recordWaterReflectionResolve(commandBuffer, aoFrameIndex)) {
+                m_waterReflectionHistoryValid = false;
+            }
+            writeGpuTimestampBottom(kGpuTimestampQueryWaterReflectionResolveEnd);
+        }
+        m_waterReflectionImageInitialized[aoFrameIndex] = true;
+        m_waterReflectionDepthImageInitialized[aoFrameIndex] = true;
+        endDebugLabel(commandBuffer);
+    }
 
     // Null when the sample count is 1: createMsaaColorTargets skips the image
     // entirely and the main pass targets hdrResolve directly. See there.
@@ -338,6 +583,22 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 sizeof(ChunkPushConstants),
                 &importedPushConstants);
         };
+        std::uint32_t lastPushedAnimation = 0xffffffffu;
+        const auto pushRigidAnimation = [&](std::uint32_t animationIndex) {
+            if (animationIndex == lastPushedAnimation) {
+                return;
+            }
+            lastPushedAnimation = animationIndex;
+            importedPushConstants.rigidAnimationParams[0] =
+                sampleImportedRigidAnimationTransform(
+                    animationIndex, importedPushConstants.rigidAnimationTransform)
+                    ? 1.0f
+                    : 0.0f;
+            vkCmdPushConstants(
+                commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(ChunkPushConstants), &importedPushConstants);
+        };
         // Opaque imported geometry, as indirect batches grouped by alpha-test
         // threshold. This is the bulk of the frame's draw calls -- roughly 3000
         // of them in the Mojave -- and they all share one vertex and one index
@@ -369,6 +630,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     m_importedTerrainTessPipeline);
                 for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
                     pushAlphaThreshold(batch.alphaThreshold);
+                    pushRigidAnimation(0xffffffffu);
                     countDrawCalls(m_debugDrawCallsMain, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, terrainIndirectBuffer,
@@ -458,6 +720,27 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                         batch.drawCount,
                         sizeof(VkDrawIndexedIndirectCommand));
                 }
+                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                    const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                    if (draw.blended || draw.rigidAnimationIndex == 0xffffffffu ||
+                        !includeOpaqueDraw(drawIndex)) {
+                        continue;
+                    }
+                    const VkPipeline wantedPipeline =
+                        (draw.twoSided && m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticDepthPrewritePipelineTwoSided
+                            : m_importedStaticDepthPrewritePipeline;
+                    if (wantedPipeline != boundPrewritePipeline) {
+                        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrewritePipeline = wantedPipeline;
+                    }
+                    pushAlphaThreshold(draw.alphaThreshold);
+                    pushRigidAnimation(draw.rigidAnimationIndex);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                        draw.vertexOffset, 0);
+                }
                 writeGpuTimestampBottom(kGpuTimestampQueryPrewriteEnd);
             }
 
@@ -477,10 +760,34 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     boundOpaquePipeline = wantedPipeline;
                 }
                 pushAlphaThreshold(batch.alphaThreshold);
+                pushRigidAnimation(0xffffffffu);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexedIndirect(
                     commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                     batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+            }
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                if (draw.blended || draw.rigidAnimationIndex == 0xffffffffu ||
+                    !includeOpaqueDraw(drawIndex)) {
+                    continue;
+                }
+                const VkPipeline wantedPipeline =
+                    (draw.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineTwoSided
+                        : ((useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                               ? m_importedStaticPipelineRt
+                               : m_importedStaticPipeline);
+                if (wantedPipeline != boundOpaquePipeline) {
+                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundOpaquePipeline = wantedPipeline;
+                }
+                pushAlphaThreshold(draw.alphaThreshold);
+                pushRigidAnimation(draw.rigidAnimationIndex);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                    draw.vertexOffset, 0);
             }
             if (boundOpaquePipeline != VK_NULL_HANDLE) {
                 // Leave the opaque pipeline bound for the blended replay below,
@@ -503,6 +810,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     continue;  // replayed below, in back-to-front order
                 }
                 pushAlphaThreshold(importedDraw.alphaThreshold);
+                pushRigidAnimation(importedDraw.rigidAnimationIndex);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -531,6 +839,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
                 pushAlphaThreshold(importedDraw.alphaThreshold);
+                pushRigidAnimation(importedDraw.rigidAnimationIndex);
                 VkPipeline wantedPipeline =
                     (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
                         ? m_importedStaticPipelineBlendedTwoSided
@@ -978,6 +1287,13 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     if (renderImportedSky && m_skyboxPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
         bindGraphicsDescriptorBuffers(commandBuffer);
+        // Do not inherit the planar pass's reflection flag in a frame where no
+        // later imported draw happened to overwrite the push constants.
+        ChunkPushConstants skyPushConstants{};
+        vkCmdPushConstants(
+            commandBuffer, m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(skyPushConstants), &skyPushConstants);
         countDrawCalls(m_debugDrawCallsMain, 1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }

@@ -1,4 +1,5 @@
 import camera_uniform;
+import chunk_push_constants;
 import imported_vertex_pack;
 
 struct VertexInput
@@ -45,8 +46,22 @@ struct VertexOutput
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
-    output.outWorldPosition = input.inPosition;
-    output.outWorldNormal = decodeImportedVertexNormal(input.inNormalOct);
+    float3 worldPosition = input.inPosition;
+    float3 worldNormal = decodeImportedVertexNormal(input.inNormalOct);
+    if (chunkPc.rigidAnimationParams.x > 0.5)
+    {
+        const float4 p = float4(worldPosition, 1.0);
+        worldPosition = float3(
+            dot(chunkPc.rigidAnimationTransform[0], p),
+            dot(chunkPc.rigidAnimationTransform[1], p),
+            dot(chunkPc.rigidAnimationTransform[2], p));
+        worldNormal = normalize(float3(
+            dot(chunkPc.rigidAnimationTransform[0].xyz, worldNormal),
+            dot(chunkPc.rigidAnimationTransform[1].xyz, worldNormal),
+            dot(chunkPc.rigidAnimationTransform[2].xyz, worldNormal)));
+    }
+    output.outWorldPosition = worldPosition;
+    output.outWorldNormal = worldNormal;
     output.outColor = float4(decodeImportedVertexColor(input.inColorSrgb), input.inColorSrgb.a);
     output.outUv = input.inUv;
     output.outTextureIndex = input.inTextureIndex;
@@ -62,6 +77,15 @@ VertexOutput main(VertexInput input)
         float((input.inLayerWeights >> 8) & 0xffu) / 255.0,
         float((input.inLayerWeights >> 16) & 0xffu) / 255.0,
         float((input.inLayerWeights >> 24) & 0xffu) / 255.0);
-    output.position = mul(camera.mvp, float4(input.inPosition, 1.0));
+    float3 rasterPosition = worldPosition;
+    // A camera mirrored across y=h is equivalent to reflecting every world
+    // point across that plane and rendering it through the original camera.
+    // Keeping outWorldPosition unreflected preserves authored lighting and
+    // shadow lookups; only rasterization sees the mirrored point.
+    if (chunkPc.cascadeData.x > 0.5)
+    {
+        rasterPosition.y = (2.0 * chunkPc.materialParams.w) - rasterPosition.y;
+    }
+    output.position = mul(camera.mvp, float4(rasterPosition, 1.0));
     return output;
 }

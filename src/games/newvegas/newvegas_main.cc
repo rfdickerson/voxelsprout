@@ -4,9 +4,33 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <iostream>
+
+namespace {
+
+std::filesystem::path defaultShaderPackWaterNormalPath() {
+    std::filesystem::path dataHome;
+    if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
+        if (xdgDataHome[0] != '\0') {
+            dataHome = xdgDataHome;
+        }
+    }
+    if (dataHome.empty()) {
+        if (const char* userHome = std::getenv("HOME")) {
+            if (userHome[0] != '\0') {
+                dataHome = std::filesystem::path{userHome} / ".local" / "share";
+            }
+        }
+    }
+    return dataHome / "odai" / "morrowind" / "shader-packs" /
+        "enhanced-pbr-2.0e" / "Enhanced PBR Lighting for OpenMW 0.49-0.52" /
+        "water_nm.png";
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
     // MSAA off by default for this game: TAA (taa.comp.slang) does the
@@ -113,6 +137,16 @@ int main(int argc, char** argv) {
             // A directory laid out like Data itself (textures\..., meshes\...).
             // Repeatable; later ones win, as a mod manager's load order would.
             app.addModDirectory(argv[++i]);
+        } else if (std::strcmp(argv[i], "--shader-pack") == 0 && i + 1 < argc) {
+            const std::string preset = argv[++i];
+            if (preset != "rafael") {
+                std::cout << "unknown --shader-pack preset: " << preset
+                          << " (rafael)\n";
+                return 1;
+            }
+            // The app reads this after renderer initialization, while the water
+            // texture is created during initialization. Publish both choices now.
+            setenv("ODAI_FNV_SHADER_PACK", preset.c_str(), 1);
         } else if (std::strcmp(argv[i], "--cache") == 0 && i + 1 < argc) {
             app.setStreamCacheDirectory(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-cache") == 0) {
@@ -221,14 +255,25 @@ int main(int argc, char** argv) {
                       << "  A texture pack needs $ODAI_FNV_TEX_SIZE raised too: the\n"
                       << "  default clamps every texture to 512 px, so higher-resolution\n"
                       << "  art is mip-dropped away before it is ever seen.\n"
+                      << "  --shader-pack rafael enables the native Rafael/Enhanced-PBR\n"
+                      << "  preset and its externally installed water normal. Also\n"
+                      << "  $ODAI_FNV_SHADER_PACK=rafael and $ODAI_WATER_NORMAL=<png|dds>.\n"
                       << "odai_game_newvegas --stream <Data> --plugin-add <Mod.esp>\n"
-                      << "  Load an extra plugin for its weather records; masters resolve\n"
-                      << "  on their own. The .esp must be in the --stream directory, not\n"
-                      << "  in a --mod directory. Also $ODAI_FNV_PLUGINS, ','-separated.\n"
+                      << "  Load an extra plugin and merge its world-record overrides; masters\n"
+                      << "  resolve on their own. Plugins may live in --stream or --mod roots.\n"
+                      << "  TES3 load orders merge exterior grids and named interiors. Also\n"
+                      << "  $ODAI_FNV_PLUGINS, ','-separated.\n"
                       << "  --weather <EditorID> forces one weather by name.\n"
                       << "\n"
-                      << "See docs/FNV_MODS.md for install + launch recipes.\n";
+                      << "See docs/FNV_MODS.md and docs/MORROWIND_MODS.md for recipes.\n";
             return 0;
+        }
+    }
+    if (const char* shaderPack = std::getenv("ODAI_FNV_SHADER_PACK")) {
+        if (std::strcmp(shaderPack, "rafael") == 0 && std::getenv("ODAI_WATER_NORMAL") == nullptr) {
+            const std::filesystem::path waterNormal = defaultShaderPackWaterNormalPath();
+            const std::string waterNormalString = waterNormal.string();
+            setenv("ODAI_WATER_NORMAL", waterNormalString.c_str(), 0);
         }
     }
     if (!app.init("New Vegas")) {

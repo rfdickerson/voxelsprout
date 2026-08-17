@@ -14,6 +14,7 @@
 #include <sstream>
 #include <random>
 #include <chrono>
+#include <unordered_set>
 
 #include "core/log.h"
 #include "import/fnv/asset_source.h"
@@ -579,6 +580,37 @@ bool NewVegasApp::onInit() {
     // reset (VK_ERROR_DEVICE_LOST) on the very first frame.
     m_renderer.setShadowSettings(render::ShadowSettings{render::ShadowMode::Auto});
 
+    const std::string shaderPackPreset = std::getenv("ODAI_FNV_SHADER_PACK") != nullptr
+        ? std::getenv("ODAI_FNV_SHADER_PACK")
+        : "";
+    const bool rafaelShaderPack = shaderPackPreset == "rafael";
+    if (rafaelShaderPack) {
+        // Clean-room mapping of Enhanced PBR Lighting's documented defaults
+        // onto this renderer's native GGX path. TES3 NIFs carry no authored
+        // metallic/roughness data, so this fills only that legacy case; named
+        // engine materials and newer-game PBR data remain authoritative.
+        render::ImportedPbrDefaults pbrDefaults;
+        pbrDefaults.enabled = true;
+        if (const char* value = std::getenv("ODAI_FNV_PBR_OBJECT_ROUGHNESS")) {
+            pbrDefaults.objectRoughness = static_cast<float>(std::atof(value));
+        }
+        if (const char* value = std::getenv("ODAI_FNV_PBR_TERRAIN_ROUGHNESS")) {
+            pbrDefaults.terrainRoughness = static_cast<float>(std::atof(value));
+        }
+        if (const char* value = std::getenv("ODAI_FNV_PBR_METALLIC")) {
+            pbrDefaults.metallic = static_cast<float>(std::atof(value));
+        }
+        m_renderer.setImportedPbrDefaults(pbrDefaults);
+        VOX_LOGI("newvegas")
+            << "shader pack preset: rafael (native GGX PBR defaults, XeGTAO/TAA, "
+               "external water normal; object roughness=" << pbrDefaults.objectRoughness
+            << ", terrain roughness=" << pbrDefaults.terrainRoughness
+            << ", metallic=" << pbrDefaults.metallic << ")";
+    } else if (!shaderPackPreset.empty()) {
+        VOX_LOGW("newvegas") << "unknown ODAI_FNV_SHADER_PACK=" << shaderPackPreset
+                              << "; rendering with normal settings";
+    }
+
     // Voxel GI contributes nothing here anyway: the grid is 64 world units wide
     // and camera-following, which at Bethesda scale (~70 units/metre) is under a
     // metre across inside a scene spanning tens of thousands of units, so
@@ -816,8 +848,13 @@ bool NewVegasApp::onInit() {
     // ODAI_FNV_COLOR_LOOK=stylized restores the defaults. There was no runtime
     // knob for any of this, which is why the report of "oversaturated" had to
     // be answered by reading the shader instead of an A/B.
-    const std::string colorLook =
+    std::string colorLook =
         std::getenv("ODAI_FNV_COLOR_LOOK") != nullptr ? std::getenv("ODAI_FNV_COLOR_LOOK") : "";
+    if (colorLook.empty() && rafaelShaderPack) {
+        // Rafael's package includes its own tonemap; use the renderer's restrained
+        // cinematic equivalent unless the caller selected a grade explicitly.
+        colorLook = "cinematic";
+    }
     if (colorLook == "cinematic") {
         // A measured middle between the neutral grade above and the engine's
         // stylized default, for the landscape flythroughs. Every number here
@@ -855,8 +892,12 @@ bool NewVegasApp::onInit() {
         // on. The white point is what supplies that range; the two together are
         // the look. ODAI_FNV_WHITEPOINT still overrides, in applyTonemapSettings.
         render::TonemapSettings tonemap = m_renderer.tonemapSettings();
-        tonemap.whitePoint = 0.8f;
-        tonemap.highlightShoulder = 1.0f;
+        // Rafael's own defaults call for a 1.0 linear white and a 0.45 exterior
+        // shoulder. The controls are not mathematically identical across the
+        // two tone curves, but preserving their anchors avoids the clipped,
+        // chalk-white roofs a generic cinematic white point produced here.
+        tonemap.whitePoint = rafaelShaderPack ? 1.0f : 0.8f;
+        tonemap.highlightShoulder = rafaelShaderPack ? 0.45f : 1.0f;
         m_renderer.setTonemapSettings(tonemap);
     } else if (colorLook != "stylized") {
         m_renderer.setNeutralColorGrading();
@@ -1253,6 +1294,10 @@ void NewVegasApp::applyTimeOfDay() {
 void NewVegasApp::initWeather() {
     if (m_streamDirectory.empty()) {
         return;  // a cooked scene has no plugin to read weather from
+    }
+    if (m_streamIsMorrowind) {
+        VOX_LOGI("newvegas") << "TES3 load order: keeping the procedural Morrowind sky";
+        return;
     }
     // This used to skip the read entirely unless a weather mod or an explicit
     // --weather gave it something to select. The pause menu's weather picker is
@@ -2515,7 +2560,12 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     // The scripted tour owns the camera outright -- no input, no collision, no
     // ground clamp. It flies over rooftops on purpose.
     if (m_flythroughSeconds > 0.0f) {
-        updateFlythrough(deltaSeconds);
+        // Stream, TAA and exposure warm up on the exact first authored pose.
+        // Advancing here before frame capture begins used to consume the start
+        // of the tour and leave an equally long frozen tail at the endpoint.
+        const bool captureWaiting =
+            (!m_captureVideoPath.empty() || !m_captureDirectory.empty()) && !m_captureStarted;
+        updateFlythrough(captureWaiting ? 0.0f : deltaSeconds);
         return;
     }
 
@@ -2910,6 +2960,20 @@ bool NewVegasApp::initStreaming() {
         m_streamer->addModDirectory(std::filesystem::path(modDirectory));
     }
 
+    // Needed even on the single-plugin path: actor/dialogue and TES4 weather
+    // readers accept enough TES3 bytes to fail confusingly rather than being a
+    // meaningful part of a world-rendering-only Morrowind session.
+    {
+        importer::fnv::FalloutPluginHeader header;
+        std::string headerError;
+        if (importer::fnv::readFalloutPluginHeader(
+                std::filesystem::path(m_streamDirectory) / m_streamPlugin,
+                header, headerError)) {
+            m_streamIsMorrowind =
+                header.format == importer::fnv::EsmPluginFormat::kMorrowind;
+        }
+    }
+
     // ODAI_FNV_TEX_SIZE is the mip-drop ceiling. The 512 default is what makes
     // the base game fit; a high-resolution texture pack is invisible without
     // raising it, because its art gets dropped straight back down. Memory goes
@@ -2968,11 +3032,21 @@ bool NewVegasApp::initStreaming() {
                 std::filesystem::path(m_streamDirectory), requestedPlugins, orderError)) {
             VOX_LOGW("newvegas") << "streaming one plugin only: " << orderError;
         } else {
+            std::string loadOrderText;
+            for (const auto& entry : streamOrder.entries()) {
+                if (!loadOrderText.empty()) {
+                    loadOrderText += " -> ";
+                }
+                loadOrderText += entry.header.fileName;
+            }
             VOX_LOGI("newvegas") << "streaming across " << streamOrder.size()
-                                 << " plugins (record overrides active)";
+                                 << " plugins (record overrides active): " << loadOrderText;
             // Kept on the app too: actor discovery needs the same order, and a
             // companion mod's NPC/placement/race/armour all live in its plugin.
             m_streamLoadOrder = streamOrder;
+            m_streamIsMorrowind = !streamOrder.entries().empty() &&
+                streamOrder.entries().front().header.format ==
+                    importer::fnv::EsmPluginFormat::kMorrowind;
             m_streamer->setLoadOrder(std::move(streamOrder));
         }
     }
@@ -3009,6 +3083,43 @@ bool NewVegasApp::initStreaming() {
         config.unloadRadius = config.loadRadius + 2;
     }
     m_streamer->setConfig(config);
+
+    // A fixed-step video capture advances the tour in simulation time, not in
+    // wall time. That can cross the entire route while the worker threads are
+    // still extracting its first cells, leaving a visibly half-built town in
+    // the recording even though every mesh eventually loads. Preload and pin
+    // the whole corridor before its first captured frame instead.
+    const bool isVideoTourCapture = m_flythroughSeconds > 0.0f &&
+        (!m_captureVideoPath.empty() || !m_captureDirectory.empty());
+    if (isVideoTourCapture) {
+        constexpr int kTourPreloadSamples = 96;
+        std::unordered_set<importer::CellCoord, importer::CellCoordHash> pinnedCells;
+        const std::int32_t radius = std::max(0, config.loadRadius);
+        for (int sample = 0; sample <= kTourPreloadSamples; ++sample) {
+            float enginePosition[3] = {};
+            float ignoredLookAt[3] = {};
+            sampleTour(static_cast<float>(sample) / static_cast<float>(kTourPreloadSamples),
+                       enginePosition, ignoredLookAt);
+            float falloutPosition[3] = {};
+            importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
+            const importer::CellCoord centre =
+                m_streamer->config().cellSize > 0.0f
+                ? importer::CellCoord{
+                    static_cast<std::int32_t>(std::floor(falloutPosition[0] / config.cellSize)),
+                    static_cast<std::int32_t>(std::floor(falloutPosition[1] / config.cellSize))}
+                : importer::CellCoord{};
+            for (std::int32_t dz = -radius; dz <= radius; ++dz) {
+                for (std::int32_t dx = -radius; dx <= radius; ++dx) {
+                    pinnedCells.insert(importer::CellCoord{centre.x + dx, centre.z + dz});
+                }
+            }
+        }
+        std::vector<importer::CellCoord> corridor(pinnedCells.begin(), pinnedCells.end());
+        m_streamer->setPinnedCells(corridor);
+        m_captureRoutePreloadActive = !corridor.empty();
+        VOX_LOGI("newvegas") << "capture route preload: pinned " << corridor.size()
+                             << " exterior cells before recording";
+    }
 
     // Spawn at the centre of the available cells so the first ring has content
     // on every side; the world origin is often outside a cooked region entirely.
@@ -3183,7 +3294,7 @@ bool NewVegasApp::initStreaming() {
                     ? ground
                     : (m_cameraY - kEyeHeightUnits);
         }
-        {
+        if (!m_streamIsMorrowind) {
             const std::filesystem::path dataPath(m_streamDirectory);
             // Victor is loaded into a local and appended to m_actors AFTER the
             // town, because loadGoodspringsActors clears the list -- and it has
@@ -3603,6 +3714,15 @@ void NewVegasApp::onTick(float deltaSeconds) {
     if (m_captureFixedDt > 0.0f) {
         deltaSeconds = m_captureFixedDt;
     }
+    // Keep renderer-side water and rigid machinery on the tour's fixed clock.
+    // During capture pre-roll, hold phase zero while streaming, TAA, and
+    // exposure warm up. Frame zero then starts camera and machinery together,
+    // independent of how long extraction took on this machine.
+    const bool capturePreroll = m_captureFixedDt > 0.0f && !m_captureStarted;
+    if (!capturePreroll) {
+        m_visualTimeSeconds += deltaSeconds;
+    }
+    m_renderer.setVisualTimeSeconds(m_visualTimeSeconds);
     // Before anything reads input: the menu toggle decided here gates whether
     // camera movement runs at all this frame.
     pollNavInput(deltaSeconds);
@@ -4867,7 +4987,7 @@ bool NewVegasApp::captureWarmupComplete() const {
     if (m_framesRendered <= m_captureWarmupFrames) {
         return false;
     }
-    if (m_framesRendered >= m_captureWarmupFrameCeiling) {
+    if (!m_captureRoutePreloadActive && m_framesRendered >= m_captureWarmupFrameCeiling) {
         return true;
     }
     // Streaming is wall-clock work on other threads, so a frame count cannot
@@ -4928,6 +5048,7 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
     if (!m_captureVideoPath.empty() && m_captureWritten < m_captureFrames) {
         ++m_framesRendered;
         if (captureWarmupComplete()) {
+            m_captureStarted = true;
             std::uint32_t width = 0;
             std::uint32_t height = 0;
             bool ok = m_renderer.captureFrameRgb(m_captureRgb, width, height);
@@ -4969,6 +5090,7 @@ void NewVegasApp::onRender(float /*deltaSeconds*/) {
     if (!m_captureDirectory.empty() && m_captureWritten < m_captureFrames) {
         ++m_framesRendered;
         if (captureWarmupComplete()) {
+            m_captureStarted = true;
             char leaf[32] = {};
             std::snprintf(leaf, sizeof(leaf), "/frame_%05d.ppm", m_captureWritten);
             if (!m_renderer.captureFrameToFile(m_captureDirectory + leaf)) {

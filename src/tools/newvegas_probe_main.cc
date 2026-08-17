@@ -9,10 +9,10 @@
 // It is deliberately not registered with ctest. It needs game data that only
 // exists on a machine with the game installed.
 //
-//   odai_newvegas_probe <DataFilesPath> --archives
-//   odai_newvegas_probe <DataFilesPath> --nifs [limit]
-//   odai_newvegas_probe <DataFilesPath> --nif <virtualPath>
-//   odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm>
+//   odai_bethesda_probe <DataFilesPath> --archives
+//   odai_bethesda_probe <DataFilesPath> --nifs [limit]
+//   odai_bethesda_probe <DataFilesPath> --nif <virtualPath>
+//   odai_bethesda_probe <DataFilesPath> --plugin <Plugin.esm>
 
 #include "import/dds.h"
 #include "import/fnv/asset_source.h"
@@ -323,16 +323,23 @@ int probeNifs(const std::filesystem::path& dataPath, std::size_t limit) {
 // by walking to a computed field offset all missed -- reading the file's own
 // declared contents settles in one shot what guessing does not.
 int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virtualPath) {
-    MeshIndex index = buildMeshIndex(dataPath);
+    // Specific-file diagnostics must see loose mod assets too. The archive-only
+    // mesh index used by --nifs made --nifblocks claim that every unpacked
+    // Morrowind/Tamriel Data mesh was missing, even though the runtime resolved
+    // that same path successfully a moment later.
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "cannot index assets under " << dataPath << "\n";
+        return 1;
+    }
+    assets.addModDirectory(dataPath);
     std::vector<std::uint8_t> bytes;
-    for (const auto& [archiveIndex, entry] : index.nifs) {
-        if (toLowerAscii(entry->virtualPath) != toLowerAscii(virtualPath)) {
-            continue;
-        }
-        if (!index.archives[archiveIndex].extract(*entry, bytes)) {
-            std::cout << "Extract failed.\n";
-            return 1;
-        }
+    std::string resolveError;
+    if (!assets.resolveMesh(virtualPath, bytes, resolveError)) {
+        std::cout << "resolve failed: " << resolveError << "\n";
+        return 1;
+    }
+    {
         odai::importer::fnv::NifBlockSummary summary;
         std::string error;
         if (!odai::importer::fnv::parseNifBlockSummary(bytes, summary, error)) {
@@ -444,8 +451,6 @@ int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virt
         }
         return 0;
     }
-    std::cout << "Not found in any mesh archive: " << virtualPath << "\n";
-    return 1;
 }
 
 // Dumps a .kf animation file's block layout and the raw words of its
@@ -562,9 +567,42 @@ int dumpKfAnimation(const std::filesystem::path& dataPath, const std::string& vi
                   << " scale";
         if (!track.rotationKeys.empty()) {
             std::cout << "  t[" << track.rotationKeys.front().time << ".."
-                      << track.rotationKeys.back().time << "]";
+                      << track.rotationKeys.back().time << "]"
+                      << " q0=(" << track.rotationKeys.front().value.x << ","
+                      << track.rotationKeys.front().value.y << ","
+                      << track.rotationKeys.front().value.z << ","
+                      << track.rotationKeys.front().value.w << ")"
+                      << " q1=(" << track.rotationKeys.back().value.x << ","
+                      << track.rotationKeys.back().value.y << ","
+                      << track.rotationKeys.back().value.z << ","
+                      << track.rotationKeys.back().value.w << ")";
+        }
+        if (!track.translationKeys.empty()) {
+            std::cout << " p0=(" << track.translationKeys.front().value.x << ","
+                      << track.translationKeys.front().value.y << ","
+                      << track.translationKeys.front().value.z << ")"
+                      << " p1=(" << track.translationKeys.back().value.x << ","
+                      << track.translationKeys.back().value.y << ","
+                      << track.translationKeys.back().value.z << ")";
         }
         std::cout << "\n";
+    }
+
+    std::vector<odai::importer::fnv::KfAnimation> embeddedAnimations;
+    if (odai::importer::fnv::parseNifEmbeddedAnimations(bytes, embeddedAnimations, error) &&
+        embeddedAnimations.size() > 1u) {
+        std::cout << "all embedded sequences:\n";
+        for (const auto& embedded : embeddedAnimations) {
+            std::cout << "  \"" << embedded.name << "\": " << embedded.duration()
+                      << "s, " << (embedded.loops() ? "looping" : "one-shot")
+                      << ", " << embedded.tracks.size() << " tracks\n";
+            for (const auto& track : embedded.tracks) {
+                std::cout << "    " << track.nodeName << ": "
+                          << track.rotationKeys.size() << " rot, "
+                          << track.translationKeys.size() << " trans, "
+                          << track.scaleKeys.size() << " scale\n";
+            }
+        }
     }
 
     std::cout << "string table:\n";
@@ -1357,17 +1395,19 @@ int lodHeightAt(const std::filesystem::path& dataPath, const std::string& nifPat
 }
 
 int probeSingleNif(const std::filesystem::path& dataPath, const std::string& virtualPath) {
-    MeshIndex index = buildMeshIndex(dataPath);
-    for (std::size_t a = 0; a < index.archives.size(); ++a) {
-        const BsaFileEntry* entry = index.archives[a].find(virtualPath);
-        if (entry == nullptr) {
-            continue;
-        }
-        std::vector<std::uint8_t> bytes;
-        if (!index.archives[a].extract(*entry, bytes)) {
-            std::cout << "extract failed: " << index.archives[a].lastError() << "\n";
-            return 1;
-        }
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "cannot index assets under " << dataPath << "\n";
+        return 1;
+    }
+    assets.addModDirectory(dataPath);
+    std::vector<std::uint8_t> bytes;
+    std::string resolveError;
+    if (!assets.resolveMesh(virtualPath, bytes, resolveError)) {
+        std::cout << "resolve failed: " << resolveError << "\n";
+        return 1;
+    }
+    {
         std::cout << "Extracted " << bytes.size() << " bytes.\n";
         // ODAI_NIF_DUMP writes the decompressed asset out as-is. Everything an
         // unsupported header needs is in its first hundred bytes, and there is
@@ -1385,6 +1425,12 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         std::cout << "parse " << (ok ? "ok" : "FAILED") << (error.empty() ? "" : (": " + error)) << "\n"
                   << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount
                   << ", editor markers " << model.editorMarkerShapeCount << "\n";
+        for (const odai::importer::fnv::KfAnimation& animation : model.embeddedAnimations) {
+            std::cout << "  animation \"" << animation.name << "\": "
+                      << animation.duration() << "s, "
+                      << (animation.loops() ? "looping" : "one-shot") << ", "
+                      << animation.tracks.size() << " tracks\n";
+        }
         for (const odai::importer::fnv::NifShape& shape : model.shapes) {
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
@@ -1394,7 +1440,20 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                               : std::string())
                       << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
-                      << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
+                      << ", diffuse=\"" << shape.diffuseTexturePath << "\""
+                      << (shape.animationNodeName.empty()
+                              ? std::string()
+                              : (", animated-by=\"" + shape.animationNodeName + "\""))
+                      << "\n";
+            if (!shape.animationNodeName.empty()) {
+                std::cout << "      animation parent translation=("
+                          << shape.animationParentTransform[3] << ","
+                          << shape.animationParentTransform[7] << ","
+                          << shape.animationParentTransform[11] << ") bind translation=("
+                          << shape.animationBindTransform[3] << ","
+                          << shape.animationBindTransform[7] << ","
+                          << shape.animationBindTransform[11] << ")\n";
+            }
             // Vertex-alpha census. This is the channel that feathers a placed
             // road into the ground under it, so "does this shape have one, and
             // is it actually varying" is the question a hard-edged road asks.
@@ -1527,8 +1586,6 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         }
         return ok ? 0 : 1;
     }
-    std::cout << "Not found in any mesh archive: " << virtualPath << "\n";
-    return 1;
 }
 
 // Interior cell EditorIDs, which is what odai_newvegas_cooker --cell takes.
@@ -1537,11 +1594,11 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
 // them. An optional substring filters the list, since a retail plugin has
 // hundreds.
 // Verifies the streaming index against the full extractor: build the offset
-// index, then materialize a sample of cells through extractFalloutCellAt and
-// require every field to match what a whole-file pass produces for the same
-// cell. This is the gate on Phase 1 -- an index that is subtly wrong (an offset
-// off by a group header, a cell attributed to the wrong worldspace) produces
-// plausible-looking geometry in the wrong place rather than an error.
+// index, then materialize a sample of cells through extractFalloutCellAt. For
+// TES4+ every field is required to match what a whole-file pass produces for
+// the same cell. TES3's whole-file extractor intentionally scans object tables
+// only, so its oracle is that every sampled indexed CELL/LAND range can be read
+// and preserves the metadata carried by the index.
 int probeCellIndex(
     const std::filesystem::path& esmPath, const std::string& worldspaceFilter, std::size_t sampleCount) {
     using namespace odai::importer::fnv;
@@ -1660,6 +1717,54 @@ int probeCellIndex(
         return 1;
     }
 
+    EsmReader reader;
+    if (!reader.open(esmPath)) {
+        std::cout << "Reader open FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        std::size_t failures = 0;
+        std::size_t materialized = 0;
+        std::size_t referenceCount = 0;
+        std::size_t landCount = 0;
+        double extractMsTotal = 0.0;
+        for (const std::size_t i : sampleIndices) {
+            const FalloutCellIndexEntry& entry = index.cells[i];
+            const auto extractStart = std::chrono::steady_clock::now();
+            FalloutCellRecord actual;
+            if (!extractFalloutCellAt(reader, entry, actual, error)) {
+                std::cout << "  cell " << std::hex << entry.cellFormId << std::dec
+                          << ": extract FAILED: " << error << "\n";
+                ++failures;
+                continue;
+            }
+            extractMsTotal += std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - extractStart)
+                                  .count();
+            ++materialized;
+            referenceCount += actual.references.size();
+            landCount += actual.land != nullptr ? 1u : 0u;
+            if (actual.isInterior != entry.isInterior ||
+                actual.hasGridCoords != entry.hasGridCoords ||
+                actual.gridX != entry.gridX || actual.gridZ != entry.gridZ ||
+                actual.editorId != entry.editorId) {
+                std::cout << "  cell " << std::hex << entry.cellFormId << std::dec
+                          << ": indexed metadata changed during extraction\n";
+                ++failures;
+            }
+        }
+        std::cout << "materialized " << materialized << " TES3 cells ("
+                  << referenceCount << " references, " << landCount << " LAND records), "
+                  << failures << " failures\n";
+        if (materialized > 0) {
+            std::cout << "  extractFalloutCellAt averaged "
+                      << (extractMsTotal / static_cast<double>(materialized))
+                      << " ms per cell\n";
+        }
+        return failures == 0 && materialized == sampleIndices.size() ? 0 : 1;
+    }
+
     // Full-pass reference: materialize exactly the sampled cells.
     std::vector<std::uint32_t> wantedFormIds;
     wantedFormIds.reserve(sampleIndices.size());
@@ -1674,12 +1779,6 @@ int probeCellIndex(
     FalloutSceneData reference;
     if (!extractFalloutScene(esmPath, referenceFilter, reference, error)) {
         std::cout << "Reference extract FAILED: " << error << "\n";
-        return 1;
-    }
-
-    EsmReader reader;
-    if (!reader.open(esmPath)) {
-        std::cout << "Reader open FAILED: " << reader.lastError() << "\n";
         return 1;
     }
 
@@ -1931,6 +2030,25 @@ int probeBuildCell(
             }
         }
         std::cout << "\n  land texture LAYERS (ATXT): " << cell.land->textureLayers.size() << "\n";
+        for (const auto& layer : cell.land->textureLayers) {
+            float peak = 0.0f;
+            float sum = 0.0f;
+            std::size_t nonzero = 0u;
+            for (const float opacity : layer.opacity) {
+                peak = std::max(peak, opacity);
+                sum += opacity;
+                nonzero += opacity > 0.0f ? 1u : 0u;
+            }
+            const auto path = tables.landTexturePaths.find(layer.textureFormId);
+            std::cout << "    q" << static_cast<unsigned>(layer.quadrant)
+                      << " layer=" << layer.layerIndex
+                      << " form=0x" << std::hex << layer.textureFormId << std::dec
+                      << " peak=" << peak << " sum=" << sum << " posts=" << nonzero
+                      << " " << (path != tables.landTexturePaths.end()
+                                      ? path->second
+                                      : std::string("UNRESOLVED"))
+                      << "\n";
+        }
     } else {
         std::cout << "  no LAND record\n";
     }
@@ -1963,7 +2081,20 @@ int probeBuildCell(
               << " packedVerts=" << scene.packedVertices.size()
               << " packedIndices=" << scene.packedIndices.size()
               << " packedDraws=" << scene.packedDraws.size()
+              << " rigidAnimations=" << scene.rigidAnimations.size()
               << " terrainParts=" << stats.terrainPartsEmitted << "\n";
+    for (const auto& animation : scene.rigidAnimations) {
+        float start[16] = {};
+        float quarter[16] = {};
+        if (odai::importer::sampleImportedSceneRigidAnimation(animation, 0.0f, start) &&
+            odai::importer::sampleImportedSceneRigidAnimation(
+                animation, animation.duration * 0.25f, quarter)) {
+            std::cout << "  animation \"" << animation.nodeName << "\" delta t0=("
+                      << start[3] << "," << start[7] << "," << start[11]
+                      << ") quarter=(" << quarter[3] << "," << quarter[7] << ","
+                      << quarter[11] << ")\n";
+        }
+    }
     // The terrain mesh's normals AFTER the basis change, in engine space, where
     // a level post must read (0, 1, 0). Printed next to the raw VNML above so a
     // terrain that shades like a wall can be blamed on the decode or on the
@@ -2083,6 +2214,14 @@ int probeBuildCell(
         std::cout << " terrain z [" << *lowest << "," << *highest << "]";
     }
     std::cout << " -> patches=" << scene.waterPatches.size() << "\n";
+    if (!scene.waterPatches.empty()) {
+        const odai::importer::ImportedSceneWaterPatch& water = scene.waterPatches.front();
+        const auto textureName = [&](std::uint32_t index) -> std::string {
+            return index < scene.textures.size() ? scene.textures[index].sourcePath : "<generic>";
+        };
+        std::cout << "    water normal: " << textureName(water.normalTextureIndex) << "\n"
+                  << "    water flow:   " << textureName(water.flowTextureIndex) << "\n";
+    }
     // Every one of these used to be a silent `continue`. A town with holes in it
     // is the symptom; this is the only place that says which kind of hole.
     const std::size_t droppedReferences =
@@ -2212,7 +2351,20 @@ int probeFloaters(
             current.push_back(*cursor);
         }
         if (const char* rootsEnv = std::getenv("ODAI_FLOATERS_MODROOTS")) {
-            order.addSearchRoot(std::filesystem::path(rootsEnv));
+            std::string root;
+            for (const char* cursor = rootsEnv; ; ++cursor) {
+                if (*cursor == ':' || *cursor == '\0') {
+                    if (!root.empty()) {
+                        order.addSearchRoot(std::filesystem::path(root));
+                        root.clear();
+                    }
+                    if (*cursor == '\0') {
+                        break;
+                    }
+                } else {
+                    root.push_back(*cursor);
+                }
+            }
         }
         std::string orderError;
         if (!order.open(dataPath, requested, orderError)) {
@@ -2431,7 +2583,20 @@ int probeFloaters(
     // which is exactly the geometry a new mod is most likely to get wrong.
     if (haveAssets) {
         if (const char* rootsEnv = std::getenv("ODAI_FLOATERS_MODROOTS")) {
-            assets.addModDirectory(std::filesystem::path(rootsEnv));
+            std::string root;
+            for (const char* cursor = rootsEnv; ; ++cursor) {
+                if (*cursor == ':' || *cursor == '\0') {
+                    if (!root.empty()) {
+                        assets.addModDirectory(std::filesystem::path(root));
+                        root.clear();
+                    }
+                    if (*cursor == '\0') {
+                        break;
+                    }
+                } else {
+                    root.push_back(*cursor);
+                }
+            }
         }
     }
     std::unordered_map<std::uint32_t, std::vector<std::array<float, 3>>> meshPointsByFormId;
@@ -2491,7 +2656,14 @@ int probeFloaters(
     std::size_t unknownBaseCount = 0;
     std::map<std::string, std::vector<std::uint32_t>> droppedByType;
     for (const FalloutPlacedReference& ref : cell.references) {
-        const auto modelIt = tables.staticModelPaths.find(ref.baseFormId);
+        std::uint32_t baseFormId = ref.baseFormId;
+        if (baseFormId == 0u && !ref.baseEditorId.empty()) {
+            const auto resolved = tables.baseFormIdsByEditorId.find(toLowerAscii(ref.baseEditorId));
+            if (resolved != tables.baseFormIdsByEditorId.end()) {
+                baseFormId = resolved->second;
+            }
+        }
+        const auto modelIt = tables.staticModelPaths.find(baseFormId);
         if (modelIt == tables.staticModelPaths.end()) {
             // The base record is not one this importer places. Every such
             // reference is silently dropped from the scene, which is how a road
@@ -2499,11 +2671,11 @@ int probeFloaters(
             // counting them. A count says something is missing; the TYPE says
             // whether it is geometry that should have been there.
             ++unknownBaseCount;
-            const auto droppedTypeIt = tables.staticRecordTypes.find(ref.baseFormId);
+            const auto droppedTypeIt = tables.staticRecordTypes.find(baseFormId);
             droppedByType[droppedTypeIt == tables.staticRecordTypes.end()
                               ? std::string("<base record not found>")
                               : droppedTypeIt->second]
-                .push_back(ref.baseFormId);
+                .push_back(baseFormId);
             continue;
         }
         const float ground = terrainHeightAt(ref.position[0], ref.position[1]);
@@ -2531,7 +2703,7 @@ int probeFloaters(
             sz * cy,  (sz * sy * sx) + (cz * cx),  (sz * sy * cx) - (cz * sx),
             -sy,      cy * sx,                     cy * cx};
         float minClearance = std::numeric_limits<float>::max();
-        for (const std::array<float, 3>& local : meshPointsFor(ref.baseFormId, modelIt->second)) {
+        for (const std::array<float, 3>& local : meshPointsFor(baseFormId, modelIt->second)) {
             const float wx = ref.position[0] + ref.scale * ((rot[0] * local[0]) + (rot[1] * local[1]) + (rot[2] * local[2]));
             const float wy = ref.position[1] + ref.scale * ((rot[3] * local[0]) + (rot[4] * local[1]) + (rot[5] * local[2]));
             const float wz = ref.position[2] + ref.scale * ((rot[6] * local[0]) + (rot[7] * local[1]) + (rot[8] * local[2]));
@@ -2556,7 +2728,14 @@ int probeFloaters(
     // Which base record types actually placed geometry here.
     std::map<std::string, std::size_t> countByType;
     for (const FalloutPlacedReference& ref : cell.references) {
-        const auto typeIt = tables.staticRecordTypes.find(ref.baseFormId);
+        std::uint32_t baseFormId = ref.baseFormId;
+        if (baseFormId == 0u && !ref.baseEditorId.empty()) {
+            const auto resolved = tables.baseFormIdsByEditorId.find(toLowerAscii(ref.baseEditorId));
+            if (resolved != tables.baseFormIdsByEditorId.end()) {
+                baseFormId = resolved->second;
+            }
+        }
+        const auto typeIt = tables.staticRecordTypes.find(baseFormId);
         if (typeIt != tables.staticRecordTypes.end()) {
             ++countByType[typeIt->second];
         }
@@ -2570,8 +2749,15 @@ int probeFloaters(
     // say whether those records carry real geometry or invisible markers.
     std::map<std::string, std::set<std::string>> modelsByType;
     for (const FalloutPlacedReference& ref : cell.references) {
-        const auto typeIt = tables.staticRecordTypes.find(ref.baseFormId);
-        const auto modelIt = tables.staticModelPaths.find(ref.baseFormId);
+        std::uint32_t baseFormId = ref.baseFormId;
+        if (baseFormId == 0u && !ref.baseEditorId.empty()) {
+            const auto resolved = tables.baseFormIdsByEditorId.find(toLowerAscii(ref.baseEditorId));
+            if (resolved != tables.baseFormIdsByEditorId.end()) {
+                baseFormId = resolved->second;
+            }
+        }
+        const auto typeIt = tables.staticRecordTypes.find(baseFormId);
+        const auto modelIt = tables.staticModelPaths.find(baseFormId);
         if (typeIt == tables.staticRecordTypes.end() || typeIt->second == "STAT" ||
             modelIt == tables.staticModelPaths.end()) {
             continue;
@@ -2632,14 +2818,56 @@ int probeFloaters(
 }
 
 int listCells(const std::filesystem::path& esmPath, const std::string& filter) {
-    odai::importer::fnv::FalloutSceneData scene;
+    using namespace odai::importer::fnv;
     std::string error;
-    odai::importer::fnv::FalloutExtractFilter extractFilter{};
-    if (!odai::importer::fnv::extractFalloutScene(esmPath, extractFilter, scene, error)) {
-        std::cout << "Extract FAILED: " << error << "\n";
+    EsmReader formatReader;
+    if (!formatReader.open(esmPath)) {
+        std::cout << "Open FAILED: " << formatReader.lastError() << "\n";
         return 1;
     }
     const std::string loweredFilter = toLowerAscii(filter);
+    if (formatReader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        // TES3's whole-file extractor intentionally scans object tables only;
+        // its CELL records are exposed through the streaming index instead.
+        FalloutCellIndex index;
+        if (!buildFalloutCellIndex(esmPath, index, error)) {
+            std::cout << "Index FAILED: " << error << "\n";
+            return 1;
+        }
+        std::size_t interiorCount = 0;
+        std::size_t shown = 0;
+        for (const FalloutCellIndexEntry& entry : index.cells) {
+            if (!entry.isInterior || entry.editorId.empty()) {
+                continue;
+            }
+            ++interiorCount;
+            if (!loweredFilter.empty() &&
+                toLowerAscii(entry.editorId).find(loweredFilter) == std::string::npos) {
+                continue;
+            }
+            FalloutCellRecord cell;
+            if (!extractFalloutCellAt(formatReader, entry, cell, error)) {
+                std::cout << "  " << entry.editorId << "  (extract FAILED: " << error << ")\n";
+            } else {
+                std::cout << "  " << entry.editorId << "  (" << cell.references.size()
+                          << " refs)\n";
+            }
+            ++shown;
+        }
+        std::cout << "Interior cells with an EditorID: " << interiorCount;
+        if (!loweredFilter.empty()) {
+            std::cout << ", " << shown << " matching \"" << filter << "\"";
+        }
+        std::cout << "\n";
+        return 0;
+    }
+
+    FalloutSceneData scene;
+    FalloutExtractFilter extractFilter{};
+    if (!extractFalloutScene(esmPath, extractFilter, scene, error)) {
+        std::cout << "Extract FAILED: " << error << "\n";
+        return 1;
+    }
     std::size_t interiorCount = 0;
     std::size_t shown = 0;
     for (const auto& cell : scene.cells) {
@@ -3591,6 +3819,131 @@ int probeRefsByBaseType(
     return 0;
 }
 
+int probePlacements(
+    const std::filesystem::path& pluginPath, std::uint32_t wantedBaseFormId,
+    std::size_t limit) {
+    using namespace odai::importer::fnv;
+    std::string error;
+    FalloutSceneData data;
+    FalloutExtractFilter filter{};
+    if (!extractFalloutScene(pluginPath, filter, data, error)) {
+        std::cout << "extract FAILED: " << error << "\n";
+        return 1;
+    }
+    std::size_t matches = 0u;
+    for (const FalloutCellRecord& cell : data.cells) {
+        for (const FalloutPlacedReference& ref : cell.references) {
+            if (ref.baseFormId != wantedBaseFormId) {
+                continue;
+            }
+            ++matches;
+            if (matches > limit) {
+                continue;
+            }
+            std::cout << "  ref=0x" << std::hex << ref.formId << std::dec
+                      << (cell.isInterior ? " interior" : " exterior")
+                      << " cell=0x" << std::hex << cell.formId << std::dec;
+            if (!cell.isInterior) {
+                std::cout << " grid=(" << cell.gridX << "," << cell.gridZ << ")";
+            }
+            std::cout << " bethesda=(" << ref.position[0] << "," << ref.position[1]
+                      << "," << ref.position[2] << ") engine=(" << ref.position[0]
+                      << "," << ref.position[2] << "," << -ref.position[1] << ")"
+                      << " rotation=(" << ref.rotationRadians[0] << "," << ref.rotationRadians[1]
+                      << "," << ref.rotationRadians[2] << ") scale=" << ref.scale << "\n";
+        }
+    }
+    std::cout << matches << " placement(s) of base 0x" << std::hex
+              << wantedBaseFormId << std::dec << "\n";
+    return matches == 0u ? 1 : 0;
+}
+
+int probeModelPlacements(
+    const std::filesystem::path& pluginPath, const std::string& modelSubstring,
+    std::size_t limit) {
+    using namespace odai::importer::fnv;
+    std::string error;
+    EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(modelSubstring);
+    std::unordered_set<std::uint32_t> baseFormIds;
+    EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        std::string editorId;
+        std::string modelPath;
+        std::string matchedSubrecord;
+        for (const EsmSubrecordView& sub : record.subrecords) {
+            std::string* destination = nullptr;
+            if (sub.type == "EDID") destination = &editorId;
+            if (sub.type == "MODL" || sub.type == "MOD2") destination = &modelPath;
+            if (destination != nullptr && sub.size != 0u) {
+                destination->assign(reinterpret_cast<const char*>(sub.data), sub.size);
+                while (!destination->empty() && destination->back() == '\0') {
+                    destination->pop_back();
+                }
+            }
+            if (sub.size != 0u && matchedSubrecord.empty()) {
+                const std::string payload(
+                    reinterpret_cast<const char*>(sub.data), sub.size);
+                if (toLowerAscii(payload).find(wanted) != std::string::npos) {
+                    matchedSubrecord = sub.type;
+                }
+            }
+        }
+        if (matchedSubrecord.empty()) return;
+        baseFormIds.insert(record.formId);
+        std::cout << record.type << " base=0x" << std::hex << record.formId << std::dec
+                  << " editor=\"" << editorId
+                  << "\" matched=" << matchedSubrecord
+                  << (modelPath.empty() ? std::string() : " model=\"" + modelPath + "\"")
+                  << "\n";
+    };
+    if (!reader.walk(visitor)) {
+        std::cout << "walk FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+    if (baseFormIds.empty()) {
+        std::cout << "no base models contain \"" << modelSubstring << "\"\n";
+        return 1;
+    }
+
+    FalloutSceneData data;
+    FalloutExtractFilter filter{};
+    if (!extractFalloutScene(pluginPath, filter, data, error)) {
+        std::cout << "extract FAILED: " << error << "\n";
+        return 1;
+    }
+    std::size_t matches = 0u;
+    for (const FalloutCellRecord& cell : data.cells) {
+        for (const FalloutPlacedReference& ref : cell.references) {
+            if (!baseFormIds.contains(ref.baseFormId)) {
+                continue;
+            }
+            ++matches;
+            if (matches > limit) {
+                continue;
+            }
+            std::cout << "  base=0x" << std::hex << ref.baseFormId
+                      << " ref=0x" << ref.formId << std::dec
+                      << (cell.isInterior ? " interior" : " exterior");
+            if (cell.isInterior) {
+                std::cout << " cell=\"" << cell.editorId << "\"";
+            } else {
+                std::cout << " grid=(" << cell.gridX << "," << cell.gridZ << ")";
+            }
+            std::cout << " engine=(" << ref.position[0] << "," << ref.position[2]
+                      << "," << -ref.position[1] << ")"
+                      << " rotation=(" << ref.rotationRadians[0] << "," << ref.rotationRadians[1]
+                      << "," << ref.rotationRadians[2] << ") scale=" << ref.scale << "\n";
+        }
+    }
+    std::cout << matches << " placement(s) matching \"" << modelSubstring << "\"\n";
+    return matches == 0u ? 1 : 0;
+}
+
 int probePlugin(const std::filesystem::path& pluginPath, std::size_t typeLimit) {
     odai::importer::fnv::EsmReader reader;
     if (!reader.open(pluginPath)) {
@@ -4051,34 +4404,36 @@ int probeScene(const std::filesystem::path& scenePath) {
 
 void printUsage() {
     std::cout << "Usage:\n"
-              << "  odai_newvegas_probe <DataFilesPath> --archives\n"
-              << "  odai_newvegas_probe <DataFilesPath> --nifs [limit]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --nif <virtualPath>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --nifblocks <virtualPath>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --lodheight <lodBlock.nif> <worldX> <worldY>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --kf <virtualPath.kf>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --kfsweep <folderSubstring>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --actor <Plugin.esm> <ActorEditorID>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --footers [limit]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --dialogue <Plugin.esm> <speakerEdid> [limit]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --dialoguetree <Plugin.esm> <speakerEdid> [steps]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --regions <Plugin.esm> [topN]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --texture <texturePath>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --skeleton <virtualPath>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --skinned <virtualPath>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --character <skeleton.nif> <part.nif>...\n"
+              << "  odai_bethesda_probe <DataFilesPath> --archives\n"
+              << "  odai_bethesda_probe <DataFilesPath> --nifs [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --nif <virtualPath>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --nifblocks <virtualPath>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --lodheight <lodBlock.nif> <worldX> <worldY>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --kf <virtualPath.kf>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --kfsweep <folderSubstring>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --actor <Plugin.esm> <ActorEditorID>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --footers [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --dialogue <Plugin.esm> <speakerEdid> [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --dialoguetree <Plugin.esm> <speakerEdid> [steps]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --regions <Plugin.esm> [topN]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --texture <texturePath>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --skeleton <virtualPath>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --skinned <virtualPath>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --character <skeleton.nif> <part.nif>...\n"
               // Modes that existed but were never listed here.
-              << "  odai_newvegas_probe <DataFilesPath> --find <substring> [limit]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --cellindex <Plugin.esm> [worldspace] [limit]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --buildcell <Plugin.esm> <Worldspace> <x> <z>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --floaters <Plugin.esm> <Worldspace> <x> <z>\n"
-              << "  odai_newvegas_probe <DataFilesPath> --plugin <Plugin.esm> [typeCount]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --record <Plugin.esm> <TYPE> [dumpCount]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --refs <Plugin.esm> <BASETYPE> [topN]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
-              << "  odai_newvegas_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
-              << "  odai_newvegas_probe <anyDir> --scene <cooked.bin>\n";
+              << "  odai_bethesda_probe <DataFilesPath> --find <substring> [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --cellindex <Plugin.esm> [worldspace] [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --buildcell <Plugin.esm> <Worldspace> <x> <z>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --floaters <Plugin.esm> <Worldspace> <x> <z>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --plugin <Plugin.esm> [typeCount]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --record <Plugin.esm> <TYPE> [dumpCount]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --refs <Plugin.esm> <BASETYPE> [topN]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --placements <Plugin.esm> <baseFormID> [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --modelrefs <Plugin.esm> <modelSubstring> [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
+              << "  odai_bethesda_probe <anyDir> --scene <cooked.bin>\n";
 }
 
 }  // namespace
@@ -4227,6 +4582,16 @@ int main(int argc, char** argv) {
         return probeRefsByBaseType(
             dataPath, dataPath / argv[3], argv[4],
             argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 15u);
+    }
+    if (mode == "--placements" && argc >= 5) {
+        return probePlacements(
+            dataPath / argv[3], static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 16)),
+            argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 25u);
+    }
+    if (mode == "--modelrefs" && argc >= 5) {
+        return probeModelPlacements(
+            dataPath / argv[3], argv[4],
+            argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 25u);
     }
     if (mode == "--voicedialogue" && argc >= 5) {
         return probeVoiceTypeDialogue(dataPath / argv[3], argv[4]);

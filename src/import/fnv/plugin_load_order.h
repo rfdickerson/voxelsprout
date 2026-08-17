@@ -25,10 +25,12 @@
 #include <string>
 #include <vector>
 
+#include "import/fnv/esm_reader.h"
+
 namespace odai::importer::fnv {
 
-// A plugin's TES4 header, which is all that is needed to place it in a load
-// order.
+// A plugin's TES3/TES4 header, which is all that is needed to place it in a
+// load order.
 struct FalloutPluginHeader {
     std::string fileName;  // "NevadaSkies.esp", as the masters of other plugins spell it
     std::vector<std::string> masters;  // MAST subrecords, in declared order
@@ -41,10 +43,14 @@ struct FalloutPluginHeader {
     // reading one of those IDs as a zstring succeeds and returns a plausible
     // one-character name, so nothing downstream can detect this on its own.
     bool isLocalized = false;
+    // TES3 and TES4 use different master-index conventions. Keeping the
+    // container generation on the header makes remapping an explicit property
+    // of the file rather than an inference from its extension.
+    EsmPluginFormat format = EsmPluginFormat::kFallout3;
 };
 
-// Reads just the TES4 record at the front of `path`. Returns false if the file
-// cannot be read or does not begin with a TES4 record.
+// Reads just the TES3/TES4 record at the front of `path`. Returns false if the
+// file cannot be read or does not begin with a supported header record.
 bool readFalloutPluginHeader(
     const std::filesystem::path& path, FalloutPluginHeader& outHeader, std::string& outError);
 
@@ -55,10 +61,9 @@ struct FalloutLoadOrderEntry {
     // This plugin's position in the load order, and the value its own records'
     // formIDs must carry after remapping.
     std::uint8_t globalIndex = 0;
-    // Local mod index -> global mod index. Sized masters.size() + 1; the last
-    // entry maps the plugin's own local index to globalIndex. A local index at
-    // or past this size is malformed and remapFormId leaves it alone rather
-    // than inventing a mapping.
+    // Local mod index -> global mod index. TES4 stores masters first and self
+    // last; TES3 stores self at zero and masters at 1..N. The vector is laid
+    // out exactly as the source format addresses it.
     std::vector<std::uint8_t> localToGlobal;
 };
 

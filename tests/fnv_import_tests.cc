@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -907,6 +908,27 @@ void testCellWaterPatch() {
             // An absent XCLW is Oblivion's sea level, which is 0 -- no WRLD
             // record in Oblivion.esm carries a DNAM to override it.
             expectNear(patch.waterLevel, 0.0f, 1e-6f, "an absent XCLW resolves to sea level");
+        }
+    }
+
+    // A narrow river is not a full-cell lake. Its water must follow the LAND
+    // posts so nearby bridges and boardwalks meet a shoreline rather than a
+    // 4096-unit rectangular water card.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(2, -3);
+        giveFlatLand(cell, 32.0f);
+        cell.hasWater = true;
+        cell.waterHeight = 0.0f;
+        const int side = cell.land->gridSize;
+        // One low interior post wets only its four surrounding quads.
+        cell.land->heights[static_cast<std::size_t>((16 * side) + 16)] = -16.0f;
+        expectTrue(appendCellWaterPatch(scene, cell) && scene.waterPatches.size() == 2u,
+                   "partial LAND water is clipped into shoreline runs rather than one cell quad");
+        if (!scene.waterPatches.empty()) {
+            expectTrue(scene.waterPatches.front().sizeX <= (2.0f * kLandPostSpacing) &&
+                           scene.waterPatches.front().sizeZ == kLandPostSpacing,
+                       "shoreline water patches stay at LAND-post resolution");
         }
     }
 
@@ -3376,6 +3398,300 @@ void testPluginLoadOrderRemapsFormIds() {
     fs::remove_all(dataDir, cleanupError);
 }
 
+void testMorrowindLoadOrderMergesWorldRenderingRecords() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const fs::path dataDir = fs::temp_directory_path() / "odai_tes3_load_order_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDir, cleanupError);
+    fs::create_directories(dataDir, cleanupError);
+
+    const auto subrecord = [](const char* type, const std::vector<std::uint8_t>& payload) {
+        std::vector<std::uint8_t> bytes;
+        bytes.insert(bytes.end(), type, type + 4);
+        appendPod(bytes, static_cast<std::uint32_t>(payload.size()));
+        bytes.insert(bytes.end(), payload.begin(), payload.end());
+        return bytes;
+    };
+    const auto appendBytes = [](std::vector<std::uint8_t>& target,
+                                const std::vector<std::uint8_t>& source) {
+        target.insert(target.end(), source.begin(), source.end());
+    };
+    const auto zstring = [](const std::string& value) {
+        std::vector<std::uint8_t> bytes(value.begin(), value.end());
+        bytes.push_back(0u);
+        return bytes;
+    };
+    const auto record = [](const char* type, const std::vector<std::uint8_t>& body,
+                           std::uint32_t flags = 0u) {
+        std::vector<std::uint8_t> bytes;
+        bytes.insert(bytes.end(), type, type + 4);
+        appendPod(bytes, static_cast<std::uint32_t>(body.size()));
+        appendPod(bytes, static_cast<std::uint32_t>(0u));
+        appendPod(bytes, flags);
+        bytes.insert(bytes.end(), body.begin(), body.end());
+        return bytes;
+    };
+    const auto headerRecord = [&](const std::vector<std::string>& masters, bool isMaster,
+                                  std::uint32_t recordCount) {
+        std::vector<std::uint8_t> body;
+        std::vector<std::uint8_t> hedr(300u, 0u);
+        const float version = 1.3f;
+        std::memcpy(hedr.data(), &version, sizeof(version));
+        const std::uint32_t fileType = isMaster ? 1u : 0u;
+        std::memcpy(hedr.data() + 4u, &fileType, sizeof(fileType));
+        std::memcpy(hedr.data() + 296u, &recordCount, sizeof(recordCount));
+        appendBytes(body, subrecord("HEDR", hedr));
+        for (const std::string& master : masters) {
+            appendBytes(body, subrecord("MAST", zstring(master)));
+            appendBytes(body, subrecord("DATA", std::vector<std::uint8_t>(8u, 0u)));
+        }
+        return record("TES3", body);
+    };
+    const auto statRecord = [&](const std::string& id, const std::string& model,
+                                const char* type = "STAT") {
+        std::vector<std::uint8_t> body;
+        appendBytes(body, subrecord("NAME", zstring(id)));
+        appendBytes(body, subrecord("MODL", zstring(model)));
+        return record(type, body);
+    };
+    const auto ltexRecord = [&](const std::string& id, std::uint32_t index,
+                                const std::string& path) {
+        std::vector<std::uint8_t> body;
+        appendBytes(body, subrecord("NAME", zstring(id)));
+        std::vector<std::uint8_t> intv;
+        appendPod(intv, index);
+        appendBytes(body, subrecord("INTV", intv));
+        appendBytes(body, subrecord("DATA", zstring(path)));
+        return record("LTEX", body);
+    };
+    const auto cellHeader = [&](const std::string& name, bool interior,
+                                std::int32_t x, std::int32_t z) {
+        std::vector<std::uint8_t> body;
+        appendBytes(body, subrecord("NAME", zstring(name)));
+        std::vector<std::uint8_t> data;
+        appendPod(data, static_cast<std::uint32_t>(interior ? 1u : 0u));
+        appendPod(data, x);
+        appendPod(data, z);
+        appendBytes(body, subrecord("DATA", data));
+        return body;
+    };
+    const auto appendReference = [&](std::vector<std::uint8_t>& cell,
+                                     std::uint32_t formId, const std::string& base,
+                                     float x, float y, float z, bool deleted) {
+        std::vector<std::uint8_t> frmr;
+        appendPod(frmr, formId);
+        appendBytes(cell, subrecord("FRMR", frmr));
+        if (!base.empty()) {
+            appendBytes(cell, subrecord("NAME", zstring(base)));
+        }
+        if (deleted) {
+            appendBytes(cell, subrecord("DELE", std::vector<std::uint8_t>(4u, 0u)));
+            return;
+        }
+        std::vector<std::uint8_t> data;
+        appendPod(data, x); appendPod(data, y); appendPod(data, z);
+        appendPod(data, 0.0f); appendPod(data, 0.0f); appendPod(data, 0.0f);
+        appendBytes(cell, subrecord("DATA", data));
+    };
+    const auto landRecord = [&](std::int32_t x, std::int32_t z,
+                                std::uint16_t storedTexture) {
+        std::vector<std::uint8_t> body;
+        std::vector<std::uint8_t> intv;
+        appendPod(intv, x); appendPod(intv, z);
+        appendBytes(body, subrecord("INTV", intv));
+        std::vector<std::uint8_t> vhgt(4u + (65u * 65u), 0u);
+        appendBytes(body, subrecord("VHGT", vhgt));
+        std::vector<std::uint8_t> vtex;
+        for (int i = 0; i < 16 * 16; ++i) {
+            appendPod(vtex, storedTexture);
+        }
+        appendBytes(body, subrecord("VTEX", vtex));
+        return record("LAND", body);
+    };
+    const auto writePlugin = [&](const std::string& name,
+                                 const std::vector<std::string>& masters,
+                                 bool master,
+                                 const std::vector<std::vector<std::uint8_t>>& records) {
+        std::vector<std::uint8_t> bytes =
+            headerRecord(masters, master, static_cast<std::uint32_t>(records.size()));
+        for (const auto& item : records) {
+            appendBytes(bytes, item);
+        }
+        std::ofstream output(dataDir / name, std::ios::binary | std::ios::trunc);
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+    };
+
+    std::vector<std::uint8_t> baseExterior = cellHeader("Almas Thirr", false, 5, -28);
+    appendReference(baseExterior, 0x00000010u, "crate", 41000.0f, -225000.0f, 100.0f, false);
+    std::vector<std::uint8_t> baseInterior =
+        cellHeader("Almas Thirr, Canalworks", true, 0, 0);
+    appendReference(baseInterior, 0x00000011u, "crate", 10.0f, 20.0f, 30.0f, false);
+    // Cell (6,-28) deliberately starts as LAND-only in the base plugin. The
+    // later TR CELL must make it streamable without losing this contribution.
+    writePlugin("Morrowind.esm", {}, true, {
+        ltexRecord("ground", 0u, "base_ground.dds"),
+        statRecord("crate", "base_crate.nif"),
+        record("CELL", baseExterior), landRecord(5, -28, 1u), record("CELL", baseInterior),
+        landRecord(6, -28, 1u)});
+
+    writePlugin("Tribunal.esm", {"Morrowind.esm"}, true, {});
+    writePlugin("Bloodmoon.esm", {"Morrowind.esm", "Tribunal.esm"}, true, {});
+    writePlugin("Tamriel_Data.esm",
+                {"Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm"}, true,
+                {ltexRecord("other_ground", 7u, "other_ground.dds")});
+
+    std::vector<std::uint8_t> trExterior = cellHeader("Almas Thirr", false, 5, -28);
+    // TES3 local index 1 addresses the first master, Morrowind.esm.
+    appendReference(trExterior, 0x01000010u, "", 0.0f, 0.0f, 0.0f, true);
+    appendReference(trExterior, 0x00000020u, "crate", 42000.0f, -226000.0f, 200.0f, false);
+    std::vector<std::uint8_t> trInterior =
+        cellHeader("almas thirr, canalworks", true, 0, 0);
+    appendReference(trInterior, 0x00000021u, "crate", 40.0f, 50.0f, 60.0f, false);
+    std::vector<std::uint8_t> trSecondExterior =
+        cellHeader("Almas Thirr East", false, 6, -28);
+    appendReference(trSecondExterior, 0x00000022u, "crate", 50000.0f, -226000.0f, 200.0f, false);
+    writePlugin("TR_Mainland.esm",
+                {"Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm", "Tamriel_Data.esm"},
+                true, {
+                    ltexRecord("ground", 7u, "tr_ground.dds"),
+                    statRecord("crate", "tr_crate.nif", "ACTI"),
+                    record("CELL", trExterior), landRecord(5, -28, 8u),
+                    record("CELL", trInterior), record("CELL", trSecondExterior)});
+
+    std::vector<std::uint8_t> factionsExterior = cellHeader("Almas Thirr", false, 5, -28);
+    appendReference(
+        factionsExterior, 0x00000030u, "crate", 43000.0f, -227000.0f, 300.0f, false);
+    writePlugin("TR_Factions.esp",
+                {"Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm", "Tamriel_Data.esm",
+                 "TR_Mainland.esm"},
+                false, {record("CELL", factionsExterior)});
+
+    FalloutPluginHeader trHeader;
+    std::string error;
+    expectTrue(readFalloutPluginHeader(dataDir / "TR_Mainland.esm", trHeader, error),
+               ("TES3 plugin header reads: " + error).c_str());
+    expectTrue(trHeader.format == EsmPluginFormat::kMorrowind,
+               "the load-order header retains the TES3 format");
+    expectTrue(trHeader.isMaster && trHeader.masters.size() == 4u,
+               "TES3 HEDR file type and MAST chain are parsed");
+    expectTrue(trHeader.recordCount == 6u, "TES3 HEDR record count is read at offset 296");
+
+    FalloutLoadOrder order;
+    expectTrue(order.open(dataDir, {"Morrowind.esm", "TR_Factions.esp"}, error),
+               ("the six-plugin TES3 load order opens: " + error).c_str());
+    expectTrue(order.size() == 6u, "TR_Factions pulls the exact five-master chain");
+    const std::vector<std::string> expectedOrder{
+        "Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm", "Tamriel_Data.esm",
+        "TR_Mainland.esm", "TR_Factions.esp"};
+    bool orderMatches = order.size() == expectedOrder.size();
+    for (std::size_t i = 0; i < std::min(order.size(), expectedOrder.size()); ++i) {
+        orderMatches = orderMatches && order.entries()[i].header.fileName == expectedOrder[i];
+    }
+    expectTrue(orderMatches, "TES3 masters resolve in declared dependency order");
+    expectTrue(order.remapFormId(4u, 0x00000020u) == 0x04000020u,
+               "TES3 local index zero remaps to the current plugin");
+    expectTrue(order.remapFormId(4u, 0x01000010u) == 0x00000010u,
+               "TES3 local indices 1..N remap to masters");
+
+    FalloutCellIndex index;
+    expectTrue(buildFalloutCellIndex(order, index, error),
+               ("the merged TES3 cell index builds: " + error).c_str());
+    expectTrue(index.cellWorldSize == 8192.0f, "the merged TES3 grid keeps 8192-unit cells");
+    expectTrue(index.cells.size() == 3u,
+               "exteriors merge by grid and interiors by case-insensitive name");
+    const FalloutCellIndexEntry* exterior = nullptr;
+    const FalloutCellIndexEntry* secondExterior = nullptr;
+    const FalloutCellIndexEntry* interior = nullptr;
+    for (const FalloutCellIndexEntry& cell : index.cells) {
+        if (cell.hasGridCoords && cell.gridX == 5 && cell.gridZ == -28) exterior = &cell;
+        if (cell.hasGridCoords && cell.gridX == 6 && cell.gridZ == -28) secondExterior = &cell;
+        if (cell.isInterior) interior = &cell;
+    }
+    expectTrue(exterior != nullptr && exterior->contributions.size() == 3u,
+               "base, TR terrain, and factions reference patches contribute to one exterior");
+    expectTrue(interior != nullptr && interior->contributions.size() == 2u,
+               "case variants of the Canalworks interior merge into one cell");
+    expectTrue(secondExterior != nullptr && secondExterior->childrenGroupSize != 0u &&
+                   secondExterior->contributions.size() == 2u,
+               "a later CELL makes an earlier LAND-only identity streamable");
+
+    FalloutCellRecord merged;
+    expectTrue(exterior != nullptr && extractFalloutCellMerged(index, order, *exterior, merged, error),
+               ("the merged TES3 exterior extracts: " + error).c_str());
+    expectTrue(merged.references.size() == 2u,
+               "DELE removes the base placement while later TR references remain");
+    expectTrue(merged.land != nullptr && merged.land->sourcePluginIndex == 4u,
+               "the later TR LAND wins and a reference-only factions patch retains it");
+    expectTrue(merged.land != nullptr && !merged.land->morrowindTextureGrid.empty() &&
+                   merged.land->morrowindTextureGrid[0] == 8u,
+               "the winning LAND retains its plugin-local VTEX palette index");
+
+    FalloutCellRecord mergedInterior;
+    expectTrue(interior != nullptr &&
+                   extractFalloutCellMerged(index, order, *interior, mergedInterior, error),
+               ("the case-insensitive Canalworks interior extracts: " + error).c_str());
+    expectTrue(mergedInterior.references.size() == 2u,
+               "named-interior extraction includes base and TR contributions");
+
+    FalloutCellRecord mergedSecondExterior;
+    expectTrue(secondExterior != nullptr &&
+                   extractFalloutCellMerged(
+                       index, order, *secondExterior, mergedSecondExterior, error),
+               ("the LAND-first exterior extracts: " + error).c_str());
+    expectTrue(mergedSecondExterior.land != nullptr &&
+                   mergedSecondExterior.land->sourcePluginIndex == 0u &&
+                   mergedSecondExterior.references.size() == 1u,
+               "a later CELL retains terrain contributed earlier without a CELL");
+
+    FalloutWorldTables tables;
+    expectTrue(buildFalloutWorldTables(order, tables, error),
+               ("the merged TES3 world tables build: " + error).c_str());
+    const auto crate = tables.baseFormIdsByEditorId.find("crate");
+    expectTrue(crate != tables.baseFormIdsByEditorId.end(),
+               "TES3 string-keyed bases receive one global synthetic ID");
+    expectTrue(crate != tables.baseFormIdsByEditorId.end() &&
+                   tables.staticModelPaths.at(crate->second) == "tr_crate.nif",
+               "a later TES3 base definition overrides the model behind that ID");
+    expectTrue(crate != tables.baseFormIdsByEditorId.end() &&
+                   tables.staticRecordTypes.at(crate->second) == "ACTI",
+               "a later TES3 base definition overrides the type behind that ID");
+    const std::uint64_t tdPalette = (3ull << 32u) | 8u;
+    const std::uint64_t trPalette = (4ull << 32u) | 8u;
+    expectTrue(tables.morrowindLandTexturePaths.at(tdPalette) == "other_ground.dds" &&
+                   tables.morrowindLandTexturePaths.at(trPalette) == "tr_ground.dds",
+               "identical LTEX indices in different TES3 plugins resolve through their own palettes");
+    expectTrue(tables.morrowindLandTexturePaths.at(1u) == "tr_ground.dds",
+               "a later LTEX with the same editor ID overrides the path for earlier LAND too");
+
+    const std::string fingerprintBefore = order.fingerprint();
+    {
+        std::ofstream append(dataDir / "TR_Factions.esp", std::ios::binary | std::ios::app);
+        append.put('\0');
+    }
+    FalloutLoadOrder changed;
+    expectTrue(changed.open(dataDir, {"Morrowind.esm", "TR_Factions.esp"}, error),
+               "the content-stamp fixture reopens after a size change");
+    expectTrue(fingerprintBefore != changed.fingerprint(),
+               "changing plugin content without renaming it invalidates the cache fingerprint");
+
+    const std::string fingerprintAfterSizeChange = changed.fingerprint();
+    const fs::path factionsPath = dataDir / "TR_Factions.esp";
+    const auto oldStamp = fs::last_write_time(factionsPath, cleanupError);
+    cleanupError.clear();
+    fs::last_write_time(factionsPath, oldStamp + std::chrono::seconds(2), cleanupError);
+    expectTrue(!cleanupError, "the cache fixture modification time can be changed");
+    FalloutLoadOrder retimestamped;
+    expectTrue(retimestamped.open(dataDir, {"Morrowind.esm", "TR_Factions.esp"}, error),
+               "the content-stamp fixture reopens after an mtime-only change");
+    expectTrue(fingerprintAfterSizeChange != retimestamped.fingerprint(),
+               "changing only a plugin modification time invalidates the cache fingerprint");
+
+    fs::remove_all(dataDir, cleanupError);
+}
+
 // The LOD block origin must floor toward negative infinity, not truncate:
 // truncation makes the blocks straddling zero twice as wide as every other and
 // silently maps cells to the wrong distant tile.
@@ -3748,6 +4064,13 @@ void testKfAnimationStrideAndBasisChange() {
     std::string error;
     expectTrue(parseKfAnimation(fileBytes, animation, error),
                ("synthetic .kf parses: " + error).c_str());
+    std::vector<KfAnimation> embeddedAnimations;
+    std::string embeddedError;
+    expectTrue(parseNifEmbeddedAnimations(fileBytes, embeddedAnimations, embeddedError),
+               ("embedded NIF sequence scan parses: " + embeddedError).c_str());
+    expectTrue(embeddedAnimations.size() == 1u &&
+                   embeddedAnimations.front().name == "TestClip",
+               "embedded sequence scan returns every controller sequence by name");
     expectTrue(animation.name == "TestClip", "clip name comes from the header string table");
     expectTrue(animation.loops(), "cycleType 0 is a looping clip");
     expectNear(animation.duration(), 2.0f, 1e-5f, "duration is stopTime - startTime");
@@ -4531,6 +4854,90 @@ void testAnimatedBannerSettlesUnderJoltGravity() {
         "a banner without embedded animation keeps its authored static pose");
 }
 
+void testMorrowindNifLodNodeSubtypeTail() {
+    const auto appendMorrowindNodeBase = [](std::vector<std::uint8_t>& bytes) {
+        appendPod(bytes, static_cast<std::uint32_t>(0));   // name length
+        appendPod(bytes, static_cast<std::int32_t>(-1));   // extra data
+        appendPod(bytes, static_cast<std::int32_t>(-1));   // controller
+        appendPod(bytes, static_cast<std::uint16_t>(0));   // flags
+        for (int i = 0; i < 3; ++i) appendPod(bytes, 0.0f);  // translation
+        const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        for (float value : identity) appendPod(bytes, value);
+        appendPod(bytes, 1.0f);                            // scale
+        for (int i = 0; i < 3; ++i) appendPod(bytes, 0.0f);  // velocity
+        appendPod(bytes, static_cast<std::uint32_t>(0));   // properties
+        appendPod(bytes, static_cast<std::uint32_t>(0));   // has bounds (wide bool)
+        appendPod(bytes, static_cast<std::uint32_t>(0));   // children
+        appendPod(bytes, static_cast<std::uint32_t>(0));   // effects
+    };
+
+    std::vector<std::uint8_t> lodBlock;
+    appendMorrowindNodeBase(lodBlock);
+    appendPod(lodBlock, static_cast<std::int32_t>(-1));  // NiSwitchNode initial child
+    appendPod(lodBlock, 10.0f);                          // NiLODNode centre
+    appendPod(lodBlock, 20.0f);
+    appendPod(lodBlock, 30.0f);
+    appendPod(lodBlock, static_cast<std::uint32_t>(1));  // one near/far range
+    appendPod(lodBlock, 0.0f);
+    appendPod(lodBlock, 1000.0f);
+
+    std::vector<std::uint8_t> nodeBlock;
+    appendMorrowindNodeBase(nodeBlock);
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
+    fileBytes.insert(fileBytes.end(), header.begin(), header.end());
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(fileBytes, static_cast<std::uint32_t>(2));
+    appendSizedString32(fileBytes, "NiLODNode");
+    fileBytes.insert(fileBytes.end(), lodBlock.begin(), lodBlock.end());
+    appendSizedString32(fileBytes, "NiNode");
+    fileBytes.insert(fileBytes.end(), nodeBlock.begin(), nodeBlock.end());
+
+    odai::importer::fnv::NifBlockSummary summary;
+    std::string error;
+    expectTrue(
+        odai::importer::fnv::parseNifBlockSummary(fileBytes, summary, error),
+        ("Morrowind NiLODNode subtype tail parses: " + error).c_str());
+    expectTrue(
+        summary.blockTypeNames == std::vector<std::string>{"NiLODNode", "NiNode"},
+        "the block after NiLODNode remains aligned");
+    expectTrue(
+        summary.blockSizes.size() == 2u && summary.blockSizes[0] == lodBlock.size() &&
+            summary.blockSizes[1] == nodeBlock.size(),
+        "NiLODNode includes its switch index, centre and range array in its derived size");
+}
+
+void testLandLayerOpacityReconstruction() {
+    using namespace odai::importer::fnv;
+
+    FalloutLandTextureLayer empty;
+    expectNear(sampleLandLayerOpacity(empty, 8.0f, 8.0f), 0.0f, 1e-6f,
+               "empty VTXT reconstruction stays transparent");
+
+    FalloutLandTextureLayer full;
+    std::fill(std::begin(full.opacity), std::end(full.opacity), 1.0f);
+    expectNear(sampleLandLayerOpacity(full, 7.25f, 11.75f), 1.0f, 1e-6f,
+               "constant VTXT reconstruction stays fully opaque");
+
+    FalloutLandTextureLayer spot;
+    constexpr int kCentre = 8 * kLandQuadrantGridSize + 8;
+    spot.opacity[kCentre] = 1.0f;
+    const float centre = sampleLandLayerOpacity(spot, 8.0f, 8.0f);
+    const float left = sampleLandLayerOpacity(spot, 8.0f, 7.0f);
+    const float right = sampleLandLayerOpacity(spot, 8.0f, 9.0f);
+    expectNear(centre, 0.7375f, 1e-6f,
+               "reconstruction keeps an isolated authored post dominant");
+    expectTrue(left > 0.0f && left < centre && std::fabs(left - right) < 1e-6f,
+               "reconstruction feathers an isolated post symmetrically");
+    const float halfway = sampleLandLayerOpacity(spot, 8.0f, 8.5f);
+    expectTrue(halfway > right && halfway < centre,
+               "fractional reconstruction smoothly bridges adjacent posts");
+    const float clamped = sampleLandLayerOpacity(spot, -100.0f, 100.0f);
+    expectTrue(clamped >= 0.0f && clamped <= 1.0f,
+               "out-of-range reconstruction coordinates clamp to a valid opacity");
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -4544,6 +4951,7 @@ int main() {
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
+    testLandLayerOpacityReconstruction();
     testNifParserExtractsTransformedGeometry();
     testNifParserDoesNotReparentSubtreesToTheOrigin();
     testNifParserInheritsPropertiesFromParentNodes();
@@ -4554,6 +4962,7 @@ int main() {
     testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
     testModDirectoryOverridesArchives();
     testPluginLoadOrderRemapsFormIds();
+    testMorrowindLoadOrderMergesWorldRenderingRecords();
     testLandLodBlockOrigin();
     testLandLodTileOriginAcrossTiers();
     testLandLodTilePaths();
@@ -4568,6 +4977,7 @@ int main() {
     testSkyrimWeatherCloudLayers();
     testBethesdaFireParticleEffectClassification();
     testAnimatedBannerSettlesUnderJoltGravity();
+    testMorrowindNifLodNodeSubtypeTail();
 
     if (g_failures != 0) {
         std::cerr << "[fnv import test] " << g_failures << " failures\n";

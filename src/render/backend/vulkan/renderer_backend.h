@@ -53,7 +53,9 @@ struct CoreFrameGraphPlan;
 // skinned actors -- and it has to be ONE definition: reference counting is keyed
 // on this string, so two callers normalizing differently would upload the same
 // file twice and release the wrong slot.
-inline std::string normalizedImportedTextureKey(std::string_view sourcePath) {
+inline std::string normalizedImportedTextureKey(
+    std::string_view sourcePath,
+    odai::importer::TextureFormat format = odai::importer::TextureFormat::RGBA8) {
     std::string key(sourcePath);
     for (char& c : key) {
         if (c == '\\') {
@@ -62,6 +64,10 @@ inline std::string normalizedImportedTextureKey(std::string_view sourcePath) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
     }
+    if (key.empty()) {
+        return key;
+    }
+    key += "|format=" + std::to_string(static_cast<unsigned>(format));
     return key;
 }
 
@@ -250,7 +256,10 @@ public:
         float volumetricSunScattering = 1.05f;
         float waterAnimationSpeed = 1.05f;
         float waterNormalStrength = 1.25f;
-        float waterReflectionStrength = 2.45f;
+        // Artistic multiplier over the physical air/water Schlick term.  Keep
+        // this close to one: values above two made an overhead river a mirror
+        // even though water reflects only about two percent at normal incidence.
+        float waterReflectionStrength = 1.15f;
         float waterRefractionDecay = 0.70f;
         float waterRefractionStrength = 1.65f;
         float waterRefractionDistortionPixels = 96.0f;
@@ -541,6 +550,7 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    void setVisualTimeSeconds(float seconds) { m_visualTimeSeconds = seconds; }
     void setWeatherSky(const WeatherSkyParams& params) { m_weatherSky = params; }
     // Uploads the cloud layer textures and holds their bindless slots. Only
     // called when the weather changes; the per-frame tints ride on
@@ -548,6 +558,15 @@ public:
     void setWeatherClouds(const WeatherCloudTextures& clouds);
     void setTonemapSettings(const TonemapSettings& settings) { m_tonemapSettings = settings; }
     [[nodiscard]] TonemapSettings tonemapSettings() const { return m_tonemapSettings; }
+    void setImportedPbrDefaults(const ImportedPbrDefaults& defaults) {
+        m_importedPbrDefaults = defaults;
+        m_importedPbrDefaults.objectRoughness =
+            std::clamp(m_importedPbrDefaults.objectRoughness, 0.04f, 1.0f);
+        m_importedPbrDefaults.terrainRoughness =
+            std::clamp(m_importedPbrDefaults.terrainRoughness, 0.04f, 1.0f);
+        m_importedPbrDefaults.metallic =
+            std::clamp(m_importedPbrDefaults.metallic, 0.0f, 1.0f);
+    }
     // Drives the same DoF state the sky debug panel edits; clamping happens
     // where the values feed the frame uniform.
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
@@ -662,7 +681,9 @@ private:
     static constexpr uint32_t kGpuTimestampQueryScreenDepthEnd = 49;
     static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiStart = 50;
     static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiEnd = 51;
-    static constexpr uint32_t kGpuTimestampQueryCount = 52;
+    static constexpr uint32_t kGpuTimestampQueryWaterReflectionResolveStart = 52;
+    static constexpr uint32_t kGpuTimestampQueryWaterReflectionResolveEnd = 53;
+    static constexpr uint32_t kGpuTimestampQueryCount = 54;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -691,6 +712,7 @@ private:
     bool createLogicalDevice();
     bool createSwapchain();
     bool createHdrResolveTargets();
+    bool createWaterReflectionHistoryTargets();
     bool createMsaaColorTargets();
     bool createDepthTargets();
     bool createAoTargets();
@@ -884,6 +906,7 @@ private:
     bool recreateSwapchain();
     void destroySwapchain();
     void destroyHdrResolveTargets();
+    void destroyWaterReflectionHistoryTargets();
     void destroyMsaaColorTargets();
     void destroyDepthTargets();
     void destroyAoTargets();
@@ -1267,6 +1290,8 @@ private:
     struct ImportedWaterVertex {
         float position[3];
         float uv[2];
+        std::uint32_t normalTextureSlot;
+        std::uint32_t flowTextureSlot;
     };
 
     struct ReadyMagicaDraw {
@@ -1320,6 +1345,7 @@ private:
         // the push constants. Part of the merge key: two runs that discard at
         // different thresholds are not the same draw.
         std::uint8_t alphaThreshold = 128;
+        std::uint32_t rigidAnimationIndex = 0xffffffffu;
     };
 
     struct ImportedScenePageDrawRange {
@@ -1369,6 +1395,7 @@ private:
         // again.
         std::vector<ImportedLocalLight> lights;
         std::vector<odai::importer::ImportedSceneParticleEmitter> particleEmitters;
+        std::vector<odai::importer::ImportedSceneRigidAnimation> rigidAnimations;
         // This chunk's water surfaces, owned for the same reason the lights
         // are: the single water buffer pair is rebuilt from the live chunks in
         // rebuildImportedWaterBuffers(), so evicting a coastal cell takes its
@@ -1712,6 +1739,79 @@ private:
     std::vector<VkImageView> m_waterRefractionImageViews;
     std::vector<TransientImageHandle> m_waterRefractionTransientHandles;
     std::vector<bool> m_waterRefractionImageInitialized;
+    VkExtent2D m_waterReflectionExtent{};
+    std::vector<VkImage> m_waterReflectionImages;
+    std::vector<VkImageView> m_waterReflectionImageViews;
+    std::vector<TransientImageHandle> m_waterReflectionTransientHandles;
+    std::vector<bool> m_waterReflectionImageInitialized;
+    std::vector<VkImage> m_waterReflectionDepthImages;
+    std::vector<VkImageView> m_waterReflectionDepthImageViews;
+    std::vector<TransientImageHandle> m_waterReflectionDepthTransientHandles;
+    std::vector<bool> m_waterReflectionDepthImageInitialized;
+    std::vector<bool> m_waterReflectionDepthSampled;
+    float m_waterReflectionPlaneHeight = 0.0f;
+    bool m_waterReflectionPlaneValid = false;
+
+    // Full-render-resolution temporal reconstruction of the half-resolution
+    // planar target.  Like TAA these are persistent ping-pong images, not
+    // per-frame scratch: one pair is sampled while the other is written.
+    std::array<VkImage, 2> m_waterReflectionHistoryImages{};
+    std::array<VkImageView, 2> m_waterReflectionHistoryImageViews{};
+    std::array<TransientImageHandle, 2> m_waterReflectionHistoryTransientHandles{
+        kInvalidTransientImageHandle, kInvalidTransientImageHandle};
+    std::array<VkImage, 2> m_waterReflectionHistoryDepthImages{};
+    std::array<VkImageView, 2> m_waterReflectionHistoryDepthImageViews{};
+    std::array<TransientImageHandle, 2> m_waterReflectionHistoryDepthTransientHandles{
+        kInvalidTransientImageHandle, kInvalidTransientImageHandle};
+    std::array<bool, 2> m_waterReflectionHistoryImageInitialized{};
+    std::array<bool, 2> m_waterReflectionHistoryDepthInitialized{};
+    std::uint32_t m_waterReflectionHistoryIndex = 0u;
+    bool m_waterReflectionHistoryValid = false;
+    bool m_waterReflectionPreviousAvailable = false;
+    bool m_waterReflectionTemporalEnabled = true;
+    float m_waterReflectionPreviousPlaneHeight = 0.0f;
+    bool m_waterReflectionPreviousPlaneValid = false;
+
+    odai::math::Matrix4 m_waterReflectionInvViewProjColumnMajor{};
+    odai::math::Matrix4 m_waterReflectionInvViewColumnMajor{};
+    odai::math::Matrix4 m_waterReflectionViewColumnMajor{};
+    odai::math::Matrix4 m_waterReflectionPrevViewColumnMajor{};
+    odai::math::Matrix4 m_waterReflectionPrevViewProjColumnMajor{};
+    odai::math::Matrix4 m_waterReflectionPrevView{};
+    odai::math::Matrix4 m_waterReflectionPrevViewProj{};
+    odai::math::Vector3 m_waterReflectionPrevEye{};
+    float m_waterReflectionProjection[2] = {1.0f, 1.0f};
+    bool m_waterReflectionPrevMatricesValid = false;
+
+    VkDescriptorSetLayout m_waterReflectionResolveDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_waterReflectionResolvePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_waterReflectionResolvePipeline = VK_NULL_HANDLE;
+    DescriptorBufferSet m_waterReflectionResolveBufferSet{};
+
+    struct WaterReflectionResolveUniform {
+        float invViewProj[16];
+        float invView[16];
+        float view[16];
+        float prevView[16];
+        float prevViewProj[16];
+        // x/y = geometry/sky history weight, z = history valid, w = plane.
+        float temporalParams[4];
+        // xy = current jitter NDC, zw = previous jitter NDC.
+        float jitterParams[4];
+        // xy = raw extent, zw = full output extent.
+        float extentParams[4];
+        // xy = projection diagonal, z/w reserved.
+        float projectionParams[4];
+    };
+    struct WaterReflectionResolvePushConstants {
+        std::uint32_t width = 1u;
+        std::uint32_t height = 1u;
+        float pad0 = 0.0f;
+        float pad1 = 0.0f;
+    };
+    bool createWaterReflectionResolveResources();
+    void destroyWaterReflectionResolveResources();
+    bool recordWaterReflectionResolve(VkCommandBuffer commandBuffer, std::uint32_t aoFrameIndex);
     std::vector<VkImage> m_depthImages;
     std::vector<VkDeviceMemory> m_depthImageMemories;
     std::vector<VkImageView> m_depthImageViews;
@@ -2562,6 +2662,7 @@ private:
     // something authored is pushed in.
     WeatherSkyParams m_weatherSky{};
     TonemapSettings m_tonemapSettings{};
+    ImportedPbrDefaults m_importedPbrDefaults{};
     // ~0u is kInvalidImportedTextureSlot, which this header cannot see --
     // renderer_shared.h is included inside `namespace odai::render` by some TUs
     // and not at all by others. A static_assert in chunk_upload.cc, which sees
@@ -2613,6 +2714,7 @@ private:
     float m_debugGpuPrewriteTimeMs = 0.0f;
     float m_debugGpuVelocityTimeMs = 0.0f;
     float m_debugGpuTaaTimeMs = 0.0f;
+    float m_debugGpuWaterReflectionResolveTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
     float m_debugGpuUiTimeMs = 0.0f;
     float m_debugResolvedExposure = 1.0f;
@@ -2699,6 +2801,7 @@ private:
     // exists to remove.
     std::vector<VkDrawIndexedIndirectCommand> m_importedIndirectScratch;
     std::vector<ImportedIndirectBatch> m_importedIndirectBatches;
+    std::vector<odai::importer::ImportedSceneRigidAnimation> m_importedRigidAnimations;
 
     // Builds grouped indirect commands for the given draws into the frame
     // arena. `include` decides which draw indices participate (culling, terrain
@@ -2710,9 +2813,16 @@ private:
         const std::function<bool(std::size_t)>& include,
         VkBuffer& outBuffer,
         VkDeviceSize& outBaseOffset);
+    [[nodiscard]] bool sampleImportedRigidAnimationTransform(
+        std::uint32_t animationIndex,
+        float outTransform[3][4]) const;
 
     // Draws folded away by index-range merging this frame, for the census.
     std::uint32_t m_debugImportedDrawsMerged = 0;
+    float m_importedRigidAnimationTimeSeconds = 0.0f;
+    // Negative means use GLFW wall time. Games with deterministic capture
+    // publish a simulation clock through Renderer::setVisualTimeSeconds.
+    float m_visualTimeSeconds = -1.0f;
 
     std::uint32_t m_debugDrawCallsTotal = 0;
     std::uint32_t m_debugDrawCallsShadow = 0;

@@ -6,6 +6,9 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <string_view>
 #include <system_error>
 #include <unordered_map>
 
@@ -108,28 +111,33 @@ bool readFalloutPluginHeader(
     input.read(reinterpret_cast<char*>(header), static_cast<std::streamsize>(sizeof(header)));
     const auto headerBytesRead = static_cast<std::size_t>(input.gcount());
     if (headerBytesRead < kMaxRecordHeaderSize) {
-        outError = "truncated before the TES4 header: " + path.string();
+        outError = "truncated before the TES3/TES4 header: " + path.string();
         return false;
     }
     // A short read sets eofbit/failbit, and the seekg below needs a clear stream.
     input.clear();
-    if (std::memcmp(header, "TES4", 4) != 0) {
-        outError = "not a Fallout plugin (no TES4 record): " + path.string();
+    const EsmPluginFormat format = detectEsmPluginFormat(header, headerBytesRead);
+    outHeader.format = format;
+    const bool isTes3 = format == EsmPluginFormat::kMorrowind;
+    if ((!isTes3 && std::memcmp(header, "TES4", 4) != 0) ||
+        (isTes3 && std::memcmp(header, "TES3", 4) != 0)) {
+        outError = "not a supported Bethesda plugin (no TES3/TES4 record): " + path.string();
         return false;
     }
 
     const std::uint32_t dataSize = readU32(header + 4);
-    const std::uint32_t flags = readU32(header + 8);
-    outHeader.isMaster = (flags & kTes4MasterFlag) != 0u;
-    outHeader.isLocalized = (flags & kTes4LocalizedFlag) != 0u;
+    if (!isTes3) {
+        const std::uint32_t flags = readU32(header + 8);
+        outHeader.isMaster = (flags & kTes4MasterFlag) != 0u;
+        outHeader.isLocalized = (flags & kTes4LocalizedFlag) != 0u;
+    }
 
     // Seek to where the record body actually starts, because the read above
     // deliberately overshot. Oblivion's header is 20 bytes, so continuing
     // sequentially from 24 would swallow the first four bytes of HEDR and walk
     // the body one subrecord out of phase — which finds no MAST at all and so
     // reports a mod with masters as having none.
-    const std::size_t headerSize =
-        esmRecordHeaderSize(detectEsmPluginFormat(header, headerBytesRead));
+    const std::size_t headerSize = esmRecordHeaderSize(format);
     input.seekg(static_cast<std::streamoff>(headerSize), std::ios::beg);
 
     // Bound the declared size against the file BEFORE sizing anything from it.
@@ -139,8 +147,9 @@ bool readFalloutPluginHeader(
     // bad_alloc instead of reporting "not a Fallout plugin".
     std::error_code fileSizeError;
     const auto fileSize = std::filesystem::file_size(path, fileSizeError);
-    if (!fileSizeError && static_cast<std::uintmax_t>(dataSize) > fileSize) {
-        outError = "TES4 record claims more bytes than the file holds: " + path.string();
+    if (!fileSizeError && static_cast<std::uintmax_t>(headerSize) + dataSize > fileSize) {
+        outError = std::string(isTes3 ? "TES3" : "TES4") +
+            " record claims more bytes than the file holds: " + path.string();
         return false;
     }
     // The TES4 record is never compressed and is a few hundred bytes; reading
@@ -148,20 +157,30 @@ bool readFalloutPluginHeader(
     std::vector<std::uint8_t> body(dataSize);
     if (dataSize != 0u &&
         !input.read(reinterpret_cast<char*>(body.data()), static_cast<std::streamsize>(dataSize))) {
-        outError = "truncated TES4 record: " + path.string();
+        outError = std::string("truncated ") + (isTes3 ? "TES3" : "TES4") +
+            " record: " + path.string();
         return false;
     }
 
+    const std::size_t subrecordHeaderSize = isTes3 ? 8u : 6u;
     std::size_t offset = 0;
-    while (offset + 6u <= body.size()) {
+    while (offset + subrecordHeaderSize <= body.size()) {
         const char* type = reinterpret_cast<const char*>(body.data() + offset);
-        const std::uint16_t size = readU16(body.data() + offset + 4);
-        const std::size_t dataOffset = offset + 6u;
+        const std::uint32_t size = isTes3
+            ? readU32(body.data() + offset + 4)
+            : static_cast<std::uint32_t>(readU16(body.data() + offset + 4));
+        const std::size_t dataOffset = offset + subrecordHeaderSize;
         if (dataOffset + size > body.size()) {
             break;
         }
-        if (std::memcmp(type, "HEDR", 4) == 0 && size >= 8u) {
-            outHeader.recordCount = readU32(body.data() + dataOffset + 4);
+        if (std::memcmp(type, "HEDR", 4) == 0) {
+            if (isTes3 && size >= 300u) {
+                // version, file type, company[32], description[256], records.
+                outHeader.isMaster = readU32(body.data() + dataOffset + 4) == 1u;
+                outHeader.recordCount = readU32(body.data() + dataOffset + 296u);
+            } else if (!isTes3 && size >= 8u) {
+                outHeader.recordCount = readU32(body.data() + dataOffset + 4);
+            }
         } else if (std::memcmp(type, "MAST", 4) == 0) {
             std::string master(
                 reinterpret_cast<const char*>(body.data() + dataOffset), size);
@@ -276,13 +295,16 @@ bool FalloutLoadOrder::open(
     }
 
     // Now that every plugin has a position, build each one's local -> global
-    // map. Local index i names masters[i] for i < masters.size(), and the
-    // plugin itself at i == masters.size().
+    // map. TES4 addresses masters at 0..N-1 and self at N; TES3 addresses self
+    // at zero and masters at 1..N.
     for (std::size_t i = 0; i < m_entries.size(); ++i) {
         FalloutLoadOrderEntry& entry = m_entries[i];
         entry.globalIndex = static_cast<std::uint8_t>(i);
         entry.localToGlobal.clear();
         entry.localToGlobal.reserve(entry.header.masters.size() + 1u);
+        if (entry.header.format == EsmPluginFormat::kMorrowind) {
+            entry.localToGlobal.push_back(entry.globalIndex);
+        }
         for (const std::string& master : entry.header.masters) {
             const auto found = placedByLowerName.find(toLowerAsciiCopy(master));
             if (found == placedByLowerName.end()) {
@@ -293,7 +315,9 @@ bool FalloutLoadOrder::open(
             }
             entry.localToGlobal.push_back(static_cast<std::uint8_t>(found->second));
         }
-        entry.localToGlobal.push_back(entry.globalIndex);
+        if (entry.header.format != EsmPluginFormat::kMorrowind) {
+            entry.localToGlobal.push_back(entry.globalIndex);
+        }
     }
     return true;
 }
@@ -306,6 +330,13 @@ std::uint32_t FalloutLoadOrder::remapFormId(
     const FalloutLoadOrderEntry& entry = m_entries[pluginIndex];
     const std::size_t localIndex = static_cast<std::size_t>(localFormId >> 24u);
     if (localIndex >= entry.localToGlobal.size()) {
+        if (entry.header.format == EsmPluginFormat::kMorrowind) {
+            // TES3 treats an out-of-range content-file byte as belonging to the
+            // current file. Preserve the low 24 bits and make that ownership
+            // explicit in global space.
+            return (localFormId & 0x00FFFFFFu) |
+                (static_cast<std::uint32_t>(entry.globalIndex) << 24u);
+        }
         // Not an index this plugin declares. Leaving it alone keeps the bad
         // reference identifiable instead of aliasing it onto a real record.
         return localFormId;
@@ -315,17 +346,30 @@ std::uint32_t FalloutLoadOrder::remapFormId(
 }
 
 std::string FalloutLoadOrder::fingerprint() const {
-    std::string result;
+    // A directory component must stay short even for a six-plugin Morrowind
+    // chain. Hash ordered names plus content stamps rather than concatenating
+    // them; changing a file in place then selects a fresh derived-cell cache.
+    std::uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&hash](std::string_view value) {
+        for (const unsigned char c : value) {
+            hash ^= c;
+            hash *= 1099511628211ull;
+        }
+        hash ^= 0xffu;
+        hash *= 1099511628211ull;
+    };
     for (const FalloutLoadOrderEntry& entry : m_entries) {
-        if (!result.empty()) {
-            result += "-";
-        }
-        for (char c : toLowerAsciiCopy(entry.header.fileName)) {
-            const bool safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-            result.push_back(safe ? c : '_');
-        }
+        mix(toLowerAsciiCopy(entry.header.fileName));
+        std::error_code error;
+        const auto size = std::filesystem::file_size(entry.path, error);
+        mix(error ? std::string("?") : std::to_string(size));
+        error.clear();
+        const auto stamp = std::filesystem::last_write_time(entry.path, error);
+        mix(error ? std::string("?") : std::to_string(stamp.time_since_epoch().count()));
     }
-    return result;
+    std::ostringstream result;
+    result << m_entries.size() << "p_" << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return result.str();
 }
 
 }  // namespace odai::importer::fnv

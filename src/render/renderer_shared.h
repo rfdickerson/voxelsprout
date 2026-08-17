@@ -316,6 +316,13 @@ struct alignas(16) CameraUniform {
     // Quarter-resolution diffuse GI. x/y are record extent, z is enabled,
     // w is the receiver bounce scale. Appended to preserve existing offsets.
     float screenSpaceGiConfig[4];
+    // Legacy imported-material PBR override. x/y = object/terrain roughness,
+    // z = metallic, w = enabled. Appended; mirrored in camera_uniform.slang.
+    float importedPbrConfig[4];
+    // Dominant planar-water reflection for this frame.
+    // x = horizontal water plane in world Y, y = pass valid, z/w unused.
+    // Appended so all existing camera-uniform offsets remain stable.
+    float waterReflectionConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {
@@ -326,6 +333,10 @@ struct alignas(16) ChunkPushConstants {
     // the private copy of this struct in pass_pipelines.cc -- all three must
     // agree or the pipeline layout's push range stops covering the block.
     float materialParams[4];
+    // World-space affine delta for one rigid imported-machine draw. Rows 0-2;
+    // the implicit final row is (0,0,0,1). animationParams.x enables it.
+    float rigidAnimationTransform[3][4];
+    float rigidAnimationParams[4];
 };
 
 struct alignas(16) ChunkInstanceData {

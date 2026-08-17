@@ -1,0 +1,34 @@
+# Skyrim SE Tamriel -- Riverwood's White River to Whiterun's southern exterior.
+#
+# Engine space is x east, y height, z south. The opening two poses stay above
+# Riverwood's XCLW=-250 river cells (4,-11), (5,-11) and (5,-10), opening on
+# the lumber mill so its authored waterwheel/saw motion reads, then follow the road
+# north over the mountain shoulder and descend into the Whiterun tundra. The
+# camera remains in Tamriel: Whiterun's distant city shell, farms, stables and
+# approach roads are visible, but the separate WhiterunWorld city is not used.
+#
+# Release capture:
+#   ODAI_WINDOW_SIZE=1920x1080 ODAI_FNV_HOUR=10.5 ODAI_FNV_NOHUD=1 \
+#   ODAI_FNV_LOAD_RADIUS=3 odai_game_newvegas --stream "<SSE Data>" \
+#     --plugin Skyrim.esm --worldspace Tamriel \
+#     --tour-file assets/tours/riverwood_to_whiterun.txt --flythrough 45 \
+#     --capture-video riverwood_to_whiterun.mp4 60 45
+#
+# The wheel REFR origin is (19650, 91, 43941), but the visible wheel is
+# intentionally offset inside its NIF. Its authored axle centre, after the
+# placement's 0.789608-radian yaw, is approximately (19973, -69, 43616).
+# Frame that axle rather than the invisible REFR origin.
+# px py pz             lx ly lz
+21300   500 42300      19973   -69 43616
+21600   580 43000      19900   -20 43660
+23100   650 45700      22200  -220 43800
+22600   700 42500      22600  -100 40500
+23100  2200 39000      23800   350 36900
+24100  2500 34200      24800   650 32000
+25200  1700 30200      25900  -450 28100
+26300   600 26500      27000 -2100 24400
+27300 -1000 22500      28000 -3400 20400
+28400 -2700 18000      29100 -4150 15800
+29700 -3350 14000      30300 -4250 11700
+31200 -3150 10500      31000 -4050  8500
+33000 -2300  8500      30000 -3700  7000

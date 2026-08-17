@@ -160,6 +160,8 @@ struct alignas(16) ChunkPushConstants {
     // the private copy of this struct in pass_pipelines.cc -- all three must
     // agree or the pipeline layout's push range stops covering the block.
     float materialParams[4];
+    float rigidAnimationTransform[3][4];
+    float rigidAnimationParams[4];
 };
 
 } // namespace
@@ -1137,7 +1139,7 @@ bool RendererBackend::createPipePipeline() {
     importedWaterBindings[0].stride = sizeof(ImportedWaterVertex);
     importedWaterBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedWaterAttributes[2]{};
+    VkVertexInputAttributeDescription importedWaterAttributes[4]{};
     importedWaterAttributes[0].location = 0;
     importedWaterAttributes[0].binding = 0;
     importedWaterAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1146,12 +1148,20 @@ bool RendererBackend::createPipePipeline() {
     importedWaterAttributes[1].binding = 0;
     importedWaterAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
     importedWaterAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, uv));
+    importedWaterAttributes[2].location = 2;
+    importedWaterAttributes[2].binding = 0;
+    importedWaterAttributes[2].format = VK_FORMAT_R32_UINT;
+    importedWaterAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, normalTextureSlot));
+    importedWaterAttributes[3].location = 3;
+    importedWaterAttributes[3].binding = 0;
+    importedWaterAttributes[3].format = VK_FORMAT_R32_UINT;
+    importedWaterAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, flowTextureSlot));
 
     VkPipelineVertexInputStateCreateInfo importedWaterVertexInputInfo{};
     importedWaterVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedWaterVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedWaterVertexInputInfo.pVertexBindingDescriptions = importedWaterBindings;
-    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 2;
+    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 4;
     importedWaterVertexInputInfo.pVertexAttributeDescriptions = importedWaterAttributes;
 
     VkGraphicsPipelineCreateInfo importedWaterPipelineCreateInfo = pipelineCreateInfo;
@@ -1931,7 +1941,7 @@ bool RendererBackend::createAoPipelines() {
     importedWaterBindings[0].stride = sizeof(ImportedWaterVertex);
     importedWaterBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedWaterAttributes[2]{};
+    VkVertexInputAttributeDescription importedWaterAttributes[4]{};
     importedWaterAttributes[0].location = 0;
     importedWaterAttributes[0].binding = 0;
     importedWaterAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1940,12 +1950,20 @@ bool RendererBackend::createAoPipelines() {
     importedWaterAttributes[1].binding = 0;
     importedWaterAttributes[1].format = VK_FORMAT_R32G32_SFLOAT;
     importedWaterAttributes[1].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, uv));
+    importedWaterAttributes[2].location = 2;
+    importedWaterAttributes[2].binding = 0;
+    importedWaterAttributes[2].format = VK_FORMAT_R32_UINT;
+    importedWaterAttributes[2].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, normalTextureSlot));
+    importedWaterAttributes[3].location = 3;
+    importedWaterAttributes[3].binding = 0;
+    importedWaterAttributes[3].format = VK_FORMAT_R32_UINT;
+    importedWaterAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, flowTextureSlot));
 
     VkPipelineVertexInputStateCreateInfo importedWaterVertexInputInfo{};
     importedWaterVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedWaterVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedWaterVertexInputInfo.pVertexBindingDescriptions = importedWaterBindings;
-    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 2;
+    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 4;
     importedWaterVertexInputInfo.pVertexAttributeDescriptions = importedWaterAttributes;
 
     VkPipelineRasterizationStateCreateInfo importedWaterRasterizer = rasterizer;

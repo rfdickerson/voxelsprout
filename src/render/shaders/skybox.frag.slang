@@ -1,4 +1,5 @@
 import camera_uniform;
+import chunk_push_constants;
 
 // Same bindless table the imported-geometry shaders use; the sky pipeline binds
 // set 1 already, so cloud layers cost no new descriptor.
@@ -313,7 +314,13 @@ float4 main(FragmentInput input) : SV_Target0
     }
     const float3 viewDir = normalize(float3(input.inNdc.x / projX, input.inNdc.y / projY, -1.0));
     const float3x3 invViewRotation = transpose((float3x3)camera.view);
-    const float3 worldDir = normalize(mul(invViewRotation, viewDir));
+    float3 worldDir = normalize(mul(invViewRotation, viewDir));
+    // The planar pass reflects the camera across a horizontal plane. Sky is at
+    // infinity, so only the ray direction changes; the plane height cancels.
+    if (chunkPc.cascadeData.x > 0.5)
+    {
+        worldDir.y = -worldDir.y;
+    }
     // Morrowind sky textures are authored for dedicated sky NIF meshes. Keep this
     // pass as the atmospheric base; the mesh cloud layer is drawn over sky pixels.
     return float4(proceduralSky(worldDir, camera.sunDirectionIntensity.xyz), 1.0);

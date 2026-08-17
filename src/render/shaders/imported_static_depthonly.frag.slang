@@ -46,6 +46,11 @@ struct FragmentInput
 // untouched while depth is written.
 void main(FragmentInput input)
 {
+    if (chunkPc.cascadeData.x > 0.5 &&
+        input.inWorldPosition.y < chunkPc.materialParams.w - 0.25)
+    {
+        discard;
+    }
     if (input.inTextureIndex != kInvalidImportedTextureIndex &&
         (input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
         (bindlessTextures[input.inTextureIndex].Sample(input.inUv).a * input.inColor.a) <=

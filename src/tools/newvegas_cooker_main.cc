@@ -154,7 +154,7 @@ Mat3 makeEngineInstanceRotation(const Mat3& beth) {
 // REFR rotation order: Bethesda applies X, then Y, then Z (R = Rz*Ry*Rx),
 // with the angles used as stored (not negated).
 //
-// The angle sign is settled: `odai_newvegas_probe --rotations FalloutNV.esm
+// The angle sign is settled: `odai_bethesda_probe --rotations FalloutNV.esm
 // GSDocMitchellHouse` scores every candidate convention by how much the cell's
 // modular pieces interpenetrate once placed, and positive angles beat negated
 // ones by 1.6x (5.9e7 vs 9.6e7). The order is not separated by that test —

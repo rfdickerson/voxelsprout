@@ -360,6 +360,10 @@ void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
 }
 
+void Renderer::setVisualTimeSeconds(float seconds) {
+    m_backend->setVisualTimeSeconds(seconds);
+}
+
 void Renderer::setWeatherSky(const WeatherSkyParams& params) {
     m_backend->setWeatherSky(params);
 }
@@ -374,6 +378,10 @@ void Renderer::setTonemapSettings(const TonemapSettings& settings) {
 
 TonemapSettings Renderer::tonemapSettings() const {
     return m_backend->tonemapSettings();
+}
+
+void Renderer::setImportedPbrDefaults(const ImportedPbrDefaults& defaults) {
+    m_backend->setImportedPbrDefaults(defaults);
 }
 
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,

@@ -8,7 +8,7 @@
 // HOW A LINE IS ATTRIBUTED TO A SPEAKER, which is the non-obvious part: an INFO
 // record carries no speaker field. Fallout attributes it with a CTDA condition
 // -- function index 72, GetIsID, whose first parameter is the actor's formID.
-// That was derived rather than looked up: odai_newvegas_probe --dialogue
+// That was derived rather than looked up: odai_bethesda_probe --dialogue
 // histograms every CTDA function index whose parameter matches the wanted
 // actor, and across Victor's records function 72 accounts for 179 of 181 hits.
 //
@@ -55,7 +55,7 @@ namespace odai::importer::fnv {
 inline constexpr std::uint32_t kCtdaFunctionGetIsId = 72u;
 
 // The OTHER way an INFO names who says it: by VOICE TYPE rather than by actor.
-// Derived the same way (odai_newvegas_probe --voicedialogue histograms every
+// Derived the same way (odai_bethesda_probe --voicedialogue histograms every
 // function index whose param1 is a given VTYP formID; 427 accounts for every
 // hit across the voice types Goodsprings uses).
 //

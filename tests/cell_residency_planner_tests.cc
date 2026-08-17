@@ -274,6 +274,34 @@ void testTimelyLoadIsAccepted() {
     CHECK(planner.stats().loadsCompleted == 1u);
 }
 
+// A capture pins its complete route before it starts. Future cells must not be
+// rejected as stale or evicted simply because the camera has not reached them.
+void testPinnedCellsSurviveTourTravel() {
+    CellResidencyPlanner planner;
+    planner.setConfig(testConfig());
+    const CellCoord future{40, -12};
+    planner.setPinnedCells({future});
+
+    const auto origin = atCell(0, 0);
+    planner.update(origin.data(), kStill.data());
+    CHECK(!planner.cellsToLoad().empty());
+    CHECK(planner.cellsToLoad().front() == future);
+    planner.markLoadStarted(future);
+
+    // The camera can be far away before the worker completes. A normal cell
+    // would be reported as wasted here; the pinned route cell must be kept.
+    const auto faraway = atCell(-30, 30);
+    planner.update(faraway.data(), kStill.data());
+    CHECK(planner.markLoadFinished(future));
+    CHECK(planner.isResident(future));
+
+    planner.update(faraway.data(), kStill.data());
+    CHECK(std::find(planner.cellsToEvict().begin(), planner.cellsToEvict().end(), future) ==
+          planner.cellsToEvict().end());
+    planner.reset();
+    CHECK(!planner.isTracked(future));
+}
+
 // The worldspace is not a rectangle. Cells that do not exist must be asked for
 // once, not every frame forever.
 void testUnavailableCellsAreNeverReRequested() {
@@ -419,6 +447,7 @@ int main() {
     testInFlightBudgetIsRespected();
     testStaleLoadIsRejectedAndCounted();
     testTimelyLoadIsAccepted();
+    testPinnedCellsSurviveTourTravel();
     testUnavailableCellsAreNeverReRequested();
     testLongWalkKeepsResidencyBoundedAndWasteAtZero();
     testEvictionIsFarthestFirst();

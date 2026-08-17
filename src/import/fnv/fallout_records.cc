@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
@@ -11,6 +12,13 @@
 namespace odai::importer::fnv {
 
 namespace {
+
+std::string toLowerAsciiCopy(std::string text) {
+    for (char& c : text) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return text;
+}
 
 std::uint16_t readU16(const std::uint8_t* bytes) {
     std::uint16_t value = 0;
@@ -50,7 +58,7 @@ std::string subrecordString(const EsmSubrecordView& sub) {
 // the same shape as STAT.
 //
 // Handling only STAT dropped 20-37% of the references in a typical Goodsprings
-// cell -- measured with `odai_newvegas_probe --floaters`. The visible symptom is
+// cell -- measured with `odai_bethesda_probe --floaters`. The visible symptom is
 // not a missing object so much as a floating one: road segments rest on
 // embankment and fill pieces that are MSTT/ACTI, and with those gone the road
 // hangs in the air over the terrain.
@@ -293,6 +301,7 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
     FalloutPlacedReference ref{};
     ref.formId = record.formId;
     ref.recordFlags = record.flags;
+    ref.isDeleted = (record.flags & 0x00000020u) != 0u;
     ref.scale = 1.0f;
     bool hasData = false;
     for (const EsmSubrecordView& sub : record.subrecords) {
@@ -329,7 +338,7 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             ref.teleportRotationRadians[2] = readF32(sub.data + 24);
         }
     }
-    if (hasData && ref.baseFormId != 0u) {
+    if ((hasData && ref.baseFormId != 0u) || ref.isDeleted) {
         currentCell->references.push_back(ref);
     }
 }
@@ -662,7 +671,7 @@ void parseMorrowindCellRecord(
     bool inReference = false;
     FalloutPlacedReference current{};
     const auto flushReference = [&]() {
-        if (inReference && !current.baseEditorId.empty()) {
+        if (inReference && (!current.baseEditorId.empty() || current.isDeleted)) {
             outCell.references.push_back(current);
         }
         current = FalloutPlacedReference{};
@@ -683,6 +692,7 @@ void parseMorrowindCellRecord(
             } else if (sub.type == "DATA" && sub.size >= 12u) {
                 const std::uint32_t flags = readU32(sub.data);
                 outCell.isInterior = (flags & 0x1u) != 0u;
+                outCell.cellFlags = static_cast<std::uint16_t>(flags & 0xffffu);
                 outCell.gridX = readI32(sub.data + 4);
                 outCell.gridZ = readI32(sub.data + 8);
                 outCell.hasGridCoords = !outCell.isInterior;
@@ -704,6 +714,8 @@ void parseMorrowindCellRecord(
             current.rotationRadians[2] = readF32(sub.data + 20);
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             current.scale = readF32(sub.data);
+        } else if (sub.type == "DELE") {
+            current.isDeleted = true;
         }
     }
     flushReference();
@@ -844,6 +856,8 @@ bool buildMorrowindCellIndex(
         entry.editorId = parsed.editorId;
         entry.isInterior = parsed.isInterior;
         entry.cellFlags = parsed.cellFlags;
+        entry.hasWater = parsed.hasWater;
+        entry.waterHeight = parsed.waterHeight;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.gridX = parsed.gridX;
         entry.gridZ = parsed.gridZ;
@@ -853,10 +867,12 @@ bool buildMorrowindCellIndex(
         // this index hands to the extractor IS the record.
         entry.childrenGroupOffset = pendingOffset;
         entry.childrenGroupSize = pendingSize;
-        entry.contributions.push_back(FalloutCellContribution{0u, pendingOffset, pendingSize});
-        (void)0;
+        const std::size_t cellSlot = outIndex.cells.size();
         if (entry.hasGridCoords) {
-            cellByGrid[gridKey(entry.gridX, entry.gridZ)] = outIndex.cells.size();
+            cellByGrid[gridKey(entry.gridX, entry.gridZ)] = cellSlot;
+        }
+        for (const FalloutPlacedReference& reference : parsed.references) {
+            outIndex.cellIndexByReferenceFormId[reference.formId] = cellSlot;
         }
         outIndex.cells.push_back(std::move(entry));
     };
@@ -869,7 +885,30 @@ bool buildMorrowindCellIndex(
         if (it != cellByGrid.end()) {
             outIndex.cells[it->second].landRecordOffset = land.offset;
             outIndex.cells[it->second].landRecordSize = land.size;
+            continue;
         }
+        // A terrain-only override is legal: its CELL metadata and references
+        // still come from a master. Keep a contribution keyed by the LAND grid
+        // so the load-order merger can attach it to that master cell.
+        FalloutCellIndexEntry entry{};
+        entry.cellFormId = static_cast<std::uint32_t>(outIndex.cells.size()) + 2u;
+        entry.hasGridCoords = true;
+        entry.gridX = static_cast<std::int32_t>(key >> 32u);
+        entry.gridZ = static_cast<std::int32_t>(key & 0xffffffffu);
+        entry.worldspaceFormId = kVvardenfellFormId;
+        entry.isInterior = false;
+        entry.hasWater = true;
+        entry.waterHeight = 0.0f;
+        entry.landRecordOffset = land.offset;
+        entry.landRecordSize = land.size;
+        cellByGrid[key] = outIndex.cells.size();
+        outIndex.cells.push_back(std::move(entry));
+    }
+    for (FalloutCellIndexEntry& entry : outIndex.cells) {
+        entry.contributions.clear();
+        entry.contributions.push_back(FalloutCellContribution{
+            0u, entry.childrenGroupOffset, entry.childrenGroupSize,
+            entry.landRecordOffset, entry.landRecordSize});
     }
     FalloutWorldspaceRecord vvardenfell{};
     vvardenfell.formId = kVvardenfellFormId;
@@ -1027,6 +1066,110 @@ bool buildFalloutCellIndex(
         outIndex.pluginPaths.push_back(entry.path);
     }
 
+    const bool morrowind =
+        order.entries().front().header.format == EsmPluginFormat::kMorrowind;
+    for (const FalloutLoadOrderEntry& entry : order.entries()) {
+        if ((entry.header.format == EsmPluginFormat::kMorrowind) != morrowind) {
+            outError = "cannot mix TES3 and TES4 plugins in one load order";
+            return false;
+        }
+    }
+
+    if (morrowind) {
+        outIndex.cellWorldSize =
+            kLandPostSpacing * static_cast<float>(kMorrowindLandGridSize - 1);
+        FalloutWorldspaceRecord vvardenfell{};
+        vvardenfell.formId = 1u;
+        vvardenfell.editorId = "Vvardenfell";
+        outIndex.worldspaces.push_back(std::move(vvardenfell));
+
+        // TES3 CELL records have no formID. Their persistent identity is the
+        // exterior grid or the case-insensitive interior name.
+        std::unordered_map<std::string, std::size_t> entryByIdentity;
+        const auto identity = [](const FalloutCellIndexEntry& cell,
+                                 std::size_t pluginIndex) {
+            if (cell.hasGridCoords && !cell.isInterior) {
+                return std::string("e:") + std::to_string(cell.gridX) + ":" +
+                    std::to_string(cell.gridZ);
+            }
+            if (!cell.editorId.empty()) {
+                return std::string("i:") + toLowerAsciiCopy(cell.editorId);
+            }
+            return std::string("anonymous:") + std::to_string(pluginIndex) + ":" +
+                std::to_string(cell.cellRecordOffset);
+        };
+        std::uint32_t nextCellFormId = 2u;
+
+        for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
+            FalloutCellIndex single;
+            std::string error;
+            if (!buildFalloutCellIndex(order.entries()[pluginIndex].path, single, error)) {
+                std::cerr << "[fnv] cell index: skipping "
+                          << order.entries()[pluginIndex].header.fileName << ": " << error << "\n";
+                continue;
+            }
+            std::vector<std::size_t> singleToMerged(single.cells.size(), 0u);
+            for (std::size_t singleSlot = 0; singleSlot < single.cells.size(); ++singleSlot) {
+                FalloutCellIndexEntry cell = std::move(single.cells[singleSlot]);
+                const std::string key = identity(cell, pluginIndex);
+                std::vector<FalloutCellContribution> contributions;
+                if (cell.childrenGroupSize != 0u || cell.landRecordSize != 0u) {
+                    contributions.push_back(FalloutCellContribution{
+                        pluginIndex, cell.childrenGroupOffset, cell.childrenGroupSize,
+                        cell.landRecordOffset, cell.landRecordSize});
+                }
+                const auto existing = entryByIdentity.find(key);
+                if (existing == entryByIdentity.end()) {
+                    cell.cellFormId = nextCellFormId++;
+                    cell.worldspaceFormId = cell.isInterior ? 0u : 1u;
+                    cell.contributions = std::move(contributions);
+                    const std::size_t mergedSlot = outIndex.cells.size();
+                    entryByIdentity.emplace(key, mergedSlot);
+                    singleToMerged[singleSlot] = mergedSlot;
+                    outIndex.cells.push_back(std::move(cell));
+                    continue;
+                }
+
+                const std::size_t mergedSlot = existing->second;
+                singleToMerged[singleSlot] = mergedSlot;
+                FalloutCellIndexEntry& merged = outIndex.cells[mergedSlot];
+                merged.contributions.insert(
+                    merged.contributions.end(), contributions.begin(), contributions.end());
+                // A LAND-only contribution has no CELL metadata to replace.
+                if (cell.childrenGroupSize == 0u) {
+                    continue;
+                }
+                // These compatibility fields still drive streamability checks
+                // and single-file diagnostics. If this identity first appeared
+                // as a LAND-only contribution, leaving the zero range behind
+                // would hide the later, now-complete cell from the streamer.
+                merged.cellRecordOffset = cell.cellRecordOffset;
+                merged.childrenGroupOffset = cell.childrenGroupOffset;
+                merged.childrenGroupSize = cell.childrenGroupSize;
+                if (!cell.editorId.empty()) {
+                    merged.editorId = cell.editorId;
+                }
+                merged.isInterior = cell.isInterior;
+                merged.cellFlags = cell.cellFlags;
+                merged.hasGridCoords = cell.hasGridCoords;
+                merged.gridX = cell.gridX;
+                merged.gridZ = cell.gridZ;
+                merged.worldspaceFormId = cell.isInterior ? 0u : 1u;
+                merged.hasWater = cell.hasWater;
+                merged.waterHeight = cell.waterHeight;
+            }
+            for (const auto& [referenceFormId, singleSlot] :
+                 single.cellIndexByReferenceFormId) {
+                if (singleSlot < singleToMerged.size()) {
+                    outIndex.cellIndexByReferenceFormId[
+                        order.remapFormId(pluginIndex, referenceFormId)] =
+                        singleToMerged[singleSlot];
+                }
+            }
+        }
+        return true;
+    }
+
     // Cells merge by their REMAPPED formID: the same cell described by the base
     // game and by a patch is one cell with two contributions, not two cells.
     std::unordered_map<std::uint32_t, std::size_t> entryByCellFormId;
@@ -1056,7 +1199,8 @@ bool buildFalloutCellIndex(
             std::vector<FalloutCellContribution> contributions;
             if (cell.childrenGroupSize != 0u) {
                 contributions.push_back(FalloutCellContribution{
-                    pluginIndex, cell.childrenGroupOffset, cell.childrenGroupSize});
+                    pluginIndex, cell.childrenGroupOffset, cell.childrenGroupSize,
+                    cell.landRecordOffset, cell.landRecordSize});
             }
             const auto existing = entryByCellFormId.find(cellFormId);
             if (existing == entryByCellFormId.end()) {
@@ -1134,6 +1278,7 @@ void remapCellFormIds(const FalloutLoadOrder& order, std::size_t pluginIndex,
         ref.enableParentFormId = remap(ref.enableParentFormId);
     }
     if (cell.land != nullptr) {
+        cell.land->sourcePluginIndex = pluginIndex;
         cell.land->cellFormId = remap(cell.land->cellFormId);
         for (std::uint32_t& baseTexture : cell.land->quadrantBaseTextureFormId) {
             baseTexture = remap(baseTexture);
@@ -1171,6 +1316,8 @@ bool extractFalloutCellMerged(
     }
     outCell.fogNear = entry.fogNear;
     outCell.fogFar = entry.fogFar;
+    outCell.hasWater = entry.hasWater;
+    outCell.waterHeight = entry.waterHeight;
 
     // References keyed by formID, remembering the order they were first seen so
     // the merged list is deterministic rather than hash-ordered. A later
@@ -1179,7 +1326,7 @@ bool extractFalloutCellMerged(
     std::unordered_map<std::uint32_t, std::size_t> referenceSlotByFormId;
 
     for (const FalloutCellContribution& contribution : entry.contributions) {
-        if (contribution.childrenGroupSize == 0u ||
+        if ((contribution.childrenGroupSize == 0u && contribution.landRecordSize == 0u) ||
             contribution.pluginIndex >= index.pluginPaths.size()) {
             continue;
         }
@@ -1191,6 +1338,8 @@ bool extractFalloutCellMerged(
         FalloutCellIndexEntry single = entry;
         single.childrenGroupOffset = contribution.childrenGroupOffset;
         single.childrenGroupSize = contribution.childrenGroupSize;
+        single.landRecordOffset = contribution.landRecordOffset;
+        single.landRecordSize = contribution.landRecordSize;
         FalloutCellRecord part;
         std::string error;
         if (!extractFalloutCellAt(reader, single, part, error)) {
@@ -1219,6 +1368,11 @@ bool extractFalloutCellMerged(
             outCell.navMeshes = std::move(part.navMeshes);
         }
     }
+    outCell.references.erase(
+        std::remove_if(
+            outCell.references.begin(), outCell.references.end(),
+            [](const FalloutPlacedReference& reference) { return reference.isDeleted; }),
+        outCell.references.end());
     return true;
 }
 

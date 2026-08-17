@@ -48,6 +48,7 @@ RaytracingAccelerationStructure shadowScene;
 // both together. Geometry cooked before materials existed has flags == 0, so
 // the PBR bit stays clear and shading falls back to the legacy diffuse chain.
 static const uint kImportedMaterialFlagAlphaTest = 1u;
+static const uint kImportedMaterialFlagTerrain = 2u;
 static const uint kImportedMaterialFlagPbr = 4u;
 static const uint kImportedMaterialFlagVertexColorTint = 8u;
 static const uint kImportedMaterialFlagTerrainLayers = 16u;
@@ -133,6 +134,25 @@ PbrSurface resolveImportedMaterial(uint flags, out float3 baseColorTint, out flo
     PbrSurface surface;
     surface.metallic = saturate(entry.baseColorMetallic.w);
     surface.roughness = saturate(entry.emissiveRoughness.w);
+    return surface;
+}
+
+// Applies a renderer preset only to the legacy path. An authored material is a
+// stronger statement than a global look and must never be overwritten.
+PbrSurface resolveImportedMaterialWithDefaults(
+    uint flags, out float3 baseColorTint, out float3 emissive, out bool usePbr)
+{
+    PbrSurface surface = resolveImportedMaterial(flags, baseColorTint, emissive);
+    usePbr = importedMaterialHasPbr(flags);
+    if (!usePbr && camera.importedPbrConfig.w > 0.5)
+    {
+        const bool terrain = (flags & kImportedMaterialFlagTerrain) != 0u;
+        surface.roughness = saturate(terrain
+            ? camera.importedPbrConfig.y
+            : camera.importedPbrConfig.x);
+        surface.metallic = saturate(camera.importedPbrConfig.z);
+        usePbr = true;
+    }
     return surface;
 }
 
@@ -1170,7 +1190,9 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
     {
         float3 tint = float3(1.0, 1.0, 1.0);
         float3 emissive = float3(0.0, 0.0, 0.0);
-        const PbrSurface surface = resolveImportedMaterial(input.inFlags, tint, emissive);
+        bool usePbr = false;
+        const PbrSurface surface =
+            resolveImportedMaterialWithDefaults(input.inFlags, tint, emissive, usePbr);
         const float value = (view == kDebugViewRoughness) ? surface.roughness : surface.metallic;
         return float4(debugRamp(value), 1.0);
     }
@@ -1211,6 +1233,15 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
 
 float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
 {
+    // The mirrored planar pass contains only geometry above the water. Without
+    // this clip, the riverbed is reflected upward and appears as a second,
+    // inverted landscape in the surface. A small tolerance keeps coplanar bank
+    // edges from flickering as the selected plane changes between cells.
+    if (chunkPc.cascadeData.x > 0.5 &&
+        input.inWorldPosition.y < chunkPc.materialParams.w - 0.25)
+    {
+        discard;
+    }
     // Debug views replace the frame outright and deliberately run before the
     // unlit early-out and every lighting term below -- an "albedo" view that
     // still went through the self-lit branch would not be albedo.
@@ -1259,9 +1290,9 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // override albedo on cliff faces, and tinting afterwards would fight them.
     float3 materialTint = float3(1.0, 1.0, 1.0);
     float3 materialEmissive = float3(0.0, 0.0, 0.0);
-    const PbrSurface surface =
-        resolveImportedMaterial(input.inFlags, materialTint, materialEmissive);
-    const bool usePbr = importedMaterialHasPbr(input.inFlags);
+    bool usePbr = false;
+    const PbrSurface surface = resolveImportedMaterialWithDefaults(
+        input.inFlags, materialTint, materialEmissive, usePbr);
 
     float3 albedo = albedoFull.rgb * materialTint;
     // Stylized slope tint (docs/stylized_low_poly.md): steep faces blend toward

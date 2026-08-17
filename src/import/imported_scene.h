@@ -85,13 +85,58 @@ struct ImportedSceneMeshPart {
     // way the source formats store it. 128 is the neutral 0.5 that every
     // caller which does not author a threshold gets.
     std::uint8_t alphaThreshold = 128;
+    // Index into ImportedSceneMesh::rigidAnimations, or UINT32_MAX. One source
+    // node may own several material parts; they all point at the same track.
+    std::uint32_t rigidAnimationIndex = 0xffffffffu;
 };
+
+struct ImportedSceneVectorKey {
+    float time = 0.0f;
+    float value[3] = {};
+};
+
+struct ImportedSceneQuaternionKey {
+    float time = 0.0f;
+    // x, y, z, w, matching odai::math::Quaternion.
+    float value[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+};
+
+// A rigid node track plus the two transforms needed to apply it to vertices
+// already flattened into the node's bind pose. On a mesh these matrices are
+// model-local; buildImportedScenePackedRenderData folds in the REFR placement
+// and copies the result to ImportedScene::rigidAnimations.
+struct ImportedSceneRigidAnimation {
+    std::string nodeName;
+    float duration = 0.0f;
+    std::uint32_t cycleType = 0u;
+    float parentTransform[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1};
+    float bindTransform[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1};
+    std::vector<ImportedSceneVectorKey> translationKeys;
+    std::vector<ImportedSceneQuaternionKey> rotationKeys;
+    std::vector<ImportedSceneVectorKey> scaleKeys;
+};
+
+// Samples the authored local TRS and returns the world-space delta that turns
+// already-flattened bind-pose vertices into the current rigid pose.
+bool sampleImportedSceneRigidAnimation(
+    const ImportedSceneRigidAnimation& animation,
+    float timeSeconds,
+    float outDeltaTransform[16]);
 
 struct ImportedSceneMesh {
     std::string name;
     std::vector<ImportedSceneVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<ImportedSceneMeshPart> parts;
+    std::vector<ImportedSceneRigidAnimation> rigidAnimations;
 };
 
 // A teleport door: stand near it, look at it, and it takes you to another
@@ -137,6 +182,10 @@ enum class TextureFormat : std::uint8_t {
     // renumbering the existing entries would silently reinterpret every
     // already-cooked scene's textures as the wrong format.
     BC2   = 6,  // DXT3 — 16 bytes per block (RGBA, 4-bit explicit alpha)
+    // Same bytes as BC1, but sampled as linear data. Water normals are shipped
+    // as DXT1 even though they are vectors, and an sRGB image view bends those
+    // vectors before the shader can decode them.
+    BC1Linear = 7,
 };
 
 struct ImportedSceneTexture {
@@ -276,7 +325,7 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 // src/render/shaders/imported_static.frag.slang; change both together.
 //
 //   bit 0      alpha test
-//   bit 1      reserved — terrain slope blend (docs/stylized_low_poly.md §1)
+//   bit 1      terrain geometry marker / optional slope blend
 //   bit 2      PBR material present: bits 8..23 carry metallic/roughness
 //   bit 3      modulate the diffuse texture by the vertex colour
 //   bit 4      terrain layer blend: layerTextureIndex/layerWeights are live
@@ -290,6 +339,9 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 // Bit 2 is the opt-in that makes that work: scenes cooked before materials
 // existed decode as a fully rough dielectric and shade exactly as before.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagAlphaTest = 1u << 0;
+// Every packed terrain vertex carries this bit. It remains the opt-in for a
+// future textured slope blend, and also lets runtime material presets choose a
+// terrain roughness without baking that preset into the scene cache.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainSlopeBlend = 1u << 1;
 inline constexpr std::uint32_t kImportedSceneMaterialFlagPbr = 1u << 2;
 // Opt-in for the same reason bit 2 is: untextured geometry has always used the
@@ -423,6 +475,8 @@ struct ImportedScenePackedDraw {
     // stream as well as the main one. The renderer forwards it per draw.
     std::uint8_t alphaThreshold = 128;
     std::uint8_t reserved[3] = {0, 0, 0};
+    // Index into ImportedScene::rigidAnimations, or UINT32_MAX.
+    std::uint32_t rigidAnimationIndex = 0xffffffffu;
 };
 
 // Optional spatial grouping of packed draws for per-chunk frustum culling.
@@ -458,6 +512,11 @@ struct ImportedSceneWaterPatch {
     float sizeX = 0.0f;
     float sizeZ = 0.0f;
     float waterLevel = 0.0f;
+    // Scene-local texture indices while importing, remapped to bindless slots
+    // when the resident chunk is created. Skyrim's surface normal is a normal
+    // map referenced by WATR; its exterior flow field is authored per cell.
+    std::uint32_t normalTextureIndex = 0xffffffffu;
+    std::uint32_t flowTextureIndex = 0xffffffffu;
 };
 
 struct ImportedSceneLight {
@@ -506,6 +565,7 @@ struct ImportedScene {
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;
     std::vector<ImportedScenePackedDraw> packedDraws;
+    std::vector<ImportedSceneRigidAnimation> rigidAnimations;
     std::vector<ImportedScenePageRange> pageRanges;
     // Named material library, indexed by vertex flag bits 24-31. Entry 0 is a
     // reserved sentinel so the flag index and the vector index are the same

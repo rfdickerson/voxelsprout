@@ -97,6 +97,7 @@ VkDeviceSize importedTextureMipOffset(
 std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) {
     switch (format) {
         case odai::importer::TextureFormat::BC1:
+        case odai::importer::TextureFormat::BC1Linear:
         case odai::importer::TextureFormat::BC4: return 8u;
         case odai::importer::TextureFormat::BC2:
         case odai::importer::TextureFormat::BC3:
@@ -118,6 +119,7 @@ VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
         // and terrain renders as washed-out pastel. BC4/BC5 are data (single/dual
         // channel — e.g. the water normal map) and must stay UNORM/linear.
         case odai::importer::TextureFormat::BC1: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC1Linear: return VK_FORMAT_BC1_RGB_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC2: return VK_FORMAT_BC2_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC3: return VK_FORMAT_BC3_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
@@ -490,6 +492,7 @@ void RendererBackend::clearGpuScene() {
         m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     }
     m_importedMeshDraws.clear();
+    m_importedRigidAnimations.clear();
     m_importedPageDrawRanges.clear();
     // Chunks and arenas go together: the buffers backing them were just
     // released above, so every recorded offset is now meaningless.
@@ -1093,6 +1096,8 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     chunk.lights.shrink_to_fit();
     chunk.particleEmitters.clear();
     chunk.particleEmitters.shrink_to_fit();
+    chunk.rigidAnimations.clear();
+    chunk.rigidAnimations.shrink_to_fit();
     chunk.waterPatches.clear();
     chunk.waterPatches.shrink_to_fit();
     chunk.vertexCount = 0;
@@ -1117,6 +1122,7 @@ void RendererBackend::rebuildImportedDrawTables() {
     // on both add and remove, which is what makes that true in both directions.
     m_importedLocalLights.clear();
     m_importedParticleEmitters.clear();
+    m_importedRigidAnimations.clear();
     std::uint32_t terrainDrawTotal = 0;
     std::uint32_t staticDrawTotal = 0;
     for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
@@ -1126,8 +1132,18 @@ void RendererBackend::rebuildImportedDrawTables() {
         // Each page range's firstDraw is chunk-relative on the chunk; rebase it
         // onto where this chunk's draws land in the flat table.
         const std::uint32_t chunkDrawBase = static_cast<std::uint32_t>(m_importedMeshDraws.size());
-        m_importedMeshDraws.insert(
-            m_importedMeshDraws.end(), chunk.draws.begin(), chunk.draws.end());
+        const std::uint32_t animationBase =
+            static_cast<std::uint32_t>(m_importedRigidAnimations.size());
+        for (const ImportedMeshDraw& sourceDraw : chunk.draws) {
+            ImportedMeshDraw draw = sourceDraw;
+            if (draw.rigidAnimationIndex != 0xffffffffu) {
+                draw.rigidAnimationIndex += animationBase;
+            }
+            m_importedMeshDraws.push_back(draw);
+        }
+        m_importedRigidAnimations.insert(
+            m_importedRigidAnimations.end(),
+            chunk.rigidAnimations.begin(), chunk.rigidAnimations.end());
         for (const ImportedScenePageDrawRange& pageRange : chunk.pageRanges) {
             ImportedScenePageDrawRange rebased = pageRange;
             rebased.firstDraw += chunkDrawBase;
@@ -1171,6 +1187,8 @@ void RendererBackend::rebuildImportedWaterBuffers() {
         for (const odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
             const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
             ImportedWaterVertex vertex{};
+            vertex.normalTextureSlot = patch.normalTextureIndex;
+            vertex.flowTextureSlot = patch.flowTextureIndex;
             vertex.position[1] = patch.waterLevel;
             vertex.position[0] = patch.originX;
             vertex.position[2] = patch.originZ;
@@ -1450,7 +1468,7 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
             continue;
         }
         m_weatherCloudSlots[layer] = acquireImportedTexture(
-            normalizedImportedTextureKey(texture.sourcePath), texture, commandBuffer,
+            normalizedImportedTextureKey(texture.sourcePath, texture.format), texture, commandBuffer,
             stagingBufferHandles);
     }
 
@@ -1854,7 +1872,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         for (std::size_t textureIndex = 0; textureIndex < uploadScene.textures.size(); ++textureIndex) {
             const odai::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
             const std::uint32_t slot = acquireImportedTexture(
-                normalizedImportedTextureKey(srcTexture.sourcePath),
+                normalizedImportedTextureKey(srcTexture.sourcePath, srcTexture.format),
                 srcTexture,
                 commandBuffer,
                 stagingBufferHandles);
@@ -2354,6 +2372,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                                 bool blendedDraw,
                                 bool twoSidedDraw,
                                 std::uint8_t alphaThreshold,
+                                std::uint32_t rigidAnimationIndex,
                                 const float (&drawCenter)[3],
                                 std::uint32_t pageRangeIndex
                             ) {
@@ -2369,6 +2388,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                 previous.blended == blendedDraw &&
                 previous.twoSided == twoSidedDraw &&
                 previous.alphaThreshold == alphaThreshold &&
+                previous.rigidAnimationIndex == rigidAnimationIndex &&
                 lastMergedPageRangeIndex == pageRangeIndex &&
                 previous.firstIndex + previous.indexCount == firstIndex) {
                 // Weight the merged centre by index count so a large shape does
@@ -2393,6 +2413,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         draw.blended = blendedDraw;
         draw.twoSided = twoSidedDraw;
         draw.alphaThreshold = alphaThreshold;
+        draw.rigidAnimationIndex = rigidAnimationIndex;
         draw.center[0] = drawCenter[0];
         draw.center[1] = drawCenter[1];
         draw.center[2] = drawCenter[2];
@@ -2496,35 +2517,48 @@ bool RendererBackend::uploadImportedSceneInternal(
             blendedDraw,
             packedDrawIsTwoSided(srcDraw),
             srcDraw.alphaThreshold,
+            srcDraw.rigidAnimationIndex,
             drawCenter,
             sourceDrawPageRangeIndices[drawIndex]);
     }
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
         const std::uint32_t baseVertex = static_cast<std::uint32_t>(waterVertices.size());
         ImportedWaterVertex vertex{};
+        vertex.normalTextureSlot = patch.normalTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.normalTextureIndex]
+            : kInvalidImportedTextureSlot;
+        vertex.flowTextureSlot = patch.flowTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.flowTextureIndex]
+            : kInvalidImportedTextureSlot;
+        // Skyrim's flow map is one wrapped 0..1 field per TES4 exterior cell.
+        // Shoreline water is split into LAND-grid strips above, so reset-to-0
+        // UVs would sample the same corner of that field in every strip and
+        // introduce a visible current seam. World-phased UVs preserve the
+        // original full-cell mapping (and generic water ignores them).
+        constexpr float kWaterFlowCellSize = 4096.0f;
+        const auto setWaterUv = [&](float x, float z) {
+            vertex.uv[0] = x / kWaterFlowCellSize;
+            vertex.uv[1] = z / kWaterFlowCellSize;
+        };
         vertex.position[0] = patch.originX;
         vertex.position[1] = patch.waterLevel;
         vertex.position[2] = patch.originZ;
-        vertex.uv[0] = 0.0f;
-        vertex.uv[1] = 0.0f;
+        setWaterUv(vertex.position[0], vertex.position[2]);
         waterVertices.push_back(vertex);
 
         vertex.position[0] = patch.originX + patch.sizeX;
         vertex.position[2] = patch.originZ;
-        vertex.uv[0] = 1.0f;
-        vertex.uv[1] = 0.0f;
+        setWaterUv(vertex.position[0], vertex.position[2]);
         waterVertices.push_back(vertex);
 
         vertex.position[0] = patch.originX + patch.sizeX;
         vertex.position[2] = patch.originZ + patch.sizeZ;
-        vertex.uv[0] = 1.0f;
-        vertex.uv[1] = 1.0f;
+        setWaterUv(vertex.position[0], vertex.position[2]);
         waterVertices.push_back(vertex);
 
         vertex.position[0] = patch.originX;
         vertex.position[2] = patch.originZ + patch.sizeZ;
-        vertex.uv[0] = 0.0f;
-        vertex.uv[1] = 1.0f;
+        setWaterUv(vertex.position[0], vertex.position[2]);
         waterVertices.push_back(vertex);
 
         waterIndices.push_back(baseVertex + 0u);
@@ -2753,7 +2787,16 @@ bool RendererBackend::uploadImportedSceneInternal(
     textureSlotGuard.commit();
     chunk.lights = std::move(chunkLights);
     chunk.particleEmitters = uploadScene.particleEmitters;
+    chunk.rigidAnimations = uploadScene.rigidAnimations;
     chunk.waterPatches = uploadScene.waterPatches;
+    for (odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
+        patch.normalTextureIndex = patch.normalTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.normalTextureIndex]
+            : kInvalidImportedTextureSlot;
+        patch.flowTextureIndex = patch.flowTextureIndex < importedTextureSlots.size()
+            ? importedTextureSlots[patch.flowTextureIndex]
+            : kInvalidImportedTextureSlot;
+    }
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {
         draw.vertexBufferHandle = m_importedVertexBufferHandle;

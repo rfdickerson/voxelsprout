@@ -13,6 +13,9 @@ public struct ChunkPushConstants
     //       as plausible grey-brown rock, so nothing ever looks wrong.
     // [3] spare.
     public float4 materialParams;
+    public float4 rigidAnimationTransform[3];
+    // x > 0.5 enables the transform for this draw.
+    public float4 rigidAnimationParams;
 };
 
 [[vk::push_constant]]
