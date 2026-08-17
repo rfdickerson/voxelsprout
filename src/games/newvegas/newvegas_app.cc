@@ -14,6 +14,7 @@
 #include <sstream>
 #include <random>
 #include <chrono>
+#include <unordered_set>
 
 #include "core/log.h"
 #include "import/fnv/asset_source.h"
@@ -3083,6 +3084,43 @@ bool NewVegasApp::initStreaming() {
     }
     m_streamer->setConfig(config);
 
+    // A fixed-step video capture advances the tour in simulation time, not in
+    // wall time. That can cross the entire route while the worker threads are
+    // still extracting its first cells, leaving a visibly half-built town in
+    // the recording even though every mesh eventually loads. Preload and pin
+    // the whole corridor before its first captured frame instead.
+    const bool isVideoTourCapture = m_flythroughSeconds > 0.0f &&
+        (!m_captureVideoPath.empty() || !m_captureDirectory.empty());
+    if (isVideoTourCapture) {
+        constexpr int kTourPreloadSamples = 96;
+        std::unordered_set<importer::CellCoord, importer::CellCoordHash> pinnedCells;
+        const std::int32_t radius = std::max(0, config.loadRadius);
+        for (int sample = 0; sample <= kTourPreloadSamples; ++sample) {
+            float enginePosition[3] = {};
+            float ignoredLookAt[3] = {};
+            sampleTour(static_cast<float>(sample) / static_cast<float>(kTourPreloadSamples),
+                       enginePosition, ignoredLookAt);
+            float falloutPosition[3] = {};
+            importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
+            const importer::CellCoord centre =
+                m_streamer->config().cellSize > 0.0f
+                ? importer::CellCoord{
+                    static_cast<std::int32_t>(std::floor(falloutPosition[0] / config.cellSize)),
+                    static_cast<std::int32_t>(std::floor(falloutPosition[1] / config.cellSize))}
+                : importer::CellCoord{};
+            for (std::int32_t dz = -radius; dz <= radius; ++dz) {
+                for (std::int32_t dx = -radius; dx <= radius; ++dx) {
+                    pinnedCells.insert(importer::CellCoord{centre.x + dx, centre.z + dz});
+                }
+            }
+        }
+        std::vector<importer::CellCoord> corridor(pinnedCells.begin(), pinnedCells.end());
+        m_streamer->setPinnedCells(corridor);
+        m_captureRoutePreloadActive = !corridor.empty();
+        VOX_LOGI("newvegas") << "capture route preload: pinned " << corridor.size()
+                             << " exterior cells before recording";
+    }
+
     // Spawn at the centre of the available cells so the first ring has content
     // on every side; the world origin is often outside a cooked region entirely.
     // ENGINE space (Y-up), not Fallout space (Z-up). Assigning a Fallout grid
@@ -3676,6 +3714,15 @@ void NewVegasApp::onTick(float deltaSeconds) {
     if (m_captureFixedDt > 0.0f) {
         deltaSeconds = m_captureFixedDt;
     }
+    // Keep renderer-side water and rigid machinery on the tour's fixed clock.
+    // During capture pre-roll, hold phase zero while streaming, TAA, and
+    // exposure warm up. Frame zero then starts camera and machinery together,
+    // independent of how long extraction took on this machine.
+    const bool capturePreroll = m_captureFixedDt > 0.0f && !m_captureStarted;
+    if (!capturePreroll) {
+        m_visualTimeSeconds += deltaSeconds;
+    }
+    m_renderer.setVisualTimeSeconds(m_visualTimeSeconds);
     // Before anything reads input: the menu toggle decided here gates whether
     // camera movement runs at all this frame.
     pollNavInput(deltaSeconds);
@@ -4940,7 +4987,7 @@ bool NewVegasApp::captureWarmupComplete() const {
     if (m_framesRendered <= m_captureWarmupFrames) {
         return false;
     }
-    if (m_framesRendered >= m_captureWarmupFrameCeiling) {
+    if (!m_captureRoutePreloadActive && m_framesRendered >= m_captureWarmupFrameCeiling) {
         return true;
     }
     // Streaming is wall-clock work on other threads, so a frame count cannot

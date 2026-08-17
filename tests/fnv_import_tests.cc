@@ -911,6 +911,27 @@ void testCellWaterPatch() {
         }
     }
 
+    // A narrow river is not a full-cell lake. Its water must follow the LAND
+    // posts so nearby bridges and boardwalks meet a shoreline rather than a
+    // 4096-unit rectangular water card.
+    {
+        ImportedScene scene;
+        FalloutCellRecord cell = makeExteriorCell(2, -3);
+        giveFlatLand(cell, 32.0f);
+        cell.hasWater = true;
+        cell.waterHeight = 0.0f;
+        const int side = cell.land->gridSize;
+        // One low interior post wets only its four surrounding quads.
+        cell.land->heights[static_cast<std::size_t>((16 * side) + 16)] = -16.0f;
+        expectTrue(appendCellWaterPatch(scene, cell) && scene.waterPatches.size() == 2u,
+                   "partial LAND water is clipped into shoreline runs rather than one cell quad");
+        if (!scene.waterPatches.empty()) {
+            expectTrue(scene.waterPatches.front().sizeX <= (2.0f * kLandPostSpacing) &&
+                           scene.waterPatches.front().sizeZ == kLandPostSpacing,
+                       "shoreline water patches stay at LAND-post resolution");
+        }
+    }
+
     // Interiors state a water height too, and have no footprint to fill.
     {
         ImportedScene scene;
@@ -4043,6 +4064,13 @@ void testKfAnimationStrideAndBasisChange() {
     std::string error;
     expectTrue(parseKfAnimation(fileBytes, animation, error),
                ("synthetic .kf parses: " + error).c_str());
+    std::vector<KfAnimation> embeddedAnimations;
+    std::string embeddedError;
+    expectTrue(parseNifEmbeddedAnimations(fileBytes, embeddedAnimations, embeddedError),
+               ("embedded NIF sequence scan parses: " + embeddedError).c_str());
+    expectTrue(embeddedAnimations.size() == 1u &&
+                   embeddedAnimations.front().name == "TestClip",
+               "embedded sequence scan returns every controller sequence by name");
     expectTrue(animation.name == "TestClip", "clip name comes from the header string table");
     expectTrue(animation.loops(), "cycleType 0 is a looping clip");
     expectNear(animation.duration(), 2.0f, 1e-5f, "duration is stopTime - startTime");

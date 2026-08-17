@@ -1,7 +1,8 @@
 # Skyrim SE Tamriel -- Riverwood's White River to Whiterun's southern exterior.
 #
 # Engine space is x east, y height, z south. The opening two poses stay above
-# Riverwood's XCLW=-250 river cells (5,-11) and (5,-10), then follow the road
+# Riverwood's XCLW=-250 river cells (4,-11), (5,-11) and (5,-10), opening on
+# the lumber mill so its authored waterwheel/saw motion reads, then follow the road
 # north over the mountain shoulder and descend into the Whiterun tundra. The
 # camera remains in Tamriel: Whiterun's distant city shell, farms, stables and
 # approach roads are visible, but the separate WhiterunWorld city is not used.
@@ -13,7 +14,13 @@
 #     --tour-file assets/tours/riverwood_to_whiterun.txt --flythrough 45 \
 #     --capture-video riverwood_to_whiterun.mp4 60 45
 #
+# The wheel REFR origin is (19650, 91, 43941), but the visible wheel is
+# intentionally offset inside its NIF. Its authored axle centre, after the
+# placement's 0.789608-radian yaw, is approximately (19973, -69, 43616).
+# Frame that axle rather than the invisible REFR origin.
 # px py pz             lx ly lz
+21300   500 42300      19973   -69 43616
+21600   580 43000      19900   -20 43660
 23100   650 45700      22200  -220 43800
 22600   700 42500      22600  -100 40500
 23100  2200 39000      23800   350 36900

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace odai::importer {
@@ -97,6 +98,13 @@ public:
     void setConfig(const CellResidencyConfig& config) { m_config = config; }
     [[nodiscard]] const CellResidencyConfig& config() const { return m_config; }
 
+    // Keeps these cells resident and schedules them ahead of the ordinary
+    // camera-centred ring. Used by deterministic captures, whose camera can
+    // advance faster in simulation time than the asynchronous streamer can
+    // build a new cell. Pins are deliberately explicit rather than a capture
+    // special case in update(), so the normal residency policy stays testable.
+    void setPinnedCells(const std::vector<CellCoord>& cells);
+
     // Recomputes what should happen next. `position` and `velocity` are in world
     // units, in the same space the cell grid is defined in. Results are read
     // through cellsToLoad() and cellsToEvict().
@@ -132,9 +140,11 @@ public:
 
 private:
     [[nodiscard]] std::int32_t chebyshevDistance(const CellCoord& a, const CellCoord& b) const;
+    [[nodiscard]] bool isPinned(const CellCoord& cell) const;
 
     CellResidencyConfig m_config{};
     std::unordered_map<CellCoord, CellState, CellCoordHash> m_cells;
+    std::unordered_set<CellCoord, CellCoordHash> m_pinnedCells;
     std::vector<CellCoord> m_toLoad;
     std::vector<CellCoord> m_toEvict;
     CellCoord m_centerCell{};

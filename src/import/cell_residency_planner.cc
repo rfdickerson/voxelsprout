@@ -27,6 +27,18 @@ CellCoord CellResidencyPlanner::cellAt(float worldX, float worldZ) const {
         static_cast<std::int32_t>(std::floor(worldZ / size))};
 }
 
+void CellResidencyPlanner::setPinnedCells(const std::vector<CellCoord>& cells) {
+    m_pinnedCells.clear();
+    m_pinnedCells.reserve(cells.size());
+    for (const CellCoord& cell : cells) {
+        m_pinnedCells.insert(cell);
+    }
+}
+
+bool CellResidencyPlanner::isPinned(const CellCoord& cell) const {
+    return m_pinnedCells.count(cell) != 0u;
+}
+
 std::int32_t CellResidencyPlanner::chebyshevDistance(const CellCoord& a, const CellCoord& b) const {
     return std::max(std::abs(a.x - b.x), std::abs(a.z - b.z));
 }
@@ -57,6 +69,9 @@ void CellResidencyPlanner::update(const float position[3], const float velocity[
     for (const auto& [cell, state] : m_cells) {
         if (state != CellState::Resident) {
             continue;  // in-flight loads cannot be cancelled; Unavailable is permanent
+        }
+        if (isPinned(cell)) {
+            continue;
         }
         if (chebyshevDistance(cell, m_centerCell) > m_config.unloadRadius) {
             m_toEvict.push_back(cell);
@@ -92,27 +107,37 @@ void CellResidencyPlanner::update(const float position[3], const float velocity[
     struct Candidate {
         CellCoord cell;
         float aimDistanceSq;
+        bool pinned = false;
     };
     std::vector<Candidate> candidates;
     const std::int32_t radius = std::max<std::int32_t>(0, m_config.loadRadius);
-    candidates.reserve(static_cast<std::size_t>((2 * radius + 1) * (2 * radius + 1)));
+    candidates.reserve(
+        m_pinnedCells.size() + static_cast<std::size_t>((2 * radius + 1) * (2 * radius + 1)));
+    for (const CellCoord& cell : m_pinnedCells) {
+        if (m_cells.count(cell) == 0) {
+            candidates.push_back(Candidate{cell, 0.0f, true});
+        }
+    }
     for (std::int32_t dz = -radius; dz <= radius; ++dz) {
         for (std::int32_t dx = -radius; dx <= radius; ++dx) {
             const CellCoord cell{m_centerCell.x + dx, m_centerCell.z + dz};
-            if (m_cells.count(cell) != 0) {
+            if (m_cells.count(cell) != 0 || isPinned(cell)) {
                 continue;  // already loading, resident, or known missing
             }
             const float centerX = cellCenterOffset(cell.x, size);
             const float centerZ = cellCenterOffset(cell.z, size);
             const float deltaX = centerX - aimX;
             const float deltaZ = centerZ - aimZ;
-            candidates.push_back(Candidate{cell, (deltaX * deltaX) + (deltaZ * deltaZ)});
+            candidates.push_back(Candidate{cell, (deltaX * deltaX) + (deltaZ * deltaZ), false});
         }
     }
 
     std::sort(
         candidates.begin(), candidates.end(),
         [](const Candidate& a, const Candidate& b) {
+            if (a.pinned != b.pinned) {
+                return a.pinned;
+            }
             if (a.aimDistanceSq != b.aimDistanceSq) {
                 return a.aimDistanceSq < b.aimDistanceSq;
             }
@@ -144,7 +169,7 @@ bool CellResidencyPlanner::markLoadFinished(const CellCoord& cell) {
     }
     // The player may have walked out of range while this was in flight. Uploading
     // it would burn GPU memory on geometry that is about to be evicted anyway.
-    if (chebyshevDistance(cell, m_centerCell) > m_config.unloadRadius) {
+    if (!isPinned(cell) && chebyshevDistance(cell, m_centerCell) > m_config.unloadRadius) {
         m_cells.erase(existing);
         ++m_stats.wastedLoads;
         return false;
@@ -194,6 +219,7 @@ CellResidencyStats CellResidencyPlanner::stats() const {
 
 void CellResidencyPlanner::reset() {
     m_cells.clear();
+    m_pinnedCells.clear();
     m_toLoad.clear();
     m_toEvict.clear();
     m_stats = CellResidencyStats{};

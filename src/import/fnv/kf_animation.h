@@ -101,4 +101,14 @@ struct KfAnimation {
 bool parseKfAnimation(
     const std::vector<std::uint8_t>& bytes, KfAnimation& outAnimation, std::string& outError);
 
+// Reads every NiControllerSequence embedded in a geometry NIF. Skyrim uses
+// these for rigid environmental machinery (water wheels, sawmill gears and
+// sashes) even though actor animation remains in external HKX/KF assets.
+// A malformed sequence fails the whole call: silently dropping one controller
+// would leave only part of a coupled machine moving.
+bool parseNifEmbeddedAnimations(
+    const std::vector<std::uint8_t>& bytes,
+    std::vector<KfAnimation>& outAnimations,
+    std::string& outError);
+
 }  // namespace odai::importer::fnv

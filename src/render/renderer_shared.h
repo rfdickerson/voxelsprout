@@ -333,6 +333,10 @@ struct alignas(16) ChunkPushConstants {
     // the private copy of this struct in pass_pipelines.cc -- all three must
     // agree or the pipeline layout's push range stops covering the block.
     float materialParams[4];
+    // World-space affine delta for one rigid imported-machine draw. Rows 0-2;
+    // the implicit final row is (0,0,0,1). animationParams.x enables it.
+    float rigidAnimationTransform[3][4];
+    float rigidAnimationParams[4];
 };
 
 struct alignas(16) ChunkInstanceData {

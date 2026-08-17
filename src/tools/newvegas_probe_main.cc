@@ -567,9 +567,42 @@ int dumpKfAnimation(const std::filesystem::path& dataPath, const std::string& vi
                   << " scale";
         if (!track.rotationKeys.empty()) {
             std::cout << "  t[" << track.rotationKeys.front().time << ".."
-                      << track.rotationKeys.back().time << "]";
+                      << track.rotationKeys.back().time << "]"
+                      << " q0=(" << track.rotationKeys.front().value.x << ","
+                      << track.rotationKeys.front().value.y << ","
+                      << track.rotationKeys.front().value.z << ","
+                      << track.rotationKeys.front().value.w << ")"
+                      << " q1=(" << track.rotationKeys.back().value.x << ","
+                      << track.rotationKeys.back().value.y << ","
+                      << track.rotationKeys.back().value.z << ","
+                      << track.rotationKeys.back().value.w << ")";
+        }
+        if (!track.translationKeys.empty()) {
+            std::cout << " p0=(" << track.translationKeys.front().value.x << ","
+                      << track.translationKeys.front().value.y << ","
+                      << track.translationKeys.front().value.z << ")"
+                      << " p1=(" << track.translationKeys.back().value.x << ","
+                      << track.translationKeys.back().value.y << ","
+                      << track.translationKeys.back().value.z << ")";
         }
         std::cout << "\n";
+    }
+
+    std::vector<odai::importer::fnv::KfAnimation> embeddedAnimations;
+    if (odai::importer::fnv::parseNifEmbeddedAnimations(bytes, embeddedAnimations, error) &&
+        embeddedAnimations.size() > 1u) {
+        std::cout << "all embedded sequences:\n";
+        for (const auto& embedded : embeddedAnimations) {
+            std::cout << "  \"" << embedded.name << "\": " << embedded.duration()
+                      << "s, " << (embedded.loops() ? "looping" : "one-shot")
+                      << ", " << embedded.tracks.size() << " tracks\n";
+            for (const auto& track : embedded.tracks) {
+                std::cout << "    " << track.nodeName << ": "
+                          << track.rotationKeys.size() << " rot, "
+                          << track.translationKeys.size() << " trans, "
+                          << track.scaleKeys.size() << " scale\n";
+            }
+        }
     }
 
     std::cout << "string table:\n";
@@ -1392,6 +1425,12 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         std::cout << "parse " << (ok ? "ok" : "FAILED") << (error.empty() ? "" : (": " + error)) << "\n"
                   << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount
                   << ", editor markers " << model.editorMarkerShapeCount << "\n";
+        for (const odai::importer::fnv::KfAnimation& animation : model.embeddedAnimations) {
+            std::cout << "  animation \"" << animation.name << "\": "
+                      << animation.duration() << "s, "
+                      << (animation.loops() ? "looping" : "one-shot") << ", "
+                      << animation.tracks.size() << " tracks\n";
+        }
         for (const odai::importer::fnv::NifShape& shape : model.shapes) {
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
@@ -1401,7 +1440,20 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                               : std::string())
                       << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
-                      << ", diffuse=\"" << shape.diffuseTexturePath << "\"\n";
+                      << ", diffuse=\"" << shape.diffuseTexturePath << "\""
+                      << (shape.animationNodeName.empty()
+                              ? std::string()
+                              : (", animated-by=\"" + shape.animationNodeName + "\""))
+                      << "\n";
+            if (!shape.animationNodeName.empty()) {
+                std::cout << "      animation parent translation=("
+                          << shape.animationParentTransform[3] << ","
+                          << shape.animationParentTransform[7] << ","
+                          << shape.animationParentTransform[11] << ") bind translation=("
+                          << shape.animationBindTransform[3] << ","
+                          << shape.animationBindTransform[7] << ","
+                          << shape.animationBindTransform[11] << ")\n";
+            }
             // Vertex-alpha census. This is the channel that feathers a placed
             // road into the ground under it, so "does this shape have one, and
             // is it actually varying" is the question a hard-edged road asks.
@@ -2029,7 +2081,20 @@ int probeBuildCell(
               << " packedVerts=" << scene.packedVertices.size()
               << " packedIndices=" << scene.packedIndices.size()
               << " packedDraws=" << scene.packedDraws.size()
+              << " rigidAnimations=" << scene.rigidAnimations.size()
               << " terrainParts=" << stats.terrainPartsEmitted << "\n";
+    for (const auto& animation : scene.rigidAnimations) {
+        float start[16] = {};
+        float quarter[16] = {};
+        if (odai::importer::sampleImportedSceneRigidAnimation(animation, 0.0f, start) &&
+            odai::importer::sampleImportedSceneRigidAnimation(
+                animation, animation.duration * 0.25f, quarter)) {
+            std::cout << "  animation \"" << animation.nodeName << "\" delta t0=("
+                      << start[3] << "," << start[7] << "," << start[11]
+                      << ") quarter=(" << quarter[3] << "," << quarter[7] << ","
+                      << quarter[11] << ")\n";
+        }
+    }
     // The terrain mesh's normals AFTER the basis change, in engine space, where
     // a level post must read (0, 1, 0). Printed next to the raw VNML above so a
     // terrain that shades like a wall can be blamed on the decode or on the
@@ -3783,11 +3848,99 @@ int probePlacements(
             }
             std::cout << " bethesda=(" << ref.position[0] << "," << ref.position[1]
                       << "," << ref.position[2] << ") engine=(" << ref.position[0]
-                      << "," << ref.position[2] << "," << -ref.position[1] << ")\n";
+                      << "," << ref.position[2] << "," << -ref.position[1] << ")"
+                      << " rotation=(" << ref.rotationRadians[0] << "," << ref.rotationRadians[1]
+                      << "," << ref.rotationRadians[2] << ") scale=" << ref.scale << "\n";
         }
     }
     std::cout << matches << " placement(s) of base 0x" << std::hex
               << wantedBaseFormId << std::dec << "\n";
+    return matches == 0u ? 1 : 0;
+}
+
+int probeModelPlacements(
+    const std::filesystem::path& pluginPath, const std::string& modelSubstring,
+    std::size_t limit) {
+    using namespace odai::importer::fnv;
+    std::string error;
+    EsmReader reader;
+    if (!reader.open(pluginPath)) {
+        std::cout << "open FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+    const std::string wanted = toLowerAscii(modelSubstring);
+    std::unordered_set<std::uint32_t> baseFormIds;
+    EsmReader::Visitor visitor;
+    visitor.onRecord = [&](const EsmRecordView& record) {
+        std::string editorId;
+        std::string modelPath;
+        std::string matchedSubrecord;
+        for (const EsmSubrecordView& sub : record.subrecords) {
+            std::string* destination = nullptr;
+            if (sub.type == "EDID") destination = &editorId;
+            if (sub.type == "MODL" || sub.type == "MOD2") destination = &modelPath;
+            if (destination != nullptr && sub.size != 0u) {
+                destination->assign(reinterpret_cast<const char*>(sub.data), sub.size);
+                while (!destination->empty() && destination->back() == '\0') {
+                    destination->pop_back();
+                }
+            }
+            if (sub.size != 0u && matchedSubrecord.empty()) {
+                const std::string payload(
+                    reinterpret_cast<const char*>(sub.data), sub.size);
+                if (toLowerAscii(payload).find(wanted) != std::string::npos) {
+                    matchedSubrecord = sub.type;
+                }
+            }
+        }
+        if (matchedSubrecord.empty()) return;
+        baseFormIds.insert(record.formId);
+        std::cout << record.type << " base=0x" << std::hex << record.formId << std::dec
+                  << " editor=\"" << editorId
+                  << "\" matched=" << matchedSubrecord
+                  << (modelPath.empty() ? std::string() : " model=\"" + modelPath + "\"")
+                  << "\n";
+    };
+    if (!reader.walk(visitor)) {
+        std::cout << "walk FAILED: " << reader.lastError() << "\n";
+        return 1;
+    }
+    if (baseFormIds.empty()) {
+        std::cout << "no base models contain \"" << modelSubstring << "\"\n";
+        return 1;
+    }
+
+    FalloutSceneData data;
+    FalloutExtractFilter filter{};
+    if (!extractFalloutScene(pluginPath, filter, data, error)) {
+        std::cout << "extract FAILED: " << error << "\n";
+        return 1;
+    }
+    std::size_t matches = 0u;
+    for (const FalloutCellRecord& cell : data.cells) {
+        for (const FalloutPlacedReference& ref : cell.references) {
+            if (!baseFormIds.contains(ref.baseFormId)) {
+                continue;
+            }
+            ++matches;
+            if (matches > limit) {
+                continue;
+            }
+            std::cout << "  base=0x" << std::hex << ref.baseFormId
+                      << " ref=0x" << ref.formId << std::dec
+                      << (cell.isInterior ? " interior" : " exterior");
+            if (cell.isInterior) {
+                std::cout << " cell=\"" << cell.editorId << "\"";
+            } else {
+                std::cout << " grid=(" << cell.gridX << "," << cell.gridZ << ")";
+            }
+            std::cout << " engine=(" << ref.position[0] << "," << ref.position[2]
+                      << "," << -ref.position[1] << ")"
+                      << " rotation=(" << ref.rotationRadians[0] << "," << ref.rotationRadians[1]
+                      << "," << ref.rotationRadians[2] << ") scale=" << ref.scale << "\n";
+        }
+    }
+    std::cout << matches << " placement(s) matching \"" << modelSubstring << "\"\n";
     return matches == 0u ? 1 : 0;
 }
 
@@ -4276,6 +4429,7 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --record <Plugin.esm> <TYPE> [dumpCount]\n"
               << "  odai_bethesda_probe <DataFilesPath> --refs <Plugin.esm> <BASETYPE> [topN]\n"
               << "  odai_bethesda_probe <DataFilesPath> --placements <Plugin.esm> <baseFormID> [limit]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --modelrefs <Plugin.esm> <modelSubstring> [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
               << "  odai_bethesda_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
               << "  odai_bethesda_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
@@ -4432,6 +4586,11 @@ int main(int argc, char** argv) {
     if (mode == "--placements" && argc >= 5) {
         return probePlacements(
             dataPath / argv[3], static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 16)),
+            argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 25u);
+    }
+    if (mode == "--modelrefs" && argc >= 5) {
+        return probeModelPlacements(
+            dataPath / argv[3], argv[4],
             argc >= 6 ? static_cast<std::size_t>(std::atoi(argv[5])) : 25u);
     }
     if (mode == "--voicedialogue" && argc >= 5) {

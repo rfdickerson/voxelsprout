@@ -2011,9 +2011,16 @@ bool RendererBackend::createSwapchain() {
         VOX_LOGE("render") << "HDR resolve target creation failed\n";
         return false;
     }
-    if (!createWaterReflectionHistoryTargets()) {
-        VOX_LOGE("render") << "water reflection history target creation failed\n";
-        return false;
+    if (m_waterReflectionTemporalEnabled) {
+        if (!createWaterReflectionHistoryTargets()) {
+            VOX_LOGE("render") << "water reflection history target creation failed\n";
+            return false;
+        }
+    } else {
+        // The raw half-resolution target remains valid for the diagnostic and
+        // low-memory fallback; only the full-resolution temporal histories go
+        // away when ODAI_WATER_REFLECTION_TAA=0.
+        destroyWaterReflectionHistoryTargets();
     }
     if (!createMsaaColorTargets()) {
         VOX_LOGE("render") << "MSAA color target creation failed\n";

@@ -1274,6 +1274,75 @@ void testImportedVertexPacking() {
                "unrepresentable layer slots become the 0xffff sentinel, not a truncated index");
 }
 
+void testRigidAnimationPackingSamplingAndRoundTrip() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer;
+
+    ImportedScene scene{};
+    scene.sourceTag = "synthetic_rigid_animation";
+
+    ImportedSceneMesh mesh{};
+    mesh.name = "wheel";
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}};
+    mesh.indices = {0u, 1u, 2u};
+    ImportedSceneMeshPart part{};
+    part.indexCount = 3u;
+    part.rigidAnimationIndex = 0u;
+    mesh.parts.push_back(part);
+
+    ImportedSceneRigidAnimation animation{};
+    animation.nodeName = "wheel axle";
+    animation.duration = 2.0f;
+    animation.cycleType = 0u;
+    animation.translationKeys = {
+        ImportedSceneVectorKey{0.0f, {0.0f, 0.0f, 0.0f}},
+        ImportedSceneVectorKey{2.0f, {10.0f, 0.0f, 0.0f}}};
+    mesh.rigidAnimations.push_back(animation);
+    scene.meshes.push_back(std::move(mesh));
+
+    ImportedSceneInstance instance{};
+    instance.meshIndex = 0u;
+    instance.transform[0] = 1.0f;
+    instance.transform[5] = 1.0f;
+    instance.transform[10] = 1.0f;
+    instance.transform[15] = 1.0f;
+    instance.transform[3] = 100.0f;
+    scene.instances.push_back(instance);
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.rigidAnimations.size() == 1u,
+               "rigid animation templates are placed with their mesh instance");
+    expectTrue(scene.packedDraws.size() == 1u &&
+                   scene.packedDraws.front().rigidAnimationIndex == 0u,
+               "packed draw points at its placed rigid animation");
+
+    float sampled[16] = {};
+    expectTrue(sampleImportedSceneRigidAnimation(scene.rigidAnimations.front(), 1.0f, sampled),
+               "placed rigid animation samples");
+    expectNear(sampled[3], 5.0f, 1.0e-4f,
+               "rigid animation produces a bind-relative midpoint transform");
+    expectTrue(sampleImportedSceneRigidAnimation(scene.rigidAnimations.front(), 2.5f, sampled),
+               "looping rigid animation samples after its duration");
+    expectNear(sampled[3], 2.5f, 1.0e-4f,
+               "looping rigid animation wraps on the authored duration");
+
+    const fs::path path = fs::temp_directory_path() / "odai_rigid_animation_roundtrip.bin";
+    expectTrue(saveImportedScene(scene, path), "rigid animation scene saves");
+    ImportedScene loaded{};
+    expectTrue(loadImportedSceneRuntime(path, loaded), "rigid animation scene loads at runtime");
+    expectTrue(loaded.rigidAnimations.size() == 1u,
+               "runtime scene retains packed rigid animations");
+    expectTrue(loaded.packedDraws.size() == 1u &&
+                   loaded.packedDraws.front().rigidAnimationIndex == 0u,
+               "runtime scene retains packed rigid animation draw indices");
+    expectTrue(loaded.rigidAnimations.front().translationKeys.size() == 2u,
+               "runtime scene retains rigid animation keys");
+    fs::remove(path);
+}
+
 int main() {
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
@@ -1290,6 +1359,7 @@ int main() {
     testImportedSceneRaycast();
     testAlphaThresholdRoundTrip();
     testImportedVertexPacking();
+    testRigidAnimationPackingSamplingAndRoundTrip();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

@@ -353,6 +353,7 @@ private:
     render::VideoWriter m_captureVideo;
     std::vector<std::uint8_t> m_captureRgb;
     float m_captureVideoFps = 30.0f;
+    float m_visualTimeSeconds = 0.0f;
     int m_captureFrames = 0;
     int m_captureWritten = 0;
     bool m_captureStarted = false;
@@ -365,6 +366,10 @@ private:
     // set never stops churning must not stall the capture forever -- record a
     // slightly unfinished frame rather than nothing at all.
     int m_captureWarmupFrameCeiling = 900;
+    // A video capture pins the authored tour corridor before recording. Unlike
+    // ordinary streaming, this must settle completely: fixed-rate simulation
+    // can cross several cells while worker IO is still building the first one.
+    bool m_captureRoutePreloadActive = false;
     // Frames rendered but not kept: at least m_captureWarmupFrames AND, while
     // streaming, until the streamer goes idle. Both, because auto-exposure and
     // TAA need frames while cell loading needs wall time, and neither is a

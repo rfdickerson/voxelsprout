@@ -197,12 +197,27 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 sizeof(ChunkPushConstants),
                 &importedPrepassPushConstants);
         };
+        std::uint32_t lastPushedAnimation = 0xffffffffu;
+        const auto pushRigidAnimation = [&](std::uint32_t animationIndex) {
+            if (animationIndex == lastPushedAnimation) {
+                return;
+            }
+            lastPushedAnimation = animationIndex;
+            importedPrepassPushConstants.rigidAnimationParams[0] =
+                sampleImportedRigidAnimationTransform(
+                    animationIndex, importedPrepassPushConstants.rigidAnimationTransform)
+                    ? 1.0f
+                    : 0.0f;
+            vkCmdPushConstants(
+                commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(ChunkPushConstants), &importedPrepassPushConstants);
+        };
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
             importedVertexBuffer != VK_NULL_HANDLE &&
             importedIndexBuffer != VK_NULL_HANDLE &&
             !importedMeshDraws.empty()) {
             const std::size_t terrainDrawCount = std::min<std::size_t>(importedTerrainDrawCount, importedMeshDraws.size());
-            const std::size_t staticDrawStart = terrainDrawCount;
             const VkBuffer importedVertexBuffers[1] = {importedVertexBuffer};
             const VkDeviceSize importedVertexOffsets[1] = {0};
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
@@ -233,6 +248,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                         m_importedTerrainTessNormalDepthPipeline);
                     for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
                         pushAlphaThreshold(batch.alphaThreshold);
+                        pushRigidAnimation(0xffffffffu);
                         countDrawCalls(m_debugDrawCallsPrepass, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, terrainIndirectBuffer,
@@ -278,10 +294,32 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                         boundPrepassPipeline = wantedPipeline;
                     }
                     pushAlphaThreshold(batch.alphaThreshold);
+                    pushRigidAnimation(0xffffffffu);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                         batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                }
+                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                    const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                    if (draw.blended || draw.rigidAnimationIndex == 0xffffffffu ||
+                        !includeDraw(drawIndex)) {
+                        continue;
+                    }
+                    const VkPipeline wantedPipeline =
+                        (draw.twoSided && m_importedStaticNormalDepthPipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticNormalDepthPipelineTwoSided
+                            : m_importedStaticNormalDepthPipeline;
+                    if (wantedPipeline != boundPrepassPipeline) {
+                        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrepassPipeline = wantedPipeline;
+                    }
+                    pushAlphaThreshold(draw.alphaThreshold);
+                    pushRigidAnimation(draw.rigidAnimationIndex);
+                    countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                        draw.vertexOffset, 0);
                 }
                 // The actor block below binds its own pipeline, but the skinned
                 // block after it does not -- leave the one-sided pipeline bound.
@@ -301,6 +339,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                         continue;  // no depth/normal contribution from blended surfaces
                     }
                     pushAlphaThreshold(importedDraw.alphaThreshold);
+                    pushRigidAnimation(importedDraw.rigidAnimationIndex);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -319,6 +358,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
             bindGraphicsDescriptorBuffers(commandBuffer);
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, importedVertexBuffers, importedVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, importedActorIndexBuffer, importedActorIndexOffset, VK_INDEX_TYPE_UINT32);
+            pushRigidAnimation(0xffffffffu);
             for (const ImportedMeshDraw& importedDraw : importedActorMeshDraws) {
                 if (importedDraw.blended) {
                     continue;  // no depth/normal contribution from blended surfaces

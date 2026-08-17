@@ -21,7 +21,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const uint32_t imageIndex = context.imageIndex;
     const VkViewport& viewport = context.viewport;
     const VkRect2D& scissor = context.scissor;
-    const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     // Voxel chunk inputs: consumed by the chunk draw below (VoxelCraft). The magica/pipe
     // inputs are still present on MainPassInputs but remain unconsumed here.
     const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
@@ -243,7 +242,22 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 reflectionIndirectBuffer, reflectionIndirectBase);
         const auto drawReflectionGeometry = [&](VkPipeline pipeline) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            const auto pushReflectionDraw = [&](const ImportedMeshDraw& draw) {
+                reflectionPush.materialParams[0] =
+                    static_cast<float>(draw.alphaThreshold) / 255.0f;
+                reflectionPush.rigidAnimationParams[0] =
+                    sampleImportedRigidAnimationTransform(
+                        draw.rigidAnimationIndex,
+                        reflectionPush.rigidAnimationTransform)
+                        ? 1.0f
+                        : 0.0f;
+                vkCmdPushConstants(
+                    commandBuffer, m_pipelineLayout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0, sizeof(reflectionPush), &reflectionPush);
+            };
             if (reflectionUsesIndirect) {
+                reflectionPush.rigidAnimationParams[0] = 0.0f;
                 for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
                     reflectionPush.materialParams[0] =
                         static_cast<float>(batch.alphaThreshold) / 255.0f;
@@ -257,23 +271,18 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                         reflectionIndirectBase + batch.bufferOffset,
                         batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
                 }
-            } else {
-                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                    const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
-                    if (draw.blended || !includeReflectionDraw(drawIndex)) {
-                        continue;
-                    }
-                    reflectionPush.materialParams[0] =
-                        static_cast<float>(draw.alphaThreshold) / 255.0f;
-                    vkCmdPushConstants(
-                        commandBuffer, m_pipelineLayout,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(reflectionPush), &reflectionPush);
-                    countDrawCalls(m_debugDrawCallsMain, 1);
-                    vkCmdDrawIndexed(
-                        commandBuffer, draw.indexCount, 1, draw.firstIndex,
-                        draw.vertexOffset, 0);
+            }
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                if (draw.blended || !includeReflectionDraw(drawIndex) ||
+                    (reflectionUsesIndirect && draw.rigidAnimationIndex == 0xffffffffu)) {
+                    continue;
                 }
+                pushReflectionDraw(draw);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                    draw.vertexOffset, 0);
             }
         };
         // The normal imported pipeline is configured for the merged depth
@@ -574,6 +583,22 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 sizeof(ChunkPushConstants),
                 &importedPushConstants);
         };
+        std::uint32_t lastPushedAnimation = 0xffffffffu;
+        const auto pushRigidAnimation = [&](std::uint32_t animationIndex) {
+            if (animationIndex == lastPushedAnimation) {
+                return;
+            }
+            lastPushedAnimation = animationIndex;
+            importedPushConstants.rigidAnimationParams[0] =
+                sampleImportedRigidAnimationTransform(
+                    animationIndex, importedPushConstants.rigidAnimationTransform)
+                    ? 1.0f
+                    : 0.0f;
+            vkCmdPushConstants(
+                commandBuffer, m_pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(ChunkPushConstants), &importedPushConstants);
+        };
         // Opaque imported geometry, as indirect batches grouped by alpha-test
         // threshold. This is the bulk of the frame's draw calls -- roughly 3000
         // of them in the Mojave -- and they all share one vertex and one index
@@ -605,6 +630,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     m_importedTerrainTessPipeline);
                 for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
                     pushAlphaThreshold(batch.alphaThreshold);
+                    pushRigidAnimation(0xffffffffu);
                     countDrawCalls(m_debugDrawCallsMain, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, terrainIndirectBuffer,
@@ -694,6 +720,27 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                         batch.drawCount,
                         sizeof(VkDrawIndexedIndirectCommand));
                 }
+                for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                    const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                    if (draw.blended || draw.rigidAnimationIndex == 0xffffffffu ||
+                        !includeOpaqueDraw(drawIndex)) {
+                        continue;
+                    }
+                    const VkPipeline wantedPipeline =
+                        (draw.twoSided && m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticDepthPrewritePipelineTwoSided
+                            : m_importedStaticDepthPrewritePipeline;
+                    if (wantedPipeline != boundPrewritePipeline) {
+                        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                        boundPrewritePipeline = wantedPipeline;
+                    }
+                    pushAlphaThreshold(draw.alphaThreshold);
+                    pushRigidAnimation(draw.rigidAnimationIndex);
+                    countDrawCalls(m_debugDrawCallsMain, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                        draw.vertexOffset, 0);
+                }
                 writeGpuTimestampBottom(kGpuTimestampQueryPrewriteEnd);
             }
 
@@ -713,10 +760,34 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     boundOpaquePipeline = wantedPipeline;
                 }
                 pushAlphaThreshold(batch.alphaThreshold);
+                pushRigidAnimation(0xffffffffu);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexedIndirect(
                     commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                     batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+            }
+            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
+                const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+                if (draw.blended || draw.rigidAnimationIndex == 0xffffffffu ||
+                    !includeOpaqueDraw(drawIndex)) {
+                    continue;
+                }
+                const VkPipeline wantedPipeline =
+                    (draw.twoSided && m_importedStaticPipelineTwoSided != VK_NULL_HANDLE)
+                        ? m_importedStaticPipelineTwoSided
+                        : ((useRtMainShadows && m_importedStaticPipelineRt != VK_NULL_HANDLE)
+                               ? m_importedStaticPipelineRt
+                               : m_importedStaticPipeline);
+                if (wantedPipeline != boundOpaquePipeline) {
+                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    boundOpaquePipeline = wantedPipeline;
+                }
+                pushAlphaThreshold(draw.alphaThreshold);
+                pushRigidAnimation(draw.rigidAnimationIndex);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+                vkCmdDrawIndexed(
+                    commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                    draw.vertexOffset, 0);
             }
             if (boundOpaquePipeline != VK_NULL_HANDLE) {
                 // Leave the opaque pipeline bound for the blended replay below,
@@ -739,6 +810,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     continue;  // replayed below, in back-to-front order
                 }
                 pushAlphaThreshold(importedDraw.alphaThreshold);
+                pushRigidAnimation(importedDraw.rigidAnimationIndex);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -767,6 +839,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 }
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
                 pushAlphaThreshold(importedDraw.alphaThreshold);
+                pushRigidAnimation(importedDraw.rigidAnimationIndex);
                 VkPipeline wantedPipeline =
                     (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
                         ? m_importedStaticPipelineBlendedTwoSided

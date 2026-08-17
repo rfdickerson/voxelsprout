@@ -41,6 +41,8 @@
 #include <string_view>
 #include <vector>
 
+#include "import/fnv/kf_animation.h"
+
 namespace odai::importer::fnv {
 
 struct NifShape {
@@ -81,10 +83,29 @@ struct NifShape {
     // it appears as a solid slab -- Goodsprings' window panes and dust effects
     // were floating white rectangles until this was read.
     bool alphaBlend = false;
+
+    // Nearest ancestor targeted by an embedded rigid transform track. Geometry
+    // is still emitted in its authored bind pose; these matrices let the cell
+    // builder later construct the world-space delta for each placement.
+    std::string animationNodeName;
+    float animationParentTransform[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1};
+    float animationBindTransform[16] = {
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1};
 };
 
 struct NifModel {
     std::vector<NifShape> shapes;
+    // All controller sequences carried by this mesh. Static importers can
+    // ignore them; Bethesda environmental machinery selects one clip and
+    // turns its targeted shape groups into runtime rigid animations.
+    std::vector<KfAnimation> embeddedAnimations;
     // Embedded Gamebryo transform animation was present. Static geometry can
     // still be extracted, but skinned cloth needs a deliberate rest pose when
     // these controllers are not evaluated by the runtime.

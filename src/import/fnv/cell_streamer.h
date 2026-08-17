@@ -170,6 +170,10 @@ public:
     void setConfig(const CellResidencyConfig& config) { m_planner.setConfig(config); }
     [[nodiscard]] const CellResidencyConfig& config() const { return m_planner.config(); }
 
+    // Capture routes can predeclare their complete exterior corridor. The
+    // planner holds those cells through normal-radius eviction until cleared.
+    void setPinnedCells(const std::vector<CellCoord>& cells) { m_planner.setPinnedCells(cells); }
+
     // Once per frame. Starts loads for cells coming into range, applies whatever
     // finished, and evicts what has left. World units, Fallout space (Z-up, so
     // the grid's second axis is world Y).

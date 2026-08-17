@@ -160,6 +160,8 @@ struct alignas(16) ChunkPushConstants {
     // the private copy of this struct in pass_pipelines.cc -- all three must
     // agree or the pipeline layout's push range stops covering the block.
     float materialParams[4];
+    float rigidAnimationTransform[3][4];
+    float rigidAnimationParams[4];
 };
 
 } // namespace

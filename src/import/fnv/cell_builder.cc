@@ -615,13 +615,24 @@ void appendTerrainCell(
                 vertex.position[0] = world.x;
                 vertex.position[1] = world.y;
                 vertex.position[2] = world.z;
-                // UVs stay keyed to the CELL, not the quadrant, so the base
-                // texture tiles continuously across a quadrant boundary instead
-                // of restarting at every seam.
-                vertex.uv[0] = (col / static_cast<float>(kLandGridSize - 1)) *
+                // Keep the authored 512-unit landscape-texture scale, but
+                // phase it in WORLD coordinates rather than restarting from
+                // (0,0) in every extracted CELL. The old local coordinate was
+                // continuous inside its four quadrants yet repeated the same
+                // eight-by-eight texture stamp every 4096 units. On Riverwood's
+                // riverbank that turns a natural sequence of Dirt02 / grass
+                // layers into immediately visible square repetitions whenever
+                // the camera sees two cells at once.
+                //
+                // bethesdaX/Y are deliberately used here instead of engine X/Z:
+                // terrain's authored UV orientation lives in the Bethesda grid,
+                // and the engine-space conversion negates its second horizontal
+                // axis. One texture repeat remains four 128-unit LAND quads.
+                constexpr float kTerrainTextureWorldPeriod =
+                    (kLandPostSpacing * static_cast<float>(kLandGridSize - 1)) /
                     kLandTextureTilesPerCell;
-                vertex.uv[1] = (row / static_cast<float>(kLandGridSize - 1)) *
-                    kLandTextureTilesPerCell;
+                vertex.uv[0] = bethesdaX / kTerrainTextureWorldPeriod;
+                vertex.uv[1] = bethesdaY / kTerrainTextureWorldPeriod;
                 if (land.hasNormals) {
                     Vec3 normal = bethesdaToEngine(
                         sampleAuthoredTriangle(land.normals, 3, 0, row, col, 0.0f),
@@ -1067,7 +1078,24 @@ CellSceneBuilder::CellSceneBuilder(
     const FalloutAssetSource& assets,
     const FalloutWorldTables& tables,
     DecodedTextureCache* textureCache)
-    : m_assets(assets), m_tables(tables), m_textureCache(textureCache) {}
+    : m_assets(assets), m_tables(tables), m_textureCache(textureCache) {
+    m_syntheticStaticModelPaths.emplace(
+        0xfff00001u, "Clutter\\Lumbermill\\LumbermillSaw01\\LumbermillSaw01.nif");
+    m_syntheticStaticModelPaths.emplace(
+        0xfff00002u, "Clutter\\Lumbermill\\LumbermillSash01\\LumbermillSash01.nif");
+}
+
+const std::string* CellSceneBuilder::staticModelPathFor(std::uint32_t baseFormId) const {
+    if (const auto it = m_syntheticStaticModelPaths.find(baseFormId);
+        it != m_syntheticStaticModelPaths.end()) {
+        return &it->second;
+    }
+    if (const auto it = m_tables.staticModelPaths.find(baseFormId);
+        it != m_tables.staticModelPaths.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
 
 std::uint32_t CellSceneBuilder::resolveTextureIndex(
     const std::string& texturePath, bool linearData) {
@@ -1196,10 +1224,12 @@ std::uint32_t CellSceneBuilder::dominantLandTexture(
     return best;
 }
 
-// One water quad per exterior cell whose water surface is high enough to be
-// seen. Bethesda has no water GEOMETRY: a cell states a height and the engine
-// fills the cell's whole 4096-unit footprint at it, so this is the entire
-// representation, not an approximation of one.
+// Water is authored as a height rather than geometry. A fully submerged cell
+// can therefore use one quad, but a river cell must follow the LAND shoreline:
+// one 4096-unit rectangle makes a narrow river look like a cyan city block and
+// leaves adjacent boardwalks apparently hanging in mid-air. Partial cells are
+// emitted as contiguous LAND-post runs (128 units wide in TES4/TES5), keeping
+// the coastline faithful without adding a new serialized water-mesh format.
 //
 // Without it every coast, lake and river in every worldspace is a hole. Anvil
 // is the case that surfaced it -- a port city on the Abecean Sea, where the
@@ -1240,25 +1270,77 @@ bool appendCellWaterPatch(
     const bool hasImpliedHeight = worldspace != nullptr && worldspace->hasDefaultHeights;
     const float impliedHeight = hasImpliedHeight ? worldspace->defaultWaterHeight : 0.0f;
     const float waterHeight = cell.hasWater ? cell.waterHeight : impliedHeight;
+    const float cellWorldSize = cell.land != nullptr
+        ? cell.land->cellWorldSize()
+        : kExteriorCellSize;
     if (cell.land != nullptr && cell.land->hasHeights) {
         // Water strictly below every post in the cell is water under a solid
         // floor -- true of most of the Mojave, where sea level sits far beneath
         // the desert. Emitting it anyway would put a full-cell alpha-blended
         // quad under every cell in the worldspace, at real fill cost, for
         // nothing visible.
-        const float lowestPost =
-            *std::min_element(std::begin(cell.land->heights), std::end(cell.land->heights));
+        const auto [lowest, highest] =
+            std::minmax_element(cell.land->heights.begin(), cell.land->heights.end());
+        const float lowestPost = *lowest;
         if (waterHeight <= lowestPost) {
             return false;
+        }
+        // A lake/ocean lying above every terrain post is exactly the old
+        // full-cell case. Keep one patch here rather than needlessly splitting
+        // open water into a LAND-grid checkerboard.
+        if (waterHeight < *highest) {
+            const int side = cell.land->gridSize;
+            const float postSpacing = cellWorldSize / static_cast<float>(side - 1);
+            bool appended = false;
+            for (int row = 0; row < side - 1; ++row) {
+                int col = 0;
+                while (col < side - 1) {
+                    const auto quadIsWet = [&](int quadCol) {
+                        const auto heightAt = [&](int r, int c) {
+                            return cell.land->heights[static_cast<std::size_t>((r * side) + c)];
+                        };
+                        // A terrain triangle crossing the water plane belongs
+                        // to the river. The small one-post overreach is vastly
+                        // less visible than a 4096-unit square and cannot make
+                        // a dry, wholly-above-water quad wet.
+                        return std::min({
+                            heightAt(row, quadCol), heightAt(row, quadCol + 1),
+                            heightAt(row + 1, quadCol), heightAt(row + 1, quadCol + 1)}) < waterHeight;
+                    };
+                    while (col < side - 1 && !quadIsWet(col)) {
+                        ++col;
+                    }
+                    const int firstWetCol = col;
+                    while (col < side - 1 && quadIsWet(col)) {
+                        ++col;
+                    }
+                    if (firstWetCol == col) {
+                        continue;
+                    }
+                    ImportedSceneWaterPatch patch{};
+                    patch.originX = (static_cast<float>(cell.gridX) * cellWorldSize) +
+                        (static_cast<float>(firstWetCol) * postSpacing);
+                    // Bethesda +Y maps to engine -Z. A row's lower engine-Z
+                    // edge is consequently its *next* Bethesda post.
+                    patch.originZ = -((static_cast<float>(cell.gridZ) * cellWorldSize) +
+                        (static_cast<float>(row + 1) * postSpacing));
+                    patch.sizeX = static_cast<float>(col - firstWetCol) * postSpacing;
+                    patch.sizeZ = postSpacing;
+                    patch.waterLevel = waterHeight;
+                    outScene.waterPatches.push_back(patch);
+                    appended = true;
+                }
+            }
+            return appended;
         }
     }
     // Bethesda (x, y) -> engine (x, -y), so the cell's +Y edge becomes its
     // MINIMUM engine z and the origin moves to the far corner.
     ImportedSceneWaterPatch patch{};
-    patch.originX = static_cast<float>(cell.gridX) * kExteriorCellSize;
-    patch.originZ = -(static_cast<float>(cell.gridZ) + 1.0f) * kExteriorCellSize;
-    patch.sizeX = kExteriorCellSize;
-    patch.sizeZ = kExteriorCellSize;
+    patch.originX = static_cast<float>(cell.gridX) * cellWorldSize;
+    patch.originZ = -(static_cast<float>(cell.gridZ) + 1.0f) * cellWorldSize;
+    patch.sizeX = cellWorldSize;
+    patch.sizeZ = cellWorldSize;
     patch.waterLevel = waterHeight;
     outScene.waterPatches.push_back(patch);
     return true;
@@ -1302,6 +1384,7 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     // Before the LAND guard: a cell can be open ocean with no terrain at all.
     // Tamriel (0,0) is exactly that, so gating water on terrain would drop the
     // sea precisely where there is nothing else to draw.
+    const std::size_t firstWaterPatch = m_scene.waterPatches.size();
     if (appendCellWaterPatch(m_scene, cell, m_tables.findWorldspace(cell.worldspaceFormId))) {
         // Skyrim supplies a 64x64 flow vector texture for each exterior water
         // cell. Resolve it first: its presence is the format discriminator, so
@@ -1313,12 +1396,15 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
             "." + std::to_string(cell.gridZ) + ".dds";
         const std::uint32_t flowTexture = resolveTextureIndex(flowPath, /*linearData=*/true);
         if (flowTexture != kNoTextureIndex) {
-            ImportedSceneWaterPatch& water = m_scene.waterPatches.back();
-            water.flowTextureIndex = flowTexture;
-            water.normalTextureIndex = resolveTextureIndex(
+            const std::uint32_t normalTexture = resolveTextureIndex(
                 "Data\\Textures\\Water\\DefaultWater.dds", /*linearData=*/true);
+            for (std::size_t index = firstWaterPatch; index < m_scene.waterPatches.size(); ++index) {
+                ImportedSceneWaterPatch& water = m_scene.waterPatches[index];
+                water.flowTextureIndex = flowTexture;
+                water.normalTextureIndex = normalTexture;
+            }
         }
-        ++m_stats.waterPatchesEmitted;
+        m_stats.waterPatchesEmitted += m_scene.waterPatches.size() - firstWaterPatch;
     }
     if (cell.land == nullptr) {
         return;
@@ -1499,11 +1585,10 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             // an exact cross-game emitter origin. This must run before the
             // failed-base cache: the same fire base can be placed many times
             // and every REFR needs its own emitter.
-            const auto placedModelIt = m_tables.staticModelPaths.find(ref.baseFormId);
-            if (placedModelIt != m_tables.staticModelPaths.end() &&
-                isEffectOnlyModelPath(placedModelIt->second)) {
-                if (isFireParticleEffectModelPath(placedModelIt->second)) {
-                    addCellFireEmitter(ref, placedModelIt->second);
+            const std::string* placedModelPath = staticModelPathFor(ref.baseFormId);
+            if (placedModelPath != nullptr && isEffectOnlyModelPath(*placedModelPath)) {
+                if (isFireParticleEffectModelPath(*placedModelPath)) {
+                    addCellFireEmitter(ref, *placedModelPath);
                 }
                 ++m_stats.effectMeshesSkipped;
                 noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
@@ -1520,8 +1605,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             }
             auto meshIt = m_meshIndexByStaticFormId.find(ref.baseFormId);
             if (meshIt == m_meshIndexByStaticFormId.end()) {
-                const auto statIt = m_tables.staticModelPaths.find(ref.baseFormId);
-                if (statIt == m_tables.staticModelPaths.end() || statIt->second.empty()) {
+                const std::string* resolvedModelPath = staticModelPathFor(ref.baseFormId);
+                if (resolvedModelPath == nullptr || resolvedModelPath->empty()) {
                     // Two different failures wearing one shape: a formID that
                     // names no record at all (a load-order or remap fault) and a
                     // record that simply has no MODL (a trigger or an activator,
@@ -1535,7 +1620,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                                    : StaticDropReason::kBaseNotFound);
                     continue;
                 }
-                const std::string& staticModelPath = statIt->second;
+                const std::string& staticModelPath = *resolvedModelPath;
                 std::vector<std::uint8_t> nifBytes;
                 if (isSkyOnlyModelPath(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
@@ -1618,6 +1703,90 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 mesh.name = (editorIdIt == m_tables.staticEditorIds.end() || editorIdIt->second.empty())
                     ? staticModelPath
                     : editorIdIt->second;
+                // Skyrim's environmental machines carry ordinary
+                // NiControllerSequence tracks in their geometry NIFs. Actor
+                // behavior remains out of scope, but these three assets are a
+                // closed rigid hierarchy and can be played without Papyrus or
+                // Havok state. Water wheels use their authored Idle loop; the
+                // saw and sash normally receive Activate events from the mill
+                // script, so the passive showcase repeats that work cycle.
+                const KfAnimation* selectedMachineryClip = nullptr;
+                const bool waterWheel =
+                    lowerModelPath.find("lumbermill01waterwheel") != std::string::npos;
+                const bool sawMachine =
+                    lowerModelPath.find("\\lumbermillsaw01\\lumbermillsaw01.nif") !=
+                    std::string::npos;
+                const bool sawSash =
+                    lowerModelPath.find("\\lumbermillsash01\\lumbermillsash01.nif") !=
+                    std::string::npos;
+                const std::string_view wantedClip = waterWheel ? "Idle" : "Activate";
+                if (waterWheel || sawMachine || sawSash) {
+                    const auto clipIt = std::find_if(
+                        nifModel.embeddedAnimations.begin(), nifModel.embeddedAnimations.end(),
+                        [&](const KfAnimation& animation) {
+                            return animation.name == wantedClip;
+                        });
+                    if (clipIt != nifModel.embeddedAnimations.end()) {
+                        selectedMachineryClip = &*clipIt;
+                    }
+                }
+                std::unordered_map<std::string, std::uint32_t> rigidAnimationByNode;
+                if (selectedMachineryClip != nullptr) {
+                    for (const KfBoneTrack& track : selectedMachineryClip->tracks) {
+                        const auto shapeIt = std::find_if(
+                            nifModel.shapes.begin(), nifModel.shapes.end(),
+                            [&](const NifShape& shape) {
+                                return shape.animationNodeName == track.nodeName;
+                            });
+                        if (shapeIt == nifModel.shapes.end()) {
+                            continue;
+                        }
+                        ImportedSceneRigidAnimation animation;
+                        animation.nodeName = track.nodeName;
+                        animation.duration = selectedMachineryClip->duration();
+                        // The scripted Activate cycle is intentionally repeated
+                        // by this renderer-only showcase; Idle already loops.
+                        animation.cycleType = 0u;
+                        std::memcpy(
+                            animation.parentTransform, shapeIt->animationParentTransform,
+                            sizeof(animation.parentTransform));
+                        std::memcpy(
+                            animation.bindTransform, shapeIt->animationBindTransform,
+                            sizeof(animation.bindTransform));
+                        animation.translationKeys.reserve(track.translationKeys.size());
+                        for (const KfVector3Key& key : track.translationKeys) {
+                            ImportedSceneVectorKey copied;
+                            copied.time = key.time;
+                            copied.value[0] = key.value.x;
+                            copied.value[1] = key.value.y;
+                            copied.value[2] = key.value.z;
+                            animation.translationKeys.push_back(copied);
+                        }
+                        animation.rotationKeys.reserve(track.rotationKeys.size());
+                        for (const KfQuaternionKey& key : track.rotationKeys) {
+                            ImportedSceneQuaternionKey copied;
+                            copied.time = key.time;
+                            copied.value[0] = key.value.x;
+                            copied.value[1] = key.value.y;
+                            copied.value[2] = key.value.z;
+                            copied.value[3] = key.value.w;
+                            animation.rotationKeys.push_back(copied);
+                        }
+                        animation.scaleKeys.reserve(track.scaleKeys.size());
+                        for (const KfVector3Key& key : track.scaleKeys) {
+                            ImportedSceneVectorKey copied;
+                            copied.time = key.time;
+                            copied.value[0] = key.value.x;
+                            copied.value[1] = key.value.y;
+                            copied.value[2] = key.value.z;
+                            animation.scaleKeys.push_back(copied);
+                        }
+                        const auto animationIndex =
+                            static_cast<std::uint32_t>(mesh.rigidAnimations.size());
+                        rigidAnimationByNode.emplace(track.nodeName, animationIndex);
+                        mesh.rigidAnimations.push_back(std::move(animation));
+                    }
+                }
                 for (const auto& shape : nifModel.shapes) {
                     // Drop baked shadow decals.
                     //
@@ -1713,6 +1882,11 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         // angle, which is all a stand-in has to be.
                         part.twoSided = shape.twoSided || isDistantLodModelPath(staticModelPath);
                         part.alphaThreshold = shape.alphaThreshold;
+                        if (const auto animationIt =
+                                rigidAnimationByNode.find(shape.animationNodeName);
+                            animationIt != rigidAnimationByNode.end()) {
+                            part.rigidAnimationIndex = animationIt->second;
+                        }
                         // ODAI_FNV_LOG_ALPHATEST=1 names every surface that will
                         // run the discard, with the threshold and texture it
                         // will run against. "Some walls have holes" is otherwise
@@ -1837,9 +2011,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             ImportedSceneInstance instance;
             instance.meshIndex = meshIt->second;
             instance.sourceId = "refr_" + formIdHex(ref.formId);
-            if (const auto modelIt = m_tables.staticModelPaths.find(ref.baseFormId);
-                modelIt != m_tables.staticModelPaths.end()) {
-                instance.modelPath = modelIt->second;
+            if (const std::string* modelPath = staticModelPathFor(ref.baseFormId)) {
+                instance.modelPath = *modelPath;
             }
             const Vec3 worldPos = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
             const Mat3 bethRotation = eulerToMatrixBethesdaOrder(
@@ -1848,6 +2021,25 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             writeTransform(instance, worldPos, engineRotation, ref.scale);
             m_scene.instances.push_back(instance);
             ++m_stats.placedInstances;
+
+            // Skyrim's mill furniture graph instantiates the moving saw and
+            // sash at the lumber-mill reference's origin; neither component is
+            // a separate REFR in Skyrim.esm. A passive world viewer has no
+            // Papyrus/Havok behavior graph to perform that spawn, so reproduce
+            // this one closed composition explicitly and feed the authored
+            // Activate tracks through the same rigid-animation path as the
+            // separately placed water wheel.
+            if (toLowerAsciiCopy(instance.modelPath) ==
+                "architecture\\farmhouse\\lumbermill01.nif") {
+                FalloutCellRecord components{};
+                for (const std::uint32_t componentBase : {0xfff00001u, 0xfff00002u}) {
+                    FalloutPlacedReference componentRef = ref;
+                    componentRef.baseFormId = componentBase;
+                    componentRef.formId = ref.formId ^ componentBase;
+                    components.references.push_back(std::move(componentRef));
+                }
+                addCellStatics(components);
+            }
     }
 }
 

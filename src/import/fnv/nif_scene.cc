@@ -3511,6 +3511,20 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // anything) was read here.
     }
 
+    std::unordered_set<std::string> animatedNodeNames;
+    if (outModel.hasEmbeddedTransformAnimation) {
+        std::string animationError;
+        if (parseNifEmbeddedAnimations(bytes, outModel.embeddedAnimations, animationError)) {
+            for (const KfAnimation& animation : outModel.embeddedAnimations) {
+                for (const KfBoneTrack& track : animation.tracks) {
+                    if (!track.nodeName.empty()) {
+                        animatedNodeNames.insert(track.nodeName);
+                    }
+                }
+            }
+        }
+    }
+
     // Second pass over NiTexturingProperty: a NiSourceTexture can appear after
     // the property that references it, so this cannot fold into the loop above.
     for (std::size_t i = 0; i < numBlocks; ++i) {
@@ -3537,6 +3551,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     // not drawn, which is a diagnosable outcome rather than a wrong one.
     std::vector<std::size_t> stack;
     std::vector<Mat4> transformStack;
+    std::vector<std::int32_t> animationOwnerStack;
     std::vector<std::int32_t> footerRoots;
     if (readFooterRoots(bytes, blockEnd, footerRoots)) {
         for (const std::int32_t root : footerRoots) {
@@ -3547,6 +3562,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 isNiNode[static_cast<std::size_t>(root)]) {
                 stack.push_back(static_cast<std::size_t>(root));
                 transformStack.push_back(Mat4{});
+                animationOwnerStack.push_back(-1);
             }
         }
         outModel.usedFooterRoots = !stack.empty();
@@ -3560,6 +3576,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 referencedAsChild.find(static_cast<std::int32_t>(i)) == referencedAsChild.end()) {
                 stack.push_back(i);
                 transformStack.push_back(Mat4{});
+                animationOwnerStack.push_back(-1);
             }
         }
     }
@@ -3607,14 +3624,18 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     // the same code it handles its own with.
     std::vector<std::vector<std::int32_t>> inheritedPropertyStack;
     inheritedPropertyStack.assign(stack.size(), std::vector<std::int32_t>{});
+    std::vector<Mat4> animationParentTransforms(numBlocks);
+    std::vector<Mat4> animationBindTransforms(numBlocks);
 
     std::vector<bool> visited(numBlocks, false);
     while (!stack.empty()) {
         const std::size_t blockIndex = stack.back();
         const Mat4 parentTransform = transformStack.back();
+        std::int32_t animationOwner = animationOwnerStack.back();
         std::vector<std::int32_t> inheritedProperties = std::move(inheritedPropertyStack.back());
         stack.pop_back();
         transformStack.pop_back();
+        animationOwnerStack.pop_back();
         inheritedPropertyStack.pop_back();
 
         if (blockIndex >= numBlocks || visited[blockIndex]) {
@@ -3625,6 +3646,18 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         const Mat4 localTransform = makeTrs(
             nodeFields[blockIndex].translation, nodeFields[blockIndex].rotation, nodeFields[blockIndex].scale);
         const Mat4 worldTransform = multiply(parentTransform, localTransform);
+
+        const AvObjectFields& currentFields = nodeFields[blockIndex];
+        const std::string* currentName = &currentFields.name;
+        if (currentName->empty() && currentFields.nameRef >= 0 &&
+            static_cast<std::size_t>(currentFields.nameRef) < header.strings.size()) {
+            currentName = &header.strings[static_cast<std::size_t>(currentFields.nameRef)];
+        }
+        if (!currentName->empty() && animatedNodeNames.contains(*currentName)) {
+            animationOwner = static_cast<std::int32_t>(blockIndex);
+            animationParentTransforms[blockIndex] = parentTransform;
+            animationBindTransforms[blockIndex] = worldTransform;
+        }
 
         // COLLISION GEOMETRY IS REAL GEOMETRY, and it must not be drawn.
         //
@@ -3713,6 +3746,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 if (child >= 0 && static_cast<std::size_t>(child) < numBlocks) {
                     stack.push_back(static_cast<std::size_t>(child));
                     transformStack.push_back(worldTransform);
+                    animationOwnerStack.push_back(animationOwner);
                     inheritedPropertyStack.push_back(childInherited);
                 }
             }
@@ -3730,6 +3764,25 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
             if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                 shape.name = header.strings[static_cast<std::size_t>(nameRef)];
+            }
+            if (animationOwner >= 0) {
+                const auto ownerIndex = static_cast<std::size_t>(animationOwner);
+                const AvObjectFields& ownerFields = nodeFields[ownerIndex];
+                if (!ownerFields.name.empty()) {
+                    shape.animationNodeName = ownerFields.name;
+                } else if (ownerFields.nameRef >= 0 &&
+                           static_cast<std::size_t>(ownerFields.nameRef) < header.strings.size()) {
+                    shape.animationNodeName =
+                        header.strings[static_cast<std::size_t>(ownerFields.nameRef)];
+                }
+                std::memcpy(
+                    shape.animationParentTransform,
+                    animationParentTransforms[ownerIndex].m,
+                    sizeof(shape.animationParentTransform));
+                std::memcpy(
+                    shape.animationBindTransform,
+                    animationBindTransforms[ownerIndex].m,
+                    sizeof(shape.animationBindTransform));
             }
             // Resolve this shape's material properties. A shader property
             // (BSShaderPPLightingProperty / BSShaderNoLightingProperty) points

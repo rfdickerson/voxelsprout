@@ -154,7 +154,12 @@ std::string cellAxisToken(std::int32_t value) {
 //     the whole model when its classic NIF has no block-size table.
 // 35: packed terrain vertices carry an explicit terrain marker so runtime PBR
 //     presets can choose a different terrain roughness from placed objects.
-constexpr int kCellBuildVersion = 38;
+// 40: terrain diffuse UVs are world-phased rather than restarting in every
+//     4096-unit TES4 cell, and partial water cells follow the LAND shoreline
+//     instead of covering boardwalks with a full-cell cyan rectangle.
+// 41: Skyrim's embedded rigid machinery tracks survive cell packing/cache and
+//     animate water wheels plus the sawmill work cycle at runtime.
+constexpr int kCellBuildVersion = 41;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

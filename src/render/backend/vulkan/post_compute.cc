@@ -932,6 +932,12 @@ bool RendererBackend::createWaterReflectionResolveResources() {
         "../src/render/shaders/water_reflection_resolve.comp.slang.spv";
     const char* temporalEnv = std::getenv("ODAI_WATER_REFLECTION_TAA");
     m_waterReflectionTemporalEnabled = temporalEnv == nullptr || temporalEnv[0] != '0';
+    if (!m_waterReflectionTemporalEnabled) {
+        // Keep the reflection pass's raw target path usable without retaining
+        // the temporal pipeline or its descriptor-buffer allocation.
+        destroyWaterReflectionResolveResources();
+        return true;
+    }
 
     if (m_waterReflectionResolveDescriptorSetLayout == VK_NULL_HANDLE) {
         std::array<VkDescriptorSetLayoutBinding, 7> bindings{};

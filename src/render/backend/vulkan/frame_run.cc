@@ -1180,15 +1180,16 @@ void RendererBackend::renderFrame(
     //
     // A skipped cascade samples with the matrix its tile was RENDERED with
     // (cached), never this frame's -- content and matrix must agree or far
-    // shadows swim. Skinned actors break the exact-skip (they move without
-    // moving the matrix); see the note below for why that does not also rule
-    // out deferring the far cascades.
+    // shadows swim. Animated actors and rigid imported machinery break the
+    // exact-skip (they move without moving the matrix); see the note below for
+    // why that does not also rule out deferring the far cascades.
     std::uint32_t shadowSkipCascadeMask = 0;
     static const bool s_shadowInterleaveDisabled =
         std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
         std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
     m_shadowInterleaveParity ^= 1u;
-    const bool anySkinnedShadowCasters = !m_skinningMeshDraws.empty();
+    const bool anyAnimatedShadowCasters =
+        !m_skinningMeshDraws.empty() || !m_importedRigidAnimations.empty();
     if (!s_shadowInterleaveDisabled) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             if (!directionalShadowsForFrame) {
@@ -1207,8 +1208,8 @@ void RendererBackend::renderFrame(
             // whole atlas.
             //
             // The exact-skip says "nothing in this cascade moved", which a
-            // skinned actor falsifies: it animates without moving the light
-            // matrix, so its shadow would freeze while it walked out of it.
+            // animated caster falsifies: it animates without moving the light
+            // matrix, so its shadow would freeze while the caster moved.
             //
             // The parity deferral says only "this cascade may be one frame
             // stale", which is a bound on ERROR rather than a claim of
@@ -1218,7 +1219,7 @@ void RendererBackend::renderFrame(
             // frame. Refusing it whenever any skinned actor exists anywhere was
             // free when the Fallout viewer had none; with a populated town it
             // means every cascade re-renders every frame forever.
-            const bool canExactSkip = matrixUnchanged && !anySkinnedShadowCasters;
+            const bool canExactSkip = matrixUnchanged && !anyAnimatedShadowCasters;
             const bool parityDefersFarCascade =
                 cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
             if (canExactSkip || parityDefersFarCascade) {
@@ -1389,7 +1390,11 @@ void RendererBackend::renderFrame(
     mvpUniform.skyConfig0[2] = effectiveSkySettings.mieAnisotropy;
     mvpUniform.skyConfig0[3] = effectiveSkySettings.skyExposure;
 
-    const float flowTimeSeconds = static_cast<float>(std::fmod(frameNowSeconds, 4096.0));
+    const double visualTimeSeconds = m_visualTimeSeconds >= 0.0f
+        ? static_cast<double>(m_visualTimeSeconds)
+        : frameNowSeconds;
+    const float flowTimeSeconds = static_cast<float>(std::fmod(visualTimeSeconds, 4096.0));
+    m_importedRigidAnimationTimeSeconds = flowTimeSeconds;
     mvpUniform.skyConfig1[0] = effectiveSkySettings.sunDiskIntensity;
     mvpUniform.skyConfig1[1] = effectiveSkySettings.sunHaloIntensity;
     mvpUniform.skyConfig1[2] = flowTimeSeconds;
@@ -1687,7 +1692,7 @@ void RendererBackend::renderFrame(
     }
     m_waterReflectionPreviousPlaneHeight = m_waterReflectionPlaneHeight;
     m_waterReflectionPreviousPlaneValid = m_waterReflectionPlaneValid;
-    const bool reflectionAvailable =
+    const bool reflectionResourcesAvailable =
         m_waterReflectionPlaneValid &&
         m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT &&
         m_importedWaterPipeline != VK_NULL_HANDLE &&
@@ -1695,14 +1700,26 @@ void RendererBackend::renderFrame(
         m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexCount > 0u &&
         !m_waterReflectionImages.empty() &&
-        !m_waterReflectionDepthImages.empty();
-    if (reflectionAvailable != m_waterReflectionPreviousAvailable) {
-        m_waterReflectionHistoryValid = false;
-    }
-    m_waterReflectionPreviousAvailable = reflectionAvailable;
-    // Do not let a valid plane advertise a stale target while streaming is
-    // still bringing the reflection draw resources online.
-    mvpUniform.waterReflectionConfig[1] = reflectionAvailable ? 1.0f : 0.0f;
+        !m_waterReflectionImageViews.empty() &&
+        !m_waterReflectionImageInitialized.empty() &&
+        !m_waterReflectionDepthImages.empty() &&
+        !m_waterReflectionDepthImageViews.empty() &&
+        !m_waterReflectionDepthImageInitialized.empty() &&
+        aoFrameIndex < m_waterReflectionImages.size() &&
+        aoFrameIndex < m_waterReflectionImageViews.size() &&
+        aoFrameIndex < m_waterReflectionImageInitialized.size() &&
+        aoFrameIndex < m_waterReflectionDepthImages.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageViews.size() &&
+        aoFrameIndex < m_waterReflectionDepthImageInitialized.size() &&
+        m_waterReflectionImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionDepthImages[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_waterReflectionDepthImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+        m_importedStaticPipelineTwoSided != VK_NULL_HANDLE &&
+        m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE &&
+        m_bufferAllocator.getBuffer(m_importedVertexBufferHandle) != VK_NULL_HANDLE &&
+        m_bufferAllocator.getBuffer(m_importedIndexBufferHandle) != VK_NULL_HANDLE &&
+        !m_importedMeshDraws.empty();
 
     struct SelectedImportedLight {
         const ImportedLocalLight* light = nullptr;
@@ -2246,8 +2263,6 @@ void RendererBackend::renderFrame(
         mvpUniform.voxelBaseColorPalette[colorIndex][3] = static_cast<float>((rgba >> 24u) & 0xFFu) / 255.0f;
     }
     mvpUniform.voxelGiRestirConfig0[3] = m_voxelGiRestirHistoryValid ? 1.0f : 0.0f;
-    std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
-
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = m_bufferAllocator.getBuffer(mvpSliceOpt->buffer);
     bufferInfo.offset = 0;
@@ -3178,6 +3193,18 @@ void RendererBackend::renderFrame(
     buildBlendedDrawOrder(
         std::span<const ImportedMeshDraw>(importedActorMeshDraws.data(), importedActorMeshDraws.size()),
         m_importedActorBlendedDrawOrder);
+
+    // Page culling happens after descriptor setup, but before the first GPU
+    // pass. Keep the UBO flag aligned with the exact main-pass gate so water
+    // never samples a temporal target that this frame cannot produce.
+    const bool reflectionAvailable =
+        reflectionResourcesAvailable && !importedMeshDrawsForFrame.empty();
+    if (reflectionAvailable != m_waterReflectionPreviousAvailable) {
+        m_waterReflectionHistoryValid = false;
+    }
+    m_waterReflectionPreviousAvailable = reflectionAvailable;
+    mvpUniform.waterReflectionConfig[1] = reflectionAvailable ? 1.0f : 0.0f;
+    std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
     const bool canDrawMagica =
         legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;

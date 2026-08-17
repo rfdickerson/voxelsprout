@@ -360,6 +360,10 @@ void Renderer::setSunAngles(float yawDegrees, float pitchDegrees) {
     m_backend->setSunAngles(yawDegrees, pitchDegrees);
 }
 
+void Renderer::setVisualTimeSeconds(float seconds) {
+    m_backend->setVisualTimeSeconds(seconds);
+}
+
 void Renderer::setWeatherSky(const WeatherSkyParams& params) {
     m_backend->setWeatherSky(params);
 }

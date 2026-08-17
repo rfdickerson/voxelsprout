@@ -550,6 +550,7 @@ public:
     [[nodiscard]] ShadowSettings shadowSettings() const;
     [[nodiscard]] ShadowStats shadowStats() const;
     void setSunAngles(float yawDegrees, float pitchDegrees);
+    void setVisualTimeSeconds(float seconds) { m_visualTimeSeconds = seconds; }
     void setWeatherSky(const WeatherSkyParams& params) { m_weatherSky = params; }
     // Uploads the cloud layer textures and holds their bindless slots. Only
     // called when the weather changes; the per-frame tints ride on
@@ -1344,6 +1345,7 @@ private:
         // the push constants. Part of the merge key: two runs that discard at
         // different thresholds are not the same draw.
         std::uint8_t alphaThreshold = 128;
+        std::uint32_t rigidAnimationIndex = 0xffffffffu;
     };
 
     struct ImportedScenePageDrawRange {
@@ -1393,6 +1395,7 @@ private:
         // again.
         std::vector<ImportedLocalLight> lights;
         std::vector<odai::importer::ImportedSceneParticleEmitter> particleEmitters;
+        std::vector<odai::importer::ImportedSceneRigidAnimation> rigidAnimations;
         // This chunk's water surfaces, owned for the same reason the lights
         // are: the single water buffer pair is rebuilt from the live chunks in
         // rebuildImportedWaterBuffers(), so evicting a coastal cell takes its
@@ -2798,6 +2801,7 @@ private:
     // exists to remove.
     std::vector<VkDrawIndexedIndirectCommand> m_importedIndirectScratch;
     std::vector<ImportedIndirectBatch> m_importedIndirectBatches;
+    std::vector<odai::importer::ImportedSceneRigidAnimation> m_importedRigidAnimations;
 
     // Builds grouped indirect commands for the given draws into the frame
     // arena. `include` decides which draw indices participate (culling, terrain
@@ -2809,9 +2813,16 @@ private:
         const std::function<bool(std::size_t)>& include,
         VkBuffer& outBuffer,
         VkDeviceSize& outBaseOffset);
+    [[nodiscard]] bool sampleImportedRigidAnimationTransform(
+        std::uint32_t animationIndex,
+        float outTransform[3][4]) const;
 
     // Draws folded away by index-range merging this frame, for the census.
     std::uint32_t m_debugImportedDrawsMerged = 0;
+    float m_importedRigidAnimationTimeSeconds = 0.0f;
+    // Negative means use GLFW wall time. Games with deterministic capture
+    // publish a simulation clock through Renderer::setVisualTimeSeconds.
+    float m_visualTimeSeconds = -1.0f;
 
     std::uint32_t m_debugDrawCallsTotal = 0;
     std::uint32_t m_debugDrawCallsShadow = 0;

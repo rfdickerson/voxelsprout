@@ -1,8 +1,29 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include <cstdint>
+#include <cstring>
 
 namespace odai::render {
+
+bool RendererBackend::sampleImportedRigidAnimationTransform(
+    std::uint32_t animationIndex,
+    float outTransform[3][4]
+) const {
+    if (animationIndex >= m_importedRigidAnimations.size()) {
+        return false;
+    }
+    float delta[16] = {};
+    if (!odai::importer::sampleImportedSceneRigidAnimation(
+            m_importedRigidAnimations[animationIndex],
+            m_importedRigidAnimationTimeSeconds,
+            delta)) {
+        return false;
+    }
+    for (int row = 0; row < 3; ++row) {
+        std::memcpy(outTransform[row], delta + (row * 4), sizeof(float) * 4u);
+    }
+    return true;
+}
 
 void RendererBackend::drawIndirectChunkRanges(
     VkCommandBuffer commandBuffer,
@@ -114,7 +135,7 @@ bool RendererBackend::buildImportedIndirectBatches(
     std::array<std::uint32_t, kBucketCount> countPerThreshold{};
     std::size_t totalIncluded = 0;
     for (std::size_t i = 0; i < draws.size(); ++i) {
-        if (draws[i].blended || !include(i)) {
+        if (draws[i].blended || draws[i].rigidAnimationIndex != 0xffffffffu || !include(i)) {
             continue;
         }
         ++countPerThreshold[bucketOf(draws[i])];
@@ -150,7 +171,7 @@ bool RendererBackend::buildImportedIndirectBatches(
     lastWritten.fill(kNoCommand);
 
     for (std::size_t i = 0; i < draws.size(); ++i) {
-        if (draws[i].blended || !include(i)) {
+        if (draws[i].blended || draws[i].rigidAnimationIndex != 0xffffffffu || !include(i)) {
             continue;
         }
         const ImportedMeshDraw& draw = draws[i];

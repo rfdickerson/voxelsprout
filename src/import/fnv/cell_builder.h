@@ -279,6 +279,7 @@ public:
 
 private:
     std::uint32_t resolveLandTexture(std::uint32_t landTextureFormId, bool exact);
+    [[nodiscard]] const std::string* staticModelPathFor(std::uint32_t baseFormId) const;
 
     const FalloutAssetSource& m_assets;
     const FalloutWorldTables& m_tables;
@@ -292,6 +293,10 @@ private:
     std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
     std::unordered_set<std::string> m_failedTexturePaths;
     std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
+    // Runtime-only components normally instantiated by Skyrim's lumber-mill
+    // animation graph. They use private high-byte form IDs solely as stable
+    // mesh-cache keys and never escape into plugin resolution.
+    std::unordered_map<std::uint32_t, std::string> m_syntheticStaticModelPaths;
 public:
     // Why a base record stopped producing geometry, so a REPEAT reference to it
     // can be attributed to the same cause instead of only the first one being

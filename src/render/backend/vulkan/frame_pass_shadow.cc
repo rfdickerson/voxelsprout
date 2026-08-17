@@ -25,7 +25,6 @@ constexpr float kImportedShadowSlopeBiasScale = 2.2f;
 void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context, const ShadowPassInputs& inputs) {
     VkCommandBuffer commandBuffer = context.commandBuffer;
     VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
-    const uint32_t mvpDynamicOffset = context.mvpDynamicOffset;
     CoreFrameGraphOrderValidator& coreFramePassOrderValidator = *context.frameOrderValidator;
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
     // Voxel chunk shadow inputs: consumed by the per-cascade caster draw below
@@ -199,6 +198,22 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         sizeof(ChunkPushConstants),
                         &pointPush);
                 };
+                std::uint32_t lastPointAnimation = 0xffffffffu;
+                const auto pushPointAnimation = [&](std::uint32_t animationIndex) {
+                    if (animationIndex == lastPointAnimation) {
+                        return;
+                    }
+                    lastPointAnimation = animationIndex;
+                    pointPush.rigidAnimationParams[0] =
+                        sampleImportedRigidAnimationTransform(
+                            animationIndex, pointPush.rigidAnimationTransform)
+                            ? 1.0f
+                            : 0.0f;
+                    vkCmdPushConstants(
+                        commandBuffer, m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(ChunkPushConstants), &pointPush);
+                };
                 if (useIndirect) {
                     VkPipeline boundPipeline = oneSidedPipeline;
                     vkCmdBindPipeline(
@@ -214,6 +229,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                             boundPipeline = wantedPipeline;
                         }
                         pushPointThreshold(batch.alphaThreshold);
+                        pushPointAnimation(0xffffffffu);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer,
@@ -222,21 +238,23 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                             batch.drawCount,
                             sizeof(VkDrawIndexedIndirectCommand));
                     }
-                } else {
-                    for (const ImportedMeshDraw& draw : importedMeshDraws) {
-                        if (draw.blended || !m_debugShowImportedStatics) {
-                            continue;
-                        }
-                        pushPointThreshold(draw.alphaThreshold);
-                        countDrawCalls(m_debugDrawCallsShadow, 1);
-                        vkCmdDrawIndexed(
-                            commandBuffer,
-                            draw.indexCount,
-                            1,
-                            draw.firstIndex,
-                            draw.vertexOffset,
-                            0);
+                }
+                for (const ImportedMeshDraw& draw : importedMeshDraws) {
+                    if (draw.blended || !m_debugShowImportedStatics ||
+                        (useIndirect && draw.rigidAnimationIndex == 0xffffffffu)) {
+                        continue;
                     }
+                    const VkPipeline wantedPipeline =
+                        (draw.twoSided && twoSidedPipeline != VK_NULL_HANDLE)
+                            ? twoSidedPipeline
+                            : oneSidedPipeline;
+                    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    pushPointThreshold(draw.alphaThreshold);
+                    pushPointAnimation(draw.rigidAnimationIndex);
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                        draw.vertexOffset, 0);
                 }
                 vkCmdEndRendering(commandBuffer);
             }
@@ -394,7 +412,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 !cascadeImportedMeshDraws.empty()) {
                 const std::size_t terrainDrawCount =
                     std::min<std::size_t>(cascadeImportedTerrainDrawCount, cascadeImportedMeshDraws.size());
-                const std::size_t staticDrawStart = terrainDrawCount;
                 vkCmdSetDepthBias(
                     commandBuffer,
                     -(constantBias * kImportedShadowConstantBiasScale),
@@ -458,6 +475,22 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         sizeof(ChunkPushConstants),
                         &importedPushConstants);
                 };
+                std::uint32_t lastPushedAnimation = 0xffffffffu;
+                const auto pushRigidAnimation = [&](std::uint32_t animationIndex) {
+                    if (animationIndex == lastPushedAnimation) {
+                        return;
+                    }
+                    lastPushedAnimation = animationIndex;
+                    importedPushConstants.rigidAnimationParams[0] =
+                        sampleImportedRigidAnimationTransform(
+                            animationIndex, importedPushConstants.rigidAnimationTransform)
+                            ? 1.0f
+                            : 0.0f;
+                    vkCmdPushConstants(
+                        commandBuffer, m_pipelineLayout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0, sizeof(ChunkPushConstants), &importedPushConstants);
+                };
                 // Indirect batching, rebuilt per cascade because each cascade
                 // culls its own caster list. This is the biggest single block
                 // of draw calls in the frame -- four cascades over the whole
@@ -496,10 +529,34 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                             boundShadowPipeline = wantedPipeline;
                         }
                         pushAlphaThreshold(batch.alphaThreshold);
+                        pushRigidAnimation(0xffffffffu);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                             batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                    for (std::size_t drawIndex = 0;
+                         drawIndex < cascadeImportedMeshDraws.size(); ++drawIndex) {
+                        const ImportedMeshDraw& draw = cascadeImportedMeshDraws[drawIndex];
+                        if (draw.blended || draw.rigidAnimationIndex == 0xffffffffu ||
+                            !includeDraw(drawIndex)) {
+                            continue;
+                        }
+                        const VkPipeline wantedPipeline =
+                            (draw.twoSided && twoSidedShadowPipeline != VK_NULL_HANDLE)
+                                ? twoSidedShadowPipeline
+                                : oneSidedShadowPipeline;
+                        if (wantedPipeline != boundShadowPipeline) {
+                            vkCmdBindPipeline(
+                                commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                            boundShadowPipeline = wantedPipeline;
+                        }
+                        pushAlphaThreshold(draw.alphaThreshold);
+                        pushRigidAnimation(draw.rigidAnimationIndex);
+                        countDrawCalls(m_debugDrawCallsShadow, 1);
+                        vkCmdDrawIndexed(
+                            commandBuffer, draw.indexCount, 1, draw.firstIndex,
+                            draw.vertexOffset, 0);
                     }
                     if (boundShadowPipeline != oneSidedShadowPipeline) {
                         vkCmdBindPipeline(
@@ -515,6 +572,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                             continue;  // a blended surface casts no opaque shadow
                         }
                         pushAlphaThreshold(importedDraw.alphaThreshold);
+                        pushRigidAnimation(importedDraw.rigidAnimationIndex);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexed(
                             commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
