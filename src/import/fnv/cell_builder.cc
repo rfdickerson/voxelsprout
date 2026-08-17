@@ -79,6 +79,176 @@ struct Vec3 {
     float z = 0.0f;
 };
 
+// Skyrim's sawmill wheel meshes are positioned around an axle offset inside
+// the NIF, rather than at the REFR origin. The Riverwood LAND has the river
+// beside that origin but does not cut the narrow mill race beneath the wheel;
+// vanilla fills it with an effect-water channel we do not import. Reconstruct
+// the race from the placed wheel so the wheel meets the same water surface the
+// rest of the cell uses, without moving the authored static or its animation.
+struct WaterWheelRace {
+    float centerX = 0.0f;
+    float centerZ = 0.0f;
+    float waterLevel = 0.0f;
+    // Filled after authored river strips have been emitted. The race is a
+    // capsule from this contact point to the axle, never an invented square.
+    float sourceX = 0.0f;
+    float sourceZ = 0.0f;
+};
+
+constexpr float kWaterWheelNifAxleX = 459.217f;
+constexpr float kWaterWheelRaceHalfWidth = 280.0f;
+constexpr float kWaterWheelRaceBankFeather = 112.0f;
+
+float distanceToWaterWheelRace(float worldX, float worldZ, const WaterWheelRace& race) {
+    const float segmentX = race.centerX - race.sourceX;
+    const float segmentZ = race.centerZ - race.sourceZ;
+    const float segmentLengthSquared = (segmentX * segmentX) + (segmentZ * segmentZ);
+    if (segmentLengthSquared <= 1.0e-4f) {
+        const float dx = worldX - race.centerX;
+        const float dz = worldZ - race.centerZ;
+        return std::sqrt((dx * dx) + (dz * dz));
+    }
+    const float projected = std::clamp(
+        (((worldX - race.sourceX) * segmentX) + ((worldZ - race.sourceZ) * segmentZ)) /
+            segmentLengthSquared,
+        0.0f, 1.0f);
+    const float nearestX = race.sourceX + (segmentX * projected);
+    const float nearestZ = race.sourceZ + (segmentZ * projected);
+    const float dx = worldX - nearestX;
+    const float dz = worldZ - nearestZ;
+    return std::sqrt((dx * dx) + (dz * dz));
+}
+
+std::vector<WaterWheelRace> waterWheelRacesForCell(
+    const FalloutCellRecord& cell, const FalloutWorldspaceRecord* worldspace,
+    const FalloutWorldTables& tables) {
+    if (cell.isInterior || !cell.hasGridCoords ||
+        (!cell.hasWater && (worldspace == nullptr || !worldspace->hasDefaultHeights))) {
+        return {};
+    }
+    const float waterLevel = cell.hasWater
+        ? cell.waterHeight
+        : worldspace->defaultWaterHeight;
+    std::vector<WaterWheelRace> races;
+    for (const FalloutPlacedReference& ref : cell.references) {
+        if ((ref.recordFlags & 0x00000800u) != 0u || ref.isDeleted) {
+            continue;
+        }
+        const auto model = tables.staticModelPaths.find(ref.baseFormId);
+        if (model == tables.staticModelPaths.end() ||
+            toLowerAsciiCopy(model->second).find("lumbermill01waterwheel") == std::string::npos) {
+            continue;
+        }
+        const float scale = ref.scale > 0.0f ? ref.scale : 1.0f;
+        const float yaw = ref.rotationRadians[2];
+        const Vec3 origin{ref.position[0], ref.position[2], -ref.position[1]};
+        // The wheel's axle is the NIF's local (x, 0, z) point transformed by
+        // the placed reference. Engine Z is the negated Bethesda Y axis.
+        races.push_back(WaterWheelRace{
+            origin.x + (std::cos(yaw) * kWaterWheelNifAxleX * scale),
+            origin.z - (std::sin(yaw) * kWaterWheelNifAxleX * scale),
+            waterLevel});
+    }
+    return races;
+}
+
+void connectWaterWheelRaces(
+    const ImportedScene& scene, std::size_t firstAuthoredWaterPatch,
+    std::vector<WaterWheelRace>& races) {
+    for (WaterWheelRace& race : races) {
+        float nearestX = race.centerX;
+        float nearestZ = race.centerZ;
+        float nearestDistanceSquared = std::numeric_limits<float>::max();
+        for (std::size_t index = firstAuthoredWaterPatch; index < scene.waterPatches.size(); ++index) {
+            const ImportedSceneWaterPatch& patch = scene.waterPatches[index];
+            if (std::abs(patch.waterLevel - race.waterLevel) > 24.0f) {
+                continue;
+            }
+            const float minX = std::min(patch.originX, patch.originX + patch.sizeX);
+            const float maxX = std::max(patch.originX, patch.originX + patch.sizeX);
+            const float minZ = std::min(patch.originZ, patch.originZ + patch.sizeZ);
+            const float maxZ = std::max(patch.originZ, patch.originZ + patch.sizeZ);
+            const float candidateX = std::clamp(race.centerX, minX, maxX);
+            const float candidateZ = std::clamp(race.centerZ, minZ, maxZ);
+            const float dx = race.centerX - candidateX;
+            const float dz = race.centerZ - candidateZ;
+            const float distanceSquared = (dx * dx) + (dz * dz);
+            if (distanceSquared < nearestDistanceSquared) {
+                nearestDistanceSquared = distanceSquared;
+                nearestX = candidateX;
+                nearestZ = candidateZ;
+            }
+        }
+
+        // Riverwood's wheel lies immediately beside a narrow LAND-derived
+        // river strip. Join that strip with an axle-width race rather than
+        // inventing a circular pool. The fallback keeps other wheel assets
+        // usable when their cell contains no exposed authored water geometry.
+        if (nearestDistanceSquared <= 2048.0f * 2048.0f) {
+            race.sourceX = nearestX;
+            race.sourceZ = nearestZ;
+        } else {
+            race.sourceX = race.centerX;
+            race.sourceZ = race.centerZ;
+        }
+    }
+}
+
+void appendWaterWheelRacePatches(
+    ImportedScene& scene, const std::vector<WaterWheelRace>& races) {
+    for (const WaterWheelRace& race : races) {
+        // The ordinary shoreline extractor emits 128-unit LAND strips. Use
+        // that same granularity here so an angled race follows the river and
+        // its terrain cut exactly, instead of exposing a single rectangular
+        // water tile across dry ground.
+        constexpr float kRaceTileSize = 128.0f;
+        const float minX = std::min(race.sourceX, race.centerX) - kWaterWheelRaceHalfWidth;
+        const float maxX = std::max(race.sourceX, race.centerX) + kWaterWheelRaceHalfWidth;
+        const float minZ = std::min(race.sourceZ, race.centerZ) - kWaterWheelRaceHalfWidth;
+        const float maxZ = std::max(race.sourceZ, race.centerZ) + kWaterWheelRaceHalfWidth;
+        const float alignedMinX = std::floor(minX / kRaceTileSize) * kRaceTileSize;
+        const float alignedMinZ = std::floor(minZ / kRaceTileSize) * kRaceTileSize;
+        for (float z = alignedMinZ; z < maxZ; z += kRaceTileSize) {
+            for (float x = alignedMinX; x < maxX; x += kRaceTileSize) {
+                if (distanceToWaterWheelRace(
+                        x + (kRaceTileSize * 0.5f), z + (kRaceTileSize * 0.5f), race) >
+                    kWaterWheelRaceHalfWidth) {
+                    continue;
+                }
+                ImportedSceneWaterPatch patch{};
+                patch.originX = x;
+                patch.originZ = z;
+                patch.sizeX = kRaceTileSize;
+                patch.sizeZ = kRaceTileSize;
+                patch.waterLevel = race.waterLevel;
+                scene.waterPatches.push_back(patch);
+            }
+        }
+    }
+}
+
+float lowerTerrainForWaterWheelRace(
+    float height, float worldX, float worldZ, const std::vector<WaterWheelRace>& races) {
+    for (const WaterWheelRace& race : races) {
+        const float distance = distanceToWaterWheelRace(worldX, worldZ, race);
+        if (distance >= kWaterWheelRaceHalfWidth + kWaterWheelRaceBankFeather) {
+            continue;
+        }
+        // Keep a soft rim at the bank but sink the channel enough for the
+        // water shader to read a real transmission depth. A four-unit cut
+        // makes the riverbed win everywhere and turns the race into a pale,
+        // dry-looking decal rather than water around the paddles.
+        float weight = std::clamp(
+            (kWaterWheelRaceHalfWidth + kWaterWheelRaceBankFeather - distance) /
+                kWaterWheelRaceBankFeather,
+            0.0f, 1.0f);
+        weight = weight * weight * (3.0f - (2.0f * weight));
+        const float channelFloor = race.waterLevel - 112.0f;
+        height = std::min(height, std::lerp(height, channelFloor, weight));
+    }
+    return height;
+}
+
 // Bethesda's Gamebryo space is right-handed Z-up (X east, Y north, Z up);
 // this engine is Y-up. The conversion is a -90 degree rotation about X:
 //
@@ -464,7 +634,8 @@ void appendTerrainCell(
     const odai::importer::fnv::FalloutCellRecord& cell,
     const std::function<std::uint32_t(std::uint32_t)>& resolveLandTexture,
     const std::function<std::uint32_t(std::uint32_t)>& resolveLandTextureExact,
-    std::size_t& outDroppedLayerCount
+    std::size_t& outDroppedLayerCount,
+    const std::vector<WaterWheelRace>& waterWheelRaces
 ) {
     if (cell.land == nullptr) {
         return;
@@ -609,7 +780,9 @@ void appendTerrainCell(
                 const float bethesdaZ = land.hasHeights
                     ? sampleAuthoredTriangle(land.heights, 1, 0, row, col, 0.0f)
                     : 0.0f;
-                const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+                const float terrainHeight = lowerTerrainForWaterWheelRace(
+                    bethesdaZ, bethesdaX, -bethesdaY, waterWheelRaces);
+                const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, terrainHeight);
 
                 ImportedSceneVertex vertex{};
                 vertex.position[0] = world.x;
@@ -1384,8 +1557,14 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     // Before the LAND guard: a cell can be open ocean with no terrain at all.
     // Tamriel (0,0) is exactly that, so gating water on terrain would drop the
     // sea precisely where there is nothing else to draw.
+    const FalloutWorldspaceRecord* worldspace = m_tables.findWorldspace(cell.worldspaceFormId);
+    std::vector<WaterWheelRace> waterWheelRaces =
+        waterWheelRacesForCell(cell, worldspace, m_tables);
     const std::size_t firstWaterPatch = m_scene.waterPatches.size();
-    if (appendCellWaterPatch(m_scene, cell, m_tables.findWorldspace(cell.worldspaceFormId))) {
+    const bool hasCellWater = appendCellWaterPatch(m_scene, cell, worldspace);
+    connectWaterWheelRaces(m_scene, firstWaterPatch, waterWheelRaces);
+    appendWaterWheelRacePatches(m_scene, waterWheelRaces);
+    if (hasCellWater || !waterWheelRaces.empty()) {
         // Skyrim supplies a 64x64 flow vector texture for each exterior water
         // cell. Resolve it first: its presence is the format discriminator, so
         // Fallout/Oblivion/Morrowind retain their existing generic normal.
@@ -1433,7 +1612,7 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     };
     appendTerrainCell(
         m_scene.meshes[m_terrainMeshIndex], cell, resolveInherited, resolveExact,
-        m_stats.droppedTerrainLayers);
+        m_stats.droppedTerrainLayers, waterWheelRaces);
 }
 
 // A LIGH reference becomes an ImportedSceneLight. The renderer's punctual-light

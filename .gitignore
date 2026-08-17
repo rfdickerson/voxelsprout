@@ -84,3 +84,8 @@ assets/mods
 # Python bytecode
 __pycache__/
 *.pyc
+
+
+*.png
+*.ppm
+*.mp4

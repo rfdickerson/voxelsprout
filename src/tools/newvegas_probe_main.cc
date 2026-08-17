@@ -2095,6 +2095,13 @@ int probeBuildCell(
                       << quarter[11] << ")\n";
         }
     }
+    if (!scene.waterPatches.empty()) {
+        std::cout << "  water patches (engine origin/extent):\n";
+        for (const auto& water : scene.waterPatches) {
+            std::cout << "    (" << water.originX << "," << water.waterLevel << ","
+                      << water.originZ << ") +(" << water.sizeX << "," << water.sizeZ << ")\n";
+        }
+    }
     // The terrain mesh's normals AFTER the basis change, in engine space, where
     // a level post must read (0, 1, 0). Printed next to the raw VNML above so a
     // terrain that shades like a wall can be blamed on the decode or on the
