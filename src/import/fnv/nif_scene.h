@@ -100,8 +100,17 @@ struct NifShape {
         0, 0, 0, 1};
 };
 
+// Model-space triangle emitted by a NIF's authored static Havok graph. Havok
+// stores its coordinates in metres; the parser converts them back to Bethesda
+// model units before exposing them here, so these can use the exact same
+// placement transform as visible NIF geometry.
+struct NifCollisionTriangle {
+    float vertices[9]{};
+};
+
 struct NifModel {
     std::vector<NifShape> shapes;
+    std::vector<NifCollisionTriangle> collisionTriangles;
     // All controller sequences carried by this mesh. Static importers can
     // ignore them; Bethesda environmental machinery selects one clip and
     // turns its targeted shape groups into runtime rigid animations.
@@ -284,6 +293,12 @@ struct NifSkinnedShape {
     // Measured on characters\_male\upperbody.nif: without it, the bind pose
     // fails to round-trip by up to 112.8 units -- most of a character height.
     float skinTransform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+    // Positions came from BSDynamicTriShape's FaceGen float4 tail rather than
+    // the ordinary packed vertex stream. FaceGen parts use shape-specific skin
+    // spaces, so the character assembler bakes their bind pose before sharing
+    // the actor's one GPU bone palette.
+    bool usesDynamicPositions = false;
 
     // Per vertex, kNifMaxBoneInfluences entries each. Index is into boneNames,
     // NOT into a skeleton. Weights sum to 1 for any vertex with any influence;

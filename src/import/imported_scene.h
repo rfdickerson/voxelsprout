@@ -147,11 +147,32 @@ struct ImportedSceneMesh {
 // stays valid however the cooked .bin files are laid out on disk -- the loader
 // applies whatever naming convention the cooker used (see
 // importedSceneInteriorFileName).
+enum class ImportedSceneDoorTargetKind : std::uint8_t {
+    CookedLegacy = 0,
+    Interior = 1,
+    Exterior = 2,
+};
+
 struct ImportedSceneDoor {
     float position[3] = {};
     float arrivalPosition[3] = {};
     float arrivalYawDegrees = 0.0f;
     std::string targetCellEditorId;
+    std::uint32_t sourceReferenceFormId = 0u;
+    std::uint32_t targetCellFormId = 0u;
+    std::uint32_t targetWorldspaceFormId = 0u;
+    std::string targetWorldspaceEditorId;
+    ImportedSceneDoorTargetKind targetKind = ImportedSceneDoorTargetKind::CookedLegacy;
+    bool locked = false;
+    std::uint8_t lockLevel = 0u;
+};
+
+// Static authored collision in engine/world space. It is deliberately a
+// triangle payload: CollisionWorld already buckets triangles, so preserving a
+// second hierarchy of Bethesda/Havok shape types would add machinery without
+// changing runtime behavior.
+struct ImportedSceneCollisionTriangle {
+    float vertices[9] = {};
 };
 
 // Where a cooked interior lives relative to its exterior scene. One convention,
@@ -186,6 +207,10 @@ enum class TextureFormat : std::uint8_t {
     // as DXT1 even though they are vectors, and an sRGB image view bends those
     // vectors before the shader can decode them.
     BC1Linear = 7,
+    // Same byte layout as RGBA8, but colour data sampled through an sRGB
+    // image view. Skyrim's generated-object atlases are uncompressed colour;
+    // treating them as linear makes distant cities roughly twice too bright.
+    RGBA8Srgb = 8,
 };
 
 struct ImportedSceneTexture {
@@ -561,6 +586,7 @@ struct ImportedScene {
     std::vector<ImportedSceneLight> lights;
     std::vector<ImportedSceneParticleEmitter> particleEmitters;
     std::vector<ImportedSceneDoor> doors;
+    std::vector<ImportedSceneCollisionTriangle> collisionTriangles;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;

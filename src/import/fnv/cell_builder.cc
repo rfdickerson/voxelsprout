@@ -1667,6 +1667,41 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 if (applyNifBannerGravityRestPose(staticModelPath, nifModel)) {
                     ++m_stats.clothMeshesSettled;
                 }
+                std::vector<NifCollisionTriangle> modelCollision =
+                    nifModel.collisionTriangles;
+                if (modelCollision.empty()) {
+                    // Per-NIF fallback, not a global mode: one unsupported
+                    // Havok wrapper must not disable authored collision for
+                    // every other building in the cell.
+                    for (const NifShape& shape : nifModel.shapes) {
+                        if (shape.alphaBlend ||
+                            (shape.diffuseTexturePath.empty() && shapeIsPlanar(shape))) {
+                            continue;
+                        }
+                        for (std::size_t tri = 0;
+                             (tri * 3u) + 2u < shape.triangleIndices.size(); ++tri) {
+                            const std::uint32_t indices[3] = {
+                                shape.triangleIndices[tri * 3u],
+                                shape.triangleIndices[(tri * 3u) + 1u],
+                                shape.triangleIndices[(tri * 3u) + 2u]};
+                            NifCollisionTriangle collision;
+                            bool valid = true;
+                            for (int point = 0; point < 3; ++point) {
+                                const std::size_t source =
+                                    static_cast<std::size_t>(indices[point]) * 3u;
+                                if (source + 2u >= shape.positions.size()) {
+                                    valid = false;
+                                    break;
+                                }
+                                std::copy_n(&shape.positions[source], 3u,
+                                            &collision.vertices[point * 3]);
+                            }
+                            if (valid) {
+                                modelCollision.push_back(collision);
+                            }
+                        }
+                    }
+                }
                 m_stats.skippedGeometryShapes += nifModel.skippedShapeCount;
                 // Node-recognition health. Nonzero nodeParseFailures means a
                 // subtree was dropped rather than -- as it used to be --
@@ -2024,6 +2059,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 const std::uint32_t meshIndex = static_cast<std::uint32_t>(m_scene.meshes.size());
                 m_scene.meshes.push_back(std::move(mesh));
+                m_collisionByStaticFormId.emplace(ref.baseFormId, std::move(modelCollision));
                 meshIt = m_meshIndexByStaticFormId.emplace(ref.baseFormId, meshIndex).first;
             }
 
@@ -2038,6 +2074,25 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 ref.rotationRadians[0], ref.rotationRadians[1], ref.rotationRadians[2]);
             const Mat3 engineRotation = makeEngineInstanceRotation(bethRotation);
             writeTransform(instance, worldPos, engineRotation, ref.scale);
+            if (const auto collisionIt = m_collisionByStaticFormId.find(ref.baseFormId);
+                collisionIt != m_collisionByStaticFormId.end()) {
+                for (const NifCollisionTriangle& local : collisionIt->second) {
+                    ImportedSceneCollisionTriangle world;
+                    for (int point = 0; point < 3; ++point) {
+                        for (int row = 0; row < 3; ++row) {
+                            world.vertices[(point * 3) + row] =
+                                instance.transform[(row * 4) + 0] *
+                                    local.vertices[(point * 3) + 0] +
+                                instance.transform[(row * 4) + 1] *
+                                    local.vertices[(point * 3) + 1] +
+                                instance.transform[(row * 4) + 2] *
+                                    local.vertices[(point * 3) + 2] +
+                                instance.transform[(row * 4) + 3];
+                        }
+                    }
+                    m_scene.collisionTriangles.push_back(world);
+                }
+            }
             m_scene.instances.push_back(instance);
             ++m_stats.placedInstances;
 

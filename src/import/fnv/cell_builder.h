@@ -26,6 +26,7 @@
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
+#include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
 namespace odai::importer::fnv {
@@ -293,6 +294,10 @@ private:
     std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
     std::unordered_set<std::string> m_failedTexturePaths;
     std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
+    // Complete model-space collision soup per placed base. Authored Havok wins;
+    // opaque visible geometry is stored here only as the per-NIF fallback.
+    std::unordered_map<std::uint32_t, std::vector<NifCollisionTriangle>>
+        m_collisionByStaticFormId;
     // Runtime-only components normally instantiated by Skyrim's lumber-mill
     // animation graph. They use private high-byte form IDs solely as stable
     // mesh-cache keys and never escape into plugin resolution.

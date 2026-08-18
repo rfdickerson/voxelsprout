@@ -7,7 +7,6 @@
 #include <cstring>
 #include <filesystem>
 
-#include "sim/network_procedural.h"
 
 namespace odai::render {
 
@@ -316,7 +315,8 @@ void RendererBackend::recordSkinnedVelocityPass(const FrameExecutionContext& con
 
     for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
         const SkinnedInstanceSlot& slot = m_skinningInstances[i];
-        if (slot.vertexCount == 0 || slot.boneCount == 0 || slot.currentBoneAddress == 0 ||
+        if (!slot.visible || slot.vertexCount == 0 || slot.boneCount == 0 ||
+            slot.currentBoneAddress == 0 ||
             !slot.velocityBufferSet.valid() ||
             slot.restPoseVertexBufferHandle == kInvalidBufferHandle ||
             slot.indexBufferHandle == kInvalidBufferHandle) {

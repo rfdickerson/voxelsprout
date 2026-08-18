@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <iostream>
+#include <iomanip>
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <string_view>
 
 namespace odai::importer::fnv {
@@ -124,12 +126,20 @@ FalloutRaceParts parseRaceParts(const EsmRecordView& record) {
             female = false;
         } else if (sub.type == "FNAM") {
             female = true;
+        } else if (sub.type == "ANAM") {
+            // Skyrim: the first MNAM/ANAM and FNAM/ANAM pairs name the two
+            // skeleton NIFs. Fallout's race layout has no ANAM model path, so
+            // accepting only .nif keeps this an additive generation branch.
+            const std::string model = subrecordText(sub);
+            if (endsWith(model, ".nif")) {
+                (female ? race.femaleSkeletonPath : race.maleSkeletonPath) = model;
+            }
         } else if (sub.type == "INDX" && sub.size >= 4u) {
             slot = static_cast<std::size_t>(readU32(sub));
         } else if (sub.type == "MODL") {
             const std::string model = subrecordText(sub);
             // The last body slot holds a FaceGen texture, not a mesh.
-            if (model.empty() || endsWith(model, ".egt")) {
+            if (model.empty() || !endsWith(model, ".nif")) {
                 continue;
             }
             if (section == Section::Head && slot < kRaceHeadPartCount) {
@@ -253,8 +263,17 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     // characters\_Male\Skeleton.NIF are the same directory.
     const auto* bodyModels =
         traits.isFemale ? race->second.femaleBodyModels : race->second.maleBodyModels;
-    std::string skeletonPath = directoryOf(bodyModels[kRaceUpperBodySlot]) + "skeleton.nif";
-    if (bodyModels[kRaceUpperBodySlot].empty()) {
+    std::string skeletonPath;
+    // Skyrim's RACE states the answer directly. This also distinguishes its
+    // actor assembly from Fallout's: TES5 has no naked-body NIF list on RACE;
+    // the body arrives through the default outfit's ARMO -> ARMA chain.
+    const std::string& skyrimSkeleton =
+        traits.isFemale ? race->second.femaleSkeletonPath : race->second.maleSkeletonPath;
+    if (!skyrimSkeleton.empty()) {
+        skeletonPath = skyrimSkeleton;
+    } else if (!bodyModels[kRaceUpperBodySlot].empty()) {
+        skeletonPath = directoryOf(bodyModels[kRaceUpperBodySlot]) + "skeleton.nif";
+    } else {
         // No body to stand beside: fall back to what the record claims, through
         // any template that owns the model on its behalf.
         const FalloutActorBase* modelSource =
@@ -291,15 +310,35 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     // Levelled lists expand in place, so a settler's "OutfitSettlerFemale"
     // becomes the outfits it can hand out and the loop below sees armour.
     std::vector<std::uint32_t> wardrobeItems = wardrobe.inventoryFormIds;
+    // TES5 DOFT points at an OTFT whose INAM entries are the worn set. Follow
+    // the template chain opportunistically: Skyrim's ACBS template flags do
+    // not share Fallout's trailing-u16 layout, but an empty DOFT on a derived
+    // guard unambiguously means to keep walking until a template owns one.
+    const FalloutActorBase* outfitSource = &wardrobe;
+    for (int hop = 0; hop < 8 && outfitSource != nullptr &&
+         outfitSource->defaultOutfitFormId == 0u && outfitSource->templateFormId != 0u; ++hop) {
+        outfitSource = firstActorFrom(outfitSource->templateFormId, outfitSource->formId);
+    }
+    if (outfitSource != nullptr && outfitSource->defaultOutfitFormId != 0u) {
+        const auto outfit = outfits.find(outfitSource->defaultOutfitFormId);
+        if (outfit != outfits.end()) {
+            wardrobeItems.insert(wardrobeItems.end(), outfit->second.begin(), outfit->second.end());
+        }
+    }
     for (std::size_t i = 0; i < wardrobeItems.size() && wardrobeItems.size() < 256u; ++i) {
         const auto list = leveledItems.find(wardrobeItems[i]);
         if (list == leveledItems.end()) {
             continue;
         }
-        // Which entry the game would roll depends on player level and a die.
-        // Any of them is a truthful answer to "what is this actor wearing",
-        // and the first that resolves to armour is the one that gets worn.
-        wardrobeItems.insert(wardrobeItems.end(), list->second.begin(), list->second.end());
+        const auto useAll = leveledItemUseAll.find(wardrobeItems[i]);
+        if (useAll != leveledItemUseAll.end() && useAll->second) {
+            wardrobeItems.insert(wardrobeItems.end(), list->second.begin(), list->second.end());
+        } else if (!list->second.empty()) {
+            // Player level and a die pick the real entry. A stable first choice
+            // keeps captures reproducible while still selecting exactly one of
+            // the mutually-exclusive complete outfits.
+            wardrobeItems.push_back(list->second.front());
+        }
     }
 
     for (const std::uint32_t itemFormId : wardrobeItems) {
@@ -312,6 +351,29 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
         const std::string& model = female && !armor->second.femaleModel.empty()
             ? armor->second.femaleModel
             : armor->second.maleModel;
+        // Skyrim's ARMO is a container. Each binary MODL is an ARMA reference,
+        // and the third-person model is MOD2/MOD3 on that record. Append every
+        // applicable addon: boots, cuirass, gloves and helmet are separate
+        // skinned meshes and none can substitute for another.
+        if (!armor->second.armatureFormIds.empty()) {
+            for (const std::uint32_t addonId : armor->second.armatureFormIds) {
+                const auto addon = armorAddons.find(addonId);
+                if (addon == armorAddons.end()) {
+                    continue;
+                }
+                if (!addon->second.raceFormIds.empty() &&
+                    std::find(addon->second.raceFormIds.begin(), addon->second.raceFormIds.end(),
+                              traits.raceFormId) == addon->second.raceFormIds.end()) {
+                    continue;
+                }
+                const std::string& addonModel = female && !addon->second.femaleModel.empty()
+                    ? addon->second.femaleModel
+                    : addon->second.maleModel;
+                appendUnique(resolved.bodyPartPaths, addonModel);
+            }
+            resolved.wornArmorFormIds.push_back(itemFormId);
+            continue;
+        }
         if (model.empty()) {
             continue;
         }
@@ -349,6 +411,13 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     appendUnique(resolved.bodyPartPaths, head);
     for (const std::string& accessory : accessories) {
         appendUnique(resolved.bodyPartPaths, accessory);
+    }
+    // Skyrim's RACE supplies no head NIF because the face is generated per
+    // NPC. The CK persists that result under FaceGeom/<plugin>/<localForm>.nif
+    // rather than putting a reference on NPC_. Append it only on the TES5
+    // assembly branch: Fallout's race head model above remains authoritative.
+    if (!skyrimSkeleton.empty()) {
+        appendUnique(resolved.bodyPartPaths, traits.faceGeometryPath);
     }
     return resolved;
 }
@@ -465,6 +534,7 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
         base.templateFormId = remap(base.templateFormId);
         base.raceFormId = remap(base.raceFormId);
         base.voiceTypeFormId = remap(base.voiceTypeFormId);
+        base.defaultOutfitFormId = remap(base.defaultOutfitFormId);
         for (std::uint32_t& item : base.inventoryFormIds) {
             item = remap(item);
         }
@@ -479,6 +549,7 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
             entry = remap(entry);
         }
     });
+    remapKeyed(scan.leveledItemUseAll, [](bool&) {});
     remapKeyed(scan.races, [&](FalloutRaceParts& race) {
         race.formId = remap(race.formId);
         race.maleVoiceTypeFormId = remap(race.maleVoiceTypeFormId);
@@ -486,6 +557,20 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
     });
     remapKeyed(scan.armors, [&](FalloutArmorPiece& armor) {
         armor.formId = remap(armor.formId);
+        for (std::uint32_t& addon : armor.armatureFormIds) {
+            addon = remap(addon);
+        }
+    });
+    remapKeyed(scan.outfits, [&](std::vector<std::uint32_t>& entries) {
+        for (std::uint32_t& entry : entries) {
+            entry = remap(entry);
+        }
+    });
+    remapKeyed(scan.armorAddons, [&](SkyrimArmorAddon& addon) {
+        addon.formId = remap(addon.formId);
+        for (std::uint32_t& race : addon.raceFormIds) {
+            race = remap(race);
+        }
     });
     remapKeyed(scan.voiceTypes, [](std::string&) {});
 }
@@ -536,11 +621,20 @@ bool findActorsNearAcrossOrder(
         for (auto& [formId, list] : scan.leveledItems) {
             outScan.leveledItems[formId] = std::move(list);
         }
+        for (const auto& [formId, useAll] : scan.leveledItemUseAll) {
+            outScan.leveledItemUseAll[formId] = useAll;
+        }
         for (auto& [formId, race] : scan.races) {
             outScan.races[formId] = std::move(race);
         }
         for (auto& [formId, armor] : scan.armors) {
             outScan.armors[formId] = std::move(armor);
+        }
+        for (auto& [formId, outfit] : scan.outfits) {
+            outScan.outfits[formId] = std::move(outfit);
+        }
+        for (auto& [formId, addon] : scan.armorAddons) {
+            outScan.armorAddons[formId] = std::move(addon);
         }
         for (auto& [formId, voice] : scan.voiceTypes) {
             outScan.voiceTypes[formId] = std::move(voice);
@@ -597,7 +691,8 @@ bool findActorsNear(
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "CREA" || header.type == "NPC_" || header.type == "LVLC" ||
                 header.type == "LVLN" || header.type == "LVLI" || header.type == "RACE" ||
-                header.type == "ARMO" || header.type == "VTYP";
+                header.type == "ARMO" || header.type == "ARMA" || header.type == "OTFT" ||
+                header.type == "VTYP";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
             if (record.type == "VTYP") {
@@ -620,15 +715,54 @@ bool findActorsNear(
                         armor.editorId = subrecordText(sub);
                     } else if (sub.type == "BMDT" && sub.size >= 4u) {
                         armor.bipedFlags = readU32(sub);
+                    } else if (sub.type == "BOD2" && sub.size >= 4u) {
+                        armor.bipedFlags = readU32(sub);
+                    } else if (sub.type == "MODL" && sub.size == 4u) {
+                        armor.armatureFormIds.push_back(readU32(sub));
                     } else if (sub.type == "MODL") {
                         armor.maleModel = subrecordText(sub);
                     } else if (sub.type == "MOD3") {
                         armor.femaleModel = subrecordText(sub);
                     }
                 }
-                if (armor.bipedFlags != 0u &&
-                    (!armor.maleModel.empty() || !armor.femaleModel.empty())) {
+                if ((!armor.maleModel.empty() || !armor.femaleModel.empty()) ||
+                    !armor.armatureFormIds.empty()) {
                     outScan.armors[record.formId] = std::move(armor);
+                }
+                return;
+            }
+            if (record.type == "ARMA") {
+                SkyrimArmorAddon addon;
+                addon.formId = record.formId;
+                for (const EsmSubrecordView& sub : record.subrecords) {
+                    if (sub.type == "EDID") {
+                        addon.editorId = subrecordText(sub);
+                    } else if ((sub.type == "BODT" || sub.type == "BOD2") && sub.size >= 4u) {
+                        addon.bipedFlags = readU32(sub);
+                    } else if (sub.type == "MOD2") {
+                        addon.maleModel = subrecordText(sub);
+                    } else if (sub.type == "MOD3") {
+                        addon.femaleModel = subrecordText(sub);
+                    } else if (sub.type == "RNAM" && sub.size >= 4u) {
+                        addon.raceFormIds.push_back(readU32(sub));
+                    } else if (sub.type == "MODL" && sub.size == 4u) {
+                        addon.raceFormIds.push_back(readU32(sub));
+                    }
+                }
+                if (!addon.maleModel.empty() || !addon.femaleModel.empty()) {
+                    outScan.armorAddons[record.formId] = std::move(addon);
+                }
+                return;
+            }
+            if (record.type == "OTFT") {
+                std::vector<std::uint32_t> items;
+                for (const EsmSubrecordView& sub : record.subrecords) {
+                    if (sub.type == "INAM" && sub.size >= 4u) {
+                        items.push_back(readU32(sub));
+                    }
+                }
+                if (!items.empty()) {
+                    outScan.outfits[record.formId] = std::move(items);
                 }
                 return;
             }
@@ -636,15 +770,21 @@ bool findActorsNear(
                 // LVLO is a 12-byte entry; the referenced formID sits at offset
                 // 4, after a u16 level and two unused bytes.
                 std::vector<std::uint32_t> entries;
+                bool useAll = false;
                 for (const EsmSubrecordView& sub : record.subrecords) {
                     if (sub.type == "LVLO" && sub.size >= 8u) {
                         entries.push_back(readU32(sub, 4));
+                    } else if (sub.type == "LVLF" && sub.size >= 1u) {
+                        useAll = (sub.data[0] & 0x04u) != 0u;
                     }
                 }
                 if (!entries.empty()) {
                     (record.type == "LVLI" ? outScan.leveledItems
                                            : outScan.leveledLists)[record.formId] =
                         std::move(entries);
+                    if (record.type == "LVLI") {
+                        outScan.leveledItemUseAll[record.formId] = useAll;
+                    }
                 }
                 return;
             }
@@ -668,6 +808,8 @@ bool findActorsNear(
                     base.voiceTypeFormId = readU32(sub);
                 } else if (sub.type == "CNTO" && sub.size >= 4u) {
                     base.inventoryFormIds.push_back(readU32(sub));
+                } else if (sub.type == "DOFT" && sub.size >= 4u) {
+                    base.defaultOutfitFormId = readU32(sub);
                 } else if (sub.type == "ACBS" && sub.size >= 4u) {
                     // Flags bit 0 is Female. Which of the RACE's two part sets
                     // an NPC_ uses hangs on it.
@@ -677,6 +819,14 @@ bool findActorsNear(
                         std::memcpy(&base.templateFlags, sub.data + 22, sizeof(base.templateFlags));
                     }
                 }
+            }
+            if (record.type == "NPC_") {
+                std::ostringstream localForm;
+                localForm << std::hex << std::nouppercase << std::setfill('0')
+                          << std::setw(8) << record.formId;
+                base.faceGeometryPath =
+                    "actors\\character\\facegendata\\facegeom\\" +
+                    pluginPath.filename().string() + "\\" + localForm.str() + ".nif";
             }
             outScan.bases[record.formId] = std::move(base);
         };

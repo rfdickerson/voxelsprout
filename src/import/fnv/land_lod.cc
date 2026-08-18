@@ -41,11 +41,17 @@ std::string toLowerCopy(std::string value) {
 // in 59206 bytes at identical file size. Every one of them is the sign bit of a
 // float that is zero in both, so the scenes are numerically identical -- worth
 // knowing before treating a hash mismatch on this file as a regression.
-void writeLodInstanceTransform(ImportedSceneInstance& instance, float sinkUnits) {
+void writeLodInstanceTransform(
+    ImportedSceneInstance& instance, float sinkUnits,
+    float bethesdaOffsetX = 0.0f, float bethesdaOffsetY = 0.0f) {
     instance.transform[0] = 1.0f;
     instance.transform[6] = 1.0f;
     instance.transform[9] = -1.0f;
     instance.transform[15] = 1.0f;
+    // Skyrim BTR terrain is local to its filename's corner cell. Convert that
+    // tile origin through the same (x, y, z) -> (x, z, -y) basis as vertices.
+    instance.transform[3] = bethesdaOffsetX;
+    instance.transform[11] = -bethesdaOffsetY;
     // Sink applies in ENGINE space, where +y is up, so it lands in the
     // translation row rather than being folded into the basis.
     //
@@ -129,12 +135,17 @@ bool appendLandLodTier(
                 continue;
             }
 
-            ImportedSceneMesh mesh;
-            mesh.name = "lod" + std::to_string(tierCells) + "_" + std::to_string(tx) + "_" +
-                        std::to_string(tz);
-            for (const NifShape& shape : nifModel.shapes) {
+            const std::string tileName =
+                "lod" + std::to_string(tierCells) + "_" + std::to_string(tx) + "_" +
+                std::to_string(tz);
+            ImportedSceneMesh detailMesh;
+            detailMesh.name = set == LandLodSet::SkyrimObjects
+                ? tileName + "_detail"
+                : tileName;
+            ImportedSceneMesh largeRefMesh;
+            largeRefMesh.name = tileName + "_largeref";
+            const auto appendShape = [&](ImportedSceneMesh& mesh, const NifShape& shape) {
                 const auto baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
-                const auto partFirstIndex = static_cast<std::uint32_t>(mesh.indices.size());
                 for (std::size_t v = 0; (v * 3u) < shape.positions.size(); ++v) {
                     ImportedSceneVertex vertex{};
                     vertex.position[0] = shape.positions[v * 3u];
@@ -149,35 +160,86 @@ bool appendLandLodTier(
                         vertex.uv[0] = shape.uvs[v * 2u];
                         vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
                     }
+                    if ((v * 4u) + 3u < shape.colors.size()) {
+                        vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
+                    }
                     mesh.vertices.push_back(vertex);
                 }
+                ImportedSceneMeshPart part{};
+                part.firstIndex = static_cast<std::uint32_t>(mesh.indices.size());
+                part.textureIndex = textureIndexFor(shape.diffuseTexturePath);
+                // Skyrim's generated object atlas uses alpha as auxiliary
+                // material data. Trees have their own BTT/TreeLod atlas and
+                // are not present in these BTO shapes, so inferring cutouts
+                // from Tamriel.Objects.DDS punches holes in roofs and walls.
+                // Fallout/Oblivion object LOD still gets an authored true here
+                // when its NIF explicitly carries NiAlphaProperty.
+                part.alphaTest = shape.alphaTest;
+                // A generated BTO building is a hollow exterior shell. Its
+                // merged triangles do not consistently face the camera from
+                // every authored approach, so ordinary back-face culling cuts
+                // roofs and walls out of the skyline. This is the same rule
+                // CellSceneBuilder applies to placed *LOD.nif shells, extended
+                // to Skyrim's generated object-LOD container.
+                part.twoSided = shape.twoSided || set == LandLodSet::SkyrimObjects ||
+                    set == LandLodSet::SkyrimTerrain;
                 for (const std::uint32_t index : shape.triangleIndices) {
                     mesh.indices.push_back(baseVertex + index);
                 }
-                const auto partIndexCount =
-                    static_cast<std::uint32_t>(mesh.indices.size()) - partFirstIndex;
-                if (partIndexCount == 0u) {
+                part.indexCount =
+                    static_cast<std::uint32_t>(mesh.indices.size()) - part.firstIndex;
+                if (part.indexCount != 0u) {
+                    mesh.parts.push_back(part);
+                    outStats.triangles += part.indexCount / 3u;
+                }
+            };
+            for (const NifShape& shape : nifModel.shapes) {
+                // A Skyrim BTR can carry a small, flat WATER shape alongside
+                // the textured land mesh. It has no diffuse texture and needs
+                // the runtime water material/reflection path, not the opaque
+                // static path used by this LOD ring. Emitting it here paints a
+                // featureless white slab across valleys and lakes.
+                if (set == LandLodSet::SkyrimTerrain &&
+                    shape.diffuseTexturePath.empty()) {
                     continue;
                 }
-                ImportedSceneMeshPart part{};
-                part.firstIndex = partFirstIndex;
-                part.indexCount = partIndexCount;
-                part.textureIndex = textureIndexFor(shape.diffuseTexturePath);
-                part.alphaTest = shape.alphaTest;
-                mesh.parts.push_back(part);
-                outStats.triangles += partIndexCount / 3u;
-            }
-            if (mesh.indices.empty()) {
-                continue;
+                // Skyrim deliberately separates large references from the
+                // ordinary per-tile objects inside a BTO. The runtime hands
+                // ordinary detail back to streamed cells near the camera, but
+                // a walled child worldspace's distant building shell exists
+                // only in the LargeRef shape. Keeping both in one mesh made
+                // that handoff delete roofs and towers together with rocks and
+                // props -- the partial-Whiterun skyline symptom.
+                const std::string loweredShapeName = toLowerCopy(shape.name);
+                const bool largeReference =
+                    set == LandLodSet::SkyrimObjects &&
+                    loweredShapeName.find("largeref") != std::string::npos &&
+                    // The HD variants are mountains/rocks with their own
+                    // vertex-alpha handoff, not a child-worldspace city shell.
+                    loweredShapeName.find("hd-largeref") == std::string::npos;
+                appendShape(largeReference ? largeRefMesh : detailMesh, shape);
             }
 
-            const auto meshIndex = static_cast<std::uint32_t>(out.meshes.size());
-            out.meshes.push_back(std::move(mesh));
-            ImportedSceneInstance instance{};
-            instance.meshIndex = meshIndex;
-            writeLodInstanceTransform(instance, sinkUnits);
-            out.instances.push_back(std::move(instance));
-            ++outStats.tilesParsed;
+            bool emittedTile = false;
+            const auto emitMesh = [&](ImportedSceneMesh& mesh) {
+                if (mesh.indices.empty()) {
+                    return;
+                }
+                const auto meshIndex = static_cast<std::uint32_t>(out.meshes.size());
+                out.meshes.push_back(std::move(mesh));
+                ImportedSceneInstance instance{};
+                instance.meshIndex = meshIndex;
+                const bool localTerrain = set == LandLodSet::SkyrimTerrain;
+                writeLodInstanceTransform(
+                    instance, sinkUnits,
+                    localTerrain ? static_cast<float>(tx) * kExteriorCellSize : 0.0f,
+                    localTerrain ? static_cast<float>(tz) * kExteriorCellSize : 0.0f);
+                out.instances.push_back(std::move(instance));
+                emittedTile = true;
+            };
+            emitMesh(detailMesh);
+            emitMesh(largeRefMesh);
+            outStats.tilesParsed += emittedTile ? 1u : 0u;
         }
     }
 
@@ -187,9 +249,9 @@ bool appendLandLodTier(
                    std::to_string(tierCells);
         return false;
     }
-    // Every part's alpha mode came off its own NiAlphaProperty, so the
-    // texture-content cutout guess must not run over this on load -- the same
-    // statement CellSceneBuilder::finish() makes, and for the same reason.
+    // Every part's alpha mode is explicit: Fallout/Oblivion get it from
+    // NiAlphaProperty, while Skyrim BTO architecture is opaque. Do not let
+    // ImportedScene's whole-texture inference alpha-test the combined atlas.
     out.alphaFlagsAuthored = true;
     return true;
 }

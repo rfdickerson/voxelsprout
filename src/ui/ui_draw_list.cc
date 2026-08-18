@@ -2,9 +2,6 @@
 
 #include "ui/font.h"
 #include "ui/ui_text_util.h"
-#include "ui/vector/vector_icon_registry.h"
-#include "ui/vector/vector_mesh_sink.h"
-#include "ui/vector/vector_tessellator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -672,100 +669,6 @@ void UiDrawList::addSectorFilled(const UiVec2& center, float innerRadiusPx, floa
             m_data.indices.push_back(base + 3);
             cmd.indexCount += 6;
         }
-    }
-}
-
-void UiDrawList::addPathFilled(const VectorPath& path, const UiColor& color, FillRule fillRule) {
-    if (color.a <= 0.0f || path.empty()) {
-        return;
-    }
-    TessOptions opts;
-    opts.fillRule = fillRule;
-    DrawListMeshSink sink(*this);
-    tessellateFill(path, color.packAbgr8(), opts, sink);
-}
-
-void UiDrawList::addPathStroked(const VectorPath& path, const UiColor& color,
-                                const StrokeOptions& opts) {
-    if (color.a <= 0.0f || path.empty() || opts.widthPx <= 0.0f) {
-        return;
-    }
-    DrawListMeshSink sink(*this);
-    tessellateStroke(path, color.packAbgr8(), opts, sink);
-}
-
-void UiDrawList::addPolylineAA(const UiVec2* points, std::size_t count, const UiColor& color,
-                               float widthPx, bool closed) {
-    if (points == nullptr || count < 2 || color.a <= 0.0f || widthPx <= 0.0f) {
-        return;
-    }
-    VectorPath path;
-    path.moveTo(points[0].x, points[0].y);
-    for (std::size_t i = 1; i < count; ++i) {
-        path.lineTo(points[i].x, points[i].y);
-    }
-    if (closed) {
-        path.close();
-    }
-    StrokeOptions opts;
-    opts.widthPx = widthPx;
-    opts.join = LineJoin::Round;
-    opts.cap = LineCap::Round;
-    addPathStroked(path, color, opts);
-}
-
-void UiDrawList::addVectorIcon(std::string_view name, const UiRect& dst, const UiColor& tint) {
-    if (!dst.valid()) {
-        return;
-    }
-    const VectorIcon* icon = VectorIconRegistry::global().resolve(name);
-    if (icon == nullptr || icon->geometry.empty() || icon->sizePx <= 0.0f) {
-        return;
-    }
-    // Scale geometry baked at icon->sizePx to fill dst (uniform, centered).
-    const float dstW = dst.width();
-    const float dstH = dst.height();
-    const float scale = std::min(dstW, dstH) / icon->sizePx;
-    const float ox = dst.minX + (dstW - icon->sizePx * scale) * 0.5f;
-    const float oy = dst.minY + (dstH - icon->sizePx * scale) * 0.5f;
-
-    const bool identityScale = std::abs(scale - 1.0f) < 0.001f;
-    const bool identityTint  = (tint.r == 1.0f && tint.g == 1.0f && tint.b == 1.0f && tint.a == 1.0f);
-
-    if (identityScale) {
-        const UiVec2 translate{ox, oy};
-        if (identityTint)
-            appendCached(icon->geometry, translate);
-        else
-            appendCachedTinted(icon->geometry, translate, tint);
-        return;
-    }
-
-    // Scaled replay: apply (scale, translate) per vertex.
-    const UiGeometryBlock& block = icon->geometry;
-    const auto base = static_cast<std::uint32_t>(m_data.vertices.size());
-    const float opacity = currentOpacity();
-    m_data.vertices.reserve(m_data.vertices.size() + block.vertices.size());
-    for (const UiVertex& v : block.vertices) {
-        UiVertex out = v;
-        out.posPx[0] = ox + v.posPx[0] * scale;
-        out.posPx[1] = oy + v.posPx[1] * scale;
-        const std::uint32_t c = identityTint
-            ? scaleAlpha(v.rgba8, opacity)
-            : tintAbgr8(scaleAlpha(v.rgba8, opacity), tint);
-        out.rgba8 = c;
-        m_data.vertices.push_back(out);
-    }
-    for (const UiDrawCmd& blockCmd : block.commands) {
-        if (blockCmd.indexCount == 0) {
-            continue;
-        }
-        UiDrawCmd& dstCmd = currentCommand();
-        m_data.indices.reserve(m_data.indices.size() + blockCmd.indexCount);
-        for (std::uint32_t k = 0; k < blockCmd.indexCount; ++k) {
-            m_data.indices.push_back(base + block.indices[blockCmd.indexOffset + k]);
-        }
-        dstCmd.indexCount += blockCmd.indexCount;
     }
 }
 

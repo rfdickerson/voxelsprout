@@ -43,22 +43,6 @@ void testTemporalIsAlwaysAvailable() {
     assert(status.runtimeAvailable);
 }
 
-// FSR and DLSS are declared in the enum but have no implementation. Asking for
-// one must land on Temporal with a reason that says so, not silently render at
-// the requested backend's name.
-void testUnimplementedBackendsFallBack() {
-    for (const UpscalerBackend backend : {UpscalerBackend::Fsr, UpscalerBackend::Dlss}) {
-        assert(!odai::render::upscalerBackendCompiledIn(backend));
-        UpscalerSettings settings{};
-        settings.backend = backend;
-        const UpscalerStatus status = odai::render::resolveUpscaler(settings, false);
-        assert(status.requested == backend);
-        assert(status.active == UpscalerBackend::Temporal);
-        assert(!status.compiledIn);
-        assert(std::string_view(status.reason).find("not implemented") != std::string_view::npos);
-    }
-}
-
 // XeSS behaves differently depending on how this binary was built, and BOTH
 // branches are asserted so the test is meaningful either way.
 void testXessFollowsBuildConfiguration() {
@@ -191,7 +175,6 @@ void testMipBiasMatchesThePublishedRule() {
 
 int main() {
     testTemporalIsAlwaysAvailable();
-    testUnimplementedBackendsFallBack();
     testXessFollowsBuildConfiguration();
     testQualityPresetsDriveRenderScale();
     testParsingRejectsUnknownNames();

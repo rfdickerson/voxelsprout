@@ -17,7 +17,9 @@ Audio& Audio::operator=(Audio&&) noexcept = default;
 
 bool Audio::init(const AudioConfig& cfg) {
 #ifdef ODAI_AUDIO_HAVE_MINIAUDIO
-    m_backend = createMiniaudioBackend(cfg);
+    if (!cfg.forceNullBackend) {
+        m_backend = createMiniaudioBackend(cfg);
+    }
 #endif
     if (!m_backend) {
         m_backend = createNullBackend(cfg);

@@ -4,7 +4,6 @@
 
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 
 #include <algorithm>
 #include <array>
@@ -166,6 +165,7 @@ void RendererBackend::destroySkinningComputeResources() {
         slot.outputVertexBufferHandle = kInvalidBufferHandle;
         slot.vertexCount = 0;
         slot.boneCount = 0;
+        slot.visible = true;
         slot.meshDraws.clear();
         slot.pendingBoneMatrices.clear();
         slot.previousBoneMatrices.clear();
@@ -498,21 +498,46 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
                     (flags & odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
             }
         }
+        // Body parts carry their texture in each vertex, not in draw state.
+        // When adjacent index ranges agree on the small amount of state that
+        // really is per draw, joining them is therefore exact: the GPU sees
+        // one indexed range whose vertices still select the same bindless
+        // textures. Skyrim humanoids commonly arrive as five to seven parts;
+        // leaving those splits intact multiplied them through main, depth and
+        // every shadow cascade even though no material bind separated them.
+        if (!slot.meshDraws.empty()) {
+            ImportedMeshDraw& previous = slot.meshDraws.back();
+            if (previous.firstIndex + previous.indexCount == meshDraw.firstIndex &&
+                previous.alphaThreshold == meshDraw.alphaThreshold &&
+                previous.blended == meshDraw.blended &&
+                previous.twoSided == meshDraw.twoSided) {
+                previous.indexCount += meshDraw.indexCount;
+                continue;
+            }
+        }
         slot.meshDraws.push_back(meshDraw);
     }
 
     m_skinningActiveInstanceCount = std::max(m_skinningActiveInstanceCount, instanceIndex + 1u);
 
-    // Re-flatten every active instance slot's draws into one contiguous
+    // Re-flatten every visible instance slot's draws into one contiguous
     // vector so frame_pass_shadow.cc/frame_pass_prepass.cc/frame_pass_main.cc/
     // frame_run.cc keep consuming a single std::span<const ImportedMeshDraw>
     // with no changes.
+    rebuildVisibleSkinningDraws();
+    return true;
+}
+
+void RendererBackend::rebuildVisibleSkinningDraws() {
     m_skinningMeshDraws.clear();
     for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
-        const auto& draws = m_skinningInstances[i].meshDraws;
-        m_skinningMeshDraws.insert(m_skinningMeshDraws.end(), draws.begin(), draws.end());
+        const SkinnedInstanceSlot& slot = m_skinningInstances[i];
+        if (!slot.visible) {
+            continue;
+        }
+        m_skinningMeshDraws.insert(
+            m_skinningMeshDraws.end(), slot.meshDraws.begin(), slot.meshDraws.end());
     }
-    return true;
 }
 
 // Uploads a skinned actor's textures into the shared bindless table and hands
@@ -648,6 +673,23 @@ std::vector<std::uint32_t> RendererBackend::uploadSkinnedActorTextures(
 // This just stores the pose; uploadSkinnedActorPoseForFrame() (below) does
 // the actual per-frame upload, called from frame_run.cc right after
 // m_frameArena.beginFrame(m_currentFrame).
+void RendererBackend::setSkinnedActorVisible(std::uint32_t instanceIndex, bool visible) {
+    if (instanceIndex >= kMaxSkinnedInstances) {
+        return;
+    }
+    SkinnedInstanceSlot& slot = m_skinningInstances[instanceIndex];
+    if (slot.visible == visible) {
+        return;
+    }
+    slot.visible = visible;
+    if (!visible) {
+        slot.currentBoneAddress = 0;
+        slot.previousBoneAddress = 0;
+        slot.boneBufferBytes = 0;
+    }
+    rebuildVisibleSkinningDraws();
+}
+
 void RendererBackend::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose) {
     if (instanceIndex >= kMaxSkinnedInstances) {
         return;
@@ -672,6 +714,12 @@ void RendererBackend::setSkinnedActorPose(std::uint32_t instanceIndex, const Imp
 void RendererBackend::uploadSkinnedActorPoseForFrame() {
     for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
         SkinnedInstanceSlot& slot = m_skinningInstances[i];
+        if (!slot.visible) {
+            slot.currentBoneAddress = 0;
+            slot.previousBoneAddress = 0;
+            slot.boneBufferBytes = 0;
+            continue;
+        }
         if (slot.vertexCount == 0 || slot.pendingBoneMatrices.empty() || !slot.bufferSet.valid()) {
             continue;
         }

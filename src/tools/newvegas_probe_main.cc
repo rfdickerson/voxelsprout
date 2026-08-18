@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -1090,6 +1091,7 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
     const char* formatName = "?";
     switch (texture.format) {
         case TextureFormat::RGBA8: formatName = "RGBA8"; break;
+        case TextureFormat::RGBA8Srgb: formatName = "RGBA8-sRGB"; break;
         case TextureFormat::BC1: formatName = "BC1"; break;
         case TextureFormat::BC3: formatName = "BC3"; break;
         case TextureFormat::BC5: formatName = "BC5"; break;
@@ -1101,7 +1103,8 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
               << " bytes=" << ddsBytes.size() << "\n";
     // The GPU samples the compressed data directly, so decode base mip 0 to
     // RGBA only when the loader already did; otherwise report what is known.
-    if (texture.format != TextureFormat::RGBA8 || texture.rgba8.empty()) {
+    if ((texture.format != TextureFormat::RGBA8 &&
+         texture.format != TextureFormat::RGBA8Srgb) || texture.rgba8.empty()) {
         // Decode the block alpha into the same three bands the cutout
         // classifier uses (imported_scene.cc AlphaBandCounts), so this mode
         // answers "would the importer infer alpha test from this texture".
@@ -1424,7 +1427,8 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         const bool ok = odai::importer::fnv::parseNifStaticMesh(bytes, model, error);
         std::cout << "parse " << (ok ? "ok" : "FAILED") << (error.empty() ? "" : (": " + error)) << "\n"
                   << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount
-                  << ", editor markers " << model.editorMarkerShapeCount << "\n";
+                  << ", editor markers " << model.editorMarkerShapeCount
+                  << ", authored collision triangles " << model.collisionTriangles.size() << "\n";
         for (const odai::importer::fnv::KfAnimation& animation : model.embeddedAnimations) {
             std::cout << "  animation \"" << animation.name << "\": "
                       << animation.duration() << "s, "
@@ -1519,6 +1523,92 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                               << (static_cast<double>(agree) / static_cast<double>(counted));
                 }
                 std::cout << "\n";
+
+                // Generated BTO shapes merge many unrelated placed objects
+                // into one shape. Report their disconnected components so a
+                // near-camera LOD handoff can distinguish one enormous proxy
+                // from the smaller city buildings sharing its material.
+                const std::size_t vertexCount = shape.positions.size() / 3u;
+                std::vector<std::uint32_t> parent(vertexCount);
+                for (std::size_t v = 0; v < vertexCount; ++v) {
+                    parent[v] = static_cast<std::uint32_t>(v);
+                }
+                const auto findRoot = [&](std::uint32_t value) {
+                    std::uint32_t root = value;
+                    while (parent[root] != root) {
+                        root = parent[root];
+                    }
+                    while (parent[value] != value) {
+                        const std::uint32_t next = parent[value];
+                        parent[value] = root;
+                        value = next;
+                    }
+                    return root;
+                };
+                const auto unite = [&](std::uint32_t a, std::uint32_t b) {
+                    a = findRoot(a);
+                    b = findRoot(b);
+                    if (a != b) {
+                        parent[b] = a;
+                    }
+                };
+                for (std::size_t t = 0; t + 2u < shape.triangleIndices.size(); t += 3u) {
+                    const std::uint32_t a = shape.triangleIndices[t];
+                    const std::uint32_t b = shape.triangleIndices[t + 1u];
+                    const std::uint32_t c = shape.triangleIndices[t + 2u];
+                    if (a < vertexCount && b < vertexCount && c < vertexCount) {
+                        unite(a, b);
+                        unite(a, c);
+                    }
+                }
+                struct Component {
+                    std::size_t triangles = 0u;
+                    float min[3] = {std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max()};
+                    float max[3] = {std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest()};
+                };
+                std::map<std::uint32_t, Component> components;
+                for (std::size_t t = 0; t + 2u < shape.triangleIndices.size(); t += 3u) {
+                    const std::uint32_t first = shape.triangleIndices[t];
+                    if (first >= vertexCount) {
+                        continue;
+                    }
+                    Component& component = components[findRoot(first)];
+                    ++component.triangles;
+                    for (std::size_t corner = 0; corner < 3u; ++corner) {
+                        const std::uint32_t vertex = shape.triangleIndices[t + corner];
+                        if (vertex >= vertexCount) {
+                            continue;
+                        }
+                        for (std::size_t axis = 0; axis < 3u; ++axis) {
+                            const float value = shape.positions[(vertex * 3u) + axis];
+                            component.min[axis] = std::min(component.min[axis], value);
+                            component.max[axis] = std::max(component.max[axis], value);
+                        }
+                    }
+                }
+                std::vector<Component> sortedComponents;
+                for (const auto& [root, component] : components) {
+                    (void)root;
+                    sortedComponents.push_back(component);
+                }
+                std::sort(sortedComponents.begin(), sortedComponents.end(),
+                          [](const Component& a, const Component& b) {
+                              return a.triangles > b.triangles;
+                          });
+                if (sortedComponents.size() > 1u) {
+                    std::cout << "      components: " << sortedComponents.size() << " (largest)\n";
+                    for (std::size_t i = 0; i < std::min<std::size_t>(12u, sortedComponents.size()); ++i) {
+                        const Component& component = sortedComponents[i];
+                        std::cout << "        tris " << component.triangles << " bounds min("
+                                  << component.min[0] << ", " << component.min[1] << ", "
+                                  << component.min[2] << ") max(" << component.max[0] << ", "
+                                  << component.max[1] << ", " << component.max[2] << ")\n";
+                    }
+                }
             }
             if (!shape.uvs.empty()) {
                 // Two ranges, and the difference between them is the point: a
@@ -1992,7 +2082,7 @@ int probeBuildCell(
     }
     // Match the runtime streamer's asset override path so --buildcell can
     // verify a loose replacer in the actual scene it changes. This is the same
-    // colon-separated convention used by odai_game_newvegas.
+    // colon-separated convention used by odai.
     if (const char* mods = std::getenv("ODAI_FNV_MODS")) {
         std::string root;
         for (const char* cursor = mods; ; ++cursor) {
@@ -4445,6 +4535,9 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --buildcell <Plugin.esm> <Worldspace> <x> <z>\n"
               << "  odai_bethesda_probe <DataFilesPath> --floaters <Plugin.esm> <Worldspace> <x> <z>\n"
               << "  odai_bethesda_probe <DataFilesPath> --plugin <Plugin.esm> [typeCount]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --loadorder [plugins.txt]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --doorcheck [plugins.txt]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --routecheck [plugins.txt]\n"
               << "  odai_bethesda_probe <DataFilesPath> --record <Plugin.esm> <TYPE> [dumpCount]\n"
               << "  odai_bethesda_probe <DataFilesPath> --refs <Plugin.esm> <BASETYPE> [topN]\n"
               << "  odai_bethesda_probe <DataFilesPath> --placements <Plugin.esm> <baseFormID> [limit]\n"
@@ -4456,6 +4549,182 @@ void printUsage() {
 }
 
 }  // namespace
+
+int checkSkyrimTraversalRoute(
+    const std::filesystem::path& dataPath,
+    const std::optional<std::filesystem::path>& explicitList) {
+    using namespace odai::importer;
+    using namespace odai::importer::fnv;
+
+    std::vector<std::string> plugins;
+    std::filesystem::path source;
+    std::string error;
+    if (!resolveInstalledSkyrimPluginList(
+            dataPath, explicitList, plugins, source, error)) {
+        std::cout << "resolve failed: " << error << "\n";
+        return 1;
+    }
+    FalloutLoadOrder order;
+    if (!order.open(dataPath, plugins, error)) {
+        std::cout << "open failed: " << error << "\n";
+        return 1;
+    }
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(order, index, error)) {
+        std::cout << "index failed: " << error << "\n";
+        return 1;
+    }
+    FalloutWorldTables tables;
+    if (!buildFalloutWorldTables(order, tables, error)) {
+        std::cout << "world tables failed: " << error << "\n";
+        return 1;
+    }
+
+    const auto worldspaceId = [&](const std::string& editorId) -> std::uint32_t {
+        const auto found = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(editorId));
+        return found == tables.worldspaceFormIdsByEditorId.end() ? 0u : found->second;
+    };
+    const std::uint32_t tamriel = worldspaceId("Tamriel");
+    const std::uint32_t whiterun = worldspaceId("WhiterunWorld");
+    if (tamriel == 0u || whiterun == 0u) {
+        std::cout << "route failed: Tamriel or WhiterunWorld is absent\n";
+        return 1;
+    }
+
+    const auto interiorIndex = std::find_if(
+        index.cells.begin(), index.cells.end(), [](const FalloutCellIndexEntry& entry) {
+            return entry.isInterior &&
+                   toLowerAscii(entry.editorId) == "whiterunbanneredmare";
+        });
+    if (interiorIndex == index.cells.end()) {
+        std::cout << "route failed: WhiterunBanneredMare is absent\n";
+        return 1;
+    }
+    const std::size_t banneredMare =
+        static_cast<std::size_t>(std::distance(index.cells.begin(), interiorIndex));
+
+    struct RouteDoor {
+        std::size_t sourceCell = 0u;
+        std::size_t targetCell = 0u;
+        FalloutPlacedReference reference;
+    };
+    const auto findDoor = [&](const auto& sourceMatches, const auto& targetMatches,
+                              RouteDoor& out) {
+        for (std::size_t sourceIndex = 0; sourceIndex < index.cells.size(); ++sourceIndex) {
+            if (!sourceMatches(index.cells[sourceIndex])) {
+                continue;
+            }
+            FalloutCellRecord cell;
+            std::string cellError;
+            if (!extractFalloutCellMerged(
+                    index, order, index.cells[sourceIndex], cell, cellError)) {
+                continue;
+            }
+            for (const FalloutPlacedReference& reference : cell.references) {
+                if (!reference.hasTeleport || reference.isDeleted) {
+                    continue;
+                }
+                const auto target = index.cellIndexByReferenceFormId.find(
+                    reference.teleportTargetRefFormId);
+                if (target == index.cellIndexByReferenceFormId.end() ||
+                    !targetMatches(index.cells[target->second])) {
+                    continue;
+                }
+                bool finite = true;
+                for (float component : reference.teleportPosition) {
+                    finite = finite && std::isfinite(component);
+                }
+                for (float component : reference.teleportRotationRadians) {
+                    finite = finite && std::isfinite(component);
+                }
+                if (!finite) {
+                    continue;
+                }
+                out = RouteDoor{sourceIndex, target->second, reference};
+                return true;
+            }
+        }
+        return false;
+    };
+
+    RouteDoor enterCity;
+    RouteDoor enterInn;
+    RouteDoor leaveInn;
+    RouteDoor leaveCity;
+    const auto exteriorIn = [](std::uint32_t wanted) {
+        return [wanted](const FalloutCellIndexEntry& entry) {
+            return !entry.isInterior && entry.worldspaceFormId == wanted;
+        };
+    };
+    const auto exactCell = [](std::size_t wanted, const FalloutCellIndexEntry* base) {
+        return [wanted, base](const FalloutCellIndexEntry& entry) {
+            return static_cast<std::size_t>(&entry - base) == wanted;
+        };
+    };
+    if (!findDoor(exteriorIn(tamriel), exteriorIn(whiterun), enterCity) ||
+        !findDoor(exteriorIn(whiterun), exactCell(banneredMare, index.cells.data()), enterInn) ||
+        !findDoor(exactCell(banneredMare, index.cells.data()), exteriorIn(whiterun), leaveInn) ||
+        !findDoor(exteriorIn(whiterun), exteriorIn(tamriel), leaveCity)) {
+        std::cout << "route failed: could not resolve Tamriel -> WhiterunWorld -> "
+                     "WhiterunBanneredMare -> WhiterunWorld -> Tamriel\n";
+        return 1;
+    }
+
+    FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "route failed: game archives could not be opened\n";
+        return 1;
+    }
+    std::set<std::size_t> cellsToBuild{
+        enterCity.sourceCell, enterCity.targetCell, banneredMare};
+    std::size_t builtCells = 0u;
+    std::size_t totalCollisionTriangles = 0u;
+    for (const std::size_t cellIndex : cellsToBuild) {
+        FalloutCellRecord cell;
+        if (!extractFalloutCellMerged(index, order, index.cells[cellIndex], cell, error)) {
+            std::cout << "route failed: cell extraction: " << error << "\n";
+            return 1;
+        }
+        CellSceneBuilder builder(assets, tables);
+        builder.setMaxTextureSize(64u);
+        builder.addCell(cell);
+        ImportedScene scene;
+        builder.finish(scene);
+        if (scene.packedVertices.empty() || scene.packedIndices.empty() ||
+            scene.collisionTriangles.empty()) {
+            std::cout << "route failed: "
+                      << (index.cells[cellIndex].editorId.empty()
+                              ? ("cell 0x" + toHex(index.cells[cellIndex].cellFormId))
+                              : index.cells[cellIndex].editorId)
+                      << " has incomplete render/collision geometry\n";
+            return 1;
+        }
+        ++builtCells;
+        totalCollisionTriangles += scene.collisionTriangles.size();
+        std::cout << "built "
+                  << (index.cells[cellIndex].editorId.empty()
+                          ? ("cell 0x" + toHex(index.cells[cellIndex].cellFormId))
+                          : index.cells[cellIndex].editorId)
+                  << ": vertices=" << scene.packedVertices.size()
+                  << " collision=" << scene.collisionTriangles.size() << "\n";
+    }
+
+    const auto printStep = [&](const char* label, const RouteDoor& door) {
+        std::cout << label << " 0x" << std::hex << door.reference.formId << " -> 0x"
+                  << door.reference.teleportTargetRefFormId << std::dec << " arrival=("
+                  << door.reference.teleportPosition[0] << ","
+                  << door.reference.teleportPosition[1] << ","
+                  << door.reference.teleportPosition[2] << ")\n";
+    };
+    printStep("enter-city", enterCity);
+    printStep("enter-inn", enterInn);
+    printStep("leave-inn", leaveInn);
+    printStep("leave-city", leaveCity);
+    std::cout << "route=ok cellsBuilt=" << builtCells
+              << " collisionTriangles=" << totalCollisionTriangles
+              << " fingerprint=" << order.fingerprint() << "\n";
+    return 0;
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -4596,6 +4865,92 @@ int main(int argc, char** argv) {
         return probePlugin(
             dataPath / argv[3],
             argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 20u);
+    }
+    if (mode == "--loadorder") {
+        std::vector<std::string> plugins;
+        std::filesystem::path source;
+        std::string error;
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 4 ? std::optional<std::filesystem::path>(argv[3]) : std::nullopt;
+        if (!odai::importer::fnv::resolveInstalledSkyrimPluginList(
+                dataPath, explicitList, plugins, source, error)) {
+            std::cout << "resolve failed: " << error << "\n";
+            return 1;
+        }
+        odai::importer::fnv::FalloutLoadOrder order;
+        if (!order.open(dataPath, plugins, error)) {
+            std::cout << "open failed: " << error << "\n";
+            return 1;
+        }
+        std::cout << "source: "
+                  << (source.empty() ? std::string("installed official content")
+                                     : source.string())
+                  << "\n";
+        for (const auto& entry : order.entries()) {
+            std::cout << (entry.slot.kind ==
+                                  odai::importer::fnv::FalloutPluginSlotKind::Light
+                              ? "light   " : "regular ")
+                      << entry.slot.index << "  " << entry.header.fileName << "\n";
+        }
+        std::cout << "fingerprint: " << order.fingerprint() << "\n";
+        return 0;
+    }
+    if (mode == "--doorcheck") {
+        std::vector<std::string> plugins;
+        std::filesystem::path source;
+        std::string error;
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 4 ? std::optional<std::filesystem::path>(argv[3]) : std::nullopt;
+        if (!odai::importer::fnv::resolveInstalledSkyrimPluginList(
+                dataPath, explicitList, plugins, source, error)) {
+            std::cout << "resolve failed: " << error << "\n";
+            return 1;
+        }
+        odai::importer::fnv::FalloutLoadOrder order;
+        if (!order.open(dataPath, plugins, error)) {
+            std::cout << "open failed: " << error << "\n";
+            return 1;
+        }
+        odai::importer::fnv::FalloutCellIndex index;
+        if (!odai::importer::fnv::buildFalloutCellIndex(order, index, error)) {
+            std::cout << "index failed: " << error << "\n";
+            return 1;
+        }
+        std::size_t doors = 0u;
+        std::size_t unresolved = 0u;
+        std::size_t failedCells = 0u;
+        for (const auto& entry : index.cells) {
+            odai::importer::fnv::FalloutCellRecord cell;
+            if (!odai::importer::fnv::extractFalloutCellMerged(
+                    index, order, entry, cell, error)) {
+                ++failedCells;
+                continue;
+            }
+            for (const auto& reference : cell.references) {
+                if (!reference.hasTeleport || reference.isDeleted) {
+                    continue;
+                }
+                ++doors;
+                if (!index.cellIndexByReferenceFormId.contains(
+                        reference.teleportTargetRefFormId)) {
+                    ++unresolved;
+                    if (unresolved <= 20u) {
+                        std::cout << "unresolved door 0x" << std::hex
+                                  << reference.formId << " -> 0x"
+                                  << reference.teleportTargetRefFormId << std::dec << "\n";
+                    }
+                }
+            }
+        }
+        std::cout << "doors=" << doors << " unresolved=" << unresolved
+                  << " failedCells=" << failedCells << " markers="
+                  << index.mapMarkers.size() << "\n";
+        return (unresolved == 0u && failedCells == 0u) ? 0 : 1;
+    }
+    if (mode == "--routecheck") {
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 4 ? std::optional<std::filesystem::path>(argv[3]) : std::nullopt;
+        return checkSkyrimTraversalRoute(dataPath, explicitList);
     }
     if (mode == "--refs" && argc >= 5) {
         return probeRefsByBaseType(

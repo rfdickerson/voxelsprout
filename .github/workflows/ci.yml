@@ -27,7 +27,7 @@ jobs:
             libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev \
             mesa-vulkan-drivers vulkan-tools libvulkan1 \
             libasound2-dev libpulse-dev \
-            libwayland-dev wayland-protocols libxkbcommon-dev
+            libwayland-dev wayland-protocols libxkbcommon-dev xvfb
 
       - name: Install slangc
         run: |
@@ -74,7 +74,8 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
-            -DODAI_BUILD_EXAMPLES=ON \
+            -DODAI_BUILD_RUNTIME=ON \
+            -DODAI_BUILD_TOOLS=ON \
             -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=x64-linux
 
@@ -86,11 +87,3 @@ jobs:
 
       - name: Run CTest
         run: ctest --test-dir build --output-on-failure
-
-      - name: Upload headless render output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: headless-render-output
-          path: build/**/harness_smoke_test.png
-          if-no-files-found: ignore

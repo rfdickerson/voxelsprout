@@ -5,7 +5,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 #include <imgui.h>
@@ -117,15 +116,10 @@ const char* voxelGiSurfaceFallbackReasonName(
 
 } // namespace
 
-void RendererBackend::renderFrame(
-    const odai::world::ChunkGrid& chunkGrid,
-    const odai::sim::Simulation& simulation,
-    const CameraPose& camera,
-    const VoxelPreview& preview,
-    float simulationAlpha,
-    std::span<const std::size_t> visibleChunkIndices,
-    const ImportedActorFrameData* importedActors
-) {
+void RendererBackend::renderFrame(const CameraPose& camera) {
+    static const odai::world::ChunkGrid chunkGrid;
+    static const VoxelPreview preview;
+    constexpr std::span<const std::size_t> visibleChunkIndices{};
     const auto cpuFrameStartTime = std::chrono::steady_clock::now();
     float cpuWaitMs = 0.0f;
     float cpuWaitFrameSlotMs = 0.0f;
@@ -583,12 +577,7 @@ void RendererBackend::renderFrame(
         const float value = (env != nullptr) ? static_cast<float>(std::atof(env)) : 0.0f;
         return (value > 0.0f) ? value : 0.0f;
     }();
-    const bool renderingImportedActors =
-        importedActors != nullptr &&
-        !importedActors->vertices.empty() &&
-        !importedActors->indices.empty() &&
-        !importedActors->draws.empty();
-    const bool renderingImportedScene = !m_importedMeshDraws.empty() || renderingImportedActors;
+    const bool renderingImportedScene = !m_importedMeshDraws.empty();
     const bool directionalShadowsForFrame =
         shouldRenderImportedDirectionalShadows(m_importedInteriorLighting);
     bool renderInteriorPointShadowsThisFrame = false;
@@ -2741,9 +2730,7 @@ void RendererBackend::renderFrame(
     }
 
     const bool legacySceneRenderingEnabled = legacyVoxelRenderingEnabled;
-    const FrameInstanceDrawData frameInstanceDrawData = legacySceneRenderingEnabled
-        ? prepareFrameInstanceDrawData(simulation, simulationAlpha)
-        : FrameInstanceDrawData{};
+    const FrameInstanceDrawData frameInstanceDrawData{};
     const uint32_t pipeInstanceCount = frameInstanceDrawData.pipeInstanceCount;
     const auto& pipeInstanceSliceOpt = frameInstanceDrawData.pipeInstanceSliceOpt;
     const uint32_t transportInstanceCount = frameInstanceDrawData.transportInstanceCount;
@@ -2774,130 +2761,10 @@ void RendererBackend::renderFrame(
     const VkBuffer importedVertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
     const VkBuffer importedIndexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
     std::vector<ImportedMeshDraw> importedActorMeshDraws;
-    std::optional<FrameArenaSlice> importedActorVertexSliceOpt = std::nullopt;
-    std::optional<FrameArenaSlice> importedActorIndexSliceOpt = std::nullopt;
-    VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
-    VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
-    if (renderingImportedActors) {
-        std::vector<ImportedMeshVertex> actorVertices;
-        actorVertices.reserve(importedActors->vertices.size());
-        for (const odai::importer::ImportedScenePackedVertex& srcVertex : importedActors->vertices) {
-            ImportedMeshVertex dstVertex{};
-            std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-            dstVertex.packedNormal = odai::importer::packImportedVertexNormal(srcVertex.normal);
-            dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color, srcVertex.colorAlpha);
-            std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
-            dstVertex.flags = srcVertex.flags;
-            if (srcVertex.textureIndex < m_importedTextureSlots.size()) {
-                dstVertex.textureIndex = m_importedTextureSlots[srcVertex.textureIndex];
-            } else {
-                dstVertex.textureIndex = std::numeric_limits<std::uint32_t>::max();
-            }
-            actorVertices.push_back(dstVertex);
-        }
-
-        const VkDeviceSize actorVertexBytes =
-            static_cast<VkDeviceSize>(actorVertices.size() * sizeof(ImportedMeshVertex));
-        const VkDeviceSize actorIndexBytes =
-            static_cast<VkDeviceSize>(importedActors->indices.size() * sizeof(std::uint32_t));
-        importedActorVertexSliceOpt = m_frameArena.allocateUpload(
-            actorVertexBytes,
-            static_cast<VkDeviceSize>(alignof(ImportedMeshVertex)),
-            FrameArenaUploadKind::Unknown);
-        importedActorIndexSliceOpt = m_frameArena.allocateUpload(
-            actorIndexBytes,
-            static_cast<VkDeviceSize>(alignof(std::uint32_t)),
-            FrameArenaUploadKind::Unknown);
-        if (importedActorVertexSliceOpt.has_value() &&
-            importedActorIndexSliceOpt.has_value() &&
-            importedActorVertexSliceOpt->mapped != nullptr &&
-            importedActorIndexSliceOpt->mapped != nullptr) {
-            std::memcpy(importedActorVertexSliceOpt->mapped, actorVertices.data(), actorVertexBytes);
-            std::memcpy(importedActorIndexSliceOpt->mapped, importedActors->indices.data(), actorIndexBytes);
-            importedActorVertexBuffer = m_bufferAllocator.getBuffer(importedActorVertexSliceOpt->buffer);
-            importedActorIndexBuffer = m_bufferAllocator.getBuffer(importedActorIndexSliceOpt->buffer);
-            importedActorMeshDraws.reserve(importedActors->draws.size());
-            // Per-draw material state, derived exactly as the static scene path
-            // does it in chunk_upload.cc: the authored alpha-test threshold off
-            // the packed draw, and blend/two-sidedness off the draw's first
-            // vertex (they are per-vertex flags but uniform across a draw,
-            // because a draw is one NIF shape's triangles).
-            //
-            // This used to fill in firstIndex and indexCount alone and leave
-            // everything else at its default, which meant every actor was
-            // alpha-tested at 0.5 whatever its NIF said, no actor part was ever
-            // two-sided, and an alpha-BLENDED part rendered through the opaque
-            // pipeline -- showing the black that sits under its transparent
-            // texels instead of the background.
-            auto actorDrawFlags = [&](const odai::importer::ImportedScenePackedDraw& srcDraw) {
-                if (srcDraw.firstIndex >= importedActors->indices.size()) {
-                    return 0u;
-                }
-                const std::uint32_t vertexIndex = importedActors->indices[srcDraw.firstIndex];
-                if (vertexIndex >= importedActors->vertices.size()) {
-                    return 0u;
-                }
-                return importedActors->vertices[vertexIndex].flags;
-            };
-            // AABB centre over the draw's own vertices, for the back-to-front
-            // blended sort. Computed only for blended draws, for the same
-            // reason the static path does: it exists purely to sort them.
-            auto actorDrawCenter = [&](const odai::importer::ImportedScenePackedDraw& srcDraw,
-                                       float (&outCenter)[3]) {
-                float boundsMin[3] = {
-                    std::numeric_limits<float>::max(),
-                    std::numeric_limits<float>::max(),
-                    std::numeric_limits<float>::max()};
-                float boundsMax[3] = {
-                    std::numeric_limits<float>::lowest(),
-                    std::numeric_limits<float>::lowest(),
-                    std::numeric_limits<float>::lowest()};
-                const std::size_t lastIndex = std::min<std::size_t>(
-                    static_cast<std::size_t>(srcDraw.firstIndex) + srcDraw.indexCount,
-                    importedActors->indices.size());
-                bool sawVertex = false;
-                for (std::size_t i = srcDraw.firstIndex; i < lastIndex; ++i) {
-                    const std::uint32_t vertexIndex = importedActors->indices[i];
-                    if (vertexIndex >= importedActors->vertices.size()) {
-                        continue;
-                    }
-                    const auto& position = importedActors->vertices[vertexIndex].position;
-                    for (int axis = 0; axis < 3; ++axis) {
-                        boundsMin[axis] = std::min(boundsMin[axis], position[axis]);
-                        boundsMax[axis] = std::max(boundsMax[axis], position[axis]);
-                    }
-                    sawVertex = true;
-                }
-                if (!sawVertex) {
-                    return;
-                }
-                for (int axis = 0; axis < 3; ++axis) {
-                    outCenter[axis] = (boundsMin[axis] + boundsMax[axis]) * 0.5f;
-                }
-            };
-            for (const odai::importer::ImportedScenePackedDraw& srcDraw : importedActors->draws) {
-                if (srcDraw.indexCount == 0u ||
-                    srcDraw.firstIndex >= importedActors->indices.size()) {
-                    continue;
-                }
-                ImportedMeshDraw draw{};
-                draw.firstIndex = srcDraw.firstIndex;
-                draw.indexCount = std::min<std::uint32_t>(
-                    srcDraw.indexCount,
-                    static_cast<std::uint32_t>(importedActors->indices.size() - srcDraw.firstIndex));
-                const std::uint32_t flags = actorDrawFlags(srcDraw);
-                draw.alphaThreshold = srcDraw.alphaThreshold;
-                draw.blended =
-                    (flags & odai::importer::kImportedSceneMaterialFlagAlphaBlend) != 0u;
-                draw.twoSided =
-                    (flags & odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
-                if (draw.blended) {
-                    actorDrawCenter(srcDraw, draw.center);
-                }
-                importedActorMeshDraws.push_back(draw);
-            }
-        }
-    }
+    const VkBuffer importedActorVertexBuffer = VK_NULL_HANDLE;
+    const VkBuffer importedActorIndexBuffer = VK_NULL_HANDLE;
+    constexpr VkDeviceSize importedActorVertexOffset = 0;
+    constexpr VkDeviceSize importedActorIndexOffset = 0;
     std::span<const ImportedMeshDraw> importedMeshDrawsForFrame(
         m_importedMeshDraws.data(),
         m_importedMeshDraws.size());
@@ -2905,7 +2772,18 @@ void RendererBackend::renderFrame(
     // Without page culling there is no near/far split to compute, so the whole
     // terrain prefix counts as near -- a cooked scene is a bounded region.
     m_visibleImportedNearTerrainDrawCount = m_importedTerrainDrawCount;
-    const bool importedPageCullingEnabled = !m_importedPageDrawRanges.empty();
+    static const bool s_disableImportedPageCulling =
+        std::getenv("ODAI_DEBUG_NO_IMPORTED_PAGE_CULL") != nullptr;
+    const bool importedPageCullingEnabled =
+        !s_disableImportedPageCulling && !m_importedPageDrawRanges.empty();
+    if (s_disableImportedPageCulling) {
+        static bool s_loggedDisabledImportedPageCulling = false;
+        if (!s_loggedDisabledImportedPageCulling) {
+            VOX_LOGW("render")
+                << "ODAI_DEBUG_NO_IMPORTED_PAGE_CULL active: all imported draws are submitted";
+            s_loggedDisabledImportedPageCulling = true;
+        }
+    }
     auto importedPageIntersectsClip = [](
                                           const ImportedScenePageDrawRange& pageRange,
                                           const odai::math::Matrix4& clipMatrix,
@@ -3263,10 +3141,10 @@ void RendererBackend::renderFrame(
     shadowPassInputs.importedTerrainDrawCount = m_importedTerrainDrawCount;
     shadowPassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
     shadowPassInputs.importedActorVertexOffset =
-        importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
+        importedActorVertexOffset;
     shadowPassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
     shadowPassInputs.importedActorIndexOffset =
-        importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
+        importedActorIndexOffset;
     shadowPassInputs.importedActorMeshDraws = importedActorMeshDraws;
     shadowPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     shadowPassInputs.skipCascadeMask = shadowSkipCascadeMask;
@@ -3638,10 +3516,10 @@ void RendererBackend::renderFrame(
     prepassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
     prepassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
     prepassInputs.importedActorVertexOffset =
-        importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
+        importedActorVertexOffset;
     prepassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
     prepassInputs.importedActorIndexOffset =
-        importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
+        importedActorIndexOffset;
     prepassInputs.importedActorMeshDraws = importedActorMeshDraws;
     prepassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
     prepassInputs.pipeInstanceCount = pipeInstanceCount;
@@ -3697,10 +3575,10 @@ void RendererBackend::renderFrame(
         m_importedBlendedDrawOrder.data(), m_importedBlendedDrawOrder.size());
     mainPassInputs.importedActorVertexBuffer = importedActorVertexBuffer;
     mainPassInputs.importedActorVertexOffset =
-        importedActorVertexSliceOpt.has_value() ? importedActorVertexSliceOpt->offset : 0u;
+        importedActorVertexOffset;
     mainPassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
     mainPassInputs.importedActorIndexOffset =
-        importedActorIndexSliceOpt.has_value() ? importedActorIndexSliceOpt->offset : 0u;
+        importedActorIndexOffset;
     mainPassInputs.importedActorMeshDraws = importedActorMeshDraws;
     mainPassInputs.importedActorBlendedDrawOrder = std::span<const std::uint32_t>(
         m_importedActorBlendedDrawOrder.data(), m_importedActorBlendedDrawOrder.size());

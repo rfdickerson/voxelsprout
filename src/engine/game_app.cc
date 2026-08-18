@@ -113,10 +113,6 @@ bool GameApp::init(const char* title) {
             self->m_pendingScrollDelta += static_cast<float>(dy);
     });
 
-    m_renderer.setStrategyMapMode(wantsStrategyMapTuning());
-    if (wantsMinimalRendering()) {
-        m_renderer.setMinimalRenderMode(true);
-    }
     // MSAA before init: the sample count sizes the render targets and is baked
     // into every pipeline, so it cannot be changed afterwards. ODAI_MSAA lets a
     // fill-rate-bound machine trade edge quality for frame time without a
@@ -138,7 +134,7 @@ bool GameApp::init(const char* title) {
         if (const char* backendEnv = std::getenv("ODAI_UPSCALER")) {
             if (!render::parseUpscalerBackend(backendEnv, upscaler.backend)) {
                 VOX_LOGW("engine") << "ignoring ODAI_UPSCALER=\"" << backendEnv
-                                   << "\" (expected off|temporal|xess|fsr|dlss)";
+                                   << "\" (expected off|temporal|xess)";
             }
         }
         if (const char* qualityEnv = std::getenv("ODAI_UPSCALER_QUALITY")) {
@@ -148,7 +144,7 @@ bool GameApp::init(const char* title) {
         }
         m_renderer.setUpscalerSettings(upscaler);
     }
-    if (!m_renderer.init(m_window, m_emptyGrid)) {
+    if (!m_renderer.init(m_window)) {
         VOX_LOGE("engine") << "renderer init failed";
         glfwDestroyWindow(m_window);
         m_window = nullptr;
@@ -159,16 +155,6 @@ bool GameApp::init(const char* title) {
     m_audio.init(audioConfig());
 
     if (!onInit()) {
-        m_audio.shutdown();
-        m_renderer.shutdown();
-        glfwDestroyWindow(m_window);
-        m_window = nullptr;
-        glfwTerminate();
-        return false;
-    }
-
-    if (!m_plugins.attachAll(*this)) {
-        m_plugins.detachAll(*this);
         m_audio.shutdown();
         m_renderer.shutdown();
         glfwDestroyWindow(m_window);
@@ -300,10 +286,6 @@ void GameApp::run() {
             onTick(dt);
         }
         {
-            core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::Plugins));
-            m_plugins.tickAll(*this, dt);
-        }
-        {
             core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::Audio));
             m_audio.update(dt);
         }
@@ -396,7 +378,6 @@ void GameApp::reportFrameStats() {
 
 void GameApp::shutdown() {
     onShutdown();
-    m_plugins.detachAll(*this);
     m_audio.shutdown();
     m_renderer.shutdown();
     if (m_window) {
@@ -475,9 +456,7 @@ void GameApp::beginFrameDraw() {
     m_uiDrawList.reset({static_cast<float>(fbW), static_cast<float>(fbH)});
 }
 
-void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlpha,
-                          const render::ImportedActorFrameData* importedActors,
-                          const WorldFrameContent* worldContent) {
+void GameApp::submitFrame(const render::CameraPose& camera) {
     {
         core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::UiBuild));
         m_uiContext.buildAppend(m_uiDrawList);
@@ -496,14 +475,8 @@ void GameApp::submitFrame(const render::CameraPose& camera, float simulationAlph
     }
     m_renderer.setUiDrawData(m_uiDrawList.data());
 
-    const world::ChunkGrid& grid = (worldContent && worldContent->chunkGrid)
-        ? *worldContent->chunkGrid : m_emptyGrid;
-    const render::VoxelPreview preview = worldContent ? worldContent->voxelPreview : render::VoxelPreview{};
-    const std::span<const std::size_t> visible =
-        worldContent ? worldContent->visibleChunkIndices : std::span<const std::size_t>{};
-
     core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::Submit));
-    m_renderer.renderFrame(grid, m_emptySimulation, camera, preview, simulationAlpha, visible, importedActors);
+    m_renderer.renderFrame(camera);
 }
 
 namespace {

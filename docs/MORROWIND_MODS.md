@@ -46,7 +46,7 @@ For the Seyda Neen-to-Balmora tour:
 
 ```bash
 cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
-ODAI_FNV_TEX_SIZE=1024 ./odai_game_newvegas \
+ODAI_FNV_TEX_SIZE=1024 ./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$VURT" \
   --tour-file ../assets/tours/seyda_neen_to_balmora.txt --flythrough 30
@@ -66,7 +66,7 @@ Run the viewer from its build directory so its compiled shader paths resolve:
 
 ```bash
 cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
-./odai_game_newvegas \
+./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
   --mod "$VURT" \
@@ -112,7 +112,7 @@ mkdir -p "$PACKS/rafael-2.0e" "$PACKS/enhanced-pbr-2.0e"
 Then add one argument to any Morrowind/Tamriel Rebuilt launch:
 
 ```bash
-./odai_game_newvegas \
+./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
   --plugin-add TR_Factions.esp --shader-pack rafael
@@ -131,7 +131,7 @@ representative interior with:
 
 ```bash
 cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
-./odai_game_newvegas \
+./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
   --plugin-add TR_Factions.esp --interior "Almas Thirr, Canalworks"
@@ -144,7 +144,7 @@ cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
 ODAI_WINDOW_SIZE=1920x1080 ODAI_FNV_HOUR=17.5 ODAI_FNV_NOHUD=1 \
 ODAI_FNV_COLOR_LOOK=cinematic ODAI_FNV_LOAD_RADIUS=2 \
 ODAI_FNV_SPAWN_POS=50500,220,243000 ODAI_FNV_YAW=-90.6 ODAI_FNV_PITCH=4.4 \
-./odai_game_newvegas \
+./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
   --plugin-add TR_Factions.esp \
@@ -158,7 +158,7 @@ cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
 ODAI_WINDOW_SIZE=1920x1080 ODAI_FNV_HOUR=17.5 ODAI_FNV_NOHUD=1 \
 ODAI_FNV_COLOR_LOOK=cinematic ODAI_FNV_LOAD_RADIUS=2 \
 ODAI_FNV_SPAWN_POS=50500,220,243000 ODAI_CAPTURE_ENCODER=libopenh264 \
-./odai_game_newvegas \
+./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
   --plugin-add TR_Factions.esp \

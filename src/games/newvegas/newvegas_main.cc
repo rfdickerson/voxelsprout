@@ -105,6 +105,12 @@ int main(int argc, char** argv) {
             app.setStreamDataPath(argv[++i]);
         } else if (std::strcmp(argv[i], "--plugin") == 0 && i + 1 < argc) {
             app.setStreamPlugin(argv[++i]);
+        } else if (std::strcmp(argv[i], "--load-order") == 0 && i + 1 < argc) {
+            app.setLoadOrderPath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--state") == 0 && i + 1 < argc) {
+            app.setTraversalStatePath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--no-resume") == 0) {
+            app.setResumeEnabled(false);
         } else if (std::strcmp(argv[i], "--worldspace") == 0 && i + 1 < argc) {
             app.setStreamWorldspace(argv[++i]);
         } else if (std::strcmp(argv[i], "--plugin-add") == 0 && i + 1 < argc) {
@@ -112,14 +118,14 @@ int main(int argc, char** argv) {
             // own, so "--plugin-add NevadaSkies.esp" is enough.
             app.addPlugin(argv[++i]);
         } else if (std::strcmp(argv[i], "--upscaler") == 0 && i + 1 < argc) {
-            // off | temporal | xess | fsr | dlss. Unavailable backends report
+            // off | temporal | xess. Unavailable backends report
             // why and fall back rather than failing to launch.
             odai::render::UpscalerSettings upscaler = app.upscalerSettings();
             if (odai::render::parseUpscalerBackend(argv[++i], upscaler.backend)) {
                 app.setUpscalerSettings(upscaler);
             } else {
                 std::cout << "unknown --upscaler backend: " << argv[i]
-                          << " (off|temporal|xess|fsr|dlss)\n";
+                          << " (off|temporal|xess)\n";
                 return 1;
             }
         } else if (std::strcmp(argv[i], "--upscaler-quality") == 0 && i + 1 < argc) {
@@ -232,23 +238,23 @@ int main(int argc, char** argv) {
             }
             app.setCaptureVideo(outputPath, static_cast<int>(fps * seconds), fps);
         } else if (std::strcmp(argv[i], "--help") == 0) {
-            std::cout << "odai_game_newvegas [--scene <path.bin>]\n"
+            std::cout << "odai [--scene <path.bin>]\n"
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
-                      << "odai_game_newvegas --screenshot <out.ppm> [frames]\n"
+                      << "odai --screenshot <out.ppm> [frames]\n"
                       << "  Render `frames` frames (default 8), write a PPM, and quit.\n"
                       << "  Cook a scene first with odai_newvegas_cooker.\n"
-                      << "odai_game_newvegas --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
+                      << "odai --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
                       << "  Fly the tour and encode it directly, then quit. Needs ffmpeg on PATH;\n"
                       << "  $ODAI_CAPTURE_ENCODER overrides the auto-detected H.264 encoder.\n"
-                      << "odai_game_newvegas --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
+                      << "odai --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
                       << "  The same, as numbered PPMs. Prefer --capture-video: a still sequence\n"
                       << "  at this resolution is gigabytes.\n"
-                      << "odai_game_newvegas --tour-file <path>\n"
+                      << "odai --tour-file <path>\n"
                       << "  Replace the built-in Goodsprings path with rows of `px py pz  lx ly lz`.\n"
-                      << "odai_game_newvegas --character [<skeleton.nif> <part.nif>...]\n"
+                      << "odai --character [<skeleton.nif> <part.nif>...]\n"
                       << "  Stand one GPU-skinned character in bind pose, no world.\n"
                       << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n"
-                      << "odai_game_newvegas --stream <Data> --mod <dir> [--mod <dir>...]\n"
+                      << "odai --stream <Data> --mod <dir> [--mod <dir>...]\n"
                       << "  Override game assets from directories laid out like Data\n"
                       << "  (textures\\..., meshes\\...); later --mod wins. Also\n"
                       << "  $ODAI_FNV_MODS, ':'-separated.\n"
@@ -258,11 +264,16 @@ int main(int argc, char** argv) {
                       << "  --shader-pack rafael enables the native Rafael/Enhanced-PBR\n"
                       << "  preset and its externally installed water normal. Also\n"
                       << "  $ODAI_FNV_SHADER_PACK=rafael and $ODAI_WATER_NORMAL=<png|dds>.\n"
-                      << "odai_game_newvegas --stream <Data> --plugin-add <Mod.esp>\n"
+                      << "odai --stream <Data> --plugin-add <Mod.esp>\n"
                       << "  Load an extra plugin and merge its world-record overrides; masters\n"
                       << "  resolve on their own. Plugins may live in --stream or --mod roots.\n"
                       << "  TES3 load orders merge exterior grids and named interiors. Also\n"
                       << "  $ODAI_FNV_PLUGINS, ','-separated.\n"
+                      << "  --load-order <plugins.txt> selects Skyrim's active profile;\n"
+                      << "  otherwise it auto-discovers Proton/native profiles and falls\n"
+                      << "  back to installed official content. Also $ODAI_FNV_LOAD_ORDER.\n"
+                      << "  --state <path> overrides the traversal save; --no-resume skips\n"
+                      << "  loading it without deleting it. Explicit world/interior/spawn wins.\n"
                       << "  --weather <EditorID> forces one weather by name.\n"
                       << "\n"
                       << "See docs/FNV_MODS.md and docs/MORROWIND_MODS.md for recipes.\n";

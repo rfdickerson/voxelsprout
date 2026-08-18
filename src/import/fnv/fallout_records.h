@@ -136,6 +136,13 @@ constexpr std::int32_t landLodBlockOrigin(std::int32_t cellCoord) {
 enum class LandLodSet {
     Terrain,  // <ws>\<ws>.level<N>.x<X>.y<Y>.nif   -- tiers 4, 8, 16, 32
     Objects,  // <ws>\blocks\<ws>.level4.x<X>.y<Y>.nif -- tier 4 only
+    // Skyrim's generated terrain uses the same 4/8/16/32-cell pyramid, but
+    // moved beside its object LOD and changed the extension. Unlike BTO object
+    // vertices, BTR terrain vertices are local to the named tile.
+    SkyrimTerrain,  // terrain\<ws>\<ws>.<N>.<X>.<Y>.btr
+    // Skyrim moved generated object LOD to a different tree and extension.
+    // The payload is still a NIF on the same four-cell tile lattice.
+    SkyrimObjects,  // terrain\<ws>\objects\<ws>.4.<X>.<Y>.bto
 };
 
 // Whether the given set actually ships tiles at the given tier. Only the
@@ -143,7 +150,7 @@ enum class LandLodSet {
 // than level4 resolves nothing at all, which is indistinguishable from a sparse
 // grid unless it is rejected up front.
 constexpr bool landLodTierExists(LandLodSet set, std::int32_t tierCells) {
-    if (set == LandLodSet::Objects) {
+    if (set == LandLodSet::Objects || set == LandLodSet::SkyrimObjects) {
         return tierCells == kLandLodBlockCells;
     }
     return tierCells == 4 || tierCells == 8 || tierCells == 16 || tierCells == 32;
@@ -159,6 +166,17 @@ constexpr bool landLodTierExists(LandLodSet set, std::int32_t tierCells) {
 inline std::string landLodTilePath(
     const std::string& loweredWorldspace, LandLodSet set, std::int32_t tierCells,
     std::int32_t tileX, std::int32_t tileY) {
+    if (set == LandLodSet::SkyrimObjects || set == LandLodSet::SkyrimTerrain) {
+        std::string path = "terrain\\";
+        path += loweredWorldspace;
+        path += set == LandLodSet::SkyrimObjects ? "\\objects\\" : "\\";
+        path += loweredWorldspace;
+        path += "." + std::to_string(tierCells);
+        path += "." + std::to_string(tileX);
+        path += "." + std::to_string(tileY);
+        path += set == LandLodSet::SkyrimObjects ? ".bto" : ".btr";
+        return path;
+    }
     std::string path = "landscape\\lod\\";
     path += loweredWorldspace;
     path += (set == LandLodSet::Objects) ? "\\blocks\\" : "\\";
@@ -302,6 +320,31 @@ struct FalloutPlacedReference {
     std::uint32_t teleportTargetRefFormId = 0;
     float teleportPosition[3] = {};
     float teleportRotationRadians[3] = {};
+    // XLOC. Exploration mode exposes the authored lock but may deliberately
+    // bypass it until keys and lockpicking exist.
+    bool isLocked = false;
+    std::uint8_t lockLevel = 0u;
+    // XMRK plus its following marker fields. Skyrim stores FULL as a localized
+    // string ID; keeping both representations lets the streamer's load-order
+    // aware string-table pass resolve the correct source plugin.
+    bool isMapMarker = false;
+    std::string mapMarkerName;
+    std::uint32_t mapMarkerNameStringId = 0u;
+    std::uint8_t mapMarkerFlags = 0u;
+    std::uint16_t mapMarkerType = 0u;
+};
+
+struct FalloutMapMarkerRecord {
+    std::uint32_t referenceFormId = 0u;
+    std::uint32_t cellFormId = 0u;
+    std::uint32_t worldspaceFormId = 0u;
+    std::string name;
+    std::uint32_t nameStringId = 0u;
+    float position[3] = {};
+    std::uint8_t flags = 0u;
+    std::uint16_t type = 0u;
+    bool initiallyDisabled = false;
+    bool deleted = false;
 };
 
 // One ATXT/VTXT pair: a landscape texture blended over a quadrant's base, with
@@ -398,7 +441,9 @@ struct FalloutNavMeshDoorPortal {
     std::uint16_t triangleIndex = 0;
 };
 
-// NAVM: Fallout's authored navigation mesh for one cell.
+// NAVM: Bethesda's authored navigation mesh for one cell. Fallout/Oblivion use
+// DATA + NVVX + NVTR subrecords; Skyrim stores the same vertex/triangle core in
+// one packed NVNM subrecord. Both decode into this common representation.
 //
 // The layout below was derived from real records rather than documentation --
 // every format in this importer that was reasoned out instead of measured has
@@ -662,6 +707,10 @@ struct FalloutCellIndex {
     // built from record headers alone, exactly as extractFalloutScene does.
     // Doors need this to resolve an XTEL target to the cell it stands in.
     std::unordered_map<std::uint32_t, std::size_t> cellIndexByReferenceFormId;
+    // XMRK references, extracted during the same header/index pass. These are
+    // tiny (397 in Skyrim.esm) and drive compass/location discovery without
+    // retaining all 693k placed references.
+    std::vector<FalloutMapMarkerRecord> mapMarkers;
 };
 
 // One pass that records where every cell's records are without materializing

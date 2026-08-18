@@ -3,7 +3,6 @@
 #include <GLFW/glfw3.h>
 
 #include "core/log.h"
-#include "sim/network_procedural.h"
 
 #include <array>
 #include <cstring>

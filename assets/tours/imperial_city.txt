@@ -36,7 +36,7 @@
 # Late afternoon. Sun elevation is cos(hour/24*2pi)*75 with negative meaning
 # ABOVE the horizon, so ODAI_FNV_HOUR=16 puts it ~37 degrees up.
 #
-#   odai_game_newvegas --stream "<Oblivion/Data>" --plugin Oblivion.esm \
+#   odai --stream "<Oblivion/Data>" --plugin Oblivion.esm \
 #     --worldspace ICImperialPalace --tour-file assets/tours/imperial_city.txt \
 #     --flythrough 34 --capture-video imperial_city.mp4 30 20
 #

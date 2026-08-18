@@ -39,6 +39,9 @@ struct AudioConfig {
     float ambientVolume = 0.5f;
     float uiVolume = 0.8f;
     bool muted = false;
+    // Deterministic silent mode for headless tools and tests. Normal runtime
+    // configuration leaves this false and uses miniaudio when available.
+    bool forceNullBackend = false;
 };
 
 // World-space transform used both to position the listener each frame and to

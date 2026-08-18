@@ -120,6 +120,35 @@ public:
         core::JobSystem& jobs,
         std::string& outError);
 
+    // Switches the selected exterior worldspace without reopening archives or
+    // rebuilding plugin-wide tables/indexes. Pending work is drained, resident
+    // renderer chunks and callbacks are removed, and the next update streams
+    // around the caller's new arrival position.
+    bool selectWorldspace(
+        const std::string& worldspaceEditorId,
+        render::Renderer& renderer,
+        std::string& outError);
+
+    // Read-only transition preflight. This lets a door validate its target
+    // before selectWorldspace() evicts any currently resident renderer chunks.
+    [[nodiscard]] bool hasWorldspace(const std::string& worldspaceEditorId) const;
+    // True when an exterior cell belonging to a direct child of the selected
+    // worldspace overlaps the inclusive grid rectangle. Skyrim's generated
+    // parent-world BTO contains the visible proxy for walled child cities in
+    // both its LargeRef and ordinary Obj shapes. Near-camera LOD handoff must
+    // not discard the latter: Tamriel has no detailed copy of those buildings.
+    [[nodiscard]] bool hasChildWorldspaceCellInRange(
+        std::int32_t minCellX, std::int32_t minCellZ,
+        std::int32_t maxCellX, std::int32_t maxCellZ) const;
+    // Actor scans are intentionally plugin-wide, but Bethesda reuses similar
+    // coordinate ranges in unrelated worldspaces. Resolve the placement's
+    // owning cell through the same merged index used by doors before accepting
+    // it into the current exterior population.
+    [[nodiscard]] bool referenceBelongsToCurrentWorldspace(
+        std::uint32_t referenceFormId) const;
+    [[nodiscard]] bool referenceBelongsToInterior(
+        std::uint32_t referenceFormId, const std::string& interiorEditorId) const;
+
     // Directory for the on-disk cache of built cells. A cell built once is
     // written here and loaded straight back on later visits and later runs,
     // skipping record extraction, NIF parsing and texture decode entirely.
@@ -181,10 +210,13 @@ public:
 
     // Called on the main thread as cells become resident and are evicted, so a
     // consumer (collision, navigation) can mirror the resident set without the
-    // streamer knowing what any of them are for. The scene reference is valid
-    // only for the duration of the call.
+    // streamer knowing what any of them are for. Both references are valid only
+    // for the duration of the call.
     using CellResidentCallback =
-        std::function<void(const CellCoord&, const ImportedScene&)>;
+        std::function<void(
+            const CellCoord&,
+            const ImportedScene&,
+            const std::vector<FalloutNavMeshRecord>&)>;
     using CellEvictedCallback = std::function<void(const CellCoord&)>;
     void setCellCallbacks(CellResidentCallback onResident, CellEvictedCallback onEvicted) {
         m_onCellResident = std::move(onResident);
@@ -233,10 +265,10 @@ public:
         float spawnPosition[3] = {};
         float spawnYawDegrees = 0.0f;
         // True when spawnPosition came from the scene's bounding box rather than
-        // from a navmesh triangle. Skyrim's NAVM is a TES5-layout record this
-        // reader does not parse, so this is the path EVERY Skyrim interior
-        // takes; it is reported because "centre of the bounding box" can land
-        // in a wall where "middle of the largest floor" cannot.
+        // from a navmesh triangle. TES4 and TES5 NAVM prefixes are supported;
+        // this fallback remains for rooms with no usable authored navigation.
+        // It is reported because "centre of the bounding box" can land in a
+        // wall where "middle of the largest floor" cannot.
         bool spawnFromBounds = false;
     };
 
@@ -251,6 +283,7 @@ public:
         ImportedScene& outScene,
         InteriorScene& outInterior,
         std::string& outError);
+    [[nodiscard]] bool hasInterior(const std::string& interiorEditorId) const;
 
     // Spawn on the doorstep of a named interior, in ENGINE space -- e.g.
     // "GSDocMitchellHouse" for where Fallout: New Vegas actually starts you.
@@ -286,6 +319,16 @@ public:
     // 221 are weather/audio zones nobody should be told they have entered.
     [[nodiscard]] std::vector<std::string> regionNamesAtEngineSpace(
         const float enginePosition[3]) const;
+
+    [[nodiscard]] const std::vector<FalloutMapMarkerRecord>& mapMarkers() const {
+        return m_cellIndex.mapMarkers;
+    }
+    [[nodiscard]] const std::string& currentWorldspaceEditorId() const {
+        return m_currentWorldspaceEditorId;
+    }
+    [[nodiscard]] std::uint32_t currentWorldspaceFormId() const {
+        return m_currentWorldspaceFormId;
+    }
 
     [[nodiscard]] CellStreamerStats stats() const;
     [[nodiscard]] std::size_t availableCellCount() const { return m_availableCells.size(); }
@@ -328,9 +371,11 @@ private:
     // A no-op for every Fallout and Oblivion plugin, whose RDMP already IS the
     // name -- the string-ID map is empty for them.
     void resolveLocalizedRegionNames();
+    bool configureWorldspace(const std::string& worldspaceEditorId, std::string& outError);
 
     CellResidencyPlanner m_planner;
     std::filesystem::path m_esmPath;
+    std::filesystem::path m_dataFilesPath;
     // The whole load order, when the caller supplied extra plugins. Cells,
     // references and base records are then merged across it with later plugins
     // overriding earlier ones -- the only way a patch's fixes reach the scene.
@@ -346,6 +391,8 @@ private:
     DecodedTextureCache m_textureCache;
     FalloutWorldTables m_worldTables;
     FalloutCellIndex m_cellIndex;
+    std::string m_currentWorldspaceEditorId;
+    std::uint32_t m_currentWorldspaceFormId = 0u;
 
 public:
     // World units one exterior cell covers in the plugin being streamed. The

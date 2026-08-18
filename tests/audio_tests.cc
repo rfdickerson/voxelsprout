@@ -4,15 +4,20 @@
 #include "audio/audio.h"
 #include "math/math.h"
 
-// These tests link only the facade + NullBackend (ODAI_AUDIO_HAVE_MINIAUDIO is
-// not defined for this target), so they run with no audio device on any
-// platform/CI. They verify the graceful-degrade contract: init never fails,
+// These tests explicitly select the retained null backend so they run with no
+// audio device on any platform/CI. They verify the graceful-degrade contract: init never fails,
 // missing files yield invalid handles, every play call is a safe no-op, and
 // volume/mute state round-trips (so config persistence works without a device).
 
 namespace {
 
 int g_failures = 0;
+
+odai::audio::AudioConfig silentConfig() {
+    odai::audio::AudioConfig config;
+    config.forceNullBackend = true;
+    return config;
+}
 
 void expectTrue(bool condition, const char* message) {
     if (!condition) {
@@ -32,14 +37,14 @@ void expectNear(float actual, float expected, const char* message) {
 void testInitRunsSilent() {
     using namespace odai::audio;
     Audio audio;
-    expectTrue(audio.init(AudioConfig{}), "init returns true even with no device");
+    expectTrue(audio.init(silentConfig()), "init returns true even with no device");
     expectTrue(!audio.deviceActive(), "null backend reports deviceActive() == false");
 }
 
 void testMissingFilesYieldInvalidHandles() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     const SoundHandle sound = audio.loadSound("does/not/exist.wav", SoundCategory::Ui);
     const MusicHandle music = audio.loadMusic("does/not/exist.mp3");
     expectTrue(!sound.valid(), "loadSound on a missing file is invalid");
@@ -49,7 +54,7 @@ void testMissingFilesYieldInvalidHandles() {
 void testPlayCallsAreNoOps() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     // Neither invalid nor (synthetic) valid handles may crash on the null backend.
     audio.playSound(SoundHandle{});
     audio.playSound(SoundHandle{42});
@@ -67,7 +72,7 @@ void testPlayCallsAreNoOps() {
 void testVolumeRoundTripAndClamp() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
 
     audio.setCategoryVolume(SoundCategory::Music, 0.25f);
     expectNear(audio.categoryVolume(SoundCategory::Music), 0.25f, "category volume round-trips");
@@ -84,7 +89,7 @@ void testVolumeRoundTripAndClamp() {
 void testMuteToggles() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     expectTrue(!audio.muted(), "starts unmuted by default");
     audio.setMuted(true);
     expectTrue(audio.muted(), "setMuted(true) reports muted");
@@ -95,7 +100,7 @@ void testMuteToggles() {
 void testConfigSeedsState() {
     using namespace odai::audio;
     Audio audio;
-    AudioConfig cfg;
+    AudioConfig cfg = silentConfig();
     cfg.masterVolume = 0.7f;
     cfg.musicVolume = 0.3f;
     cfg.muted = true;
@@ -108,7 +113,7 @@ void testConfigSeedsState() {
 void testListenerTransformDoesNotCrash() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     audio.setListenerTransform(ListenerTransform{});  // default (zero position, -Z forward)
     audio.setListenerTransform(ListenerTransform{
         odai::math::Vector3{12.0f, 5.0f, -3.0f},
@@ -120,7 +125,7 @@ void testListenerTransformDoesNotCrash() {
 void testPlaySoundAtIsNoOp() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     audio.playSoundAt(SoundHandle{}, odai::math::Vector3{}, AttenuationParams{});
     audio.playSoundAt(SoundHandle{9}, odai::math::Vector3{1.0f, 2.0f, 3.0f}, AttenuationParams{2.0f, 20.0f, 1.5f});
     expectTrue(true, "playSoundAt does not crash on the null backend");
@@ -129,7 +134,7 @@ void testPlaySoundAtIsNoOp() {
 void testAmbientSlotsAlwaysInvalidOnNullBackend() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     const AmbientHandle global = audio.startAmbient(SoundHandle{5}, 1.0f);
     const AmbientHandle positional = audio.startAmbientAt(
         SoundHandle{6}, odai::math::Vector3{1.0f, 1.0f, 1.0f}, AttenuationParams{}, 1.0f);
@@ -140,7 +145,7 @@ void testAmbientSlotsAlwaysInvalidOnNullBackend() {
 void testAmbientStopAndRepositionAreNoOps() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     audio.stopAmbient(AmbientHandle{}, 1.0f);
     audio.stopAmbient(AmbientHandle{3}, 0.5f);  // synthetic, non-issued handle
     audio.setAmbientPosition(AmbientHandle{}, odai::math::Vector3{});
@@ -151,7 +156,7 @@ void testAmbientStopAndRepositionAreNoOps() {
 void testManyConcurrentAmbientStartsStayIndependent() {
     using namespace odai::audio;
     Audio audio;
-    audio.init(AudioConfig{});
+    audio.init(silentConfig());
     // Exercise well past kMaxAmbientSlots worth of concurrent starts; the null backend does
     // no real slot bookkeeping, so every one must independently no-op.
     for (int i = 0; i < kMaxAmbientSlots + 2; ++i) {

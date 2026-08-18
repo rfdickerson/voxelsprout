@@ -5,7 +5,6 @@
 #include "core/frame_profiler.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 #include <imgui.h>
@@ -125,7 +124,8 @@ VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
         case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC5: return VK_FORMAT_BC5_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC7: return VK_FORMAT_BC7_SRGB_BLOCK;
-        default:                                 return VK_FORMAT_R8G8B8A8_UNORM;
+        case odai::importer::TextureFormat::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
+        default:                                      return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
 
@@ -134,7 +134,8 @@ VkDeviceSize importedTextureMipOffsetFmt(
     std::uint32_t width, std::uint32_t height,
     std::uint32_t mipLevel, odai::importer::TextureFormat format
 ) {
-    if (format == odai::importer::TextureFormat::RGBA8) {
+    if (format == odai::importer::TextureFormat::RGBA8 ||
+        format == odai::importer::TextureFormat::RGBA8Srgb) {
         return importedTextureMipOffset(width, height, mipLevel);
     }
     const std::uint32_t bpb = blockBytesForImportedFormat(format);
@@ -207,7 +208,8 @@ std::array<float, 3> sampleImportedTextureBaseColor(
         return {vertex.color[0], vertex.color[1], vertex.color[2]};
     }
     const odai::importer::ImportedSceneTexture& texture = textures[vertex.textureIndex];
-    if (texture.format != odai::importer::TextureFormat::RGBA8) {
+    if (texture.format != odai::importer::TextureFormat::RGBA8 &&
+        texture.format != odai::importer::TextureFormat::RGBA8Srgb) {
         return {vertex.color[0], vertex.color[1], vertex.color[2]};
     }
     if (texture.width == 0u ||
@@ -633,35 +635,8 @@ bool RendererBackend::uploadHexTerrain(const odai::importer::HexTerrainData& dat
     return true;
 }
 
-bool RendererBackend::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
-    odai::importer::ImportedScene compatibilityScene{};
-    compatibilityScene.sourceTag = scene.sourceTag;
-    compatibilityScene.textures = scene.renderCache.textures;
-    compatibilityScene.waterPatches = scene.renderCache.waterPatches;
-    compatibilityScene.lights = scene.renderCache.lights;
-    compatibilityScene.particleEmitters = scene.renderCache.particleEmitters;
-    compatibilityScene.packedVertices = scene.renderCache.packedVertices;
-    compatibilityScene.packedIndices = scene.renderCache.packedIndices;
-    compatibilityScene.packedDraws = scene.renderCache.packedDraws;
-    compatibilityScene.sourceTextureCount = static_cast<std::uint32_t>(scene.textures.size());
-    compatibilityScene.sourceMeshCount = static_cast<std::uint32_t>(scene.meshAssets.size());
-    compatibilityScene.sourceInstanceCount = static_cast<std::uint32_t>(scene.instances.objectIndices.size());
-    compatibilityScene.sourceLandscapeCellCount = scene.renderCache.terrainDrawCount;
-    compatibilityScene.sourceWaterPatchCount = static_cast<std::uint32_t>(scene.waterPatches.size());
-    compatibilityScene.sourceLightCount = static_cast<std::uint32_t>(scene.lights.size());
-    compatibilityScene.sourceParticleEmitterCount =
-        static_cast<std::uint32_t>(scene.particleEmitters.size());
-    compatibilityScene.boundsMin[0] = scene.sceneBounds.min[0];
-    compatibilityScene.boundsMin[1] = scene.sceneBounds.min[1];
-    compatibilityScene.boundsMin[2] = scene.sceneBounds.min[2];
-    compatibilityScene.boundsMax[0] = scene.sceneBounds.max[0];
-    compatibilityScene.boundsMax[1] = scene.sceneBounds.max[1];
-    compatibilityScene.boundsMax[2] = scene.sceneBounds.max[2];
-    return uploadImportedSceneInternal(compatibilityScene, &scene);
-}
-
 bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& scene) {
-    return uploadImportedSceneInternal(scene, nullptr, /*appendChunk=*/false);
+    return uploadImportedSceneInternal(scene, /*appendChunk=*/false);
 }
 
 std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
@@ -670,7 +645,7 @@ std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::Importe
     // after used to serve for that, and stopped being able to once a chunk could
     // land in a recycled slot without the vector growing at all.
     m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
-    if (!uploadImportedSceneInternal(scene, nullptr, /*appendChunk=*/true)) {
+    if (!uploadImportedSceneInternal(scene, /*appendChunk=*/true)) {
         return kInvalidImportedChunkIndex;
     }
     if (m_lastImportedChunkIndex == kInvalidImportedChunkIndex) {
@@ -1531,7 +1506,8 @@ std::uint32_t RendererBackend::acquireImportedTexture(
     const std::uint32_t inferredMipLevelCount =
         inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size());
     std::uint32_t mipLevelCount = 0;
-    if (srcTexture.format != odai::importer::TextureFormat::RGBA8) {
+    if (srcTexture.format != odai::importer::TextureFormat::RGBA8 &&
+        srcTexture.format != odai::importer::TextureFormat::RGBA8Srgb) {
         // Block-compressed: trust the mip count stored by the DDS loader.
         if (srcTexture.mipLevelCount == 0u) {
             VOX_LOGW("render") << "block-compressed texture missing mip data: "
@@ -1729,7 +1705,6 @@ void RendererBackend::releaseImportedTexture(std::uint32_t slot) {
 
 bool RendererBackend::uploadImportedSceneInternal(
     const odai::importer::ImportedScene& scene,
-    const odai::importer::GpuSceneAsset* gpuScene,
     bool appendChunk
 ) {
     if (m_device == VK_NULL_HANDLE) {
@@ -2284,48 +2259,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         uploadScene.packedDraws.size(),
         kInvalidImportedPageRangeIndex);
     std::vector<ImportedScenePageDrawRange> pageDrawRanges;
-    if (gpuScene != nullptr && !gpuScene->renderCache.pageDrawRanges.empty() && !gpuScene->pages.empty()) {
-        pageDrawRanges.reserve(gpuScene->renderCache.pageDrawRanges.size());
-        for (const odai::importer::GpuScenePageDrawRange& sourceRange : gpuScene->renderCache.pageDrawRanges) {
-            if (sourceRange.drawCount == 0u ||
-                sourceRange.firstDraw >= uploadScene.packedDraws.size() ||
-                sourceRange.pageIndex >= gpuScene->pages.size()) {
-                continue;
-            }
-            ImportedScenePageDrawRange rendererRange{};
-            const odai::importer::GpuSceneBounds& bounds = gpuScene->pages[sourceRange.pageIndex].bounds;
-            std::memcpy(rendererRange.boundsMin, bounds.min, sizeof(rendererRange.boundsMin));
-            std::memcpy(rendererRange.boundsMax, bounds.max, sizeof(rendererRange.boundsMax));
-            const std::uint32_t rendererRangeIndex = static_cast<std::uint32_t>(pageDrawRanges.size());
-            pageDrawRanges.push_back(rendererRange);
-
-            const std::uint32_t sourceDrawEnd = static_cast<std::uint32_t>(std::min<std::size_t>(
-                static_cast<std::size_t>(sourceRange.firstDraw) + static_cast<std::size_t>(sourceRange.drawCount),
-                uploadScene.packedDraws.size()));
-            for (std::uint32_t drawIndex = sourceRange.firstDraw; drawIndex < sourceDrawEnd; ++drawIndex) {
-                sourceDrawPageRangeIndices[drawIndex] = rendererRangeIndex;
-            }
-        }
-
-        bool pageRangesCoverDraws = !pageDrawRanges.empty();
-        for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
-            if (uploadScene.packedDraws[drawIndex].indexCount != 0u &&
-                sourceDrawPageRangeIndices[drawIndex] == kInvalidImportedPageRangeIndex) {
-                pageRangesCoverDraws = false;
-                break;
-            }
-        }
-        if (!pageRangesCoverDraws) {
-            pageDrawRanges.clear();
-            std::fill(
-                sourceDrawPageRangeIndices.begin(),
-                sourceDrawPageRangeIndices.end(),
-                kInvalidImportedPageRangeIndex);
-        }
-    } else if (gpuScene == nullptr && !uploadScene.pageRanges.empty()) {
-        // Native page ranges supplied directly on the ImportedScene (e.g. the hex
-        // strategy map emits one page per chunk). Mirror the GpuScene translation so
-        // the same downstream per-page frustum-cull consumer is reused unchanged.
+    if (!uploadScene.pageRanges.empty()) {
         pageDrawRanges.reserve(uploadScene.pageRanges.size());
         for (const odai::importer::ImportedScenePageRange& sourceRange : uploadScene.pageRanges) {
             if (sourceRange.drawCount == 0u ||

@@ -31,13 +31,6 @@ bool upscalerBackendCompiledIn(UpscalerBackend backend) {
 #else
         return false;
 #endif
-    case UpscalerBackend::Fsr:
-    case UpscalerBackend::Dlss:
-        // Declared in the enum so the selection path, the config parsing and the
-        // status reporting are all exercised for them -- and so that asking for
-        // one gives a specific answer instead of "unknown backend". Neither has
-        // an implementation; see the CMake options.
-        return false;
     }
     return false;
 }
@@ -47,8 +40,6 @@ const char* upscalerBackendName(UpscalerBackend backend) {
     case UpscalerBackend::Off: return "off";
     case UpscalerBackend::Temporal: return "temporal";
     case UpscalerBackend::Xess: return "xess";
-    case UpscalerBackend::Fsr: return "fsr";
-    case UpscalerBackend::Dlss: return "dlss";
     }
     return "unknown";
 }
@@ -72,10 +63,6 @@ bool parseUpscalerBackend(std::string_view text, UpscalerBackend& outBackend) {
         outBackend = UpscalerBackend::Temporal;
     } else if (text == "xess") {
         outBackend = UpscalerBackend::Xess;
-    } else if (text == "fsr") {
-        outBackend = UpscalerBackend::Fsr;
-    } else if (text == "dlss") {
-        outBackend = UpscalerBackend::Dlss;
     } else {
         return false;
     }
@@ -115,12 +102,6 @@ UpscalerStatus resolveUpscaler(const UpscalerSettings& settings, bool runtimeSup
         case UpscalerBackend::Xess:
             status.reason = "XeSS was not compiled in (configure with -DODAI_ENABLE_XESS=ON "
                             "and -DODAI_XESS_SDK_DIR=<sdk>)";
-            break;
-        case UpscalerBackend::Fsr:
-            status.reason = "the FSR backend is declared but not implemented";
-            break;
-        case UpscalerBackend::Dlss:
-            status.reason = "the DLSS backend is declared but not implemented";
             break;
         default:
             status.reason = "backend unavailable";

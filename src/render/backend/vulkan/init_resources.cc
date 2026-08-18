@@ -4,7 +4,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 #include <imgui.h>

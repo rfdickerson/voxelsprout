@@ -1,6 +1,6 @@
 # Running the Fallout: New Vegas viewer with mods
 
-How to install real Nexus mods and launch `odai_game_newvegas` with them. The *why* behind
+How to install real Nexus mods and launch `odai` with them. The *why* behind
 each mechanism — formID remapping, WTHR colour layout, the cloud projection — lives in
 CLAUDE.md's Fallout: New Vegas section; this file is the operational guide.
 
@@ -22,7 +22,7 @@ directory, so launching from the repo root fails with a wall of
 
 ```bash
 cd cmake-build-relwithdebinfo   # or cmake-build-app, whatever you configured
-./odai_game_newvegas --help
+./odai --help
 ```
 
 You also need the game installed. On Linux/Steam the data directory is
@@ -126,7 +126,7 @@ cd cmake-build-relwithdebinfo
 
 ODAI_FNV_TEX_SIZE=1024 \
 ODAI_FNV_MODS="$HOME/.local/share/odai/fnv-mods/nmc:$HOME/.local/share/odai/fnv-mods/nevadaskies" \
-./odai_game_newvegas \
+./odai \
   --stream "$HOME/.steam/steam/steamapps/common/Fallout New Vegas/Data" \
   --plugin-add NevadaSkies.esp \
   --weather WEAVarHRainHeavy
@@ -166,7 +166,7 @@ else means it did not resolve and the fallback list was walked.
 ```bash
 ODAI_FNV_TEX_SIZE=1024 ODAI_FNV_HOUR=16.0 ODAI_FNV_TONEMAP=enb \
 ODAI_FNV_MODS="$HOME/.local/share/odai/fnv-mods/nmc:$HOME/.local/share/odai/fnv-mods/nevadaskies" \
-./odai_game_newvegas \
+./odai \
   --stream "$HOME/.steam/steam/steamapps/common/Fallout New Vegas/Data" \
   --plugin-add NevadaSkies.esp \
   --weather WEAVarHRainHeavy

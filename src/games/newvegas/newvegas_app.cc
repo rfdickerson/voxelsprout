@@ -404,6 +404,33 @@ void NewVegasApp::endConversation() {
 }
 
 void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
+    if (door.targetKind == importer::ImportedSceneDoorTargetKind::Exterior &&
+        !m_interiorStarted && m_streamer != nullptr &&
+        door.targetWorldspaceEditorId == m_streamer->currentWorldspaceEditorId()) {
+        // XTEL between two exterior cells in one worldspace is just a teleport;
+        // residency remains continuous and the normal streamer catches up at
+        // the new position on this frame.
+        m_cameraX = door.arrivalPosition[0];
+        m_cameraY = door.arrivalPosition[1] + m_collision.tuning().eyeHeight;
+        m_cameraZ = door.arrivalPosition[2];
+        m_yawDegrees = door.arrivalYawDegrees;
+        m_pitchDegrees = 0.0f;
+        reloadActorsForCurrentSpace();
+        return;
+    }
+    if (door.targetKind != importer::ImportedSceneDoorTargetKind::CookedLegacy) {
+        if (m_doorTransitionPhase == DoorTransitionPhase::None) {
+            m_pendingDoor = door;
+            m_doorTransitionPhase = DoorTransitionPhase::FadeOut;
+            m_doorTransitionAlpha = 0.0f;
+            if (door.locked) {
+                m_toasts.push("Lock bypassed", door.targetCellEditorId.empty()
+                    ? std::string("Exploration mode") : door.targetCellEditorId);
+            }
+        }
+        return;
+    }
+
     // An empty target cell means the exterior this interior was cooked beside;
     // both spellings go through importedSceneInteriorFileName so the cooker's
     // naming convention lives in exactly one place.
@@ -419,6 +446,257 @@ void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
     const float arrivalYaw = door.arrivalYawDegrees;
     if (!loadScene(target, door.arrivalPosition, &arrivalYaw)) {
         VOX_LOGE("newvegas") << "failed to walk through the door into " << target.filename().string();
+    }
+}
+
+void NewVegasApp::rebuildStreamDoors() {
+    m_doors.clear();
+    for (const auto& [cell, doors] : m_streamDoorsByCell) {
+        (void)cell;
+        m_doors.insert(m_doors.end(), doors.begin(), doors.end());
+    }
+}
+
+bool NewVegasApp::completeDoorTransition(
+    const importer::ImportedSceneDoor& door, std::string& outError) {
+    outError.clear();
+    if (m_streamer == nullptr) {
+        outError = "no active streamed session";
+        return false;
+    }
+
+    if (door.targetKind == importer::ImportedSceneDoorTargetKind::Interior) {
+        if (door.targetCellEditorId.empty()) {
+            outError = "interior door has no destination cell identity";
+            return false;
+        }
+        // Build first. A bad destination leaves the current world untouched.
+        importer::ImportedScene scene;
+        importer::fnv::CellStreamer::InteriorScene interior;
+        if (!m_streamer->buildInteriorScene(
+                door.targetCellEditorId, scene, interior, outError)) {
+            return false;
+        }
+
+        // Upload while the old space is still intact. A renderer allocation
+        // failure must leave the player in that old space, not at a black frame
+        // with its residency already torn down.
+        const std::size_t destinationChunk = m_renderer.addImportedSceneChunk(scene);
+        if (destinationChunk == render::Renderer::kInvalidImportedChunkIndex) {
+            outError = "renderer rejected the destination interior";
+            return false;
+        }
+
+        m_streamer->waitIdle();
+        std::string clearError;
+        if (!m_streamer->selectWorldspace(
+                m_streamer->currentWorldspaceEditorId(), m_renderer, clearError)) {
+            m_renderer.removeImportedSceneChunk(destinationChunk);
+            outError = "could not clear exterior residency: " + clearError;
+            return false;
+        }
+        m_streamDoorsByCell.clear();
+        m_doors.clear();
+        m_collision.clear();
+        m_actorNavigation.clear();
+        if (m_distantLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_distantLodChunk);
+            m_distantLodChunk = render::Renderer::kInvalidImportedChunkIndex;
+        }
+        m_skyrimTerrainLodTileValid = false;
+        if (m_skyrimObjectLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_skyrimObjectLodChunk);
+            m_skyrimObjectLodChunk = render::Renderer::kInvalidImportedChunkIndex;
+            m_skyrimObjectLodTileValid = false;
+        }
+        for (const SkinnedActor& actor : m_actors) {
+            m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
+        }
+
+        m_interiorChunk = destinationChunk;
+        const importer::CellCoord collisionCell{
+            static_cast<std::int32_t>(std::floor(door.arrivalPosition[0] / 4096.0f)),
+            static_cast<std::int32_t>(std::floor(door.arrivalPosition[2] / 4096.0f))};
+        m_collision.addCell(collisionCell, scene);
+        m_doors = scene.doors;
+        m_currentInteriorEditorId = door.targetCellEditorId;
+        m_interiorStarted = true;
+        m_renderer.setImportedSceneInteriorMode(true);
+
+        render::ImportedInteriorLighting lighting{};
+        lighting.enabled = true;
+        lighting.hasAuthoredLighting = interior.hasLighting;
+        lighting.fogNear = interior.fogNear;
+        lighting.fogFar = interior.fogFar;
+        lighting.showSky = interior.showSky;
+        lighting.useSkyLighting = interior.useSkyLighting;
+        lighting.localShadowMode =
+            render::ImportedInteriorLighting::LocalShadowMode::ShadowMapsWithContact;
+        lighting.indirectLightingMode =
+            render::ImportedInteriorLighting::IndirectLightingMode::ScreenSpaceDiffuse;
+        for (int channel = 0; channel < 3; ++channel) {
+            lighting.ambientColor[channel] = srgbChannelToLinear(interior.ambientColor[channel]);
+            lighting.directionalColor[channel] =
+                srgbChannelToLinear(interior.directionalColor[channel]);
+            lighting.fogColor[channel] = srgbChannelToLinear(interior.fogColor[channel]);
+        }
+        m_renderer.setImportedInteriorLighting(lighting);
+    } else if (door.targetKind == importer::ImportedSceneDoorTargetKind::Exterior) {
+        if (door.targetWorldspaceEditorId.empty()) {
+            outError = "exterior door has no destination worldspace identity";
+            return false;
+        }
+        if (!m_streamer->hasWorldspace(door.targetWorldspaceEditorId)) {
+            outError = "destination worldspace is not present in the active load order: " +
+                       door.targetWorldspaceEditorId;
+            return false;
+        }
+        m_streamer->waitIdle();
+        if (m_interiorChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_interiorChunk);
+            m_interiorChunk = render::Renderer::kInvalidImportedChunkIndex;
+        }
+        m_collision.clear();
+        m_actorNavigation.clear();
+        m_streamDoorsByCell.clear();
+        m_doors.clear();
+        if (m_distantLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_distantLodChunk);
+            m_distantLodChunk = render::Renderer::kInvalidImportedChunkIndex;
+        }
+        m_skyrimTerrainLodTileValid = false;
+        if (m_skyrimObjectLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_skyrimObjectLodChunk);
+            m_skyrimObjectLodChunk = render::Renderer::kInvalidImportedChunkIndex;
+        }
+        m_skyrimObjectLodTileValid = false;
+        if (!m_streamer->selectWorldspace(
+                door.targetWorldspaceEditorId, m_renderer, outError)) {
+            return false;
+        }
+        m_streamWorldspace = door.targetWorldspaceEditorId;
+        m_currentInteriorEditorId.clear();
+        m_interiorStarted = false;
+        m_renderer.setImportedSceneInteriorMode(false);
+        m_renderer.setImportedInteriorLighting(render::ImportedInteriorLighting{});
+        // A child/DLC worldspace may name a different climate, or inherit one
+        // from its parent. Re-select automatic weather only after the worldspace
+        // swap commits; an explicit --weather or restored weather remains
+        // authoritative across the door.
+        if (m_requestedWeatherEditorId.empty()) {
+            m_activeWeatherFormId = 0u;
+        }
+        initWeather();
+    } else {
+        outError = "unsupported streamed door target";
+        return false;
+    }
+
+    m_cameraX = door.arrivalPosition[0];
+    m_cameraY = door.arrivalPosition[1] + m_collision.tuning().eyeHeight;
+    m_cameraZ = door.arrivalPosition[2];
+    m_yawDegrees = door.arrivalYawDegrees;
+    m_pitchDegrees = 0.0f;
+    m_walkMode = true;
+
+    if (!m_interiorStarted) {
+        const float engine[3] = {m_cameraX, m_cameraY, m_cameraZ};
+        const float zero[3] = {};
+        float fallout[3] = {};
+        importer::fnv::CellStreamer::engineToFallout(engine, fallout);
+        m_streamer->update(m_renderer, fallout, zero);
+        m_streamer->waitIdle();
+        m_streamer->update(m_renderer, fallout, zero);
+    }
+    reloadActorsForCurrentSpace();
+    VOX_LOGI("newvegas") << "door transition complete: "
+                         << (m_interiorStarted ? m_currentInteriorEditorId
+                                               : m_streamWorldspace);
+    return true;
+}
+
+void NewVegasApp::reloadActorsForCurrentSpace() {
+    // Fallout/New Vegas still give Victor special startup treatment. Skyrim's
+    // streamed traversal has no fixed companion and can rebuild the nearby
+    // population uniformly whenever a door changes ownership space.
+    if (!m_streamIsSkyrim || m_streamer == nullptr) {
+        return;
+    }
+
+    endConversation();
+    for (const SkinnedActor& actor : m_actors) {
+        if (actor.uploaded) {
+            m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
+        }
+    }
+    m_actors.clear();
+    m_victorIndex = -1;
+    m_activationActor = -1;
+    m_actorsUploadPending = false;
+
+    const float engineCentre[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    float bethesdaCentre[3] = {};
+    importer::fnv::CellStreamer::engineToFallout(engineCentre, bethesdaCentre);
+    ActorPopulationStats actorStats;
+    const auto placementFilter = [this](std::uint32_t referenceFormId) {
+        if (m_interiorStarted) {
+            return m_streamer->referenceBelongsToInterior(
+                referenceFormId, m_currentInteriorEditorId);
+        }
+        return m_streamer->referenceBelongsToCurrentWorldspace(referenceFormId);
+    };
+    const std::filesystem::path dataPath(m_streamDirectory);
+    loadGoodspringsActors(
+        dataPath / m_streamPlugin,
+        m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
+        m_streamer->assets(), bethesdaCentre, kActorLoadRadius,
+        kFirstCrowdSkinnedInstance,
+        render::kMaxSkinnedInstances - kFirstCrowdSkinnedInstance,
+        {}, placementFilter, m_actors, actorStats);
+
+    if (!m_actors.empty()) {
+        std::string dialogueDetail;
+        loadActorDialogue(
+            dataPath / m_streamPlugin,
+            m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
+            m_actors, dialogueDetail);
+        VOX_LOGI("newvegas") << "actor dialogue after transition: " << dialogueDetail;
+
+        std::string voiceDetail;
+        loadActorVoices(
+            dataPath, m_streamPlugin, m_modDirectories, m_actors, voiceDetail);
+        VOX_LOGI("newvegas") << "actor voices after transition: " << voiceDetail;
+        m_actorsUploadPending = true;
+    }
+    VOX_LOGI("newvegas")
+        << "actors after transition into "
+        << (m_interiorStarted ? m_currentInteriorEditorId : m_streamWorldspace)
+        << ": " << actorStats.detail;
+}
+
+void NewVegasApp::updateDoorTransition(float deltaSeconds) {
+    constexpr float kFadeSeconds = 0.22f;
+    if (m_doorTransitionPhase == DoorTransitionPhase::None) {
+        return;
+    }
+    if (m_doorTransitionPhase == DoorTransitionPhase::FadeOut) {
+        m_doorTransitionAlpha =
+            std::min(1.0f, m_doorTransitionAlpha + (deltaSeconds / kFadeSeconds));
+        if (m_doorTransitionAlpha >= 1.0f && m_pendingDoor.has_value()) {
+            std::string error;
+            if (!completeDoorTransition(*m_pendingDoor, error)) {
+                VOX_LOGE("newvegas") << "door transition failed: " << error;
+                m_toasts.push("Door unavailable", error);
+            }
+            m_pendingDoor.reset();
+            m_doorTransitionPhase = DoorTransitionPhase::FadeIn;
+        }
+    } else {
+        m_doorTransitionAlpha =
+            std::max(0.0f, m_doorTransitionAlpha - (deltaSeconds / kFadeSeconds));
+        if (m_doorTransitionAlpha <= 0.0f) {
+            m_doorTransitionPhase = DoorTransitionPhase::None;
+        }
     }
 }
 
@@ -618,7 +896,6 @@ bool NewVegasApp::onInit() {
     // essentially every pixel. Without this the whole ReSTIR sequence — candidate,
     // temporal, spatial, resolve, all traced against the TLAS — ran every frame
     // for a contribution that was already invisible.
-    m_renderer.setVoxelGiEnabled(false);
     // No TLAS to trace against once GI is off, so stop building acceleration
     // structures on every uploadImportedScene too. Interior shadows default to
     // the cached point-shadow atlas and need no acceleration structure. The RT
@@ -672,9 +949,7 @@ bool NewVegasApp::onInit() {
 
     // Ambient occlusion, tuned for Bethesda scale.
     //
-    // The radius is NOT a taste call. GameApp::init calls setStrategyMapMode,
-    // which pins the AO radius to 7 world units -- sensible for a strategy map,
-    // but 10 cm at Fallout's ~70 units/metre. The GTAO march takes six steps
+    // The radius is NOT a taste call. The GTAO march takes six steps
     // across a screen-space radius of roughly `radius * 9297 / depth` pixels, so
     // a 7-unit radius collapses to sub-pixel steps beyond ~1500 units and the
     // estimator early-outs to "unoccluded" for the entire frame -- AO that costs
@@ -1277,8 +1552,8 @@ void NewVegasApp::applyTimeOfDay() {
     // Sign convention, which is easy to get backwards: setSunAngles takes the
     // direction the light TRAVELS, not the direction to the sun. frame_run.cc
     // computes toSun = -sunDirection, so the sun is above the horizon only
-    // while pitch is NEGATIVE — hence the debug slider's -89..+5 range and
-    // citybuilder's -38 for ordinary daylight. Getting this backwards puts the
+    // while pitch is NEGATIVE — hence the debug slider's -89..+5 range.
+    // Getting this backwards puts the
     // sun under the map at every hour and the whole world renders in ambient
     // only, which reads as "everything is super dark".
     //
@@ -1319,24 +1594,31 @@ void NewVegasApp::initWeather() {
     // without anything looking wrong. See CLAUDE.md on onRecordHeader.
     const core::Stopwatch weatherTimer;
 
-    importer::fnv::FalloutLoadOrder order;
-    // Mod directories are searched for the plugin too, so a mod that ships an
-    // .esp beside its .bsa needs nothing copied into the game install.
-    for (const std::string& modDirectory : m_modDirectories) {
-        order.addSearchRoot(std::filesystem::path(modDirectory));
-    }
+    importer::fnv::FalloutLoadOrder fallbackOrder;
+    const importer::fnv::FalloutLoadOrder* weatherOrder = &m_streamLoadOrder;
     std::string error;
-    if (!order.open(std::filesystem::path(m_streamDirectory), requested, error)) {
-        VOX_LOGW("newvegas") << "weather disabled: " << error;
-        return;
+    if (weatherOrder->empty()) {
+        // Single-plugin Fallout/Oblivion sessions do not keep a streaming load
+        // order. Reconstruct only in that case. Skyrim must use the exact
+        // authoritative profile already opened by the streamer so DLC and ESL
+        // WRLD/CLMT/WTHR overrides cannot disappear from the sky subsystem.
+        for (const std::string& modDirectory : m_modDirectories) {
+            fallbackOrder.addSearchRoot(std::filesystem::path(modDirectory));
+        }
+        if (!fallbackOrder.open(
+                std::filesystem::path(m_streamDirectory), requested, error)) {
+            VOX_LOGW("newvegas") << "weather disabled: " << error;
+            return;
+        }
+        weatherOrder = &fallbackOrder;
     }
-    if (!buildFalloutWeatherTables(order, m_weatherTables, error)) {
+    if (!buildFalloutWeatherTables(*weatherOrder, m_weatherTables, error)) {
         VOX_LOGW("newvegas") << "weather disabled: " << error;
         return;
     }
 
     std::string loadOrderText;
-    for (const auto& entry : order.entries()) {
+    for (const auto& entry : weatherOrder->entries()) {
         if (!loadOrderText.empty()) {
             loadOrderText += " -> ";
         }
@@ -2918,6 +3200,7 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
 }
 
 bool NewVegasApp::initStreaming() {
+    std::string requestedWorldspaceBeforeResume = m_streamWorldspace;
     // One worker per core minus the main thread and a little headroom, floored
     // at 2. Streaming is latency-sensitive rather than throughput-bound, so
     // oversubscribing here would just contend with the render thread.
@@ -2971,6 +3254,20 @@ bool NewVegasApp::initStreaming() {
                 header, headerError)) {
             m_streamIsMorrowind =
                 header.format == importer::fnv::EsmPluginFormat::kMorrowind;
+            // Skyrim is the only supported generation whose base master uses
+            // localized string tables. That is a format property, unlike a
+            // filename check, so a renamed or total-conversion master keeps
+            // the generated-object LOD path.
+            m_streamIsSkyrim = header.isLocalized;
+            // WastelandNV is the historical runtime default, not a sensible
+            // implicit worldspace for a Skyrim interior/start request. Keep an
+            // explicit --worldspace authoritative, but otherwise establish
+            // Skyrim's parent exterior before opening the streamer or applying
+            // an optional saved-space override.
+            if (m_streamIsSkyrim && !m_streamWorldspaceExplicit) {
+                m_streamWorldspace = "Tamriel";
+                requestedWorldspaceBeforeResume = m_streamWorldspace;
+            }
         }
     }
 
@@ -3018,9 +3315,27 @@ bool NewVegasApp::initStreaming() {
     // Deliberately skipped when nothing was added: re-indexing seven plugins
     // costs startup time for no override, and the single-plugin path is the one
     // every measurement in this project was taken on.
-    if (!m_extraPlugins.empty()) {
+    if (m_streamIsSkyrim || !m_extraPlugins.empty()) {
         std::vector<std::string> requestedPlugins;
-        requestedPlugins.push_back(m_streamPlugin);
+        std::filesystem::path loadOrderSource;
+        if (m_streamIsSkyrim) {
+            std::optional<std::filesystem::path> explicitLoadOrder;
+            if (!m_loadOrderPath.empty()) {
+                explicitLoadOrder = std::filesystem::path(m_loadOrderPath);
+            } else if (const char* fromEnv = std::getenv("ODAI_FNV_LOAD_ORDER")) {
+                if (*fromEnv != '\0') {
+                    explicitLoadOrder = std::filesystem::path(fromEnv);
+                }
+            }
+            if (!importer::fnv::resolveInstalledSkyrimPluginList(
+                    std::filesystem::path(m_streamDirectory), explicitLoadOrder,
+                    requestedPlugins, loadOrderSource, error)) {
+                VOX_LOGE("newvegas") << "Skyrim load order failed: " << error;
+                return false;
+            }
+        } else {
+            requestedPlugins.push_back(m_streamPlugin);
+        }
         requestedPlugins.insert(
             requestedPlugins.end(), m_extraPlugins.begin(), m_extraPlugins.end());
         importer::fnv::FalloutLoadOrder streamOrder;
@@ -3030,6 +3345,10 @@ bool NewVegasApp::initStreaming() {
         std::string orderError;
         if (!streamOrder.open(
                 std::filesystem::path(m_streamDirectory), requestedPlugins, orderError)) {
+            if (m_streamIsSkyrim) {
+                VOX_LOGE("newvegas") << "Skyrim load order failed: " << orderError;
+                return false;
+            }
             VOX_LOGW("newvegas") << "streaming one plugin only: " << orderError;
         } else {
             std::string loadOrderText;
@@ -3041,20 +3360,104 @@ bool NewVegasApp::initStreaming() {
             }
             VOX_LOGI("newvegas") << "streaming across " << streamOrder.size()
                                  << " plugins (record overrides active): " << loadOrderText;
+            if (m_streamIsSkyrim) {
+                VOX_LOGI("newvegas") << "Skyrim load-order source: "
+                                     << (loadOrderSource.empty()
+                                             ? std::string("installed official content")
+                                             : loadOrderSource.string());
+            }
             // Kept on the app too: actor discovery needs the same order, and a
             // companion mod's NPC/placement/race/armour all live in its plugin.
             m_streamLoadOrder = streamOrder;
             m_streamIsMorrowind = !streamOrder.entries().empty() &&
                 streamOrder.entries().front().header.format ==
                     importer::fnv::EsmPluginFormat::kMorrowind;
+            m_streamIsSkyrim = !streamOrder.entries().empty() &&
+                streamOrder.entries().front().header.isLocalized;
+            m_loadOrderFingerprint = streamOrder.fingerprint();
             m_streamer->setLoadOrder(std::move(streamOrder));
+        }
+    }
+    if (m_traversalStatePath.empty()) {
+        m_traversalStatePath = defaultTraversalStatePath();
+    }
+    if (m_resumeEnabled && !m_explicitStart) {
+        std::error_code stateExistsError;
+        if (std::filesystem::is_regular_file(m_traversalStatePath, stateExistsError) &&
+            !stateExistsError) {
+            TraversalState state;
+            std::string stateError;
+            if (loadTraversalState(m_traversalStatePath, state, stateError)) {
+                if (!state.worldspaceEditorId.empty()) {
+                    m_streamWorldspace = state.worldspaceEditorId;
+                }
+                if (state.interior && !state.interiorEditorId.empty()) {
+                    m_startInsideInterior = state.interiorEditorId;
+                }
+                m_timeOfDayHours = state.timeOfDayHours;
+                if (!state.weatherEditorId.empty()) {
+                    m_requestedWeatherEditorId = state.weatherEditorId;
+                }
+                m_resumeState = std::move(state);
+                VOX_LOGI("newvegas") << "resuming traversal from "
+                                     << m_traversalStatePath.string();
+            } else {
+                VOX_LOGW("newvegas") << "ignoring traversal state: " << stateError;
+            }
         }
     }
     if (!m_streamer->open(
             std::filesystem::path(m_streamDirectory), std::filesystem::path(m_streamPlugin),
             m_streamWorldspace, *m_streamJobs, error)) {
-        VOX_LOGE("newvegas") << "streaming init failed: " << error;
-        return false;
+        if (m_resumeState.has_value()) {
+            VOX_LOGW("newvegas") << "saved space is unavailable (" << error
+                                 << "); falling back to " << requestedWorldspaceBeforeResume;
+            m_resumeState.reset();
+            m_startInsideInterior.clear();
+            m_streamWorldspace = requestedWorldspaceBeforeResume;
+            if (!m_streamer->open(
+                    std::filesystem::path(m_streamDirectory),
+                    std::filesystem::path(m_streamPlugin), m_streamWorldspace,
+                    *m_streamJobs, error)) {
+                VOX_LOGE("newvegas") << "streaming fallback failed: " << error;
+                return false;
+            }
+        } else {
+            VOX_LOGE("newvegas") << "streaming init failed: " << error;
+            return false;
+        }
+    }
+    if (m_resumeState.has_value() && m_resumeState->interior &&
+        !m_streamer->hasInterior(m_startInsideInterior)) {
+        VOX_LOGW("newvegas") << "saved interior " << m_startInsideInterior
+                             << " is unavailable; using exterior spawn";
+        m_startInsideInterior.clear();
+        m_resumeState.reset();
+    }
+    if (m_resumeState.has_value()) {
+        const bool fingerprintChanged =
+            !m_resumeState->loadOrderFingerprint.empty() &&
+            m_resumeState->loadOrderFingerprint != m_loadOrderFingerprint;
+        for (const TraversalDiscovery& saved : m_resumeState->discoveries) {
+            const auto marker = std::find_if(
+                m_streamer->mapMarkers().begin(), m_streamer->mapMarkers().end(),
+                [&](const importer::fnv::FalloutMapMarkerRecord& current) {
+                    return fingerprintChanged
+                        ? current.name == saved.name
+                        : current.referenceFormId == saved.sourceReferenceFormId;
+                });
+            if (marker == m_streamer->mapMarkers().end()) {
+                continue;
+            }
+            m_discoveredMarkerIds.insert(marker->referenceFormId);
+            m_discoveredLocations.push_back(
+                TraversalDiscovery{marker->referenceFormId, saved.worldspaceEditorId,
+                                   marker->name});
+        }
+        if (fingerprintChanged) {
+            VOX_LOGI("newvegas")
+                << "load order changed; re-resolved saved discoveries by world/name";
+        }
     }
     if (m_streamer->availableCellCount() == 0u) {
         VOX_LOGE("newvegas") << "worldspace " << m_streamWorldspace << " has no streamable cells in "
@@ -3065,11 +3468,29 @@ bool NewVegasApp::initStreaming() {
     // Mirror the resident set into collision. Registered before the first
     // update() so no cell can become resident without collision knowing.
     m_collision.clear();
+    m_actorNavigation.clear();
     m_streamer->setCellCallbacks(
-        [this](const importer::CellCoord& cell, const importer::ImportedScene& scene) {
+        [this](
+            const importer::CellCoord& cell,
+            const importer::ImportedScene& scene,
+            const std::vector<importer::fnv::FalloutNavMeshRecord>& navMeshes) {
             m_collision.addCell(cell, scene);
+            m_actorNavigation.addCell(cell, navMeshes);
+            m_streamDoorsByCell[cell] = scene.doors;
+            rebuildStreamDoors();
+            if (std::getenv("ODAI_FNV_LOG_NAVIGATION") != nullptr) {
+                VOX_LOGI("newvegas") << "navigation cell " << cell.x << "," << cell.z
+                                     << ": " << navMeshes.size() << " meshes, resident total "
+                                     << m_actorNavigation.meshCount() << " meshes / "
+                                     << m_actorNavigation.triangleCount() << " triangles";
+            }
         },
-        [this](const importer::CellCoord& cell) { m_collision.removeCell(cell); });
+        [this](const importer::CellCoord& cell) {
+            m_collision.removeCell(cell);
+            m_actorNavigation.removeCell(cell);
+            m_streamDoorsByCell.erase(cell);
+            rebuildStreamDoors();
+        });
 
     importer::CellResidencyConfig config;
     // From the plugin, not a constant. Fallout and Oblivion exterior cells are
@@ -3145,8 +3566,8 @@ bool NewVegasApp::initStreaming() {
                                  << interiorError;
             return false;
         }
-        if (m_renderer.addImportedSceneChunk(interiorScene) ==
-            render::Renderer::kInvalidImportedChunkIndex) {
+        m_interiorChunk = m_renderer.addImportedSceneChunk(interiorScene);
+        if (m_interiorChunk == render::Renderer::kInvalidImportedChunkIndex) {
             VOX_LOGE("newvegas") << "failed to upload interior " << m_startInsideInterior;
             return false;
         }
@@ -3158,6 +3579,8 @@ bool NewVegasApp::initStreaming() {
             static_cast<std::int32_t>(std::floor(interior.spawnPosition[0] / 4096.0f)),
             static_cast<std::int32_t>(std::floor(interior.spawnPosition[2] / 4096.0f))};
         m_collision.addCell(interiorCell, interiorScene);
+        m_doors = interiorScene.doors;
+        m_currentInteriorEditorId = m_startInsideInterior;
 
         if (interior.hasSpawn) {
             m_cameraX = interior.spawnPosition[0];
@@ -3294,7 +3717,7 @@ bool NewVegasApp::initStreaming() {
                     ? ground
                     : (m_cameraY - kEyeHeightUnits);
         }
-        if (!m_streamIsMorrowind) {
+        if (!m_streamIsMorrowind && !m_streamIsSkyrim) {
             const std::filesystem::path dataPath(m_streamDirectory);
             // Victor is loaded into a local and appended to m_actors AFTER the
             // town, because loadGoodspringsActors clears the list -- and it has
@@ -3330,7 +3753,12 @@ bool NewVegasApp::initStreaming() {
                     m_streamer->assets(), centreXY, kActorLoadRadius,
                     kFirstCrowdSkinnedInstance,
                     render::kMaxSkinnedInstances - kFirstCrowdSkinnedInstance,
-                    {victor.baseFormId}, m_actors, actorStats);
+                    {victor.baseFormId},
+                    [this](std::uint32_t referenceFormId) {
+                        return m_streamer != nullptr &&
+                               m_streamer->referenceBelongsToCurrentWorldspace(referenceFormId);
+                    },
+                    m_actors, actorStats);
                 if (victorLoaded) {
                     m_victorIndex = static_cast<int>(m_actors.size());
                     m_actors.push_back(std::move(victor));
@@ -3389,6 +3817,9 @@ bool NewVegasApp::initStreaming() {
                             : groundHeightAt(actor.position[0], actor.position[2], ground);
                         actor.position[1] =
                             onGround ? ground : (m_cameraY - kEyeHeightUnits);
+                        actor.projectedToNavigation = false;
+                        actor.wanderPath.clear();
+                        actor.wanderPathIndex = 0u;
                         // Facing the camera, so a face that failed to build is
                         // visible as a face and not as the back of a head.
                         actor.yawRadians = std::atan2(forwardX, forwardZ);
@@ -3433,6 +3864,23 @@ bool NewVegasApp::initStreaming() {
                 m_walkMode = false;
             }
         }
+    }
+    if (m_resumeState.has_value()) {
+        m_cameraX = m_resumeState->position[0];
+        m_cameraY = m_resumeState->position[1];
+        m_cameraZ = m_resumeState->position[2];
+        m_yawDegrees = m_resumeState->yawDegrees;
+        m_pitchDegrees = m_resumeState->pitchDegrees;
+        m_walkMode = true;
+        VOX_LOGI("newvegas") << "resumed camera (" << m_cameraX << ", " << m_cameraY
+                             << ", " << m_cameraZ << ")";
+    }
+    // Skyrim has no special startup companion. Populate only after resume has
+    // supplied the final camera and space identity, otherwise a saved Bannered
+    // Mare session scans the default Tamriel spawn and carries those actors
+    // through the interior load.
+    if (m_streamIsSkyrim) {
+        reloadActorsForCurrentSpace();
     }
     if (m_interiorStarted) {
         VOX_LOGI("newvegas")
@@ -3547,6 +3995,286 @@ void NewVegasApp::loadDistantLandLod() {
     VOX_LOGI("newvegas") << "distant LOD level" << tierCells << ": " << stats.tilesParsed
                          << " tiles, " << stats.triangles << " triangles, " << stats.textures
                          << " textures, sink " << sinkUnits << " units, in " << ms << " ms";
+}
+
+void NewVegasApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
+    if (!m_streamIsSkyrim || m_streamer == nullptr) {
+        return;
+    }
+
+    constexpr std::int32_t kTileCells = importer::fnv::kLandLodBlockCells;
+    constexpr std::int32_t kTileRadius = 3;
+    const float cellSize = m_streamer->cellWorldSize();
+    if (cellSize <= 0.0f) {
+        return;
+    }
+    const auto cellX = static_cast<std::int32_t>(std::floor(bethesdaPosition[0] / cellSize));
+    const auto cellZ = static_cast<std::int32_t>(std::floor(bethesdaPosition[1] / cellSize));
+    const auto tileX = importer::fnv::landLodTileOrigin(cellX, kTileCells);
+    const auto tileZ = importer::fnv::landLodTileOrigin(cellZ, kTileCells);
+    if (m_skyrimTerrainLodTileValid && tileX == m_skyrimTerrainLodTileX &&
+        tileZ == m_skyrimTerrainLodTileZ) {
+        return;
+    }
+
+    const std::int32_t firstX = tileX - (kTileRadius * kTileCells);
+    const std::int32_t firstZ = tileZ - (kTileRadius * kTileCells);
+    const std::int32_t lastX = tileX + (kTileRadius * kTileCells);
+    const std::int32_t lastZ = tileZ + (kTileRadius * kTileCells);
+    importer::ImportedScene scene;
+    scene.sourceTag = "skyrim_terrain_lod";
+    importer::fnv::LandLodTierStats stats;
+    std::string error;
+    const auto start = std::chrono::steady_clock::now();
+    const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
+    const bool built = importer::fnv::appendLandLodTier(
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveMesh(path, bytes, error);
+        },
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveTexture(path, bytes, error);
+        },
+        m_streamWorldspace, importer::fnv::LandLodSet::SkyrimTerrain, kTileCells,
+        firstX, firstZ, lastX, lastZ, 96.0f, scene, stats, error);
+
+    std::size_t replacement = render::Renderer::kInvalidImportedChunkIndex;
+    if (built) {
+        // Remove only the coarse triangles fully covered by detailed LAND.
+        // Removing an entire four-cell BTR tile when one edge cell overlaps
+        // creates a three-cell void (the mountain bug); keeping every triangle
+        // paints coarse square height/texture patches over Whiterun's detailed
+        // approach. Boundary-crossing triangles stay as a narrow overlap seam,
+        // where the 96-unit sink gives detailed LAND depth precedence.
+        const std::int32_t detailedRadius = std::max(0, m_streamer->config().loadRadius);
+        const float detailMinX = static_cast<float>(cellX - detailedRadius) * cellSize;
+        const float detailMaxX = static_cast<float>(cellX + detailedRadius + 1) * cellSize;
+        const float detailMinZ = static_cast<float>(cellZ - detailedRadius) * cellSize;
+        const float detailMaxZ = static_cast<float>(cellZ + detailedRadius + 1) * cellSize;
+        std::size_t trimmedTriangles = 0u;
+        for (const importer::ImportedSceneInstance& instance : scene.instances) {
+            if (instance.meshIndex >= scene.meshes.size()) {
+                continue;
+            }
+            importer::ImportedSceneMesh& mesh = scene.meshes[instance.meshIndex];
+            const float tileOffsetX = instance.transform[3];
+            const float tileOffsetZ = -instance.transform[11];
+            std::vector<std::uint32_t> keptIndices;
+            std::vector<importer::ImportedSceneMeshPart> keptParts;
+            keptIndices.reserve(mesh.indices.size());
+            keptParts.reserve(mesh.parts.size());
+            for (const importer::ImportedSceneMeshPart& sourcePart : mesh.parts) {
+                importer::ImportedSceneMeshPart part = sourcePart;
+                part.firstIndex = static_cast<std::uint32_t>(keptIndices.size());
+                const std::size_t first = sourcePart.firstIndex;
+                const std::size_t end = std::min<std::size_t>(
+                    mesh.indices.size(), first + sourcePart.indexCount);
+                for (std::size_t index = first; index + 2u < end; index += 3u) {
+                    bool fullyCoveredByDetailedLand = true;
+                    for (std::size_t corner = 0; corner < 3u; ++corner) {
+                        const std::uint32_t vertexIndex = mesh.indices[index + corner];
+                        if (vertexIndex >= mesh.vertices.size()) {
+                            fullyCoveredByDetailedLand = false;
+                            break;
+                        }
+                        const importer::ImportedSceneVertex& vertex = mesh.vertices[vertexIndex];
+                        const float worldX = tileOffsetX + vertex.position[0];
+                        const float worldZ = tileOffsetZ + vertex.position[1];
+                        if (worldX <= detailMinX || worldX >= detailMaxX ||
+                            worldZ <= detailMinZ || worldZ >= detailMaxZ) {
+                            fullyCoveredByDetailedLand = false;
+                            break;
+                        }
+                    }
+                    if (fullyCoveredByDetailedLand) {
+                        ++trimmedTriangles;
+                        continue;
+                    }
+                    keptIndices.push_back(mesh.indices[index]);
+                    keptIndices.push_back(mesh.indices[index + 1u]);
+                    keptIndices.push_back(mesh.indices[index + 2u]);
+                }
+                part.indexCount = static_cast<std::uint32_t>(keptIndices.size()) - part.firstIndex;
+                if (part.indexCount != 0u) {
+                    keptParts.push_back(part);
+                }
+            }
+            mesh.indices = std::move(keptIndices);
+            mesh.parts = std::move(keptParts);
+        }
+        importer::buildImportedScenePackedRenderData(scene);
+        importer::buildImportedScenePageRanges(scene);
+        replacement = m_renderer.addImportedSceneChunk(scene);
+        VOX_LOGI("newvegas") << "Skyrim terrain LOD handoff trimmed "
+                             << trimmedTriangles << " covered BTR triangles";
+    }
+    if (m_distantLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+        m_renderer.removeImportedSceneChunk(m_distantLodChunk);
+    }
+    m_distantLodChunk = replacement;
+    m_skyrimTerrainLodTileX = tileX;
+    m_skyrimTerrainLodTileZ = tileZ;
+    m_skyrimTerrainLodTileValid = true;
+
+    if (!built) {
+        VOX_LOGI("newvegas") << "no Skyrim terrain LOD around tile " << tileX << ","
+                             << tileZ << ": " << error;
+        return;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    VOX_LOGI("newvegas") << "Skyrim terrain LOD around tile " << tileX << "," << tileZ
+                         << ": " << stats.tilesParsed << " BTR tiles, " << stats.triangles
+                         << " triangles, " << stats.textures << " textures, in " << ms << " ms";
+}
+
+void NewVegasApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
+    if (!m_streamIsSkyrim || m_streamer == nullptr) {
+        return;
+    }
+
+    constexpr std::int32_t kTileCells = importer::fnv::kLandLodBlockCells;
+    // A 3x3 BTO window only reaches roughly 20-31k units from the camera,
+    // depending on where the camera sits inside its current tile. Skyrim's
+    // mountains routinely cross that boundary while still clearly visible,
+    // producing a hard partial-mountain silhouette even though every triangle
+    // in the resident tiles is submitted. Seven tiles per axis keeps complete
+    // object-LOD features resident to at least ~49k units in every direction;
+    // the existing imported page culling keeps off-screen tiles out of draws.
+    constexpr std::int32_t kTileRadius = 3;
+    const float cellSize = m_streamer->cellWorldSize();
+    if (cellSize <= 0.0f) {
+        return;
+    }
+    const auto cellX = static_cast<std::int32_t>(std::floor(bethesdaPosition[0] / cellSize));
+    const auto cellZ = static_cast<std::int32_t>(std::floor(bethesdaPosition[1] / cellSize));
+    const auto tileX = importer::fnv::landLodTileOrigin(cellX, kTileCells);
+    const auto tileZ = importer::fnv::landLodTileOrigin(cellZ, kTileCells);
+    if (m_skyrimObjectLodTileValid && tileX == m_skyrimObjectLodTileX &&
+        tileZ == m_skyrimObjectLodTileZ) {
+        return;
+    }
+
+    // BTO geometry is already in world space and all nine tiles share one
+    // atlas, so build the window as ONE ImportedScene. Besides avoiding nine
+    // atlas decodes, this gives the renderer one replaceable chunk when the
+    // camera crosses a four-cell boundary.
+    importer::ImportedScene scene;
+    scene.sourceTag = "skyrim_object_lod";
+    importer::fnv::LandLodTierStats stats;
+    std::string error;
+    const auto start = std::chrono::steady_clock::now();
+    const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
+    const std::int32_t firstX = tileX - (kTileRadius * kTileCells);
+    const std::int32_t firstZ = tileZ - (kTileRadius * kTileCells);
+    const std::int32_t lastX = tileX + (kTileRadius * kTileCells);
+    const std::int32_t lastZ = tileZ + (kTileRadius * kTileCells);
+    const bool built = importer::fnv::appendLandLodTier(
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveMesh(path, bytes, error);
+        },
+        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+            return assets.resolveTexture(path, bytes, error);
+        },
+        m_streamWorldspace, importer::fnv::LandLodSet::SkyrimObjects, kTileCells,
+        firstX, firstZ, lastX, lastZ, 0.0f, scene, stats, error);
+
+    std::size_t replacement = render::Renderer::kInvalidImportedChunkIndex;
+    if (built) {
+        // A BTO is a coarse stand-in for objects covered by four detailed
+        // cells. It must disappear before the camera reaches the tile, not
+        // only after crossing its boundary: otherwise Whiterun's whole coarse
+        // city pops back in when the player is a few hundred units across the
+        // neighbouring tile edge. Keep a one-cell hand-off band around every
+        // BTO tile. At the pinned southern approach Whiterun is ~6100 units
+        // beyond that band and remains complete; on the near approach its BTO
+        // yields to the authored city shells before the low-detail rocks and
+        // roofs become visible.
+        const auto distanceToInterval = [](float value, float low, float high) {
+            if (value < low) {
+                return low - value;
+            }
+            return value > high ? value - high : 0.0f;
+        };
+        const bool keepAllBtoShapes =
+            std::getenv("ODAI_DEBUG_KEEP_SKYRIM_BTO") != nullptr;
+        std::vector<std::size_t> nearMeshIndices;
+        if (!keepAllBtoShapes) {
+            for (std::int32_t tz = firstZ; tz <= lastZ; tz += kTileCells) {
+                for (std::int32_t tx = firstX; tx <= lastX; tx += kTileCells) {
+                    const float minX = static_cast<float>(tx) * cellSize;
+                    const float maxX = static_cast<float>(tx + kTileCells) * cellSize;
+                    const float minZ = static_cast<float>(tz) * cellSize;
+                    const float maxZ = static_cast<float>(tz + kTileCells) * cellSize;
+                    const float dx = distanceToInterval(bethesdaPosition[0], minX, maxX);
+                    const float dz = distanceToInterval(bethesdaPosition[1], minZ, maxZ);
+                    if ((dx * dx) + (dz * dz) >= cellSize * cellSize) {
+                        continue;
+                    }
+                    // A walled Skyrim city is a child worldspace whose full
+                    // geometry is absent from Tamriel. Its parent-world BTO
+                    // proxy is not only LargeRef: generated ordinary Obj
+                    // groups contain smaller roofs and houses too. Removing
+                    // those groups at the normal near-tile handoff produced a
+                    // complete wall around a visibly incomplete Whiterun.
+                    // Keep the whole BTO tile wherever a direct child
+                    // worldspace occupies its grid; ordinary Tamriel tiles
+                    // still hand off to their detailed streamed statics.
+                    if (m_streamer->hasChildWorldspaceCellInRange(
+                            tx, tz, tx + kTileCells - 1, tz + kTileCells - 1)) {
+                        continue;
+                    }
+                    const std::string meshNamePrefix =
+                        "lod" + std::to_string(kTileCells) + "_" + std::to_string(tx) + "_" +
+                        std::to_string(tz);
+                    for (std::size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex) {
+                        const std::string& meshName = scene.meshes[meshIndex].name;
+                        const bool belongsToTile =
+                            meshName == meshNamePrefix ||
+                            meshName.starts_with(meshNamePrefix + "_");
+                        const bool largeReference = meshName.ends_with("_largeref");
+                        if (belongsToTile && !largeReference) {
+                            nearMeshIndices.push_back(meshIndex);
+                        }
+                    }
+                }
+            }
+        } else {
+            VOX_LOGW("newvegas")
+                << "ODAI_DEBUG_KEEP_SKYRIM_BTO active: near-tile object LOD handoff disabled";
+        }
+        scene.instances.erase(
+            std::remove_if(
+                scene.instances.begin(), scene.instances.end(),
+                [&](const importer::ImportedSceneInstance& instance) {
+                    return std::find(
+                               nearMeshIndices.begin(), nearMeshIndices.end(),
+                               static_cast<std::size_t>(instance.meshIndex)) !=
+                           nearMeshIndices.end();
+                }),
+            scene.instances.end());
+        importer::buildImportedScenePackedRenderData(scene);
+        importer::buildImportedScenePageRanges(scene);
+        replacement = m_renderer.addImportedSceneChunk(scene);
+    }
+    if (m_skyrimObjectLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+        m_renderer.removeImportedSceneChunk(m_skyrimObjectLodChunk);
+    }
+    m_skyrimObjectLodChunk = replacement;
+    m_skyrimObjectLodTileX = tileX;
+    m_skyrimObjectLodTileZ = tileZ;
+    m_skyrimObjectLodTileValid = true;
+
+    if (!built) {
+        VOX_LOGI("newvegas") << "no Skyrim object LOD around tile " << tileX << ","
+                             << tileZ << ": " << error;
+        return;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    VOX_LOGI("newvegas") << "Skyrim object LOD around tile " << tileX << "," << tileZ
+                         << ": " << stats.tilesParsed << " BTO tiles, " << stats.triangles
+                         << " triangles, " << stats.textures << " atlas texture(s), in "
+                         << ms << " ms";
 }
 
 // Headless check that collision is actually doing its job, because walking
@@ -3673,6 +4401,8 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
     importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
     importer::fnv::CellStreamer::engineToFallout(velocity, falloutVelocity);
     m_streamer->update(m_renderer, falloutPosition, falloutVelocity);
+    updateSkyrimTerrainLod(falloutPosition);
+    updateSkyrimObjectLod(falloutPosition);
 
     // Once, after the first ring has settled.
     if (!m_collisionSelfTestDone && std::getenv("ODAI_FNV_COLLISION_TEST") != nullptr &&
@@ -3789,18 +4519,66 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // idle clip is what makes an actor read as someone standing there rather
     // than a statue of them.
     if (!m_actors.empty()) {
+        // The renderer's skinned path was built for a party, so submitting a
+        // whole worldspace's actors without culling repeats every body part in
+        // the skinning, velocity, depth, main and shadow passes. Keep a wide
+        // margin around the camera and view cone: actors near enough to notice
+        // never pop when the player turns, while guards across Whiterun cost no
+        // GPU work until they can contribute to the frame.
+        static const float actorDrawDistance = [] {
+            constexpr float kDefaultActorDrawDistance = 6000.0f;
+            const char* value = std::getenv("ODAI_FNV_ACTOR_DRAW_DISTANCE");
+            if (value == nullptr) {
+                return kDefaultActorDrawDistance;
+            }
+            const float parsed = static_cast<float>(std::atof(value));
+            return parsed > 0.0f ? parsed : kDefaultActorDrawDistance;
+        }();
+        constexpr float kAlwaysVisibleDistance = 1200.0f;
+        // cos(100 degrees): retain actors slightly behind the view plane for
+        // wide displays, shadows and a pop-free turn.
+        constexpr float kViewDotMargin = -0.17364818f;
+        const float yawRadians = m_yawDegrees * (kPi / 180.0f);
+        const float forwardX = std::cos(yawRadians);
+        const float forwardZ = std::sin(yawRadians);
+        const float maxDistanceSquared = actorDrawDistance * actorDrawDistance;
+        const float alwaysVisibleDistanceSquared =
+            kAlwaysVisibleDistance * kAlwaysVisibleDistance;
+        for (std::size_t actorIndex = 0; actorIndex < m_actors.size(); ++actorIndex) {
+            SkinnedActor& actor = m_actors[actorIndex];
+            const float dx = actor.position[0] - m_cameraX;
+            const float dz = actor.position[2] - m_cameraZ;
+            const float distanceSquared = (dx * dx) + (dz * dz);
+            bool visible = distanceSquared <= maxDistanceSquared;
+            if (visible && distanceSquared > alwaysVisibleDistanceSquared) {
+                const float inverseDistance = 1.0f / std::sqrt(distanceSquared);
+                const float viewDot = ((dx * forwardX) + (dz * forwardZ)) * inverseDistance;
+                visible = viewDot >= kViewDotMargin;
+            }
+            visible = visible || static_cast<int>(actorIndex) == m_talkingActor;
+            actor.renderVisible = visible;
+            if (actor.uploaded) {
+                m_renderer.setSkinnedActorVisible(actor.instanceSlot, visible);
+            }
+        }
+
         // Move before posing: the pose folds in world placement, so wandering
         // afterwards would draw everyone one frame behind where they are.
+        // Do not bind an actor to the first NAVM cell that happens to finish.
+        // Streaming workers complete out of order; until the initial resident
+        // set is idle, the actor's own/nearest mesh may simply not have arrived.
+        const ActorNavigationWorld* actorNavigation =
+            (m_streamer && m_streamer->isStreamingIdle()) ? &m_actorNavigation : nullptr;
         updateActorWandering(
-            m_actors, deltaSeconds,
+            m_actors, deltaSeconds, actorNavigation,
             [this](float x, float z, float referenceY, float& outHeight) {
                 // The ACTOR's own foot height is the reference, not the
                 // camera's. groundHeight uses it to reject ceilings and to
-                // raise onto walkable geometry, so a settler on a porch stays
-                // on the porch instead of sinking to the terrain under it --
-                // and, crucially, someone across town is not held at whatever
-                // altitude the player happens to be standing at.
-                return m_streamer ? m_collision.groundHeight(x, z, referenceY, outHeight) : false;
+                // raise onto walkable geometry, so someone on a porch stays
+                // on the porch instead of sinking to the terrain under it.
+                return m_streamer
+                    ? m_collision.groundHeight(x, z, referenceY, outHeight)
+                    : false;
             },
             [this](float& x, float& z, float feetY, float headY, float radius) {
                 if (m_streamer) {
@@ -3809,9 +4587,10 @@ void NewVegasApp::onTick(float deltaSeconds) {
                 }
             },
             m_talkingActor);
+
         updateActorPoses(m_actors, deltaSeconds);
         for (const SkinnedActor& actor : m_actors) {
-            if (!actor.uploaded) {
+            if (!actor.uploaded || !actor.renderVisible) {
                 continue;
             }
             render::ImportedSkinnedActorFrameData pose{};
@@ -3953,8 +4732,16 @@ void NewVegasApp::onTick(float deltaSeconds) {
         return;
     }
 
-    updateCamera(deltaSeconds);
-    updateStreaming(deltaSeconds);
+    updateDoorTransition(deltaSeconds);
+    if (m_doorTransitionPhase == DoorTransitionPhase::None) {
+        updateCamera(deltaSeconds);
+        updateStreaming(deltaSeconds);
+    }
+    m_stateSaveSeconds += deltaSeconds;
+    if (m_stateSaveSeconds >= 5.0f) {
+        m_stateSaveSeconds = 0.0f;
+        saveTraversalState(false);
+    }
 
     // Time-of-day controls. Edge-latched so a held key steps once.
     const bool bracketLeft = keyDown(m_window, GLFW_KEY_LEFT_BRACKET);
@@ -4225,6 +5012,74 @@ void NewVegasApp::updateRegionDiscovery() {
         // instead of queueing a run of identical ones.
         m_banner.push(name, "Location discovered", "region:" + name);
     }
+
+    if (m_interiorStarted) {
+        return;
+    }
+    constexpr float kMarkerDiscoveryRadius = 4096.0f;
+    constexpr float kMarkerDiscoveryRadiusSquared =
+        kMarkerDiscoveryRadius * kMarkerDiscoveryRadius;
+    for (const importer::fnv::FalloutMapMarkerRecord& marker : m_streamer->mapMarkers()) {
+        if (marker.deleted || marker.initiallyDisabled || marker.name.empty() ||
+            marker.worldspaceFormId != m_streamer->currentWorldspaceFormId() ||
+            m_discoveredMarkerIds.contains(marker.referenceFormId)) {
+            continue;
+        }
+        const float markerEngine[3] = {marker.position[0], marker.position[2], -marker.position[1]};
+        const float dx = markerEngine[0] - m_cameraX;
+        const float dz = markerEngine[2] - m_cameraZ;
+        if ((dx * dx) + (dz * dz) > kMarkerDiscoveryRadiusSquared) {
+            continue;
+        }
+        m_discoveredMarkerIds.insert(marker.referenceFormId);
+        m_discoveredLocations.push_back(
+            TraversalDiscovery{marker.referenceFormId,
+                               m_streamer->currentWorldspaceEditorId(), marker.name});
+        VOX_LOGI("newvegas") << "discovered location: " << marker.name;
+        m_banner.push(marker.name, "Location discovered", "marker:" + marker.name);
+    }
+}
+
+void NewVegasApp::saveTraversalState(bool force) {
+    if (!m_streamer || m_traversalStatePath.empty() ||
+        m_doorTransitionPhase != DoorTransitionPhase::None) {
+        return;
+    }
+    if (!force) {
+        float ground = 0.0f;
+        if (!m_collision.groundHeight(
+                m_cameraX, m_cameraZ, m_cameraY - m_collision.tuning().eyeHeight, ground) ||
+            std::abs((m_cameraY - m_collision.tuning().eyeHeight) - ground) > 24.0f) {
+            return;
+        }
+    }
+    TraversalState state;
+    state.interior = m_interiorStarted;
+    state.worldspaceEditorId = m_streamer->currentWorldspaceEditorId();
+    state.interiorEditorId = m_currentInteriorEditorId;
+    state.position[0] = m_cameraX;
+    state.position[1] = m_cameraY;
+    state.position[2] = m_cameraZ;
+    state.yawDegrees = m_yawDegrees;
+    state.pitchDegrees = m_pitchDegrees;
+    state.timeOfDayHours = m_timeOfDayHours;
+    state.loadOrderFingerprint = m_loadOrderFingerprint;
+    if (const importer::fnv::FalloutWeatherRecord* weather =
+            m_weatherTables.findWeather(m_activeWeatherFormId)) {
+        state.weatherEditorId = weather->editorId;
+    }
+    state.discoveries = m_discoveredLocations;
+    std::string error;
+    if (!saveTraversalStateAtomic(m_traversalStatePath, state, error)) {
+        VOX_LOGW("newvegas") << "could not save traversal state: " << error;
+    }
+}
+
+void NewVegasApp::onShutdown() {
+    saveTraversalState(true);
+    if (m_streamer) {
+        m_streamer->waitIdle();
+    }
 }
 
 void NewVegasApp::drawPipBoyHud() {
@@ -4239,11 +5094,11 @@ void NewVegasApp::drawPipBoyHud() {
     const int hours = static_cast<int>(m_timeOfDayHours);
     const int minutes = static_cast<int>((m_timeOfDayHours - static_cast<float>(hours)) * 60.0f);
     char status[192];
-    const std::size_t regionCount = m_discoveredRegions.size();
+    const std::size_t locationCount = m_discoveredLocations.size();
     std::snprintf(
-        status, sizeof(status), "%02d:%02d%s   %s   %zu region%s",
+        status, sizeof(status), "%02d:%02d%s   %s   %zu location%s",
         hours, minutes, m_dayCyclePaused ? " (paused)" : "",
-        m_walkMode ? "ON FOOT" : "FLY", regionCount, regionCount == 1u ? "" : "s");
+        m_walkMode ? "ON FOOT" : "FLY", locationCount, locationCount == 1u ? "" : "s");
 
     const float statusWidth = m_uiFont.measureText(status) + (margin * 1.5f);
     const float statusHeight = m_uiFont.lineHeightPx() + (10.0f * scale);
@@ -4265,8 +5120,10 @@ void NewVegasApp::drawPipBoyHud() {
     if (usableDoor >= 0 && !m_menuOpen) {
         const importer::ImportedSceneDoor& door = m_doors[static_cast<std::size_t>(usableDoor)];
         char prompt[192];
-        std::snprintf(prompt, sizeof(prompt), "%s  %s", m_navDriving ? "(A)" : "[E]",
-                      door.targetCellEditorId.empty() ? "Exit" : door.targetCellEditorId.c_str());
+        std::snprintf(
+            prompt, sizeof(prompt), "%s  %s%s", m_navDriving ? "(A)" : "[E]",
+            door.targetCellEditorId.empty() ? "Exit" : door.targetCellEditorId.c_str(),
+            door.locked ? "  [LOCKED - BYPASS]" : "");
         const float promptWidth = m_uiFont.measureText(prompt);
         ui::UiVec2 promptPosition{};
         promptPosition.x = (static_cast<float>(screenWidth) - promptWidth) * 0.5f;
@@ -4321,6 +5178,45 @@ void NewVegasApp::drawPipBoyHud() {
                 m_uiFont, victorText,
                 ui::UiVec2{(static_cast<float>(screenWidth) - victorWidth) * 0.5f, 34.0f * scale},
                 std::fabs(turn) < 12.0f ? kPipGreen : kPipGreenDim);
+        }
+
+        if (m_streamer && !m_interiorStarted) {
+            const importer::fnv::FalloutMapMarkerRecord* nearest = nullptr;
+            float nearestDistanceSquared = 20000.0f * 20000.0f;
+            for (const auto& marker : m_streamer->mapMarkers()) {
+                if (marker.deleted || marker.initiallyDisabled || marker.name.empty() ||
+                    marker.worldspaceFormId != m_streamer->currentWorldspaceFormId()) {
+                    continue;
+                }
+                const float dx = marker.position[0] - m_cameraX;
+                const float dz = -marker.position[1] - m_cameraZ;
+                const float distanceSquared = (dx * dx) + (dz * dz);
+                if (distanceSquared < nearestDistanceSquared) {
+                    nearest = &marker;
+                    nearestDistanceSquared = distanceSquared;
+                }
+            }
+            if (nearest != nullptr) {
+                const float dx = nearest->position[0] - m_cameraX;
+                const float dz = -nearest->position[1] - m_cameraZ;
+                const float markerBearing =
+                    compassDegrees(std::atan2(dz, dx) * (180.0f / kPi));
+                const float turn =
+                    std::fmod((markerBearing - heading) + 540.0f, 360.0f) - 180.0f;
+                char markerText[192] = {};
+                std::snprintf(
+                    markerText, sizeof(markerText), "%s  %s %d°  %d u",
+                    nearest->name.c_str(), turn >= 0.0f ? "right" : "left",
+                    static_cast<int>(std::fabs(turn) + 0.5f),
+                    static_cast<int>(std::sqrt(nearestDistanceSquared)));
+                const float width = m_uiFont.measureText(markerText);
+                m_uiDrawList.addText(
+                    m_uiFont, markerText,
+                    ui::UiVec2{(static_cast<float>(screenWidth) - width) * 0.5f,
+                               56.0f * scale},
+                    m_discoveredMarkerIds.contains(nearest->referenceFormId)
+                        ? kPipGreen : kPipGreenDim);
+            }
         }
     }
 
@@ -4671,6 +5567,35 @@ void NewVegasApp::drawPauseMenu() {
         m_uiFont, footer,
         ui::UiVec2{panel.minX + (24.0f * scale), panel.maxY - footerBand + (12.0f * scale)},
         kPipGreenDim);
+
+    if (!m_discoveredLocations.empty()) {
+        constexpr std::size_t kVisibleLocations = 8u;
+        const std::size_t first = m_discoveredLocations.size() > kVisibleLocations
+            ? m_discoveredLocations.size() - kVisibleLocations : 0u;
+        const float listWidth = 360.0f * scale;
+        const float listHeight =
+            (m_uiFont.lineHeightPx() + 20.0f * scale) +
+            static_cast<float>(m_discoveredLocations.size() - first) *
+                (m_uiFont.lineHeightPx() + 6.0f * scale);
+        ui::UiRect locations{
+            std::min(panel.maxX + 18.0f * scale,
+                     static_cast<float>(screenWidth) - listWidth - 16.0f * scale),
+            panel.minY, 0.0f, panel.minY + listHeight};
+        locations.maxX = locations.minX + listWidth;
+        m_uiDrawList.addRoundRectFilled(locations, kPipPanelSolid, 4.0f * scale);
+        m_uiDrawList.addRoundRect(locations, kPipGreenDim, 4.0f * scale, 1.0f * scale);
+        m_uiDrawList.addText(
+            m_uiFont, "DISCOVERED LOCATIONS",
+            ui::UiVec2{locations.minX + 16.0f * scale,
+                       locations.minY + 10.0f * scale}, kPipGreen);
+        float y = locations.minY + m_uiFont.lineHeightPx() + 18.0f * scale;
+        for (std::size_t i = first; i < m_discoveredLocations.size(); ++i) {
+            m_uiDrawList.addText(
+                m_uiFont, m_discoveredLocations[i].name.c_str(),
+                ui::UiVec2{locations.minX + 16.0f * scale, y}, kPipGreenDim);
+            y += m_uiFont.lineHeightPx() + 6.0f * scale;
+        }
+    }
 }
 
 void NewVegasApp::drawDialoguePanel(
@@ -4896,6 +5821,14 @@ void NewVegasApp::drawHud() {
         // this returns -- and it is drawn wherever the desktop happened to
         // leave the pointer, so it lands in the corner of the capture.
         setCursorVisible(false);
+        if (m_doorTransitionAlpha > 0.0f) {
+            int width = 0;
+            int height = 0;
+            framebufferSize(width, height);
+            m_uiDrawList.addRectFilled(
+                ui::UiRect{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)},
+                ui::UiColor{0.0f, 0.0f, 0.0f, m_doorTransitionAlpha});
+        }
         return;
     }
     drawPipBoyHud();
@@ -4916,6 +5849,10 @@ void NewVegasApp::drawHud() {
     if (!m_menuOpen && m_talkingActor < 0) {
         const ui::Font& bannerFont = m_uiFontDisplay.valid() ? m_uiFontDisplay : m_uiFont;
         m_banner.draw(m_uiDrawList, bannerFont, m_uiFont, screen, contentScale());
+    }
+    if (m_doorTransitionAlpha > 0.0f) {
+        m_uiDrawList.addRectFilled(
+            screen, ui::UiColor{0.0f, 0.0f, 0.0f, m_doorTransitionAlpha});
     }
 }
 

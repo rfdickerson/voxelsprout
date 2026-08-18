@@ -1,7 +1,7 @@
 # Dragonsreach great hall (Skyrim SE) -- the interior showcase for clustered
 # lighting. Load it with --interior, which builds the cell as one scene:
 #
-#   odai_game_newvegas --stream "<SSE Data>" --plugin Skyrim.esm \
+#   odai --stream "<SSE Data>" --plugin Skyrim.esm \
 #     --worldspace WhiterunWorld --interior WhiterunDragonsreach \
 #     --tour-file assets/tours/dragonsreach.txt --flythrough 30 \
 #     --capture-video dragonsreach.mp4 30 18

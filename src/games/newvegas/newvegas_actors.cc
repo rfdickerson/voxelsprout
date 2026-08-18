@@ -1,4 +1,5 @@
 #include "games/newvegas/newvegas_actors.h"
+#include "games/newvegas/newvegas_navigation.h"
 
 #include "core/lcg.h"
 #include "core/log.h"
@@ -31,6 +32,89 @@ std::string toLowerAscii(std::string value) {
 std::string directoryOf(const std::string& path) {
     const std::size_t slash = path.find_last_of("\\/");
     return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+
+odai::math::Quaternion multiplyQuaternion(
+    const odai::math::Quaternion& a, const odai::math::Quaternion& b) {
+    return odai::math::normalize(odai::math::Quaternion{
+        (a.w * b.x) + (a.x * b.w) + (a.y * b.z) - (a.z * b.y),
+        (a.w * b.y) - (a.x * b.z) + (a.y * b.w) + (a.z * b.x),
+        (a.w * b.z) + (a.x * b.y) - (a.y * b.x) + (a.z * b.w),
+        (a.w * b.w) - (a.x * b.x) - (a.y * b.y) - (a.z * b.z)});
+}
+
+odai::math::Quaternion rotationX(float degrees) {
+    const float half = odai::math::radians(degrees) * 0.5f;
+    return odai::math::Quaternion{std::sin(half), 0.0f, 0.0f, std::cos(half)};
+}
+
+void addProceduralRotationTrack(
+    anim::AnimationClip& clip, const anim::Skeleton& skeleton, const char* boneName,
+    std::initializer_list<std::pair<float, float>> keys) {
+    const int boneIndex = skeleton.findBone(boneName);
+    if (boneIndex < 0) {
+        return;
+    }
+    const odai::math::Quaternion bind =
+        skeleton.bones[static_cast<std::size_t>(boneIndex)].localRotation;
+    anim::BoneTrack track;
+    track.boneIndex = boneIndex;
+    for (const auto& [time, degrees] : keys) {
+        // Delta AFTER the authored bind rotation: Skyrim's limbs have
+        // non-identity bind transforms, so replacing rather than composing
+        // would point them along the generic rig's axes and tear the actor.
+        track.rotationKeys.push_back(
+            anim::QuaternionKey{time, multiplyQuaternion(bind, rotationX(degrees))});
+    }
+    clip.tracks.push_back(std::move(track));
+}
+
+bool makeProceduralSkyrimIdle(
+    const anim::Skeleton& skeleton, anim::AnimationClip& outClip) {
+    const int com = skeleton.findBone("NPC COM [COM ]");
+    if (com < 0 || skeleton.findBone("NPC L Thigh [LThg]") < 0 ||
+        skeleton.findBone("NPC R Thigh [RThg]") < 0) {
+        return false;
+    }
+    outClip = anim::AnimationClip{};
+    outClip.name = "procedural skyrim idle";
+    outClip.duration = 2.4f;
+    outClip.loop = true;
+    anim::BoneTrack track;
+    track.boneIndex = com;
+    const odai::math::Vector3 bind =
+        skeleton.bones[static_cast<std::size_t>(com)].localTranslation;
+    track.translationKeys = {
+        {0.0f, bind}, {1.2f, bind + odai::math::Vector3{0.0f, 0.7f, 0.0f}}, {2.4f, bind}};
+    outClip.tracks.push_back(std::move(track));
+    return true;
+}
+
+bool makeProceduralSkyrimWalk(
+    const anim::Skeleton& skeleton, anim::AnimationClip& outClip) {
+    if (skeleton.findBone("NPC L Thigh [LThg]") < 0 ||
+        skeleton.findBone("NPC R Thigh [RThg]") < 0 ||
+        skeleton.findBone("NPC L Calf [LClf]") < 0 ||
+        skeleton.findBone("NPC R Calf [RClf]") < 0) {
+        return false;
+    }
+    outClip = anim::AnimationClip{};
+    outClip.name = "procedural skyrim walk";
+    outClip.duration = 0.86f;
+    outClip.loop = true;
+    addProceduralRotationTrack(outClip, skeleton, "NPC L Thigh [LThg]",
+        {{0.0f, -24.0f}, {0.215f, 0.0f}, {0.43f, 24.0f}, {0.645f, 0.0f}, {0.86f, -24.0f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC R Thigh [RThg]",
+        {{0.0f, 24.0f}, {0.215f, 0.0f}, {0.43f, -24.0f}, {0.645f, 0.0f}, {0.86f, 24.0f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC L Calf [LClf]",
+        {{0.0f, 4.0f}, {0.215f, 34.0f}, {0.43f, 4.0f}, {0.645f, 8.0f}, {0.86f, 4.0f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC R Calf [RClf]",
+        {{0.0f, 4.0f}, {0.215f, 8.0f}, {0.43f, 4.0f}, {0.645f, 34.0f}, {0.86f, 4.0f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC L UpperArm [LUar]",
+        {{0.0f, 13.0f}, {0.43f, -13.0f}, {0.86f, 13.0f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC R UpperArm [RUar]",
+        {{0.0f, -13.0f}, {0.43f, 13.0f}, {0.86f, -13.0f}});
+    return outClip.tracks.size() >= 4u;
 }
 
 
@@ -535,6 +619,14 @@ bool loadActorIdleClip(
         outClip.loop = true;
         return true;
     }
+    // Skyrim's external actor animations are HKX, not KF. A complete Havok
+    // animation reader is far beyond what a walking town needs, so humanoids
+    // get a small bind-relative procedural idle while every Fallout path above
+    // remains data-driven.
+    if (makeProceduralSkyrimIdle(skeleton, outClip)) {
+        outWhy = "procedural Skyrim humanoid idle";
+        return true;
+    }
     return false;
 }
 
@@ -642,6 +734,15 @@ bool loadActorWalkClip(
         outClip.loop = true;
         return true;
     }
+    // Skyrim ships mt_walkforward.hkx rather than a KF. Preserve the existing
+    // GPU skinning and locomotion path with a bind-relative humanoid cycle;
+    // 100 units/s is the same measured fallback used for an in-place creature
+    // clip above and reads as a normal city patrol pace at Bethesda scale.
+    if (makeProceduralSkyrimWalk(skeleton, outClip)) {
+        outSpeedUnitsPerSecond = 100.0f;
+        outWhy = "procedural Skyrim humanoid walk (HKX fallback)";
+        return true;
+    }
     return false;
 }
 
@@ -677,6 +778,7 @@ bool loadGoodspringsActors(
     std::uint32_t firstInstanceSlot,
     std::size_t maxActors,
     const std::vector<std::uint32_t>& excludeBaseFormIds,
+    const std::function<bool(std::uint32_t referenceFormId)>& placementFilter,
     std::vector<SkinnedActor>& outActors,
     ActorPopulationStats& outStats
 ) {
@@ -701,6 +803,11 @@ bool loadGoodspringsActors(
     if (!scanned) {
         outStats.detail = "scan failed: " + error;
         return false;
+    }
+    if (placementFilter) {
+        std::erase_if(scan.placements, [&](const importer::fnv::FalloutActorPlacement& placement) {
+            return placement.refFormId != 0u && !placementFilter(placement.refFormId);
+        });
     }
 
     // ODAI_FNV_SPAWN_ACTOR=<EditorID>[,<EditorID>...] places a named actor in
@@ -1226,6 +1333,10 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
         }
         actor.animationSeconds += deltaSeconds;
 
+        if (!actor.renderVisible) {
+            continue;
+        }
+
         const bool wantsWalkClip =
             !wantsTalkClip && actor.walking && !actor.walkClip.tracks.empty();
         const anim::AnimationClip& clip = wantsTalkClip ? actor.talkClip
@@ -1255,6 +1366,7 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
 void updateActorWandering(
     std::vector<SkinnedActor>& actors,
     float deltaSeconds,
+    const ActorNavigationWorld* navigation,
     const std::function<bool(float, float, float, float&)>& groundHeightAt,
     const std::function<void(float&, float&, float, float, float)>& slideOutOfWalls,
     int skipIndex
@@ -1290,13 +1402,64 @@ void updateActorWandering(
             continue;
         }
 
-        // Settle EVERY actor onto the ground every frame, walking or not. Two
-        // things need it: a placement whose cell was not resident when the
+        // A hidden townsperson has no screen-space motion to preserve. Freeze
+        // its local wander state until it enters the conservative visibility
+        // margin. This also prevents off-screen walkers from tunnelling through
+        // walls while they are not being simulated.
+        if (!actor.renderVisible) {
+            actor.walking = false;
+            continue;
+        }
+
+        const bool authoredNavigationAvailable =
+            navigation != nullptr && navigation->meshCount() != 0u;
+
+        // Project onto the authored walkable surface before ordinary collision.
+        // Collision knows that a rock is a surface; NAVM knows it is not a path.
+        // The wider first projection moves an authored rock-top placement to
+        // the nearby street. Subsequent projections are a small height settle
+        // that cannot jump the actor sideways to a different route.
+        bool settledByNavigation = false;
+        if (authoredNavigationAvailable && !actor.projectedToNavigation) {
+            odai::math::Vector3 point;
+            if (navigation->projectPoint(
+                    actor.position[0], actor.position[1], actor.position[2],
+                    500.0f, 700.0f, point)) {
+                actor.position[0] = point.x;
+                actor.position[1] = point.y;
+                actor.position[2] = point.z;
+                settledByNavigation = true;
+                if (std::getenv("ODAI_FNV_LOG_NAVIGATION") != nullptr) {
+                    VOX_LOGI("newvegas") << "nav projected " << actor.name << " from ("
+                                         << actor.wanderOrigin[0] << "," << actor.wanderOrigin[1]
+                                         << "," << actor.wanderOrigin[2] << ") to ("
+                                         << point.x << "," << point.y << "," << point.z << ")";
+                }
+                actor.projectedToNavigation = true;
+                actor.wanderOrigin[0] = point.x;
+                actor.wanderOrigin[1] = point.y;
+                actor.wanderOrigin[2] = point.z;
+                actor.wanderTarget[0] = point.x;
+                actor.wanderTarget[1] = point.y;
+                actor.wanderTarget[2] = point.z;
+                actor.wanderPath.clear();
+                actor.wanderPathIndex = 0u;
+            }
+        } else if (authoredNavigationAvailable && actor.projectedToNavigation) {
+            // The route itself is the constraint. Avoid a global closest-point
+            // search over every resident triangle for every actor every frame.
+            settledByNavigation = true;
+        }
+
+        // Settle every visible actor onto collision when there is not yet an
+        // authored navmesh. This remains the fallback for Morrowind and cooked
+        // scenes, which do not provide NAVM records to the streamer. Two things
+        // need it: a placement whose cell was not resident when the
         // actor was built has no ground to stand on yet and would hold its
         // authored height forever, and anything repositioned from outside (the
         // diagnostic parade, the spawn-side placement) arrives with a height
         // that came from wherever the PLAYER was standing.
-        {
+        if (!settledByNavigation) {
             float ground = 0.0f;
             if (groundHeightAt(actor.position[0], actor.position[2], actor.position[1], ground)) {
                 actor.position[1] = ground;
@@ -1321,7 +1484,8 @@ void updateActorWandering(
             continue;
         }
 
-        if (!actor.wanders || actor.talking) {
+        if (!actor.wanders || actor.talking ||
+            (authoredNavigationAvailable && !actor.projectedToNavigation)) {
             actor.walking = false;
             continue;
         }
@@ -1336,19 +1500,48 @@ void updateActorWandering(
         const float toTargetZ = actor.wanderTarget[2] - actor.position[2];
         const float distance = std::sqrt((toTargetX * toTargetX) + (toTargetZ * toTargetZ));
         if (distance < kArriveDistance) {
+            if (authoredNavigationAvailable &&
+                actor.wanderPathIndex < actor.wanderPath.size()) {
+                const odai::math::Vector3& waypoint =
+                    actor.wanderPath[actor.wanderPathIndex++];
+                actor.wanderTarget[0] = waypoint.x;
+                actor.wanderTarget[1] = waypoint.y;
+                actor.wanderTarget[2] = waypoint.z;
+                actor.walking = false;
+                continue;
+            }
+
             // Arrived (or never had a target): stand for a moment, then pick
             // the next spot. The pause is most of what makes this read as
             // people rather than as patrol routes -- a town where everyone is
             // permanently in motion looks as wrong as one where nobody is.
             core::Lcg32 rng(actor.wanderRng);
-            const float angle =
-                static_cast<float>(rng.next24() % 3600u) * (3.14159265f / 1800.0f);
-            const float reach =
-                0.35f + (static_cast<float>(rng.next24() % 1000u) * 0.00065f);  // 0.35..1.0
-            actor.wanderTarget[0] =
-                actor.wanderOrigin[0] + (std::cos(angle) * kWanderRadius * reach);
-            actor.wanderTarget[2] =
-                actor.wanderOrigin[2] + (std::sin(angle) * kWanderRadius * reach);
+            if (authoredNavigationAvailable) {
+                const odai::math::Vector3 start{
+                    actor.position[0], actor.position[1], actor.position[2]};
+                const odai::math::Vector3 origin{
+                    actor.wanderOrigin[0], actor.wanderOrigin[1], actor.wanderOrigin[2]};
+                actor.wanderPath.clear();
+                actor.wanderPathIndex = 0u;
+                if (navigation->buildWanderPath(
+                        start, origin, kWanderRadius, rng.next24(), actor.wanderPath) &&
+                    !actor.wanderPath.empty()) {
+                    const odai::math::Vector3& waypoint = actor.wanderPath.front();
+                    actor.wanderTarget[0] = waypoint.x;
+                    actor.wanderTarget[1] = waypoint.y;
+                    actor.wanderTarget[2] = waypoint.z;
+                    actor.wanderPathIndex = 1u;
+                }
+            } else {
+                const float angle =
+                    static_cast<float>(rng.next24() % 3600u) * (3.14159265f / 1800.0f);
+                const float reach =
+                    0.35f + (static_cast<float>(rng.next24() % 1000u) * 0.00065f);
+                actor.wanderTarget[0] =
+                    actor.wanderOrigin[0] + (std::cos(angle) * kWanderRadius * reach);
+                actor.wanderTarget[2] =
+                    actor.wanderOrigin[2] + (std::sin(angle) * kWanderRadius * reach);
+            }
             actor.wanderPauseSeconds =
                 1.5f + (static_cast<float>(rng.next24() % 1000u) * 0.0055f);  // 1.5..7.0 s
             actor.wanderRng = rng.state();
@@ -1375,6 +1568,11 @@ void updateActorWandering(
         const float stride = step * alignment;
         actor.position[0] = fromX + (facing.x * stride);
         actor.position[2] = fromZ + (facing.z * stride);
+        if (authoredNavigationAvailable && distance > 1e-3f) {
+            const float routeFraction = std::min(stride / distance, 1.0f);
+            actor.position[1] +=
+                (actor.wanderTarget[1] - actor.position[1]) * routeFraction;
+        }
 
         // Push back out of anything solid. The capsule is the actor's own: the
         // player's is 34 units around a 120-unit body, so scaling by height

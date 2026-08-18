@@ -78,10 +78,6 @@ enum class UpscalerBackend : std::uint8_t {
     Temporal = 1,
     // Intel XeSS-SR. Requires ODAI_ENABLE_XESS and the SDK at build time.
     Xess = 2,
-    // AMD FidelityFX Super Resolution. DECLARED, NOT IMPLEMENTED.
-    Fsr = 3,
-    // NVIDIA DLSS. DECLARED, NOT IMPLEMENTED.
-    Dlss = 4,
 };
 
 // Quality preset, which is really a render-scale choice. The ratios are XeSS's
@@ -516,37 +512,6 @@ struct CameraPose {
     float fovDegrees;
     bool orthographic = false;
     float orthoHalfHeight = 1000.0f;
-};
-
-struct VoxelPreview {
-    enum class Mode {
-        Add,
-        Remove
-    };
-
-    bool visible = false;
-    int x = 0;
-    int y = 0;
-    int z = 0;
-    int brushSize = 1;
-    Mode mode = Mode::Add;
-    bool faceVisible = false;
-    int faceX = 0;
-    int faceY = 0;
-    int faceZ = 0;
-    std::uint32_t faceId = 0;
-    bool pipeStyle = false;
-    float pipeAxisX = 0.0f;
-    float pipeAxisY = 1.0f;
-    float pipeAxisZ = 0.0f;
-    float pipeRadius = 0.45f;
-    float pipeStyleId = 0.0f;
-};
-
-struct ImportedActorFrameData {
-    std::span<const odai::importer::ImportedScenePackedVertex> vertices;
-    std::span<const std::uint32_t> indices;
-    std::span<const odai::importer::ImportedScenePackedDraw> draws;
 };
 
 // A rest-pose (bind-pose) vertex for a GPU-skinned mesh (see docs/ROADMAP.md's

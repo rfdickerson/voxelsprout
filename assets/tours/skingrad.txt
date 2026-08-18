@@ -18,7 +18,7 @@
 # negative being ABOVE the horizon, so ODAI_FNV_HOUR=16 puts it ~37 degrees up
 # and warm, which is what makes the tower shadows and the stone read.
 #
-#   odai_game_newvegas --stream "<Oblivion/Data>" --plugin Oblivion.esm \
+#   odai --stream "<Oblivion/Data>" --plugin Oblivion.esm \
 #     --worldspace Tamriel --tour-file assets/tours/skingrad.txt \
 #     --flythrough 22 --capture-video skingrad.mp4 30 22
 #

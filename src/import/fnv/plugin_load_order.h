@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -36,6 +37,9 @@ struct FalloutPluginHeader {
     std::vector<std::string> masters;  // MAST subrecords, in declared order
     std::uint32_t recordCount = 0;     // HEDR
     bool isMaster = false;             // TES4 flag 0x1: an .esm-style master
+    // TES4 flag 0x200. Skyrim light plugins share the 0xFE global namespace:
+    // twelve bits select the plugin and twelve bits select one of its records.
+    bool isLight = false;
     // TES4 flag 0x80: the plugin's player-facing text lives in side files under
     // `Strings\` and every lstring subrecord (FULL, RDMP, DESC, NAM1) holds a
     // four-byte string ID instead of the text. Set for Skyrim.esm and clear for
@@ -49,6 +53,24 @@ struct FalloutPluginHeader {
     EsmPluginFormat format = EsmPluginFormat::kFallout3;
 };
 
+enum class FalloutPluginSlotKind : std::uint8_t {
+    Regular,
+    Light,
+};
+
+struct FalloutPluginSlot {
+    FalloutPluginSlotKind kind = FalloutPluginSlotKind::Regular;
+    std::uint16_t index = 0;
+
+    [[nodiscard]] std::uint32_t encode(std::uint32_t objectId) const {
+        if (kind == FalloutPluginSlotKind::Light) {
+            return 0xFE000000u | (static_cast<std::uint32_t>(index) << 12u) |
+                (objectId & 0x00000FFFu);
+        }
+        return (static_cast<std::uint32_t>(index) << 24u) | (objectId & 0x00FFFFFFu);
+    }
+};
+
 // Reads just the TES3/TES4 record at the front of `path`. Returns false if the
 // file cannot be read or does not begin with a supported header record.
 bool readFalloutPluginHeader(
@@ -58,14 +80,34 @@ bool readFalloutPluginHeader(
 struct FalloutLoadOrderEntry {
     std::filesystem::path path;
     FalloutPluginHeader header;
-    // This plugin's position in the load order, and the value its own records'
-    // formIDs must carry after remapping.
-    std::uint8_t globalIndex = 0;
-    // Local mod index -> global mod index. TES4 stores masters first and self
+    // This plugin's global regular/light slot. Load-order position is kept by
+    // the vector itself and is deliberately distinct from the encoded slot:
+    // light plugins do not consume one of the 254 regular slots.
+    FalloutPluginSlot slot;
+    // Local mod index -> global slot. TES4 stores masters first and self
     // last; TES3 stores self at zero and masters at 1..N. The vector is laid
     // out exactly as the source format addresses it.
-    std::vector<std::uint8_t> localToGlobal;
+    std::vector<FalloutPluginSlot> localToGlobal;
 };
+
+// Reads a Skyrim Special Edition plugins.txt. Only '*' lines are active;
+// blank lines and comments are ignored. The caller supplies implicit base/DLC
+// masters separately.
+bool readBethesdaPluginList(
+    const std::filesystem::path& path,
+    std::vector<std::string>& outActivePlugins,
+    std::string& outError);
+
+// Resolves the active Skyrim plugin names without loading their records.
+// `explicitList` wins. Otherwise standard native/Proton profile locations are
+// tried, followed by the installed base/DLC files and present Skyrim.ccc
+// entries. `outSource` names the selected profile or Skyrim.ccc fallback.
+bool resolveInstalledSkyrimPluginList(
+    const std::filesystem::path& dataFilesPath,
+    const std::optional<std::filesystem::path>& explicitList,
+    std::vector<std::string>& outPlugins,
+    std::filesystem::path& outSource,
+    std::string& outError);
 
 class FalloutLoadOrder {
 public:
@@ -109,6 +151,10 @@ public:
     // index is not one this plugin declares -- a malformed reference is not
     // worth inventing a target for.
     [[nodiscard]] std::uint32_t remapFormId(std::size_t pluginIndex, std::uint32_t localFormId) const;
+
+    // Finds which plugin owns a remapped global formID. Used for localized
+    // string tables, whose IDs remain local to their source plugin.
+    [[nodiscard]] const FalloutLoadOrderEntry* ownerOf(std::uint32_t globalFormId) const;
 
     // A stable identifier for the whole load order, for folding into a cache
     // key. Changing which plugins are loaded, or their order, changes this.

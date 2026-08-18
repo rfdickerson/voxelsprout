@@ -31,6 +31,8 @@
 #include "engine/game_app.h"
 #include "import/fnv/character_builder.h"
 #include "games/newvegas/newvegas_collision.h"
+#include "games/newvegas/newvegas_navigation.h"
+#include "games/newvegas/newvegas_traversal_state.h"
 #include "import/fnv/cell_streamer.h"
 #include "import/fnv/weather_records.h"
 #include "ui/nav_focus.h"
@@ -40,7 +42,9 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -122,6 +126,7 @@ public:
     // residency and a full-scene upload would clear its chunks.
     void setStreamDataPath(std::string path) { m_streamDirectory = std::move(path); }
     void setStreamPlugin(std::string plugin) { m_streamPlugin = std::move(plugin); }
+    void setLoadOrderPath(std::string path) { m_loadOrderPath = std::move(path); }
     // An additional plugin loaded after the main one, repeatable, in load order.
     // Its masters are pulled in automatically, so naming only the mod is enough.
     // Records are read for weather; cell contents still come from the main
@@ -135,18 +140,28 @@ public:
     // GameApp consumes this before renderer init, which is the only point at
     // which the quality preset can still choose the render resolution.
     render::UpscalerSettings requestedUpscalerSettings() const override { return m_upscalerSettings; }
-    void setStreamWorldspace(std::string worldspace) { m_streamWorldspace = std::move(worldspace); }
+    void setStreamWorldspace(std::string worldspace) {
+        m_streamWorldspace = std::move(worldspace);
+        m_streamWorldspaceExplicit = true;
+        m_explicitStart = true;
+    }
     // Spawn on the doorstep of this interior cell. Empty means "centre of the
     // worldspace" instead.
     // Start inside a named interior cell -- the room is built and uploaded at
     // startup and the player stands in it, instead of spawning on its doorstep
     // out in the worldspace.
-    void startInsideInterior(std::string editorId) { m_startInsideInterior = std::move(editorId); }
+    void startInsideInterior(std::string editorId) {
+        m_startInsideInterior = std::move(editorId);
+        m_explicitStart = true;
+    }
 
     void setStreamSpawnInterior(std::string editorId) {
         m_streamSpawnInterior = std::move(editorId);
         m_streamSpawnInteriorExplicit = true;
+        m_explicitStart = true;
     }
+    void setTraversalStatePath(std::string path) { m_traversalStatePath = std::move(path); }
+    void setResumeEnabled(bool enabled) { m_resumeEnabled = enabled; }
     // Stand one GPU-skinned character in bind pose against the sky, instead of
     // loading a world at all.
     //
@@ -178,7 +193,6 @@ protected:
     // Fallout's world is ~70 units per metre; the strategy-map preset's AO
     // radius and forced ray-tracing-off are both wrong at that scale. See the
     // base declaration for what opting out actually changes.
-    bool wantsStrategyMapTuning() const override { return false; }
 
     bool onInit() override;
     bool initStreaming();
@@ -191,9 +205,17 @@ protected:
     // consumes the pose during the frame it was set for and does not retain it.
     void updateCharacterPose();
     void updateStreaming(float deltaSeconds);
+    // Skyrim stores generated distant buildings in four-cell .bto tiles.
+    // Keep a small window around the camera so child-worldspace cities (most
+    // visibly Whiterun) retain their authored skyline from the parent world.
+    void updateSkyrimObjectLod(const float bethesdaPosition[3]);
+    // Skyrim's matching .btr terrain tiles form the distant ground underneath
+    // those object shells. Keep a ring outside detailed LAND residency.
+    void updateSkyrimTerrainLod(const float bethesdaPosition[3]);
     void runCollisionSelfTest();
     void onTick(float deltaSeconds) override;
     void onRender(float deltaSeconds) override;
+    void onShutdown() override;
 
 private:
     void applyTimeOfDay();
@@ -212,6 +234,13 @@ private:
     // Distant landscape from the game's own LOD pyramid; see the definition.
     void loadDistantLandLod();
     std::size_t m_distantLodChunk = static_cast<std::size_t>(-1);
+    std::int32_t m_skyrimTerrainLodTileX = 0;
+    std::int32_t m_skyrimTerrainLodTileZ = 0;
+    bool m_skyrimTerrainLodTileValid = false;
+    std::size_t m_skyrimObjectLodChunk = static_cast<std::size_t>(-1);
+    std::int32_t m_skyrimObjectLodTileX = 0;
+    std::int32_t m_skyrimObjectLodTileZ = 0;
+    bool m_skyrimObjectLodTileValid = false;
     // Fills m_weatherChoices, once. Prefers the weathers this worldspace's
     // climate actually runs -- with Nevada Skies loaded that IS the mod's
     // weather set, and it is a far more useful list than every WTHR in the load
@@ -232,6 +261,7 @@ private:
     void pollNavInput(float deltaSeconds);
     // Checks the regions covering the camera and toasts any not seen before.
     void updateRegionDiscovery();
+    void saveTraversalState(bool force);
     // Fills the renderer's stats panel with this game's own readouts --
     // streaming residency and timings, camera, weather. No-op while the panel
     // is closed.
@@ -262,6 +292,10 @@ private:
     // prompt reads.
     [[nodiscard]] int findUsableDoor() const;
     void useDoor(const importer::ImportedSceneDoor& door);
+    bool completeDoorTransition(const importer::ImportedSceneDoor& door, std::string& outError);
+    void reloadActorsForCurrentSpace();
+    void updateDoorTransition(float deltaSeconds);
+    void rebuildStreamDoors();
     // Bilinear ground height at a world XZ. false outside the cooked terrain or
     // over a lattice hole, in which case outHeight is untouched.
     [[nodiscard]] bool groundHeightAt(float x, float z, float& outHeight) const;
@@ -272,6 +306,15 @@ private:
     // (importedSceneInteriorFileName), and a door with an empty target cell is
     // the way back to "<stem>.bin".
     std::vector<importer::ImportedSceneDoor> m_doors;
+    std::unordered_map<
+        importer::CellCoord, std::vector<importer::ImportedSceneDoor>, importer::CellCoordHash>
+        m_streamDoorsByCell;
+    enum class DoorTransitionPhase : std::uint8_t { None, FadeOut, FadeIn };
+    DoorTransitionPhase m_doorTransitionPhase = DoorTransitionPhase::None;
+    std::optional<importer::ImportedSceneDoor> m_pendingDoor;
+    float m_doorTransitionAlpha = 0.0f;
+    std::size_t m_interiorChunk = render::Renderer::kInvalidImportedChunkIndex;
+    std::string m_currentInteriorEditorId;
     std::filesystem::path m_sceneDirectory;
     std::string m_exteriorStem;
     bool m_choiceKeyLatch[9] = {};
@@ -319,6 +362,7 @@ private:
     // same one the cell streamer does. Empty when no extra plugins were loaded.
     importer::fnv::FalloutLoadOrder m_streamLoadOrder;
     bool m_streamIsMorrowind = false;
+    bool m_streamIsSkyrim = false;
     // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
     // does not only magnify, it throws the background out — the two arriving
     // together is what makes the shot read as a lens rather than as a crop.
@@ -458,6 +502,15 @@ private:
     render::UpscalerSettings m_upscalerSettings{};
     importer::fnv::FalloutWeatherTables m_weatherTables;
     std::vector<std::string> m_extraPlugins;  // beyond m_streamPlugin, in load order
+    std::string m_loadOrderPath;
+    std::string m_loadOrderFingerprint;
+    std::filesystem::path m_traversalStatePath;
+    std::optional<TraversalState> m_resumeState;
+    bool m_resumeEnabled = true;
+    bool m_explicitStart = false;
+    float m_stateSaveSeconds = 0.0f;
+    std::unordered_set<std::uint32_t> m_discoveredMarkerIds;
+    std::vector<TraversalDiscovery> m_discoveredLocations;
     std::string m_requestedWeatherEditorId;
     std::uint32_t m_activeWeatherFormId = 0;
     // When the weather's colour slots peak, from the active climate's TNAM.
@@ -564,6 +617,7 @@ private:
     std::string m_streamDirectory;
     std::string m_streamPlugin = "FalloutNV.esm";
     std::string m_streamWorldspace = "WastelandNV";
+    bool m_streamWorldspaceExplicit = false;
     // Where the game itself starts you: the doorstep of Doc Mitchell's house in
     // Goodsprings.
     // Doc Mitchell's house, which is where New Vegas starts you. A DEFAULT, not
@@ -584,6 +638,7 @@ private:
     // Collision for the streamed world. The single-scene (--scene) path keeps
     // using the older height field built from the whole scene.
     CollisionWorld m_collision;
+    ActorNavigationWorld m_actorNavigation;
     // Previous frame's camera position, differenced to get the velocity the
     // planner predicts with. Cheaper and more honest than plumbing the movement
     // code's own velocity, which is reset by collision and jumping.

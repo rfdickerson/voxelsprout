@@ -6,7 +6,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 #include <imgui.h>
@@ -95,7 +94,7 @@ void appendDeviceExtensionIfMissing(std::vector<const char*>& extensions, const 
 }
 
 
-bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid) {
+bool RendererBackend::init(GLFWwindow* window) {
     // Diagnostic: ODAI_DEBUG_NO_TEXTURES=1 shades imported geometry from vertex
     // color instead of its textures (the same switch the imgui debug panel
     // flips). Exists as an env so a headless A/B can separate "the image is
@@ -301,57 +300,27 @@ bool RendererBackend::init(GLFWwindow* window, const odai::world::ChunkGrid& chu
         shutdown();
         return false;
     }
-    if (m_minimalRenderMode) {
-        // UI-only executables (e.g. the design system demo) draw nothing but the 2D
-        // overlay: no pipes/imported statics/sky-clouds/water/grass, so skip that
-        // pipeline builder, and no scene geometry to occlude, so skip the SSAO/normal-
-        // depth builder too. The SSAO pass still runs each frame but, with a null
-        // pipeline, its color attachment is cleared to 1.0 (no occlusion) and tonemap
-        // samples that harmlessly; the AO images themselves are allocated elsewhere.
-        VOX_LOGI("render") << "minimal render mode: skipping createPipePipeline + "
-                              "createAoPipelines (pipe/importedStatic/skyCloud/"
-                              "importedWater/grass + SSAO/normalDepth pipelines)\n";
-    } else {
-        if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
-            VOX_LOGE("render") << "init failed at createPipePipeline\n";
-            shutdown();
-            return false;
-        }
-        if (!runStep("createImportedFireParticlePipeline", [&] {
-                return createImportedFireParticlePipeline();
-            })) {
-            VOX_LOGE("render") << "init failed at createImportedFireParticlePipeline\n";
-            shutdown();
-            return false;
-        }
-        // AO pipelines are needed whenever SSAO can be enabled at runtime. The strategy
-        // map's 3D relief mode turns SSAO on to deepen land-against-water seams, so create
-        // them unconditionally; runtime on/off is governed by setSsaoEnabled().
-        if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
-            VOX_LOGE("render") << "init failed at createAoPipelines\n";
-            shutdown();
-            return false;
-        }
+    if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
+        VOX_LOGE("render") << "init failed at createPipePipeline\n";
+        shutdown();
+        return false;
+    }
+    if (!runStep("createImportedFireParticlePipeline", [&] {
+            return createImportedFireParticlePipeline();
+        })) {
+        VOX_LOGE("render") << "init failed at createImportedFireParticlePipeline\n";
+        shutdown();
+        return false;
+    }
+    if (!runStep("createAoPipelines", [&] { return createAoPipelines(); })) {
+        VOX_LOGE("render") << "init failed at createAoPipelines\n";
+        shutdown();
+        return false;
     }
     {
         const auto frameArenaStart = Clock::now();
         m_frameArena.beginFrame(0);
         VOX_LOGI("render") << "init step frameArena.beginFrame(0) took " << elapsedMs(frameArenaStart) << " ms\n";
-    }
-    if (!runStep("createChunkBuffers", [&] { return createChunkBuffers(chunkGrid, {}); })) {
-        VOX_LOGE("render") << "init failed at createChunkBuffers\n";
-        shutdown();
-        return false;
-    }
-    if (!runStep("createPipeBuffers", [&] { return createPipeBuffers(); })) {
-        VOX_LOGE("render") << "init failed at createPipeBuffers\n";
-        shutdown();
-        return false;
-    }
-    if (!runStep("createPreviewBuffers", [&] { return createPreviewBuffers(); })) {
-        VOX_LOGE("render") << "init failed at createPreviewBuffers\n";
-        shutdown();
-        return false;
     }
     if (!runStep("createFrameResources", [&] { return createFrameResources(); })) {
         VOX_LOGE("render") << "init failed at createFrameResources\n";
@@ -2192,22 +2161,17 @@ bool RendererBackend::recreateSwapchain() {
         VOX_LOGE("render") << "recreateSwapchain failed: createGraphicsPipeline\n";
         return false;
     }
-    // Mirror init()'s minimal-render gating so a resize does not resurrect the
-    // 3D scene pipelines a UI-only executable opted out of.
-    if (!m_minimalRenderMode) {
-        if (!createPipePipeline()) {
-            VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
-            return false;
-        }
-        if (!createImportedFireParticlePipeline()) {
-            VOX_LOGE("render")
-                << "recreateSwapchain failed: createImportedFireParticlePipeline\n";
-            return false;
-        }
-        if (!createAoPipelines()) {
-            VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
-            return false;
-        }
+    if (!createPipePipeline()) {
+        VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
+        return false;
+    }
+    if (!createImportedFireParticlePipeline()) {
+        VOX_LOGE("render") << "recreateSwapchain failed: createImportedFireParticlePipeline\n";
+        return false;
+    }
+    if (!createAoPipelines()) {
+        VOX_LOGE("render") << "recreateSwapchain failed: createAoPipelines\n";
+        return false;
     }
     if (m_imguiInitialized) {
         ImGui_ImplVulkan_SetMinImageCount(std::max<uint32_t>(2u, static_cast<uint32_t>(m_swapchainImages.size())));

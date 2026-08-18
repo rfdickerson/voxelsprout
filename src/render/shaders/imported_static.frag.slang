@@ -1274,7 +1274,19 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // texture, so it is scaled toward the exposure the rest of the scene sits
     // at rather than emitted at 1.0 -- which on an auto-exposed HDR frame keyed
     // to a sunlit desert would read as a dim grey card, not a lit screen.
-    if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u)
+    // Skyrim's BSLightingShaderProperty TreeAnim flag is carried through the
+    // existing packed unlit bit, but its alpha-tested, two-sided branch cards
+    // are foliage rather than emitters. Let those continue into the lighting
+    // path below, where a broad wrap approximates the game's leaf transmission;
+    // real CRT/glow materials still take the self-lit exit unchanged.
+    const bool foliageLighting =
+        (input.inFlags & (kImportedMaterialFlagUnlit |
+                          kImportedMaterialFlagAlphaTest |
+                          kImportedMaterialFlagTwoSided)) ==
+        (kImportedMaterialFlagUnlit |
+         kImportedMaterialFlagAlphaTest |
+         kImportedMaterialFlagTwoSided);
+    if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u && !foliageLighting)
     {
         return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
@@ -1322,7 +1334,9 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.6);
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
-    const float wrappedNdotL = saturate((ndotl * 0.65) + 0.35);
+    const float wrappedNdotL = foliageLighting
+        ? saturate((ndotl * 0.25) + 0.75)
+        : saturate((ndotl * 0.65) + 0.35);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const bool interiorMode = chunkPc.cascadeData.y > 0.5;
     const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;
