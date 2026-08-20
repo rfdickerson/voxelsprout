@@ -30,6 +30,8 @@
 
 namespace odai::importer::fnv {
 
+struct ResolvedContentProfile;
+
 // A plugin's TES3/TES4 header, which is all that is needed to place it in a
 // load order.
 struct FalloutPluginHeader {
@@ -141,6 +143,10 @@ public:
         const std::filesystem::path& dataFilesPath,
         const std::vector<std::string>& requestedFileNames,
         std::string& outError);
+
+    // Places exactly the plugins from an immutable resolved content graph and
+    // uses its ordered enabled layers as plugin search roots.
+    bool open(const ResolvedContentProfile& profile, std::string& outError);
 
     [[nodiscard]] const std::vector<FalloutLoadOrderEntry>& entries() const { return m_entries; }
     [[nodiscard]] std::size_t size() const { return m_entries.size(); }

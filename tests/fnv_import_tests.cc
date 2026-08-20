@@ -1548,6 +1548,104 @@ void testFalloutRecordExtraction() {
     fs::remove(esmPath);
 }
 
+void testSkyrimRegionAndSoundRecords() {
+    using namespace odai::importer::fnv;
+    namespace fs = std::filesystem;
+
+    constexpr std::uint32_t kWorld = 0x00001000u;
+    constexpr std::uint32_t kRegion = 0x00002000u;
+    constexpr std::uint32_t kDescriptor = 0x00003000u;
+    constexpr std::uint32_t kOutput = 0x00004000u;
+    constexpr std::uint32_t kSoundBase = 0x00005000u;
+
+    std::vector<std::uint8_t> regionBody;
+    for (const auto& subrecord : {
+             buildSubrecord("EDID", stringPayload("TestForestRegion")),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, kWorld);
+                   return buildSubrecord("WNAM", data); }(),
+             buildSubrecord("RPLI", {}),
+             [&] { std::vector<std::uint8_t> data;
+                   for (const float value : {0.0f, 0.0f, 4096.0f, 0.0f, 0.0f, 4096.0f}) {
+                       appendPod(data, value);
+                   }
+                   return buildSubrecord("RPLD", data); }(),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, 7u);
+                   return buildSubrecord("RDAT", data); }(),
+             [&] { std::vector<std::uint8_t> data;
+                   appendPod(data, kDescriptor);
+                   appendPod(data, 0x0Bu);  // pleasant, cloudy, snow
+                   appendPod(data, 75u);
+                   return buildSubrecord("RDSA", data); }()}) {
+        regionBody.insert(regionBody.end(), subrecord.begin(), subrecord.end());
+    }
+
+    std::vector<std::uint8_t> outputData(20u, 0u);
+    const float minDistance = 150.0f;
+    const float maxDistance = 4000.0f;
+    std::memcpy(outputData.data() + 4u, &minDistance, sizeof(float));
+    std::memcpy(outputData.data() + 8u, &maxDistance, sizeof(float));
+
+    std::vector<std::uint8_t> descriptorBody;
+    for (const auto& subrecord : {
+             buildSubrecord("EDID", stringPayload("TestRiverLoop")),
+             buildSubrecord("ANAM", stringPayload("fx\\amb\\river_a.wav")),
+             buildSubrecord("ANAM", stringPayload("fx\\amb\\river_b.wav")),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, kOutput);
+                   return buildSubrecord("ONAM", data); }(),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, 0x00800000u);
+                   return buildSubrecord("BNAM", data); }()}) {
+        descriptorBody.insert(descriptorBody.end(), subrecord.begin(), subrecord.end());
+    }
+    std::vector<std::uint8_t> baseData;
+    appendPod(baseData, kDescriptor);
+
+    std::vector<std::uint8_t> bytes = buildTes4Record({}, EsmPluginFormat::kFallout3);
+    const auto appendTop = [&](const char* type, const std::vector<std::uint8_t>& record) {
+        const auto group = buildGroup(type, 0, record);
+        bytes.insert(bytes.end(), group.begin(), group.end());
+    };
+    appendTop("REGN", buildRecord("REGN", kRegion, 0u, regionBody));
+    appendTop("SOPM", buildRecord(
+        "SOPM", kOutput, 0u, buildSubrecord("ANAM", outputData)));
+    appendTop("SNDR", buildRecord("SNDR", kDescriptor, 0u, descriptorBody));
+    appendTop("SOUN", buildRecord(
+        "SOUN", kSoundBase, 0u, buildSubrecord("SDSC", baseData)));
+
+    const fs::path path = fs::temp_directory_path() / "odai_skyrim_ambient_records.esm";
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+    }
+    FalloutSceneData scene;
+    std::string error;
+    expectTrue(extractFalloutScene(path, scene, error),
+               ("Skyrim ambient records extract: " + error).c_str());
+    expectTrue(scene.regions.size() == 1u && scene.regions[0].worldspaceFormId == kWorld,
+               "REGN keeps its worldspace identity");
+    expectTrue(scene.regions.size() == 1u && scene.regions[0].polygons.size() == 1u &&
+                   scene.regions[0].polygons[0].points.size() == 6u,
+               "REGN RPLI/RPLD polygon points extract in authored order");
+    expectTrue(scene.regions.size() == 1u && scene.regions[0].sounds.size() == 1u &&
+                   scene.regions[0].sounds[0].descriptorFormId == kDescriptor &&
+                   scene.regions[0].sounds[0].weatherFlags == 0x0Bu &&
+                   scene.regions[0].sounds[0].chance == 75.0f,
+               "REGN RDSA preserves descriptor, weather flags, and integer chance");
+    expectTrue(scene.soundDescriptors.size() == 1u &&
+                   scene.soundDescriptors[0].filePaths.size() == 2u &&
+                   scene.soundDescriptors[0].looping &&
+                   scene.soundDescriptors[0].outputModelFormId == kOutput,
+               "SNDR preserves variants, looping state, and output model");
+    expectTrue(scene.soundOutputModels.size() == 1u &&
+                   scene.soundOutputModels[0].minDistance == minDistance &&
+                   scene.soundOutputModels[0].maxDistance == maxDistance,
+               "SOPM preserves authored attenuation distances");
+    expectTrue(scene.soundBases.size() == 1u &&
+                   scene.soundBases[0].descriptorFormId == kDescriptor,
+               "SOUN.SDSC resolves to its descriptor");
+    fs::remove(path);
+}
+
 void appendSizedString8(std::vector<std::uint8_t>& buffer, const std::string& text) {
     appendPod(buffer, static_cast<std::uint8_t>(text.size()));
     buffer.insert(buffer.end(), text.begin(), text.end());
@@ -1940,6 +2038,136 @@ void testSkyrimTerrainPackedPositionsAreFullPrecision() {
     }
 }
 
+// Skyrim's packed vertex descriptor only says that an RGBA channel EXISTS.
+// BSLightingShaderProperty's SLSF1_Vertex_Alpha says whether its A byte is
+// actually opacity. Rock/terrain transition meshes depend on the distinction:
+// enabled ramps blend their opaque diffuse into the ground, while disabled
+// bytes must read as 1 rather than punching holes through alpha-tested shapes.
+void testSkyrimLightingShaderVertexAlpha() {
+    const auto parseFixture = [](bool enableVertexAlpha) {
+        const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+        const auto appendSseAvObjectPrefix = [&](std::vector<std::uint8_t>& block) {
+            appendPod(block, static_cast<std::int32_t>(-1));
+            appendPod(block, static_cast<std::uint32_t>(0));
+            appendPod(block, static_cast<std::int32_t>(-1));
+            appendPod(block, static_cast<std::uint32_t>(0));
+            appendPod(block, 0.0f); appendPod(block, 0.0f); appendPod(block, 0.0f);
+            for (float value : identityRotation) appendPod(block, value);
+            appendPod(block, 1.0f);
+            appendPod(block, static_cast<std::int32_t>(-1));
+        };
+
+        std::vector<std::uint8_t> rootBlock;
+        appendSseAvObjectPrefix(rootBlock);
+        appendPod(rootBlock, static_cast<std::uint32_t>(1));
+        appendPod(rootBlock, static_cast<std::int32_t>(1));
+        appendPod(rootBlock, static_cast<std::uint32_t>(0));
+
+        std::vector<std::uint8_t> shapeBlock;
+        appendSseAvObjectPrefix(shapeBlock);
+        for (int i = 0; i < 4; ++i) appendPod(shapeBlock, 0.0f);
+        appendPod(shapeBlock, static_cast<std::int32_t>(-1));  // skin
+        appendPod(shapeBlock, static_cast<std::int32_t>(2));   // shader property
+        appendPod(shapeBlock, static_cast<std::int32_t>(-1));  // alpha property
+        // 24-byte vertex: float3 + padding, half2 UV, RGBA8. Flags say that
+        // positions, UVs and colours are stored; they do NOT enable colour A.
+        constexpr std::uint64_t descriptor =
+            (static_cast<std::uint64_t>(0x23u) << 44u) |
+            (static_cast<std::uint64_t>(5u) << 24u) |
+            (static_cast<std::uint64_t>(4u) << 8u) | 6u;
+        appendPod(shapeBlock, descriptor);
+        appendPod(shapeBlock, static_cast<std::uint16_t>(1));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(3));
+        appendPod(shapeBlock, static_cast<std::uint32_t>(78));  // 3*24 + 1*6
+        constexpr std::array<std::uint8_t, 3> alpha{255u, 128u, 0u};
+        for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+            appendPod(shapeBlock, vertex == 1u ? 1.0f : 0.0f);
+            appendPod(shapeBlock, vertex == 2u ? 1.0f : 0.0f);
+            appendPod(shapeBlock, 0.0f);
+            appendPod(shapeBlock, static_cast<std::uint32_t>(0));
+            appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+            appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+            shapeBlock.push_back(255u);
+            shapeBlock.push_back(255u);
+            shapeBlock.push_back(255u);
+            shapeBlock.push_back(alpha[vertex]);
+        }
+        appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(1));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(2));
+        appendPod(shapeBlock, static_cast<std::uint32_t>(0));
+
+        std::vector<std::uint8_t> shaderBlock;
+        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // shader type
+        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // name
+        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // extra data
+        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // controller
+        appendPod(shaderBlock, enableVertexAlpha ? 0x8u : 0u);   // SLSF1
+        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // SLSF2
+        appendPod(shaderBlock, 0.0f); appendPod(shaderBlock, 0.0f); // UV offset
+        appendPod(shaderBlock, 1.0f); appendPod(shaderBlock, 1.0f); // UV scale
+        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // texture set
+
+        std::vector<std::uint8_t> fileBytes;
+        const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+        fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+        fileBytes.push_back('\n');
+        appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+        appendPod(fileBytes, static_cast<std::uint8_t>(1));
+        appendPod(fileBytes, static_cast<std::uint32_t>(12));
+        appendPod(fileBytes, static_cast<std::uint32_t>(3));
+        appendPod(fileBytes, static_cast<std::uint32_t>(100));
+        appendSizedString8(fileBytes, "");
+        appendSizedString8(fileBytes, "");
+        appendSizedString8(fileBytes, "");
+        appendPod(fileBytes, static_cast<std::uint16_t>(3));
+        appendSizedString32(fileBytes, "BSFadeNode");
+        appendSizedString32(fileBytes, "BSTriShape");
+        appendSizedString32(fileBytes, "BSLightingShaderProperty");
+        appendPod(fileBytes, static_cast<std::uint16_t>(0));
+        appendPod(fileBytes, static_cast<std::uint16_t>(1));
+        appendPod(fileBytes, static_cast<std::uint16_t>(2));
+        appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+        appendPod(fileBytes, static_cast<std::uint32_t>(shapeBlock.size()));
+        appendPod(fileBytes, static_cast<std::uint32_t>(shaderBlock.size()));
+        appendPod(fileBytes, static_cast<std::uint32_t>(0));
+        appendPod(fileBytes, static_cast<std::uint32_t>(0));
+        appendPod(fileBytes, static_cast<std::uint32_t>(0));
+        fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+        fileBytes.insert(fileBytes.end(), shapeBlock.begin(), shapeBlock.end());
+        fileBytes.insert(fileBytes.end(), shaderBlock.begin(), shaderBlock.end());
+        appendPod(fileBytes, static_cast<std::uint32_t>(1));
+        appendPod(fileBytes, static_cast<std::int32_t>(0));
+
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(
+            odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+            ("Synthetic Skyrim vertex-alpha fixture parses: " + error).c_str());
+        return model;
+    };
+
+    const auto enabled = parseFixture(true);
+    expectTrue(enabled.shapes.size() == 1u, "vertex-alpha fixture emits one shape");
+    if (enabled.shapes.size() == 1u) {
+        expectTrue(enabled.shapes[0].alphaBlend,
+                   "SLSF1_Vertex_Alpha routes a partial ramp through blending");
+        expectNear(enabled.shapes[0].colors[7], 128.0f / 255.0f, 1e-5f,
+                   "enabled vertex alpha preserves its authored coverage");
+    }
+
+    const auto disabled = parseFixture(false);
+    expectTrue(disabled.shapes.size() == 1u, "disabled-alpha fixture emits one shape");
+    if (disabled.shapes.size() == 1u) {
+        expectTrue(!disabled.shapes[0].alphaBlend,
+                   "stored alpha bytes do not imply blending when SLSF1 disables them");
+        expectNear(disabled.shapes[0].colors[7], 1.0f, 1e-5f,
+                   "disabled vertex alpha is normalized to opaque");
+        expectNear(disabled.shapes[0].colors[11], 1.0f, 1e-5f,
+                   "even a stored zero alpha is ignored when the shader flag is clear");
+    }
+}
+
 // Builds a NIF whose hierarchy is root -> middle -> NiTriShape -> data, where
 // the MIDDLE block's type name is chosen by the caller. `footerRoot` < 0 omits
 // the footer entirely (older behaviour); otherwise a one-root footer is written.
@@ -1967,6 +2195,10 @@ std::vector<std::uint8_t> buildChainedNif(
     appendPod(middleBlock, static_cast<std::int32_t>(2));   // children[0] = block 2
     if (!truncateMiddleBlock) {
         appendPod(middleBlock, static_cast<std::uint32_t>(0));  // numEffects
+        if (middleTypeName == "NiSwitchNode") {
+            appendPod(middleBlock, static_cast<std::uint16_t>(3));  // switch flags
+            appendPod(middleBlock, static_cast<std::uint32_t>(0));  // initial child
+        }
     }
 
     // Block 2: NiTriShape, identity local transform, dataRef = block 3.
@@ -2046,6 +2278,25 @@ std::vector<std::uint8_t> buildChainedNif(
 
 // The floating-geometry regression, stated as the two outcomes that matter.
 void testNifParserDoesNotReparentSubtreesToTheOrigin() {
+    // Skyrim trees put obsolete billboard/LOD alternatives under a
+    // NiSwitchNode. Its six-byte subtype tail selects the one authored child;
+    // ignoring it traverses inactive geometry and reports valid trees as
+    // corrupt or duplicates their silhouette.
+    {
+        const std::vector<std::uint8_t> bytes =
+            buildChainedNif("NiSwitchNode", 2500.0f, 0);
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("NiSwitchNode subtype tail parses: " + error).c_str());
+        expectTrue(model.nodeParseFailedCount == 0u && model.shapes.size() == 1u,
+                   "NiSwitchNode reaches its authored initial child without a parse failure");
+        if (model.shapes.size() == 1u && model.shapes.front().positions.size() >= 3u) {
+            expectNear(model.shapes.front().positions[2], 2500.0f, 1e-3f,
+                       "NiSwitchNode preserves the selected child's ancestor transform");
+        }
+    }
+
     // 1. A middle node of a type the allowlist did not previously cover
     //    (BSMasterParticleSystem is NiNode-derived per nif.xml and roots 38
     //    retail meshes, yet does not end in "Node" so no suffix rule sees it).
@@ -5388,6 +5639,32 @@ void testMorrowindNifLodNodeSubtypeTail() {
         summary.blockSizes.size() == 2u && summary.blockSizes[0] == lodBlock.size() &&
             summary.blockSizes[1] == nodeBlock.size(),
         "NiLODNode includes its switch index, centre and range array in its derived size");
+
+    // NiSwitchNode itself has the same four-byte signed initial-child field in
+    // 4.0.0.2, without the 16-bit flags present in modern Gamebryo files. This
+    // is a static-parser regression test in addition to the block-size test
+    // above: reading the modern six-byte tail used to reject this valid node.
+    std::vector<std::uint8_t> switchBlock;
+    appendMorrowindNodeBase(switchBlock);
+    appendPod(switchBlock, static_cast<std::int32_t>(-1));
+
+    std::vector<std::uint8_t> switchFileBytes;
+    switchFileBytes.insert(switchFileBytes.end(), header.begin(), header.end());
+    appendPod(switchFileBytes, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(switchFileBytes, static_cast<std::uint32_t>(2));
+    appendSizedString32(switchFileBytes, "NiSwitchNode");
+    switchFileBytes.insert(switchFileBytes.end(), switchBlock.begin(), switchBlock.end());
+    appendSizedString32(switchFileBytes, "NiNode");
+    switchFileBytes.insert(switchFileBytes.end(), nodeBlock.begin(), nodeBlock.end());
+
+    odai::importer::fnv::NifModel switchModel;
+    error.clear();
+    expectTrue(
+        odai::importer::fnv::parseNifStaticMesh(switchFileBytes, switchModel, error),
+        ("Morrowind NiSwitchNode parses: " + error).c_str());
+    expectTrue(
+        switchModel.nodeParseFailedCount == 0u,
+        "Morrowind NiSwitchNode consumes its four-byte subtype tail");
 }
 
 void testMorrowindDirectKeyframeAndStencilSizing() {
@@ -5516,6 +5793,42 @@ void testLandLayerOpacityReconstruction() {
                "out-of-range reconstruction coordinates clamp to a valid opacity");
 }
 
+void testVertexFadeTrianglePartitioning() {
+    using namespace odai::importer::fnv;
+
+    NifShape shape;
+    shape.alphaSemantic = NifAlphaSemantic::VertexFade;
+    shape.alphaBlend = true;
+    shape.triangleIndices = {0u, 1u, 2u, 2u, 1u, 3u};
+    shape.colors.resize(4u * 4u, 1.0f);
+    // Only the second triangle touches vertex 3, so only that triangle belongs
+    // in the no-depth-write transition tail.
+    shape.colors[(3u * 4u) + 3u] = 0.25f;
+    std::vector<std::uint32_t> indices{99u};
+    std::uint32_t opaque = 0u;
+    std::uint32_t faded = 0u;
+    appendPartitionedNifShapeIndices(shape, 10u, indices, opaque, faded);
+    expectTrue(opaque == 3u && faded == 3u,
+               "vertex-fade partition keeps opaque and faded triangle counts");
+    expectTrue(indices == std::vector<std::uint32_t>({99u, 10u, 11u, 12u, 12u, 11u, 13u}),
+               "vertex-fade partition preserves winding and appends the faded tail");
+
+    shape.alphaSemantic = NifAlphaSemantic::ExplicitBlend;
+    indices.clear();
+    appendPartitionedNifShapeIndices(shape, 0u, indices, opaque, faded);
+    expectTrue(opaque == 6u && faded == 0u && indices == shape.triangleIndices,
+               "explicit transparency stays one material-controlled range");
+
+    shape.alphaSemantic = NifAlphaSemantic::VertexFade;
+    for (std::size_t alpha = 3u; alpha < shape.colors.size(); alpha += 4u) {
+        shape.colors[alpha] = 0.5f;
+    }
+    indices.clear();
+    appendPartitionedNifShapeIndices(shape, 0u, indices, opaque, faded);
+    expectTrue(opaque == 0u && faded == 6u && indices == shape.triangleIndices,
+               "fully faded geometry remains wholly in the blended tail");
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -5529,9 +5842,12 @@ int main() {
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
+    testSkyrimRegionAndSoundRecords();
     testLandLayerOpacityReconstruction();
+    testVertexFadeTrianglePartitioning();
     testNifParserExtractsTransformedGeometry();
     testSkyrimTerrainPackedPositionsAreFullPrecision();
+    testSkyrimLightingShaderVertexAlpha();
     testNifParserDoesNotReparentSubtreesToTheOrigin();
     testNifParserInheritsPropertiesFromParentNodes();
     testNifParserRejectsUnusableTriangles();

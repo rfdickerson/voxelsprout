@@ -543,29 +543,71 @@ WaterSurfaceSample waterSurface(
     const float currentWave0 = sin((acrossPosition * 0.0105) + (alongPosition * 0.0022) - (time * 0.30 * animationSpeed));
     const float currentWave1 = sin((acrossPosition * 0.0210) - (alongPosition * 0.0040) - (time * 0.48 * animationSpeed));
     const float2 proceduralSlope =
-        across * ((currentWave0 * 0.012) + (currentWave1 * 0.004));
+        across * ((currentWave0 * 0.0025) + (currentWave1 * 0.0012));
 
-    const float2 flowUv = float2(alongPosition, acrossPosition) * 0.00095;
     const float speedScale = lerp(0.65, 1.15, flowSpeed);
-    const float2 sampleUv0 = flowUv + float2(-time * 0.028 * animationSpeed * speedScale, 0.0);
-    const float2 sampleUv1 = (float2(alongPosition, acrossPosition) * 0.0018) +
-        float2(-time * 0.045 * animationSpeed * speedScale, 0.037);
+    // Keep the texture metric tied to equal Bethesda world units. Flow is an
+    // animation vector, not a UV basis: rotating the entire coordinate frame
+    // with a spatially varying current made one map axis read as stretched
+    // after reflection/refraction amplified its slopes.
+    const float2 sampleUv0 =
+        (worldPosition.xz * 0.00320) -
+        (flow * time * 0.026 * animationSpeed * speedScale);
+    // A second octave in the same tangent frame collapses into long parallel
+    // streaks at grazing view angles. Rotate both its coordinates and its
+    // decoded tangent basis, producing crossing capillary ripples while the
+    // broad octave still follows the authored/current flow direction.
+    const float2 detailAxisX = normalize(float2(0.68, 0.73));
+    const float2 detailAxisY = float2(-detailAxisX.y, detailAxisX.x);
+    const float detailAlongPosition = dot(worldPosition.xz, detailAxisX);
+    const float detailAcrossPosition = dot(worldPosition.xz, detailAxisY);
+    const float2 detailFlowUv = float2(
+        dot(flow, detailAxisX),
+        dot(flow, detailAxisY));
+    const float2 sampleUv1 =
+        (float2(detailAlongPosition, detailAcrossPosition) * 0.00750) +
+        float2(0.0, 0.037) -
+        (detailFlowUv * time * 0.041 * animationSpeed * speedScale);
+    // Generated ripple art can retain a weak preferred direction even after
+    // authoring. A counter-rotated middle octave prevents that direction from
+    // collapsing into long screen-space bands at water-level camera angles.
+    const float2 crossAxisX = normalize(float2(0.79, -0.61));
+    const float2 crossAxisY = float2(-crossAxisX.y, crossAxisX.x);
+    const float crossAlongPosition = dot(worldPosition.xz, crossAxisX);
+    const float crossAcrossPosition = dot(worldPosition.xz, crossAxisY);
+    const float2 crossFlowUv = float2(
+        dot(flow, crossAxisX),
+        dot(flow, crossAxisY));
+    const float2 sampleUv2 =
+        (float2(crossAlongPosition, crossAcrossPosition) * 0.00485) +
+        float2(0.173, 0.291) -
+        (crossFlowUv * time * 0.033 * animationSpeed * speedScale);
     const uint normalTextureSlot = authoredNormalTextureSlot != 0xffffffffu
         ? authoredNormalTextureSlot
         : kBindlessTextureIndexWaterNormal;
-    // Tamriel's default WATR references DefaultWater.dds for all three normal
-    // layers. Sample that original DXT1 vector map at the material's three
-    // scales; its image view is linear rather than sRGB.
-    const float2 waterNormalRg0 = bindlessTextures[NonUniformResourceIndex(normalTextureSlot)].Sample(sampleUv0).xy * 2.0 - 1.0;
-    const float2 waterNormalRg1 = bindlessTextures[NonUniformResourceIndex(normalTextureSlot)].Sample(sampleUv1).xy * 2.0 - 1.0;
-    const float2 flowTextureSlope =
-        (waterNormalRg0 * 0.62) +
-        (waterNormalRg1 * (0.30 + (0.08 * detailFade)));
-    // Normal texture X/Y are in the flow/across frame. Rotate the slope back
-    // into world X/Z before lighting and refraction use it.
+    // Water normals are sampled as linear tangent vectors. The fallback is a
+    // BC5 UNORM image; external PNG/DDS overrides use RGBA8 UNORM, never sRGB.
+    // A small positive bias suppresses grazing-angle alias bands from dense
+    // generated ripple art. Mips are built by averaging and renormalizing
+    // tangent vectors, so this filters slopes rather than RGB colours.
+    const float normalMipBias = lerp(0.45, 1.55, smoothstep(350.0, 2200.0, viewDistance));
+    const float2 waterNormalRg0 = bindlessTextures[NonUniformResourceIndex(normalTextureSlot)].SampleBias(sampleUv0, normalMipBias).xy * 2.0 - 1.0;
+    const float2 waterNormalRg1 = bindlessTextures[NonUniformResourceIndex(normalTextureSlot)].SampleBias(sampleUv1, normalMipBias).xy * 2.0 - 1.0;
+    const float2 waterNormalRg2 = bindlessTextures[NonUniformResourceIndex(normalTextureSlot)].SampleBias(sampleUv2, normalMipBias).xy * 2.0 - 1.0;
+    const float2 broadTextureSlope = waterNormalRg0;
+    const float2 detailTextureSlope =
+        (detailAxisX * waterNormalRg1.x) + (detailAxisY * waterNormalRg1.y);
+    const float2 crossTextureSlope =
+        (crossAxisX * waterNormalRg2.x) + (crossAxisY * waterNormalRg2.y);
+    // Keep the map a perturbation of the physical surface. The old 0.56 near
+    // multiplier bent reflection/refraction rays enough to turn fine normal
+    // detail into comb-like bands. This still reads clearly up close without
+    // stretching reflected buildings across the foreground.
     const float2 textureSlope =
-        ((flow * flowTextureSlope.x) + (across * flowTextureSlope.y)) *
-        (0.34 + (0.22 * detailFade)) * normalStrength;
+        ((broadTextureSlope * 0.29) +
+            (crossTextureSlope * 0.27) +
+            (detailTextureSlope * (0.25 + (0.04 * detailFade)))) *
+        (0.12 + (0.10 * detailFade)) * normalStrength;
     const float distanceFlattenFactor = 1.0 - smoothstep(500.0, 3500.0, viewDistance) * 0.72;
     const float2 waveSlope = (textureSlope + (proceduralSlope * normalStrength)) * distanceFlattenFactor;
     WaterSurfaceSample result;

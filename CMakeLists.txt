@@ -211,7 +211,8 @@ target_include_directories(odai_ui PRIVATE ${Stb_INCLUDE_DIR})
 target_link_libraries(odai_ui PUBLIC odai_core nlohmann_json::nlohmann_json)
 odai_warnings(odai_ui)
 
-add_library(odai_audio STATIC src/audio/audio.cc src/audio/null_backend.cc)
+add_library(odai_audio STATIC src/audio/audio.cc src/audio/null_backend.cc
+    src/audio/wav_writer.cc)
 odai_source_includes(odai_audio)
 target_link_libraries(odai_audio PUBLIC odai_core)
 if(ODAI_MINIAUDIO_INCLUDE_DIR)
@@ -251,6 +252,7 @@ add_library(odai_bethesda_import STATIC
     src/import/fnv/actor_records.cc src/import/fnv/asset_source.cc
     src/import/fnv/async_asset_loader.cc src/import/fnv/bsa_archive.cc
     src/import/fnv/cell_builder.cc src/import/fnv/character_builder.cc
+    src/import/fnv/content_profile.cc src/import/fnv/content_record_index.cc
     src/import/fnv/decoded_texture_cache.cc src/import/fnv/dialogue_records.cc
     src/import/fnv/esm_reader.cc src/import/fnv/fallout_records.cc
     src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/lz4_frame.cc
@@ -258,7 +260,7 @@ add_library(odai_bethesda_import STATIC
     src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc)
 odai_source_includes(odai_bethesda_import)
 target_link_libraries(odai_bethesda_import PUBLIC odai_core odai_anim odai_dialogue
-    ZLIB::ZLIB Jolt::Jolt)
+    ZLIB::ZLIB Jolt::Jolt nlohmann_json::nlohmann_json)
 odai_warnings(odai_bethesda_import)
 
 # The Vulkan renderer is compiled once. Until the imported-only API pruning is
@@ -354,6 +356,9 @@ if(BUILD_TESTING)
     odai_plain_test(odai_fnv_import_tests tests/fnv_import_tests.cc)
     target_link_libraries(odai_fnv_import_tests PRIVATE odai_bethesda_import)
 
+    odai_plain_test(odai_content_profile_tests tests/content_profile_tests.cc)
+    target_link_libraries(odai_content_profile_tests PRIVATE odai_bethesda_import)
+
     if(TARGET odai_traversal)
         odai_plain_test(odai_traversal_state_tests tests/traversal_state_tests.cc)
         target_link_libraries(odai_traversal_state_tests PRIVATE odai_traversal)
@@ -367,6 +372,17 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_audio_tests tests/audio_tests.cc)
     target_link_libraries(odai_audio_tests PRIVATE odai_audio)
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME odai_skyrim_showcase_manifest_tests
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/scripts/render_skyrim_showcase.py
+                --odai ${CMAKE_BINARY_DIR}/odai
+                --data ${CMAKE_BINARY_DIR}/missing-skyrim-data
+                --dry-run)
+    endif()
 
     odai_plain_test(odai_upscaler_tests tests/upscaler_tests.cc)
     target_link_libraries(odai_upscaler_tests PRIVATE odai_upscale)
@@ -405,15 +421,19 @@ if(BUILD_TESTING)
     target_link_libraries(odai_imported_scene_vulkan_smoke PRIVATE odai_renderer)
     odai_warnings(odai_imported_scene_vulkan_smoke)
     find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run)
+    set(ODAI_VULKAN_SMOKE_REGISTERED OFF)
     if(XVFB_RUN_EXECUTABLE)
         add_test(NAME odai_imported_scene_vulkan_smoke
             COMMAND "${XVFB_RUN_EXECUTABLE}" -a $<TARGET_FILE:odai_imported_scene_vulkan_smoke>)
+        set(ODAI_VULKAN_SMOKE_REGISTERED ON)
     else()
-        add_test(NAME odai_imported_scene_vulkan_smoke
-            COMMAND odai_imported_scene_vulkan_smoke)
+        message(STATUS
+            "Skipping imported-scene Vulkan smoke test: xvfb-run is unavailable")
     endif()
-    set_tests_properties(odai_imported_scene_vulkan_smoke PROPERTIES
-        # Shader development paths are rooted one level above the process CWD.
-        # `tests/` is stable for both in-tree and out-of-tree build directories.
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests" TIMEOUT 60)
+    if(ODAI_VULKAN_SMOKE_REGISTERED)
+        set_tests_properties(odai_imported_scene_vulkan_smoke PROPERTIES
+            # Shader development paths are rooted one level above the process CWD.
+            # `tests/` is stable for both in-tree and out-of-tree build directories.
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests" TIMEOUT 60)
+    endif()
 endif()

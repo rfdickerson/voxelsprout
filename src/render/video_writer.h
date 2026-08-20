@@ -57,4 +57,10 @@ private:
 // distribution ffmpeg often omits entirely. $ODAI_CAPTURE_ENCODER overrides.
 const std::string& preferredVideoEncoder();
 
+// Copies an already-encoded video stream and encodes a float WAV sidecar as
+// 48 kHz stereo AAC. The inputs are intentionally retained; the caller removes
+// only its own temporary files after this returns true.
+bool muxVideoAndAudio(const std::string& videoPath, const std::string& wavPath,
+                      const std::string& outputPath);
+
 }  // namespace odai::render

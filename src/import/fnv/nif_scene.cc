@@ -202,7 +202,10 @@ bool isNodeTypeName(std::string_view typeName) {
 // it. Worth surfacing rather than absorbing — mods and DLC use node types the
 // base game happens not to.
 bool looksLikeUnhandledNodeType(std::string_view typeName) {
-    return !isNodeTypeName(typeName) && typeName.size() > 4u &&
+    // Despite its suffix BSFurnitureMarkerNode is NiExtraData, not NiNode.
+    // Treating it structurally as a node reports every bed/chair as a failed
+    // visible subtree even though the furniture mesh itself is complete.
+    return typeName != "BSFurnitureMarkerNode" && !isNodeTypeName(typeName) && typeName.size() > 4u &&
         typeName.substr(typeName.size() - 4u) == "Node";
 }
 
@@ -522,6 +525,9 @@ struct AvObjectFields {
     // and the geometry lives in the NiSkinPartition two hops away, so this is
     // the only route to it. See linkSkinnedShapesToPartitions.
     std::int32_t skinRef = -1;
+    // NiSwitchNode's authored initial child. -2 means this is not a switch;
+    // -1 means the switch intentionally displays no child.
+    std::int32_t switchChildIndex = -2;
 };
 
 // A NiNode named "EditorMarker" holds geometry the Construction Set draws and
@@ -1142,7 +1148,7 @@ bool readAvObjectPrefix(
 // -- which costs a whole model, the exact outcome this file is trying to avoid.
 bool readNiNode(
     ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
-    AvObjectFields& out) {
+    AvObjectFields& out, std::string_view typeName = {}) {
     if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, morrowind, out)) {
         return false;
     }
@@ -1175,8 +1181,37 @@ bool readNiNode(
     // this block, and reads refuse to run past its end (the same argument the
     // geometry reader's own comment makes). A minimum-trailer check is the
     // form that actually asserts something here.
-    if ((cursor.size() - cursor.pos()) < sizeof(std::uint32_t)) {
+    std::uint32_t numEffects = 0u;
+    if (!cursor.read(numEffects) ||
+        static_cast<std::size_t>(numEffects) * sizeof(std::int32_t) >
+            (cursor.size() - cursor.pos())) {
         return false;
+    }
+    if (!cursor.skip(static_cast<std::size_t>(numEffects) * sizeof(std::int32_t))) {
+        return false;
+    }
+    if (typeName == "NiSwitchNode") {
+        if (morrowind) {
+            // NetImmerse 4.0.0.2 stores only the signed initial-child index.
+            // The 16-bit switch flags were added in later NIF generations.
+            // Reading the modern six-byte tail here consumed two bytes from
+            // the next block (or failed at end-of-block) and dropped the whole
+            // switched subtree. Tamriel Rebuilt uses these nodes extensively
+            // for exterior architecture, including the Narsis arena/temples.
+            std::int32_t initialChild = -1;
+            if (!cursor.read(initialChild)) {
+                return false;
+            }
+            out.switchChildIndex = initialChild;
+        } else {
+            std::uint16_t switchFlags = 0u;
+            std::uint32_t initialChild = 0xffffffffu;
+            if (!cursor.read(switchFlags) || !cursor.read(initialChild)) {
+                return false;
+            }
+            (void)switchFlags;
+            out.switchChildIndex = static_cast<std::int32_t>(initialChild);
+        }
     }
     return true;
 }
@@ -1695,7 +1730,7 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
 // BSShaderTextureSet.
 bool readBsLightingShaderTextureSetRef(
     ByteCursor& cursor, std::int32_t& outTextureSetRef, bool& outTwoSided,
-    bool& outTreeAnim) {
+    bool& outTreeAnim, bool& outVertexAlpha) {
     std::uint32_t shaderType = 0;
     std::int32_t nameRef = 0;
     std::uint32_t numExtraData = 0;
@@ -1717,6 +1752,12 @@ bool readBsLightingShaderTextureSetRef(
     }
     outTwoSided = (shaderFlags2 & 0x10u) != 0u;
     outTreeAnim = (shaderFlags2 & 0x20000000u) != 0u;
+    // SLSF1_Vertex_Alpha is not redundant with the packed vertex descriptor's
+    // colour bit. Skyrim routinely stores an alpha byte on every vertex, then
+    // uses this material flag to say whether that byte is opacity or merely
+    // unused payload. Rock/ground transition meshes are the load-bearing case:
+    // their opaque texture is feathered into the terrain solely by this flag.
+    outVertexAlpha = (shaderFlags1 & 0x8u) != 0u;
     return cursor.read(outTextureSetRef);
 }
 
@@ -3995,6 +4036,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
     std::vector<bool> lightingShaderTwoSided(numBlocks, false);
     std::vector<bool> lightingShaderTreeAnim(numBlocks, false);
+    std::vector<bool> lightingShaderVertexAlpha(numBlocks, false);
+    std::vector<bool> lightingShaderValid(numBlocks, false);
     // Per NiSkinInstance block, the NiSkinPartition holding its geometry.
     std::vector<std::int32_t> skinPartitionRefs(numBlocks, -1);
     // Diffuse paths reached through the older NiTexturingProperty ->
@@ -4035,7 +4078,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // NiNode-derived fails that and is counted, rather than misparsed.
         if (isNodeTypeName(typeName) || looksLikeUnhandledNodeType(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
+                           header.inlineBlockTypes, fields, typeName)) {
                 nodeFields[i] = std::move(fields);
                 isNiNode[i] = true;
                 if (typeName == "NiBSAnimationNode" &&
@@ -4055,6 +4099,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 // are exactly the bytes that cannot be trusted -- so the
                 // subtree is left unreachable and simply not drawn.
                 ++outModel.nodeParseFailedCount;
+                if (std::find(outModel.failedNodeTypes.begin(), outModel.failedNodeTypes.end(),
+                              typeName) == outModel.failedNodeTypes.end()) {
+                    outModel.failedNodeTypes.push_back(typeName);
+                }
             }
         } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
                    typeName == "BSSegmentedTriShape") {
@@ -4110,11 +4158,14 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             std::int32_t textureSetRef = -1;
             bool twoSided = false;
             bool treeAnim = false;
+            bool vertexAlpha = false;
             if (readBsLightingShaderTextureSetRef(
-                    blockCursor, textureSetRef, twoSided, treeAnim)) {
+                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha)) {
                 shaderTextureSetRefs[i] = textureSetRef;
                 lightingShaderTwoSided[i] = twoSided;
                 lightingShaderTreeAnim[i] = treeAnim;
+                lightingShaderVertexAlpha[i] = vertexAlpha;
+                lightingShaderValid[i] = true;
             }
         } else if (typeName == "BSShaderPPLightingProperty") {
             std::int32_t textureSetRef = -1;
@@ -4417,7 +4468,17 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 childInherited.end(),
                 nodeFields[blockIndex].properties.begin(),
                 nodeFields[blockIndex].properties.end());
-            for (const std::int32_t child : nodeFields[blockIndex].children) {
+            const AvObjectFields& node = nodeFields[blockIndex];
+            const bool isSwitch = node.switchChildIndex != -2;
+            if (isSwitch && node.children.size() > 1u) {
+                outModel.inactiveSwitchSubtreeCount +=
+                    static_cast<std::uint32_t>(node.children.size() - 1u);
+            }
+            for (std::size_t childIndex = 0; childIndex < node.children.size(); ++childIndex) {
+                if (isSwitch && static_cast<std::int32_t>(childIndex) != node.switchChildIndex) {
+                    continue;
+                }
+                const std::int32_t child = node.children[childIndex];
                 if (child >= 0 && static_cast<std::size_t>(child) < numBlocks) {
                     stack.push_back(static_cast<std::size_t>(child));
                     transformStack.push_back(worldTransform);
@@ -4436,6 +4497,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
             const GeometryBlock& src = geometry[dataRef];
             NifShape shape;
+            if (blockIndex < header.blockTypeIndex.size()) {
+                shape.sourceBlockType =
+                    header.blockTypeNames[header.blockTypeIndex[blockIndex]];
+            }
             const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
             if (!nodeFields[blockIndex].name.empty()) {
                 shape.name = nodeFields[blockIndex].name;
@@ -4484,6 +4549,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // in the header comment relies on.
             std::string noLightingFallback;
             bool shapeReversedWinding = false;
+            bool vertexAlphaResolved = false;
+            bool vertexAlphaEnabled = true;  // classic NIFs keep their existing semantics
             const auto applyProperty = [&](std::int32_t propertyRef) {
                 if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
                     return;
@@ -4491,6 +4558,14 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
                 shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
                 shape.twoSided = shape.twoSided || lightingShaderTwoSided[propertyIndex];
+                // Own properties are visited before inherited ones. The first
+                // BSLightingShaderProperty therefore owns this decision just as
+                // it owns the shape's texture; a parent material cannot turn a
+                // deliberately disabled vertex-alpha channel back on.
+                if (!vertexAlphaResolved && lightingShaderValid[propertyIndex]) {
+                    vertexAlphaEnabled = lightingShaderVertexAlpha[propertyIndex];
+                    vertexAlphaResolved = true;
+                }
                 // Reuse the packed unlit bit as the source-material marker.
                 // The shader distinguishes TreeAnim from a true emissive by
                 // its authored alpha-test + two-sided combination and applies
@@ -4523,6 +4598,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     }
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
+                    if (shape.alphaTest) {
+                        shape.alphaSemantic = NifAlphaSemantic::Cutout;
+                    } else if (shape.alphaBlend) {
+                        shape.alphaSemantic = NifAlphaSemantic::ExplicitBlend;
+                    }
                     return;
                 }
                 if (stencilProperties[propertyIndex].valid) {
@@ -4589,6 +4669,34 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
 
             shape.uvs = src.uvs;
             shape.colors = src.colors;
+            if (vertexAlphaResolved && !vertexAlphaEnabled) {
+                // NifSkope/Bethesda semantics: a stored colour alpha is 1.0
+                // unless SLSF1_Vertex_Alpha explicitly enables it. Multiplying
+                // an alpha-tested rock skirt by an inactive channel discarded
+                // authored faces and looked exactly like missing triangles.
+                for (std::size_t i = 3u; i < shape.colors.size(); i += 4u) {
+                    shape.colors[i] = 1.0f;
+                }
+            } else if (vertexAlphaResolved && vertexAlphaEnabled && !shape.alphaTest) {
+                // Skyrim does not need a separate NiAlphaProperty for these
+                // transition skirts. If the material enables vertex alpha and
+                // the channel actually varies, route it through the existing
+                // sorted blended tail instead of painting an opaque sheet over
+                // the rocks/terrain beneath it.
+                const bool hasPartialAlpha = [&]() {
+                    for (std::size_t i = 3u; i < shape.colors.size(); i += 4u) {
+                        if (shape.colors[i] < (254.5f / 255.0f)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }();
+                if (hasPartialAlpha &&
+                    shape.alphaSemantic != NifAlphaSemantic::ExplicitBlend) {
+                    shape.alphaBlend = true;
+                    shape.alphaSemantic = NifAlphaSemantic::VertexFade;
+                }
+            }
             shape.positions.resize(src.positions.size());
             for (std::size_t v = 0; v * 3u < src.positions.size(); ++v) {
                 const float local[3] = {src.positions[v * 3u], src.positions[(v * 3u) + 1], src.positions[(v * 3u) + 2]};
@@ -4608,6 +4716,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 }
             }
             shape.triangleIndices = src.triangleIndices;
+            shape.sourceTriangleCount = static_cast<std::uint32_t>(
+                (src.triangleIndices.size() / 3u) + src.outOfRangeTriangles +
+                src.degenerateTriangles);
+            shape.rejectedTriangleCount =
+                src.outOfRangeTriangles + src.degenerateTriangles;
 
             // Mirrored shapes: reverse the winding.
             //
@@ -4788,7 +4901,8 @@ bool parseNifSkeleton(
         ByteCursor blockCursor(
             bytes.data() + blockStart[i], header.blockSize[i]);
         AvObjectFields fields;
-        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
+        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
+                       header.inlineBlockTypes, fields, typeName)) {
             nodeFields[i] = std::move(fields);
             isNiNode[i] = true;
         }
@@ -5107,7 +5221,8 @@ bool parseNifSkinnedMesh(
 
         if (isNodeTypeName(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
+                           header.inlineBlockTypes, fields, typeName)) {
                 const std::int32_t nameRef = fields.nameRef;
                 if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                     nodeNames[i] = header.strings[static_cast<std::size_t>(nameRef)];
@@ -5161,8 +5276,9 @@ bool parseNifSkinnedMesh(
             std::int32_t textureSetRef = -1;
             bool twoSided = false;
             bool treeAnim = false;
+            bool vertexAlpha = false;
             if (readBsLightingShaderTextureSetRef(
-                    blockCursor, textureSetRef, twoSided, treeAnim)) {
+                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha)) {
                 shaderTextureSetRefs[i] = textureSetRef;
                 lightingShaderTwoSided[i] = twoSided;
                 lightingShaderTreeAnim[i] = treeAnim;

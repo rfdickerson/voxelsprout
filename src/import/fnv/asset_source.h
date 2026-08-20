@@ -24,9 +24,11 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "import/fnv/bsa_archive.h"
+#include "import/fnv/content_profile.h"
 
 namespace odai::importer::fnv {
 
@@ -56,6 +58,13 @@ public:
     // that fail to open are reported through warnings() and skipped.
     bool open(
         const std::filesystem::path& dataFilesPath,
+        std::uint32_t contentMask = kBsaContentMeshes | kBsaContentTextures);
+
+    // Opens the immutable content graph used by profile-driven runs. Layers
+    // are applied in ascending priority and the graph's stable fingerprint is
+    // used by cell caches instead of the legacy name/count/byte summary.
+    bool open(
+        const ResolvedContentProfile& profile,
         std::uint32_t contentMask = kBsaContentMeshes | kBsaContentTextures);
 
     // Adds a mod root laid out like the Data directory itself
@@ -139,6 +148,8 @@ private:
         const std::string& archiveVirtualPath,
         std::vector<std::uint8_t>& outBytes,
         std::string& outError) const;
+    bool openDataFiles(
+        const std::filesystem::path& dataFilesPath, std::uint32_t contentMask);
 
     std::filesystem::path m_dataFilesPath;
     std::vector<BsaArchive> m_archives;  // load order; later entries win
@@ -147,6 +158,11 @@ private:
     // archives the same way the game's were.
     std::uint32_t m_contentMask = kBsaContentMeshes | kBsaContentTextures;
     std::vector<std::string> m_warnings;
+    std::string m_profileFingerprint;
+    std::filesystem::path m_contentIndexCacheDirectory;
+    bool m_forceContentReindex = false;
+    bool m_archiveAllowListEnabled = false;
+    std::unordered_set<std::string> m_allowedArchivePaths;
 };
 
 }  // namespace odai::importer::fnv

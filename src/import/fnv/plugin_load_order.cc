@@ -1,5 +1,7 @@
 #include "import/fnv/plugin_load_order.h"
 
+#include "import/fnv/content_profile.h"
+
 #include "import/fnv/esm_reader.h"
 
 #include <algorithm>
@@ -539,6 +541,15 @@ bool FalloutLoadOrder::open(
         }
     }
     return true;
+}
+
+bool FalloutLoadOrder::open(
+    const ResolvedContentProfile& profile, std::string& outError) {
+    m_searchRoots.clear();
+    for (const ContentLayer& layer : profile.layers) {
+        if (layer.enabled) m_searchRoots.push_back(layer.root);
+    }
+    return open(profile.dataRoot, profile.plugins, outError);
 }
 
 std::uint32_t FalloutLoadOrder::remapFormId(

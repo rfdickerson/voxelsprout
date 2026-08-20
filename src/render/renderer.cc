@@ -37,6 +37,10 @@ void Renderer::removeImportedSceneChunk(std::size_t chunkIndex) {
     m_backend->removeImportedSceneChunkAt(chunkIndex);
 }
 
+bool Renderer::waitForImportedSceneUploads() {
+    return m_backend->waitForImportedSceneUploads();
+}
+
 std::size_t Renderer::liveImportedSceneChunkCount() const {
     return m_backend->liveImportedSceneChunkCount();
 }

@@ -16,11 +16,13 @@ only what is Skyrim-specific and what was measured.
 | base-record edits (models, land textures, trees) | ignored | **applied**, later plugin wins |
 | grass (GRAS assigned to a land texture) | — | **still nothing** — procedural GRAS scattering is outside the retained renderer |
 
-Prefer Skyrim's active profile through auto-discovery or `--load-order
-<plugins.txt>`. Repeatable `--plugin-add` entries are appended after that
-authoritative order. Base records and cell contents come from every plugin in
-order, regular and ESL form IDs are remapped into distinct slots, and the
-ordered fingerprint joins the cell-cache and traversal-state identities.
+Prefer an existing read-only MO2 profile through `--profile <profile-dir>` (see
+[`MOD_PROFILES.md`](MOD_PROFILES.md)), or Skyrim's native active list through
+auto-discovery/`--load-order <plugins.txt>`. Repeatable `--plugin-add` entries
+are appended after that authoritative order. Base records and cell contents
+come from every plugin in order, regular and ESL form IDs are remapped into
+distinct slots, and the ordered fingerprint joins the cell-cache and
+traversal-state identities.
 
 ## Installed here
 

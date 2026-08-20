@@ -667,6 +667,25 @@ void RendererBackend::removeImportedSceneChunkAt(std::size_t chunkIndex) {
     removeImportedSceneChunk(chunkIndex);
 }
 
+bool RendererBackend::waitForImportedSceneUploads() {
+    const std::uint64_t value = m_pendingTransferTimelineValue;
+    if (value == 0u || isTimelineValueReached(value)) {
+        m_pendingTransferTimelineValue = 0u;
+        return true;
+    }
+    float waitMs = 0.0f;
+    constexpr std::uint64_t kCaptureUploadTimeoutNs = 5'000'000'000ull;
+    if (!waitTimelineValue(value, kCaptureUploadTimeoutNs, &waitMs)) {
+        VOX_LOGE("render") << "capture upload wait timed out at timeline " << value;
+        return false;
+    }
+    m_pendingTransferTimelineValue = 0u;
+    collectCompletedBufferReleases();
+    VOX_LOGI("render") << "capture uploads ready at timeline " << value
+                        << " after " << waitMs << " ms";
+    return true;
+}
+
 std::size_t RendererBackend::importedLocalLightCount() const {
     return m_importedLocalLights.size();
 }

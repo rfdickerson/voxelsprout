@@ -67,6 +67,13 @@ struct ImportedSceneVertex {
 // byte), which is the whole reason this is a fixed budget and not a list.
 inline constexpr int kImportedSceneMaxTerrainLayers = 4;
 inline constexpr std::uint32_t kImportedSceneNoTerrainLayer = 0xffffffffu;
+// Transient cooker marker used by TES3 LAND. Morrowind's synthetic VTEX
+// weights form a normalized bilinear partition, unlike TES4/TES5's authored
+// ordered opacity stack. The packer consumes this value from the otherwise
+// unused fourth layer slot, clears the slot, and emits the material flag below;
+// it is never serialized as a texture index and does not widen either vertex
+// structure.
+inline constexpr std::uint32_t kImportedSceneTerrainNormalizedBlendMarker = 0xfffffffeu;
 
 struct ImportedSceneMeshPart {
     std::uint32_t firstIndex = 0;
@@ -354,8 +361,10 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 //   bit 2      PBR material present: bits 8..23 carry metallic/roughness
 //   bit 3      modulate the diffuse texture by the vertex colour
 //   bit 4      terrain layer blend: layerTextureIndex/layerWeights are live
-//   bits 5-7   free
-//   bits 8-15  roughness, 8-bit quantized over [0,1]
+//   bits 5-7   alpha blend, two sided, unlit
+//   bit 8      normalized terrain layers when PBR is clear; otherwise the
+//              low bit of roughness
+//   bits 8-15  roughness, 8-bit quantized over [0,1], when PBR is set
 //   bits 16-23 metallic, 8-bit quantized over [0,1]
 //   bits 24-31 free
 //
@@ -400,6 +409,13 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagTwoSided = 1u << 6;
 // the sun happens to make it, which rendered Victor's face -- a lit screen
 // facing away from the sun -- as a black rectangle in a bezel.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagUnlit = 1u << 7;
+
+// TES3 VTEX names one texture per block rather than an ordered opacity stack.
+// Cell building reconstructs a normalized bilinear mixture from neighbouring
+// blocks and opts it out of the noise/sharpen transform intended for VTXT.
+// Terrain vertices never set the PBR bit, so sharing bit 8 with the conditional
+// roughness payload preserves the serialized flags layout.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainNormalizedLayers = 1u << 8;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;

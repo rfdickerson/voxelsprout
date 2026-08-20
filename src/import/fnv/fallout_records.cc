@@ -194,11 +194,12 @@ void parseLightRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     scene.lights.push_back(std::move(entry));
 }
 
-// REGN. Only EDID and RDMP are read -- see FalloutRegionRecord for why the
-// displayed name is RDMP and why a region without one is not a fallback case.
+// REGN display identity, coverage polygons, and authored ambient sound entries.
 void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     FalloutRegionRecord entry{};
     entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    std::uint32_t regionDataType = 0u;
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
@@ -211,9 +212,79 @@ void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
             if (sub.size == 4u) {
                 entry.mapNameStringId = readU32(sub.data);
             }
+        } else if (sub.type == "WNAM" && sub.size >= 4u) {
+            entry.worldspaceFormId = readU32(sub.data);
+        } else if (sub.type == "RPLI") {
+            entry.polygons.emplace_back();
+        } else if (sub.type == "RPLD" && sub.size >= 8u) {
+            if (entry.polygons.empty()) {
+                entry.polygons.emplace_back();
+            }
+            FalloutRegionRecord::Polygon& polygon = entry.polygons.back();
+            polygon.points.resize((sub.size / 8u) * 2u);
+            std::memcpy(polygon.points.data(), sub.data,
+                        polygon.points.size() * sizeof(float));
+        } else if (sub.type == "RDAT" && sub.size >= 4u) {
+            regionDataType = readU32(sub.data);
+        } else if (sub.type == "RDSA" && regionDataType == 7u) {
+            for (std::size_t offset = 0u; offset + 12u <= sub.size; offset += 12u) {
+                FalloutRegionRecord::Sound sound;
+                sound.descriptorFormId = readU32(sub.data + offset);
+                sound.weatherFlags = readU32(sub.data + offset + 4u);
+                sound.chance = static_cast<float>(readU32(sub.data + offset + 8u));
+                entry.sounds.push_back(sound);
+            }
         }
     }
     scene.regions.push_back(std::move(entry));
+}
+
+void parseSoundOutputModelRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutSoundOutputModelRecord entry;
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        // Skyrim SOPM.ANAM is 20 bytes. The two floats at 4/8 are the
+        // min/max distances (SOMStereoRad04000 measures 150/4000).
+        if (sub.type == "ANAM" && sub.size >= 12u) {
+            std::memcpy(&entry.minDistance, sub.data + 4u, sizeof(float));
+            std::memcpy(&entry.maxDistance, sub.data + 8u, sizeof(float));
+        }
+    }
+    scene.soundOutputModels.push_back(entry);
+}
+
+void parseSoundDescriptorRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutSoundDescriptorRecord entry;
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "EDID") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "ANAM") {
+            entry.filePaths.push_back(subrecordString(sub));
+        } else if (sub.type == "ONAM" && sub.size >= 4u) {
+            entry.outputModelFormId = readU32(sub.data);
+        } else if (sub.type == "BNAM" && sub.size >= 4u) {
+            entry.flags = readU32(sub.data);
+        }
+    }
+    // BSISoundDescriptor::BNAM bit 23 is the authored looping flag. This is
+    // present on continuous water/wind beds and absent on regional bird calls.
+    entry.looping = (entry.flags & 0x00800000u) != 0u;
+    scene.soundDescriptors.push_back(std::move(entry));
+}
+
+void parseSoundBaseRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutSoundBaseRecord entry;
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "SDSC" && sub.size >= 4u) {
+            entry.descriptorFormId = readU32(sub.data);
+        }
+    }
+    scene.soundBases.push_back(entry);
 }
 
 void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene) {
@@ -1734,7 +1805,9 @@ bool extractFalloutScene(
         if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
             if (!isModelBearingBaseType(group.rawLabel) && group.rawLabel != "WRLD" &&
                 group.rawLabel != "CELL" && group.rawLabel != "LTEX" &&
-                group.rawLabel != "TXST" && group.rawLabel != "REGN") {
+                group.rawLabel != "TXST" && group.rawLabel != "REGN" &&
+                group.rawLabel != "SOUN" && group.rawLabel != "SNDR" &&
+                group.rawLabel != "SOPM") {
                 return false;
             }
         }
@@ -1775,6 +1848,12 @@ bool extractFalloutScene(
             }
         } else if (record.type == "REGN") {
             parseRegionRecord(record, outScene);
+        } else if (record.type == "SOUN") {
+            parseSoundBaseRecord(record, outScene);
+        } else if (record.type == "SNDR") {
+            parseSoundDescriptorRecord(record, outScene);
+        } else if (record.type == "SOPM") {
+            parseSoundOutputModelRecord(record, outScene);
         } else if (record.type == "LTEX") {
             parseLandTextureRecord(record, outScene);
         } else if (record.type == "TXST") {

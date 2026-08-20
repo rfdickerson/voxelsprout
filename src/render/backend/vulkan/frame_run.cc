@@ -553,7 +553,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     m_debugDrawCallsMain = 0;
     m_debugDrawCallsPost = 0;
 
-    const float aspectRatio = static_cast<float>(m_renderExtent.width) / static_cast<float>(m_renderExtent.height);
+    // Projection follows the displayed image, not the internal shading grid.
+    // Exact render extents may have a different aspect ratio (for example 1800x1200 into a
+    // 3200x1800 display); using the internal ratio here and then stretching it
+    // at presentation makes circles oval and changes the horizontal FOV.
+    const float aspectRatio = static_cast<float>(m_swapchainExtent.width) /
+                              static_cast<float>(m_swapchainExtent.height);
     // ODAI_RENDER_NEAR / ODAI_RENDER_FAR open up the view distance.
     //
     // The whole renderer is reverse-Z (perspectiveVulkanReverseZ, and every

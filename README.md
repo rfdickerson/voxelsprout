@@ -46,6 +46,22 @@ The official fallback preserves Skyrim, Update, installed DLC, and locally
 present `Skyrim.ccc` order; it never enables arbitrary plugins by scanning the
 Data directory. `ODAI_FNV_LOAD_ORDER` is the environment equivalent.
 
+Large existing MO2, OpenMW, and ODAI JSON setups can be loaded read-only as one
+resolved content graph:
+
+```bash
+./build-linux/odai --profile "/path/to/MO2/profiles/Default" \
+  --stream "/path/to/Skyrim Special Edition/Data" --worldspace Tamriel
+./build-linux/odai --profile "$HOME/.config/openmw/openmw.cfg" \
+  --worldspace Vvardenfell
+```
+
+Use `--mods-root` for a nonstandard MO2 layout, `--compat-report <json>` for an
+atomic launch report, and `--reindex-content` after manually changing indexed
+files. `--mod` and `--plugin-add` still append at highest priority. See
+[`docs/MOD_PROFILES.md`](docs/MOD_PROFILES.md) for profile formats, precedence,
+diagnostics, and the deliberately unsupported script-runtime boundary.
+
 WASD and the mouse explore, `E` activates actors and real XTEL doors, `F`
 toggles walking, and Escape opens the pause menu and discovered-location list.
 Exterior cells stream continuously; doors fade between interiors and child
@@ -62,4 +78,4 @@ odai_newvegas_cooker
 odai_fnv_texture_pack
 ```
 
-See `docs/index.md` for import notes and mod-root usage.
+See `docs/index.md` for profile, import, and mod-root usage.

@@ -1,7 +1,14 @@
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <vector>
 
 #include "audio/audio.h"
+#include "audio/wav_writer.h"
 #include "math/math.h"
 
 // These tests explicitly select the retained null backend so they run with no
@@ -180,6 +187,79 @@ void testCallsAfterShutdownAreSafe() {
                "loadSound after shutdown is invalid, not a crash");
 }
 
+std::filesystem::path writeToneFixture() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "odai_offline_audio_test.wav";
+    std::vector<float> samples(480u * 2u);
+    for (std::size_t frame = 0; frame < 480u; ++frame) {
+        const float sample = 0.25f * std::sin(
+            static_cast<float>(frame) * 2.0f * 3.1415926535f * 440.0f / 48000.0f);
+        samples[frame * 2u] = sample;
+        samples[frame * 2u + 1u] = sample;
+    }
+    odai::audio::WavWriter writer;
+    expectTrue(writer.open(path, 48000u, 2u), "float WAV fixture opens");
+    expectTrue(writer.write(samples), "float WAV fixture writes exact frame count");
+    expectTrue(writer.framesWritten() == 480u, "WAV writer reports exact frames");
+    expectTrue(writer.close(), "float WAV fixture closes and patches header");
+    return path;
+}
+
+void testWavHeaderAndOfflineDeterminism() {
+    using namespace odai::audio;
+    const std::filesystem::path path = writeToneFixture();
+    std::ifstream file(path, std::ios::binary);
+    std::vector<std::uint8_t> bytes{
+        std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    expectTrue(bytes.size() == 44u + (480u * 2u * sizeof(float)),
+               "WAV byte length matches 48 kHz stereo float payload");
+    expectTrue(bytes.size() >= 44u && bytes[0] == 'R' && bytes[1] == 'I' &&
+                   bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'W' &&
+                   bytes[9] == 'A' && bytes[10] == 'V' && bytes[11] == 'E',
+               "WAV header has RIFF/WAVE signatures");
+
+    const auto render = [&]() {
+        Audio audio;
+        AudioConfig config;
+        config.offlineMix = true;
+        config.offlineSampleRate = 48000u;
+        config.offlineChannels = 2u;
+        expectTrue(audio.init(config), "offline mixer initializes without a device");
+        expectTrue(audio.offlineMixActive(), "offline mixer reports active");
+        expectTrue(!audio.deviceActive(), "offline mixer does not claim a playback device");
+        expectTrue(audio.mixSampleRate() == 48000u && audio.mixChannels() == 2u,
+                   "offline mixer exposes 48 kHz stereo format");
+        const SoundHandle tone = audio.loadSound(path, SoundCategory::Ambient);
+        expectTrue(tone.valid(), "offline mixer loads a WAV asset");
+        const AmbientHandle loop = audio.startAmbient(tone, 0.0f);
+        expectTrue(loop.valid(), "offline mixer starts an ambient loop");
+        std::vector<float> pcm(1600u * 2u);
+        expectTrue(audio.renderOfflineFrames(pcm, 1600u),
+                   "offline mixer renders the requested exact frame count");
+        return pcm;
+    };
+    const std::vector<float> first = render();
+    const std::vector<float> second = render();
+    expectTrue(first == second, "identical offline graphs render deterministic PCM");
+    expectTrue(std::any_of(first.begin(), first.end(), [](float sample) {
+                   return std::fabs(sample) > 1e-5f;
+               }),
+               "offline render contains mixed audio rather than silence");
+
+    std::error_code removeError;
+    std::filesystem::remove(path, removeError);
+}
+
+void testNullBackendRejectsOfflineRendering() {
+    using namespace odai::audio;
+    Audio audio;
+    audio.init(silentConfig());
+    std::vector<float> pcm(32u, 1.0f);
+    expectTrue(!audio.offlineMixActive(), "null backend reports no offline mixer");
+    expectTrue(!audio.renderOfflineFrames(pcm, 16u),
+               "null backend reports offline rendering failure");
+}
+
 }  // namespace
 
 int main() {
@@ -195,6 +275,8 @@ int main() {
     testAmbientSlotsAlwaysInvalidOnNullBackend();
     testAmbientStopAndRepositionAreNoOps();
     testManyConcurrentAmbientStartsStayIndependent();
+    testWavHeaderAndOfflineDeterminism();
+    testNullBackendRejectsOfflineRendering();
 
     if (g_failures != 0) {
         std::cerr << "[audio test] " << g_failures << " failures\n";

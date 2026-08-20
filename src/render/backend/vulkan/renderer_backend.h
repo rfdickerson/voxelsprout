@@ -276,7 +276,7 @@ public:
         float volumetricFogBaseHeight = 42.0f;
         float volumetricSunScattering = 1.05f;
         float waterAnimationSpeed = 1.05f;
-        float waterNormalStrength = 1.25f;
+        float waterNormalStrength = 0.90f;
         // Artistic multiplier over the physical air/water Schlick term.  Keep
         // this close to one: values above two made an overhead river a mirror
         // even though water reflects only about two percent at normal incidence.
@@ -411,6 +411,7 @@ public:
     static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunkAt(std::size_t chunkIndex);
+    bool waitForImportedSceneUploads();
     // Number of chunk slots, live or evicted. Indices remain valid across
     // evictions, so this only grows within a scene.
     [[nodiscard]] std::size_t importedSceneChunkCount() const { return m_importedSceneChunks.size(); }
@@ -1654,8 +1655,9 @@ private:
     // tonemap fullscreen pass samples with normalized UVs into the
     // swapchain-sized target, so it upscales for free, and the UI still
     // renders at native resolution on top -- text stays sharp at any scale.
-    // Set from ODAI_RENDER_SCALE (0.3..1.0, default 1.0) wherever the
-    // swapchain extent is (re)established.
+    // Set from ODAI_RENDER_SIZE (WIDTHxHEIGHT) or ODAI_RENDER_SCALE (0.3..1.0)
+    // wherever the swapchain extent is (re)established. Scale wins when both
+    // are supplied; an exact extent is clamped to the display extent.
     VkExtent2D m_renderExtent{};
     VkExtent2D m_aoExtent{};
     // Resolution of the AO estimator's own output, m_aoExtent / m_aoDownscale.

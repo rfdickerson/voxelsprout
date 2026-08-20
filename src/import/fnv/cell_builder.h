@@ -31,6 +31,15 @@
 
 namespace odai::importer::fnv {
 
+// Appends one shape's triangle list in renderer order: opaque triangles first,
+// then its vertex-faded fringe. Counts refer to the newly appended indices.
+void appendPartitionedNifShapeIndices(
+    const NifShape& shape,
+    std::uint32_t baseVertex,
+    std::vector<std::uint32_t>& outIndices,
+    std::uint32_t& outOpaqueIndexCount,
+    std::uint32_t& outFadedIndexCount);
+
 // Plugin-wide lookups the per-cell build needs, gathered once. A cell's REFR
 // names a STAT by formID and a LAND quadrant names an LTEX by formID; neither
 // record carries the path, so these have to come from a pass over the plugin
@@ -60,6 +69,14 @@ struct FalloutWorldTables {
     // overwrites regionNamesByFormId. Empty for every Fallout/Oblivion plugin,
     // which makes that resolution a no-op rather than a special case.
     std::unordered_map<std::uint32_t, std::uint32_t> regionNameStringIdsByFormId;
+    // Full Skyrim audio regions, including their ground-plane polygons and
+    // weather-filtered sound candidates. Kept separate from discoverable names
+    // because most audio regions deliberately have no map label.
+    std::unordered_map<std::uint32_t, FalloutRegionRecord> regionAudioByFormId;
+    std::unordered_map<std::uint32_t, FalloutSoundOutputModelRecord> soundOutputModelsByFormId;
+    std::unordered_map<std::uint32_t, FalloutSoundDescriptorRecord> soundDescriptorsByFormId;
+    // Placed REFR NAME -> SOUN -> SDSC -> SNDR.
+    std::unordered_map<std::uint32_t, std::uint32_t> soundDescriptorByBaseFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
     // Every worldspace by formID, with its DNAM default land/water heights
@@ -136,6 +153,13 @@ bool appendCellWaterPatch(
     odai::importer::ImportedScene& outScene,
     const FalloutCellRecord& cell,
     const FalloutWorldspaceRecord* worldspace = nullptr);
+
+// Resolves XTEL destinations through the load-order-wide cell index and
+// appends runtime-ready door records. Shared by streaming and profile cooking.
+void appendResolvedDoors(
+    const FalloutCellRecord& record,
+    const FalloutCellIndex& index,
+    odai::importer::ImportedScene& scene);
 
 // Samples a TES4/TES5 LAND overlay at a fractional quadrant-post coordinate.
 // The source VTXT lattice is only 17x17 (128 world units between posts); a

@@ -45,8 +45,20 @@
 
 namespace odai::importer::fnv {
 
+// Why a shape uses alpha, kept separate from the renderer-facing booleans.
+// Skyrim often enables vertex alpha on a large opaque architectural shape only
+// to feather a narrow transition fringe. Treating that as ordinary whole-shape
+// transparency removes depth writes from the building itself.
+enum class NifAlphaSemantic : std::uint8_t {
+    Opaque,
+    Cutout,
+    ExplicitBlend,
+    VertexFade,
+};
+
 struct NifShape {
     std::string name;               // from the NIF string table; may be empty
+    std::string sourceBlockType;    // BSTriShape/NiTriShape/etc., diagnostics only
     std::vector<float> positions;   // xyz per vertex, world space (parent transforms applied)
     std::vector<float> normals;     // xyz per vertex, world space; empty if the source had none
     std::vector<float> uvs;         // uv per vertex (set 0); empty if the source had none
@@ -58,6 +70,8 @@ struct NifShape {
     // road renders as a hard-edged slab laid on the terrain.
     std::vector<float> colors;
     std::vector<std::uint32_t> triangleIndices;  // 3 per triangle, indexes into positions/normals
+    std::uint32_t sourceTriangleCount = 0;
+    std::uint32_t rejectedTriangleCount = 0;
     // Diffuse texture path as stored in the NIF, relative to Data\textures
     // and backslash-separated. Empty when the shape has no resolvable
     // BSShaderTextureSet.
@@ -83,6 +97,7 @@ struct NifShape {
     // it appears as a solid slab -- Goodsprings' window panes and dust effects
     // were floating white rectangles until this was read.
     bool alphaBlend = false;
+    NifAlphaSemantic alphaSemantic = NifAlphaSemantic::Opaque;
 
     // Nearest ancestor targeted by an embedded rigid transform track. Geometry
     // is still emitted in its authored bind pose; these matrices let the cell
@@ -144,6 +159,10 @@ struct NifModel {
     // thousands of units across, which drawn literally are a white plane over
     // the landscape.
     std::uint32_t hiddenShapeCount = 0;
+    // Child subtrees deliberately not traversed because a NiSwitchNode selects
+    // a different initial child. These are authored alternatives, not missing
+    // visible geometry, and diagnostics must keep them out of failure totals.
+    std::uint32_t inactiveSwitchSubtreeCount = 0;
     // Blocks whose type name ends in "Node" but which this parser does not
     // know how to walk. Nonzero means geometry may be missing or, worse,
     // reparented to the origin — see isNodeTypeName in nif_scene.cc.
@@ -157,6 +176,7 @@ struct NifModel {
     // geometry is being dropped rather than misplaced, which is the trade this
     // parser deliberately makes.
     std::uint32_t nodeParseFailedCount = 0;
+    std::vector<std::string> failedNodeTypes;
     // True when the DFS started from the footer's declared roots rather than
     // from the legacy "every unclaimed node is a root" scan. Recorded because
     // the two agree on a well-formed file, so without it a footer read that

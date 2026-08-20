@@ -4,6 +4,7 @@
 Fallout 3/New Vegas, and TES5 data formats.
 
 - [Fallout mod roots and texture packs](FNV_MODS.md)
+- [Scalable MO2, OpenMW, and ODAI mod profiles](MOD_PROFILES.md)
 - [Morrowind mod roots](MORROWIND_MODS.md)
 - [Oblivion importer notes](OBLIVION_IMPORT.md)
 - [Skyrim mod roots](SKYRIM_MODS.md)

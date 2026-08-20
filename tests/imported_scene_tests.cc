@@ -910,34 +910,49 @@ void testTerrainLayerPacking() {
     layered.layerWeight[0] = 1.0f;
     layered.layerTextureIndex[1] = 9u;
     layered.layerWeight[1] = 0.5f;
+    layered.layerTextureIndex[3] = kImportedSceneTerrainNormalizedBlendMarker;
+    ImportedSceneVertex declaredZero{};
+    declaredZero.position[0] = 2.0f;
+    declaredZero.layerTextureIndex[0] = 12u;
     ImportedSceneVertex plain{};
-    plain.position[0] = 2.0f;
+    plain.position[0] = 3.0f;
 
-    mesh.vertices = {layered, layered, plain};
-    mesh.indices = {0u, 1u, 2u};
-    mesh.parts = {ImportedSceneMeshPart{0u, 3u, 0u, false}};
+    mesh.vertices = {layered, layered, declaredZero, plain};
+    mesh.indices = {0u, 1u, 2u, 1u, 2u, 3u};
+    mesh.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
     scene.meshes.push_back(mesh);
     scene.landscapeCells.resize(1);
 
     buildImportedScenePackedRenderData(scene);
-    expectTrue(scene.packedVertices.size() == 3, "layered terrain packs one vertex per source vertex");
-    if (scene.packedVertices.size() != 3) {
+    expectTrue(scene.packedVertices.size() == 4, "layered terrain packs one vertex per source vertex");
+    if (scene.packedVertices.size() != 4) {
         return;
     }
 
     const ImportedScenePackedVertex& packedLayered = scene.packedVertices[0];
     expectTrue((packedLayered.flags & kImportedSceneMaterialFlagTerrainLayers) != 0u,
                "a vertex with a layer sets the terrain layer flag");
+    expectTrue((packedLayered.flags &
+                    kImportedSceneMaterialFlagTerrainNormalizedLayers) != 0u,
+               "the TES3 normalized-layer marker becomes a packed material semantic");
     expectTrue(packedLayered.layerTextureIndex[0] == 7u, "layer 0 texture index survives packing");
     expectTrue(packedLayered.layerTextureIndex[1] == 9u, "layer 1 texture index survives packing");
     expectTrue(packedLayered.layerTextureIndex[2] == kImportedSceneNoTerrainLayer,
                "unused layer slot stays empty");
+    expectTrue(packedLayered.layerTextureIndex[3] == kImportedSceneNoTerrainLayer,
+               "the transient normalized-layer marker is not serialized as a texture");
     // 8-bit quantization: 1.0 -> 255, 0.5 -> 128 (round-half-up).
     expectTrue((packedLayered.layerWeights & 0xffu) == 255u, "layer 0 weight quantizes to full");
     expectTrue(((packedLayered.layerWeights >> 8) & 0xffu) == 128u, "layer 1 weight quantizes to half");
     expectTrue(((packedLayered.layerWeights >> 16) & 0xffu) == 0u, "unused layer weight is zero");
 
-    const ImportedScenePackedVertex& packedPlain = scene.packedVertices[2];
+    const ImportedScenePackedVertex& packedDeclaredZero = scene.packedVertices[2];
+    expectTrue((packedDeclaredZero.flags & kImportedSceneMaterialFlagTerrainLayers) != 0u,
+               "a declared zero-weight layer keeps the flat triangle semantic enabled");
+    expectTrue((packedDeclaredZero.layerWeights & 0xffu) == 0u,
+               "a declared zero-weight layer remains zero after packing");
+
+    const ImportedScenePackedVertex& packedPlain = scene.packedVertices[3];
     expectTrue((packedPlain.flags & kImportedSceneMaterialFlagTerrainLayers) == 0u,
                "a vertex with no layers does not set the terrain layer flag");
 
@@ -947,15 +962,18 @@ void testTerrainLayerPacking() {
     expectTrue(saveImportedScene(scene, path), "layered scene saves");
     ImportedScene loaded{};
     expectTrue(loadImportedScene(path, loaded), "layered scene loads");
-    if (loaded.packedVertices.size() == 3) {
+    if (loaded.packedVertices.size() == 4) {
         expectTrue(loaded.packedVertices[0].layerTextureIndex[1] == 9u,
                    "layer texture index round-trips through the file");
         expectTrue(loaded.packedVertices[0].layerWeights == packedLayered.layerWeights,
                    "packed layer weights round-trip through the file");
+        expectTrue((loaded.packedVertices[0].flags &
+                        kImportedSceneMaterialFlagTerrainNormalizedLayers) != 0u,
+                   "normalized TES3 terrain semantics round-trip through the packed flags");
     }
-    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3,
+    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 4,
                "layered mesh vertices round-trip");
-    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3) {
+    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 4) {
         expectNear(loaded.meshes[0].vertices[0].layerWeight[1], 0.5f, 1e-5f,
                    "source layer weight round-trips unquantized");
     }

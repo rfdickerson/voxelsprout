@@ -283,10 +283,53 @@ struct FalloutRegionRecord {
     // is what a localized plugin always writes and what a real map name never
     // is (the shortest in FalloutNV.esm is "Goodsprings").
     std::uint32_t mapNameStringId = 0;
+    std::uint32_t worldspaceFormId = 0;
+    bool deleted = false;
+
+    struct Polygon {
+        // Bethesda/plugin space: X/Y ground plane, pairs in authored order.
+        std::vector<float> points;
+    };
+    struct Sound {
+        std::uint32_t descriptorFormId = 0;
+        std::uint32_t weatherFlags = 0;
+        float chance = 0.0f;
+    };
+    std::vector<Polygon> polygons;
+    std::vector<Sound> sounds;
 
     [[nodiscard]] bool isDiscoverable() const {
         return !mapName.empty() || mapNameStringId != 0u;
     }
+};
+
+struct FalloutSoundOutputModelRecord {
+    std::uint32_t formId = 0;
+    float minDistance = 150.0f;
+    float maxDistance = 4000.0f;
+    bool deleted = false;
+};
+
+struct FalloutSoundDescriptorRecord {
+    std::uint32_t formId = 0;
+    std::string editorId;
+    std::vector<std::string> filePaths;
+    std::uint32_t outputModelFormId = 0;
+    std::uint32_t flags = 0;
+    bool looping = false;
+    bool deleted = false;
+};
+
+struct FalloutSoundBaseRecord {
+    std::uint32_t formId = 0;
+    std::uint32_t descriptorFormId = 0;
+    bool deleted = false;
+};
+
+struct FalloutSoundEmitterRecord {
+    std::uint32_t referenceFormId = 0;
+    std::uint32_t descriptorFormId = 0;
+    float position[3] = {};  // engine space, Y-up
 };
 
 struct FalloutPlacedReference {
@@ -578,6 +621,9 @@ struct FalloutWorldspaceRecord {
 struct FalloutSceneData {
     std::vector<FalloutStaticRecord> statics;
     std::vector<FalloutRegionRecord> regions;  // REGN, for discovery notification
+    std::vector<FalloutSoundOutputModelRecord> soundOutputModels;
+    std::vector<FalloutSoundDescriptorRecord> soundDescriptors;
+    std::vector<FalloutSoundBaseRecord> soundBases;
     std::vector<FalloutLightRecord> lights;  // LIGH base records, placed by REFR like any other base
     std::vector<FalloutLandTextureRecord> landTextures;  // LTEX, already resolved through TXST
     // Every placed reference's owning cell, by the reference's own formID. A

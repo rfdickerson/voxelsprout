@@ -177,7 +177,23 @@ std::string toLowerAscii(std::string value) {
 //     cached v44 cells have the two-sided geometry but not that material bit.
 // 46: streamed scenes serialize resolved door destinations and authored static
 //     collision alongside render geometry (ImportedScene v29).
-constexpr int kCellBuildVersion = 46;
+// 47: Skyrim BSLightingShaderProperty's SLSF1_Vertex_Alpha now controls the
+//     stored colour-alpha channel. Disabled channels become opaque; enabled
+//     partial-alpha rock/ground skirts use the blended draw path instead of
+//     covering neighbouring rock faces with opaque transition geometry.
+// 48: additive-only city window-glow cards are no longer baked as opaque
+//     daytime rectangles while the imported material path lacks additive NIF
+//     blend factors.
+// 49: Skyrim vertex-alpha transition shapes are partitioned per triangle so
+//     their opaque architectural body keeps depth writes while only the faded
+//     fringe enters the blended tail.
+// 50: TES3 VTEX blocks use constant-layer subpatches so flat texture IDs agree
+//     with interpolated weights, and their normalized bilinear weights bypass
+//     the TES4/TES5 ordered-opacity noise/sharpen transform.
+// 51: NetImmerse 4.0.0.2 NiSwitchNode reads its four-byte initial-child tail
+//     instead of the six-byte Skyrim spelling. Existing cells can otherwise
+//     retain missing switched architectural subtrees after the importer fix.
+constexpr int kCellBuildVersion = 51;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -205,6 +221,34 @@ std::uint64_t countBlendedDraws(const ImportedScene& scene) {
         }
     }
     return blended;
+}
+
+std::vector<FalloutSoundEmitterRecord> extractSoundEmitters(
+    const FalloutCellRecord& cell,
+    const FalloutWorldTables& tables) {
+    std::vector<FalloutSoundEmitterRecord> emitters;
+    for (const FalloutPlacedReference& reference : cell.references) {
+        if (reference.isDeleted || (reference.recordFlags & 0x0800u) != 0u) {
+            continue;
+        }
+        const auto base = tables.soundDescriptorByBaseFormId.find(reference.baseFormId);
+        if (base == tables.soundDescriptorByBaseFormId.end()) {
+            continue;
+        }
+        const auto descriptor = tables.soundDescriptorsByFormId.find(base->second);
+        if (descriptor == tables.soundDescriptorsByFormId.end() ||
+            !descriptor->second.looping || descriptor->second.filePaths.empty()) {
+            continue;
+        }
+        FalloutSoundEmitterRecord emitter{};
+        emitter.referenceFormId = reference.formId;
+        emitter.descriptorFormId = base->second;
+        const float source[3] = {
+            reference.position[0], reference.position[2], -reference.position[1]};
+        std::copy(std::begin(source), std::end(source), emitter.position);
+        emitters.push_back(emitter);
+    }
+    return emitters;
 }
 
 // `modFingerprint` and `maxTextureSize` join the key for the same reason the
@@ -242,58 +286,6 @@ std::string pluginFingerprint(
     return fingerprint;
 }
 
-std::string worldspaceEditorIdFor(
-    const FalloutCellIndex& index, std::uint32_t worldspaceFormId) {
-    for (const FalloutWorldspaceRecord& worldspace : index.worldspaces) {
-        if (worldspace.formId == worldspaceFormId) {
-            return worldspace.editorId;
-        }
-    }
-    return {};
-}
-
-void appendResolvedDoors(
-    const FalloutCellRecord& record,
-    const FalloutCellIndex& index,
-    ImportedScene& scene) {
-    constexpr float kRadiansToDegrees = 180.0f / 3.14159265358979323846f;
-    for (const FalloutPlacedReference& ref : record.references) {
-        if (!ref.hasTeleport || ref.isDeleted ||
-            (ref.recordFlags & 0x00000800u) != 0u) {
-            continue;
-        }
-        const auto target = index.cellIndexByReferenceFormId.find(
-            ref.teleportTargetRefFormId);
-        if (target == index.cellIndexByReferenceFormId.end() ||
-            target->second >= index.cells.size()) {
-            continue;
-        }
-        const FalloutCellIndexEntry& targetCell = index.cells[target->second];
-        if (targetCell.isInterior && targetCell.editorId.empty()) {
-            continue;
-        }
-        ImportedSceneDoor door{};
-        door.sourceReferenceFormId = ref.formId;
-        door.targetCellFormId = targetCell.cellFormId;
-        door.targetWorldspaceFormId = targetCell.worldspaceFormId;
-        door.targetCellEditorId = targetCell.editorId;
-        door.targetWorldspaceEditorId = worldspaceEditorIdFor(
-            index, targetCell.worldspaceFormId);
-        door.targetKind = targetCell.isInterior
-            ? ImportedSceneDoorTargetKind::Interior
-            : ImportedSceneDoorTargetKind::Exterior;
-        door.locked = ref.isLocked;
-        door.lockLevel = ref.lockLevel;
-        const float source[3] = {ref.position[0], ref.position[2], -ref.position[1]};
-        const float arrival[3] = {
-            ref.teleportPosition[0], ref.teleportPosition[2], -ref.teleportPosition[1]};
-        std::copy(std::begin(source), std::end(source), door.position);
-        std::copy(std::begin(arrival), std::end(arrival), door.arrivalPosition);
-        door.arrivalYawDegrees = -ref.teleportRotationRadians[2] * kRadiansToDegrees;
-        scene.doors.push_back(std::move(door));
-    }
-}
-
 }  // namespace
 
 // Loads in flight and their results. Held by shared_ptr so a job still running
@@ -304,6 +296,7 @@ struct CellStreamer::Pending {
         CellCoord cell;
         ImportedScene scene;
         std::vector<FalloutNavMeshRecord> navMeshes;
+        std::vector<FalloutSoundEmitterRecord> soundEmitters;
         bool succeeded = false;
         bool fromCache = false;
         bool cacheWriteFailed = false;
@@ -343,14 +336,23 @@ bool CellStreamer::open(
     m_dataFilesPath = dataFilesPath;
     m_esmPath = dataFilesPath / pluginFileName;
 
-    if (!m_assets.open(dataFilesPath)) {
+    // The streamer also owns runtime weather, regional, and placed ambience,
+    // so its one shared archive index must admit authored WAV assets too.
+    const std::uint32_t assetMask =
+        kBsaContentMeshes | kBsaContentTextures | kBsaContentSounds;
+    const bool assetsOpened = m_contentProfile.has_value()
+        ? m_assets.open(*m_contentProfile, assetMask)
+        : m_assets.open(dataFilesPath, assetMask);
+    if (!assetsOpened) {
         outError = "cannot read Fallout data directory " + dataFilesPath.string();
         return false;
     }
     // After open(), which clears the warning list, and before it is drained
     // below, so an unreadable mod directory actually gets reported.
-    for (const std::filesystem::path& modDirectory : m_modDirectories) {
-        m_assets.addModDirectory(modDirectory);
+    if (!m_contentProfile.has_value()) {
+        for (const std::filesystem::path& modDirectory : m_modDirectories) {
+            m_assets.addModDirectory(modDirectory);
+        }
     }
     for (const std::string& warning : m_assets.warnings()) {
         VOX_LOGW("streamer") << warning;
@@ -467,6 +469,9 @@ bool CellStreamer::selectWorldspace(
         if (m_onCellEvicted) {
             m_onCellEvicted(cell);
         }
+        if (m_onAmbientEmittersEvicted) {
+            m_onAmbientEmittersEvicted(cell);
+        }
     }
     m_residentChunks.clear();
     if (!configureWorldspace(worldspaceEditorId, outError)) {
@@ -559,6 +564,9 @@ void CellStreamer::update(
         if (m_onCellEvicted) {
             m_onCellEvicted(cell);
         }
+        if (m_onAmbientEmittersEvicted) {
+            m_onAmbientEmittersEvicted(cell);
+        }
         m_planner.markEvicted(cell);
     }
 
@@ -614,6 +622,9 @@ void CellStreamer::update(
                     ? extractFalloutCellMerged(
                           *cellIndex, *loadOrder, entry, record, result.error)
                     : extractFalloutCellAt(reader, entry, record, result.error);
+            }
+            if (extracted) {
+                result.soundEmitters = extractSoundEmitters(record, *tables);
             }
 
             if (extracted && !cachePath.empty()) {
@@ -781,6 +792,9 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
             if (m_onCellResident) {
                 m_onCellResident(result.cell, result.scene, result.navMeshes);
             }
+            if (m_onAmbientEmittersResident) {
+                m_onAmbientEmittersResident(result.cell, result.soundEmitters);
+            }
             continue;  // legitimately empty cell; resident with no geometry
         }
 
@@ -818,6 +832,9 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         if (m_onCellResident) {
             // Before result.scene is destroyed at the end of this loop.
             m_onCellResident(result.cell, result.scene, result.navMeshes);
+        }
+        if (m_onAmbientEmittersResident) {
+            m_onAmbientEmittersResident(result.cell, result.soundEmitters);
         }
     }
 
@@ -1363,6 +1380,89 @@ std::vector<std::string> CellStreamer::regionNamesAtEngineSpace(
         }
     }
     return names;
+}
+
+std::vector<FalloutRegionRecord::Sound> CellStreamer::regionSoundsAtEngineSpace(
+    const float enginePosition[3]) const {
+    float fallout[3] = {};
+    engineToFallout(enginePosition, fallout);
+
+    const auto cellOf = [this](float world) {
+        return static_cast<std::int32_t>(std::floor(world / m_cellIndex.cellWorldSize));
+    };
+    const CellCoord coord{cellOf(fallout[0]), cellOf(fallout[1])};
+    const auto foundCell = m_availableCells.find(coord);
+    const FalloutCellIndexEntry* cell =
+        (foundCell != m_availableCells.end() && foundCell->second < m_cellIndex.cells.size())
+        ? &m_cellIndex.cells[foundCell->second]
+        : nullptr;
+
+    const auto pointInside = [x = fallout[0], y = fallout[1]](
+                                 const FalloutRegionRecord::Polygon& polygon) {
+        const std::size_t count = polygon.points.size() / 2u;
+        if (count < 3u) {
+            return false;
+        }
+        bool inside = false;
+        for (std::size_t i = 0, j = count - 1u; i < count; j = i++) {
+            const float xi = polygon.points[i * 2u];
+            const float yi = polygon.points[i * 2u + 1u];
+            const float xj = polygon.points[j * 2u];
+            const float yj = polygon.points[j * 2u + 1u];
+            const bool crosses = ((yi > y) != (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            inside = crosses ? !inside : inside;
+        }
+        return inside;
+    };
+
+    std::unordered_map<std::uint32_t, FalloutRegionRecord::Sound> unique;
+    for (const auto& [regionFormId, region] : m_worldTables.regionAudioByFormId) {
+        if (region.worldspaceFormId != 0u &&
+            region.worldspaceFormId != m_currentWorldspaceFormId) {
+            continue;
+        }
+        bool active = false;
+        if (!region.polygons.empty()) {
+            active = std::any_of(region.polygons.begin(), region.polygons.end(), pointInside);
+        } else if (cell != nullptr) {
+            active = std::find(
+                cell->regionFormIds.begin(), cell->regionFormIds.end(), regionFormId) !=
+                cell->regionFormIds.end();
+        }
+        if (!active) {
+            continue;
+        }
+        for (const FalloutRegionRecord::Sound& sound : region.sounds) {
+            auto [it, inserted] = unique.emplace(sound.descriptorFormId, sound);
+            if (!inserted) {
+                it->second.weatherFlags |= sound.weatherFlags;
+                it->second.chance = std::max(it->second.chance, sound.chance);
+            }
+        }
+    }
+
+    std::vector<FalloutRegionRecord::Sound> sounds;
+    sounds.reserve(unique.size());
+    for (const auto& entry : unique) {
+        sounds.push_back(entry.second);
+    }
+    std::sort(sounds.begin(), sounds.end(), [](const auto& a, const auto& b) {
+        return a.descriptorFormId < b.descriptorFormId;
+    });
+    return sounds;
+}
+
+const FalloutSoundDescriptorRecord* CellStreamer::soundDescriptor(
+    std::uint32_t formId) const {
+    const auto found = m_worldTables.soundDescriptorsByFormId.find(formId);
+    return found != m_worldTables.soundDescriptorsByFormId.end() ? &found->second : nullptr;
+}
+
+const FalloutSoundOutputModelRecord* CellStreamer::soundOutputModel(
+    std::uint32_t formId) const {
+    const auto found = m_worldTables.soundOutputModelsByFormId.find(formId);
+    return found != m_worldTables.soundOutputModelsByFormId.end() ? &found->second : nullptr;
 }
 
 CellStreamerStats CellStreamer::stats() const {

@@ -1324,18 +1324,39 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         // whose cooker never filled these reads exactly as
                         // before.
                         bool hasTerrainLayer = false;
+                        bool hasNormalizedTerrainLayers = false;
                         float layerWeights[kImportedSceneMaxTerrainLayers] = {};
                         for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
-                            dstVertex.layerTextureIndex[layer] = srcVertex.layerTextureIndex[layer];
+                            const std::uint32_t sourceTexture = srcVertex.layerTextureIndex[layer];
+                            if (sourceTexture == kImportedSceneTerrainNormalizedBlendMarker) {
+                                // A build-time semantic, not a real texture.
+                                // Consume it here so packed/cooked scenes never
+                                // retain the sentinel as a bindless index.
+                                dstVertex.layerTextureIndex[layer] = kImportedSceneNoTerrainLayer;
+                                layerWeights[layer] = 0.0f;
+                                hasNormalizedTerrainLayers = true;
+                                continue;
+                            }
+                            dstVertex.layerTextureIndex[layer] = sourceTexture;
                             layerWeights[layer] = srcVertex.layerWeight[layer];
-                            if (srcVertex.layerTextureIndex[layer] != kImportedSceneNoTerrainLayer &&
-                                srcVertex.layerWeight[layer] > 0.0f) {
+                            // Layer IDs and the enabled flag are flat shader
+                            // inputs while weights interpolate. A layer declared
+                            // by the patch must therefore keep the flag set even
+                            // at a corner whose own weight is zero; otherwise a
+                            // provoking zero corner disables the blend across
+                            // the whole triangle.
+                            if (srcVertex.layerTextureIndex[layer] !=
+                                kImportedSceneNoTerrainLayer) {
                                 hasTerrainLayer = true;
                             }
                         }
                         dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(layerWeights);
                         if (hasTerrainLayer) {
                             dstVertex.flags |= kImportedSceneMaterialFlagTerrainLayers;
+                            if (hasNormalizedTerrainLayers) {
+                                dstVertex.flags |=
+                                    kImportedSceneMaterialFlagTerrainNormalizedLayers;
+                            }
                         }
                         remappedIndex = static_cast<std::uint32_t>(scene.packedVertices.size());
                         scene.packedVertices.push_back(dstVertex);

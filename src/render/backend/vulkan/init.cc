@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1907,28 +1908,67 @@ bool RendererBackend::createSwapchain() {
                                << upscalerBackendName(m_upscalerStatus.requested) << " but running "
                                << upscalerBackendName(m_upscalerStatus.active) << " -- "
                                << m_upscalerStatus.reason;
+        }
+
+        const char* scaleEnv = std::getenv("ODAI_RENDER_SCALE");
+        const char* sizeEnv = std::getenv("ODAI_RENDER_SIZE");
+        bool usedExactExtent = false;
+        if (scaleEnv == nullptr && sizeEnv != nullptr && sizeEnv[0] != '\0') {
+            char* widthEnd = nullptr;
+            char* heightEnd = nullptr;
+            const unsigned long requestedWidth = std::strtoul(sizeEnv, &widthEnd, 10);
+            const bool hasSeparator = widthEnd != nullptr &&
+                (*widthEnd == 'x' || *widthEnd == 'X');
+            const unsigned long requestedHeight = hasSeparator
+                ? std::strtoul(widthEnd + 1, &heightEnd, 10)
+                : 0ul;
+            const bool valid = hasSeparator && heightEnd != nullptr && *heightEnd == '\0' &&
+                requestedWidth > 0ul && requestedHeight > 0ul;
+            if (valid) {
+                m_renderExtent.width = std::min(
+                    extent.width, static_cast<uint32_t>(std::min<unsigned long>(
+                        requestedWidth, std::numeric_limits<uint32_t>::max())));
+                m_renderExtent.height = std::min(
+                    extent.height, static_cast<uint32_t>(std::min<unsigned long>(
+                        requestedHeight, std::numeric_limits<uint32_t>::max())));
+                usedExactExtent = true;
+            } else {
+                VOX_LOGW("render") << "ignoring invalid ODAI_RENDER_SIZE='" << sizeEnv
+                                   << "' (expected WIDTHxHEIGHT)";
+            }
+        }
+
+        if (!usedExactExtent) {
+            float renderScale = m_upscalerStatus.renderScale;
+            // ODAI_RENDER_SCALE predates the upscaler and remains the highest
+            // precedence override for reproducible measurements.
+            if (scaleEnv != nullptr) {
+                renderScale = static_cast<float>(std::atof(scaleEnv));
+            }
+            renderScale = std::clamp(renderScale, 0.3f, 1.0f);
+            m_renderExtent.width = std::max(
+                1u, static_cast<uint32_t>(static_cast<float>(extent.width) * renderScale + 0.5f));
+            m_renderExtent.height = std::max(
+                1u, static_cast<uint32_t>(static_cast<float>(extent.height) * renderScale + 0.5f));
+        }
+
+        if (m_renderExtent.width != m_swapchainExtent.width ||
+            m_renderExtent.height != m_swapchainExtent.height) {
+            const float widthScale = static_cast<float>(m_renderExtent.width) /
+                                     static_cast<float>(m_swapchainExtent.width);
+            const float heightScale = static_cast<float>(m_renderExtent.height) /
+                                      static_cast<float>(m_swapchainExtent.height);
+            m_upscalerStatus.renderScale = std::min(widthScale, heightScale);
+            VOX_LOGI("render") << "upscaler: "
+                               << upscalerBackendName(m_upscalerStatus.active) << ", 3D at "
+                               << m_renderExtent.width << "x" << m_renderExtent.height
+                               << ", UI/present at " << m_swapchainExtent.width << "x"
+                               << m_swapchainExtent.height << " (render scale "
+                               << m_upscalerStatus.renderScale << ")";
         } else if (m_upscalerStatus.active != UpscalerBackend::Off) {
             VOX_LOGI("render") << "upscaler: " << upscalerBackendName(m_upscalerStatus.active)
                                << " at " << upscalerQualityName(m_upscalerSettings.quality)
-                               << " (render scale " << m_upscalerStatus.renderScale << ")";
-        }
-
-        float renderScale = m_upscalerStatus.renderScale;
-        // ODAI_RENDER_SCALE still wins where it is set: it predates the upscaler
-        // and is what every measurement in this project's notes was taken with.
-        if (const char* scaleEnv = std::getenv("ODAI_RENDER_SCALE")) {
-            renderScale = static_cast<float>(std::atof(scaleEnv));
-        }
-        renderScale = std::clamp(renderScale, 0.3f, 1.0f);
-        m_renderExtent.width = std::max(
-            1u, static_cast<uint32_t>(static_cast<float>(extent.width) * renderScale + 0.5f));
-        m_renderExtent.height = std::max(
-            1u, static_cast<uint32_t>(static_cast<float>(extent.height) * renderScale + 0.5f));
-        if (renderScale < 1.0f) {
-            VOX_LOGI("render") << "render scale " << renderScale << ": 3D at "
-                               << m_renderExtent.width << "x" << m_renderExtent.height
-                               << ", UI/present at " << m_swapchainExtent.width << "x"
-                               << m_swapchainExtent.height;
+                               << " (render scale 1)";
         }
     }
     // Read here rather than at AO-target creation because it sizes those targets

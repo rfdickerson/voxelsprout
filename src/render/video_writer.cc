@@ -100,4 +100,23 @@ bool VideoWriter::close() {
     return ok;
 }
 
+bool muxVideoAndAudio(const std::string& videoPath, const std::string& wavPath,
+                      const std::string& outputPath) {
+    std::ostringstream command;
+    command << "ffmpeg -y -hide_banner -loglevel error"
+            << " -i \"" << videoPath << "\""
+            << " -i \"" << wavPath << "\""
+            << " -map 0:v:0 -map 1:a:0 -c:v copy"
+            << " -c:a aac -b:a 192k -ar 48000 -ac 2"
+            << " -shortest -movflags +faststart"
+            << " \"" << outputPath << "\"";
+    const int status = std::system(command.str().c_str());
+    if (status != 0) {
+        VOX_LOGE("render") << "audio mux: ffmpeg exited " << status << " for " << outputPath;
+        return false;
+    }
+    VOX_LOGI("render") << "audio mux written: " << outputPath;
+    return true;
+}
+
 }  // namespace odai::render

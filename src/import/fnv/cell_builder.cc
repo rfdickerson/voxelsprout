@@ -16,6 +16,45 @@
 
 namespace odai::importer::fnv {
 
+void appendResolvedDoors(
+    const FalloutCellRecord& record,
+    const FalloutCellIndex& index,
+    odai::importer::ImportedScene& scene) {
+    constexpr float kRadiansToDegrees = 180.0f / 3.14159265358979323846f;
+    const auto worldspaceEditorIdFor = [&](std::uint32_t worldspaceFormId) {
+        for (const FalloutWorldspaceRecord& worldspace : index.worldspaces) {
+            if (worldspace.formId == worldspaceFormId) return worldspace.editorId;
+        }
+        return std::string{};
+    };
+    for (const FalloutPlacedReference& ref : record.references) {
+        if (!ref.hasTeleport || ref.isDeleted || (ref.recordFlags & 0x00000800u) != 0u) continue;
+        const auto target = index.cellIndexByReferenceFormId.find(ref.teleportTargetRefFormId);
+        if (target == index.cellIndexByReferenceFormId.end() || target->second >= index.cells.size()) {
+            continue;
+        }
+        const FalloutCellIndexEntry& targetCell = index.cells[target->second];
+        if (targetCell.isInterior && targetCell.editorId.empty()) continue;
+        ImportedSceneDoor door{};
+        door.sourceReferenceFormId = ref.formId;
+        door.targetCellFormId = targetCell.cellFormId;
+        door.targetWorldspaceFormId = targetCell.worldspaceFormId;
+        door.targetCellEditorId = targetCell.editorId;
+        door.targetWorldspaceEditorId = worldspaceEditorIdFor(targetCell.worldspaceFormId);
+        door.targetKind = targetCell.isInterior
+            ? ImportedSceneDoorTargetKind::Interior : ImportedSceneDoorTargetKind::Exterior;
+        door.locked = ref.isLocked;
+        door.lockLevel = ref.lockLevel;
+        const float source[3] = {ref.position[0], ref.position[2], -ref.position[1]};
+        const float arrival[3] = {
+            ref.teleportPosition[0], ref.teleportPosition[2], -ref.teleportPosition[1]};
+        std::copy(std::begin(source), std::end(source), door.position);
+        std::copy(std::begin(arrival), std::end(arrival), door.arrivalPosition);
+        door.arrivalYawDegrees = -ref.teleportRotationRadians[2] * kRadiansToDegrees;
+        scene.doors.push_back(std::move(door));
+    }
+}
+
 float sampleLandLayerOpacity(
     const FalloutLandTextureLayer& layer, float quadrantRow, float quadrantCol) {
     constexpr int kSide = kLandQuadrantGridSize;
@@ -54,6 +93,48 @@ float sampleLandLayerOpacity(
     const float bottom =
         std::lerp(filteredPost(row0 + 1, col0), filteredPost(row0 + 1, col0 + 1), colT);
     return std::clamp(std::lerp(top, bottom, rowT), 0.0f, 1.0f);
+}
+
+void appendPartitionedNifShapeIndices(
+    const NifShape& shape,
+    std::uint32_t baseVertex,
+    std::vector<std::uint32_t>& outIndices,
+    std::uint32_t& outOpaqueIndexCount,
+    std::uint32_t& outFadedIndexCount) {
+    const std::size_t firstIndex = outIndices.size();
+    outOpaqueIndexCount = 0u;
+    outFadedIndexCount = 0u;
+    if (shape.alphaSemantic != NifAlphaSemantic::VertexFade) {
+        for (const std::uint32_t index : shape.triangleIndices) {
+            outIndices.push_back(baseVertex + index);
+        }
+        outOpaqueIndexCount = static_cast<std::uint32_t>(outIndices.size() - firstIndex);
+        return;
+    }
+
+    std::vector<std::uint32_t> fadedIndices;
+    fadedIndices.reserve(shape.triangleIndices.size());
+    constexpr float kOpaqueVertexAlpha = 254.0f / 255.0f;
+    for (std::size_t tri = 0u; tri + 2u < shape.triangleIndices.size(); tri += 3u) {
+        bool fullyOpaque = true;
+        for (std::size_t corner = 0u; corner < 3u; ++corner) {
+            const std::uint32_t vertexIndex = shape.triangleIndices[tri + corner];
+            const std::size_t alphaOffset =
+                (static_cast<std::size_t>(vertexIndex) * 4u) + 3u;
+            if (alphaOffset >= shape.colors.size() ||
+                shape.colors[alphaOffset] < kOpaqueVertexAlpha) {
+                fullyOpaque = false;
+                break;
+            }
+        }
+        auto& destination = fullyOpaque ? outIndices : fadedIndices;
+        destination.push_back(baseVertex + shape.triangleIndices[tri]);
+        destination.push_back(baseVertex + shape.triangleIndices[tri + 1u]);
+        destination.push_back(baseVertex + shape.triangleIndices[tri + 2u]);
+    }
+    outOpaqueIndexCount = static_cast<std::uint32_t>(outIndices.size() - firstIndex);
+    outFadedIndexCount = static_cast<std::uint32_t>(fadedIndices.size());
+    outIndices.insert(outIndices.end(), fadedIndices.begin(), fadedIndices.end());
 }
 
 namespace {
@@ -242,11 +323,14 @@ bool shapeIsPlanar(const odai::importer::fnv::NifShape& shape) {
 // part per distinct texture, gathering every block that uses it -- typically two
 // to eight parts rather than the four a Fallout cell emits.
 //
-// Each block gets its OWN 5x5 vertex block rather than sharing posts with its
-// neighbours. That costs 16*16*25 = 6400 posts against 4225 shared (+51%) and
-// buys the thing that matters: the texture tiles once across each block, so a
-// shared post would need two different UVs. Same trade the Fallout path makes
-// for its quadrants, for the same reason.
+// Each block gets four 3x3 subpatches rather than one 5x5 patch or vertices
+// shared with its neighbours. The split is important in addition to preserving
+// the block-local 0..1 UVs: layer texture IDs are flat shader inputs while
+// layer weights interpolate. The neighbour direction changes at the centre of
+// a block, so a triangle may never straddle that change. Four 2x2-quad patches
+// keep every triangle's base/U/V/diagonal texture set constant. This costs
+// 16*16*36 = 9216 posts, but retains the same 8192 triangles per cell and fixes
+// the blend semantics rather than hiding the mismatch in the shader.
 void appendMorrowindTerrainCell(
     ImportedSceneMesh& terrainMesh,
     const odai::importer::fnv::FalloutCellRecord& cell,
@@ -334,119 +418,128 @@ void appendMorrowindTerrainCell(
             const int blockCol = block % kMorrowindTextureGridSize;
             const int postRow0 = blockRow * kMorrowindTextureBlockQuads;
             const int postCol0 = blockCol * kMorrowindTextureBlockQuads;
-            const std::uint32_t baseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
-            for (int row = 0; row <= kMorrowindTextureBlockQuads; ++row) {
-                for (int col = 0; col <= kMorrowindTextureBlockQuads; ++col) {
-                    const int postRow = std::min(postRow0 + row, gridSize - 1);
-                    const int postCol = std::min(postCol0 + col, gridSize - 1);
-                    const int postIndex = (postRow * gridSize) + postCol;
-                    const float bethesdaX = cellOriginX + (static_cast<float>(postCol) * kLandPostSpacing);
-                    const float bethesdaY = cellOriginY + (static_cast<float>(postRow) * kLandPostSpacing);
-                    const float bethesdaZ =
-                        land.hasHeights ? land.heights[static_cast<std::size_t>(postIndex)] : 0.0f;
-                    const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
-
-                    ImportedSceneVertex vertex{};
-                    vertex.position[0] = world.x;
-                    vertex.position[1] = world.y;
-                    vertex.position[2] = world.z;
-                    // One full tile of the texture across the block.
-                    const float blockU =
-                        static_cast<float>(col) / static_cast<float>(kMorrowindTextureBlockQuads);
-                    const float blockV =
-                        static_cast<float>(row) / static_cast<float>(kMorrowindTextureBlockQuads);
-                    vertex.uv[0] = blockU;
-                    vertex.uv[1] = blockV;
-
-                    // Bilinear blend toward the neighbouring blocks' textures.
-                    // Offset from this block's CENTRE, so the influence is zero
-                    // in the middle of a block and half at its edge -- where the
-                    // neighbour computes the mirrored half and the two meet
-                    // continuously.
-                    const float offsetU = blockU - 0.5f;
-                    const float offsetV = blockV - 0.5f;
-                    const float fracU = std::abs(offsetU);
-                    const float fracV = std::abs(offsetV);
-                    const int stepCol = offsetU < 0.0f ? -1 : 1;
-                    const int stepRow = offsetV < 0.0f ? -1 : 1;
+            static_assert((kMorrowindTextureBlockQuads % 2) == 0);
+            constexpr int kSubpatchQuads = kMorrowindTextureBlockQuads / 2;
+            constexpr int kSubpatchStride = kSubpatchQuads + 1;
+            for (int subpatchRow = 0; subpatchRow < 2; ++subpatchRow) {
+                for (int subpatchCol = 0; subpatchCol < 2; ++subpatchCol) {
+                    const int localRow0 = subpatchRow * kSubpatchQuads;
+                    const int localCol0 = subpatchCol * kSubpatchQuads;
+                    const int stepRow = subpatchRow == 0 ? -1 : 1;
+                    const int stepCol = subpatchCol == 0 ? -1 : 1;
                     const std::uint32_t ownTexture = textureIndex;
-                    const std::uint32_t neighbourU =
-                        textureAt(blockRow, blockCol + stepCol, ownTexture);
-                    const std::uint32_t neighbourV =
-                        textureAt(blockRow + stepRow, blockCol, ownTexture);
-                    const std::uint32_t neighbourUv =
-                        textureAt(blockRow + stepRow, blockCol + stepCol, ownTexture);
-                    // Partition of unity over the four nearest block centres.
-                    // amount[0] is this block's own share and is carried by the
-                    // base texture rather than by a layer slot.
-                    const float amount[4] = {
-                        (1.0f - fracU) * (1.0f - fracV),
-                        fracU * (1.0f - fracV),
-                        (1.0f - fracU) * fracV,
-                        fracU * fracV,
-                    };
+                    // These IDs are deliberately constant across the entire
+                    // subpatch. The fragment interface carries them without
+                    // interpolation, so varying them between triangle vertices
+                    // would attach interpolated weights to the provoking
+                    // vertex's unrelated neighbour set.
                     const std::uint32_t neighbourTexture[3] = {
-                        neighbourU, neighbourV, neighbourUv};
-                    // The shader composites as a chain of lerps from the base
-                    // sample, so a layer's weight has to be its share of the
-                    // running total, not its share of the whole. Dividing by the
-                    // cumulative sum makes the chain reproduce the normalized
-                    // blend exactly.
-                    float runningTotal = amount[0];
-                    for (int slot = 0; slot < 3; ++slot) {
-                        const float share = amount[slot + 1];
-                        runningTotal += share;
-                        // A neighbour using the same texture as this block is
-                        // not a transition and must not consume a layer slot --
-                        // blending a texture with itself is a no-op that costs a
-                        // sample, and there are only four slots for what can be
-                        // four genuinely different textures at a corner.
-                        if (neighbourTexture[slot] == ownTexture || share <= 0.0f ||
-                            runningTotal <= 0.0f) {
-                            continue;
+                        textureAt(blockRow, blockCol + stepCol, ownTexture),
+                        textureAt(blockRow + stepRow, blockCol, ownTexture),
+                        textureAt(blockRow + stepRow, blockCol + stepCol, ownTexture),
+                    };
+                    const std::uint32_t baseVertex =
+                        static_cast<std::uint32_t>(terrainMesh.vertices.size());
+                    for (int localRow = 0; localRow <= kSubpatchQuads; ++localRow) {
+                        for (int localCol = 0; localCol <= kSubpatchQuads; ++localCol) {
+                            const int row = localRow0 + localRow;
+                            const int col = localCol0 + localCol;
+                            const int postRow = std::min(postRow0 + row, gridSize - 1);
+                            const int postCol = std::min(postCol0 + col, gridSize - 1);
+                            const int postIndex = (postRow * gridSize) + postCol;
+                            const float bethesdaX =
+                                cellOriginX + (static_cast<float>(postCol) * kLandPostSpacing);
+                            const float bethesdaY =
+                                cellOriginY + (static_cast<float>(postRow) * kLandPostSpacing);
+                            const float bethesdaZ = land.hasHeights
+                                ? land.heights[static_cast<std::size_t>(postIndex)] : 0.0f;
+                            const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+
+                            ImportedSceneVertex vertex{};
+                            vertex.position[0] = world.x;
+                            vertex.position[1] = world.y;
+                            vertex.position[2] = world.z;
+                            // One full tile of the texture across the original
+                            // 4x4-quad VTEX block, not independently per patch.
+                            const float blockU = static_cast<float>(col) /
+                                static_cast<float>(kMorrowindTextureBlockQuads);
+                            const float blockV = static_cast<float>(row) /
+                                static_cast<float>(kMorrowindTextureBlockQuads);
+                            vertex.uv[0] = blockU;
+                            vertex.uv[1] = blockV;
+
+                            // Offset from the block centre. The selected
+                            // neighbour has zero influence on the duplicated
+                            // centre row/column and reaches one half at an edge,
+                            // meeting the adjacent block continuously.
+                            const float fracU = std::abs(blockU - 0.5f);
+                            const float fracV = std::abs(blockV - 0.5f);
+                            const float amount[4] = {
+                                (1.0f - fracU) * (1.0f - fracV),
+                                fracU * (1.0f - fracV),
+                                (1.0f - fracU) * fracV,
+                                fracU * fracV,
+                            };
+                            float runningTotal = amount[0];
+                            for (int slot = 0; slot < 3; ++slot) {
+                                const float share = amount[slot + 1];
+                                runningTotal += share;
+                                if (neighbourTexture[slot] == ownTexture) {
+                                    continue;
+                                }
+                                // Declare the constant patch layer even at a
+                                // vertex where its weight is zero. Texture IDs
+                                // and the terrain-layer flag are flat inputs;
+                                // omitting them on the centre vertex would
+                                // disable a whole triangle whose other corners
+                                // interpolate toward this neighbour.
+                                vertex.layerTextureIndex[slot] = neighbourTexture[slot];
+                                if (share > 0.0f && runningTotal > 0.0f) {
+                                    vertex.layerWeight[slot] = share / runningTotal;
+                                }
+                            }
+                            // The fourth slot is unused by this four-sample
+                            // reconstruction (base + three neighbours). Mark
+                            // its normalized semantics for the packer, which
+                            // consumes and clears the sentinel.
+                            vertex.layerTextureIndex[3] =
+                                kImportedSceneTerrainNormalizedBlendMarker;
+                            if (land.hasNormals) {
+                                const Vec3 normal = bethesdaToEngine(
+                                    land.normals[static_cast<std::size_t>(postIndex) * 3u],
+                                    land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 1u],
+                                    land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 2u]);
+                                vertex.normal[0] = normal.x;
+                                vertex.normal[1] = normal.y;
+                                vertex.normal[2] = normal.z;
+                            } else {
+                                vertex.normal[1] = 1.0f;
+                            }
+                            if (land.hasColors) {
+                                vertex.color[0] = land.colors[static_cast<std::size_t>(postIndex) * 3u];
+                                vertex.color[1] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 1u];
+                                vertex.color[2] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 2u];
+                            }
+                            terrainMesh.vertices.push_back(vertex);
                         }
-                        vertex.layerTextureIndex[slot] = neighbourTexture[slot];
-                        vertex.layerWeight[slot] = share / runningTotal;
                     }
-                    if (land.hasNormals) {
-                        const Vec3 normal = bethesdaToEngine(
-                            land.normals[static_cast<std::size_t>(postIndex) * 3u],
-                            land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 1u],
-                            land.normals[(static_cast<std::size_t>(postIndex) * 3u) + 2u]);
-                        vertex.normal[0] = normal.x;
-                        vertex.normal[1] = normal.y;
-                        vertex.normal[2] = normal.z;
-                    } else {
-                        vertex.normal[1] = 1.0f;
+                    for (int row = 0; row < kSubpatchQuads; ++row) {
+                        for (int col = 0; col < kSubpatchQuads; ++col) {
+                            const std::uint32_t i00 = baseVertex +
+                                static_cast<std::uint32_t>((row * kSubpatchStride) + col);
+                            const std::uint32_t i10 = i00 + 1u;
+                            const std::uint32_t i01 =
+                                i00 + static_cast<std::uint32_t>(kSubpatchStride);
+                            const std::uint32_t i11 = i01 + 1u;
+                            // bethesdaToEngine negates Y, flipping the winding.
+                            terrainMesh.indices.push_back(i00);
+                            terrainMesh.indices.push_back(i11);
+                            terrainMesh.indices.push_back(i01);
+                            terrainMesh.indices.push_back(i00);
+                            terrainMesh.indices.push_back(i10);
+                            terrainMesh.indices.push_back(i11);
+                        }
                     }
-                    // VCLR is Morrowind's baked lighting, and it is doing more
-                    // work here than VCLR does in Fallout: this is a game with
-                    // no dynamic terrain shadowing, so the shading under trees
-                    // and against cliffs lives entirely in these bytes.
-                    if (land.hasColors) {
-                        vertex.color[0] = land.colors[static_cast<std::size_t>(postIndex) * 3u];
-                        vertex.color[1] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 1u];
-                        vertex.color[2] = land.colors[(static_cast<std::size_t>(postIndex) * 3u) + 2u];
-                    }
-                    terrainMesh.vertices.push_back(vertex);
-                }
-            }
-            constexpr int kStride = kMorrowindTextureBlockQuads + 1;
-            for (int row = 0; row < kMorrowindTextureBlockQuads; ++row) {
-                for (int col = 0; col < kMorrowindTextureBlockQuads; ++col) {
-                    const std::uint32_t i00 =
-                        baseVertex + static_cast<std::uint32_t>((row * kStride) + col);
-                    const std::uint32_t i10 = i00 + 1u;
-                    const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(kStride);
-                    const std::uint32_t i11 = i01 + 1u;
-                    // Same winding as the Fallout path, and for the same reason:
-                    // bethesdaToEngine negates Y, which flips the quad's sense.
-                    terrainMesh.indices.push_back(i00);
-                    terrainMesh.indices.push_back(i11);
-                    terrainMesh.indices.push_back(i01);
-                    terrainMesh.indices.push_back(i00);
-                    terrainMesh.indices.push_back(i10);
-                    terrainMesh.indices.push_back(i11);
                 }
             }
         }
@@ -804,6 +897,17 @@ bool isSkyOnlyModelPath(std::string_view modelPath) {
     return lowered.rfind("sky\\", 0) == 0 || lowered.rfind("meshes\\sky\\", 0) == 0;
 }
 
+bool isUnsupportedAdditiveLodOverlay(std::string_view modelPath) {
+    const std::string lowered = toLowerAsciiCopy(std::string(modelPath));
+    // WRLODWindowGlow01 is 218 disconnected window cards whose BC1 texture is
+    // intentionally opaque black around the lit panes. Skyrim draws it with
+    // additive blending, where black contributes nothing. The imported static
+    // material currently carries alpha blend but not NIF source/destination
+    // blend factors, so drawing the cards as ordinary source-alpha produces
+    // floating black rectangles across the daytime Whiterun skyline.
+    return lowered.find("lodwindowglow") != std::string::npos;
+}
+
 namespace {
 
 // Fills `outTables` from one plugin's records, rewriting every formID from that
@@ -854,13 +958,63 @@ void mergeWorldTablesFromScene(
         }
     }
     for (const FalloutRegionRecord& entry : data.regions) {
+        const std::uint32_t formId = remap(entry.formId);
+        if (entry.deleted) {
+            outTables.regionAudioByFormId.erase(formId);
+            outTables.regionNamesByFormId.erase(formId);
+            outTables.regionNameStringIdsByFormId.erase(formId);
+            continue;
+        }
         if (entry.isDiscoverable()) {
-            put(outTables.regionNamesByFormId, remap(entry.formId), entry.mapName);
+            put(outTables.regionNamesByFormId, formId, entry.mapName);
             if (entry.mapNameStringId != 0u) {
-                put(outTables.regionNameStringIdsByFormId, remap(entry.formId),
+                put(outTables.regionNameStringIdsByFormId, formId,
                     entry.mapNameStringId);
             }
         }
+        if (!entry.sounds.empty()) {
+            FalloutRegionRecord region = entry;
+            region.formId = formId;
+            if (region.worldspaceFormId != 0u) {
+                region.worldspaceFormId = remap(region.worldspaceFormId);
+            }
+            for (FalloutRegionRecord::Sound& sound : region.sounds) {
+                sound.descriptorFormId = remap(sound.descriptorFormId);
+            }
+            put(outTables.regionAudioByFormId, formId, region);
+        }
+    }
+    for (const FalloutSoundOutputModelRecord& source : data.soundOutputModels) {
+        const std::uint32_t formId = remap(source.formId);
+        if (source.deleted) {
+            outTables.soundOutputModelsByFormId.erase(formId);
+            continue;
+        }
+        FalloutSoundOutputModelRecord output = source;
+        output.formId = formId;
+        put(outTables.soundOutputModelsByFormId, formId, output);
+    }
+    for (const FalloutSoundDescriptorRecord& source : data.soundDescriptors) {
+        const std::uint32_t formId = remap(source.formId);
+        if (source.deleted) {
+            outTables.soundDescriptorsByFormId.erase(formId);
+            continue;
+        }
+        FalloutSoundDescriptorRecord descriptor = source;
+        descriptor.formId = formId;
+        if (descriptor.outputModelFormId != 0u) {
+            descriptor.outputModelFormId = remap(descriptor.outputModelFormId);
+        }
+        put(outTables.soundDescriptorsByFormId, formId, descriptor);
+    }
+    for (const FalloutSoundBaseRecord& source : data.soundBases) {
+        const std::uint32_t formId = remap(source.formId);
+        if (source.deleted || source.descriptorFormId == 0u) {
+            outTables.soundDescriptorByBaseFormId.erase(formId);
+            continue;
+        }
+        put(outTables.soundDescriptorByBaseFormId, formId,
+            remap(source.descriptorFormId));
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
         if (!entry.editorId.empty()) {
@@ -1061,6 +1215,25 @@ bool buildFalloutWorldTables(
             if (entry.mapNameStringId != 0u) {
                 outTables.regionNameStringIdsByFormId.emplace(entry.formId, entry.mapNameStringId);
             }
+        }
+        if (!entry.deleted && !entry.sounds.empty()) {
+            outTables.regionAudioByFormId.emplace(entry.formId, entry);
+        }
+    }
+    for (const FalloutSoundOutputModelRecord& entry : data.soundOutputModels) {
+        if (!entry.deleted) {
+            outTables.soundOutputModelsByFormId.emplace(entry.formId, entry);
+        }
+    }
+    for (const FalloutSoundDescriptorRecord& entry : data.soundDescriptors) {
+        if (!entry.deleted) {
+            outTables.soundDescriptorsByFormId.emplace(entry.formId, entry);
+        }
+    }
+    for (const FalloutSoundBaseRecord& entry : data.soundBases) {
+        if (!entry.deleted && entry.descriptorFormId != 0u) {
+            outTables.soundDescriptorByBaseFormId.emplace(
+                entry.formId, entry.descriptorFormId);
         }
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
@@ -1622,7 +1795,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 const std::string& staticModelPath = *resolvedModelPath;
                 std::vector<std::uint8_t> nifBytes;
-                if (isSkyOnlyModelPath(staticModelPath)) {
+                if (isSkyOnlyModelPath(staticModelPath) ||
+                    isUnsupportedAdditiveLodOverlay(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
@@ -1663,6 +1837,24 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     std::cerr << "warning: failed to parse NIF " << staticModelPath << ": " << nifError << "\n";
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
+                }
+                if (nifModel.skippedShapeCount != 0u ||
+                    nifModel.nodeParseFailedCount != 0u) {
+                    std::cerr << "warning: partial NIF geometry " << staticModelPath
+                              << ": emittedShapes=" << nifModel.shapes.size()
+                              << " skippedShapes=" << nifModel.skippedShapeCount
+                              << " failedNodes=" << nifModel.nodeParseFailedCount;
+                    if (!nifModel.failedNodeTypes.empty()) {
+                        std::cerr << " nodeTypes=";
+                        for (std::size_t typeIndex = 0u;
+                             typeIndex < nifModel.failedNodeTypes.size(); ++typeIndex) {
+                            if (typeIndex != 0u) {
+                                std::cerr << ',';
+                            }
+                            std::cerr << nifModel.failedNodeTypes[typeIndex];
+                        }
+                    }
+                    std::cerr << '\n';
                 }
                 if (applyNifBannerGravityRestPose(staticModelPath, nifModel)) {
                     ++m_stats.clothMeshesSettled;
@@ -1894,9 +2086,18 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         }
                         mesh.vertices.push_back(vertex);
                     }
-                    for (const std::uint32_t index : shape.triangleIndices) {
-                        mesh.indices.push_back(baseVertex + index);
-                    }
+                    // Skyrim uses vertex alpha on two very different scales:
+                    // a genuinely transparent shape, and a mostly opaque rock
+                    // or building whose narrow edge is feathered into its
+                    // neighbour. Sending the latter's WHOLE index range to the
+                    // no-depth-write blended pass makes a solid building sort
+                    // against itself and appear disassembled. Keep triangles
+                    // whose three corners are opaque in the normal path and
+                    // append only the transition fringe after them.
+                    std::uint32_t opaqueIndexCount = 0u;
+                    std::uint32_t fadedIndexCount = 0u;
+                    appendPartitionedNifShapeIndices(
+                        shape, baseVertex, mesh.indices, opaqueIndexCount, fadedIndexCount);
                     // One part per shape. Without these the mesh has no parts
                     // at all and every surface falls back to the per-model
                     // hashed color, which is why cooked scenes used to look
@@ -1906,7 +2107,10 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     if (partIndexCount != 0u) {
                         ImportedSceneMeshPart part{};
                         part.firstIndex = partFirstIndex;
-                        part.indexCount = partIndexCount;
+                        part.indexCount =
+                            shape.alphaSemantic == NifAlphaSemantic::VertexFade
+                            ? opaqueIndexCount
+                            : partIndexCount;
                         part.textureIndex = resolveTextureIndex(shape.diffuseTexturePath);
                         if (part.textureIndex == kNoTextureIndex &&
                             modelDominantTexture != kNoTextureIndex) {
@@ -1914,7 +2118,10 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             ++m_stats.untexturedShapesGivenModelTexture;
                         }
                         part.alphaTest = shape.alphaTest;
-                        part.alphaBlend = shape.alphaBlend;
+                        part.alphaBlend =
+                            shape.alphaSemantic == NifAlphaSemantic::VertexFade
+                            ? false
+                            : shape.alphaBlend;
                         part.unlit = shape.unlit;
                         // A DISTANT-LOD SHELL IS A HOLLOW, SINGLE-SIDED HULL,
                         // and back-face culling eats half of it.
@@ -2042,7 +2249,16 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             }
                         }
                         ++m_stats.totalShapes;
-                        mesh.parts.push_back(part);
+                        if (part.indexCount != 0u) {
+                            mesh.parts.push_back(part);
+                        }
+                        if (fadedIndexCount != 0u) {
+                            ImportedSceneMeshPart fadedPart = part;
+                            fadedPart.firstIndex = partFirstIndex + opaqueIndexCount;
+                            fadedPart.indexCount = fadedIndexCount;
+                            fadedPart.alphaBlend = true;
+                            mesh.parts.push_back(fadedPart);
+                        }
                     }
                 }
                 if (mesh.vertices.empty()) {

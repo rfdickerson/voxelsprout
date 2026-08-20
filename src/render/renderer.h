@@ -45,6 +45,9 @@ public:
     static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunk(std::size_t chunkIndex);
+    // Capture-only readiness fence. Waits on the upload timeline values already
+    // signalled by chunk staging; it never drains unrelated device work.
+    bool waitForImportedSceneUploads();
     [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
     [[nodiscard]] std::size_t importedLocalLightCount() const;
 

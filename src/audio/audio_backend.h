@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <span>
 
 // Internal backend interface behind the Audio facade. Included only by the
 // audio .cc files — never by a public header — so concrete backends can pull in
@@ -44,6 +45,11 @@ public:
     virtual void setMuted(bool muted) = 0;
     [[nodiscard]] virtual bool muted() const = 0;
     [[nodiscard]] virtual bool deviceActive() const = 0;
+    [[nodiscard]] virtual bool offlineMixActive() const = 0;
+    [[nodiscard]] virtual std::uint32_t mixSampleRate() const = 0;
+    [[nodiscard]] virtual std::uint32_t mixChannels() const = 0;
+    virtual bool renderOfflineFrames(std::span<float> interleaved,
+                                     std::uint64_t frameCount) = 0;
 };
 
 // Always available. Silent; loaders return invalid handles. Seeded with cfg so

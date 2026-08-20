@@ -43,6 +43,7 @@
 #include "import/cell_residency_planner.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/cell_builder.h"
+#include "import/fnv/content_profile.h"
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
@@ -165,6 +166,10 @@ public:
         m_useLoadOrder = !m_loadOrder.empty();
     }
 
+    void setContentProfile(ResolvedContentProfile profile) {
+        m_contentProfile = std::move(profile);
+    }
+
     void setCacheDirectory(std::filesystem::path directory) {
         m_cacheDirectory = std::move(directory);
     }
@@ -221,6 +226,20 @@ public:
     void setCellCallbacks(CellResidentCallback onResident, CellEvictedCallback onEvicted) {
         m_onCellResident = std::move(onResident);
         m_onCellEvicted = std::move(onEvicted);
+    }
+
+    // Sound-marker references are record residency rather than scene data.
+    // Publish them beside the geometry callbacks without baking them into the
+    // ImportedScene cache format.
+    using AmbientEmittersResidentCallback =
+        std::function<void(
+            const CellCoord&,
+            const std::vector<FalloutSoundEmitterRecord>&)>;
+    void setAmbientEmitterCallbacks(
+        AmbientEmittersResidentCallback onResident,
+        CellEvictedCallback onEvicted) {
+        m_onAmbientEmittersResident = std::move(onResident);
+        m_onAmbientEmittersEvicted = std::move(onEvicted);
     }
 
     // Blocks until in-flight loads finish and are drained. Required before
@@ -319,6 +338,12 @@ public:
     // 221 are weather/audio zones nobody should be told they have entered.
     [[nodiscard]] std::vector<std::string> regionNamesAtEngineSpace(
         const float enginePosition[3]) const;
+    [[nodiscard]] std::vector<FalloutRegionRecord::Sound> regionSoundsAtEngineSpace(
+        const float enginePosition[3]) const;
+    [[nodiscard]] const FalloutSoundDescriptorRecord* soundDescriptor(
+        std::uint32_t formId) const;
+    [[nodiscard]] const FalloutSoundOutputModelRecord* soundOutputModel(
+        std::uint32_t formId) const;
 
     [[nodiscard]] const std::vector<FalloutMapMarkerRecord>& mapMarkers() const {
         return m_cellIndex.mapMarkers;
@@ -403,6 +428,7 @@ public:
 
 private:
     FalloutAssetSource m_assets;
+    std::optional<ResolvedContentProfile> m_contentProfile;
     // Grid coordinate -> index into m_cellIndex.cells, for the chosen worldspace
     // only. The worldspace is not a rectangle, so this is also what stops the
     // planner re-requesting holes forever.
@@ -412,6 +438,8 @@ private:
     std::shared_ptr<Pending> m_pending;
     CellResidentCallback m_onCellResident;
     CellEvictedCallback m_onCellEvicted;
+    AmbientEmittersResidentCallback m_onAmbientEmittersResident;
+    CellEvictedCallback m_onAmbientEmittersEvicted;
     core::JobSystem* m_jobs = nullptr;
     CellStreamerStats m_stats{};
 };

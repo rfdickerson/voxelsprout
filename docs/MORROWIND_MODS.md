@@ -4,6 +4,10 @@ The Bethesda viewer streams Morrowind, Tamriel Data, and Tamriel Rebuilt from
 their original TES3 plugins. The archives are extracted once; they are not
 copied into the repository or into the Steam installation.
 
+An existing OpenMW setup can instead be consumed directly with `odai --profile
+/path/to/openmw.cfg`; chained data directories, content order, `data-local`, and
+fallback archives are preserved. See [`MOD_PROFILES.md`](MOD_PROFILES.md).
+
 ## One-time extraction
 
 ```bash
@@ -118,8 +122,9 @@ Then add one argument to any Morrowind/Tamriel Rebuilt launch:
   --plugin-add TR_Factions.esp --shader-pack rafael
 ```
 
-The preset uses the standard XDG data location above. A custom installation
-can select a PNG or DDS directly with `ODAI_WATER_NORMAL=/path/to/water_nm.png`.
+The renderer uses the bundled, tileable multi-scale water normal at
+`assets/textures/morrowind_water_normal.png`. A shader or texture mod can
+replace it for one launch with `ODAI_WATER_NORMAL=/path/to/water_nm.png`.
 `ODAI_FNV_PBR_OBJECT_ROUGHNESS`, `ODAI_FNV_PBR_TERRAIN_ROUGHNESS`, and
 `ODAI_FNV_PBR_METALLIC` override the defaults for A/B tuning. Authored native
 PBR materials always take precedence over the preset.

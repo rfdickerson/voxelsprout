@@ -27,6 +27,7 @@
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/cell_builder.h"
+#include "import/fnv/content_profile.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/land_lod.h"
 #include "import/fnv/nif_scene.h"
@@ -1412,7 +1413,137 @@ int cookLodTier(
     return 0;
 }
 
+int cookResolvedProfile(int argc, char** argv) {
+    using namespace odai::importer;
+    using namespace odai::importer::fnv;
+    if (argc < 6) {
+        std::cerr << "usage: odai_newvegas_cooker --profile <profile> <output.bin> "
+                     "[--data <Data>] [--mods-root <dir>] "
+                     "--cell <EditorID>\n"
+                     "   or: odai_newvegas_cooker --profile <profile> <output.bin> "
+                     "[--data <Data>] [--mods-root <dir>] "
+                     "--worldspace <EditorID> <x0> <z0> <x1> <z1>\n";
+        return 1;
+    }
+    const std::filesystem::path profilePath = argv[2];
+    const std::filesystem::path outputPath = argv[3];
+    ContentProfileResolveOptions options;
+    std::optional<std::string> cellEditorId;
+    std::optional<std::string> worldspaceEditorId;
+    std::int32_t x0 = 0, z0 = 0, x1 = 0, z1 = 0;
+    for (int i = 4; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
+            options.dataRootOverride = std::filesystem::path(argv[++i]);
+        } else if (std::strcmp(argv[i], "--mods-root") == 0 && i + 1 < argc) {
+            options.modsRoot = std::filesystem::path(argv[++i]);
+        } else if (std::strcmp(argv[i], "--reindex-content") == 0) {
+            options.forceContentReindex = true;
+        } else if (std::strcmp(argv[i], "--cell") == 0 && i + 1 < argc) {
+            cellEditorId = argv[++i];
+        } else if (std::strcmp(argv[i], "--worldspace") == 0 && i + 5 < argc) {
+            worldspaceEditorId = argv[++i];
+            x0 = std::atoi(argv[++i]); z0 = std::atoi(argv[++i]);
+            x1 = std::atoi(argv[++i]); z1 = std::atoi(argv[++i]);
+            if (x0 > x1) std::swap(x0, x1);
+            if (z0 > z1) std::swap(z0, z1);
+        }
+    }
+    if (cellEditorId.has_value() == worldspaceEditorId.has_value()) {
+        std::cerr << "error: choose exactly one of --cell or --worldspace\n";
+        return 1;
+    }
+
+    ResolvedContentProfile profile;
+    std::string error;
+    if (!resolveContentProfile(profilePath, options, profile, error)) {
+        std::cerr << "error: " << error << '\n';
+        return 1;
+    }
+    FalloutLoadOrder order;
+    if (!order.open(profile, error)) {
+        std::cerr << "error: " << error << '\n';
+        return 1;
+    }
+    FalloutAssetSource assets;
+    if (!assets.open(profile, kBsaContentMeshes | kBsaContentTextures)) {
+        std::cerr << "error: cannot open resolved content graph\n";
+        return 1;
+    }
+    FalloutWorldTables tables;
+    FalloutCellIndex index;
+    if (!buildFalloutWorldTables(order, tables, error) ||
+        !buildFalloutCellIndex(order, index, error)) {
+        std::cerr << "error: " << error << '\n';
+        return 1;
+    }
+
+    std::uint32_t worldspaceFormId = 0u;
+    if (worldspaceEditorId) {
+        const auto found = tables.worldspaceFormIdsByEditorId.find(
+            toLowerAsciiCopy(*worldspaceEditorId));
+        if (found == tables.worldspaceFormIdsByEditorId.end()) {
+            std::cerr << "error: no worldspace named " << *worldspaceEditorId << '\n';
+            return 1;
+        }
+        worldspaceFormId = found->second;
+    }
+
+    std::vector<FalloutCellRecord> records;
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        bool selected = false;
+        if (cellEditorId) {
+            selected = entry.isInterior &&
+                toLowerAsciiCopy(entry.editorId) == toLowerAsciiCopy(*cellEditorId);
+        } else {
+            selected = !entry.isInterior && entry.hasGridCoords &&
+                entry.worldspaceFormId == worldspaceFormId &&
+                entry.gridX >= x0 && entry.gridX <= x1 &&
+                entry.gridZ >= z0 && entry.gridZ <= z1;
+        }
+        if (!selected) continue;
+        FalloutCellRecord record;
+        if (!extractFalloutCellMerged(index, order, entry, record, error)) {
+            std::cerr << "error: " << error << '\n';
+            return 1;
+        }
+        records.push_back(std::move(record));
+    }
+    if (records.empty()) {
+        std::cerr << "error: requested profile region contains no cells\n";
+        return 1;
+    }
+
+    DecodedTextureCache textureCache;
+    CellSceneBuilder builder(assets, tables, &textureCache);
+    std::vector<const FalloutCellRecord*> recordPointers;
+    recordPointers.reserve(records.size());
+    for (const FalloutCellRecord& record : records) recordPointers.push_back(&record);
+    if (!cellEditorId) {
+        builder.setFallbackLandTexture(builder.dominantLandTexture(recordPointers));
+        for (const FalloutCellRecord& record : records) builder.addCellTerrain(record);
+    }
+    for (const FalloutCellRecord& record : records) {
+        builder.addCellStatics(record);
+        appendResolvedDoors(record, index, builder.scene());
+    }
+    ImportedScene scene;
+    builder.finish(scene);
+    scene.sourceTag = profile.name + ":" + profile.fingerprint;
+    if (!saveImportedScene(scene, outputPath)) {
+        std::cerr << "error: failed to write " << outputPath << ": "
+                  << getImportedSceneLastError() << '\n';
+        return 1;
+    }
+    std::cout << "Wrote " << outputPath << " from " << profile.name << " ("
+              << records.size() << " merged cells, " << scene.instances.size()
+              << " instances, " << scene.doors.size() << " doors)\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "--profile") == 0) {
+        return cookResolvedProfile(argc, argv);
+    }
     if (argc < 5) {
         printUsage();
         return 1;
