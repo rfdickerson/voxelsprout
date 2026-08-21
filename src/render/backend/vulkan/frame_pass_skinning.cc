@@ -2,7 +2,6 @@
 
 #include <GLFW/glfw3.h>
 
-#include "sim/network_procedural.h"
 
 // GPU skeletal skinning compute pre-pass (Dragon Age: Origins touchstone; see
 // docs/ROADMAP.md and skinning_resources.cc for the buffer/pipeline setup
@@ -59,7 +58,8 @@ void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
         // (bone matrices) is only ever written by uploadSkinnedActorPoseForFrame,
         // which skips a slot with no pending pose, so dispatching here would
         // read whatever garbage that descriptor region last held.
-        if (slot.vertexCount == 0 || !slot.bufferSet.valid() || slot.pendingBoneMatrices.empty()) {
+        if (!slot.visible || slot.vertexCount == 0 || !slot.bufferSet.valid() ||
+            slot.pendingBoneMatrices.empty()) {
             continue;
         }
 

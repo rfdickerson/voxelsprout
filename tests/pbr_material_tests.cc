@@ -23,9 +23,7 @@
 // Change both together -- same contract imported_scene.h already has with
 // imported_static.frag.slang over the flag bit layout.
 
-#include "anim/biped_rig.h"
 #include "import/imported_scene.h"
-#include "procgen/humanoid_generator.h"
 
 #include <algorithm>
 #include <cassert>
@@ -271,81 +269,6 @@ void testMaterialIndexPacking() {
     check(importedSceneMaterialIndex(wide) == 0xffu, "index is masked to 8 bits");
 }
 
-void testHumanoidMaterialAssignment() {
-    std::printf("humanoid generator material assignment\n");
-    using odai::importer::kImportedSceneMaterialFlagPbr;
-    using odai::importer::unpackImportedSceneMaterialFlags;
-
-    const odai::anim::Skeleton skeleton = odai::anim::makeBipedSkeleton();
-    odai::procgen::HumanoidMeshColors colors{};
-
-    // No materials: must be byte-identical to what the generator produced before
-    // materials existed. This is the regression guard for every existing caller.
-    const odai::procgen::HumanoidSkinnedMesh plain =
-        odai::procgen::buildHumanoidSkinnedMesh(skeleton, colors);
-    check(!plain.vertices.empty(), "generator emits geometry");
-    bool allPlainFlagsZero = true;
-    for (const auto& v : plain.vertices) {
-        if (v.flags != 0u) {
-            allPlainFlagsZero = false;
-        }
-    }
-    check(allPlainFlagsZero, "default materials leave every vertex flag at 0");
-
-    // Legion's assignment: bronze metal on the accent group, dielectrics elsewhere.
-    odai::procgen::HumanoidMeshMaterials materials{};
-    materials.torso = {0.0f, 0.85f};
-    materials.limbs = {0.0f, 0.75f};
-    materials.accent = {1.0f, 0.35f};
-    const odai::procgen::HumanoidSkinnedMesh dressed =
-        odai::procgen::buildHumanoidSkinnedMesh(skeleton, colors, materials);
-
-    check(dressed.vertices.size() == plain.vertices.size(),
-          "materials change no geometry");
-    check(dressed.indices == plain.indices, "materials change no topology");
-
-    std::size_t pbrVertices = 0;
-    std::size_t metalVertices = 0;
-    for (std::size_t i = 0; i < dressed.vertices.size(); ++i) {
-        const auto& v = dressed.vertices[i];
-        // Geometry must be untouched -- only flags may differ.
-        check(v.position[0] == plain.vertices[i].position[0] &&
-              v.position[1] == plain.vertices[i].position[1] &&
-              v.position[2] == plain.vertices[i].position[2],
-              "material assignment leaves positions untouched");
-        if ((v.flags & kImportedSceneMaterialFlagPbr) != 0u) {
-            ++pbrVertices;
-            if (unpackImportedSceneMaterialFlags(v.flags).metallic > 0.5f) {
-                ++metalVertices;
-            }
-        }
-    }
-
-    // Every group got a non-default material, so every vertex opts in.
-    check(pbrVertices == dressed.vertices.size(),
-          "every vertex carries the PBR opt-in bit once every group is assigned");
-    // Only the accent group is metal, and it is a minority of the body.
-    check(metalVertices > 0, "the accent group produces metallic vertices");
-    check(metalVertices < dressed.vertices.size(),
-          "metal is confined to the accent group, not the whole body");
-
-    // Leaving one group default must leave exactly that group's vertices at flags 0.
-    odai::procgen::HumanoidMeshMaterials accentOnly{};
-    accentOnly.accent = {1.0f, 0.35f};
-    const odai::procgen::HumanoidSkinnedMesh partial =
-        odai::procgen::buildHumanoidSkinnedMesh(skeleton, colors, accentOnly);
-    std::size_t partialPbr = 0;
-    for (const auto& v : partial.vertices) {
-        if ((v.flags & kImportedSceneMaterialFlagPbr) != 0u) {
-            ++partialPbr;
-        }
-    }
-    check(partialPbr == metalVertices,
-          "assigning only the accent group opts in exactly the accent vertices");
-    check(partialPbr > 0 && partialPbr < partial.vertices.size(),
-          "the accent-only build is a strict subset");
-}
-
 void testBrdfReferenceValues() {
     std::printf("BRDF against reference values\n");
 
@@ -443,7 +366,6 @@ int main() {
     std::printf("PBR material tests\n\n");
     testMaterialPackRoundTrip();
     testMaterialIndexPacking();
-    testHumanoidMaterialAssignment();
     testBrdfReferenceValues();
     testEnergyConservation();
 

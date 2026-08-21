@@ -1,6 +1,6 @@
 #include "render/renderer.h"
 
-#include "render/backend/render_backend_selector.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <memory>
 #include <utility>
@@ -15,33 +15,12 @@ Renderer::~Renderer() = default;
 Renderer::Renderer(Renderer&&) noexcept = default;
 Renderer& Renderer::operator=(Renderer&&) noexcept = default;
 
-bool Renderer::init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid) {
-    return m_backend->init(window, chunkGrid);
-}
-
-void Renderer::clearMagicaVoxelMeshes() {
-    m_backend->clearMagicaVoxelMeshes();
-}
-
-void Renderer::clearGpuScene() {
-    m_backend->clearGpuScene();
+bool Renderer::init(GLFWwindow* window) {
+    return m_backend->init(window);
 }
 
 void Renderer::clearImportedSceneMeshes() {
     m_backend->clearImportedSceneMeshes();
-}
-
-bool Renderer::uploadMagicaVoxelMesh(
-    const odai::world::ChunkMeshData& mesh,
-    float worldOffsetX,
-    float worldOffsetY,
-    float worldOffsetZ
-) {
-    return m_backend->uploadMagicaVoxelMesh(mesh, worldOffsetX, worldOffsetY, worldOffsetZ);
-}
-
-bool Renderer::uploadGpuScene(const odai::importer::GpuSceneAsset& scene) {
-    return m_backend->uploadGpuScene(scene);
 }
 
 std::size_t Renderer::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
@@ -56,6 +35,10 @@ void Renderer::removeImportedSceneChunk(std::size_t chunkIndex) {
         return;
     }
     m_backend->removeImportedSceneChunkAt(chunkIndex);
+}
+
+bool Renderer::waitForImportedSceneUploads() {
+    return m_backend->waitForImportedSceneUploads();
 }
 
 std::size_t Renderer::liveImportedSceneChunkCount() const {
@@ -80,6 +63,10 @@ std::vector<std::uint32_t> Renderer::uploadSkinnedActorTextures(
     return m_backend->uploadSkinnedActorTextures(instanceIndex, textures);
 }
 
+void Renderer::setSkinnedActorVisible(std::uint32_t instanceIndex, bool visible) {
+    m_backend->setSkinnedActorVisible(instanceIndex, visible);
+}
+
 void Renderer::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose) {
     m_backend->setSkinnedActorPose(instanceIndex, pose);
 }
@@ -90,62 +77,6 @@ void Renderer::setSkinningDebugBypass(bool bypass) {
 
 void Renderer::setTaaEnabled(bool enabled) {
     m_backend->setTaaEnabled(enabled);
-}
-
-void Renderer::clearHexTerrain() {
-    m_backend->clearHexTerrain();
-}
-
-bool Renderer::uploadHexTerrain(const odai::importer::HexTerrainData& data) {
-    return m_backend->uploadHexTerrain(data);
-}
-
-bool Renderer::hexTerrainReady() const {
-    return m_backend->hexTerrainReady();
-}
-
-void Renderer::setHexTerrainEnabled(bool enabled) {
-    m_backend->setHexTerrainEnabled(enabled);
-}
-
-void Renderer::setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba) {
-    m_backend->setVoxelBaseColorPalette(paletteRgba);
-}
-
-bool Renderer::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid) {
-    return m_backend->updateChunkMesh(chunkGrid);
-}
-
-bool Renderer::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex) {
-    return m_backend->updateChunkMesh(chunkGrid, chunkIndex);
-}
-
-bool Renderer::updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices) {
-    return m_backend->updateChunkMesh(chunkGrid, chunkIndices);
-}
-
-bool Renderer::uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results) {
-    return m_backend->uploadChunkMeshes(chunkGrid, std::move(results));
-}
-
-odai::world::MeshingOptions Renderer::chunkMeshingOptions() const {
-    return m_backend->chunkMeshingOptions();
-}
-
-bool Renderer::useSpatialPartitioningQueries() const {
-    return m_backend->useSpatialPartitioningQueries();
-}
-
-odai::world::ClipmapConfig Renderer::clipmapQueryConfig() const {
-    return m_backend->clipmapQueryConfig();
-}
-
-void Renderer::setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount) {
-    m_backend->setSpatialQueryStats(used, stats, visibleChunkCount);
-}
-
-void Renderer::setStrategyMapMode(bool enabled) {
-    m_backend->setStrategyMapMode(enabled);
 }
 
 void Renderer::setRayTracingEnabled(bool enabled) {
@@ -186,14 +117,6 @@ DebugView Renderer::debugView() const {
     return m_backend->debugView();
 }
 
-void Renderer::setVoxelGiEnabled(bool enabled) {
-    m_backend->setVoxelGiEnabled(enabled);
-}
-
-bool Renderer::isVoxelGiEnabled() const {
-    return m_backend->isVoxelGiEnabled();
-}
-
 void Renderer::setSunShaftsEnabled(bool enabled) {
     m_backend->setSunShaftsEnabled(enabled);
 }
@@ -204,14 +127,6 @@ bool Renderer::isSunShaftsEnabled() const {
 
 void Renderer::setMsaaSamples(std::uint32_t samples) {
     m_backend->setRequestedMsaaSamples(samples);
-}
-
-void Renderer::setMinimalRenderMode(bool enabled) {
-    m_backend->setMinimalRenderMode(enabled);
-}
-
-void Renderer::setGameplayUiState(const GameplayUiState& state) {
-    m_backend->setGameplayUiState(state);
 }
 
 void Renderer::setUiDrawData(const odai::ui::UiDrawData& drawData) {
@@ -238,16 +153,8 @@ odai::ui::UiTextureId Renderer::registerUiTextureRgba8Mipmapped(const std::uint8
     return m_backend->registerUiTextureRgba8Mipmapped(pixels, width, height);
 }
 
-void Renderer::renderFrame(
-    const odai::world::ChunkGrid& chunkGrid,
-    const odai::sim::Simulation& simulation,
-    const CameraPose& camera,
-    const VoxelPreview& preview,
-    float simulationAlpha,
-    std::span<const std::size_t> visibleChunkIndices,
-    const ImportedActorFrameData* importedActors
-) {
-    m_backend->renderFrame(chunkGrid, simulation, camera, preview, simulationAlpha, visibleChunkIndices, importedActors);
+void Renderer::renderFrame(const CameraPose& camera) {
+    m_backend->renderFrame(camera);
 }
 
 void Renderer::setUpscalerSettings(const UpscalerSettings& settings) {

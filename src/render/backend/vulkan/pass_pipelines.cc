@@ -732,10 +732,15 @@ bool RendererBackend::createPipePipeline() {
     // it and diffing localises "this surface is see-through" to culling
     // specifically -- pixels that change are exactly the ones a back face was
     // being removed from.
-    importedRasterizer.cullMode = (std::getenv("ODAI_DEBUG_NO_CULL") != nullptr)
+    const bool disableImportedCulling = std::getenv("ODAI_DEBUG_NO_CULL") != nullptr;
+    importedRasterizer.cullMode = disableImportedCulling
         ? VK_CULL_MODE_NONE
         : VK_CULL_MODE_BACK_BIT;
     importedPipelineCreateInfo.pRasterizationState = &importedRasterizer;
+    if (disableImportedCulling) {
+        VOX_LOGW("render")
+            << "ODAI_DEBUG_NO_CULL active: imported scene face culling is disabled";
+    }
 
     // ODAI_MAIN_DEPTH_WRITE=0 drops depth writes from the opaque imported pass.
     //
@@ -1819,7 +1824,15 @@ bool RendererBackend::createAoPipelines() {
 
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;
     pipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
-    pipelineCreateInfo.pRasterizationState = &rasterizer;
+    // Keep this diagnostic in lockstep with the lit imported-static pipeline.
+    // Otherwise the merged depth/normal prepass can still reject the back
+    // faces before the no-cull colour pass gets a chance to shade them.
+    VkPipelineRasterizationStateCreateInfo importedNormalDepthRasterizer = rasterizer;
+    importedNormalDepthRasterizer.cullMode =
+        (std::getenv("ODAI_DEBUG_NO_CULL") != nullptr)
+            ? VK_CULL_MODE_NONE
+            : VK_CULL_MODE_BACK_BIT;
+    pipelineCreateInfo.pRasterizationState = &importedNormalDepthRasterizer;
     const VkResult importedNormalDepthPipelineResult = vkCreateGraphicsPipelines(
         m_device,
         m_pipelineCache,
@@ -1840,7 +1853,8 @@ bool RendererBackend::createAoPipelines() {
     // DRAW_BOTH geometry -- window glass, foliage cards, awnings -- wrote depth
     // and normals for its front faces only, and SSAO then saw a different
     // silhouette than the lit pass did.
-    VkPipelineRasterizationStateCreateInfo importedNormalDepthTwoSidedRasterizer = rasterizer;
+    VkPipelineRasterizationStateCreateInfo importedNormalDepthTwoSidedRasterizer =
+        importedNormalDepthRasterizer;
     importedNormalDepthTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
     pipelineCreateInfo.pRasterizationState = &importedNormalDepthTwoSidedRasterizer;
     const VkResult importedNormalDepthTwoSidedResult = vkCreateGraphicsPipelines(
@@ -2902,6 +2916,16 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(importedShadowShaderStages.size());
     importedShadowPipelineCreateInfo.pStages = importedShadowShaderStages.data();
     importedShadowPipelineCreateInfo.pVertexInputState = &importedShadowVertexInputInfo;
+    // Apply the same diagnostic to imported shadow casters. This does not
+    // decide whether a surface is visible, but keeping all imported-scene
+    // raster variants consistent avoids a misleading lighting difference in
+    // the A/B comparison.
+    VkPipelineRasterizationStateCreateInfo importedShadowRasterizer = shadowRasterizer;
+    importedShadowRasterizer.cullMode =
+        (std::getenv("ODAI_DEBUG_NO_CULL") != nullptr)
+            ? VK_CULL_MODE_NONE
+            : VK_CULL_MODE_BACK_BIT;
+    importedShadowPipelineCreateInfo.pRasterizationState = &importedShadowRasterizer;
 
     VkPipeline importedStaticShadowPipeline = VK_NULL_HANDLE;
     const VkResult importedShadowPipelineResult = vkCreateGraphicsPipelines(
@@ -2940,7 +2964,8 @@ bool RendererBackend::createGraphicsPipeline() {
     // strides need their own variant because the shadow pass picks between them
     // per cascade. Neither is fatal to miss: the draw falls back to the
     // one-sided pipeline, which is exactly today's behaviour.
-    VkPipelineRasterizationStateCreateInfo importedShadowTwoSidedRasterizer = shadowRasterizer;
+    VkPipelineRasterizationStateCreateInfo importedShadowTwoSidedRasterizer =
+        importedShadowRasterizer;
     importedShadowTwoSidedRasterizer.cullMode = VK_CULL_MODE_NONE;
     VkGraphicsPipelineCreateInfo importedShadowTwoSidedCreateInfo = importedShadowPipelineCreateInfo;
     importedShadowTwoSidedCreateInfo.pRasterizationState = &importedShadowTwoSidedRasterizer;
@@ -3122,7 +3147,7 @@ bool RendererBackend::createGraphicsPipeline() {
     // map mode when tessellation is supported; a failure here is non-fatal (the app
     // keeps the flat imported-static land via hexTerrainReady() == false).
     VkPipeline hexTerrainPipeline = VK_NULL_HANDLE;
-    if (m_strategyMapMode && m_supportsTessellationShader && !m_minimalRenderMode) {
+    if (m_strategyMapMode && m_supportsTessellationShader) {
         std::array<VkShaderModule, 4> hexShaderModules = {
             VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE
         };

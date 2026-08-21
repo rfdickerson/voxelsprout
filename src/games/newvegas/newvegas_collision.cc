@@ -91,6 +91,66 @@ void CollisionWorld::addCell(
     // be different answers, which a single box per mesh fundamentally cannot
     // express.
     collision.buckets.assign(kBucketGrid * kBucketGrid, {});
+    const auto addTriangle = [&](const float* vertices) {
+        Triangle triangle;
+        std::copy_n(vertices, 9u, triangle.v);
+
+        const float e1[3] = {triangle.v[3] - triangle.v[0], triangle.v[4] - triangle.v[1],
+                             triangle.v[5] - triangle.v[2]};
+        const float e2[3] = {triangle.v[6] - triangle.v[0], triangle.v[7] - triangle.v[1],
+                             triangle.v[8] - triangle.v[2]};
+        float normal[3] = {(e1[1] * e2[2]) - (e1[2] * e2[1]),
+                           (e1[2] * e2[0]) - (e1[0] * e2[2]),
+                           (e1[0] * e2[1]) - (e1[1] * e2[0])};
+        const float length =
+            std::sqrt((normal[0] * normal[0]) + (normal[1] * normal[1]) +
+                      (normal[2] * normal[2]));
+        if (length <= 1e-6f) {
+            return;
+        }
+        triangle.normalY = normal[1] / length;
+
+        const float minX = std::min({triangle.v[0], triangle.v[3], triangle.v[6]});
+        const float maxX = std::max({triangle.v[0], triangle.v[3], triangle.v[6]});
+        const float minZ = std::min({triangle.v[2], triangle.v[5], triangle.v[8]});
+        const float maxZ = std::max({triangle.v[2], triangle.v[5], triangle.v[8]});
+        const auto bucketIndex = [&](float value, float origin) {
+            return std::clamp(
+                static_cast<int>((value - origin) / kBucketSize), 0, kBucketGrid - 1);
+        };
+        const int bx0 = bucketIndex(minX, collision.originX);
+        const int bx1 = bucketIndex(maxX, collision.originX);
+        const int bz0 = bucketIndex(minZ, collision.originZ);
+        const int bz1 = bucketIndex(maxZ, collision.originZ);
+        if ((bx1 - bx0) > 4 || (bz1 - bz0) > 4) {
+            return;
+        }
+
+        const auto index = static_cast<std::uint32_t>(collision.triangles.size());
+        collision.triangles.push_back(triangle);
+        for (int bz = bz0; bz <= bz1; ++bz) {
+            for (int bx = bx0; bx <= bx1; ++bx) {
+                collision.buckets[(static_cast<std::size_t>(bz) * kBucketGrid) + bx]
+                    .push_back(index);
+            }
+        }
+    };
+
+    // CellSceneBuilder emits a complete world-space soup: authored Havok for
+    // each NIF that has a supported fixed/keyframed graph, opaque visible
+    // triangles for that individual NIF otherwise. Cached cells therefore use
+    // exactly the same collision as freshly built ones.
+    if (!scene.collisionTriangles.empty()) {
+        for (const importer::ImportedSceneCollisionTriangle& triangle :
+             scene.collisionTriangles) {
+            addTriangle(triangle.vertices);
+        }
+        m_cells[cell] = std::move(collision);
+        return;
+    }
+
+    // Compatibility fallback for synthetic/test scenes that predate the
+    // separate collision stream.
     for (const importer::ImportedSceneInstance& instance : scene.instances) {
         if (instance.meshIndex >= scene.meshes.size()) {
             continue;
@@ -116,53 +176,11 @@ void CollisionWorld::addCell(
                 i2 >= mesh.vertices.size()) {
                 continue;
             }
-            Triangle triangle;
-            toWorld(mesh.vertices[i0].position, &triangle.v[0]);
-            toWorld(mesh.vertices[i1].position, &triangle.v[3]);
-            toWorld(mesh.vertices[i2].position, &triangle.v[6]);
-
-            const float e1[3] = {triangle.v[3] - triangle.v[0], triangle.v[4] - triangle.v[1],
-                                 triangle.v[5] - triangle.v[2]};
-            const float e2[3] = {triangle.v[6] - triangle.v[0], triangle.v[7] - triangle.v[1],
-                                 triangle.v[8] - triangle.v[2]};
-            float normal[3] = {(e1[1] * e2[2]) - (e1[2] * e2[1]),
-                               (e1[2] * e2[0]) - (e1[0] * e2[2]),
-                               (e1[0] * e2[1]) - (e1[1] * e2[0])};
-            const float length =
-                std::sqrt((normal[0] * normal[0]) + (normal[1] * normal[1]) + (normal[2] * normal[2]));
-            if (length <= 1e-6f) {
-                continue;  // degenerate
-            }
-            triangle.normalY = normal[1] / length;
-
-            // Bucket by the triangle's XZ footprint so a query only looks at
-            // what is actually near the player.
-            const float minX = std::min({triangle.v[0], triangle.v[3], triangle.v[6]});
-            const float maxX = std::max({triangle.v[0], triangle.v[3], triangle.v[6]});
-            const float minZ = std::min({triangle.v[2], triangle.v[5], triangle.v[8]});
-            const float maxZ = std::max({triangle.v[2], triangle.v[5], triangle.v[8]});
-            const auto bucketIndex = [&](float value, float origin) {
-                return std::clamp(
-                    static_cast<int>((value - origin) / kBucketSize), 0, kBucketGrid - 1);
-            };
-            const int bx0 = bucketIndex(minX, collision.originX);
-            const int bx1 = bucketIndex(maxX, collision.originX);
-            const int bz0 = bucketIndex(minZ, collision.originZ);
-            const int bz1 = bucketIndex(maxZ, collision.originZ);
-            // A triangle spanning an absurd area is a skybox or a terrain-sized
-            // decal; bucketing it everywhere would make every query O(all).
-            if ((bx1 - bx0) > 4 || (bz1 - bz0) > 4) {
-                continue;
-            }
-
-            const auto index = static_cast<std::uint32_t>(collision.triangles.size());
-            collision.triangles.push_back(triangle);
-            for (int bz = bz0; bz <= bz1; ++bz) {
-                for (int bx = bx0; bx <= bx1; ++bx) {
-                    collision.buckets[(static_cast<std::size_t>(bz) * kBucketGrid) + bx]
-                        .push_back(index);
-                }
-            }
+            float vertices[9];
+            toWorld(mesh.vertices[i0].position, &vertices[0]);
+            toWorld(mesh.vertices[i1].position, &vertices[3]);
+            toWorld(mesh.vertices[i2].position, &vertices[6]);
+            addTriangle(vertices);
         }
     }
 
@@ -252,15 +270,16 @@ bool CollisionWorld::terrainHeight(float worldX, float worldZ, float& outHeight)
 
 bool CollisionWorld::groundHeight(
     float worldX, float worldZ, float referenceY, float& outHeight) const {
-    float height = 0.0f;
-    const bool haveTerrain = terrainHeight(worldX, worldZ, height);
-    if (!haveTerrain) {
-        return false;
-    }
+    float height = -std::numeric_limits<float>::infinity();
+    bool haveGround = terrainHeight(worldX, worldZ, height);
 
     // Surfaces the player can stand on: floors, rock tops, steps. Take the
     // highest one at or below head height, so walking onto a rock raises the
-    // player rather than stopping them.
+    // player rather than stopping them. A LAND heightfield is not required:
+    // Skyrim's city child-world cells commonly contain only static streets,
+    // floors and battlements. Returning early when terrain was absent left
+    // every actor in those cells at its unsnapped authored Y, visibly hovering
+    // over the rendered street even though valid walkable triangles existed.
     const float headY = referenceY + m_tuning.stepHeight;
     forEachNearbyTriangle(worldX, worldZ, [&](const Triangle& triangle) {
         if (triangle.normalY < m_tuning.minWalkableNormalY) {
@@ -288,9 +307,13 @@ bool CollisionWorld::groundHeight(
         const float surfaceY = (a * triangle.v[1]) + (b * triangle.v[4]) + (c * triangle.v[7]);
         if (surfaceY <= headY && surfaceY > height) {
             height = surfaceY;
+            haveGround = true;
         }
     });
 
+    if (!haveGround) {
+        return false;
+    }
     outHeight = height;
     return true;
 }

@@ -2,7 +2,6 @@
 
 #include <GLFW/glfw3.h>
 
-#include "sim/network_procedural.h"
 #include "render/backend/vulkan/frame_graph_runtime.h"
 
 namespace odai::render {

@@ -61,6 +61,9 @@ static const uint kImportedMaterialFlagAlphaBlend = 32u;
 static const uint kImportedMaterialFlagTwoSided = 64u;
 // kImportedSceneMaterialFlagUnlit -- BSShaderNoLightingProperty.
 static const uint kImportedMaterialFlagUnlit = 128u;
+// Context-dependent bit 8: terrain never sets PBR, so it can identify TES3's
+// normalized VTEX reconstruction without consuming serialized flag space.
+static const uint kImportedMaterialFlagTerrainNormalizedLayers = 256u;
 static const uint kImportedMaterialRoughnessShift = 8u;
 static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
@@ -360,6 +363,8 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // that they are each half strength.
     if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u)
     {
+        const bool normalizedTerrainLayers =
+            (input.inFlags & kImportedMaterialFlagTerrainNormalizedLayers) != 0u;
         // VTXT authors one opacity per landscape post -- a value every 128 units
         // -- and interpolating that linearly across the triangles makes every
         // blend boundary a straight, grid-aligned edge. That is the blockiness,
@@ -384,15 +389,21 @@ float4 sampleImportedAlbedo(FragmentInput input)
         // every 128 units, so noise finer than that displaces a boundary by only
         // a few tens of units and cannot break up the lattice it is sitting on.
         // The noise has to be COARSER than the data it is hiding.
-        const float2 blendNoiseUv = input.inWorldPosition.xz;
-        const float coarseUnits = max(camera.terrainBlendConfig.y, 1.0);
-        const float fineUnits = max(camera.terrainBlendConfig.z, 1.0);
-        const float blendNoise =
-            (terrainBlendNoise(blendNoiseUv * (1.0 / coarseUnits)) * 0.65) +
-            (terrainBlendNoise(blendNoiseUv * (1.0 / fineUnits)) * 0.35);
-        const float blendNoiseSigned = blendNoise - 0.5;
-        const float blendSharpness = saturate(camera.terrainBlendConfig.x);
-        const float blendNoiseAmount = max(camera.terrainBlendConfig.w, 0.0);
+        float blendNoiseSigned = 0.0;
+        float blendSharpness = 0.0;
+        float blendNoiseAmount = 0.0;
+        if (!normalizedTerrainLayers)
+        {
+            const float2 blendNoiseUv = input.inWorldPosition.xz;
+            const float coarseUnits = max(camera.terrainBlendConfig.y, 1.0);
+            const float fineUnits = max(camera.terrainBlendConfig.z, 1.0);
+            const float blendNoise =
+                (terrainBlendNoise(blendNoiseUv * (1.0 / coarseUnits)) * 0.65) +
+                (terrainBlendNoise(blendNoiseUv * (1.0 / fineUnits)) * 0.35);
+            blendNoiseSigned = blendNoise - 0.5;
+            blendSharpness = saturate(camera.terrainBlendConfig.x);
+            blendNoiseAmount = max(camera.terrainBlendConfig.w, 0.0);
+        }
 
         for (uint layer = 0u; layer < 4u; ++layer)
         {
@@ -419,8 +430,12 @@ float4 sampleImportedAlbedo(FragmentInput input)
             // those kinks into visible facets, and the noise that should hide
             // them is scaled by transitionAmount, which decays to zero exactly
             // where the contour is sharpest.
-            const float layerWeight =
-                lerp(perturbed, smoothstep(0.22, 0.78, perturbed), blendSharpness);
+            // Morrowind's synthetic weights already encode an exact normalized
+            // bilinear mixture. Applying VTXT's independent noise/sharpening to
+            // them destroys that partition and makes seams or texture islands.
+            const float layerWeight = normalizedTerrainLayers
+                ? rawWeight
+                : lerp(perturbed, smoothstep(0.22, 0.78, perturbed), blendSharpness);
             if (layerWeight <= 0.0)
             {
                 continue;
@@ -1274,7 +1289,19 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // texture, so it is scaled toward the exposure the rest of the scene sits
     // at rather than emitted at 1.0 -- which on an auto-exposed HDR frame keyed
     // to a sunlit desert would read as a dim grey card, not a lit screen.
-    if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u)
+    // Skyrim's BSLightingShaderProperty TreeAnim flag is carried through the
+    // existing packed unlit bit, but its alpha-tested, two-sided branch cards
+    // are foliage rather than emitters. Let those continue into the lighting
+    // path below, where a broad wrap approximates the game's leaf transmission;
+    // real CRT/glow materials still take the self-lit exit unchanged.
+    const bool foliageLighting =
+        (input.inFlags & (kImportedMaterialFlagUnlit |
+                          kImportedMaterialFlagAlphaTest |
+                          kImportedMaterialFlagTwoSided)) ==
+        (kImportedMaterialFlagUnlit |
+         kImportedMaterialFlagAlphaTest |
+         kImportedMaterialFlagTwoSided);
+    if ((input.inFlags & kImportedMaterialFlagUnlit) != 0u && !foliageLighting)
     {
         return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
@@ -1322,7 +1349,9 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.6);
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
-    const float wrappedNdotL = saturate((ndotl * 0.65) + 0.35);
+    const float wrappedNdotL = foliageLighting
+        ? saturate((ndotl * 0.25) + 0.75)
+        : saturate((ndotl * 0.65) + 0.35);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const bool interiorMode = chunkPc.cascadeData.y > 0.5;
     const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;

@@ -39,6 +39,15 @@ struct AudioConfig {
     float ambientVolume = 0.5f;
     float uiVolume = 0.8f;
     bool muted = false;
+    // Deterministic silent mode for headless tools and tests. Normal runtime
+    // configuration leaves this false and uses miniaudio when available.
+    bool forceNullBackend = false;
+    // Device-free deterministic mixing for video capture. The caller advances
+    // the graph explicitly through Audio::renderOfflineFrames(); no operating
+    // system playback device or wall-clock audio callback is involved.
+    bool offlineMix = false;
+    std::uint32_t offlineSampleRate = 48000u;
+    std::uint32_t offlineChannels = 2u;
 };
 
 // World-space transform used both to position the listener each frame and to

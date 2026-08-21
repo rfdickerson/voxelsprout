@@ -9,7 +9,7 @@
 #
 # Release capture:
 #   ODAI_WINDOW_SIZE=1920x1080 ODAI_FNV_HOUR=10.5 ODAI_FNV_NOHUD=1 \
-#   ODAI_FNV_LOAD_RADIUS=3 odai_game_newvegas --stream "<SSE Data>" \
+#   ODAI_FNV_LOAD_RADIUS=3 odai --stream "<SSE Data>" \
 #     --plugin Skyrim.esm --worldspace Tamriel \
 #     --tour-file assets/tours/riverwood_to_whiterun.txt --flythrough 45 \
 #     --capture-video riverwood_to_whiterun.mp4 60 45

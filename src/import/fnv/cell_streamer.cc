@@ -28,6 +28,13 @@ std::string cellAxisToken(std::int32_t value) {
                        : std::to_string(value);
 }
 
+std::string toLowerAscii(std::string value) {
+    for (char& c : value) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
 // Identifies the plugin a cache was built from. Folded into a directory name
 // rather than checked and deleted: a different or updated plugin simply misses,
 // so no cache invalidation ever removes a file.
@@ -161,7 +168,32 @@ std::string cellAxisToken(std::int32_t value) {
 //     animate water wheels plus the sawmill work cycle at runtime.
 // 42: Morrowind NiBSAnimationNode statics promote their direct keyframe
 //     controllers into the same runtime rigid-animation path.
-constexpr int kCellBuildVersion = 42;
+// 43: Skyrim BSEffectShaderProperty source textures are decoded inline, so
+//     distant window-glow meshes no longer cache as untextured geometry.
+// 44: BSLightingShaderProperty's SLSF2_Double_Sided flag reaches packed
+//     materials. Skyrim tree branches carry it there rather than in a stencil
+//     property.
+// 45: the same property's TreeAnim flag selects wrapped foliage lighting;
+//     cached v44 cells have the two-sided geometry but not that material bit.
+// 46: streamed scenes serialize resolved door destinations and authored static
+//     collision alongside render geometry (ImportedScene v29).
+// 47: Skyrim BSLightingShaderProperty's SLSF1_Vertex_Alpha now controls the
+//     stored colour-alpha channel. Disabled channels become opaque; enabled
+//     partial-alpha rock/ground skirts use the blended draw path instead of
+//     covering neighbouring rock faces with opaque transition geometry.
+// 48: additive-only city window-glow cards are no longer baked as opaque
+//     daytime rectangles while the imported material path lacks additive NIF
+//     blend factors.
+// 49: Skyrim vertex-alpha transition shapes are partitioned per triangle so
+//     their opaque architectural body keeps depth writes while only the faded
+//     fringe enters the blended tail.
+// 50: TES3 VTEX blocks use constant-layer subpatches so flat texture IDs agree
+//     with interpolated weights, and their normalized bilinear weights bypass
+//     the TES4/TES5 ordered-opacity noise/sharpen transform.
+// 51: NetImmerse 4.0.0.2 NiSwitchNode reads its four-byte initial-child tail
+//     instead of the six-byte Skyrim spelling. Existing cells can otherwise
+//     retain missing switched architectural subtrees after the importer fix.
+constexpr int kCellBuildVersion = 51;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -189,6 +221,34 @@ std::uint64_t countBlendedDraws(const ImportedScene& scene) {
         }
     }
     return blended;
+}
+
+std::vector<FalloutSoundEmitterRecord> extractSoundEmitters(
+    const FalloutCellRecord& cell,
+    const FalloutWorldTables& tables) {
+    std::vector<FalloutSoundEmitterRecord> emitters;
+    for (const FalloutPlacedReference& reference : cell.references) {
+        if (reference.isDeleted || (reference.recordFlags & 0x0800u) != 0u) {
+            continue;
+        }
+        const auto base = tables.soundDescriptorByBaseFormId.find(reference.baseFormId);
+        if (base == tables.soundDescriptorByBaseFormId.end()) {
+            continue;
+        }
+        const auto descriptor = tables.soundDescriptorsByFormId.find(base->second);
+        if (descriptor == tables.soundDescriptorsByFormId.end() ||
+            !descriptor->second.looping || descriptor->second.filePaths.empty()) {
+            continue;
+        }
+        FalloutSoundEmitterRecord emitter{};
+        emitter.referenceFormId = reference.formId;
+        emitter.descriptorFormId = base->second;
+        const float source[3] = {
+            reference.position[0], reference.position[2], -reference.position[1]};
+        std::copy(std::begin(source), std::end(source), emitter.position);
+        emitters.push_back(emitter);
+    }
+    return emitters;
 }
 
 // `modFingerprint` and `maxTextureSize` join the key for the same reason the
@@ -235,6 +295,8 @@ struct CellStreamer::Pending {
     struct Result {
         CellCoord cell;
         ImportedScene scene;
+        std::vector<FalloutNavMeshRecord> navMeshes;
+        std::vector<FalloutSoundEmitterRecord> soundEmitters;
         bool succeeded = false;
         bool fromCache = false;
         bool cacheWriteFailed = false;
@@ -271,16 +333,26 @@ bool CellStreamer::open(
     m_residentChunks.clear();
     m_planner.reset();
     m_jobs = nullptr;
+    m_dataFilesPath = dataFilesPath;
     m_esmPath = dataFilesPath / pluginFileName;
 
-    if (!m_assets.open(dataFilesPath)) {
+    // The streamer also owns runtime weather, regional, and placed ambience,
+    // so its one shared archive index must admit authored WAV assets too.
+    const std::uint32_t assetMask =
+        kBsaContentMeshes | kBsaContentTextures | kBsaContentSounds;
+    const bool assetsOpened = m_contentProfile.has_value()
+        ? m_assets.open(*m_contentProfile, assetMask)
+        : m_assets.open(dataFilesPath, assetMask);
+    if (!assetsOpened) {
         outError = "cannot read Fallout data directory " + dataFilesPath.string();
         return false;
     }
     // After open(), which clears the warning list, and before it is drained
     // below, so an unreadable mod directory actually gets reported.
-    for (const std::filesystem::path& modDirectory : m_modDirectories) {
-        m_assets.addModDirectory(modDirectory);
+    if (!m_contentProfile.has_value()) {
+        for (const std::filesystem::path& modDirectory : m_modDirectories) {
+            m_assets.addModDirectory(modDirectory);
+        }
     }
     for (const std::string& warning : m_assets.warnings()) {
         VOX_LOGW("streamer") << warning;
@@ -315,6 +387,24 @@ bool CellStreamer::open(
     }
     resolveLocalizedRegionNames();
 
+    m_jobs = &jobs;
+    if (!configureWorldspace(worldspaceEditorId, outError)) {
+        m_jobs = nullptr;
+        return false;
+    }
+    VOX_LOGI("streamer") << "streaming " << worldspaceEditorId << " from " << m_esmPath.string()
+                         << ": " << m_availableCells.size() << " exterior cells, "
+                         << m_worldTables.staticModelPaths.size() << " statics, "
+                         << m_assets.archiveCount() << " archives";
+    return true;
+}
+
+bool CellStreamer::configureWorldspace(
+    const std::string& worldspaceEditorId, std::string& outError) {
+    outError.clear();
+    m_availableCells.clear();
+    m_planner.reset();
+
     std::string loweredWorldspace = worldspaceEditorId;
     for (char& c : loweredWorldspace) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -324,27 +414,25 @@ bool CellStreamer::open(
         outError = "no worldspace named \"" + worldspaceEditorId + "\" in " + m_esmPath.string();
         return false;
     }
-    const std::uint32_t worldspaceFormId = worldIt->second;
-
+    m_currentWorldspaceEditorId = worldspaceEditorId;
+    m_currentWorldspaceFormId = worldIt->second;
     for (std::size_t i = 0; i < m_cellIndex.cells.size(); ++i) {
         const FalloutCellIndexEntry& entry = m_cellIndex.cells[i];
         if (entry.isInterior || !entry.hasGridCoords ||
-            entry.worldspaceFormId != worldspaceFormId || entry.childrenGroupSize == 0u) {
+            entry.worldspaceFormId != m_currentWorldspaceFormId ||
+            entry.childrenGroupSize == 0u) {
             continue;
         }
         m_availableCells.emplace(CellCoord{entry.gridX, entry.gridZ}, i);
     }
 
-    // Resolve the cache directory now so the per-cell jobs only have to join a
-    // filename onto it.
     m_resolvedCacheDirectory.clear();
     if (!m_cacheDirectory.empty()) {
-        std::string loweredForPath = loweredWorldspace;
         const std::filesystem::path candidate =
             m_cacheDirectory /
             pluginFingerprint(m_esmPath, m_assets.modFingerprint(), m_maxTextureSize,
                               m_useLoadOrder ? m_loadOrder.fingerprint() : std::string()) /
-            loweredForPath;
+            loweredWorldspace;
         std::error_code createError;
         std::filesystem::create_directories(candidate, createError);
         if (createError) {
@@ -355,13 +443,101 @@ bool CellStreamer::open(
             VOX_LOGI("streamer") << "cell cache at " << candidate.string();
         }
     }
-
-    m_jobs = &jobs;
-    VOX_LOGI("streamer") << "streaming " << worldspaceEditorId << " from " << m_esmPath.string()
-                         << ": " << m_availableCells.size() << " exterior cells, "
-                         << m_worldTables.staticModelPaths.size() << " statics, "
-                         << m_assets.archiveCount() << " archives";
     return true;
+}
+
+bool CellStreamer::selectWorldspace(
+    const std::string& worldspaceEditorId,
+    render::Renderer& renderer,
+    std::string& outError) {
+    if (m_jobs == nullptr) {
+        outError = "cell streamer is not open";
+        return false;
+    }
+    if (!hasWorldspace(worldspaceEditorId)) {
+        outError = "no worldspace named \"" + worldspaceEditorId + "\" in " +
+                   m_esmPath.string();
+        return false;
+    }
+    waitIdle();
+    {
+        std::lock_guard<std::mutex> lock(m_pending->mutex);
+        m_pending->completed.clear();
+    }
+    for (const auto& [cell, chunk] : m_residentChunks) {
+        renderer.removeImportedSceneChunk(chunk);
+        if (m_onCellEvicted) {
+            m_onCellEvicted(cell);
+        }
+        if (m_onAmbientEmittersEvicted) {
+            m_onAmbientEmittersEvicted(cell);
+        }
+    }
+    m_residentChunks.clear();
+    if (!configureWorldspace(worldspaceEditorId, outError)) {
+        return false;
+    }
+    VOX_LOGI("streamer") << "selected worldspace " << worldspaceEditorId << ": "
+                         << m_availableCells.size() << " exterior cells";
+    return true;
+}
+
+bool CellStreamer::hasWorldspace(const std::string& worldspaceEditorId) const {
+    std::string lowered = worldspaceEditorId;
+    for (char& c : lowered) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return m_worldTables.worldspaceFormIdsByEditorId.contains(lowered);
+}
+
+bool CellStreamer::hasChildWorldspaceCellInRange(
+    std::int32_t minCellX, std::int32_t minCellZ,
+    std::int32_t maxCellX, std::int32_t maxCellZ) const {
+    if (m_currentWorldspaceFormId == 0u) {
+        return false;
+    }
+    const std::int32_t rangeMinX = std::min(minCellX, maxCellX);
+    const std::int32_t rangeMinZ = std::min(minCellZ, maxCellZ);
+    const std::int32_t rangeMaxX = std::max(minCellX, maxCellX);
+    const std::int32_t rangeMaxZ = std::max(minCellZ, maxCellZ);
+
+    for (const FalloutCellIndexEntry& cell : m_cellIndex.cells) {
+        if (cell.isInterior || !cell.hasGridCoords ||
+            cell.gridX < rangeMinX || cell.gridX > rangeMaxX ||
+            cell.gridZ < rangeMinZ || cell.gridZ > rangeMaxZ) {
+            continue;
+        }
+        const FalloutWorldspaceRecord* worldspace =
+            m_worldTables.findWorldspace(cell.worldspaceFormId);
+        if (worldspace != nullptr &&
+            worldspace->parentWorldspaceFormId == m_currentWorldspaceFormId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CellStreamer::referenceBelongsToCurrentWorldspace(
+    std::uint32_t referenceFormId) const {
+    const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(referenceFormId);
+    if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
+        owner->second >= m_cellIndex.cells.size()) {
+        return false;
+    }
+    const FalloutCellIndexEntry& cell = m_cellIndex.cells[owner->second];
+    return !cell.isInterior && cell.worldspaceFormId == m_currentWorldspaceFormId;
+}
+
+bool CellStreamer::referenceBelongsToInterior(
+    std::uint32_t referenceFormId, const std::string& interiorEditorId) const {
+    const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(referenceFormId);
+    if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
+        owner->second >= m_cellIndex.cells.size()) {
+        return false;
+    }
+    const FalloutCellIndexEntry& cell = m_cellIndex.cells[owner->second];
+    return cell.isInterior &&
+           toLowerAscii(cell.editorId) == toLowerAscii(interiorEditorId);
 }
 
 void CellStreamer::update(
@@ -382,9 +558,14 @@ void CellStreamer::update(
         if (resident != m_residentChunks.end()) {
             renderer.removeImportedSceneChunk(resident->second);
             m_residentChunks.erase(resident);
-            if (m_onCellEvicted) {
-                m_onCellEvicted(cell);
-            }
+        }
+        // Empty geometry cells can still own NAVM records and therefore never
+        // get a renderer chunk. Eviction must retire their navigation too.
+        if (m_onCellEvicted) {
+            m_onCellEvicted(cell);
+        }
+        if (m_onAmbientEmittersEvicted) {
+            m_onAmbientEmittersEvicted(cell);
         }
         m_planner.markEvicted(cell);
     }
@@ -426,14 +607,32 @@ void CellStreamer::update(
             Pending::Result result;
             result.cell = cell;
 
-            // Cache hit: skip record extraction, NIF parsing and texture decode
-            // entirely. This is the whole point -- a rebuilt cell costs ~270 ms,
-            // most of it DDS decode, and reading one back costs a file read.
-            if (!cachePath.empty()) {
+            // Navigation is record data rather than rendered scene data, so it
+            // is deliberately not baked into the geometry cache. Even a warm
+            // cell does this cheap record extraction; it still skips the costly
+            // NIF parsing and DDS decode that make up almost all build time.
+            EsmReader reader;
+            FalloutCellRecord record;
+            const bool needBaseReader = loadOrder == nullptr;
+            bool extracted = false;
+            if (needBaseReader && !reader.open(esmPath)) {
+                result.error = reader.lastError();
+            } else {
+                extracted = (loadOrder != nullptr)
+                    ? extractFalloutCellMerged(
+                          *cellIndex, *loadOrder, entry, record, result.error)
+                    : extractFalloutCellAt(reader, entry, record, result.error);
+            }
+            if (extracted) {
+                result.soundEmitters = extractSoundEmitters(record, *tables);
+            }
+
+            if (extracted && !cachePath.empty()) {
                 std::error_code existsError;
                 if (std::filesystem::exists(cachePath, existsError) && !existsError) {
                     const core::Stopwatch cacheTimer;
                     if (loadImportedScene(cachePath, result.scene)) {
+                        result.navMeshes = std::move(record.navMeshes);
                         result.succeeded = true;
                         result.fromCache = true;
                         result.cacheLoadMs = cacheTimer.elapsedMs();
@@ -463,22 +662,7 @@ void CellStreamer::update(
                 }
             }
 
-            // Each job owns its reader: EsmReader records walk state in members
-            // and is not safe to share. Opening one is a memory map, not a read.
-            EsmReader reader;
-            const bool needBaseReader = loadOrder == nullptr;
-            if (needBaseReader && !reader.open(esmPath)) {
-                result.error = reader.lastError();
-            } else {
-                FalloutCellRecord record;
-                const bool extracted =
-                    (loadOrder != nullptr)
-                        ? extractFalloutCellMerged(*cellIndex, *loadOrder, entry, record,
-                                                   result.error)
-                        : extractFalloutCellAt(reader, entry, record, result.error);
-                if (!extracted) {
-                    // result.error already set
-                } else {
+            if (extracted) {
                     CellSceneBuilder builder(*assets, *tables, textureCache);
                     builder.setMaxTextureSize(maxTextureSize);
                     const std::vector<const FalloutCellRecord*> single{&record};
@@ -489,6 +673,8 @@ void CellStreamer::update(
                     builder.addCellTerrain(record);
                     builder.addCellStatics(record);
                     builder.finish(result.scene);
+                    appendResolvedDoors(record, *cellIndex, result.scene);
+                    result.navMeshes = std::move(record.navMeshes);
                     result.succeeded = true;
                     result.effectMeshesSkipped = builder.stats().effectMeshesSkipped;
                     result.nodeParseFailures = builder.stats().nodeParseFailures;
@@ -515,7 +701,6 @@ void CellStreamer::update(
                             result.cacheWriteFailed = true;
                         }
                     }
-                }
             }
             result.buildMs = buildTimer.elapsedMs();
 
@@ -604,6 +789,12 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         }
         if (result.scene.packedIndices.empty()) {
             ++m_stats.emptyScenes;
+            if (m_onCellResident) {
+                m_onCellResident(result.cell, result.scene, result.navMeshes);
+            }
+            if (m_onAmbientEmittersResident) {
+                m_onAmbientEmittersResident(result.cell, result.soundEmitters);
+            }
             continue;  // legitimately empty cell; resident with no geometry
         }
 
@@ -640,7 +831,10 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         m_stats.blendedPartsLoaded += result.blendedParts;
         if (m_onCellResident) {
             // Before result.scene is destroyed at the end of this loop.
-            m_onCellResident(result.cell, result.scene);
+            m_onCellResident(result.cell, result.scene, result.navMeshes);
+        }
+        if (m_onAmbientEmittersResident) {
+            m_onAmbientEmittersResident(result.cell, result.soundEmitters);
         }
     }
 
@@ -712,6 +906,7 @@ bool CellStreamer::buildInteriorScene(
     builder.setMaxTextureSize(m_maxTextureSize);
     builder.addCellStatics(record);
     builder.finish(outScene);
+    appendResolvedDoors(record, m_cellIndex, outScene);
 
     outInterior.hasLighting = record.hasLighting;
     outInterior.cellFlags = record.cellFlags;
@@ -794,20 +989,11 @@ bool CellStreamer::buildInteriorScene(
         outInterior.hasSpawn = true;
     }
 
-    // NO NAVMESH IS THE NORMAL CASE FOR SKYRIM, not an error. The search above
-    // wants the largest navmesh triangle -- the middle of the biggest walkable
-    // floor -- but Skyrim's NAVM is a TES5-layout record this reader does not
-    // parse, so `record.navMeshes` is empty for every Skyrim interior. With no
-    // spawn the caller keeps whatever camera it had, which means "--interior
-    // WhiterunDragonsreach" loads Dragonsreach and leaves you standing outside
-    // it in the worldspace, looking at sky. That reads as "the interior did not
-    // load" when in fact 1431 references and 588599 vertices did.
-    //
-    // The fallback is the built geometry's own bounds: horizontally centred,
-    // and low in the vertical span so the camera starts near the ground floor
-    // rather than up in the rafters. Gravity and collision are already running
-    // on the interior cell, so the exact height only has to be inside the room
-    // -- the player settles onto the floor on the first tick.
+    // Some rooms have no usable authored NAVM even though both TES4's split
+    // arrays and TES5's packed NVNM prefix are supported. The fallback is the
+    // built geometry's own bounds: horizontally centred and low in the vertical
+    // span so the camera starts near the ground floor rather than in the
+    // rafters. Gravity and collision settle it onto the floor on the first tick.
     if (!outInterior.hasSpawn && !outScene.packedVertices.empty()) {
         outInterior.spawnPosition[0] = (outScene.boundsMin[0] + outScene.boundsMax[0]) * 0.5f;
         outInterior.spawnPosition[2] = (outScene.boundsMin[2] + outScene.boundsMax[2]) * 0.5f;
@@ -852,6 +1038,11 @@ bool CellStreamer::buildInteriorScene(
                          << outScene.boundsMax[1] << "] z[" << outScene.boundsMin[2] << ", "
                          << outScene.boundsMax[2] << "]";
     return true;
+}
+
+bool CellStreamer::hasInterior(const std::string& interiorEditorId) const {
+    const FalloutCellIndexEntry* entry = findCellByEditorId(m_cellIndex, interiorEditorId);
+    return entry != nullptr && entry->isInterior;
 }
 
 bool CellStreamer::spawnAtInteriorDoorEngineSpace(
@@ -1072,24 +1263,24 @@ void CellStreamer::waitIdle() {
 }
 
 void CellStreamer::resolveLocalizedRegionNames() {
-    if (m_worldTables.regionNameStringIdsByFormId.empty()) {
+    const bool haveLocalizedMarkers = std::any_of(
+        m_cellIndex.mapMarkers.begin(), m_cellIndex.mapMarkers.end(),
+        [](const FalloutMapMarkerRecord& marker) { return marker.nameStringId != 0u; });
+    if (m_worldTables.regionNameStringIdsByFormId.empty() && !haveLocalizedMarkers) {
         return;  // no plugin here stores its region names as string IDs
     }
     // Which plugin a region came from decides which table to look it up in:
     // string IDs are local to the file that stored them, exactly like a
     // formID's mod index. After remapping, the formID's high byte IS the global
     // load-order position, so it names the plugin directly.
-    const auto pluginFileNameAt = [this](std::uint8_t globalIndex) -> std::string {
+    const auto pluginFileNameFor = [this](std::uint32_t formId) -> std::string {
         if (!m_useLoadOrder) {
             return m_esmPath.filename().string();
         }
-        const std::vector<FalloutLoadOrderEntry>& entries = m_loadOrder.entries();
-        for (const FalloutLoadOrderEntry& entry : entries) {
-            if (entry.globalIndex == globalIndex) {
-                return entry.header.isLocalized ? entry.header.fileName : std::string();
-            }
-        }
-        return {};
+        const FalloutLoadOrderEntry* entry = m_loadOrder.ownerOf(formId);
+        return entry != nullptr && entry->header.isLocalized
+            ? entry->header.fileName
+            : std::string();
     };
     if (!m_useLoadOrder) {
         // The single-plugin path never reads a TES4 header, so ask for one.
@@ -1102,13 +1293,7 @@ void CellStreamer::resolveLocalizedRegionNames() {
     }
 
     std::unordered_map<std::string, FalloutStringTable> tablesByPlugin;
-    std::size_t resolved = 0;
-    std::size_t missing = 0;
-    for (const auto& [formId, stringId] : m_worldTables.regionNameStringIdsByFormId) {
-        const std::string pluginFileName = pluginFileNameAt(static_cast<std::uint8_t>(formId >> 24u));
-        if (pluginFileName.empty()) {
-            continue;
-        }
+    const auto tableFor = [&](const std::string& pluginFileName) -> FalloutStringTable* {
         auto table = tablesByPlugin.find(pluginFileName);
         if (table == tablesByPlugin.end()) {
             FalloutStringTable loaded;
@@ -1118,16 +1303,22 @@ void CellStreamer::resolveLocalizedRegionNames() {
                     FalloutStringFileKind::Strings, loaded, tableError)) {
                 VOX_LOGW("streamer")
                     << "localized plugin " << pluginFileName << " has no readable "
-                    << falloutStringLanguage() << " string table (" << tableError
-                    << "); region names will read as single characters";
-                // Cached as empty so a missing table is looked for once, not
-                // once per region.
+                    << falloutStringLanguage() << " string table (" << tableError << ")";
                 table = tablesByPlugin.emplace(pluginFileName, FalloutStringTable{}).first;
             } else {
                 table = tablesByPlugin.emplace(pluginFileName, std::move(loaded)).first;
             }
         }
-        const std::string* text = table->second.find(stringId);
+        return &table->second;
+    };
+    std::size_t resolved = 0;
+    std::size_t missing = 0;
+    for (const auto& [formId, stringId] : m_worldTables.regionNameStringIdsByFormId) {
+        const std::string pluginFileName = pluginFileNameFor(formId);
+        if (pluginFileName.empty()) {
+            continue;
+        }
+        const std::string* text = tableFor(pluginFileName)->find(stringId);
         if (text == nullptr || text->empty()) {
             ++missing;
             continue;
@@ -1137,10 +1328,31 @@ void CellStreamer::resolveLocalizedRegionNames() {
         m_worldTables.regionNamesByFormId[formId] = *text;
         ++resolved;
     }
+    std::size_t markerResolved = 0u;
+    std::size_t markerMissing = 0u;
+    for (FalloutMapMarkerRecord& marker : m_cellIndex.mapMarkers) {
+        if (marker.nameStringId == 0u) {
+            continue;
+        }
+        const std::string pluginFileName = pluginFileNameFor(marker.referenceFormId);
+        if (pluginFileName.empty()) {
+            ++markerMissing;
+            continue;
+        }
+        const std::string* text = tableFor(pluginFileName)->find(marker.nameStringId);
+        if (text == nullptr || text->empty()) {
+            ++markerMissing;
+            continue;
+        }
+        marker.name = *text;
+        ++markerResolved;
+    }
     // A localized plugin whose table never loaded would otherwise announce "h"
     // at the player with nothing in the log to say why.
     VOX_LOGI("streamer") << "localized region names: " << resolved << " resolved, " << missing
                          << " unresolved across " << tablesByPlugin.size() << " plugin(s)";
+    VOX_LOGI("streamer") << "localized map markers: " << markerResolved << " resolved, "
+                         << markerMissing << " unresolved";
 }
 
 std::vector<std::string> CellStreamer::regionNamesAtEngineSpace(
@@ -1168,6 +1380,89 @@ std::vector<std::string> CellStreamer::regionNamesAtEngineSpace(
         }
     }
     return names;
+}
+
+std::vector<FalloutRegionRecord::Sound> CellStreamer::regionSoundsAtEngineSpace(
+    const float enginePosition[3]) const {
+    float fallout[3] = {};
+    engineToFallout(enginePosition, fallout);
+
+    const auto cellOf = [this](float world) {
+        return static_cast<std::int32_t>(std::floor(world / m_cellIndex.cellWorldSize));
+    };
+    const CellCoord coord{cellOf(fallout[0]), cellOf(fallout[1])};
+    const auto foundCell = m_availableCells.find(coord);
+    const FalloutCellIndexEntry* cell =
+        (foundCell != m_availableCells.end() && foundCell->second < m_cellIndex.cells.size())
+        ? &m_cellIndex.cells[foundCell->second]
+        : nullptr;
+
+    const auto pointInside = [x = fallout[0], y = fallout[1]](
+                                 const FalloutRegionRecord::Polygon& polygon) {
+        const std::size_t count = polygon.points.size() / 2u;
+        if (count < 3u) {
+            return false;
+        }
+        bool inside = false;
+        for (std::size_t i = 0, j = count - 1u; i < count; j = i++) {
+            const float xi = polygon.points[i * 2u];
+            const float yi = polygon.points[i * 2u + 1u];
+            const float xj = polygon.points[j * 2u];
+            const float yj = polygon.points[j * 2u + 1u];
+            const bool crosses = ((yi > y) != (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            inside = crosses ? !inside : inside;
+        }
+        return inside;
+    };
+
+    std::unordered_map<std::uint32_t, FalloutRegionRecord::Sound> unique;
+    for (const auto& [regionFormId, region] : m_worldTables.regionAudioByFormId) {
+        if (region.worldspaceFormId != 0u &&
+            region.worldspaceFormId != m_currentWorldspaceFormId) {
+            continue;
+        }
+        bool active = false;
+        if (!region.polygons.empty()) {
+            active = std::any_of(region.polygons.begin(), region.polygons.end(), pointInside);
+        } else if (cell != nullptr) {
+            active = std::find(
+                cell->regionFormIds.begin(), cell->regionFormIds.end(), regionFormId) !=
+                cell->regionFormIds.end();
+        }
+        if (!active) {
+            continue;
+        }
+        for (const FalloutRegionRecord::Sound& sound : region.sounds) {
+            auto [it, inserted] = unique.emplace(sound.descriptorFormId, sound);
+            if (!inserted) {
+                it->second.weatherFlags |= sound.weatherFlags;
+                it->second.chance = std::max(it->second.chance, sound.chance);
+            }
+        }
+    }
+
+    std::vector<FalloutRegionRecord::Sound> sounds;
+    sounds.reserve(unique.size());
+    for (const auto& entry : unique) {
+        sounds.push_back(entry.second);
+    }
+    std::sort(sounds.begin(), sounds.end(), [](const auto& a, const auto& b) {
+        return a.descriptorFormId < b.descriptorFormId;
+    });
+    return sounds;
+}
+
+const FalloutSoundDescriptorRecord* CellStreamer::soundDescriptor(
+    std::uint32_t formId) const {
+    const auto found = m_worldTables.soundDescriptorsByFormId.find(formId);
+    return found != m_worldTables.soundDescriptorsByFormId.end() ? &found->second : nullptr;
+}
+
+const FalloutSoundOutputModelRecord* CellStreamer::soundOutputModel(
+    std::uint32_t formId) const {
+    const auto found = m_worldTables.soundOutputModelsByFormId.find(formId);
+    return found != m_worldTables.soundOutputModelsByFormId.end() ? &found->second : nullptr;
 }
 
 CellStreamerStats CellStreamer::stats() const {

@@ -49,6 +49,10 @@ public:
     void setMuted(bool muted) override { m_muted = muted; }
     bool muted() const override { return m_muted; }
     bool deviceActive() const override { return false; }
+    bool offlineMixActive() const override { return false; }
+    std::uint32_t mixSampleRate() const override { return 0u; }
+    std::uint32_t mixChannels() const override { return 0u; }
+    bool renderOfflineFrames(std::span<float>, std::uint64_t) override { return false; }
 
 private:
     std::array<float, kSoundCategoryCount> m_volumes{1.0f, 0.6f, 0.5f, 0.8f};

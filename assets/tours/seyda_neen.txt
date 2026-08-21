@@ -21,7 +21,7 @@
 # carried by the lookAt curve rather than by a heading change at one waypoint,
 # which is what whips.
 #
-#   odai_game_newvegas --stream "<Morrowind/Data Files>" --plugin Morrowind.esm \
+#   odai --stream "<Morrowind/Data Files>" --plugin Morrowind.esm \
 #     --worldspace Vvardenfell --tour-file assets/tours/seyda_neen.txt \
 #     --flythrough 20 --capture-video seyda_neen.mp4 30 20
 #

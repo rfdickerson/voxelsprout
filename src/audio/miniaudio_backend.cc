@@ -5,10 +5,12 @@
 
 #include <miniaudio.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -80,7 +82,12 @@ public:
     float categoryVolume(SoundCategory c) const override;
     void setMuted(bool muted) override;
     bool muted() const override;
-    bool deviceActive() const override { return m_active; }
+    bool deviceActive() const override { return m_active && !m_offline; }
+    bool offlineMixActive() const override { return m_active && m_offline; }
+    std::uint32_t mixSampleRate() const override { return m_sampleRate; }
+    std::uint32_t mixChannels() const override { return m_channels; }
+    bool renderOfflineFrames(std::span<float> interleaved,
+                             std::uint64_t frameCount) override;
 
 private:
     MiniaudioBackend() = default;
@@ -116,6 +123,9 @@ private:
     ma_engine m_engine{};
     bool m_engineInitialized = false;
     bool m_active = false;
+    bool m_offline = false;
+    std::uint32_t m_sampleRate = 0u;
+    std::uint32_t m_channels = 0u;
 
     std::array<ma_sound_group, 3> m_groups{};                 // [0]=Music [1]=Ambient [2]=Ui
     std::array<bool, 3> m_groupInit{false, false, false};
@@ -136,11 +146,19 @@ std::unique_ptr<AudioBackend> MiniaudioBackend::create(const AudioConfig& cfg) {
     std::unique_ptr<MiniaudioBackend> backend(new MiniaudioBackend());
 
     ma_engine_config engineConfig = ma_engine_config_init();
+    if (cfg.offlineMix) {
+        engineConfig.noDevice = MA_TRUE;
+        engineConfig.sampleRate = std::max<std::uint32_t>(8000u, cfg.offlineSampleRate);
+        engineConfig.channels = std::clamp<std::uint32_t>(cfg.offlineChannels, 1u, 2u);
+    }
     if (ma_engine_init(&engineConfig, &backend->m_engine) != MA_SUCCESS) {
         VOX_LOGW("audio") << "ma_engine_init failed; audio will run silent";
         return nullptr;  // caller falls back to the null backend
     }
     backend->m_engineInitialized = true;
+    backend->m_offline = cfg.offlineMix;
+    backend->m_sampleRate = ma_engine_get_sample_rate(&backend->m_engine);
+    backend->m_channels = ma_engine_get_channels(&backend->m_engine);
 
     for (int i = 0; i < 3; ++i) {
         if (ma_sound_group_init(&backend->m_engine, 0, nullptr, &backend->m_groups[i]) == MA_SUCCESS) {
@@ -155,8 +173,8 @@ std::unique_ptr<AudioBackend> MiniaudioBackend::create(const AudioConfig& cfg) {
     backend->applyVolumes();
     backend->m_active = true;
 
-    VOX_LOGI("audio") << "miniaudio engine initialized ("
-                      << ma_engine_get_sample_rate(&backend->m_engine) << " Hz)";
+    VOX_LOGI("audio") << "miniaudio engine initialized (" << backend->m_sampleRate << " Hz, "
+                      << (backend->m_offline ? "offline mix" : "playback device") << ")";
     return backend;
 }
 
@@ -222,6 +240,12 @@ void MiniaudioBackend::retire(std::unique_ptr<ma_sound> sound, float fadeSeconds
 }
 
 void MiniaudioBackend::update(float dt) {
+    // In offline mode the PCM graph, fades and sound cursors advance only when
+    // the capture asks for samples. Wall-clock frame time must not leak into a
+    // deterministic recording.
+    if (m_offline) {
+        return;
+    }
     for (auto it = m_fading.begin(); it != m_fading.end();) {
         it->remaining -= dt;
         if (it->remaining <= 0.0f) {
@@ -239,6 +263,44 @@ void MiniaudioBackend::update(float dt) {
             ++it;
         }
     }
+}
+
+bool MiniaudioBackend::renderOfflineFrames(std::span<float> interleaved,
+                                           std::uint64_t frameCount) {
+    if (!m_active || !m_offline || m_channels == 0u ||
+        interleaved.size() != frameCount * static_cast<std::uint64_t>(m_channels)) {
+        return false;
+    }
+    ma_uint64 framesRead = 0u;
+    const ma_result result = ma_engine_read_pcm_frames(
+        &m_engine, interleaved.data(), static_cast<ma_uint64>(frameCount), &framesRead);
+    if (result != MA_SUCCESS || framesRead != frameCount) {
+        VOX_LOGE("audio") << "offline mix read " << framesRead << "/" << frameCount
+                          << " frames (result " << result << ")";
+        return false;
+    }
+
+    const float elapsed = m_sampleRate > 0u
+        ? static_cast<float>(frameCount) / static_cast<float>(m_sampleRate)
+        : 0.0f;
+    for (auto it = m_fading.begin(); it != m_fading.end();) {
+        it->remaining -= elapsed;
+        if (it->remaining <= 0.0f) {
+            ma_sound_uninit(it->sound.get());
+            it = m_fading.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_positionalOneShots.begin(); it != m_positionalOneShots.end();) {
+        if (*it && ma_sound_at_end(it->get())) {
+            ma_sound_uninit(it->get());
+            it = m_positionalOneShots.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return true;
 }
 
 SoundHandle MiniaudioBackend::loadSound(const std::filesystem::path& file, SoundCategory category) {

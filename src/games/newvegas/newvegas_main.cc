@@ -4,33 +4,9 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <string>
 #include <vector>
 #include <iostream>
-
-namespace {
-
-std::filesystem::path defaultShaderPackWaterNormalPath() {
-    std::filesystem::path dataHome;
-    if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-        if (xdgDataHome[0] != '\0') {
-            dataHome = xdgDataHome;
-        }
-    }
-    if (dataHome.empty()) {
-        if (const char* userHome = std::getenv("HOME")) {
-            if (userHome[0] != '\0') {
-                dataHome = std::filesystem::path{userHome} / ".local" / "share";
-            }
-        }
-    }
-    return dataHome / "odai" / "morrowind" / "shader-packs" /
-        "enhanced-pbr-2.0e" / "Enhanced PBR Lighting for OpenMW 0.49-0.52" /
-        "water_nm.png";
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
     // MSAA off by default for this game: TAA (taa.comp.slang) does the
@@ -39,19 +15,13 @@ int main(int argc, char** argv) {
     // show here (texture shimmer, alpha-test cutout crawl) anyway. setenv with
     // overwrite=0, so an explicit ODAI_MSAA from the user still wins.
     setenv("ODAI_MSAA", "1", 0);
-    // Render at native resolution. This used to default to 0.6, which drew the
-    // 3D scene at 36% of the pixels and upscaled it into a native-resolution UI
-    // composite -- visibly soft, and the first thing anyone notices.
-    //
-    // Measured on the LNL iGPU (RelWithDebInfo, scripted camera, 1920x1080
-    // swapchain), 0.6 -> 1.0 costs ~3.5 ms of GPU: 8.8 ms/frame -> 12.3 ms,
-    // about 81 fps. Only two passes scale with it -- main (3.6 -> 5.7) and SSAO
-    // (0.46 -> 1.5). Shadow (~1.3) and prepass (~2.3) do not move at all,
-    // because they are vertex-bound rather than fill-bound, which is why
-    // dropping resolution bought so much less than it looked like it should.
-    //
-    // ODAI_RENDER_SCALE still dials it back; 0.6 is worth reaching for on a 4K
-    // swapchain, where the fill-bound half of that budget quadruples.
+    // Keep the window, presentation and UI at the display resolution, but shade
+    // the 3D scene at 1920x1080 and let the temporal backend reconstruct it.
+    // The measured 3200x1800 Skyrim frame is fill-bound at ~35 ms; this removes
+    // 62.5% of its scene pixels without softening native-resolution text.
+    // ODAI_RENDER_SIZE and the older ODAI_RENDER_SCALE both remain explicit
+    // overrides, with scale taking precedence when both are supplied.
+    setenv("ODAI_RENDER_SIZE", "1920x1080", 0);
     // NO SHADOW DISTANCE OVERRIDE. There used to be a
     // setenv("ODAI_SHADOW_DISTANCE", "3500", 0) here, sitting under the render
     // scale comment above with no comment of its own, and it silently beat
@@ -67,6 +37,10 @@ int main(int argc, char** argv) {
     //
     // The renderer now caps at its own far plane; see frame_run.cc.
     odai::games::newvegas::NewVegasApp app;
+    bool profileSpecified = false;
+    bool loadOrderSpecified = false;
+    bool listProfiles = false;
+    bool profilePicker = false;
     // TAA ON, AT NATIVE RESOLUTION, BY DEFAULT.
     //
     // setTaaEnabled(true) was doing nothing: recordTaaPass returns early with no
@@ -105,6 +79,28 @@ int main(int argc, char** argv) {
             app.setStreamDataPath(argv[++i]);
         } else if (std::strcmp(argv[i], "--plugin") == 0 && i + 1 < argc) {
             app.setStreamPlugin(argv[++i]);
+        } else if (std::strcmp(argv[i], "--load-order") == 0 && i + 1 < argc) {
+            app.setLoadOrderPath(argv[++i]);
+            loadOrderSpecified = true;
+        } else if (std::strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+            app.setContentProfilePath(argv[++i]);
+            profileSpecified = true;
+        } else if (std::strcmp(argv[i], "--mods-root") == 0 && i + 1 < argc) {
+            app.setContentProfileModsRoot(argv[++i]);
+        } else if (std::strcmp(argv[i], "--compat-report") == 0 && i + 1 < argc) {
+            app.setCompatibilityReportPath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--reindex-content") == 0) {
+            app.setForceContentReindex(true);
+        } else if (std::strcmp(argv[i], "--list-profiles") == 0) {
+            listProfiles = true;
+        } else if (std::strcmp(argv[i], "--profile-picker") == 0) {
+            profilePicker = true;
+        } else if (std::strcmp(argv[i], "--no-profile-picker") == 0) {
+            profilePicker = false;
+        } else if (std::strcmp(argv[i], "--state") == 0 && i + 1 < argc) {
+            app.setTraversalStatePath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--no-resume") == 0) {
+            app.setResumeEnabled(false);
         } else if (std::strcmp(argv[i], "--worldspace") == 0 && i + 1 < argc) {
             app.setStreamWorldspace(argv[++i]);
         } else if (std::strcmp(argv[i], "--plugin-add") == 0 && i + 1 < argc) {
@@ -112,14 +108,14 @@ int main(int argc, char** argv) {
             // own, so "--plugin-add NevadaSkies.esp" is enough.
             app.addPlugin(argv[++i]);
         } else if (std::strcmp(argv[i], "--upscaler") == 0 && i + 1 < argc) {
-            // off | temporal | xess | fsr | dlss. Unavailable backends report
+            // off | temporal | xess. Unavailable backends report
             // why and fall back rather than failing to launch.
             odai::render::UpscalerSettings upscaler = app.upscalerSettings();
             if (odai::render::parseUpscalerBackend(argv[++i], upscaler.backend)) {
                 app.setUpscalerSettings(upscaler);
             } else {
                 std::cout << "unknown --upscaler backend: " << argv[i]
-                          << " (off|temporal|xess|fsr|dlss)\n";
+                          << " (off|temporal|xess)\n";
                 return 1;
             }
         } else if (std::strcmp(argv[i], "--upscaler-quality") == 0 && i + 1 < argc) {
@@ -133,6 +129,13 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(argv[i], "--weather") == 0 && i + 1 < argc) {
             app.setWeather(argv[++i]);
+        } else if (std::strcmp(argv[i], "--hour") == 0 && i + 1 < argc) {
+            const float hour = static_cast<float>(std::atof(argv[++i]));
+            if (hour < 0.0f || hour >= 24.0f) {
+                std::cout << "--hour must be in [0,24)\n";
+                return 1;
+            }
+            app.setTimeOfDayHours(hour);
         } else if (std::strcmp(argv[i], "--mod") == 0 && i + 1 < argc) {
             // A directory laid out like Data itself (textures\..., meshes\...).
             // Repeatable; later ones win, as a mod manager's load order would.
@@ -231,24 +234,37 @@ int main(int argc, char** argv) {
                 fps = 60.0f;
             }
             app.setCaptureVideo(outputPath, static_cast<int>(fps * seconds), fps);
+        } else if (std::strcmp(argv[i], "--capture-audio") == 0) {
+            app.setCaptureAudio(true);
+        } else if (std::strcmp(argv[i], "--capture-seed") == 0 && i + 1 < argc) {
+            char* end = nullptr;
+            const unsigned long value = std::strtoul(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value > 0xfffffffful) {
+                std::cout << "--capture-seed must be a 32-bit unsigned integer\n";
+                return 1;
+            }
+            app.setCaptureSeed(static_cast<std::uint32_t>(value));
         } else if (std::strcmp(argv[i], "--help") == 0) {
-            std::cout << "odai_game_newvegas [--scene <path.bin>]\n"
+            std::cout << "odai [--scene <path.bin>]\n"
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
-                      << "odai_game_newvegas --screenshot <out.ppm> [frames]\n"
+                      << "odai --screenshot <out.ppm> [frames]\n"
                       << "  Render `frames` frames (default 8), write a PPM, and quit.\n"
                       << "  Cook a scene first with odai_newvegas_cooker.\n"
-                      << "odai_game_newvegas --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
+                      << "odai --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
                       << "  Fly the tour and encode it directly, then quit. Needs ffmpeg on PATH;\n"
                       << "  $ODAI_CAPTURE_ENCODER overrides the auto-detected H.264 encoder.\n"
-                      << "odai_game_newvegas --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
+                      << "  Add --capture-audio for deterministic 48 kHz engine ambience;\n"
+                      << "  --capture-seed <u32> fixes regional sound choices.\n"
+                      << "  --hour <0..24) fixes the authored time of day.\n"
+                      << "odai --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
                       << "  The same, as numbered PPMs. Prefer --capture-video: a still sequence\n"
                       << "  at this resolution is gigabytes.\n"
-                      << "odai_game_newvegas --tour-file <path>\n"
+                      << "odai --tour-file <path>\n"
                       << "  Replace the built-in Goodsprings path with rows of `px py pz  lx ly lz`.\n"
-                      << "odai_game_newvegas --character [<skeleton.nif> <part.nif>...]\n"
+                      << "odai --character [<skeleton.nif> <part.nif>...]\n"
                       << "  Stand one GPU-skinned character in bind pose, no world.\n"
                       << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n"
-                      << "odai_game_newvegas --stream <Data> --mod <dir> [--mod <dir>...]\n"
+                      << "odai --stream <Data> --mod <dir> [--mod <dir>...]\n"
                       << "  Override game assets from directories laid out like Data\n"
                       << "  (textures\\..., meshes\\...); later --mod wins. Also\n"
                       << "  $ODAI_FNV_MODS, ':'-separated.\n"
@@ -256,25 +272,50 @@ int main(int argc, char** argv) {
                       << "  default clamps every texture to 512 px, so higher-resolution\n"
                       << "  art is mip-dropped away before it is ever seen.\n"
                       << "  --shader-pack rafael enables the native Rafael/Enhanced-PBR\n"
-                      << "  preset and its externally installed water normal. Also\n"
+                      << "  preset. The engine uses its bundled tileable water normal;\n"
                       << "  $ODAI_FNV_SHADER_PACK=rafael and $ODAI_WATER_NORMAL=<png|dds>.\n"
-                      << "odai_game_newvegas --stream <Data> --plugin-add <Mod.esp>\n"
+                      << "odai --stream <Data> --plugin-add <Mod.esp>\n"
                       << "  Load an extra plugin and merge its world-record overrides; masters\n"
                       << "  resolve on their own. Plugins may live in --stream or --mod roots.\n"
                       << "  TES3 load orders merge exterior grids and named interiors. Also\n"
                       << "  $ODAI_FNV_PLUGINS, ','-separated.\n"
+                      << "  --load-order <plugins.txt> selects Skyrim's active profile;\n"
+                      << "  otherwise it auto-discovers Proton/native profiles and falls\n"
+                      << "  back to installed official content. Also $ODAI_FNV_LOAD_ORDER.\n"
+                      << "  --state <path> overrides the traversal save; --no-resume skips\n"
+                      << "  loading it without deleting it. Explicit world/interior/spawn wins.\n"
                       << "  --weather <EditorID> forces one weather by name.\n"
+                      << "  --profile <path> loads an ODAI JSON, MO2 profile directory,\n"
+                      << "  or OpenMW openmw.cfg as one authoritative content graph.\n"
+                      << "  --mods-root <dir> resolves nonstandard MO2 instances; --mod and\n"
+                      << "  --plugin-add remain highest-priority overlays.\n"
+                      << "  --list-profiles lists discovered profiles; --profile-picker selects\n"
+                      << "  the sole match or lists ambiguous matches. --compat-report <json> writes validation.\n"
+                      << "  --reindex-content rebuilds persistent content indexes.\n"
                       << "\n"
                       << "See docs/FNV_MODS.md and docs/MORROWIND_MODS.md for recipes.\n";
             return 0;
         }
     }
-    if (const char* shaderPack = std::getenv("ODAI_FNV_SHADER_PACK")) {
-        if (std::strcmp(shaderPack, "rafael") == 0 && std::getenv("ODAI_WATER_NORMAL") == nullptr) {
-            const std::filesystem::path waterNormal = defaultShaderPackWaterNormalPath();
-            const std::string waterNormalString = waterNormal.string();
-            setenv("ODAI_WATER_NORMAL", waterNormalString.c_str(), 0);
+    if (profileSpecified && loadOrderSpecified) {
+        std::cout << "--profile and --load-order are both authoritative; choose one\n";
+        return 1;
+    }
+    if (listProfiles || (profilePicker && !profileSpecified)) {
+        const auto profiles = odai::importer::fnv::discoverContentProfiles();
+        if (profiles.empty()) {
+            std::cout << "no ODAI, MO2, or OpenMW profiles discovered\n";
+            return listProfiles ? 0 : 1;
         }
+        for (std::size_t index = 0; index < profiles.size(); ++index) {
+            std::cout << index + 1u << "  " << profiles[index].string() << "\n";
+        }
+        if (listProfiles) return 0;
+        if (profiles.size() != 1u) {
+            std::cout << "multiple profiles found; pass --profile <path> to select one\n";
+            return 1;
+        }
+        app.setContentProfilePath(profiles.front().string());
     }
     if (!app.init("New Vegas")) {
         return 1;

@@ -19,6 +19,8 @@
 #include "import/fnv/bsa_archive.h"
 #include "import/fnv/cell_builder.h"
 #include "import/fnv/character_builder.h"
+#include "import/fnv/content_profile.h"
+#include "import/fnv/content_record_index.h"
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/dialogue_records.h"
 #include "import/fnv/actor_records.h"
@@ -30,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -40,8 +43,12 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -62,6 +69,17 @@ std::string toLowerAscii(std::string value) {
         return static_cast<char>(std::tolower(c));
     });
     return value;
+}
+
+const char* alphaSemanticName(odai::importer::fnv::NifAlphaSemantic semantic) {
+    using Semantic = odai::importer::fnv::NifAlphaSemantic;
+    switch (semantic) {
+        case Semantic::Opaque: return "opaque";
+        case Semantic::Cutout: return "cutout";
+        case Semantic::ExplicitBlend: return "explicit-blend";
+        case Semantic::VertexFade: return "vertex-fade";
+    }
+    return "unknown";
 }
 
 std::vector<std::filesystem::path> listArchives(const std::filesystem::path& dataPath) {
@@ -1090,6 +1108,7 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
     const char* formatName = "?";
     switch (texture.format) {
         case TextureFormat::RGBA8: formatName = "RGBA8"; break;
+        case TextureFormat::RGBA8Srgb: formatName = "RGBA8-sRGB"; break;
         case TextureFormat::BC1: formatName = "BC1"; break;
         case TextureFormat::BC3: formatName = "BC3"; break;
         case TextureFormat::BC5: formatName = "BC5"; break;
@@ -1101,7 +1120,8 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
               << " bytes=" << ddsBytes.size() << "\n";
     // The GPU samples the compressed data directly, so decode base mip 0 to
     // RGBA only when the loader already did; otherwise report what is known.
-    if (texture.format != TextureFormat::RGBA8 || texture.rgba8.empty()) {
+    if ((texture.format != TextureFormat::RGBA8 &&
+         texture.format != TextureFormat::RGBA8Srgb) || texture.rgba8.empty()) {
         // Decode the block alpha into the same three bands the cutout
         // classifier uses (imported_scene.cc AlphaBandCounts), so this mode
         // answers "would the importer infer alpha test from this texture".
@@ -1424,7 +1444,17 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         const bool ok = odai::importer::fnv::parseNifStaticMesh(bytes, model, error);
         std::cout << "parse " << (ok ? "ok" : "FAILED") << (error.empty() ? "" : (": " + error)) << "\n"
                   << "shapes " << model.shapes.size() << ", skipped " << model.skippedShapeCount
-                  << ", editor markers " << model.editorMarkerShapeCount << "\n";
+                  << ", editor markers " << model.editorMarkerShapeCount
+                  << ", hidden " << model.hiddenShapeCount
+                  << ", failed nodes " << model.nodeParseFailedCount
+                  << ", authored collision triangles " << model.collisionTriangles.size() << "\n";
+        if (!model.failedNodeTypes.empty()) {
+            std::cout << "  failed node types:";
+            for (const std::string& type : model.failedNodeTypes) {
+                std::cout << " " << type;
+            }
+            std::cout << "\n";
+        }
         for (const odai::importer::fnv::KfAnimation& animation : model.embeddedAnimations) {
             std::cout << "  animation \"" << animation.name << "\": "
                       << animation.duration() << "s, "
@@ -1434,12 +1464,16 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
         for (const odai::importer::fnv::NifShape& shape : model.shapes) {
             std::cout << "  \"" << shape.name << "\" verts " << (shape.positions.size() / 3u) << ", tris "
                       << (shape.triangleIndices.size() / 3u) << ", uvs " << (shape.uvs.size() / 2u)
+                      << ", block=" << shape.sourceBlockType
+                      << ", sourceTris=" << shape.sourceTriangleCount
+                      << ", rejectedTris=" << shape.rejectedTriangleCount
                       << ", alphaTest=" << (shape.alphaTest ? "yes" : "no")
                       << (shape.alphaTest
                               ? (" thr=" + std::to_string(static_cast<int>(shape.alphaThreshold)))
                               : std::string())
                       << ", twoSided=" << (shape.twoSided ? "yes" : "no")
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
+                      << ", alphaSemantic=" << alphaSemanticName(shape.alphaSemantic)
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\""
                       << (shape.animationNodeName.empty()
                               ? std::string()
@@ -1519,6 +1553,92 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                               << (static_cast<double>(agree) / static_cast<double>(counted));
                 }
                 std::cout << "\n";
+
+                // Generated BTO shapes merge many unrelated placed objects
+                // into one shape. Report their disconnected components so a
+                // near-camera LOD handoff can distinguish one enormous proxy
+                // from the smaller city buildings sharing its material.
+                const std::size_t vertexCount = shape.positions.size() / 3u;
+                std::vector<std::uint32_t> parent(vertexCount);
+                for (std::size_t v = 0; v < vertexCount; ++v) {
+                    parent[v] = static_cast<std::uint32_t>(v);
+                }
+                const auto findRoot = [&](std::uint32_t value) {
+                    std::uint32_t root = value;
+                    while (parent[root] != root) {
+                        root = parent[root];
+                    }
+                    while (parent[value] != value) {
+                        const std::uint32_t next = parent[value];
+                        parent[value] = root;
+                        value = next;
+                    }
+                    return root;
+                };
+                const auto unite = [&](std::uint32_t a, std::uint32_t b) {
+                    a = findRoot(a);
+                    b = findRoot(b);
+                    if (a != b) {
+                        parent[b] = a;
+                    }
+                };
+                for (std::size_t t = 0; t + 2u < shape.triangleIndices.size(); t += 3u) {
+                    const std::uint32_t a = shape.triangleIndices[t];
+                    const std::uint32_t b = shape.triangleIndices[t + 1u];
+                    const std::uint32_t c = shape.triangleIndices[t + 2u];
+                    if (a < vertexCount && b < vertexCount && c < vertexCount) {
+                        unite(a, b);
+                        unite(a, c);
+                    }
+                }
+                struct Component {
+                    std::size_t triangles = 0u;
+                    float min[3] = {std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max(),
+                                    std::numeric_limits<float>::max()};
+                    float max[3] = {std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest(),
+                                    std::numeric_limits<float>::lowest()};
+                };
+                std::map<std::uint32_t, Component> components;
+                for (std::size_t t = 0; t + 2u < shape.triangleIndices.size(); t += 3u) {
+                    const std::uint32_t first = shape.triangleIndices[t];
+                    if (first >= vertexCount) {
+                        continue;
+                    }
+                    Component& component = components[findRoot(first)];
+                    ++component.triangles;
+                    for (std::size_t corner = 0; corner < 3u; ++corner) {
+                        const std::uint32_t vertex = shape.triangleIndices[t + corner];
+                        if (vertex >= vertexCount) {
+                            continue;
+                        }
+                        for (std::size_t axis = 0; axis < 3u; ++axis) {
+                            const float value = shape.positions[(vertex * 3u) + axis];
+                            component.min[axis] = std::min(component.min[axis], value);
+                            component.max[axis] = std::max(component.max[axis], value);
+                        }
+                    }
+                }
+                std::vector<Component> sortedComponents;
+                for (const auto& [root, component] : components) {
+                    (void)root;
+                    sortedComponents.push_back(component);
+                }
+                std::sort(sortedComponents.begin(), sortedComponents.end(),
+                          [](const Component& a, const Component& b) {
+                              return a.triangles > b.triangles;
+                          });
+                if (sortedComponents.size() > 1u) {
+                    std::cout << "      components: " << sortedComponents.size() << " (largest)\n";
+                    for (std::size_t i = 0; i < std::min<std::size_t>(12u, sortedComponents.size()); ++i) {
+                        const Component& component = sortedComponents[i];
+                        std::cout << "        tris " << component.triangles << " bounds min("
+                                  << component.min[0] << ", " << component.min[1] << ", "
+                                  << component.min[2] << ") max(" << component.max[0] << ", "
+                                  << component.max[1] << ", " << component.max[2] << ")\n";
+                    }
+                }
             }
             if (!shape.uvs.empty()) {
                 // Two ranges, and the difference between them is the point: a
@@ -1992,7 +2112,7 @@ int probeBuildCell(
     }
     // Match the runtime streamer's asset override path so --buildcell can
     // verify a loose replacer in the actual scene it changes. This is the same
-    // colon-separated convention used by odai_game_newvegas.
+    // colon-separated convention used by odai.
     if (const char* mods = std::getenv("ODAI_FNV_MODS")) {
         std::string root;
         for (const char* cursor = mods; ; ++cursor) {
@@ -4423,6 +4543,10 @@ int probeScene(const std::filesystem::path& scenePath) {
 
 void printUsage() {
     std::cout << "Usage:\n"
+              << "  odai_bethesda_probe --profilecheck <profile> [--data <Data>] [--mods-root <dir>]\n"
+              << "  odai_bethesda_probe --why <profile> <virtualPath|formID> [--data <Data>]\n"
+              << "  odai_bethesda_probe --conflicts <profile> [--data <Data>]\n"
+              << "  odai_bethesda_probe --export-profile <profile> <out.json> [--data <Data>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --archives\n"
               << "  odai_bethesda_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --nif <virtualPath>\n"
@@ -4445,6 +4569,10 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --buildcell <Plugin.esm> <Worldspace> <x> <z>\n"
               << "  odai_bethesda_probe <DataFilesPath> --floaters <Plugin.esm> <Worldspace> <x> <z>\n"
               << "  odai_bethesda_probe <DataFilesPath> --plugin <Plugin.esm> [typeCount]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --loadorder [plugins.txt]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --doorcheck [plugins.txt]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --routecheck [plugins.txt]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --tourcheck <Worldspace> <tour.txt> [plugins.txt]\n"
               << "  odai_bethesda_probe <DataFilesPath> --record <Plugin.esm> <TYPE> [dumpCount]\n"
               << "  odai_bethesda_probe <DataFilesPath> --refs <Plugin.esm> <BASETYPE> [topN]\n"
               << "  odai_bethesda_probe <DataFilesPath> --placements <Plugin.esm> <baseFormID> [limit]\n"
@@ -4457,7 +4585,891 @@ void printUsage() {
 
 }  // namespace
 
+int checkSkyrimTraversalRoute(
+    const std::filesystem::path& dataPath,
+    const std::optional<std::filesystem::path>& explicitList) {
+    using namespace odai::importer;
+    using namespace odai::importer::fnv;
+
+    std::vector<std::string> plugins;
+    std::filesystem::path source;
+    std::string error;
+    if (!resolveInstalledSkyrimPluginList(
+            dataPath, explicitList, plugins, source, error)) {
+        std::cout << "resolve failed: " << error << "\n";
+        return 1;
+    }
+    FalloutLoadOrder order;
+    if (!order.open(dataPath, plugins, error)) {
+        std::cout << "open failed: " << error << "\n";
+        return 1;
+    }
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(order, index, error)) {
+        std::cout << "index failed: " << error << "\n";
+        return 1;
+    }
+    FalloutWorldTables tables;
+    if (!buildFalloutWorldTables(order, tables, error)) {
+        std::cout << "world tables failed: " << error << "\n";
+        return 1;
+    }
+
+    const auto worldspaceId = [&](const std::string& editorId) -> std::uint32_t {
+        const auto found = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(editorId));
+        return found == tables.worldspaceFormIdsByEditorId.end() ? 0u : found->second;
+    };
+    const std::uint32_t tamriel = worldspaceId("Tamriel");
+    const std::uint32_t whiterun = worldspaceId("WhiterunWorld");
+    if (tamriel == 0u || whiterun == 0u) {
+        std::cout << "route failed: Tamriel or WhiterunWorld is absent\n";
+        return 1;
+    }
+
+    const auto interiorIndex = std::find_if(
+        index.cells.begin(), index.cells.end(), [](const FalloutCellIndexEntry& entry) {
+            return entry.isInterior &&
+                   toLowerAscii(entry.editorId) == "whiterunbanneredmare";
+        });
+    if (interiorIndex == index.cells.end()) {
+        std::cout << "route failed: WhiterunBanneredMare is absent\n";
+        return 1;
+    }
+    const std::size_t banneredMare =
+        static_cast<std::size_t>(std::distance(index.cells.begin(), interiorIndex));
+
+    struct RouteDoor {
+        std::size_t sourceCell = 0u;
+        std::size_t targetCell = 0u;
+        FalloutPlacedReference reference;
+    };
+    const auto findDoor = [&](const auto& sourceMatches, const auto& targetMatches,
+                              RouteDoor& out) {
+        for (std::size_t sourceIndex = 0; sourceIndex < index.cells.size(); ++sourceIndex) {
+            if (!sourceMatches(index.cells[sourceIndex])) {
+                continue;
+            }
+            FalloutCellRecord cell;
+            std::string cellError;
+            if (!extractFalloutCellMerged(
+                    index, order, index.cells[sourceIndex], cell, cellError)) {
+                continue;
+            }
+            for (const FalloutPlacedReference& reference : cell.references) {
+                if (!reference.hasTeleport || reference.isDeleted) {
+                    continue;
+                }
+                const auto target = index.cellIndexByReferenceFormId.find(
+                    reference.teleportTargetRefFormId);
+                if (target == index.cellIndexByReferenceFormId.end() ||
+                    !targetMatches(index.cells[target->second])) {
+                    continue;
+                }
+                bool finite = true;
+                for (float component : reference.teleportPosition) {
+                    finite = finite && std::isfinite(component);
+                }
+                for (float component : reference.teleportRotationRadians) {
+                    finite = finite && std::isfinite(component);
+                }
+                if (!finite) {
+                    continue;
+                }
+                out = RouteDoor{sourceIndex, target->second, reference};
+                return true;
+            }
+        }
+        return false;
+    };
+
+    RouteDoor enterCity;
+    RouteDoor enterInn;
+    RouteDoor leaveInn;
+    RouteDoor leaveCity;
+    const auto exteriorIn = [](std::uint32_t wanted) {
+        return [wanted](const FalloutCellIndexEntry& entry) {
+            return !entry.isInterior && entry.worldspaceFormId == wanted;
+        };
+    };
+    const auto exactCell = [](std::size_t wanted, const FalloutCellIndexEntry* base) {
+        return [wanted, base](const FalloutCellIndexEntry& entry) {
+            return static_cast<std::size_t>(&entry - base) == wanted;
+        };
+    };
+    if (!findDoor(exteriorIn(tamriel), exteriorIn(whiterun), enterCity) ||
+        !findDoor(exteriorIn(whiterun), exactCell(banneredMare, index.cells.data()), enterInn) ||
+        !findDoor(exactCell(banneredMare, index.cells.data()), exteriorIn(whiterun), leaveInn) ||
+        !findDoor(exteriorIn(whiterun), exteriorIn(tamriel), leaveCity)) {
+        std::cout << "route failed: could not resolve Tamriel -> WhiterunWorld -> "
+                     "WhiterunBanneredMare -> WhiterunWorld -> Tamriel\n";
+        return 1;
+    }
+
+    FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "route failed: game archives could not be opened\n";
+        return 1;
+    }
+    std::set<std::size_t> cellsToBuild{
+        enterCity.sourceCell, enterCity.targetCell, banneredMare};
+    std::size_t builtCells = 0u;
+    std::size_t totalCollisionTriangles = 0u;
+    for (const std::size_t cellIndex : cellsToBuild) {
+        FalloutCellRecord cell;
+        if (!extractFalloutCellMerged(index, order, index.cells[cellIndex], cell, error)) {
+            std::cout << "route failed: cell extraction: " << error << "\n";
+            return 1;
+        }
+        CellSceneBuilder builder(assets, tables);
+        builder.setMaxTextureSize(64u);
+        builder.addCell(cell);
+        ImportedScene scene;
+        builder.finish(scene);
+        if (scene.packedVertices.empty() || scene.packedIndices.empty() ||
+            scene.collisionTriangles.empty()) {
+            std::cout << "route failed: "
+                      << (index.cells[cellIndex].editorId.empty()
+                              ? ("cell 0x" + toHex(index.cells[cellIndex].cellFormId))
+                              : index.cells[cellIndex].editorId)
+                      << " has incomplete render/collision geometry\n";
+            return 1;
+        }
+        ++builtCells;
+        totalCollisionTriangles += scene.collisionTriangles.size();
+        std::cout << "built "
+                  << (index.cells[cellIndex].editorId.empty()
+                          ? ("cell 0x" + toHex(index.cells[cellIndex].cellFormId))
+                          : index.cells[cellIndex].editorId)
+                  << ": vertices=" << scene.packedVertices.size()
+                  << " collision=" << scene.collisionTriangles.size() << "\n";
+    }
+
+    const auto printStep = [&](const char* label, const RouteDoor& door) {
+        std::cout << label << " 0x" << std::hex << door.reference.formId << " -> 0x"
+                  << door.reference.teleportTargetRefFormId << std::dec << " arrival=("
+                  << door.reference.teleportPosition[0] << ","
+                  << door.reference.teleportPosition[1] << ","
+                  << door.reference.teleportPosition[2] << ")\n";
+    };
+    printStep("enter-city", enterCity);
+    printStep("enter-inn", enterInn);
+    printStep("leave-inn", leaveInn);
+    printStep("leave-city", leaveCity);
+    std::cout << "route=ok cellsBuilt=" << builtCells
+              << " collisionTriangles=" << totalCollisionTriangles
+              << " fingerprint=" << order.fingerprint() << "\n";
+    return 0;
+}
+
+namespace {
+
+struct TourAuditPoint {
+    float position[3] = {};
+};
+
+std::string jsonString(std::string_view value) {
+    std::ostringstream out;
+    out << '"';
+    for (const unsigned char c : value) {
+        switch (c) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (c < 0x20u) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<unsigned int>(c) << std::dec;
+                } else {
+                    out << static_cast<char>(c);
+                }
+        }
+    }
+    out << '"';
+    return out.str();
+}
+
+bool readTourPoints(const std::filesystem::path& path,
+                    std::vector<TourAuditPoint>& out,
+                    std::string& error) {
+    std::ifstream input(path);
+    if (!input) {
+        error = "cannot open tour file";
+        return false;
+    }
+    std::string line;
+    std::size_t lineNumber = 0u;
+    while (std::getline(input, line)) {
+        ++lineNumber;
+        if (const std::size_t comment = line.find('#'); comment != std::string::npos) {
+            line.resize(comment);
+        }
+        std::istringstream row(line);
+        float values[6]{};
+        if (!(row >> values[0])) {
+            continue;
+        }
+        bool valid = true;
+        for (int component = 1; component < 6; ++component) {
+            valid = valid && static_cast<bool>(row >> values[component]);
+        }
+        std::string trailing;
+        if (!valid || (row >> trailing)) {
+            error = "line " + std::to_string(lineNumber) +
+                    " must contain exactly six numbers";
+            return false;
+        }
+        TourAuditPoint point;
+        std::copy_n(values, 3u, point.position);
+        if (!std::all_of(std::begin(point.position), std::end(point.position),
+                         [](float value) { return std::isfinite(value); })) {
+            error = "line " + std::to_string(lineNumber) + " contains a non-finite position";
+            return false;
+        }
+        out.push_back(point);
+    }
+    if (out.size() < 4u) {
+        error = "tour needs at least four waypoints";
+        return false;
+    }
+    return true;
+}
+
+void tourKnots(const float p0[3], const float p1[3], const float p2[3],
+               const float p3[3], float out[4]) {
+    const auto span = [](const float a[3], const float b[3]) {
+        const float dx = b[0] - a[0];
+        const float dy = b[1] - a[1];
+        const float dz = b[2] - a[2];
+        return std::max(std::sqrt(std::sqrt((dx * dx) + (dy * dy) + (dz * dz))), 1e-4f);
+    };
+    out[0] = 0.0f;
+    out[1] = span(p0, p1);
+    out[2] = out[1] + span(p1, p2);
+    out[3] = out[2] + span(p2, p3);
+}
+
+void tourLerp(const float a[3], const float b[3], float ta, float tb, float t, float out[3]) {
+    const float denominator = tb - ta;
+    const float weight = std::abs(denominator) < 1e-6f ? 0.0f : (t - ta) / denominator;
+    for (int axis = 0; axis < 3; ++axis) {
+        out[axis] = a[axis] + ((b[axis] - a[axis]) * weight);
+    }
+}
+
+TourAuditPoint sampleTourSegment(const TourAuditPoint& p0, const TourAuditPoint& p1,
+                                 const TourAuditPoint& p2, const TourAuditPoint& p3,
+                                 float parameter) {
+    float knots[4];
+    tourKnots(p0.position, p1.position, p2.position, p3.position, knots);
+    const float t = knots[1] + ((knots[2] - knots[1]) * parameter);
+    float a1[3], a2[3], a3[3], b1[3], b2[3];
+    tourLerp(p0.position, p1.position, knots[0], knots[1], t, a1);
+    tourLerp(p1.position, p2.position, knots[1], knots[2], t, a2);
+    tourLerp(p2.position, p3.position, knots[2], knots[3], t, a3);
+    tourLerp(a1, a2, knots[0], knots[2], t, b1);
+    tourLerp(a2, a3, knots[1], knots[3], t, b2);
+    TourAuditPoint out;
+    tourLerp(b1, b2, knots[1], knots[2], t, out.position);
+    return out;
+}
+
+std::vector<TourAuditPoint> sampleTour60Hz(const std::vector<TourAuditPoint>& points) {
+    std::vector<TourAuditPoint> samples;
+    for (std::size_t segment = 0; segment + 1u < points.size(); ++segment) {
+        const TourAuditPoint& p0 = points[segment == 0u ? 0u : segment - 1u];
+        const TourAuditPoint& p1 = points[segment];
+        const TourAuditPoint& p2 = points[segment + 1u];
+        const TourAuditPoint& p3 = points[std::min(segment + 2u, points.size() - 1u)];
+        for (int frame = 0; frame < 60; ++frame) {
+            samples.push_back(sampleTourSegment(p0, p1, p2, p3,
+                                                static_cast<float>(frame) / 60.0f));
+        }
+    }
+    samples.push_back(points.back());
+    return samples;
+}
+
+float pointTriangleDistanceSquared(const float point[3], const float vertices[9]) {
+    const auto dot = [](const float a[3], const float b[3]) {
+        return (a[0] * b[0]) + (a[1] * b[1]) + (a[2] * b[2]);
+    };
+    const auto subtract = [](const float a[3], const float b[3], float out[3]) {
+        for (int axis = 0; axis < 3; ++axis) out[axis] = a[axis] - b[axis];
+    };
+    const float* a = vertices;
+    const float* b = vertices + 3;
+    const float* c = vertices + 6;
+    float ab[3], ac[3], ap[3];
+    subtract(b, a, ab); subtract(c, a, ac); subtract(point, a, ap);
+    const float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return dot(ap, ap);
+    float bp[3]; subtract(point, b, bp);
+    const float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return dot(bp, bp);
+    const float vc = (d1 * d4) - (d3 * d2);
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        float nearest[3] = {a[0] + v * ab[0], a[1] + v * ab[1], a[2] + v * ab[2]};
+        float delta[3]; subtract(point, nearest, delta); return dot(delta, delta);
+    }
+    float cp[3]; subtract(point, c, cp);
+    const float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return dot(cp, cp);
+    const float vb = (d5 * d2) - (d1 * d6);
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        float nearest[3] = {a[0] + w * ac[0], a[1] + w * ac[1], a[2] + w * ac[2]};
+        float delta[3]; subtract(point, nearest, delta); return dot(delta, delta);
+    }
+    const float va = (d3 * d6) - (d5 * d4);
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        float bc[3]; subtract(c, b, bc);
+        float nearest[3] = {b[0] + w * bc[0], b[1] + w * bc[1], b[2] + w * bc[2]};
+        float delta[3]; subtract(point, nearest, delta); return dot(delta, delta);
+    }
+    const float denominator = 1.0f / (va + vb + vc);
+    const float v = vb * denominator, w = vc * denominator;
+    float nearest[3] = {a[0] + ab[0] * v + ac[0] * w,
+                        a[1] + ab[1] * v + ac[1] * w,
+                        a[2] + ab[2] * v + ac[2] * w};
+    float delta[3]; subtract(point, nearest, delta); return dot(delta, delta);
+}
+
+float sampleCellTerrain(const odai::importer::fnv::FalloutCellRecord& cell,
+                        float engineX, float engineZ) {
+    if (cell.land == nullptr || !cell.land->hasHeights || cell.land->gridSize < 2) {
+        return -std::numeric_limits<float>::infinity();
+    }
+    const float worldSize = cell.land->cellWorldSize();
+    const float localX = engineX - (static_cast<float>(cell.gridX) * worldSize);
+    const float bethesdaY = -engineZ;
+    const float localY = bethesdaY - (static_cast<float>(cell.gridZ) * worldSize);
+    const float column = std::clamp(localX / odai::importer::fnv::kLandPostSpacing,
+                                    0.0f, static_cast<float>(cell.land->gridSize - 1));
+    const float row = std::clamp(localY / odai::importer::fnv::kLandPostSpacing,
+                                 0.0f, static_cast<float>(cell.land->gridSize - 1));
+    const int c0 = static_cast<int>(std::floor(column));
+    const int r0 = static_cast<int>(std::floor(row));
+    const int c1 = std::min(c0 + 1, cell.land->gridSize - 1);
+    const int r1 = std::min(r0 + 1, cell.land->gridSize - 1);
+    const float tx = column - static_cast<float>(c0);
+    const float ty = row - static_cast<float>(r0);
+    const auto height = [&](int r, int c) {
+        return cell.land->heights[static_cast<std::size_t>((r * cell.land->gridSize) + c)];
+    };
+    const float h0 = height(r0, c0) + ((height(r0, c1) - height(r0, c0)) * tx);
+    const float h1 = height(r1, c0) + ((height(r1, c1) - height(r1, c0)) * tx);
+    return h0 + ((h1 - h0) * ty);
+}
+
+bool isIntentionalAuditModel(std::string_view modelPath) {
+    const std::string lower = toLowerAscii(std::string(modelPath));
+    const std::size_t slash = lower.find_last_of("\\/");
+    const std::string_view name = slash == std::string::npos
+        ? std::string_view(lower)
+        : std::string_view(lower).substr(slash + 1u);
+    return lower.rfind("markers\\", 0u) == 0u ||
+           lower.find("\\markers\\") != std::string::npos ||
+           name.rfind("marker", 0u) == 0u ||
+           name.find("invisible") != std::string_view::npos ||
+           lower.find("\\dummyitems\\") != std::string::npos ||
+           lower.rfind("critters\\crittermarker", 0u) == 0u ||
+           (lower.rfind("furniture\\", 0u) == 0u &&
+            name.find("marker") != std::string_view::npos) ||
+           odai::importer::fnv::isSkyOnlyModelPath(modelPath) ||
+           odai::importer::fnv::isEffectOnlyModelPath(modelPath);
+}
+
+}  // namespace
+
+int checkSkyrimTour(const std::filesystem::path& dataPath, std::string worldspace,
+                    const std::filesystem::path& tourPath,
+                    const std::optional<std::filesystem::path>& explicitList) {
+    using namespace odai::importer;
+    using namespace odai::importer::fnv;
+    const auto failJson = [&](std::string_view message) {
+        std::cout << "{\"ok\":false,\"error\":" << jsonString(message) << "}\n";
+        return 1;
+    };
+    std::vector<TourAuditPoint> waypoints;
+    std::string error;
+    if (!readTourPoints(tourPath, waypoints, error)) return failJson(error);
+    const std::vector<TourAuditPoint> samples = sampleTour60Hz(waypoints);
+
+    std::vector<std::string> plugins;
+    std::filesystem::path source;
+    if (!resolveInstalledSkyrimPluginList(dataPath, explicitList, plugins, source, error)) {
+        return failJson(error);
+    }
+    FalloutLoadOrder order;
+    FalloutCellIndex index;
+    FalloutWorldTables tables;
+    if (!order.open(dataPath, plugins, error) || !buildFalloutCellIndex(order, index, error) ||
+        !buildFalloutWorldTables(order, tables, error)) {
+        return failJson(error);
+    }
+    const auto world = tables.worldspaceFormIdsByEditorId.find(toLowerAscii(worldspace));
+    if (world == tables.worldspaceFormIdsByEditorId.end()) {
+        return failJson("worldspace is absent from the resolved load order: " + worldspace);
+    }
+    const std::uint32_t worldspaceFormId = world->second;
+    std::map<std::pair<int, int>, const FalloutCellIndexEntry*> cellsByGrid;
+    for (const FalloutCellIndexEntry& entry : index.cells) {
+        if (!entry.isInterior && entry.hasGridCoords &&
+            entry.worldspaceFormId == worldspaceFormId) {
+            cellsByGrid[{entry.gridX, entry.gridZ}] = &entry;
+        }
+    }
+
+    std::set<std::pair<int, int>> requiredCells;
+    for (const TourAuditPoint& sample : samples) {
+        const int gridX = static_cast<int>(std::floor(sample.position[0] / kExteriorCellSize));
+        const int gridZ = static_cast<int>(std::floor((-sample.position[2]) / kExteriorCellSize));
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) requiredCells.insert({gridX + dx, gridZ + dz});
+        }
+    }
+    FalloutAssetSource assets;
+    if (!assets.open(dataPath)) return failJson("game archives could not be opened");
+
+    struct BuiltCell {
+        FalloutCellRecord record;
+        ImportedScene scene;
+    };
+    std::map<std::pair<int, int>, BuiltCell> built;
+    std::size_t missingCells = 0u;
+    std::size_t intentionalDrops = 0u;
+    std::size_t skippedShapes = 0u;
+    std::size_t invalidTriangles = 0u;
+    std::vector<std::string> visibleFailures;
+    std::vector<std::string> modelDiagnostics;
+    std::set<std::string> auditedModels;
+    for (const auto& grid : requiredCells) {
+        const auto entry = cellsByGrid.find(grid);
+        if (entry == cellsByGrid.end()) {
+            ++missingCells;
+            continue;
+        }
+        BuiltCell cell;
+        if (!extractFalloutCellMerged(index, order, *entry->second, cell.record, error)) {
+            visibleFailures.push_back("cell " + std::to_string(grid.first) + "," +
+                                      std::to_string(grid.second) + ": " + error);
+            continue;
+        }
+        CellSceneBuilder builder(assets, tables);
+        builder.setTextureBudget(1u);
+        builder.setMaxTextureSize(64u);
+        builder.addCell(cell.record);
+        builder.finish(cell.scene);
+        const CellBuildStats& stats = builder.stats();
+        intentionalDrops += stats.editorMarkerModelsSkipped + stats.disabledReferencesSkipped +
+                            stats.effectMeshesSkipped;
+        for (const FalloutPlacedReference& reference : cell.record.references) {
+            if (reference.isDeleted || (reference.recordFlags & 0x800u) != 0u) continue;
+            const auto pathIt = tables.staticModelPaths.find(reference.baseFormId);
+            if (pathIt == tables.staticModelPaths.end() || pathIt->second.empty()) continue;
+            const std::string& modelPath = pathIt->second;
+            if (isIntentionalAuditModel(modelPath)) {
+                ++intentionalDrops;
+                continue;
+            }
+            const std::string modelKey = toLowerAscii(modelPath);
+            if (!auditedModels.insert(modelKey).second) continue;
+            std::vector<std::uint8_t> bytes;
+            std::string modelError;
+            if (!assets.resolveMesh(modelPath, bytes, modelError)) {
+                visibleFailures.push_back(modelPath + ": unresolved asset: " + modelError);
+                continue;
+            }
+            NifModel model;
+            if (!parseNifStaticMesh(bytes, model, modelError) || model.shapes.empty()) {
+                visibleFailures.push_back(modelPath + ": no rendered geometry: " + modelError);
+                continue;
+            }
+            std::size_t trianglesBefore = 0u;
+            std::size_t trianglesAfter = 0u;
+            std::array<std::size_t, 4> semanticCounts{};
+            for (const NifShape& shape : model.shapes) {
+                trianglesBefore += shape.sourceTriangleCount;
+                trianglesAfter += shape.triangleIndices.size() / 3u;
+                semanticCounts[static_cast<std::size_t>(shape.alphaSemantic)]++;
+            }
+            skippedShapes += model.skippedShapeCount + model.nodeParseFailedCount +
+                             model.unhandledNodeTypeCount;
+            intentionalDrops += model.hiddenShapeCount + model.editorMarkerShapeCount +
+                                model.inactiveSwitchSubtreeCount;
+            if (model.skippedShapeCount != 0u || model.nodeParseFailedCount != 0u ||
+                model.unhandledNodeTypeCount != 0u) {
+                visibleFailures.push_back(modelPath + ": skipped visible shape or subtree");
+            }
+            std::ostringstream diagnostic;
+            diagnostic << "{\"model_path\":" << jsonString(modelPath)
+                       << ",\"shape_count\":" << model.shapes.size()
+                       << ",\"triangles_before_validation\":" << trianglesBefore
+                       << ",\"triangles_after_validation\":" << trianglesAfter
+                       << ",\"skipped_shape_count\":" << model.skippedShapeCount
+                       << ",\"failed_node_count\":" << model.nodeParseFailedCount
+                       << ",\"inactive_switch_subtree_count\":"
+                       << model.inactiveSwitchSubtreeCount
+                       << ",\"failed_node_types\":[";
+            for (std::size_t i = 0; i < model.failedNodeTypes.size(); ++i) {
+                if (i != 0u) diagnostic << ',';
+                diagnostic << jsonString(model.failedNodeTypes[i]);
+            }
+            diagnostic << "],\"materials\":{\"opaque\":" << semanticCounts[0]
+                       << ",\"cutout\":" << semanticCounts[1]
+                       << ",\"explicit_transparency\":" << semanticCounts[2]
+                       << ",\"vertex_fade\":" << semanticCounts[3] << "}}";
+            modelDiagnostics.push_back(diagnostic.str());
+        }
+        for (const ImportedSceneCollisionTriangle& triangle : cell.scene.collisionTriangles) {
+            for (float value : triangle.vertices) {
+                if (!std::isfinite(value)) { ++invalidTriangles; break; }
+            }
+        }
+        built.emplace(grid, std::move(cell));
+    }
+
+    std::size_t collisionSamples = 0u;
+    std::size_t belowSurfaceSamples = 0u;
+    float minimumClearance = std::numeric_limits<float>::infinity();
+    std::vector<std::string> unsafeSamples;
+    for (std::size_t sampleIndex = 0; sampleIndex < samples.size(); ++sampleIndex) {
+        const TourAuditPoint& sample = samples[sampleIndex];
+        const int gridX = static_cast<int>(std::floor(sample.position[0] / kExteriorCellSize));
+        const int gridZ = static_cast<int>(std::floor((-sample.position[2]) / kExteriorCellSize));
+        const auto ownCell = built.find({gridX, gridZ});
+        if (ownCell != built.end()) {
+            float surface = sampleCellTerrain(ownCell->second.record,
+                                              sample.position[0], sample.position[2]);
+            const FalloutWorldspaceRecord* worldDefaults = tables.findWorldspace(worldspaceFormId);
+            if (ownCell->second.record.hasWater) {
+                surface = std::max(surface, ownCell->second.record.waterHeight);
+            } else if (worldDefaults != nullptr && worldDefaults->hasDefaultHeights) {
+                const float terrain = surface;
+                if (!std::isfinite(terrain) || worldDefaults->defaultWaterHeight > terrain) {
+                    surface = std::max(surface, worldDefaults->defaultWaterHeight);
+                }
+            }
+            if (std::isfinite(surface)) {
+                const float clearance = sample.position[1] - surface;
+                minimumClearance = std::min(minimumClearance, clearance);
+                if (clearance < 64.0f) {
+                    ++belowSurfaceSamples;
+                    if (unsafeSamples.size() < 64u) {
+                        std::ostringstream issue;
+                        issue << "{\"sample\":" << sampleIndex
+                              << ",\"reason\":\"surface-clearance\",\"position\":["
+                              << sample.position[0] << ',' << sample.position[1] << ','
+                              << sample.position[2] << "],\"clearance\":" << clearance << '}';
+                        unsafeSamples.push_back(issue.str());
+                    }
+                }
+            }
+        }
+        bool intersects = false;
+        float nearestDistanceSquared = std::numeric_limits<float>::infinity();
+        float nearestTriangle[9]{};
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const auto candidate = built.find({gridX + dx, gridZ + dz});
+                if (candidate == built.end()) continue;
+                for (const ImportedSceneCollisionTriangle& triangle :
+                     candidate->second.scene.collisionTriangles) {
+                    const float distanceSquared =
+                        pointTriangleDistanceSquared(sample.position, triangle.vertices);
+                    if (distanceSquared < nearestDistanceSquared) {
+                        nearestDistanceSquared = distanceSquared;
+                        std::copy_n(triangle.vertices, 9u, nearestTriangle);
+                    }
+                    if (distanceSquared < (48.0f * 48.0f)) {
+                        intersects = true;
+                    }
+                }
+            }
+        }
+        if (intersects) {
+            ++collisionSamples;
+            if (unsafeSamples.size() < 64u) {
+                std::ostringstream issue;
+                issue << "{\"sample\":" << sampleIndex
+                      << ",\"reason\":\"collision-sphere\",\"position\":["
+                      << sample.position[0] << ',' << sample.position[1] << ','
+                      << sample.position[2] << "],\"distance\":"
+                      << std::sqrt(nearestDistanceSquared) << ",\"nearest_triangle\":[";
+                for (int component = 0; component < 9; ++component) {
+                    if (component != 0) issue << ',';
+                    issue << nearestTriangle[component];
+                }
+                issue << "]}";
+                unsafeSamples.push_back(issue.str());
+            }
+        }
+    }
+
+    const bool ok = missingCells == 0u && visibleFailures.empty() && skippedShapes == 0u &&
+                    invalidTriangles == 0u && collisionSamples == 0u && belowSurfaceSamples == 0u;
+    std::cout << std::setprecision(7)
+              << "{\"version\":1,\"ok\":" << (ok ? "true" : "false")
+              << ",\"worldspace\":" << jsonString(worldspace)
+              << ",\"tour\":" << jsonString(tourPath.string())
+              << ",\"load_order_fingerprint\":" << jsonString(order.fingerprint())
+              << ",\"sample_count\":" << samples.size()
+              << ",\"required_cell_count\":" << requiredCells.size()
+              << ",\"built_cell_count\":" << built.size()
+              << ",\"missing_cell_count\":" << missingCells
+              << ",\"collision_sample_count\":" << collisionSamples
+              << ",\"below_surface_sample_count\":" << belowSurfaceSamples
+              << ",\"minimum_surface_clearance\":"
+              << (std::isfinite(minimumClearance) ? std::to_string(minimumClearance) : "null")
+              << ",\"intentional_drop_count\":" << intentionalDrops
+              << ",\"skipped_visible_shape_count\":" << skippedShapes
+              << ",\"invalid_triangle_count\":" << invalidTriangles
+              << ",\"visible_failures\":[";
+    for (std::size_t i = 0; i < visibleFailures.size(); ++i) {
+        if (i != 0u) std::cout << ',';
+        std::cout << jsonString(visibleFailures[i]);
+    }
+    std::cout << "],\"model_diagnostics\":[";
+    for (std::size_t i = 0; i < modelDiagnostics.size(); ++i) {
+        if (i != 0u) std::cout << ',';
+        std::cout << modelDiagnostics[i];
+    }
+    std::cout << "],\"unsafe_samples\":[";
+    for (std::size_t i = 0; i < unsafeSamples.size(); ++i) {
+        if (i != 0u) std::cout << ',';
+        std::cout << unsafeSamples[i];
+    }
+    std::cout << "]}\n";
+    return ok ? 0 : 1;
+}
+
+namespace {
+
+bool resolveProbeContentProfile(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart,
+    odai::importer::fnv::ResolvedContentProfile& profile, std::string& error) {
+    odai::importer::fnv::ContentProfileResolveOptions options;
+    for (int i = optionStart; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--data") == 0 && i + 1 < argc) {
+            options.dataRootOverride = std::filesystem::path(argv[++i]);
+        } else if (std::strcmp(argv[i], "--mods-root") == 0 && i + 1 < argc) {
+            options.modsRoot = std::filesystem::path(argv[++i]);
+        } else if (std::strcmp(argv[i], "--reindex-content") == 0) {
+            options.forceContentReindex = true;
+        }
+    }
+    return odai::importer::fnv::resolveContentProfile(source, options, profile, error);
+}
+
+bool openProfileLoadOrder(
+    const odai::importer::fnv::ResolvedContentProfile& profile,
+    odai::importer::fnv::FalloutLoadOrder& order, std::string& error) {
+    return order.open(profile, error);
+}
+
+int profileCheckCommand(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart) {
+    using namespace odai::importer::fnv;
+    ResolvedContentProfile profile;
+    std::string error;
+    nlohmann::json output;
+    output["profile_source"] = source.string();
+    if (!resolveProbeContentProfile(source, argc, argv, optionStart, profile, error)) {
+        output["ok"] = false;
+        output["error"] = error;
+        std::cout << output.dump(2) << '\n';
+        return 1;
+    }
+    FalloutLoadOrder order;
+    if (!openProfileLoadOrder(profile, order, error)) {
+        output["ok"] = false;
+        output["error"] = error;
+        output["fingerprint"] = profile.fingerprint;
+        std::cout << output.dump(2) << '\n';
+        return 1;
+    }
+    ContentRecordIndex recordIndex;
+    if (!recordIndex.build(order, error)) {
+        output["ok"] = false;
+        output["error"] = "record provenance index failed: " + error;
+        std::cout << output.dump(2) << '\n';
+        return 1;
+    }
+    std::map<std::string, std::size_t> unsupported;
+    const std::set<std::string> scriptExtensions = {
+        ".dll", ".pex", ".psc", ".lua", ".omwscripts"};
+    for (const ContentLayer& layer : profile.layers) {
+        std::error_code scanError;
+        for (std::filesystem::recursive_directory_iterator it(
+                 layer.root, std::filesystem::directory_options::skip_permission_denied,
+                 scanError), end;
+             !scanError && it != end; it.increment(scanError)) {
+            std::error_code typeError;
+            if (!it->is_regular_file(typeError) || typeError) continue;
+            const std::string extension = toLowerAscii(it->path().extension().string());
+            if (scriptExtensions.contains(extension)) ++unsupported[extension];
+        }
+    }
+    nlohmann::json diagnostics = nlohmann::json::array();
+    for (const ContentDiagnostic& item : profile.diagnostics) {
+        diagnostics.push_back({{"severity",
+            item.severity == ContentDiagnosticSeverity::Error ? "error" :
+            item.severity == ContentDiagnosticSeverity::Warning ? "warning" : "info"},
+            {"code", item.code}, {"message", item.message}, {"source", item.source.string()}});
+    }
+    nlohmann::json placed = nlohmann::json::array();
+    for (const FalloutLoadOrderEntry& entry : order.entries()) {
+        placed.push_back({{"name", entry.header.fileName},
+            {"kind", entry.slot.kind == FalloutPluginSlotKind::Light ? "light" : "regular"},
+            {"slot", entry.slot.index}, {"path", entry.path.string()}});
+    }
+    output["ok"] = true;
+    output["name"] = profile.name;
+    output["game"] = bethesdaGameName(profile.game);
+    output["data_root"] = profile.dataRoot.string();
+    output["fingerprint"] = profile.fingerprint;
+    output["layers"] = profile.layers.size();
+    output["plugins"] = std::move(placed);
+    output["archives"] = profile.archives.size();
+    output["record_identities"] = recordIndex.recordCount();
+    output["record_overrides"] = recordIndex.overrideCount();
+    output["record_deletions"] = recordIndex.deletionCount();
+    output["unsupported_executable_content"] = unsupported;
+    output["diagnostics"] = std::move(diagnostics);
+    std::cout << output.dump(2) << '\n';
+    return 0;
+}
+
+std::string normalizedVirtualPath(std::string value) {
+    for (char& c : value) if (c == '/') c = '\\';
+    return toLowerAscii(std::move(value));
+}
+
+int whyCommand(
+    const std::filesystem::path& source, const std::string& key,
+    int argc, char** argv, int optionStart) {
+    using namespace odai::importer::fnv;
+    ResolvedContentProfile profile;
+    std::string error;
+    if (!resolveProbeContentProfile(source, argc, argv, optionStart, profile, error)) {
+        std::cout << "profile failed: " << error << '\n'; return 1;
+    }
+    if (key.rfind("0x", 0u) == 0u) {
+        FalloutLoadOrder order;
+        if (!openProfileLoadOrder(profile, order, error)) {
+            std::cout << "load order failed: " << error << '\n'; return 1;
+        }
+        const auto formId = static_cast<std::uint32_t>(std::strtoul(key.c_str() + 2, nullptr, 16));
+        ContentRecordIndex records;
+        if (!records.build(order, error)) {
+            std::cout << "record index failed: " << error << '\n'; return 1;
+        }
+        const auto* versions = records.versions(formId);
+        if (versions == nullptr || versions->empty()) {
+            const FalloutLoadOrderEntry* owner = order.ownerOf(formId);
+            if (owner == nullptr) { std::cout << "no active plugin owns " << key << '\n'; return 1; }
+            std::cout << key << " is allocated to " << owner->header.fileName
+                      << " but has no indexed record\n";
+            return 1;
+        }
+        for (std::size_t i = 0; i < versions->size(); ++i) {
+            const ContentRecordVersion& version = (*versions)[i];
+            std::cout << (i + 1u == versions->size() ? "WINNER " : "overridden ")
+                      << version.type << " in " << version.pluginName
+                      << (version.deleted ? " [deleted]" : "") << " ("
+                      << version.pluginPath.string() << ")\n";
+        }
+        return 0;
+    }
+    const std::string wanted = normalizedVirtualPath(key);
+    std::vector<std::pair<std::string, std::filesystem::path>> providers;
+    const auto scanRoot = [&](const std::string& name, const std::filesystem::path& root) {
+        std::error_code scanError;
+        for (std::filesystem::recursive_directory_iterator it(
+                 root, std::filesystem::directory_options::skip_permission_denied, scanError), end;
+             !scanError && it != end; it.increment(scanError)) {
+            if (!it->is_regular_file()) continue;
+            std::error_code relativeError;
+            const auto relative = std::filesystem::relative(it->path(), root, relativeError);
+            if (!relativeError && normalizedVirtualPath(relative.generic_string()) == wanted) {
+                providers.emplace_back(name, it->path());
+            }
+        }
+    };
+    scanRoot("base Data", profile.dataRoot);
+    for (const ContentLayer& layer : profile.layers) scanRoot(layer.name, layer.root);
+    for (const ContentArchive& item : profile.archives) {
+        BsaArchive archive;
+        if (!archive.open(item.path)) continue;
+        if (archive.find(wanted) != nullptr) providers.emplace_back("archive", item.path);
+    }
+    if (providers.empty()) { std::cout << key << " has no provider\n"; return 1; }
+    for (std::size_t i = 0; i < providers.size(); ++i) {
+        std::cout << (i + 1u == providers.size() ? "WINNER " : "overridden ")
+                  << providers[i].first << ": " << providers[i].second.string() << '\n';
+    }
+    return 0;
+}
+
+int conflictsCommand(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart) {
+    using namespace odai::importer::fnv;
+    ResolvedContentProfile profile;
+    std::string error;
+    if (!resolveProbeContentProfile(source, argc, argv, optionStart, profile, error)) {
+        std::cout << "profile failed: " << error << '\n'; return 1;
+    }
+    std::unordered_map<std::string, std::vector<std::string>> providers;
+    for (const ContentLayer& layer : profile.layers) {
+        std::error_code scanError;
+        for (std::filesystem::recursive_directory_iterator it(
+                 layer.root, std::filesystem::directory_options::skip_permission_denied,
+                 scanError), end;
+             !scanError && it != end; it.increment(scanError)) {
+            if (!it->is_regular_file()) continue;
+            std::error_code relativeError;
+            const auto relative = std::filesystem::relative(it->path(), layer.root, relativeError);
+            if (!relativeError) providers[normalizedVirtualPath(relative.generic_string())].push_back(layer.name);
+        }
+    }
+    nlohmann::json conflicts = nlohmann::json::array();
+    std::size_t total = 0u;
+    for (const auto& [path, sources] : providers) {
+        if (sources.size() < 2u) continue;
+        ++total;
+        if (conflicts.size() < 100u) conflicts.push_back({{"path", path}, {"providers", sources},
+            {"winner", sources.back()}});
+    }
+    std::cout << nlohmann::json({{"profile", profile.name}, {"conflict_count", total},
+        {"shown", conflicts.size()}, {"conflicts", std::move(conflicts)}}).dump(2) << '\n';
+    return 0;
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::strcmp(argv[1], "--profilecheck") == 0) {
+        return profileCheckCommand(argv[2], argc, argv, 3);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--why") == 0) {
+        return whyCommand(argv[2], argv[3], argc, argv, 4);
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--conflicts") == 0) {
+        return conflictsCommand(argv[2], argc, argv, 3);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--export-profile") == 0) {
+        odai::importer::fnv::ResolvedContentProfile profile;
+        std::string error;
+        if (!resolveProbeContentProfile(argv[2], argc, argv, 4, profile, error) ||
+            !odai::importer::fnv::writeOdaiContentProfile(argv[3], profile, error)) {
+            std::cout << "export failed: " << error << '\n'; return 1;
+        }
+        std::cout << "wrote " << argv[3] << '\n'; return 0;
+    }
     if (argc < 3) {
         printUsage();
         return 2;
@@ -4596,6 +5608,97 @@ int main(int argc, char** argv) {
         return probePlugin(
             dataPath / argv[3],
             argc >= 5 ? static_cast<std::size_t>(std::atoi(argv[4])) : 20u);
+    }
+    if (mode == "--loadorder") {
+        std::vector<std::string> plugins;
+        std::filesystem::path source;
+        std::string error;
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 4 ? std::optional<std::filesystem::path>(argv[3]) : std::nullopt;
+        if (!odai::importer::fnv::resolveInstalledSkyrimPluginList(
+                dataPath, explicitList, plugins, source, error)) {
+            std::cout << "resolve failed: " << error << "\n";
+            return 1;
+        }
+        odai::importer::fnv::FalloutLoadOrder order;
+        if (!order.open(dataPath, plugins, error)) {
+            std::cout << "open failed: " << error << "\n";
+            return 1;
+        }
+        std::cout << "source: "
+                  << (source.empty() ? std::string("installed official content")
+                                     : source.string())
+                  << "\n";
+        for (const auto& entry : order.entries()) {
+            std::cout << (entry.slot.kind ==
+                                  odai::importer::fnv::FalloutPluginSlotKind::Light
+                              ? "light   " : "regular ")
+                      << entry.slot.index << "  " << entry.header.fileName << "\n";
+        }
+        std::cout << "fingerprint: " << order.fingerprint() << "\n";
+        return 0;
+    }
+    if (mode == "--doorcheck") {
+        std::vector<std::string> plugins;
+        std::filesystem::path source;
+        std::string error;
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 4 ? std::optional<std::filesystem::path>(argv[3]) : std::nullopt;
+        if (!odai::importer::fnv::resolveInstalledSkyrimPluginList(
+                dataPath, explicitList, plugins, source, error)) {
+            std::cout << "resolve failed: " << error << "\n";
+            return 1;
+        }
+        odai::importer::fnv::FalloutLoadOrder order;
+        if (!order.open(dataPath, plugins, error)) {
+            std::cout << "open failed: " << error << "\n";
+            return 1;
+        }
+        odai::importer::fnv::FalloutCellIndex index;
+        if (!odai::importer::fnv::buildFalloutCellIndex(order, index, error)) {
+            std::cout << "index failed: " << error << "\n";
+            return 1;
+        }
+        std::size_t doors = 0u;
+        std::size_t unresolved = 0u;
+        std::size_t failedCells = 0u;
+        for (const auto& entry : index.cells) {
+            odai::importer::fnv::FalloutCellRecord cell;
+            if (!odai::importer::fnv::extractFalloutCellMerged(
+                    index, order, entry, cell, error)) {
+                ++failedCells;
+                continue;
+            }
+            for (const auto& reference : cell.references) {
+                if (!reference.hasTeleport || reference.isDeleted) {
+                    continue;
+                }
+                ++doors;
+                if (!index.cellIndexByReferenceFormId.contains(
+                        reference.teleportTargetRefFormId)) {
+                    ++unresolved;
+                    if (unresolved <= 20u) {
+                        std::cout << "unresolved door 0x" << std::hex
+                                  << reference.formId << " -> 0x"
+                                  << reference.teleportTargetRefFormId << std::dec << "\n";
+                    }
+                }
+            }
+        }
+        std::cout << "doors=" << doors << " unresolved=" << unresolved
+                  << " failedCells=" << failedCells << " markers="
+                  << index.mapMarkers.size() << "\n";
+        return (unresolved == 0u && failedCells == 0u) ? 0 : 1;
+    }
+    if (mode == "--routecheck") {
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 4 ? std::optional<std::filesystem::path>(argv[3]) : std::nullopt;
+        return checkSkyrimTraversalRoute(dataPath, explicitList);
+    }
+    if (mode == "--tourcheck" && argc >= 5) {
+        const std::optional<std::filesystem::path> explicitList =
+            argc >= 6 ? std::optional<std::filesystem::path>(argv[5]) : std::nullopt;
+        return checkSkyrimTour(dataPath, argv[3], argv[4], explicitList);
     }
     if (mode == "--refs" && argc >= 5) {
         return probeRefsByBaseType(

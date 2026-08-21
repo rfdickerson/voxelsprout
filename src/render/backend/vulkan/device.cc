@@ -4,7 +4,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 #include <imgui.h>
@@ -17,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -36,7 +36,25 @@ namespace odai::render {
 
 namespace {
 
-constexpr const char* kPipelineCacheFilePath = "odai_pipeline_cache.bin";
+std::filesystem::path pipelineCacheFilePath() {
+    if (const char* overridePath = std::getenv("ODAI_PIPELINE_CACHE")) {
+        if (*overridePath != '\0') {
+            return overridePath;
+        }
+    }
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
+        if (*xdg != '\0') {
+            return std::filesystem::path(xdg) / "odai" / "vulkan_pipeline_cache.bin";
+        }
+    }
+    if (const char* home = std::getenv("HOME")) {
+        if (*home != '\0') {
+            return std::filesystem::path(home) / ".cache" / "odai" /
+                "vulkan_pipeline_cache.bin";
+        }
+    }
+    return std::filesystem::temp_directory_path() / "odai-vulkan-pipeline-cache.bin";
+}
 
 } // namespace
 
@@ -50,7 +68,8 @@ bool RendererBackend::createPipelineCache() {
     // or a GPU swap (implementations must reject mismatches anyway, but a
     // corrupt file could still fail cache creation outright).
     std::vector<char> initialData;
-    std::ifstream cacheFile(kPipelineCacheFilePath, std::ios::binary | std::ios::ate);
+    const std::filesystem::path cachePath = pipelineCacheFilePath();
+    std::ifstream cacheFile(cachePath, std::ios::binary | std::ios::ate);
     if (cacheFile) {
         const std::streamsize size = cacheFile.tellg();
         if (size >= static_cast<std::streamsize>(sizeof(VkPipelineCacheHeaderVersionOne))) {
@@ -96,7 +115,7 @@ bool RendererBackend::createPipelineCache() {
 
     setObjectName(VK_OBJECT_TYPE_PIPELINE_CACHE, vkHandleToUint64(m_pipelineCache), "renderer.pipelineCache");
     VOX_LOGI("render") << "pipeline cache ready (loaded " << initialData.size() << " bytes from "
-                       << kPipelineCacheFilePath << ")\n";
+                       << cachePath.string() << ")\n";
     return true;
 }
 
@@ -109,12 +128,16 @@ void RendererBackend::savePipelineCache() {
     if (vkGetPipelineCacheData(m_device, m_pipelineCache, &dataSize, nullptr) == VK_SUCCESS && dataSize > 0) {
         std::vector<char> data(dataSize);
         if (vkGetPipelineCacheData(m_device, m_pipelineCache, &dataSize, data.data()) == VK_SUCCESS) {
-            std::ofstream cacheFile(kPipelineCacheFilePath, std::ios::binary | std::ios::trunc);
+            const std::filesystem::path cachePath = pipelineCacheFilePath();
+            std::error_code directoryError;
+            std::filesystem::create_directories(cachePath.parent_path(), directoryError);
+            std::ofstream cacheFile(cachePath, std::ios::binary | std::ios::trunc);
             if (cacheFile && cacheFile.write(data.data(), static_cast<std::streamsize>(dataSize))) {
                 VOX_LOGI("render") << "pipeline cache saved (" << dataSize << " bytes to "
-                                   << kPipelineCacheFilePath << ")\n";
+                                   << cachePath.string() << ")\n";
             } else {
-                VOX_LOGW("render") << "failed writing pipeline cache file: " << kPipelineCacheFilePath << "\n";
+                VOX_LOGW("render") << "failed writing pipeline cache file: "
+                                   << cachePath.string() << "\n";
             }
         }
     }

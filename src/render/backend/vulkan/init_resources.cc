@@ -4,7 +4,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 #include <imgui.h>
@@ -314,6 +313,140 @@ bool loadRgbaImageFile(const std::filesystem::path& path, DdsRgbaImage& outImage
     return true;
 }
 
+void recenterRgbaNormalMapXY(std::vector<std::uint8_t>& pixelData) {
+    const std::size_t pixelCount = pixelData.size() / 4u;
+    if (pixelCount == 0u) {
+        return;
+    }
+
+    std::uint64_t redSum = 0u;
+    std::uint64_t greenSum = 0u;
+    for (std::size_t pixelIndex = 0u; pixelIndex < pixelCount; ++pixelIndex) {
+        redSum += pixelData[pixelIndex * 4u + 0u];
+        greenSum += pixelData[pixelIndex * 4u + 1u];
+    }
+
+    // Generated normal maps can carry a small image-wide colour bias even when
+    // their local ripple detail is good. Remove that DC component from the
+    // bundled map so it perturbs the authored water plane without imposing a
+    // permanent surface tilt. Explicit ODAI_WATER_NORMAL overrides are left as
+    // authored.
+    constexpr double kNeutralEncodedNormal = 127.5;
+    const double redOffset = kNeutralEncodedNormal -
+        (static_cast<double>(redSum) / static_cast<double>(pixelCount));
+    const double greenOffset = kNeutralEncodedNormal -
+        (static_cast<double>(greenSum) / static_cast<double>(pixelCount));
+    for (std::size_t pixelIndex = 0u; pixelIndex < pixelCount; ++pixelIndex) {
+        const std::size_t byteOffset = pixelIndex * 4u;
+        pixelData[byteOffset + 0u] = static_cast<std::uint8_t>(std::lround(std::clamp(
+            static_cast<double>(pixelData[byteOffset + 0u]) + redOffset,
+            0.0,
+            255.0)));
+        pixelData[byteOffset + 1u] = static_cast<std::uint8_t>(std::lround(std::clamp(
+            static_cast<double>(pixelData[byteOffset + 1u]) + greenOffset,
+            0.0,
+            255.0)));
+    }
+}
+
+std::vector<DdsMipInfo> appendRgbaNormalMipChain(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::vector<std::uint8_t>& pixelData
+) {
+    std::vector<DdsMipInfo> mipInfos;
+    if (width == 0u || height == 0u) {
+        return mipInfos;
+    }
+
+    const VkDeviceSize baseSize =
+        static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4u;
+    if (pixelData.size() < static_cast<std::size_t>(baseSize)) {
+        return mipInfos;
+    }
+
+    mipInfos.push_back(DdsMipInfo{width, height, 0u, baseSize});
+    std::uint32_t sourceWidth = width;
+    std::uint32_t sourceHeight = height;
+    while (sourceWidth > 1u || sourceHeight > 1u) {
+        const DdsMipInfo& sourceMip = mipInfos.back();
+        const std::uint32_t destinationWidth = std::max(1u, (sourceWidth + 1u) / 2u);
+        const std::uint32_t destinationHeight = std::max(1u, (sourceHeight + 1u) / 2u);
+        const VkDeviceSize destinationOffset = static_cast<VkDeviceSize>(pixelData.size());
+        const VkDeviceSize destinationSize =
+            static_cast<VkDeviceSize>(destinationWidth) *
+            static_cast<VkDeviceSize>(destinationHeight) * 4u;
+        pixelData.resize(pixelData.size() + static_cast<std::size_t>(destinationSize));
+
+        for (std::uint32_t y = 0u; y < destinationHeight; ++y) {
+            for (std::uint32_t x = 0u; x < destinationWidth; ++x) {
+                float averagedX = 0.0f;
+                float averagedY = 0.0f;
+                float averagedZ = 0.0f;
+                float averagedAlpha = 0.0f;
+                std::uint32_t sampleCount = 0u;
+                for (std::uint32_t oy = 0u; oy < 2u; ++oy) {
+                    const std::uint32_t sourceY = std::min((y * 2u) + oy, sourceHeight - 1u);
+                    for (std::uint32_t ox = 0u; ox < 2u; ++ox) {
+                        const std::uint32_t sourceX = std::min((x * 2u) + ox, sourceWidth - 1u);
+                        const std::size_t sourceIndex =
+                            static_cast<std::size_t>(sourceMip.offset) +
+                            ((static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) * 4u);
+                        const float normalX =
+                            (static_cast<float>(pixelData[sourceIndex + 0u]) / 127.5f) - 1.0f;
+                        const float normalY =
+                            (static_cast<float>(pixelData[sourceIndex + 1u]) / 127.5f) - 1.0f;
+                        const float encodedZ =
+                            (static_cast<float>(pixelData[sourceIndex + 2u]) / 127.5f) - 1.0f;
+                        const float reconstructedZ = std::sqrt(std::max(
+                            1.0f - (normalX * normalX) - (normalY * normalY),
+                            0.0f));
+                        // BC5-style overrides commonly leave blue empty while PNG
+                        // normals carry it. Prefer a valid positive encoded Z, but
+                        // reconstruct it when only the tangent X/Y pair is useful.
+                        const float normalZ = encodedZ > 0.0f ? encodedZ : reconstructedZ;
+                        const float inverseLength = 1.0f / std::sqrt(std::max(
+                            (normalX * normalX) + (normalY * normalY) + (normalZ * normalZ),
+                            1.0e-8f));
+                        averagedX += normalX * inverseLength;
+                        averagedY += normalY * inverseLength;
+                        averagedZ += normalZ * inverseLength;
+                        averagedAlpha += static_cast<float>(pixelData[sourceIndex + 3u]);
+                        ++sampleCount;
+                    }
+                }
+
+                const float inverseLength = 1.0f / std::sqrt(std::max(
+                    (averagedX * averagedX) +
+                    (averagedY * averagedY) +
+                    (averagedZ * averagedZ),
+                    1.0e-8f));
+                const std::size_t destinationIndex =
+                    static_cast<std::size_t>(destinationOffset) +
+                    ((static_cast<std::size_t>(y) * destinationWidth + x) * 4u);
+                const auto encodeNormal = [](float component) {
+                    return static_cast<std::uint8_t>(std::lround(
+                        std::clamp((component * 0.5f) + 0.5f, 0.0f, 1.0f) * 255.0f));
+                };
+                pixelData[destinationIndex + 0u] = encodeNormal(averagedX * inverseLength);
+                pixelData[destinationIndex + 1u] = encodeNormal(averagedY * inverseLength);
+                pixelData[destinationIndex + 2u] = encodeNormal(averagedZ * inverseLength);
+                pixelData[destinationIndex + 3u] = static_cast<std::uint8_t>(std::lround(
+                    averagedAlpha / static_cast<float>(sampleCount)));
+            }
+        }
+
+        mipInfos.push_back(DdsMipInfo{
+            destinationWidth,
+            destinationHeight,
+            destinationOffset,
+            destinationSize});
+        sourceWidth = destinationWidth;
+        sourceHeight = destinationHeight;
+    }
+    return mipInfos;
+}
+
 std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& relativePath) {
     std::vector<std::filesystem::path> baseCandidates;
     baseCandidates.reserve(6);
@@ -464,7 +597,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
         waterNormalOverride != nullptr && waterNormalOverride[0] != '\0';
     const std::filesystem::path waterNormalPath = hasWaterNormalOverride
         ? std::filesystem::path{waterNormalOverride}
-        : resolveRendererAssetPath("assets/water.dds");
+        : resolveRendererAssetPath("assets/textures/morrowind_water_normal.png");
     if (supportsBc5WaterNormalTexture(m_physicalDevice)) {
         DdsCompressedImage ddsImage{};
         if (loadCompressedDdsFile(
@@ -741,7 +874,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
                                 samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
                                 samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
                                 samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
-                                    ? std::min(8.0f, m_maxSamplerAnisotropy)
+                                    ? m_maxSamplerAnisotropy
                                     : 1.0f;
                                 samplerCreateInfo.minLod = 0.0f;
                                 samplerCreateInfo.maxLod = static_cast<float>(ddsImage.mipLevels - 1u);
@@ -793,16 +926,32 @@ bool RendererBackend::createWaterNormalTextureResources() {
     std::vector<std::uint8_t> pixelData = loadedRgbaWaterNormal
         ? std::move(rgbaWaterNormal.pixelData)
         : generateWaterNormalTexturePixels();
+    if (loadedRgbaWaterNormal && !hasWaterNormalOverride) {
+        recenterRgbaNormalMapXY(pixelData);
+    }
     const std::uint32_t waterNormalWidth = loadedRgbaWaterNormal
         ? rgbaWaterNormal.width
         : kGeneratedWaterNormalTextureSize;
     const std::uint32_t waterNormalHeight = loadedRgbaWaterNormal
         ? rgbaWaterNormal.height
         : kGeneratedWaterNormalTextureSize;
+    const std::vector<DdsMipInfo> waterNormalMipInfos = appendRgbaNormalMipChain(
+        waterNormalWidth,
+        waterNormalHeight,
+        pixelData);
+    if (waterNormalMipInfos.empty()) {
+        VOX_LOGW("render") << "failed to build water normal mip chain";
+        return false;
+    }
+    const std::uint32_t waterNormalMipLevels =
+        static_cast<std::uint32_t>(waterNormalMipInfos.size());
     if (loadedRgbaWaterNormal) {
-        VOX_LOGI("render") << "external RGBA water normal texture ready: "
+        VOX_LOGI("render") << (hasWaterNormalOverride
+                ? "override RGBA water normal texture ready: "
+                : "bundled RGBA water normal texture ready: ")
                            << waterNormalPath.string() << " ("
-                           << waterNormalWidth << "x" << waterNormalHeight << ")";
+                           << waterNormalWidth << "x" << waterNormalHeight
+                           << ", mips=" << waterNormalMipLevels << ")";
     } else if (hasWaterNormalOverride) {
         VOX_LOGW("render") << "failed to read ODAI_WATER_NORMAL as BC5 DDS or RGBA image: "
                            << waterNormalPath.string() << "; falling back to generated normal";
@@ -813,7 +962,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
     imageCreateInfo.extent = {waterNormalWidth, waterNormalHeight, 1u};
-    imageCreateInfo.mipLevels = 1;
+    imageCreateInfo.mipLevels = waterNormalMipLevels;
     imageCreateInfo.arrayLayers = 1;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -885,7 +1034,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
         VkImageSubresourceRange subresourceRange{};
         subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         subresourceRange.baseMipLevel = 0;
-        subresourceRange.levelCount = 1;
+        subresourceRange.levelCount = waterNormalMipLevels;
         subresourceRange.baseArrayLayer = 0;
         subresourceRange.layerCount = 1;
 
@@ -901,21 +1050,27 @@ bool RendererBackend::createWaterNormalTextureResources() {
             return false;
         }
 
-        VkMemoryToImageCopyEXT copyRegion{};
-        copyRegion.sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT;
-        copyRegion.pHostPointer = pixelData.data();
-        copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copyRegion.imageSubresource.mipLevel = 0;
-        copyRegion.imageSubresource.baseArrayLayer = 0;
-        copyRegion.imageSubresource.layerCount = 1;
-        copyRegion.imageExtent = {waterNormalWidth, waterNormalHeight, 1u};
+        std::vector<VkMemoryToImageCopyEXT> copyRegions;
+        copyRegions.reserve(waterNormalMipInfos.size());
+        for (std::uint32_t mipLevel = 0u; mipLevel < waterNormalMipLevels; ++mipLevel) {
+            const DdsMipInfo& mipInfo = waterNormalMipInfos[mipLevel];
+            VkMemoryToImageCopyEXT copyRegion{};
+            copyRegion.sType = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT;
+            copyRegion.pHostPointer = pixelData.data() + static_cast<std::size_t>(mipInfo.offset);
+            copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copyRegion.imageSubresource.mipLevel = mipLevel;
+            copyRegion.imageSubresource.baseArrayLayer = 0;
+            copyRegion.imageSubresource.layerCount = 1;
+            copyRegion.imageExtent = {mipInfo.width, mipInfo.height, 1u};
+            copyRegions.push_back(copyRegion);
+        }
 
         VkCopyMemoryToImageInfoEXT copyInfo{};
         copyInfo.sType = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT;
         copyInfo.dstImage = m_waterNormalTextureImage;
         copyInfo.dstImageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        copyInfo.regionCount = 1;
-        copyInfo.pRegions = &copyRegion;
+        copyInfo.regionCount = static_cast<std::uint32_t>(copyRegions.size());
+        copyInfo.pRegions = copyRegions.data();
         result = m_copyMemoryToImage(m_device, &copyInfo);
         if (result != VK_SUCCESS) {
             logVkFailure("vkCopyMemoryToImageEXT(waterNormal)", result);
@@ -1011,19 +1166,30 @@ bool RendererBackend::createWaterNormalTextureResources() {
                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                        VK_IMAGE_ASPECT_COLOR_BIT);
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        0u, 1u, 0u, waterNormalMipLevels);
 
-                    VkBufferImageCopy copyRegion{};
-                    copyRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                    copyRegion.imageExtent = {waterNormalWidth, waterNormalHeight, 1u};
+                    std::vector<VkBufferImageCopy> copyRegions;
+                    copyRegions.reserve(waterNormalMipInfos.size());
+                    for (std::uint32_t mipLevel = 0u; mipLevel < waterNormalMipLevels; ++mipLevel) {
+                        const DdsMipInfo& mipInfo = waterNormalMipInfos[mipLevel];
+                        VkBufferImageCopy copyRegion{};
+                        copyRegion.bufferOffset = mipInfo.offset;
+                        copyRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, mipLevel, 0, 1};
+                        copyRegion.imageExtent = {mipInfo.width, mipInfo.height, 1u};
+                        copyRegions.push_back(copyRegion);
+                    }
                     vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, m_waterNormalTextureImage,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        static_cast<std::uint32_t>(copyRegions.size()),
+                        copyRegions.data());
 
                     transitionImageLayout(commandBuffer, m_waterNormalTextureImage,
                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-                        VK_IMAGE_ASPECT_COLOR_BIT);
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        0u, 1u, 0u, waterNormalMipLevels);
 
                     result = vkEndCommandBuffer(commandBuffer);
                     if (result == VK_SUCCESS) {
@@ -1051,7 +1217,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
     viewCreateInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
     viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewCreateInfo.subresourceRange.baseMipLevel = 0;
-    viewCreateInfo.subresourceRange.levelCount = 1;
+    viewCreateInfo.subresourceRange.levelCount = waterNormalMipLevels;
     viewCreateInfo.subresourceRange.baseArrayLayer = 0;
     viewCreateInfo.subresourceRange.layerCount = 1;
     result = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &m_waterNormalTextureImageView);
@@ -1070,8 +1236,11 @@ bool RendererBackend::createWaterNormalTextureResources() {
     samplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerCreateInfo.minLod = 0.0f;
-    samplerCreateInfo.maxLod = 0.0f;
-    samplerCreateInfo.maxAnisotropy = 1.0f;
+    samplerCreateInfo.maxLod = static_cast<float>(waterNormalMipLevels - 1u);
+    samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
+    samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
+        ? m_maxSamplerAnisotropy
+        : 1.0f;
     result = vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_waterNormalTextureSampler);
     if (result != VK_SUCCESS) {
         logVkFailure("vkCreateSampler(waterNormal)", result);
@@ -1080,7 +1249,8 @@ bool RendererBackend::createWaterNormalTextureResources() {
     setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_waterNormalTextureSampler), "water.normal.sampler");
     if (!loadedRgbaWaterNormal) {
         VOX_LOGI("render") << "generated subtle water normal texture ready: "
-                           << waterNormalWidth << "x" << waterNormalHeight;
+                           << waterNormalWidth << "x" << waterNormalHeight
+                           << ", mips=" << waterNormalMipLevels;
     }
     return true;
 }

@@ -30,7 +30,7 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // This file used to carry every layout back to v15 -- a legacy stride table,
 // three field-by-field expansion paths, and a version gate on every section.
 // That machinery served files nobody has. A cooked scene is either a cell
-// cache, keyed by kCellBuildVersion (31) AND the plugin's size and mtime, or a
+// cache, keyed by kCellBuildVersion (46) AND the plugin/load-order fingerprint, or a
 // hand-cooked .bin from a tree old enough to predate several vertex widenings;
 // in both cases the current build cannot consult it and would rebuild anyway.
 // The reader rejects anything below the floor cleanly and the caller rebuilds,
@@ -46,11 +46,14 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v26 appends placed particle emitters after the alpha-authored byte. They are
 // field-written (not raw-blitted) so the renderer-facing preset can evolve
 // without inheriting a platform ABI.
-constexpr std::uint32_t kImportedSceneVersion = 28u;
+// v29 resolves streamed door destinations and appends authored static
+// collision triangles. Cell caches carrying the old cooked-scene-only door
+// shape cannot be interpreted as the new one, so this is a real format bump.
+constexpr std::uint32_t kImportedSceneVersion = 29u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
-    static_cast<std::uint8_t>(TextureFormat::BC1Linear);
+    static_cast<std::uint8_t>(TextureFormat::RGBA8Srgb);
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
@@ -70,6 +73,10 @@ bool readString(std::istream& input, std::string& out);
 void writeSceneMaterials(std::ostream& output, const std::vector<ImportedSceneMaterial>& materials);
 void writeSceneDoors(std::ostream& output, const std::vector<ImportedSceneDoor>& doors);
 bool readSceneDoors(std::istream& input, std::vector<ImportedSceneDoor>& out);
+void writeSceneCollision(
+    std::ostream& output, const std::vector<ImportedSceneCollisionTriangle>& triangles);
+bool readSceneCollision(
+    std::istream& input, std::vector<ImportedSceneCollisionTriangle>& out);
 void writeSceneParticleEmitters(
     std::ostream& output, const std::vector<ImportedSceneParticleEmitter>& emitters);
 bool readSceneParticleEmitters(
@@ -243,7 +250,8 @@ bool collectTextureAlphaBands(const ImportedSceneTexture& texture, AlphaBandCoun
         (static_cast<std::size_t>(texture.width) + 3u) / 4u *
         ((static_cast<std::size_t>(texture.height) + 3u) / 4u);
     switch (texture.format) {
-        case TextureFormat::RGBA8: {
+        case TextureFormat::RGBA8:
+        case TextureFormat::RGBA8Srgb: {
             const std::size_t basePixelCount = static_cast<std::size_t>(texture.width) * texture.height;
             const std::size_t baseByteCount = basePixelCount * 4u;
             if (texture.rgba8.size() < baseByteCount) {
@@ -561,6 +569,13 @@ void writeSceneDoors(std::ostream& output, const std::vector<ImportedSceneDoor>&
         output.write(reinterpret_cast<const char*>(door.arrivalPosition), sizeof(door.arrivalPosition));
         writeValue(output, door.arrivalYawDegrees);
         writeString(output, door.targetCellEditorId);
+        writeValue(output, door.sourceReferenceFormId);
+        writeValue(output, door.targetCellFormId);
+        writeValue(output, door.targetWorldspaceFormId);
+        writeString(output, door.targetWorldspaceEditorId);
+        writeValue(output, static_cast<std::uint8_t>(door.targetKind));
+        writeValue(output, static_cast<std::uint8_t>(door.locked ? 1u : 0u));
+        writeValue(output, door.lockLevel);
     }
 }
 
@@ -574,7 +589,44 @@ bool readSceneDoors(std::istream& input, std::vector<ImportedSceneDoor>& out) {
         if (!readExact(input, door.position, sizeof(door.position)) ||
             !readExact(input, door.arrivalPosition, sizeof(door.arrivalPosition)) ||
             !readValue(input, door.arrivalYawDegrees) ||
-            !readString(input, door.targetCellEditorId)) {
+            !readString(input, door.targetCellEditorId) ||
+            !readValue(input, door.sourceReferenceFormId) ||
+            !readValue(input, door.targetCellFormId) ||
+            !readValue(input, door.targetWorldspaceFormId) ||
+            !readString(input, door.targetWorldspaceEditorId)) {
+            return false;
+        }
+        std::uint8_t kind = 0u;
+        std::uint8_t locked = 0u;
+        if (!readValue(input, kind) ||
+            kind > static_cast<std::uint8_t>(ImportedSceneDoorTargetKind::Exterior) ||
+            !readValue(input, locked) || !readValue(input, door.lockLevel)) {
+            return false;
+        }
+        door.targetKind = static_cast<ImportedSceneDoorTargetKind>(kind);
+        door.locked = locked != 0u;
+    }
+    return true;
+}
+
+void writeSceneCollision(
+    std::ostream& output, const std::vector<ImportedSceneCollisionTriangle>& triangles) {
+    writeValue(output, static_cast<std::uint32_t>(triangles.size()));
+    for (const ImportedSceneCollisionTriangle& triangle : triangles) {
+        output.write(
+            reinterpret_cast<const char*>(triangle.vertices), sizeof(triangle.vertices));
+    }
+}
+
+bool readSceneCollision(
+    std::istream& input, std::vector<ImportedSceneCollisionTriangle>& out) {
+    std::uint32_t count = 0u;
+    if (!readValue(input, count) || count > 100000000u) {
+        return false;
+    }
+    out.resize(count);
+    for (ImportedSceneCollisionTriangle& triangle : out) {
+        if (!readExact(input, triangle.vertices, sizeof(triangle.vertices))) {
             return false;
         }
     }
@@ -1272,18 +1324,39 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         // whose cooker never filled these reads exactly as
                         // before.
                         bool hasTerrainLayer = false;
+                        bool hasNormalizedTerrainLayers = false;
                         float layerWeights[kImportedSceneMaxTerrainLayers] = {};
                         for (int layer = 0; layer < kImportedSceneMaxTerrainLayers; ++layer) {
-                            dstVertex.layerTextureIndex[layer] = srcVertex.layerTextureIndex[layer];
+                            const std::uint32_t sourceTexture = srcVertex.layerTextureIndex[layer];
+                            if (sourceTexture == kImportedSceneTerrainNormalizedBlendMarker) {
+                                // A build-time semantic, not a real texture.
+                                // Consume it here so packed/cooked scenes never
+                                // retain the sentinel as a bindless index.
+                                dstVertex.layerTextureIndex[layer] = kImportedSceneNoTerrainLayer;
+                                layerWeights[layer] = 0.0f;
+                                hasNormalizedTerrainLayers = true;
+                                continue;
+                            }
+                            dstVertex.layerTextureIndex[layer] = sourceTexture;
                             layerWeights[layer] = srcVertex.layerWeight[layer];
-                            if (srcVertex.layerTextureIndex[layer] != kImportedSceneNoTerrainLayer &&
-                                srcVertex.layerWeight[layer] > 0.0f) {
+                            // Layer IDs and the enabled flag are flat shader
+                            // inputs while weights interpolate. A layer declared
+                            // by the patch must therefore keep the flag set even
+                            // at a corner whose own weight is zero; otherwise a
+                            // provoking zero corner disables the blend across
+                            // the whole triangle.
+                            if (srcVertex.layerTextureIndex[layer] !=
+                                kImportedSceneNoTerrainLayer) {
                                 hasTerrainLayer = true;
                             }
                         }
                         dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(layerWeights);
                         if (hasTerrainLayer) {
                             dstVertex.flags |= kImportedSceneMaterialFlagTerrainLayers;
+                            if (hasNormalizedTerrainLayers) {
+                                dstVertex.flags |=
+                                    kImportedSceneMaterialFlagTerrainNormalizedLayers;
+                            }
                         }
                         remappedIndex = static_cast<std::uint32_t>(scene.packedVertices.size());
                         scene.packedVertices.push_back(dstVertex);
@@ -1673,6 +1746,8 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     writeSceneParticleEmitters(output, scene.particleEmitters);
     // v28: placed rigid environmental machinery tracks.
     writeSceneRigidAnimations(output, scene.rigidAnimations);
+    // v29: authored static collision, already transformed to scene space.
+    writeSceneCollision(output, scene.collisionTriangles);
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -1936,6 +2011,11 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
             "Failed to read imported-scene rigid animations: " + inputPath.string());
         return false;
     }
+    if (!readSceneCollision(input, scene.collisionTriangles)) {
+        setLastImportedSceneError(
+            "Failed to read imported scene collision: " + inputPath.string());
+        return false;
+    }
 
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
@@ -2182,6 +2262,11 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
     if (!readSceneRigidAnimations(input, scene.rigidAnimations)) {
         setLastImportedSceneError(
             "Failed to read imported-scene rigid animations: " + inputPath.string());
+        return false;
+    }
+    if (!readSceneCollision(input, scene.collisionTriangles)) {
+        setLastImportedSceneError(
+            "Failed to read imported scene collision: " + inputPath.string());
         return false;
     }
 

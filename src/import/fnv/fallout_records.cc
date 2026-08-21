@@ -194,11 +194,12 @@ void parseLightRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     scene.lights.push_back(std::move(entry));
 }
 
-// REGN. Only EDID and RDMP are read -- see FalloutRegionRecord for why the
-// displayed name is RDMP and why a region without one is not a fallback case.
+// REGN display identity, coverage polygons, and authored ambient sound entries.
 void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     FalloutRegionRecord entry{};
     entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    std::uint32_t regionDataType = 0u;
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "EDID") {
             entry.editorId = subrecordString(sub);
@@ -211,9 +212,79 @@ void parseRegionRecord(const EsmRecordView& record, FalloutSceneData& scene) {
             if (sub.size == 4u) {
                 entry.mapNameStringId = readU32(sub.data);
             }
+        } else if (sub.type == "WNAM" && sub.size >= 4u) {
+            entry.worldspaceFormId = readU32(sub.data);
+        } else if (sub.type == "RPLI") {
+            entry.polygons.emplace_back();
+        } else if (sub.type == "RPLD" && sub.size >= 8u) {
+            if (entry.polygons.empty()) {
+                entry.polygons.emplace_back();
+            }
+            FalloutRegionRecord::Polygon& polygon = entry.polygons.back();
+            polygon.points.resize((sub.size / 8u) * 2u);
+            std::memcpy(polygon.points.data(), sub.data,
+                        polygon.points.size() * sizeof(float));
+        } else if (sub.type == "RDAT" && sub.size >= 4u) {
+            regionDataType = readU32(sub.data);
+        } else if (sub.type == "RDSA" && regionDataType == 7u) {
+            for (std::size_t offset = 0u; offset + 12u <= sub.size; offset += 12u) {
+                FalloutRegionRecord::Sound sound;
+                sound.descriptorFormId = readU32(sub.data + offset);
+                sound.weatherFlags = readU32(sub.data + offset + 4u);
+                sound.chance = static_cast<float>(readU32(sub.data + offset + 8u));
+                entry.sounds.push_back(sound);
+            }
         }
     }
     scene.regions.push_back(std::move(entry));
+}
+
+void parseSoundOutputModelRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutSoundOutputModelRecord entry;
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        // Skyrim SOPM.ANAM is 20 bytes. The two floats at 4/8 are the
+        // min/max distances (SOMStereoRad04000 measures 150/4000).
+        if (sub.type == "ANAM" && sub.size >= 12u) {
+            std::memcpy(&entry.minDistance, sub.data + 4u, sizeof(float));
+            std::memcpy(&entry.maxDistance, sub.data + 8u, sizeof(float));
+        }
+    }
+    scene.soundOutputModels.push_back(entry);
+}
+
+void parseSoundDescriptorRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutSoundDescriptorRecord entry;
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "EDID") {
+            entry.editorId = subrecordString(sub);
+        } else if (sub.type == "ANAM") {
+            entry.filePaths.push_back(subrecordString(sub));
+        } else if (sub.type == "ONAM" && sub.size >= 4u) {
+            entry.outputModelFormId = readU32(sub.data);
+        } else if (sub.type == "BNAM" && sub.size >= 4u) {
+            entry.flags = readU32(sub.data);
+        }
+    }
+    // BSISoundDescriptor::BNAM bit 23 is the authored looping flag. This is
+    // present on continuous water/wind beds and absent on regional bird calls.
+    entry.looping = (entry.flags & 0x00800000u) != 0u;
+    scene.soundDescriptors.push_back(std::move(entry));
+}
+
+void parseSoundBaseRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutSoundBaseRecord entry;
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x00000020u) != 0u;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "SDSC" && sub.size >= 4u) {
+            entry.descriptorFormId = readU32(sub.data);
+        }
+    }
+    scene.soundBases.push_back(entry);
 }
 
 void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene) {
@@ -336,6 +407,20 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             ref.teleportRotationRadians[0] = readF32(sub.data + 16);
             ref.teleportRotationRadians[1] = readF32(sub.data + 20);
             ref.teleportRotationRadians[2] = readF32(sub.data + 24);
+        } else if (sub.type == "XLOC" && sub.size >= 1u) {
+            ref.isLocked = true;
+            ref.lockLevel = sub.data[0];
+        } else if (sub.type == "XMRK") {
+            ref.isMapMarker = true;
+        } else if (sub.type == "FULL") {
+            ref.mapMarkerName = subrecordString(sub);
+            if (sub.size == 4u) {
+                ref.mapMarkerNameStringId = readU32(sub.data);
+            }
+        } else if (sub.type == "FNAM" && sub.size >= 1u) {
+            ref.mapMarkerFlags = sub.data[0];
+        } else if (sub.type == "TNAM" && sub.size >= 2u) {
+            std::memcpy(&ref.mapMarkerType, sub.data, sizeof(ref.mapMarkerType));
         }
     }
     if ((hasData && ref.baseFormId != 0u) || ref.isDeleted) {
@@ -371,6 +456,7 @@ void parseNavMeshRecord(const EsmRecordView& record, FalloutCellRecord* currentC
     const EsmSubrecordView* vertexData = nullptr;
     const EsmSubrecordView* triangleData = nullptr;
     const EsmSubrecordView* doorPortalData = nullptr;
+    const EsmSubrecordView* skyrimData = nullptr;
 
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "DATA" && sub.size >= 12u) {
@@ -383,8 +469,98 @@ void parseNavMeshRecord(const EsmRecordView& record, FalloutCellRecord* currentC
             triangleData = &sub;
         } else if (sub.type == "NVDP") {
             doorPortalData = &sub;
+        } else if (sub.type == "NVNM") {
+            skyrimData = &sub;
         }
     }
+
+    // TES5 packs the complete navmesh into one NVNM subrecord. The prefix is:
+    //
+    //   u32 version, u32 location, FormID worldspace,
+    //   (i16 gridY, i16 gridX) for Tamriel OR FormID cell,
+    //   u32 vertexCount, float3 vertices[], u32 triangleCount,
+    //   16-byte triangles[]
+    //
+    // Later arrays describe cross-mesh connections, doors, cover and spatial
+    // lookup bins. Navigation within a resident mesh needs only this prefix;
+    // stopping after the triangles also keeps the reader independent of those
+    // versioned tail fields. All offsets are bounds checked before use because
+    // one bad count would otherwise turn a malformed record into an enormous
+    // allocation on a streaming worker.
+    if (skyrimData != nullptr) {
+        constexpr std::uint32_t kTamrielWorldspaceFormId = 0x0000003cu;
+        const std::uint8_t* bytes = skyrimData->data;
+        const std::size_t size = skyrimData->size;
+        std::size_t offset = 0u;
+        const auto takeU32 = [&](std::uint32_t& out) {
+            if (offset + 4u > size) {
+                return false;
+            }
+            out = readU32(bytes + offset);
+            offset += 4u;
+            return true;
+        };
+
+        std::uint32_t version = 0u;
+        std::uint32_t location = 0u;
+        std::uint32_t worldspaceFormId = 0u;
+        if (!takeU32(version) || !takeU32(location) || !takeU32(worldspaceFormId)) {
+            return;
+        }
+        (void)version;
+        (void)location;
+        if (worldspaceFormId == kTamrielWorldspaceFormId) {
+            if (offset + 4u > size) {
+                return;
+            }
+            offset += 4u;  // two signed 16-bit exterior grid coordinates
+            navMesh.cellFormId = currentCell->formId;
+        } else {
+            if (!takeU32(navMesh.cellFormId)) {
+                return;
+            }
+        }
+
+        if (!takeU32(declaredVertexCount) ||
+            declaredVertexCount > ((size - offset) / kNavMeshVertexBytes)) {
+            return;
+        }
+        navMesh.vertices.resize(static_cast<std::size_t>(declaredVertexCount) * 3u);
+        for (std::uint32_t i = 0; i < declaredVertexCount * 3u; ++i) {
+            navMesh.vertices[i] = readF32(bytes + offset);
+            offset += sizeof(float);
+        }
+
+        if (!takeU32(declaredTriangleCount) ||
+            declaredTriangleCount > ((size - offset) / kNavMeshTriangleBytes)) {
+            return;
+        }
+        navMesh.triangles.resize(declaredTriangleCount);
+        for (std::uint32_t i = 0; i < declaredTriangleCount; ++i) {
+            const std::uint8_t* entry = bytes + offset;
+            offset += kNavMeshTriangleBytes;
+            FalloutNavMeshTriangle& triangle = navMesh.triangles[i];
+            for (int corner = 0; corner < 3; ++corner) {
+                triangle.vertex[corner] = readU16(entry + (corner * 2));
+                if (triangle.vertex[corner] >= declaredVertexCount) {
+                    return;
+                }
+            }
+            for (int edge = 0; edge < 3; ++edge) {
+                const std::uint16_t neighbour = readU16(entry + 6 + (edge * 2));
+                triangle.neighbour[edge] =
+                    neighbour < declaredTriangleCount ? neighbour : kNavMeshNoNeighbour;
+            }
+            triangle.flags = readU16(entry + 12);       // cover marker in TES5
+            triangle.coverFlags = readU16(entry + 14);  // cover flags in TES5
+        }
+
+        if (!navMesh.triangles.empty()) {
+            currentCell->navMeshes.push_back(std::move(navMesh));
+        }
+        return;
+    }
+
     if (vertexData == nullptr || triangleData == nullptr) {
         return;
     }
@@ -952,15 +1128,16 @@ bool buildFalloutCellIndex(
     // the CELL's file offset across to where the entry is built.
     std::uint64_t pendingCellRecordOffset = 0;
     visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
-        if (header.type == "REFR" && hasCurrentCell) {
+        if ((header.type == "REFR" || header.type == "ACRE" || header.type == "ACHR") &&
+            hasCurrentCell) {
             outIndex.cellIndexByReferenceFormId.emplace(header.formId, currentCellIndex);
         }
         if (header.type == "CELL") {
             pendingCellRecordOffset = header.fileOffset;
         }
-        // The whole point of the index: never materialize cell contents. Only
-        // CELL and WRLD records are parsed; LAND in particular stays compressed.
-        return header.type == "CELL" || header.type == "WRLD";
+        // Parse REFR only far enough to retain the tiny XMRK subset. LAND and
+        // every other cell payload remain skipped/compressed.
+        return header.type == "CELL" || header.type == "WRLD" || header.type == "REFR";
     };
     visitor.onGroupEnter = [&](const EsmGroupView& group) {
         if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
@@ -1010,6 +1187,33 @@ bool buildFalloutCellIndex(
         if (record.type == "WRLD") {
             parseWorldspaceRecord(record, scratch);
             outIndex.worldspaces = scratch.worldspaces;
+            return;
+        }
+        if (record.type == "REFR") {
+            if (!hasCurrentCell || currentCellIndex >= outIndex.cells.size()) {
+                return;
+            }
+            FalloutCellRecord markerCell;
+            parseReferenceRecord(record, &markerCell);
+            if (markerCell.references.empty() ||
+                (!markerCell.references.front().isMapMarker &&
+                 !markerCell.references.front().isDeleted)) {
+                return;
+            }
+            const FalloutPlacedReference& ref = markerCell.references.front();
+            const FalloutCellIndexEntry& cell = outIndex.cells[currentCellIndex];
+            FalloutMapMarkerRecord marker{};
+            marker.referenceFormId = ref.formId;
+            marker.cellFormId = cell.cellFormId;
+            marker.worldspaceFormId = cell.worldspaceFormId;
+            marker.name = ref.mapMarkerName;
+            marker.nameStringId = ref.mapMarkerNameStringId;
+            std::copy(std::begin(ref.position), std::end(ref.position), marker.position);
+            marker.flags = ref.mapMarkerFlags;
+            marker.type = ref.mapMarkerType;
+            marker.initiallyDisabled = (ref.recordFlags & 0x00000800u) != 0u;
+            marker.deleted = ref.isDeleted;
+            outIndex.mapMarkers.push_back(std::move(marker));
             return;
         }
         if (record.type != "CELL") {
@@ -1173,6 +1377,8 @@ bool buildFalloutCellIndex(
     // Cells merge by their REMAPPED formID: the same cell described by the base
     // game and by a patch is one cell with two contributions, not two cells.
     std::unordered_map<std::uint32_t, std::size_t> entryByCellFormId;
+    std::unordered_map<std::uint32_t, FalloutMapMarkerRecord> markerByReferenceFormId;
+    std::unordered_map<std::uint32_t, FalloutWorldspaceRecord> worldspaceByFormId;
 
     for (std::size_t pluginIndex = 0; pluginIndex < order.entries().size(); ++pluginIndex) {
         FalloutCellIndex single;
@@ -1247,9 +1453,37 @@ bool buildFalloutCellIndex(
                 outIndex.cellIndexByReferenceFormId[remap(referenceFormId)] = found->second;
             }
         }
-        if (outIndex.worldspaces.empty()) {
-            outIndex.worldspaces = single.worldspaces;
+        for (FalloutMapMarkerRecord marker : single.mapMarkers) {
+            marker.referenceFormId = remap(marker.referenceFormId);
+            marker.cellFormId = remap(marker.cellFormId);
+            marker.worldspaceFormId = remap(marker.worldspaceFormId);
+            if (marker.deleted) {
+                markerByReferenceFormId.erase(marker.referenceFormId);
+            } else {
+                markerByReferenceFormId.insert_or_assign(
+                    marker.referenceFormId, std::move(marker));
+            }
         }
+        for (FalloutWorldspaceRecord worldspace : single.worldspaces) {
+            worldspace.formId = remap(worldspace.formId);
+            worldspace.parentWorldspaceFormId = remap(worldspace.parentWorldspaceFormId);
+            worldspaceByFormId.insert_or_assign(worldspace.formId, std::move(worldspace));
+        }
+    }
+    outIndex.mapMarkers.reserve(markerByReferenceFormId.size());
+    for (auto& [unused, marker] : markerByReferenceFormId) {
+        (void)unused;
+        outIndex.mapMarkers.push_back(std::move(marker));
+    }
+    std::sort(
+        outIndex.mapMarkers.begin(), outIndex.mapMarkers.end(),
+        [](const FalloutMapMarkerRecord& a, const FalloutMapMarkerRecord& b) {
+            return a.referenceFormId < b.referenceFormId;
+        });
+    outIndex.worldspaces.reserve(worldspaceByFormId.size());
+    for (auto& [unused, worldspace] : worldspaceByFormId) {
+        (void)unused;
+        outIndex.worldspaces.push_back(std::move(worldspace));
     }
     return true;
 }
@@ -1541,11 +1775,13 @@ bool extractFalloutScene(
     // it from the header costs a hash insert per REFR instead of a full
     // subrecord walk.
     visitor.onRecordHeader = [&](const EsmRecordHeaderView& header) {
-        if (header.type == "REFR" && hasCurrentCell) {
+        if ((header.type == "REFR" || header.type == "ACRE" || header.type == "ACHR") &&
+            hasCurrentCell) {
             outScene.cellIndexByReferenceFormId.emplace(header.formId, currentCellIndex);
         }
         if (filter.wantCellContents &&
-            (header.type == "LAND" || header.type == "REFR" || header.type == "NAVM")) {
+            (header.type == "LAND" || header.type == "REFR" || header.type == "ACRE" ||
+             header.type == "ACHR" || header.type == "NAVM")) {
             return wantCurrentCellContents;
         }
         return true;
@@ -1569,7 +1805,9 @@ bool extractFalloutScene(
         if (group.groupType == kTopLevelGroup && group.rawLabel.size() == 4u) {
             if (!isModelBearingBaseType(group.rawLabel) && group.rawLabel != "WRLD" &&
                 group.rawLabel != "CELL" && group.rawLabel != "LTEX" &&
-                group.rawLabel != "TXST" && group.rawLabel != "REGN") {
+                group.rawLabel != "TXST" && group.rawLabel != "REGN" &&
+                group.rawLabel != "SOUN" && group.rawLabel != "SNDR" &&
+                group.rawLabel != "SOPM") {
                 return false;
             }
         }
@@ -1610,6 +1848,12 @@ bool extractFalloutScene(
             }
         } else if (record.type == "REGN") {
             parseRegionRecord(record, outScene);
+        } else if (record.type == "SOUN") {
+            parseSoundBaseRecord(record, outScene);
+        } else if (record.type == "SNDR") {
+            parseSoundDescriptorRecord(record, outScene);
+        } else if (record.type == "SOPM") {
+            parseSoundOutputModelRecord(record, outScene);
         } else if (record.type == "LTEX") {
             parseLandTextureRecord(record, outScene);
         } else if (record.type == "TXST") {

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "core/ring_buffer.h"
-#include "import/gpu_scene.h"
 #include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
 #include "render/upscale/upscaler_backend.h"
@@ -13,7 +12,6 @@
 #include "render/backend/vulkan/pipeline_manager.h"
 #include "render/backend/vulkan/ui_renderer.h"
 #include "render/renderer_types.h"
-#include "sim/simulation.h"
 #include "world/clipmap_index.h"
 #include "world/chunk_grid.h"
 #include "world/chunk_mesher.h"
@@ -41,6 +39,29 @@ namespace odai::render {
 
 class CoreFrameGraphOrderValidator;
 struct CoreFrameGraphPlan;
+
+// Transitional backend-only state used by the old preview draw code. It is
+// deliberately not part of the renderer facade or public renderer types.
+struct VoxelPreview {
+    enum class Mode { Add, Remove };
+    bool visible = false;
+    int x = 0;
+    int y = 0;
+    int z = 0;
+    int brushSize = 1;
+    Mode mode = Mode::Add;
+    bool faceVisible = false;
+    int faceX = 0;
+    int faceY = 0;
+    int faceZ = 0;
+    std::uint32_t faceId = 0;
+    bool pipeStyle = false;
+    float pipeAxisX = 0.0f;
+    float pipeAxisY = 1.0f;
+    float pipeAxisZ = 0.0f;
+    float pipeRadius = 0.45f;
+    float pipeStyleId = 0.0f;
+};
 
 // Dedup key for an imported texture: its source path, lowercased with separators
 // unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
@@ -255,7 +276,7 @@ public:
         float volumetricFogBaseHeight = 42.0f;
         float volumetricSunScattering = 1.05f;
         float waterAnimationSpeed = 1.05f;
-        float waterNormalStrength = 1.25f;
+        float waterNormalStrength = 0.90f;
         // Artistic multiplier over the physical air/water Schlick term.  Keep
         // this close to one: values above two made an overhead river a mirror
         // even though water reflects only about two percent at normal incidence.
@@ -284,52 +305,13 @@ public:
         int visualizationMode = 0; // 0 = off, 1 = radiance, 2 = false-color luminance, 3 = radiance gray, 4 = occupancy albedo, 5 = imported lights
     };
 
-    void setStrategyMapMode(bool enabled) {
-        m_strategyMapMode = enabled;
-        if (enabled) {
-            // The hex map is a single-level plateau over a flat sea: one enormous
-            // coplanar surface, the worst case for SSAO self-occlusion. Across a sample
-            // disk the flat top's own depth varies by ~radius*sin(tilt); if that exceeds
-            // the bias (clamped to 8) the whole top occludes itself and goes black. So
-            // keep the radius SMALL and the bias high — the only real occluder we want is
-            // the tall coastline cliff, which still reads at this radius. That reasoning
-            // is specific to the point sampler; the horizon estimators evaluate a flat
-            // surface as unoccluded by construction, so they keep their own biases.
-            m_shadowDebugSettings.ssaoRadius = 7.0f;
-            m_shadowDebugSettings.ssaoBias = 6.0f;
-            m_shadowDebugSettings.ssaoIntensity = 0.5f;
-            // Water in strategy mode sits very shallow (0.06*hexSize) over the sea floor.
-            // The default 96-pixel refraction distortion at that depth smears the hex geometry
-            // underneath into a stippled/pixelated pattern. Reduce to gentle visual shimmer.
-            m_skyDebugSettings.waterRefractionDistortionPixels = 14.0f;
-            m_skyDebugSettings.waterNormalStrength = 0.55f;
-            m_skyDebugSettings.waterAnimationSpeed = 0.65f;
-        }
-    }
     // App-level opt-out of the ray-traced BLAS/TLAS scene. false always wins;
     // true restores whatever init()'s hardware/driver capability probe already
     // determined (m_rayTracingHardwareCapable) -- this can only opt further out
     // of ray tracing, never force it on where the device doesn't support it.
-    // strategyMapMode's own hex-terrain tuning above also disables RT (for a
-    // different reason: skipping the multi-second BLAS/TLAS build on a scene
-    // that's a flat plateau with no use for it); this is the same underlying
-    // flag but a dedicated, explicit lever apps can reach for on their own
-    // terms instead of relying on that side effect.
     void setRayTracingEnabled(bool enabled) {
         m_rayTracingRuntimeEnabled = enabled && m_rayTracingHardwareCapable;
     }
-    // App-level opt-out of the voxel GI dispatch sequence (occupancy, sky
-    // exposure, surface/ReSTIR, inject, propagate). Like setRayTracingEnabled
-    // this only opts further out: it is ANDed with m_voxelGiComputeAvailable,
-    // the capability flag init already clears on hardware without the compute
-    // path, so "GI off" is a state the frame recording has always handled.
-    //
-    // Worth reaching for whenever the world is much larger than the GI volume.
-    // The grid is kVoxelGiGridResolution * kVoxelGiCellSize = 64 world units
-    // wide and follows the camera, so at Bethesda scale (~70 units/metre) it
-    // covers under a metre and sampleImportedVoxelGi returns black for nearly
-    // every pixel -- the dispatches still run at full cost for no visible
-    // contribution.
     // Histogram-driven eye adaptation. Off by default and, until now, reachable
     // only from the debug UI -- so every game shipped with a fixed exposure and
     // the compute resources built but never dispatched. A scene whose light
@@ -397,14 +379,6 @@ public:
     // and leaves it SHADER_READ_ONLY_OPTIMAL, so the main pass samples zero.
     void setSunShaftsEnabled(bool enabled) { m_sunShaftsRequested = enabled; }
     [[nodiscard]] bool isSunShaftsEnabled() const { return m_sunShaftsRequested; }
-    // Opt-in "UI-only" mode for showcase/tooling executables (e.g. the design
-    // system demo) that draw nothing but the 2D UI overlay. When enabled, init()
-    // and recreateSwapchain() skip building the pipelines those tools structurally
-    // cannot use: the pipe/imported-static/sky-cloud/imported-water/grass builder
-    // (createPipePipeline), the SSAO/normal-depth builder (createAoPipelines), and
-    // the tessellated hex-terrain pipeline. The UI/skybox/tonemap/present path is
-    // untouched. Must be set BEFORE init(); persists across swapchain recreation.
-    void setMinimalRenderMode(bool enabled) { m_minimalRenderMode = enabled; }
     // MSAA sample count. Must be set BEFORE init(): it sizes the HDR/depth
     // attachments and is baked into every graphics pipeline. Clamped to what
     // the device supports at init. 4x was hardcoded, which is a lot of shading
@@ -422,11 +396,10 @@ public:
                              std::uint32_t& outWidth,
                              std::uint32_t& outHeight);
     void destroyFrameCaptureResources();
-    bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
+    bool init(GLFWwindow* window);
     void clearMagicaVoxelMeshes();
     bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     void clearGpuScene();
-    bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
 
@@ -438,6 +411,7 @@ public:
     static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunkAt(std::size_t chunkIndex);
+    bool waitForImportedSceneUploads();
     // Number of chunk slots, live or evicted. Indices remain valid across
     // evictions, so this only grows within a scene.
     [[nodiscard]] std::size_t importedSceneChunkCount() const { return m_importedSceneChunks.size(); }
@@ -457,6 +431,7 @@ public:
     std::vector<std::uint32_t> uploadSkinnedActorTextures(
         std::uint32_t instanceIndex,
         const std::vector<odai::importer::ImportedSceneTexture>& textures);
+    void setSkinnedActorVisible(std::uint32_t instanceIndex, bool visible);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     // Debug bypass: when true, recordSkinningPass leaves the last-skinned (or
     // rest-pose, if never skinned) output untouched instead of dispatching --
@@ -496,15 +471,7 @@ public:
     odai::ui::UiTextureId registerUiFontAtlas(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     odai::ui::UiTextureId registerUiTextureRgba8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     odai::ui::UiTextureId registerUiTextureRgba8Mipmapped(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
-    void renderFrame(
-        const odai::world::ChunkGrid& chunkGrid,
-        const odai::sim::Simulation& simulation,
-        const odai::render::CameraPose& camera,
-        const odai::render::VoxelPreview& preview,
-        float simulationAlpha,
-        std::span<const std::size_t> visibleChunkIndices,
-        const odai::render::ImportedActorFrameData* importedActors = nullptr
-    );
+    void renderFrame(const odai::render::CameraPose& camera);
     void setUpscalerSettings(const UpscalerSettings& settings);
     [[nodiscard]] UpscalerStatus upscalerStatus() const;
     void setDebugUiVisible(bool visible);
@@ -522,12 +489,6 @@ public:
     [[nodiscard]] bool isVertexAoEnabled() const;
     void setSsaoEnabled(bool enabled);
     [[nodiscard]] bool isSsaoEnabled() const;
-    // Overrides the AO radius/bias/intensity after setStrategyMapMode(true)
-    // has applied its hex-map-scale tuning (see setStrategyMapMode above) --
-    // for a GameApp whose world scale is nothing like the hex strategy map's
-    // (e.g. CityBuilder's 1-world-unit tiles vs. the hex map's much larger
-    // plateau), that tuning actively breaks AO rather than helping it.
-    //
     // `bias` is the SSAO depth offset, in world units -- the only one of the three
     // biases that depends on scene scale (see ShadowDebugSettings). HBAO and GTAO
     // carry their own scale-free defaults and are deliberately not settable here:
@@ -798,7 +759,6 @@ private:
     // streaming uses.
     bool uploadImportedSceneInternal(
         const odai::importer::ImportedScene& scene,
-        const odai::importer::GpuSceneAsset* gpuScene,
         bool appendChunk = false
     );
 
@@ -1592,11 +1552,6 @@ private:
         const VoxelPreview* preview = nullptr;
     };
 
-    FrameInstanceDrawData prepareFrameInstanceDrawData(
-        const odai::sim::Simulation& simulation,
-        float simulationAlpha
-    );
-
     FrameChunkDrawData prepareFrameChunkDrawData(
         const std::vector<odai::world::Chunk>& chunks,
         std::span<const std::size_t> visibleChunkIndices,
@@ -1632,6 +1587,7 @@ private:
     // m_frameArena.beginFrame() for the current frame index and before
     // recordSkinningPass -- see frame_run.cc.
     void uploadSkinnedActorPoseForFrame();
+    void rebuildVisibleSkinningDraws();
     // Skinning compute pre-pass: resolves the bound skinned-mesh template's
     // rest-pose vertices against this frame's bone matrices into the
     // persistent output buffer, with an explicit barrier before any pass
@@ -1699,8 +1655,9 @@ private:
     // tonemap fullscreen pass samples with normalized UVs into the
     // swapchain-sized target, so it upscales for free, and the UI still
     // renders at native resolution on top -- text stays sharp at any scale.
-    // Set from ODAI_RENDER_SCALE (0.3..1.0, default 1.0) wherever the
-    // swapchain extent is (re)established.
+    // Set from ODAI_RENDER_SIZE (WIDTHxHEIGHT) or ODAI_RENDER_SCALE (0.3..1.0)
+    // wherever the swapchain extent is (re)established. Scale wins when both
+    // are supplied; an exact extent is clamped to the display extent.
     VkExtent2D m_renderExtent{};
     VkExtent2D m_aoExtent{};
     // Resolution of the AO estimator's own output, m_aoExtent / m_aoDownscale.
@@ -2154,7 +2111,6 @@ private:
     // Countdown, not a flag: one edit must reach every frame-in-flight region.
     std::uint32_t m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
     bool m_strategyMapMode = false;
-    bool m_minimalRenderMode = false;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
     uint64_t m_autoExposureUpdateFrameIndex = 0u;
@@ -2248,6 +2204,7 @@ private:
         BufferHandle outputVertexBufferHandle = kInvalidBufferHandle;
         std::uint32_t vertexCount = 0;
         std::uint32_t boneCount = 0;
+        bool visible = true;
         std::vector<ImportedMeshDraw> meshDraws;
         // Set by setSkinnedActorPose() (called before renderFrame()); consumed
         // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
@@ -2277,8 +2234,8 @@ private:
     // only iterate [0, m_skinningActiveInstanceCount).
     std::uint32_t m_skinningActiveInstanceCount = 0;
     bool m_skinningDebugBypass = false;
-    // Flattened draws across every active instance slot, rebuilt whenever a
-    // slot's template changes -- kept as a single vector (rather than each
+    // Flattened draws across every visible instance slot, rebuilt whenever a
+    // slot's template or visibility changes -- kept as a single vector (rather than each
     // consuming frame_pass_*.cc looping over m_skinningInstances itself) so
     // those three call sites and frame_run.cc need no changes at all.
     std::vector<ImportedMeshDraw> m_skinningMeshDraws;
@@ -2709,6 +2666,7 @@ private:
     float m_debugGpuPrepassTimeMs = 0.0f;
     float m_debugGpuSsaoTimeMs = 0.0f;
     float m_debugGpuSsaoBlurTimeMs = 0.0f;
+    float m_debugGpuSkinningTimeMs = 0.0f;
     float m_debugGpuMainTimeMs = 0.0f;
     // Inside main's window, not additional to it.
     float m_debugGpuPrewriteTimeMs = 0.0f;

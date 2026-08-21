@@ -14,12 +14,15 @@ only what is Skyrim-specific and what was measured.
 | a mesh/texture at a path the game already uses | replaces it | replaces it |
 | a NEW mesh placed by REFR records | nothing references it | **placed** |
 | base-record edits (models, land textures, trees) | ignored | **applied**, later plugin wins |
-| grass (GRAS assigned to a land texture) | — | **still nothing** — needs a grass scatter, see `docs/SKYRIM_GRASS_AND_DISTANCE.md` |
+| grass (GRAS assigned to a land texture) | — | **still nothing** — procedural GRAS scattering is outside the retained renderer |
 
-Passing `--plugin-add` switches `CellStreamer` onto the merged path: base
-records and cell contents come from every plugin in the order, formIDs are
-remapped out of each plugin's local mod-index space, and the order's
-fingerprint joins the cell-cache key.
+Prefer an existing read-only MO2 profile through `--profile <profile-dir>` (see
+[`MOD_PROFILES.md`](MOD_PROFILES.md)), or Skyrim's native active list through
+auto-discovery/`--load-order <plugins.txt>`. Repeatable `--plugin-add` entries
+are appended after that authoritative order. Base records and cell contents
+come from every plugin in order, regular and ESL form IDs are remapped into
+distinct slots, and the ordered fingerprint joins the cell-cache and
+traversal-state identities.
 
 ## Installed here
 
@@ -30,7 +33,7 @@ copied into the Steam install.
 SSE="$HOME/.steam/steam/steamapps/common/Skyrim Special Edition/Data"
 MODS="$HOME/.local/share/odai/skyrim-mods"
 
-ODAI_FNV_TEX_SIZE=1024 cmake-build-app/odai_game_newvegas \
+ODAI_FNV_TEX_SIZE=1024 cmake-build-app/odai \
   --stream "$SSE" --plugin Skyrim.esm --worldspace Tamriel \
   --mod "$MODS/smim" --mod "$MODS/sfo"
 ```
@@ -57,8 +60,8 @@ the vanilla tree and grass meshes (`treepineforest*`, `ferngrass01`,
 The other 65 meshes are `vurt_*` grass billboards, and they stay unreachable
 even with `--plugin-add`, because **Skyrim does not place grass as
 references**. The plugin is 66 GRAS, 16 TREE, 14 LTEX and exactly ONE REFR:
-grass is scattered procedurally from the land texture painted on the terrain.
-`docs/SKYRIM_GRASS_AND_DISTANCE.md` has the record chain and the DATA layout.
+grass is scattered procedurally from the land texture painted on the terrain,
+and that procedural renderer is intentionally outside the Bethesda-only slice.
 
 The 16 TREE records DO apply with `--plugin-add`, which is worth having on its
 own.

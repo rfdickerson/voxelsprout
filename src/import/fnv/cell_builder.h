@@ -26,9 +26,19 @@
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/decoded_texture_cache.h"
 #include "import/fnv/fallout_records.h"
+#include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
 
 namespace odai::importer::fnv {
+
+// Appends one shape's triangle list in renderer order: opaque triangles first,
+// then its vertex-faded fringe. Counts refer to the newly appended indices.
+void appendPartitionedNifShapeIndices(
+    const NifShape& shape,
+    std::uint32_t baseVertex,
+    std::vector<std::uint32_t>& outIndices,
+    std::uint32_t& outOpaqueIndexCount,
+    std::uint32_t& outFadedIndexCount);
 
 // Plugin-wide lookups the per-cell build needs, gathered once. A cell's REFR
 // names a STAT by formID and a LAND quadrant names an LTEX by formID; neither
@@ -59,6 +69,14 @@ struct FalloutWorldTables {
     // overwrites regionNamesByFormId. Empty for every Fallout/Oblivion plugin,
     // which makes that resolution a no-op rather than a special case.
     std::unordered_map<std::uint32_t, std::uint32_t> regionNameStringIdsByFormId;
+    // Full Skyrim audio regions, including their ground-plane polygons and
+    // weather-filtered sound candidates. Kept separate from discoverable names
+    // because most audio regions deliberately have no map label.
+    std::unordered_map<std::uint32_t, FalloutRegionRecord> regionAudioByFormId;
+    std::unordered_map<std::uint32_t, FalloutSoundOutputModelRecord> soundOutputModelsByFormId;
+    std::unordered_map<std::uint32_t, FalloutSoundDescriptorRecord> soundDescriptorsByFormId;
+    // Placed REFR NAME -> SOUN -> SDSC -> SNDR.
+    std::unordered_map<std::uint32_t, std::uint32_t> soundDescriptorByBaseFormId;
     // Worldspace editor ID -> formID, so a streamer can select one by name.
     std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
     // Every worldspace by formID, with its DNAM default land/water heights
@@ -135,6 +153,13 @@ bool appendCellWaterPatch(
     odai::importer::ImportedScene& outScene,
     const FalloutCellRecord& cell,
     const FalloutWorldspaceRecord* worldspace = nullptr);
+
+// Resolves XTEL destinations through the load-order-wide cell index and
+// appends runtime-ready door records. Shared by streaming and profile cooking.
+void appendResolvedDoors(
+    const FalloutCellRecord& record,
+    const FalloutCellIndex& index,
+    odai::importer::ImportedScene& scene);
 
 // Samples a TES4/TES5 LAND overlay at a fractional quadrant-post coordinate.
 // The source VTXT lattice is only 17x17 (128 world units between posts); a
@@ -293,6 +318,10 @@ private:
     std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
     std::unordered_set<std::string> m_failedTexturePaths;
     std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
+    // Complete model-space collision soup per placed base. Authored Havok wins;
+    // opaque visible geometry is stored here only as the per-NIF fallback.
+    std::unordered_map<std::uint32_t, std::vector<NifCollisionTriangle>>
+        m_collisionByStaticFormId;
     // Runtime-only components normally instantiated by Skyrim's lumber-mill
     // animation graph. They use private high-byte form IDs solely as stable
     // mesh-cache keys and never escape into plugin resolution.

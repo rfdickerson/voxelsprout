@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstring>
 
-#include "sim/network_procedural.h"
 #include "render/backend/vulkan/frame_graph_runtime.h"
 
 namespace odai::render {

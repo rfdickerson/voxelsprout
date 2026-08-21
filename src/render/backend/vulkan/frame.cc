@@ -353,6 +353,8 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuPrepassTimeMs = durationMs(kGpuTimestampQueryPrepassStart, kGpuTimestampQueryPrepassEnd);
     m_debugGpuSsaoTimeMs = durationMs(kGpuTimestampQuerySsaoStart, kGpuTimestampQuerySsaoEnd);
     m_debugGpuSsaoBlurTimeMs = durationMs(kGpuTimestampQuerySsaoBlurStart, kGpuTimestampQuerySsaoBlurEnd);
+    m_debugGpuSkinningTimeMs =
+        durationMs(kGpuTimestampQuerySkinningStart, kGpuTimestampQuerySkinningEnd);
     m_debugGpuMainTimeMs = durationMs(kGpuTimestampQueryMainStart, kGpuTimestampQueryMainEnd);
     m_debugGpuPrewriteTimeMs =
         durationMs(kGpuTimestampQueryPrewriteStart, kGpuTimestampQueryPrewriteEnd);
@@ -399,6 +401,7 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
                 << " prepass=" << m_debugGpuPrepassTimeMs
                 << " ssao=" << m_debugGpuSsaoTimeMs
                 << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs
+                << " skinning=" << m_debugGpuSkinningTimeMs
                 << " main=" << m_debugGpuMainTimeMs
                 << " (prewrite=" << m_debugGpuPrewriteTimeMs << ")"
                 << " velocity=" << m_debugGpuVelocityTimeMs

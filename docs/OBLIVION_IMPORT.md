@@ -21,7 +21,7 @@ should follow the same rule: additive version branches, never a fork.
 No Oblivion-specific code, no cooking step:
 
 ```bash
-odai_game_newvegas --stream "<.../Oblivion/Data>" --plugin Oblivion.esm --worldspace Tamriel
+odai --stream "<.../Oblivion/Data>" --plugin Oblivion.esm --worldspace Tamriel
 ```
 
 streams the Great Forest out of the retail install — 14686 exterior cells indexed, 13708
@@ -548,7 +548,7 @@ seeing Tamriel.
 
 ```bash
 cmake -S . -B cmake-build-tools -G Ninja \
-  -DODAI_BUILD_APP=OFF -DODAI_BUILD_TOOLS=ON -DBUILD_TESTING=ON \
+  -DODAI_BUILD_RUNTIME=OFF -DODAI_BUILD_TOOLS=ON -DBUILD_TESTING=ON \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_TARGET_TRIPLET=x64-linux

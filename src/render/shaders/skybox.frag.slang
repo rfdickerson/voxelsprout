@@ -111,7 +111,13 @@ float3 applyWeatherClouds(float3 sky, float3 dir, float time)
             const float elevation =
                 saturate01((dir.y - bandLow) / max(bandHigh - bandLow, 1e-4));
             // No v drift: a bank of cloud drifts around the sky, not up it.
-            uv = float2((bearing * params.z) + (time * params.y), 1.0 - elevation);
+            // The bindless sky sampler wraps so the bank can repeat around the
+            // compass. V must NOT wrap: elevation=0 produces exactly 1.0 and
+            // would jump from the texture's bottom row to its top row on the
+            // skyline, leaving a one-pixel seam that temporal reconstruction
+            // makes more obvious. Keep only V inside the texture; U still wraps.
+            const float bankV = clamp(1.0 - elevation, 0.002, 0.998);
+            uv = float2((bearing * params.z) + (time * params.y), bankV);
             horizonFade = 1.0;  // the band mask already owns both ends
         }
         else if (mapping == 1)
@@ -286,11 +292,32 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     // burning through it.
     sky = applyWeatherClouds(sky, dir, camera.skyConfig1.z);
 
+    // The distant world is faded toward WTHR's far-fog colour. The sky used to
+    // arrive at the same skyline using the separate Horizon stop, while its
+    // clouds faded independently; the result was a bright, flat strip behind
+    // otherwise convincing aerial perspective. Make the last few degrees one
+    // atmosphere by attenuating the completed sky (including clouds and sun)
+    // toward the same far-fog colour. Horizon remains the dominant authored
+    // stop rather than being replaced outright.
+    const float horizonHaze =
+        weatherWeight * (1.0 - smoothStep(0.0, 0.16, max(dir.y, 0.0)));
+    const float3 atmosphericHorizon =
+        lerp(horizonColor, camera.weatherFog.xyz, weatherWeight * 0.68);
+    sky = lerp(sky, camera.weatherFog.xyz, horizonHaze * 0.68);
+
     const float3 groundColor = float3(0.05, 0.06, 0.07);
     const float belowHorizon = saturate01(-dir.y);
-    const float3 horizonGroundColor = horizonColor * 0.32;
-    const float3 ground = lerp(horizonGroundColor, groundColor, pow(belowHorizon, 0.55));
-    const float skyWeight = smoothstep(-0.18, 0.02, dir.y);
+    // Begin below the SAME atmospheric colour used above. Darkening the old
+    // horizon colour to 32% immediately below y=0 made open-water and mountain
+    // gaps reveal a dark lower band unrelated to either sky or fog.
+    const float3 horizonGroundColor =
+        lerp(horizonColor * 0.32, atmosphericHorizon, weatherWeight);
+    const float groundDepth = smoothStep(0.0, 0.28, belowHorizon);
+    const float3 ground =
+        lerp(horizonGroundColor, groundColor, pow(groundDepth, 0.72));
+    const float skyBlendLow = lerp(-0.18, -0.10, weatherWeight);
+    const float skyBlendHigh = lerp(0.02, 0.015, weatherWeight);
+    const float skyWeight = smoothStep(skyBlendLow, skyBlendHigh, dir.y);
     const float3 color = lerp(ground, sky, skyWeight);
     return max(color * skyExposure, float3(0.0, 0.0, 0.0));
 }

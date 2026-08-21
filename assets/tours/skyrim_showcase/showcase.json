@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "title": "Skyrim Engine Showcase",
+  "width": 1920,
+  "height": 1080,
+  "fps": 60,
+  "transition_seconds": 1.0,
+  "master_duration_seconds": 90.0,
+  "shots": [
+    {"id": "whiterun_tundra", "tour": "whiterun_tundra.txt", "worldspace": "Tamriel", "weather": "SkyrimCloudyTU", "hour": 10.0, "duration": 12.0, "seed": 1101},
+    {"id": "riverwood_bleak_falls", "tour": "riverwood_bleak_falls.txt", "worldspace": "Tamriel", "weather": "SkyrimClearFF", "hour": 10.5, "duration": 14.0, "seed": 1102},
+    {"id": "riften", "tour": "riften.txt", "worldspace": "Tamriel", "weather": "RiftenOvercastFog", "hour": 15.0, "duration": 11.0, "seed": 1103},
+    {"id": "solitude", "tour": "solitude.txt", "worldspace": "Tamriel", "weather": "SkyrimCloudyCO", "hour": 16.0, "duration": 13.0, "seed": 1104},
+    {"id": "markarth", "tour": "markarth.txt", "worldspace": "MarkarthWorld", "weather": "SkyrimCloudyMA", "hour": 14.0, "duration": 11.0, "seed": 1105},
+    {"id": "winterhold_college", "tour": "winterhold_college.txt", "worldspace": "Tamriel", "weather": "SkyrimOvercastSnow", "hour": 12.0, "duration": 10.0, "seed": 1106},
+    {"id": "blackreach", "tour": "blackreach.txt", "worldspace": "Blackreach", "weather": "BlackreachWeather", "hour": 12.0, "duration": 13.0, "seed": 1107},
+    {"id": "throat_of_the_world", "tour": "throat_of_the_world.txt", "worldspace": "Tamriel", "weather": "SkyrimClearSN", "hour": 7.25, "duration": 13.0, "seed": 1108}
+  ]
+}

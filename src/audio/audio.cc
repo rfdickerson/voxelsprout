@@ -17,7 +17,9 @@ Audio& Audio::operator=(Audio&&) noexcept = default;
 
 bool Audio::init(const AudioConfig& cfg) {
 #ifdef ODAI_AUDIO_HAVE_MINIAUDIO
-    m_backend = createMiniaudioBackend(cfg);
+    if (!cfg.forceNullBackend) {
+        m_backend = createMiniaudioBackend(cfg);
+    }
 #endif
     if (!m_backend) {
         m_backend = createNullBackend(cfg);
@@ -101,6 +103,22 @@ bool Audio::muted() const {
 
 bool Audio::deviceActive() const {
     return m_backend && m_backend->deviceActive();
+}
+
+bool Audio::offlineMixActive() const {
+    return m_backend && m_backend->offlineMixActive();
+}
+
+std::uint32_t Audio::mixSampleRate() const {
+    return m_backend ? m_backend->mixSampleRate() : 0u;
+}
+
+std::uint32_t Audio::mixChannels() const {
+    return m_backend ? m_backend->mixChannels() : 0u;
+}
+
+bool Audio::renderOfflineFrames(std::span<float> interleaved, std::uint64_t frameCount) {
+    return m_backend && m_backend->renderOfflineFrames(interleaved, frameCount);
 }
 
 }  // namespace odai::audio

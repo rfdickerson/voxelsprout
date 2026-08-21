@@ -19,6 +19,7 @@
 #include "import/fnv/plugin_load_order.h"
 #include "import/fnv/character_builder.h"
 #include "import/fnv/kf_animation.h"
+#include "import/fnv/land_lod.h"
 #include "import/fnv/actor_records.h"
 #include "import/fnv/dialogue_records.h"
 #include "import/fnv/async_asset_loader.h"
@@ -1155,7 +1156,25 @@ void testFalloutRecordExtraction() {
     }();
     const auto navMeshRecord = buildRecord("NAVM", kNavMeshFormId, 0u, navSubrecords);
 
+    // --- Skyrim NAVM: the same core data packed into NVNM. ---
+    constexpr std::uint32_t kSkyrimNavMeshFormId = 0x00005200u;
+    std::vector<std::uint8_t> skyrimNvnmPayload;
+    appendPod(skyrimNvnmPayload, static_cast<std::uint32_t>(12));  // NVER
+    appendPod(skyrimNvnmPayload, static_cast<std::uint32_t>(0));   // LCTN
+    appendPod(skyrimNvnmPayload, static_cast<std::uint32_t>(0));   // interior: no worldspace
+    appendPod(skyrimNvnmPayload, static_cast<std::uint32_t>(0x00002000u));
+    appendPod(skyrimNvnmPayload, static_cast<std::uint32_t>(4));
+    skyrimNvnmPayload.insert(
+        skyrimNvnmPayload.end(), navVertexPayload.begin(), navVertexPayload.end());
+    appendPod(skyrimNvnmPayload, static_cast<std::uint32_t>(2));
+    skyrimNvnmPayload.insert(
+        skyrimNvnmPayload.end(), navTrianglePayload.begin(), navTrianglePayload.end());
+    const auto skyrimNavMeshRecord = buildRecord(
+        "NAVM", kSkyrimNavMeshFormId, 0u,
+        buildSubrecord("NVNM", skyrimNvnmPayload));
+
     // --- REFR placing the static in the exterior cell. ---
+    constexpr std::uint32_t kIntRefFormId = 0x00007000u;
     std::vector<std::uint8_t> refData;
     appendPod(refData, 512.0f);   // posX
     appendPod(refData, 64.0f);    // posY
@@ -1172,13 +1191,40 @@ void testFalloutRecordExtraction() {
         std::vector<std::uint8_t> scalePayload;
         appendPod(scalePayload, 2.0f);
         const auto xscl = buildSubrecord("XSCL", scalePayload);
+        std::vector<std::uint8_t> xtelPayload;
+        appendPod(xtelPayload, kIntRefFormId);
+        for (const float value : {10.0f, 20.0f, 30.0f, 0.0f, 0.0f, 1.25f}) {
+            appendPod(xtelPayload, value);
+        }
+        const auto xtel = buildSubrecord("XTEL", xtelPayload);
+        const auto xloc = buildSubrecord("XLOC", std::vector<std::uint8_t>{75u});
         out.insert(out.end(), name.begin(), name.end());
         out.insert(out.end(), data.begin(), data.end());
         out.insert(out.end(), xscl.begin(), xscl.end());
+        out.insert(out.end(), xtel.begin(), xtel.end());
+        out.insert(out.end(), xloc.begin(), xloc.end());
         return out;
     }();
     constexpr std::uint32_t kRefFormId = 0x00004000u;
     const auto refRecord = buildRecord("REFR", kRefFormId, 0u, refSubrecords);
+
+    std::vector<std::uint8_t> markerNamePayload;
+    appendPod(markerNamePayload, kStaticFormId);
+    const auto markerName = buildSubrecord("NAME", markerNamePayload);
+    const auto markerData = buildSubrecord("DATA", refData);
+    const auto xmrk = buildSubrecord("XMRK", {});
+    const auto markerFull = buildSubrecord("FULL", stringPayload("Test Marker"));
+    const auto markerFlags = buildSubrecord("FNAM", std::vector<std::uint8_t>{1u});
+    std::vector<std::uint8_t> markerTypePayload;
+    appendPod(markerTypePayload, static_cast<std::uint16_t>(4u));
+    const auto markerType = buildSubrecord("TNAM", markerTypePayload);
+    std::vector<std::uint8_t> markerSubrecords;
+    for (const auto* sub : {&markerName, &markerData, &xmrk, &markerFull, &markerFlags,
+                            &markerType}) {
+        markerSubrecords.insert(markerSubrecords.end(), sub->begin(), sub->end());
+    }
+    constexpr std::uint32_t kMarkerRefFormId = 0x00004001u;
+    const auto markerRecord = buildRecord("REFR", kMarkerRefFormId, 0u, markerSubrecords);
 
     // --- Exterior CELL wrapping LAND + REFR, nested under a WRLD. ---
     constexpr std::uint32_t kExtCellFormId = 0x00002000u;
@@ -1209,7 +1255,10 @@ void testFalloutRecordExtraction() {
     std::vector<std::uint8_t> tempChildrenContent;
     tempChildrenContent.insert(tempChildrenContent.end(), landRecord.begin(), landRecord.end());
     tempChildrenContent.insert(tempChildrenContent.end(), navMeshRecord.begin(), navMeshRecord.end());
+    tempChildrenContent.insert(
+        tempChildrenContent.end(), skyrimNavMeshRecord.begin(), skyrimNavMeshRecord.end());
     tempChildrenContent.insert(tempChildrenContent.end(), refRecord.begin(), refRecord.end());
+    tempChildrenContent.insert(tempChildrenContent.end(), markerRecord.begin(), markerRecord.end());
     char extCellLabel[4];
     std::memcpy(extCellLabel, &kExtCellFormId, 4);
     const auto tempChildrenGroup = buildGroup(extCellLabel, 9, tempChildrenContent);
@@ -1270,12 +1319,19 @@ void testFalloutRecordExtraction() {
     std::vector<std::uint8_t> intRefSubrecords;
     intRefSubrecords.insert(intRefSubrecords.end(), intName.begin(), intName.end());
     intRefSubrecords.insert(intRefSubrecords.end(), intData.begin(), intData.end());
-    constexpr std::uint32_t kIntRefFormId = 0x00007000u;
     const auto intRefRecord = buildRecord("REFR", kIntRefFormId, 0u, intRefSubrecords);
+    constexpr std::uint32_t kIntActorRefFormId = 0x00007001u;
+    const auto intActorRefRecord =
+        buildRecord("ACHR", kIntActorRefFormId, 0u, intRefSubrecords);
 
     char intCellLabel[4];
     std::memcpy(intCellLabel, &kIntCellFormId, 4);
-    const auto intTempChildrenGroup = buildGroup(intCellLabel, 9, intRefRecord);
+    std::vector<std::uint8_t> intTemporaryChildren;
+    intTemporaryChildren.insert(
+        intTemporaryChildren.end(), intRefRecord.begin(), intRefRecord.end());
+    intTemporaryChildren.insert(
+        intTemporaryChildren.end(), intActorRefRecord.begin(), intActorRefRecord.end());
+    const auto intTempChildrenGroup = buildGroup(intCellLabel, 9, intTemporaryChildren);
     const auto intCellChildrenGroup = buildGroup(intCellLabel, 6, intTempChildrenGroup);
     std::vector<std::uint8_t> intSubBlockContent;
     intSubBlockContent.insert(intSubBlockContent.end(), intCellRecord.begin(), intCellRecord.end());
@@ -1319,6 +1375,12 @@ void testFalloutRecordExtraction() {
                "Exterior cell attributes (worldspace, grid coords, interior flag) round-trip");
     expectTrue(intCell != nullptr && intCell->isInterior && intCell->worldspaceFormId == 0u,
                "Interior cell is flagged interior and attributed to no worldspace");
+    const auto actorOwner = scene.cellIndexByReferenceFormId.find(kIntActorRefFormId);
+    expectTrue(
+        actorOwner != scene.cellIndexByReferenceFormId.end() &&
+            actorOwner->second < scene.cells.size() &&
+            scene.cells[actorOwner->second].formId == kIntCellFormId,
+        "ACHR ownership is indexed so interior actor population can be filtered by cell");
     expectTrue(intCell != nullptr && intCell->cellFlags == 0x04C1u,
                "CELL DATA flags, including show-sky/use-sky-lighting and the high byte, round-trip");
     if (intCell != nullptr) {
@@ -1337,16 +1399,37 @@ void testFalloutRecordExtraction() {
     expectTrue(extCell != nullptr && !extCell->hasWater,
                "XCLW's dry sentinel is rejected rather than read as a water height");
 
-    expectTrue(extCell != nullptr && extCell->references.size() == 1u,
-               "Exterior cell owns exactly the one REFR placed inside its group hierarchy");
-    if (extCell != nullptr && extCell->references.size() == 1u) {
-        const FalloutPlacedReference& ref = extCell->references.front();
-        expectTrue(ref.baseFormId == kStaticFormId, "REFR base formID (NAME) round-trips");
-        expectTrue(
-            ref.position[0] == 512.0f && ref.position[1] == 64.0f && ref.position[2] == 1024.0f,
-            "REFR position round-trips");
-        expectNear(ref.rotationRadians[1], 1.5707963f, 1e-5f, "REFR rotation round-trips");
-        expectNear(ref.scale, 2.0f, 1e-6f, "REFR explicit XSCL scale round-trips");
+    expectTrue(extCell != nullptr && extCell->references.size() == 2u,
+               "Exterior cell owns both REFRs placed inside its group hierarchy");
+    if (extCell != nullptr && extCell->references.size() == 2u) {
+        const auto refIt = std::find_if(
+            extCell->references.begin(), extCell->references.end(),
+            [](const FalloutPlacedReference& ref) { return ref.formId == kRefFormId; });
+        expectTrue(refIt != extCell->references.end(), "Teleport reference remains indexed");
+        if (refIt != extCell->references.end()) {
+            const FalloutPlacedReference& ref = *refIt;
+            expectTrue(ref.baseFormId == kStaticFormId, "REFR base formID (NAME) round-trips");
+            expectTrue(
+                ref.position[0] == 512.0f && ref.position[1] == 64.0f && ref.position[2] == 1024.0f,
+                "REFR position round-trips");
+            expectNear(ref.rotationRadians[1], 1.5707963f, 1e-5f, "REFR rotation round-trips");
+            expectNear(ref.scale, 2.0f, 1e-6f, "REFR explicit XSCL scale round-trips");
+            expectTrue(ref.hasTeleport && ref.teleportTargetRefFormId == kIntRefFormId,
+                       "XTEL destination reference round-trips");
+            expectNear(ref.teleportRotationRadians[2], 1.25f, 1e-6f,
+                       "XTEL arrival yaw round-trips");
+            expectTrue(ref.isLocked && ref.lockLevel == 75u,
+                       "XLOC lock state round-trips");
+        }
+        const auto markerIt = std::find_if(
+            extCell->references.begin(), extCell->references.end(),
+            [](const FalloutPlacedReference& placed) {
+                return placed.formId == kMarkerRefFormId;
+            });
+        expectTrue(markerIt != extCell->references.end() && markerIt->isMapMarker &&
+                       markerIt->mapMarkerName == "Test Marker" &&
+                       markerIt->mapMarkerFlags == 1u && markerIt->mapMarkerType == 4u,
+                   "XMRK name, visibility flags, and type round-trip");
     }
     expectTrue(intCell != nullptr && intCell->references.size() == 1u &&
                intCell->references.front().scale == 1.0f,
@@ -1373,8 +1456,8 @@ void testFalloutRecordExtraction() {
         expectTrue(vclrMatches, "LAND VCLR decodes to unsigned [0,1] RGB at every post");
 
         // --- NAVM ---
-        expectTrue(extCell->navMeshes.size() == 1, "exterior cell owns its NAVM record");
-        if (extCell->navMeshes.size() == 1) {
+        expectTrue(extCell->navMeshes.size() == 2, "exterior cell owns Fallout and Skyrim NAVM records");
+        if (extCell->navMeshes.size() == 2) {
             const FalloutNavMeshRecord& navMesh = extCell->navMeshes.front();
             expectTrue(navMesh.vertices.size() == 12u, "NAVM decodes 4 vertices (3 floats each)");
             expectTrue(navMesh.triangles.size() == 2u, "NAVM decodes 2 triangles");
@@ -1398,6 +1481,17 @@ void testFalloutRecordExtraction() {
                            navMesh.doorPortals[0].doorRefFormId == kNavDoorRefFormId &&
                            navMesh.doorPortals[0].triangleIndex == 1u,
                        "NAVM door portal names its door reference and triangle");
+
+            const FalloutNavMeshRecord& skyrimNavMesh = extCell->navMeshes[1];
+            expectTrue(skyrimNavMesh.formId == kSkyrimNavMeshFormId &&
+                           skyrimNavMesh.cellFormId == kExtCellFormId,
+                       "Skyrim NVNM keeps its mesh and owning-cell formIDs");
+            expectTrue(skyrimNavMesh.vertices == navMesh.vertices &&
+                           skyrimNavMesh.triangles.size() == navMesh.triangles.size(),
+                       "Skyrim NVNM decodes the same vertex and triangle core");
+            expectTrue(skyrimNavMesh.triangles[0].neighbour[1] == 1u &&
+                           skyrimNavMesh.triangles[1].neighbour[2] == kNavMeshNoNeighbour,
+                       "Skyrim NVNM adjacency is decoded and invalid links clamp to borders");
         }
 
         // ATXT/VTXT: two layers, emitted high-index-first, so a correct parse
@@ -1452,6 +1546,104 @@ void testFalloutRecordExtraction() {
     testFalloutCellIndexMatchesFullExtraction(esmPath);
 
     fs::remove(esmPath);
+}
+
+void testSkyrimRegionAndSoundRecords() {
+    using namespace odai::importer::fnv;
+    namespace fs = std::filesystem;
+
+    constexpr std::uint32_t kWorld = 0x00001000u;
+    constexpr std::uint32_t kRegion = 0x00002000u;
+    constexpr std::uint32_t kDescriptor = 0x00003000u;
+    constexpr std::uint32_t kOutput = 0x00004000u;
+    constexpr std::uint32_t kSoundBase = 0x00005000u;
+
+    std::vector<std::uint8_t> regionBody;
+    for (const auto& subrecord : {
+             buildSubrecord("EDID", stringPayload("TestForestRegion")),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, kWorld);
+                   return buildSubrecord("WNAM", data); }(),
+             buildSubrecord("RPLI", {}),
+             [&] { std::vector<std::uint8_t> data;
+                   for (const float value : {0.0f, 0.0f, 4096.0f, 0.0f, 0.0f, 4096.0f}) {
+                       appendPod(data, value);
+                   }
+                   return buildSubrecord("RPLD", data); }(),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, 7u);
+                   return buildSubrecord("RDAT", data); }(),
+             [&] { std::vector<std::uint8_t> data;
+                   appendPod(data, kDescriptor);
+                   appendPod(data, 0x0Bu);  // pleasant, cloudy, snow
+                   appendPod(data, 75u);
+                   return buildSubrecord("RDSA", data); }()}) {
+        regionBody.insert(regionBody.end(), subrecord.begin(), subrecord.end());
+    }
+
+    std::vector<std::uint8_t> outputData(20u, 0u);
+    const float minDistance = 150.0f;
+    const float maxDistance = 4000.0f;
+    std::memcpy(outputData.data() + 4u, &minDistance, sizeof(float));
+    std::memcpy(outputData.data() + 8u, &maxDistance, sizeof(float));
+
+    std::vector<std::uint8_t> descriptorBody;
+    for (const auto& subrecord : {
+             buildSubrecord("EDID", stringPayload("TestRiverLoop")),
+             buildSubrecord("ANAM", stringPayload("fx\\amb\\river_a.wav")),
+             buildSubrecord("ANAM", stringPayload("fx\\amb\\river_b.wav")),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, kOutput);
+                   return buildSubrecord("ONAM", data); }(),
+             [&] { std::vector<std::uint8_t> data; appendPod(data, 0x00800000u);
+                   return buildSubrecord("BNAM", data); }()}) {
+        descriptorBody.insert(descriptorBody.end(), subrecord.begin(), subrecord.end());
+    }
+    std::vector<std::uint8_t> baseData;
+    appendPod(baseData, kDescriptor);
+
+    std::vector<std::uint8_t> bytes = buildTes4Record({}, EsmPluginFormat::kFallout3);
+    const auto appendTop = [&](const char* type, const std::vector<std::uint8_t>& record) {
+        const auto group = buildGroup(type, 0, record);
+        bytes.insert(bytes.end(), group.begin(), group.end());
+    };
+    appendTop("REGN", buildRecord("REGN", kRegion, 0u, regionBody));
+    appendTop("SOPM", buildRecord(
+        "SOPM", kOutput, 0u, buildSubrecord("ANAM", outputData)));
+    appendTop("SNDR", buildRecord("SNDR", kDescriptor, 0u, descriptorBody));
+    appendTop("SOUN", buildRecord(
+        "SOUN", kSoundBase, 0u, buildSubrecord("SDSC", baseData)));
+
+    const fs::path path = fs::temp_directory_path() / "odai_skyrim_ambient_records.esm";
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+    }
+    FalloutSceneData scene;
+    std::string error;
+    expectTrue(extractFalloutScene(path, scene, error),
+               ("Skyrim ambient records extract: " + error).c_str());
+    expectTrue(scene.regions.size() == 1u && scene.regions[0].worldspaceFormId == kWorld,
+               "REGN keeps its worldspace identity");
+    expectTrue(scene.regions.size() == 1u && scene.regions[0].polygons.size() == 1u &&
+                   scene.regions[0].polygons[0].points.size() == 6u,
+               "REGN RPLI/RPLD polygon points extract in authored order");
+    expectTrue(scene.regions.size() == 1u && scene.regions[0].sounds.size() == 1u &&
+                   scene.regions[0].sounds[0].descriptorFormId == kDescriptor &&
+                   scene.regions[0].sounds[0].weatherFlags == 0x0Bu &&
+                   scene.regions[0].sounds[0].chance == 75.0f,
+               "REGN RDSA preserves descriptor, weather flags, and integer chance");
+    expectTrue(scene.soundDescriptors.size() == 1u &&
+                   scene.soundDescriptors[0].filePaths.size() == 2u &&
+                   scene.soundDescriptors[0].looping &&
+                   scene.soundDescriptors[0].outputModelFormId == kOutput,
+               "SNDR preserves variants, looping state, and output model");
+    expectTrue(scene.soundOutputModels.size() == 1u &&
+                   scene.soundOutputModels[0].minDistance == minDistance &&
+                   scene.soundOutputModels[0].maxDistance == maxDistance,
+               "SOPM preserves authored attenuation distances");
+    expectTrue(scene.soundBases.size() == 1u &&
+                   scene.soundBases[0].descriptorFormId == kDescriptor,
+               "SOUN.SDSC resolves to its descriptor");
+    fs::remove(path);
 }
 
 void appendSizedString8(std::vector<std::uint8_t>& buffer, const std::string& text) {
@@ -1748,6 +1940,234 @@ void testNifParserExtractsTransformedGeometry() {
     }
 }
 
+// Skyrim SE forces full-precision BSVertexData positions even when the
+// descriptor omits Full_Precision. Terrain BTR is the load-bearing case: its
+// float3 + padding + half2 UV layout is only 20 bytes, so the old "stride >=
+// 28" heuristic decoded the low half of each float and collapsed X/Z to zero.
+void testSkyrimTerrainPackedPositionsAreFullPrecision() {
+    const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const auto appendSseAvObjectPrefix = [&](std::vector<std::uint8_t>& block) {
+        appendPod(block, static_cast<std::int32_t>(-1));   // nameRef
+        appendPod(block, static_cast<std::uint32_t>(0));  // numExtraData
+        appendPod(block, static_cast<std::int32_t>(-1));  // controllerRef
+        appendPod(block, static_cast<std::uint32_t>(0));  // flags
+        appendPod(block, 0.0f); appendPod(block, 0.0f); appendPod(block, 0.0f);
+        for (float value : identityRotation) appendPod(block, value);
+        appendPod(block, 1.0f);                           // scale
+        // Skyrim has no NiAVObject property array at BS version 100.
+        appendPod(block, static_cast<std::int32_t>(-1));  // collisionRef
+    };
+
+    std::vector<std::uint8_t> rootBlock;
+    appendSseAvObjectPrefix(rootBlock);
+    appendPod(rootBlock, static_cast<std::uint32_t>(1));  // numChildren
+    appendPod(rootBlock, static_cast<std::int32_t>(1));   // shape
+    appendPod(rootBlock, static_cast<std::uint32_t>(0));  // numEffects
+
+    std::vector<std::uint8_t> shapeBlock;
+    appendSseAvObjectPrefix(shapeBlock);
+    for (int i = 0; i < 4; ++i) appendPod(shapeBlock, 0.0f);  // bounding sphere
+    appendPod(shapeBlock, static_cast<std::int32_t>(-1));     // skin
+    appendPod(shapeBlock, static_cast<std::int32_t>(-1));     // shader
+    appendPod(shapeBlock, static_cast<std::int32_t>(-1));     // alpha
+    // stride=5 dwords, UV offset=4 dwords, flags Vertex|UV. This is the retail
+    // Tamriel BTR descriptor exactly; notably, bit 0x400 is absent.
+    constexpr std::uint64_t descriptor = 0x0000300000000405ull;
+    appendPod(shapeBlock, descriptor);
+    appendPod(shapeBlock, static_cast<std::uint16_t>(1));  // triangles
+    appendPod(shapeBlock, static_cast<std::uint16_t>(3));  // vertices
+    appendPod(shapeBlock, static_cast<std::uint32_t>(66)); // 3*20 + 1*6
+    const std::array<std::array<float, 3>, 3> positions{{
+        {32.0f, 128.0f, -1174.0f},
+        {0.0f, 0.0f, -1162.0f},
+        {320.0f, 416.0f, -1134.0f},
+    }};
+    for (std::size_t vertex = 0; vertex < positions.size(); ++vertex) {
+        for (float value : positions[vertex]) appendPod(shapeBlock, value);
+        appendPod(shapeBlock, static_cast<std::uint32_t>(0));  // bitangent/padding
+        appendPod(shapeBlock, static_cast<std::uint16_t>(vertex == 0 ? 0u : 0x3c00u));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(vertex == 2 ? 0x3c00u : 0u));
+    }
+    appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+    appendPod(shapeBlock, static_cast<std::uint16_t>(1));
+    appendPod(shapeBlock, static_cast<std::uint16_t>(2));
+    appendPod(shapeBlock, static_cast<std::uint32_t>(0));  // SSE particle data size
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+    fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+    fileBytes.push_back('\n');
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+    appendPod(fileBytes, static_cast<std::uint8_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(12));   // user version
+    appendPod(fileBytes, static_cast<std::uint32_t>(2));    // blocks
+    appendPod(fileBytes, static_cast<std::uint32_t>(100));  // Skyrim SE BS version
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendSizedString8(fileBytes, "");
+    appendPod(fileBytes, static_cast<std::uint16_t>(2));
+    appendSizedString32(fileBytes, "BSFadeNode");
+    appendSizedString32(fileBytes, "BSTriShape");
+    appendPod(fileBytes, static_cast<std::uint16_t>(0));
+    appendPod(fileBytes, static_cast<std::uint16_t>(1));
+    appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(shapeBlock.size()));
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // strings
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // max string length
+    appendPod(fileBytes, static_cast<std::uint32_t>(0));  // groups
+    fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+    fileBytes.insert(fileBytes.end(), shapeBlock.begin(), shapeBlock.end());
+    appendPod(fileBytes, static_cast<std::uint32_t>(1));  // footer roots
+    appendPod(fileBytes, static_cast<std::int32_t>(0));
+
+    odai::importer::fnv::NifModel model;
+    std::string error;
+    expectTrue(
+        odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+        ("Synthetic Skyrim BTR layout parses: " + error).c_str());
+    expectTrue(model.shapes.size() == 1u, "Skyrim BTR fixture emits one terrain shape");
+    if (model.shapes.size() == 1u) {
+        const auto& decoded = model.shapes.front().positions;
+        expectTrue(decoded.size() == 9u, "Skyrim BTR fixture keeps all positions");
+        if (decoded.size() == 9u) {
+            expectNear(decoded[0], 32.0f, 1e-5f, "20-byte BTR vertex keeps full-precision X");
+            expectNear(decoded[1], 128.0f, 1e-5f, "20-byte BTR vertex keeps full-precision Y");
+            expectNear(decoded[2], -1174.0f, 1e-5f, "20-byte BTR vertex keeps full-precision height");
+            expectNear(decoded[7], 416.0f, 1e-5f, "later BTR vertices do not collapse");
+        }
+    }
+}
+
+// Skyrim's packed vertex descriptor only says that an RGBA channel EXISTS.
+// BSLightingShaderProperty's SLSF1_Vertex_Alpha says whether its A byte is
+// actually opacity. Rock/terrain transition meshes depend on the distinction:
+// enabled ramps blend their opaque diffuse into the ground, while disabled
+// bytes must read as 1 rather than punching holes through alpha-tested shapes.
+void testSkyrimLightingShaderVertexAlpha() {
+    const auto parseFixture = [](bool enableVertexAlpha) {
+        const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
+        const auto appendSseAvObjectPrefix = [&](std::vector<std::uint8_t>& block) {
+            appendPod(block, static_cast<std::int32_t>(-1));
+            appendPod(block, static_cast<std::uint32_t>(0));
+            appendPod(block, static_cast<std::int32_t>(-1));
+            appendPod(block, static_cast<std::uint32_t>(0));
+            appendPod(block, 0.0f); appendPod(block, 0.0f); appendPod(block, 0.0f);
+            for (float value : identityRotation) appendPod(block, value);
+            appendPod(block, 1.0f);
+            appendPod(block, static_cast<std::int32_t>(-1));
+        };
+
+        std::vector<std::uint8_t> rootBlock;
+        appendSseAvObjectPrefix(rootBlock);
+        appendPod(rootBlock, static_cast<std::uint32_t>(1));
+        appendPod(rootBlock, static_cast<std::int32_t>(1));
+        appendPod(rootBlock, static_cast<std::uint32_t>(0));
+
+        std::vector<std::uint8_t> shapeBlock;
+        appendSseAvObjectPrefix(shapeBlock);
+        for (int i = 0; i < 4; ++i) appendPod(shapeBlock, 0.0f);
+        appendPod(shapeBlock, static_cast<std::int32_t>(-1));  // skin
+        appendPod(shapeBlock, static_cast<std::int32_t>(2));   // shader property
+        appendPod(shapeBlock, static_cast<std::int32_t>(-1));  // alpha property
+        // 24-byte vertex: float3 + padding, half2 UV, RGBA8. Flags say that
+        // positions, UVs and colours are stored; they do NOT enable colour A.
+        constexpr std::uint64_t descriptor =
+            (static_cast<std::uint64_t>(0x23u) << 44u) |
+            (static_cast<std::uint64_t>(5u) << 24u) |
+            (static_cast<std::uint64_t>(4u) << 8u) | 6u;
+        appendPod(shapeBlock, descriptor);
+        appendPod(shapeBlock, static_cast<std::uint16_t>(1));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(3));
+        appendPod(shapeBlock, static_cast<std::uint32_t>(78));  // 3*24 + 1*6
+        constexpr std::array<std::uint8_t, 3> alpha{255u, 128u, 0u};
+        for (std::size_t vertex = 0; vertex < 3u; ++vertex) {
+            appendPod(shapeBlock, vertex == 1u ? 1.0f : 0.0f);
+            appendPod(shapeBlock, vertex == 2u ? 1.0f : 0.0f);
+            appendPod(shapeBlock, 0.0f);
+            appendPod(shapeBlock, static_cast<std::uint32_t>(0));
+            appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+            appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+            shapeBlock.push_back(255u);
+            shapeBlock.push_back(255u);
+            shapeBlock.push_back(255u);
+            shapeBlock.push_back(alpha[vertex]);
+        }
+        appendPod(shapeBlock, static_cast<std::uint16_t>(0));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(1));
+        appendPod(shapeBlock, static_cast<std::uint16_t>(2));
+        appendPod(shapeBlock, static_cast<std::uint32_t>(0));
+
+        std::vector<std::uint8_t> shaderBlock;
+        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // shader type
+        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // name
+        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // extra data
+        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // controller
+        appendPod(shaderBlock, enableVertexAlpha ? 0x8u : 0u);   // SLSF1
+        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // SLSF2
+        appendPod(shaderBlock, 0.0f); appendPod(shaderBlock, 0.0f); // UV offset
+        appendPod(shaderBlock, 1.0f); appendPod(shaderBlock, 1.0f); // UV scale
+        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // texture set
+
+        std::vector<std::uint8_t> fileBytes;
+        const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
+        fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
+        fileBytes.push_back('\n');
+        appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
+        appendPod(fileBytes, static_cast<std::uint8_t>(1));
+        appendPod(fileBytes, static_cast<std::uint32_t>(12));
+        appendPod(fileBytes, static_cast<std::uint32_t>(3));
+        appendPod(fileBytes, static_cast<std::uint32_t>(100));
+        appendSizedString8(fileBytes, "");
+        appendSizedString8(fileBytes, "");
+        appendSizedString8(fileBytes, "");
+        appendPod(fileBytes, static_cast<std::uint16_t>(3));
+        appendSizedString32(fileBytes, "BSFadeNode");
+        appendSizedString32(fileBytes, "BSTriShape");
+        appendSizedString32(fileBytes, "BSLightingShaderProperty");
+        appendPod(fileBytes, static_cast<std::uint16_t>(0));
+        appendPod(fileBytes, static_cast<std::uint16_t>(1));
+        appendPod(fileBytes, static_cast<std::uint16_t>(2));
+        appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
+        appendPod(fileBytes, static_cast<std::uint32_t>(shapeBlock.size()));
+        appendPod(fileBytes, static_cast<std::uint32_t>(shaderBlock.size()));
+        appendPod(fileBytes, static_cast<std::uint32_t>(0));
+        appendPod(fileBytes, static_cast<std::uint32_t>(0));
+        appendPod(fileBytes, static_cast<std::uint32_t>(0));
+        fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
+        fileBytes.insert(fileBytes.end(), shapeBlock.begin(), shapeBlock.end());
+        fileBytes.insert(fileBytes.end(), shaderBlock.begin(), shaderBlock.end());
+        appendPod(fileBytes, static_cast<std::uint32_t>(1));
+        appendPod(fileBytes, static_cast<std::int32_t>(0));
+
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(
+            odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+            ("Synthetic Skyrim vertex-alpha fixture parses: " + error).c_str());
+        return model;
+    };
+
+    const auto enabled = parseFixture(true);
+    expectTrue(enabled.shapes.size() == 1u, "vertex-alpha fixture emits one shape");
+    if (enabled.shapes.size() == 1u) {
+        expectTrue(enabled.shapes[0].alphaBlend,
+                   "SLSF1_Vertex_Alpha routes a partial ramp through blending");
+        expectNear(enabled.shapes[0].colors[7], 128.0f / 255.0f, 1e-5f,
+                   "enabled vertex alpha preserves its authored coverage");
+    }
+
+    const auto disabled = parseFixture(false);
+    expectTrue(disabled.shapes.size() == 1u, "disabled-alpha fixture emits one shape");
+    if (disabled.shapes.size() == 1u) {
+        expectTrue(!disabled.shapes[0].alphaBlend,
+                   "stored alpha bytes do not imply blending when SLSF1 disables them");
+        expectNear(disabled.shapes[0].colors[7], 1.0f, 1e-5f,
+                   "disabled vertex alpha is normalized to opaque");
+        expectNear(disabled.shapes[0].colors[11], 1.0f, 1e-5f,
+                   "even a stored zero alpha is ignored when the shader flag is clear");
+    }
+}
+
 // Builds a NIF whose hierarchy is root -> middle -> NiTriShape -> data, where
 // the MIDDLE block's type name is chosen by the caller. `footerRoot` < 0 omits
 // the footer entirely (older behaviour); otherwise a one-root footer is written.
@@ -1775,6 +2195,10 @@ std::vector<std::uint8_t> buildChainedNif(
     appendPod(middleBlock, static_cast<std::int32_t>(2));   // children[0] = block 2
     if (!truncateMiddleBlock) {
         appendPod(middleBlock, static_cast<std::uint32_t>(0));  // numEffects
+        if (middleTypeName == "NiSwitchNode") {
+            appendPod(middleBlock, static_cast<std::uint16_t>(3));  // switch flags
+            appendPod(middleBlock, static_cast<std::uint32_t>(0));  // initial child
+        }
     }
 
     // Block 2: NiTriShape, identity local transform, dataRef = block 3.
@@ -1854,6 +2278,25 @@ std::vector<std::uint8_t> buildChainedNif(
 
 // The floating-geometry regression, stated as the two outcomes that matter.
 void testNifParserDoesNotReparentSubtreesToTheOrigin() {
+    // Skyrim trees put obsolete billboard/LOD alternatives under a
+    // NiSwitchNode. Its six-byte subtype tail selects the one authored child;
+    // ignoring it traverses inactive geometry and reports valid trees as
+    // corrupt or duplicates their silhouette.
+    {
+        const std::vector<std::uint8_t> bytes =
+            buildChainedNif("NiSwitchNode", 2500.0f, 0);
+        odai::importer::fnv::NifModel model;
+        std::string error;
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(bytes, model, error),
+                   ("NiSwitchNode subtype tail parses: " + error).c_str());
+        expectTrue(model.nodeParseFailedCount == 0u && model.shapes.size() == 1u,
+                   "NiSwitchNode reaches its authored initial child without a parse failure");
+        if (model.shapes.size() == 1u && model.shapes.front().positions.size() >= 3u) {
+            expectNear(model.shapes.front().positions[2], 2500.0f, 1e-3f,
+                       "NiSwitchNode preserves the selected child's ancestor transform");
+        }
+    }
+
     // 1. A middle node of a type the allowlist did not previously cover
     //    (BSMasterParticleSystem is NiNode-derived per nif.xml and roots 38
     //    retail meshes, yet does not end in "Node" so no suffix rule sees it).
@@ -3187,7 +3630,8 @@ void testPluginLoadOrderRemapsFormIds() {
     // load order ever reads.
     const auto writePlugin = [&](const std::string& fileName,
                                  const std::vector<std::string>& masters,
-                                 bool isMaster) {
+                                 bool isMaster,
+                                 bool isLight = false) {
         std::vector<std::uint8_t> body;
         const auto appendSubrecord = [&](const char* type, const std::vector<std::uint8_t>& data) {
             body.insert(body.end(), type, type + 4);
@@ -3215,7 +3659,7 @@ void testPluginLoadOrderRemapsFormIds() {
             }
         };
         appendU32(static_cast<std::uint32_t>(body.size()));
-        appendU32(isMaster ? 0x00000001u : 0u);
+        appendU32((isMaster ? 0x00000001u : 0u) | (isLight ? 0x00000200u : 0u));
         appendU32(0u);  // formID
         appendU32(0u);  // version control
         appendU32(0u);  // formVersion + unknown
@@ -3239,6 +3683,11 @@ void testPluginLoadOrderRemapsFormIds() {
          "LonesomeRoad.esm"},
         false);
 
+    // Skyrim light plugins still address masters/self with the ordinary local
+    // high byte on disk; only the remapped global identity uses 0xFE.
+    writePlugin("LightMaster.esl", {"FalloutNV.esm"}, true, true);
+    writePlugin("LightPatch.esl", {"FalloutNV.esm", "LightMaster.esl"}, false, true);
+
     {
         FalloutPluginHeader header;
         std::string error;
@@ -3249,6 +3698,34 @@ void testPluginLoadOrderRemapsFormIds() {
         expectTrue(header.masters[0] == "FalloutNV.esm", "the first master is the base game");
         expectTrue(header.masters[4] == "LonesomeRoad.esm", "the last master keeps its position");
         expectTrue(!header.isMaster, "an .esp is not flagged as a master");
+    }
+
+    {
+        FalloutLoadOrder order;
+        std::string error;
+        expectTrue(
+            order.open(dataDir, {"FalloutNV.esm", "LightMaster.esl", "LightPatch.esl"}, error),
+            ("a regular/light load order resolves: " + error).c_str());
+        expectTrue(order.entries()[1].header.isLight, "TES4 flag 0x200 marks a light plugin");
+        expectTrue(
+            order.entries()[1].slot.kind == FalloutPluginSlotKind::Light &&
+                order.entries()[1].slot.index == 0u,
+            "the first light plugin gets light slot zero without consuming a regular slot");
+        expectTrue(
+            order.remapFormId(1u, 0x01000800u) == 0xFE000800u,
+            "a light plugin's own local record maps into the 0xFE namespace");
+        expectTrue(
+            order.remapFormId(2u, 0x01000801u) == 0xFE000801u,
+            "a light plugin reference to a light master keeps the master's light slot");
+        expectTrue(
+            order.remapFormId(2u, 0x02000802u) == 0xFE001802u,
+            "a second light plugin gets the next twelve-bit light slot");
+        expectTrue(
+            order.ownerOf(0xFE001802u) == &order.entries()[2],
+            "owner lookup decodes a light global formID");
+        expectTrue(
+            order.remapFormId(2u, 0x02001802u) == 0x02001802u,
+            "an out-of-range light object ID is not truncated onto another record");
     }
 
     // Asking for only the mod must pull in every master it needs, ahead of it.
@@ -3396,6 +3873,54 @@ void testPluginLoadOrderRemapsFormIds() {
     }
 
     fs::remove_all(dataDir, cleanupError);
+}
+
+void testSkyrimPluginListResolution() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    const fs::path root = fs::temp_directory_path() / "odai_skyrim_plugin_list_test";
+    const fs::path data = root / "Data";
+    std::error_code errorCode;
+    fs::remove_all(root, errorCode);
+    fs::create_directories(data, errorCode);
+    const auto touch = [&](const std::string& name) {
+        std::ofstream(data / name, std::ios::binary).put('\0');
+    };
+    touch("Skyrim.esm");
+    touch("Update.esm");
+    touch("Dawnguard.esm");
+    touch("Present.esl");
+    touch("Explicit.esp");
+    {
+        std::ofstream ccc(root / "Skyrim.ccc");
+        ccc << "Missing.esl\nPresent.esl\n";
+    }
+
+    std::vector<std::string> plugins;
+    fs::path source;
+    std::string error;
+    expectTrue(
+        resolveInstalledSkyrimPluginList(data, std::nullopt, plugins, source, error),
+        ("the Skyrim.ccc fallback resolves: " + error).c_str());
+    expectTrue(
+        plugins == std::vector<std::string>({"Skyrim.esm", "Update.esm", "Dawnguard.esm", "Present.esl"}),
+        "fallback keeps implicit masters and only present Skyrim.ccc entries in order");
+
+    const fs::path list = root / "plugins.txt";
+    {
+        std::ofstream profile(list);
+        profile << "# comment\nInactive.esp\n*Explicit.esp\n*Present.esl\n*explicit.esp\n";
+    }
+    expectTrue(
+        resolveInstalledSkyrimPluginList(data, list, plugins, source, error),
+        ("an explicit plugins.txt resolves: " + error).c_str());
+    expectTrue(
+        plugins == std::vector<std::string>({"Skyrim.esm", "Update.esm", "Dawnguard.esm", "Explicit.esp", "Present.esl"}),
+        "plugins.txt activates starred entries, ignores inactive lines, and deduplicates case-insensitively");
+    expectTrue(source == list, "the selected explicit load-order source is reported");
+
+    fs::remove_all(root, errorCode);
 }
 
 void testMorrowindLoadOrderMergesWorldRenderingRecords() {
@@ -3762,6 +4287,14 @@ void testLandLodTilePaths() {
             "landscape\\lod\\wastelandnv\\blocks\\wastelandnv.level4.x24.y-12.nif",
         "object level4 sits under blocks\\");
     expectTrue(
+        landLodTilePath("tamriel", LandLodSet::SkyrimObjects, 4, 4, -4) ==
+            "terrain\\tamriel\\objects\\tamriel.4.4.-4.bto",
+        "Skyrim object LOD uses the BTO naming scheme");
+    expectTrue(
+        landLodTilePath("tamriel", LandLodSet::SkyrimTerrain, 4, 4, -4) ==
+            "terrain\\tamriel\\tamriel.4.4.-4.btr",
+        "Skyrim terrain LOD uses the BTR naming scheme");
+    expectTrue(
         landLodTilePath("wastelandnv", LandLodSet::Terrain, 32, -32, 0) ==
             "landscape\\lod\\wastelandnv\\wastelandnv.level32.x-32.y0.nif",
         "a coarse terrain tier keeps the same shape, negative coordinate and all");
@@ -3770,13 +4303,21 @@ void testLandLodTilePaths() {
     // WastelandNV and nothing whatsoever at level8/16/32.
     for (const int tier : odai::importer::fnv::kLandLodTierCellCounts) {
         expectTrue(landLodTierExists(LandLodSet::Terrain, tier), "every terrain tier exists");
+        expectTrue(
+            landLodTierExists(LandLodSet::SkyrimTerrain, tier),
+            "every Skyrim terrain tier exists");
     }
     expectTrue(landLodTierExists(LandLodSet::Objects, 4), "object LOD exists at level4");
+    expectTrue(
+        landLodTierExists(LandLodSet::SkyrimObjects, 4),
+        "Skyrim object LOD exists at level4");
+    expectTrue(
+        !landLodTierExists(LandLodSet::SkyrimObjects, 8),
+        "Skyrim object LOD has no level8");
     expectTrue(!landLodTierExists(LandLodSet::Objects, 8), "object LOD has no level8");
     expectTrue(!landLodTierExists(LandLodSet::Objects, 32), "object LOD has no level32");
     expectTrue(!landLodTierExists(LandLodSet::Terrain, 2), "there is no level2 tier");
 }
-
 
 // The skinning bind-pose identity, on a synthetic two-bone rig.
 //
@@ -3891,6 +4432,66 @@ void testSkinnedBindPoseIsIdentity() {
         expectTrue(std::fabs(skinned.x - expected.x) < 1e-3f, "skinned x matches the bind world");
         expectTrue(std::fabs(skinned.y - expected.y) < 1e-3f, "skinned y matches the bind world");
         expectTrue(std::fabs(skinned.z - expected.z) < 1e-3f, "skinned z matches the bind world");
+    }
+}
+
+// Skyrim FaceGen gives every generated facial piece its own NiSkinData skin
+// space even though the GPU actor has one bone palette. BSDynamicTriShape
+// positions therefore have to be baked through each piece's authored bind and
+// rebound to the skeleton's canonical inverse bind. Without that step the
+// first piece wins: eyes may be correct while hair, brows and mouth collapse by
+// roughly one actor height (or vice versa).
+void testDynamicFacePartsShareOneBonePalette() {
+    using namespace odai::importer::fnv;
+
+    NifSkeleton source;
+    NifSkeletonBone head;
+    head.name = "NPC Head [Head]";
+    head.parentIndex = -1;
+    head.translation[2] = 60.0f;
+    source.bones.push_back(head);
+
+    FalloutCharacter character;
+    expectTrue(buildFalloutSkeleton(source, character.skeleton), "FaceGen skeleton converts");
+
+    NifSkinnedModel model;
+    for (int part = 0; part < 2; ++part) {
+        NifSkinnedShape shape;
+        shape.name = part == 0 ? "eyes" : "hair";
+        shape.usesDynamicPositions = true;
+        shape.boneNames = {"NPC Head [Head]"};
+        shape.inverseBindMatrices.assign(16u, 0.0f);
+        shape.inverseBindMatrices[0] = shape.inverseBindMatrices[5] =
+            shape.inverseBindMatrices[10] = shape.inverseBindMatrices[15] = 1.0f;
+        // Deliberately disagree. The shape-space transform and its inverse
+        // geometry normalization cancel during the FaceGen bake.
+        shape.skinTransform[11] = part == 0 ? 25.0f : -40.0f;
+        shape.positions = {1.0f, 2.0f, 3.0f};
+        shape.normals = {0.0f, 0.0f, 1.0f};
+        shape.uvs = {0.0f, 0.0f};
+        shape.triangleIndices = {0, 0, 0};
+        shape.boneIndices.assign(kNifMaxBoneInfluences, 0u);
+        shape.boneWeights.assign(kNifMaxBoneInfluences, 0.0f);
+        shape.boneWeights[0] = 1.0f;
+        model.shapes.push_back(std::move(shape));
+    }
+
+    std::string error;
+    expectTrue(appendFalloutCharacterMesh(model, character, error), "FaceGen pieces bind");
+    expectTrue(character.vertices.size() == 2u, "both FaceGen pieces survive");
+    expectTrue(character.conflictingInverseBindCount == 0u,
+               "shape-local FaceGen binds do not conflict in the shared palette");
+
+    std::vector<odai::math::Matrix4> pose;
+    computeFalloutBindPose(character, pose);
+    for (const auto& vertex : character.vertices) {
+        const odai::math::Vector3 rest{
+            vertex.position[0], vertex.position[1], vertex.position[2]};
+        const odai::math::Vector3 skinned = odai::math::transformPoint(pose[0], rest);
+        expectTrue(std::fabs(skinned.x - rest.x) < 1e-3f, "FaceGen bind preserves x");
+        expectTrue(std::fabs(skinned.y - rest.y) < 1e-3f, "FaceGen bind preserves y");
+        expectTrue(std::fabs(skinned.z - rest.z) < 1e-3f, "FaceGen bind preserves z");
+        expectTrue(rest.y > 50.0f, "FaceGen remains at head height");
     }
 }
 
@@ -4791,6 +5392,138 @@ void testActorRaceAndWardrobeAssembly() {
     fs::remove(esmPath);
 }
 
+// Skyrim moved the human skeleton onto RACE and the visible outfit through
+// NPC_ DOFT -> OTFT -> LVLI(set) -> ARMO -> ARMA. It also marks the inner set
+// "use all" while its outer list chooses one set. This is the complete path a
+// Whiterun guard takes before character_builder can skin and animate it.
+void testSkyrimActorSkeletonAndOutfitAssembly() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr std::uint32_t kRace = 0x100u;
+    constexpr std::uint32_t kOutfit = 0x200u;
+    constexpr std::uint32_t kChoiceList = 0x300u;
+    constexpr std::uint32_t kSetList = 0x301u;
+    constexpr std::uint32_t kNpc = 0x600u;
+    constexpr std::uint32_t kPlacement = 0x700u;
+    const std::uint32_t armorIds[] = {0x400u, 0x401u, 0x402u, 0x403u};
+    const std::uint32_t addonIds[] = {0x500u, 0x501u, 0x502u, 0x503u};
+    const char* models[] = {
+        "Armor\\Guard\\BootsM_1.nif", "Armor\\Guard\\CuirassM_1.nif",
+        "Armor\\Guard\\GlovesM_1.nif", "Armor\\Guard\\HelmM_1.nif"};
+
+    const auto append = [](std::vector<std::uint8_t>& out, const std::vector<std::uint8_t>& sub) {
+        out.insert(out.end(), sub.begin(), sub.end());
+    };
+    const auto u32Payload = [](std::uint32_t value) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, value);
+        return out;
+    };
+    const auto listEntry = [&](std::uint32_t formId) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, static_cast<std::uint16_t>(1));
+        appendPod(out, static_cast<std::uint16_t>(0));
+        appendPod(out, formId);
+        appendPod(out, static_cast<std::uint32_t>(1));
+        return buildSubrecord("LVLO", out);
+    };
+
+    std::vector<std::uint8_t> content;
+    const auto appendGroup = [&](const char* type, const std::vector<std::uint8_t>& record) {
+        const auto group = buildGroup(type, 0, record);
+        content.insert(content.end(), group.begin(), group.end());
+    };
+
+    std::vector<std::uint8_t> raceSubs;
+    append(raceSubs, buildSubrecord("EDID", stringPayload("GuardRace")));
+    append(raceSubs, buildSubrecord("MNAM", {}));
+    append(raceSubs, buildSubrecord(
+        "ANAM", stringPayload("Actors\\Character\\Character Assets\\skeleton.nif")));
+    append(raceSubs, buildSubrecord("FNAM", {}));
+    append(raceSubs, buildSubrecord(
+        "ANAM", stringPayload("Actors\\Character\\Character Assets Female\\skeleton_female.nif")));
+    appendGroup("RACE", buildRecord("RACE", kRace, 0u, raceSubs));
+
+    for (std::size_t i = 0; i < 4u; ++i) {
+        std::vector<std::uint8_t> armorSubs;
+        append(armorSubs, buildSubrecord("EDID", stringPayload("GuardArmor")));
+        append(armorSubs, buildSubrecord("BOD2", u32Payload(1u << i)));
+        append(armorSubs, buildSubrecord("MODL", u32Payload(addonIds[i])));
+        appendGroup("ARMO", buildRecord("ARMO", armorIds[i], 0u, armorSubs));
+
+        std::vector<std::uint8_t> addonSubs;
+        append(addonSubs, buildSubrecord("EDID", stringPayload("GuardArmorAddon")));
+        append(addonSubs, buildSubrecord("RNAM", u32Payload(kRace)));
+        append(addonSubs, buildSubrecord("MOD2", stringPayload(models[i])));
+        appendGroup("ARMA", buildRecord("ARMA", addonIds[i], 0u, addonSubs));
+    }
+
+    std::vector<std::uint8_t> setSubs;
+    append(setSubs, buildSubrecord("EDID", stringPayload("ArmorGuardSet")));
+    append(setSubs, buildSubrecord("LVLF", std::vector<std::uint8_t>{0x04u}));
+    for (const std::uint32_t armor : armorIds) {
+        append(setSubs, listEntry(armor));
+    }
+    appendGroup("LVLI", buildRecord("LVLI", kSetList, 0u, setSubs));
+
+    std::vector<std::uint8_t> choiceSubs;
+    append(choiceSubs, buildSubrecord("EDID", stringPayload("OutfitListGuard")));
+    append(choiceSubs, buildSubrecord("LVLF", std::vector<std::uint8_t>{0x00u}));
+    append(choiceSubs, listEntry(kSetList));
+    append(choiceSubs, listEntry(0x4ffu));  // mutually-exclusive alternative
+    appendGroup("LVLI", buildRecord("LVLI", kChoiceList, 0u, choiceSubs));
+
+    std::vector<std::uint8_t> outfitSubs;
+    append(outfitSubs, buildSubrecord("EDID", stringPayload("GuardOutfit")));
+    append(outfitSubs, buildSubrecord("INAM", u32Payload(kChoiceList)));
+    appendGroup("OTFT", buildRecord("OTFT", kOutfit, 0u, outfitSubs));
+
+    std::vector<std::uint8_t> npcSubs;
+    append(npcSubs, buildSubrecord("EDID", stringPayload("GuardWhiterunTest")));
+    append(npcSubs, buildSubrecord("ACBS", std::vector<std::uint8_t>(24u, 0u)));
+    append(npcSubs, buildSubrecord("RNAM", u32Payload(kRace)));
+    append(npcSubs, buildSubrecord("DOFT", u32Payload(kOutfit)));
+    appendGroup("NPC_", buildRecord("NPC_", kNpc, 0u, npcSubs));
+
+    std::vector<std::uint8_t> placementSubs;
+    append(placementSubs, buildSubrecord("NAME", u32Payload(kNpc)));
+    std::vector<std::uint8_t> transform;
+    for (const float value : {100.0f, 200.0f, 300.0f, 0.0f, 0.0f, 0.0f}) {
+        appendPod(transform, value);
+    }
+    append(placementSubs, buildSubrecord("DATA", transform));
+    appendGroup("ACHR", buildRecord("ACHR", kPlacement, 0u, placementSubs));
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_skyrim_actor_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(content.data()),
+                  static_cast<std::streamsize>(content.size()));
+    }
+
+    FalloutActorScan scan;
+    std::string error;
+    expectTrue(
+        findActorsNear(esmPath, 100.0f, 200.0f, 1000.0f, scan, error),
+        ("Skyrim actor scan succeeds: " + error).c_str());
+    const ResolvedActorBase resolved = scan.resolve(kNpc);
+    const std::string faceGeometry =
+        "actors\\character\\facegendata\\facegeom\\odai_skyrim_actor_test.esm\\00000600.nif";
+    expectTrue(
+        resolved.skeletonPath == "Actors\\Character\\Character Assets\\skeleton.nif",
+        "Skyrim uses the RACE ANAM skeleton rather than an NPC/Fallout fallback");
+    std::vector<std::string> expectedParts(std::begin(models), std::end(models));
+    expectedParts.push_back(faceGeometry);
+    expectTrue(resolved.bodyPartPaths == expectedParts,
+               "Skyrim expands the outfit and appends the NPC's generated FaceGen mesh");
+    expectTrue(
+        resolved.wornArmorFormIds.size() == 4u,
+        "the outer leveled list chooses one set while the inner use-all list wears every piece");
+
+    fs::remove(esmPath);
+}
+
 void testBethesdaFireParticleEffectClassification() {
     using odai::importer::fnv::isFireParticleEffectModelPath;
     expectTrue(
@@ -4906,6 +5639,32 @@ void testMorrowindNifLodNodeSubtypeTail() {
         summary.blockSizes.size() == 2u && summary.blockSizes[0] == lodBlock.size() &&
             summary.blockSizes[1] == nodeBlock.size(),
         "NiLODNode includes its switch index, centre and range array in its derived size");
+
+    // NiSwitchNode itself has the same four-byte signed initial-child field in
+    // 4.0.0.2, without the 16-bit flags present in modern Gamebryo files. This
+    // is a static-parser regression test in addition to the block-size test
+    // above: reading the modern six-byte tail used to reject this valid node.
+    std::vector<std::uint8_t> switchBlock;
+    appendMorrowindNodeBase(switchBlock);
+    appendPod(switchBlock, static_cast<std::int32_t>(-1));
+
+    std::vector<std::uint8_t> switchFileBytes;
+    switchFileBytes.insert(switchFileBytes.end(), header.begin(), header.end());
+    appendPod(switchFileBytes, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(switchFileBytes, static_cast<std::uint32_t>(2));
+    appendSizedString32(switchFileBytes, "NiSwitchNode");
+    switchFileBytes.insert(switchFileBytes.end(), switchBlock.begin(), switchBlock.end());
+    appendSizedString32(switchFileBytes, "NiNode");
+    switchFileBytes.insert(switchFileBytes.end(), nodeBlock.begin(), nodeBlock.end());
+
+    odai::importer::fnv::NifModel switchModel;
+    error.clear();
+    expectTrue(
+        odai::importer::fnv::parseNifStaticMesh(switchFileBytes, switchModel, error),
+        ("Morrowind NiSwitchNode parses: " + error).c_str());
+    expectTrue(
+        switchModel.nodeParseFailedCount == 0u,
+        "Morrowind NiSwitchNode consumes its four-byte subtype tail");
 }
 
 void testMorrowindDirectKeyframeAndStencilSizing() {
@@ -5034,6 +5793,42 @@ void testLandLayerOpacityReconstruction() {
                "out-of-range reconstruction coordinates clamp to a valid opacity");
 }
 
+void testVertexFadeTrianglePartitioning() {
+    using namespace odai::importer::fnv;
+
+    NifShape shape;
+    shape.alphaSemantic = NifAlphaSemantic::VertexFade;
+    shape.alphaBlend = true;
+    shape.triangleIndices = {0u, 1u, 2u, 2u, 1u, 3u};
+    shape.colors.resize(4u * 4u, 1.0f);
+    // Only the second triangle touches vertex 3, so only that triangle belongs
+    // in the no-depth-write transition tail.
+    shape.colors[(3u * 4u) + 3u] = 0.25f;
+    std::vector<std::uint32_t> indices{99u};
+    std::uint32_t opaque = 0u;
+    std::uint32_t faded = 0u;
+    appendPartitionedNifShapeIndices(shape, 10u, indices, opaque, faded);
+    expectTrue(opaque == 3u && faded == 3u,
+               "vertex-fade partition keeps opaque and faded triangle counts");
+    expectTrue(indices == std::vector<std::uint32_t>({99u, 10u, 11u, 12u, 12u, 11u, 13u}),
+               "vertex-fade partition preserves winding and appends the faded tail");
+
+    shape.alphaSemantic = NifAlphaSemantic::ExplicitBlend;
+    indices.clear();
+    appendPartitionedNifShapeIndices(shape, 0u, indices, opaque, faded);
+    expectTrue(opaque == 6u && faded == 0u && indices == shape.triangleIndices,
+               "explicit transparency stays one material-controlled range");
+
+    shape.alphaSemantic = NifAlphaSemantic::VertexFade;
+    for (std::size_t alpha = 3u; alpha < shape.colors.size(); alpha += 4u) {
+        shape.colors[alpha] = 0.5f;
+    }
+    indices.clear();
+    appendPartitionedNifShapeIndices(shape, 0u, indices, opaque, faded);
+    expectTrue(opaque == 0u && faded == 6u && indices == shape.triangleIndices,
+               "fully faded geometry remains wholly in the blended tail");
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -5047,8 +5842,12 @@ int main() {
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
+    testSkyrimRegionAndSoundRecords();
     testLandLayerOpacityReconstruction();
+    testVertexFadeTrianglePartitioning();
     testNifParserExtractsTransformedGeometry();
+    testSkyrimTerrainPackedPositionsAreFullPrecision();
+    testSkyrimLightingShaderVertexAlpha();
     testNifParserDoesNotReparentSubtreesToTheOrigin();
     testNifParserInheritsPropertiesFromParentNodes();
     testNifParserRejectsUnusableTriangles();
@@ -5058,15 +5857,18 @@ int main() {
     testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently();
     testModDirectoryOverridesArchives();
     testPluginLoadOrderRemapsFormIds();
+    testSkyrimPluginListResolution();
     testMorrowindLoadOrderMergesWorldRenderingRecords();
     testLandLodBlockOrigin();
     testLandLodTileOriginAcrossTiers();
     testLandLodTilePaths();
     testSkinnedBindPoseIsIdentity();
+    testDynamicFacePartsShareOneBonePalette();
     testSkinnedInfluenceWeightsAreNormalized();
     testKfAnimationStrideAndBasisChange();
     testKfBSplineDecoding();
     testActorRaceAndWardrobeAssembly();
+    testSkyrimActorSkeletonAndOutfitAssembly();
     testDialogueAttributionByActorAndVoiceType();
     testTemplateSkeletonThroughNestedLeveledLists();
     testOblivionWeatherFogAndCloudTints();

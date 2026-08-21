@@ -33,7 +33,7 @@
 # Leading this far holds the horizon in frame, which is where the sky, the fog
 # and the aerial perspective actually live.
 #
-#   odai_game_newvegas --stream "<Morrowind/Data Files>" --plugin Morrowind.esm \
+#   odai --stream "<Morrowind/Data Files>" --plugin Morrowind.esm \
 #     --worldspace Vvardenfell --tour-file assets/tours/seyda_neen_to_balmora.txt \
 #     --flythrough 46 --capture-video seyda_to_balmora.mp4 30 32
 #

@@ -1,5 +1,5 @@
 {
-  "name": "voxel-factory-toy",
+  "name": "odai-bethesda-engine",
   "version-string": "0.1.0",
   "builtin-baseline": "b02e341c927f16d991edbd915d8ea43eac52096c",
   "dependencies": [
@@ -9,7 +9,6 @@
         "wayland"
       ]
     },
-    "gtest",
     {
       "name": "imgui",
       "features": [
@@ -18,11 +17,8 @@
       ]
     },
     "joltphysics",
-    "lua",
     "miniaudio",
-    "nanosvg",
     "nlohmann-json",
-    "sol2",
     "stb",
     "vulkan",
     "vulkan-memory-allocator",
@@ -32,11 +28,6 @@
     {
       "name": "imgui",
       "version": "1.91.9"
-    },
-    {
-      "name": "sol2",
-      "version": "3.5.0",
-      "port-version": 1
     }
   ]
 }

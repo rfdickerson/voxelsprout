@@ -8,7 +8,6 @@
 #include <cstring>
 #include <vector>
 
-#include "sim/network_procedural.h"
 #include "world/chunk_mesher.h"
 
 namespace odai::render {

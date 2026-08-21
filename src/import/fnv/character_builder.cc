@@ -337,6 +337,21 @@ bool appendFalloutCharacterMesh(
         inverseBindWritten[i] = matricesDiffer(character.inverseBindMatrices[i], Matrix4::identity());
     }
 
+    // Skeleton bind-pose world matrices are the canonical GPU binding for
+    // FaceGen. Most body parts already author this same binding (within export
+    // noise); generated face pieces do not, because eyes, mouth, hair and head
+    // each carry their own skin space while the renderer has one palette per
+    // actor. Their vertices are baked through the authored bind below, then use
+    // these canonical inverses for animation.
+    std::vector<Matrix4> skeletonBindWorld(character.skeleton.bones.size(), Matrix4::identity());
+    for (std::size_t i = 0; i < character.skeleton.bones.size(); ++i) {
+        const Matrix4 local = boneLocalMatrix(character.skeleton.bones[i]);
+        const int parent = character.skeleton.bones[i].parentIndex;
+        skeletonBindWorld[i] = parent >= 0
+            ? skeletonBindWorld[static_cast<std::size_t>(parent)] * local
+            : local;
+    }
+
     for (const NifSkinnedShape& shape : model.shapes) {
         const std::size_t vertexCount = shape.positions.size() / 3u;
         if (vertexCount == 0u || shape.triangleIndices.empty()) {
@@ -346,6 +361,7 @@ bool appendFalloutCharacterMesh(
         // This shape's local bone list -> skeleton bone indices, resolved once
         // per shape and then applied per vertex.
         std::vector<int> skeletonBoneIndex(shape.boneNames.size(), -1);
+        std::vector<Matrix4> authoredBindSkin(shape.boneNames.size(), Matrix4::identity());
         for (std::size_t b = 0; b < shape.boneNames.size(); ++b) {
             const auto found = boneIndexByName.find(shape.boneNames[b]);
             if (found == boneIndexByName.end()) {
@@ -366,6 +382,16 @@ bool appendFalloutCharacterMesh(
             const Matrix4 inverseBind =
                 changeMatrixBasis(shape.inverseBindMatrices.data() + (b * 16u)) *
                 changeMatrixBasis(shape.skinTransform);
+            authoredBindSkin[b] = skeletonBindWorld[boneSlot] * inverseBind;
+            if (shape.usesDynamicPositions) {
+                if (!inverseBindWritten[boneSlot]) {
+                    character.inverseBindMatrices[boneSlot] = inverse(skeletonBindWorld[boneSlot]);
+                    inverseBindWritten[boneSlot] = true;
+                }
+                // A disagreement is expected across generated face pieces and
+                // is resolved by baking each piece through authoredBindSkin.
+                continue;
+            }
             if (!inverseBindWritten[boneSlot]) {
                 character.inverseBindMatrices[boneSlot] = inverseBind;
                 inverseBindWritten[boneSlot] = true;
@@ -415,6 +441,28 @@ bool appendFalloutCharacterMesh(
             if (moveGeometry) {
                 position = transformPoint(geometryToCharacter, position);
             }
+            if (shape.usesDynamicPositions) {
+                Vector3 baked{0.0f, 0.0f, 0.0f};
+                float totalWeight = 0.0f;
+                for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
+                    const std::size_t slot =
+                        (v * kNifMaxBoneInfluences) + static_cast<std::size_t>(k);
+                    const float weight = shape.boneWeights[slot];
+                    const std::uint16_t localBone = shape.boneIndices[slot];
+                    if (weight <= 0.0f || localBone >= authoredBindSkin.size()) {
+                        continue;
+                    }
+                    const Vector3 contribution =
+                        transformPoint(authoredBindSkin[localBone], position);
+                    baked.x += contribution.x * weight;
+                    baked.y += contribution.y * weight;
+                    baked.z += contribution.z * weight;
+                    totalWeight += weight;
+                }
+                if (totalWeight > 0.0f) {
+                    position = baked * (1.0f / totalWeight);
+                }
+            }
             vertex.position[0] = position.x;
             vertex.position[1] = position.y;
             vertex.position[2] = position.z;
@@ -425,6 +473,26 @@ bool appendFalloutCharacterMesh(
                 if (moveGeometry) {
                     // A direction, so translation must not apply.
                     normal = normalize(transformDirection(geometryToCharacter, normal));
+                }
+                if (shape.usesDynamicPositions) {
+                    Vector3 baked{0.0f, 0.0f, 0.0f};
+                    for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
+                        const std::size_t slot =
+                            (v * kNifMaxBoneInfluences) + static_cast<std::size_t>(k);
+                        const float weight = shape.boneWeights[slot];
+                        const std::uint16_t localBone = shape.boneIndices[slot];
+                        if (weight <= 0.0f || localBone >= authoredBindSkin.size()) {
+                            continue;
+                        }
+                        const Vector3 contribution =
+                            transformDirection(authoredBindSkin[localBone], normal);
+                        baked.x += contribution.x * weight;
+                        baked.y += contribution.y * weight;
+                        baked.z += contribution.z * weight;
+                    }
+                    if (lengthSquared(baked) > 1e-12f) {
+                        normal = normalize(baked);
+                    }
                 }
                 vertex.normal[0] = normal.x;
                 vertex.normal[1] = normal.y;

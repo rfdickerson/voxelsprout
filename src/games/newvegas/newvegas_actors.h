@@ -29,6 +29,8 @@
 
 namespace odai::games::newvegas {
 
+class ActorNavigationWorld;
+
 // How close, and how squarely faced, an actor has to be for "press E to talk".
 // Generous on both: a conversation the player has to hunt for the exact angle
 // of is worse than one that occasionally offers itself a step early.
@@ -139,15 +141,16 @@ struct SkinnedActor {
     float yawRadians = 0.0f;
 
     // ---- Wandering ---------------------------------------------------
-    // Enough state for a townsperson to walk between spots near where the
-    // plugin placed them. Not AI and not pathfinding: there is no navmesh
-    // consulted here and nothing avoids anything, which is affordable because
-    // the destinations stay inside a radius of an authored standing position --
-    // somewhere the game already believed an actor could be.
+    // A townsperson walks between connected authored navmesh triangles near
+    // where the plugin placed them. The route stores shared-edge midpoints, so
+    // following it cannot take a straight-line shortcut across scenery.
     bool wanders = false;   // has a locomotion clip, so it can move at all
     bool walking = false;   // moving right now, which picks walkClip over idle
+    bool projectedToNavigation = false;
     float wanderOrigin[3] = {};
     float wanderTarget[3] = {};
+    std::vector<odai::math::Vector3> wanderPath;
+    std::size_t wanderPathIndex = 0u;
     float wanderPauseSeconds = 0.0f;
     std::uint32_t wanderRng = 0;
     // Top of the actor's own rest-pose geometry, above its feet. A conversation
@@ -182,6 +185,10 @@ struct SkinnedActor {
     bool placed = false;
     std::uint32_t instanceSlot = 0;
     bool uploaded = false;
+    // Game-side mirror of the renderer slot's culling state. Invisible actors
+    // keep advancing their animation clock, but do not wander, sample or upload
+    // a pose until they can contribute to the frame again.
+    bool renderVisible = true;
 
     std::string status;           // one line for the startup log, success or reason
     std::string animationStatus;
@@ -279,6 +286,10 @@ bool loadGoodspringsActors(
     // newvegas_victor.cc with dialogue and a voice; without this he is built a
     // second time here, at his authored position, and the town has two of him.
     const std::vector<std::uint32_t>& excludeBaseFormIds,
+    // Optional ownership filter applied after load-order remapping. Distance
+    // alone is insufficient for Skyrim because Solstheim and Tamriel reuse
+    // overlapping coordinate ranges.
+    const std::function<bool(std::uint32_t referenceFormId)>& placementFilter,
     std::vector<SkinnedActor>& outActors,
     ActorPopulationStats& outStats);
 
@@ -342,8 +353,10 @@ void speakActorLine(
 // placement folded in. Hand each actor's poseScratch to setSkinnedActorPose.
 void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds);
 
-// Walks the ones that can walk: picks a spot near where they were placed, turns
-// toward it, and moves at the speed their own animation was authored for.
+// Walks the ones that can walk: chooses a connected authored-navmesh route near
+// where they were placed, turns toward each shared-edge waypoint, and moves at
+// the speed their own animation was authored for. With no resident navmesh the
+// legacy local wander remains available for games/content that have none.
 //
 // `groundHeightAt(x, z, referenceY, outHeight)` clamps feet to whatever they
 // should be standing on, and must answer false where no cell is resident -- an
@@ -365,9 +378,11 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds);
 // an authored spot keeps everyone indoors-or-outdoors as the game intended. It
 // does not: a companion spawned beside the player has no authored spot, and
 // walks through the nearest wall and out through the floor beyond it.
+//
 void updateActorWandering(
     std::vector<SkinnedActor>& actors,
     float deltaSeconds,
+    const ActorNavigationWorld* navigation,
     const std::function<bool(float, float, float, float&)>& groundHeightAt,
     const std::function<void(float&, float&, float, float, float)>& slideOutOfWalls,
     int skipIndex);

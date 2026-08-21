@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstdint>
 
-#include "sim/network_procedural.h"
 
 namespace odai::render {
 

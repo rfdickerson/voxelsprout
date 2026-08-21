@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "configurePresets": [
     {
       "name": "default",
@@ -33,7 +33,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "BUILD_TESTING": "ON",
-        "ODAI_BUILD_EXAMPLES": "ON",
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
       }
@@ -65,7 +64,7 @@
     {
       "name": "linux-vcpkg-relwithdebinfo",
       "displayName": "Linux vcpkg Optimized + Symbols (Ninja) -- use this to profile",
-      "description": "Linux counterpart of vcpkg-relwithdebinfo, with examples on to match CI's target set.",
+      "description": "Linux Bethesda runtime build with profiling symbols.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-linux-relwithdebinfo",
       "condition": {
@@ -76,7 +75,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "BUILD_TESTING": "ON",
-        "ODAI_BUILD_EXAMPLES": "ON",
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
       }
@@ -94,7 +92,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": "ON",
-        "ODAI_BUILD_EXAMPLES": "ON",
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
       }

@@ -2,19 +2,15 @@
 
 #include "audio/audio.h"
 #include "engine/game_frame_stats.h"
-#include "engine/plugin.h"
 #include "render/renderer.h"
 #include "render/renderer_types.h"
-#include "sim/simulation.h"
 #include "ui/font.h"
 #include "ui/ui_context.h"
 #include "ui/ui_draw_list.h"
 #include "ui/ui_input.h"
-#include "world/chunk_grid.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <span>
 #include <string>
 #include <vector>
 
@@ -49,32 +45,6 @@ protected:
     virtual void onRender(float dt) = 0;
     virtual void onShutdown() {}
 
-    // Opt in to UI-only rendering: skip building the 3D scene pipelines the renderer
-    // otherwise creates (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain).
-    // Override to return true in tools that draw nothing but the 2D UI overlay.
-    // Checked in init() before the renderer is initialized. Default: false.
-    virtual bool wantsMinimalRendering() const { return false; }
-
-    // Opt out of the renderer's strategy-map tuning preset.
-    //
-    // init() applies setStrategyMapMode(true) before renderer init, and that
-    // preset does three things a non-strategy game may not want: it pins the
-    // ambient-occlusion radius/bias/intensity to values scaled for a hex map
-    // (7 world units of AO reach), it disables the ray-tracing runtime
-    // outright, and it forces voxel GI onto its legacy path. Those are the
-    // right defaults for the 4X/city games this class was built for, and
-    // actively wrong for a game whose world is at Bethesda scale (~70 units
-    // per metre), where a 7-unit AO radius is 10 cm and the estimator
-    // early-outs to "unoccluded" across the whole frame.
-    //
-    // Defaults to true so every existing game keeps its current behavior; a
-    // game that wants the untuned renderer overrides this to false and sets
-    // its own AO tuning in onInit(). Checked in init() before renderer init,
-    // because setStrategyMapMode's ray-tracing effect cannot be undone later:
-    // the RT shader variants and acceleration structures are skipped at
-    // pipeline-creation time.
-    virtual bool wantsStrategyMapTuning() const { return true; }
-
     // Upscaler request, consumed by init() BEFORE renderer init for the same
     // reason wantsStrategyMapTuning is: the quality preset chooses the internal
     // render resolution, and that sizes every render target at swapchain build.
@@ -96,16 +66,6 @@ protected:
     // if a game wants different starting volumes; there is no persisted GameApp-level config
     // file today (unlike src/app/App's odai.cfg), so this is the explicit seam for that.
     virtual audio::AudioConfig audioConfig() const { return audio::AudioConfig{}; }
-
-    // Voxel chunk content for a game that renders real world/ terrain (as opposed to an
-    // ImportedScene or pure 2D/UI content). Pass a pointer to submitFrame() when the game
-    // has resident chunks to draw; leave it null (the default) to render nothing, which
-    // reproduces prior behavior exactly for every non-voxel game.
-    struct WorldFrameContent {
-        const world::ChunkGrid* chunkGrid = nullptr;
-        std::span<const std::size_t> visibleChunkIndices{};
-        render::VoxelPreview voxelPreview{};
-    };
 
     // Load four font faces from disk and register their atlases with the renderer.
     // Call from onInit() after the renderer is up.
@@ -142,14 +102,7 @@ protected:
 
     // Flush the UI tree onto the draw list (appending, not resetting) then submit
     // the frame to the renderer. Call at the end of onRender().
-    // importedActors, when non-null, is per-frame dynamic geometry (packed
-    // vertex-color format) streamed through the FrameArena — use it for small
-    // animated meshes (vehicles, units) that would be far too expensive to
-    // re-upload via uploadImportedScene() every frame. The spans must stay
-    // alive through the call only.
-    void submitFrame(const render::CameraPose& camera, float simulationAlpha = 0.0f,
-                     const render::ImportedActorFrameData* importedActors = nullptr,
-                     const WorldFrameContent* worldContent = nullptr);
+    void submitFrame(const render::CameraPose& camera);
 
     // Capture the mouse into relative/FPS-look mode (GLFW_CURSOR_DISABLED), or release it
     // back to the default hidden-but-free cursor (GLFW_CURSOR_HIDDEN). Games with no
@@ -179,12 +132,6 @@ protected:
     ui::UiDrawList m_uiDrawList;
     ui::UiInput    m_uiInput;
 
-    // Register plugins from onInit(); GameApp::init() attaches them right
-    // after onInit() returns, run() ticks them every frame, and shutdown()
-    // detaches them right after onShutdown(). See engine/plugin.h for the
-    // onRender() caveat -- it is not fanned out automatically.
-    PluginRegistry m_plugins;
-
     std::vector<std::uint32_t> m_pendingTextInput;
     float  m_pendingScrollDelta = 0.0f;
     double m_lastMouseX = 0.0;
@@ -195,9 +142,6 @@ private:
     // Draws the F3 overlay onto m_uiDrawList. Called from submitFrame() after
     // the widget tree is flushed so it sits above game UI.
     void drawPerfOverlay();
-
-    world::ChunkGrid  m_emptyGrid;
-    sim::Simulation   m_emptySimulation;
 
     void reportFrameStats();
     // ODAI_FRAME_STATS benchmark state. Zero means the benchmark is off.

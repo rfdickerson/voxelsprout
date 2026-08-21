@@ -1,7 +1,6 @@
 #pragma once
 
 #include "ui/ui_types.h"
-#include "ui/vector/vector_path.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -14,8 +13,6 @@
 namespace odai::ui {
 
 class Font;
-struct StrokeOptions;  // ui/vector/vector_tessellator.h
-
 // Per-vertex draw mode. The low 8 bits of UiVertex::mode select this mode; the
 // remaining bits hold the bindless UI texture slot. One command can therefore
 // mix icons, font atlases, and solid geometry under one shared clip rect.
@@ -168,18 +165,6 @@ public:
                          float startAngleRad, float endAngleRad, const UiColor& color,
                          int numSteps = 32);
 
-    // --- Procedural vector paths (CPU-tessellated, anti-aliased) ---
-    // Fill an arbitrary path (curves/arcs/polygons). Subpaths are treated as
-    // closed; holes and concave shapes are handled per the fill rule. The result
-    // is a triangle mesh with a feathered AA fringe, emitted as SolidColor.
-    void addPathFilled(const VectorPath& path, const UiColor& color,
-                       FillRule fillRule = FillRule::NonZero);
-    // Stroke an arbitrary path with width/join/cap from `opts`.
-    void addPathStroked(const VectorPath& path, const UiColor& color, const StrokeOptions& opts);
-    // Convenience: stroke a polyline of `count` points with a round-join/cap line.
-    void addPolylineAA(const UiVec2* points, std::size_t count, const UiColor& color,
-                       float widthPx, bool closed = false);
-
     // Draw a single line of text with the top-left baseline box at posPx; returns
     // the pen x advance. Newlines are not interpreted (use RichText for layout).
     float addText(const Font& font, std::string_view utf8, const UiVec2& posPx, const UiColor& color);
@@ -227,11 +212,6 @@ public:
     // without re-tessellating. Pass white (1,1,1,1) for no tint.
     void appendCachedTinted(const UiGeometryBlock& block, const UiVec2& translate,
                             const UiColor& tintMul);
-
-    // Resolve a vector icon by name from VectorIconRegistry::global() and draw it
-    // fitted into `dst` (uniform aspect-preserving scale). `tint` multiplies the
-    // baked colors; pass default white to draw the icon's own colors.
-    void addVectorIcon(std::string_view name, const UiRect& dst, const UiColor& tint = UiColor{});
 
 private:
     // Ensure the current command matches the current clip; texture selection is

@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
             std::cout
                 << "odai_fnv_texture_pack --in <dir> --out <dir> [--max-size 1024] [--dry-run]\n"
                 << "  Mip-drops every .dds to the ceiling and lowercases every path,\n"
-                << "  producing a directory ready to pass to odai_game_newvegas --mod.\n"
+                << "  producing a directory ready to pass to odai --mod.\n"
                 << "  --max-size 0 keeps every level (paths are still lowercased).\n"
                 << "  Match --max-size to the ODAI_FNV_TEX_SIZE you intend to run;\n"
                 << "  a pack cut to 512 cannot be turned back up later.\n";

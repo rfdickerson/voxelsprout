@@ -8,7 +8,6 @@
 
 #include "core/log.h"
 #include "render/backend/vulkan/frame_math.h"
-#include "sim/network_procedural.h"
 
 namespace odai::render {
 

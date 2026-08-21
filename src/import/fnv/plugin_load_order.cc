@@ -1,5 +1,7 @@
 #include "import/fnv/plugin_load_order.h"
 
+#include "import/fnv/content_profile.h"
+
 #include "import/fnv/esm_reader.h"
 
 #include <algorithm>
@@ -18,6 +20,7 @@ namespace {
 
 constexpr std::uint32_t kTes4MasterFlag = 0x00000001u;
 constexpr std::uint32_t kTes4LocalizedFlag = 0x00000080u;
+constexpr std::uint32_t kTes4LightFlag = 0x00000200u;
 // The largest record header of any supported generation: type[4], dataSize[4],
 // flags[4], formId[4], versionControlInfo[4], formVersion[2], unknown[2]. Read
 // this many bytes to sniff the file, then rewind to the header size the sniff
@@ -30,6 +33,47 @@ std::string toLowerAsciiCopy(std::string text) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return text;
+}
+
+std::string trimAscii(std::string text) {
+    const auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
+    while (!text.empty() && isSpace(static_cast<unsigned char>(text.front()))) {
+        text.erase(text.begin());
+    }
+    while (!text.empty() && isSpace(static_cast<unsigned char>(text.back()))) {
+        text.pop_back();
+    }
+    return text;
+}
+
+void appendUniquePlugin(std::vector<std::string>& plugins, const std::string& name) {
+    const std::string lowered = toLowerAsciiCopy(name);
+    const auto found = std::find_if(
+        plugins.begin(), plugins.end(), [&](const std::string& existing) {
+            return toLowerAsciiCopy(existing) == lowered;
+        });
+    if (found == plugins.end()) {
+        plugins.push_back(name);
+    }
+}
+
+bool findCaseInsensitiveFile(
+    const std::filesystem::path& directory,
+    const std::string& name,
+    std::filesystem::path& outPath) {
+    std::error_code error;
+    for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end;
+         it.increment(error)) {
+        std::error_code typeError;
+        if (!it->is_regular_file(typeError) || typeError) {
+            continue;
+        }
+        if (toLowerAsciiCopy(it->path().filename().string()) == toLowerAsciiCopy(name)) {
+            outPath = it->path();
+            return true;
+        }
+    }
+    return false;
 }
 
 std::uint32_t readU32(const std::uint8_t* bytes) {
@@ -130,6 +174,7 @@ bool readFalloutPluginHeader(
         const std::uint32_t flags = readU32(header + 8);
         outHeader.isMaster = (flags & kTes4MasterFlag) != 0u;
         outHeader.isLocalized = (flags & kTes4LocalizedFlag) != 0u;
+        outHeader.isLight = (flags & kTes4LightFlag) != 0u;
     }
 
     // Seek to where the record body actually starts, because the read above
@@ -194,6 +239,166 @@ bool readFalloutPluginHeader(
             }
         }
         offset = dataOffset + size;
+    }
+    return true;
+}
+
+bool readBethesdaPluginList(
+    const std::filesystem::path& path,
+    std::vector<std::string>& outActivePlugins,
+    std::string& outError) {
+    outActivePlugins.clear();
+    outError.clear();
+    std::ifstream input(path);
+    if (!input) {
+        outError = "cannot open load order " + path.string();
+        return false;
+    }
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        line = trimAscii(std::move(line));
+        if (line.empty() || line[0] == '#' || line[0] == ';') {
+            continue;
+        }
+        // Skyrim SE plugins.txt keeps inactive entries without a star. Treating
+        // them as active is especially dangerous for half-installed mod sets.
+        if (line[0] != '*') {
+            continue;
+        }
+        line = trimAscii(line.substr(1));
+        if (!line.empty()) {
+            appendUniquePlugin(outActivePlugins, line);
+        }
+    }
+    if (!input.eof() && input.fail()) {
+        outError = "failed while reading load order " + path.string();
+        outActivePlugins.clear();
+        return false;
+    }
+    return true;
+}
+
+bool resolveInstalledSkyrimPluginList(
+    const std::filesystem::path& dataFilesPath,
+    const std::optional<std::filesystem::path>& explicitList,
+    std::vector<std::string>& outPlugins,
+    std::filesystem::path& outSource,
+    std::string& outError) {
+    outPlugins.clear();
+    outSource.clear();
+    outError.clear();
+
+    std::vector<std::filesystem::path> candidates;
+    if (explicitList.has_value()) {
+        candidates.push_back(*explicitList);
+    } else {
+        // A Steam install gives an exact Proton prefix without guessing which
+        // of several user profiles belongs to this Data directory.
+        const std::filesystem::path gameRoot = dataFilesPath.parent_path();
+        const std::filesystem::path common = gameRoot.parent_path();
+        if (toLowerAsciiCopy(common.filename().string()) == "common") {
+            const std::filesystem::path steamApps = common.parent_path();
+            candidates.push_back(
+                steamApps / "compatdata" / "489830" / "pfx" / "drive_c" / "users" /
+                "steamuser" / "AppData" / "Local" / "Skyrim Special Edition" /
+                "plugins.txt");
+        }
+        const char* home = std::getenv("HOME");
+        if (home != nullptr) {
+            const std::filesystem::path homePath(home);
+            for (const std::filesystem::path& steamRoot : {
+                     homePath / ".local" / "share" / "Steam",
+                     homePath / ".steam" / "steam"}) {
+                candidates.push_back(
+                    steamRoot / "steamapps" / "compatdata" / "489830" / "pfx" /
+                    "drive_c" / "users" / "steamuser" / "AppData" / "Local" /
+                    "Skyrim Special Edition" / "plugins.txt");
+            }
+            candidates.push_back(
+                homePath / ".local" / "share" / "Skyrim Special Edition" / "plugins.txt");
+        }
+    }
+
+    std::filesystem::path selected;
+    if (explicitList.has_value()) {
+        selected = candidates.front();
+        std::error_code existsError;
+        if (!std::filesystem::is_regular_file(selected, existsError) || existsError) {
+            outError = "load order does not exist: " + selected.string();
+            return false;
+        }
+    } else {
+        // If more than one valid profile exists, the newest is the one a mod
+        // manager or the game's launcher most recently wrote.
+        std::filesystem::file_time_type newest{};
+        bool haveNewest = false;
+        for (const std::filesystem::path& candidate : candidates) {
+            std::error_code stampError;
+            if (!std::filesystem::is_regular_file(candidate, stampError) || stampError) {
+                continue;
+            }
+            const auto stamp = std::filesystem::last_write_time(candidate, stampError);
+            if (!stampError && (!haveNewest || stamp > newest)) {
+                selected = candidate;
+                newest = stamp;
+                haveNewest = true;
+            }
+        }
+    }
+
+    // Base masters are implicit in plugins.txt. Add only what is actually
+    // installed, except Skyrim.esm itself which is required.
+    const std::vector<std::string> implicit = {
+        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"};
+    for (const std::string& name : implicit) {
+        std::filesystem::path found;
+        if (findCaseInsensitiveFile(dataFilesPath, name, found)) {
+            appendUniquePlugin(outPlugins, found.filename().string());
+        } else if (name == "Skyrim.esm") {
+            outError = "Skyrim.esm not found in " + dataFilesPath.string();
+            return false;
+        }
+    }
+
+    if (!selected.empty()) {
+        std::vector<std::string> active;
+        if (!readBethesdaPluginList(selected, active, outError)) {
+            outPlugins.clear();
+            return false;
+        }
+        for (const std::string& name : active) {
+            appendUniquePlugin(outPlugins, name);
+        }
+        outSource = selected;
+        return true;
+    }
+
+    // A stock Proton install often has no profile until the Bethesda launcher
+    // runs. Skyrim.ccc is the authoritative Creation Club order, but it may
+    // list content not installed, so include only present files.
+    const std::filesystem::path cccPath = dataFilesPath.parent_path() / "Skyrim.ccc";
+    std::ifstream ccc(cccPath);
+    if (ccc) {
+        std::string line;
+        while (std::getline(ccc, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            line = trimAscii(std::move(line));
+            if (line.empty() || line[0] == '#' || line[0] == ';') {
+                continue;
+            }
+            std::filesystem::path found;
+            if (findCaseInsensitiveFile(dataFilesPath, line, found)) {
+                appendUniquePlugin(outPlugins, found.filename().string());
+            }
+        }
+        outSource = cccPath;
+    } else {
+        outSource = "official installed masters";
     }
     return true;
 }
@@ -287,11 +492,28 @@ bool FalloutLoadOrder::open(
         }
     }
 
-    if (m_entries.size() > 256u) {
-        outError = "load order has " + std::to_string(m_entries.size()) +
-            " plugins; a formID mod index is one byte, so 256 is the hard ceiling";
-        m_entries.clear();
-        return false;
+    std::size_t regularCount = 0u;
+    std::size_t lightCount = 0u;
+    for (FalloutLoadOrderEntry& entry : m_entries) {
+        if (entry.header.isLight) {
+            if (lightCount >= 4096u) {
+                outError = "load order has more than 4096 light plugins";
+                m_entries.clear();
+                return false;
+            }
+            entry.slot = FalloutPluginSlot{
+                FalloutPluginSlotKind::Light, static_cast<std::uint16_t>(lightCount++)};
+        } else {
+            // 0xFE is reserved for the light namespace and 0xFF for transient
+            // runtime forms, leaving regular slots 0x00..0xFD.
+            if (regularCount >= 254u) {
+                outError = "load order has more than 254 regular plugins";
+                m_entries.clear();
+                return false;
+            }
+            entry.slot = FalloutPluginSlot{
+                FalloutPluginSlotKind::Regular, static_cast<std::uint16_t>(regularCount++)};
+        }
     }
 
     // Now that every plugin has a position, build each one's local -> global
@@ -299,11 +521,10 @@ bool FalloutLoadOrder::open(
     // at zero and masters at 1..N.
     for (std::size_t i = 0; i < m_entries.size(); ++i) {
         FalloutLoadOrderEntry& entry = m_entries[i];
-        entry.globalIndex = static_cast<std::uint8_t>(i);
         entry.localToGlobal.clear();
         entry.localToGlobal.reserve(entry.header.masters.size() + 1u);
         if (entry.header.format == EsmPluginFormat::kMorrowind) {
-            entry.localToGlobal.push_back(entry.globalIndex);
+            entry.localToGlobal.push_back(entry.slot);
         }
         for (const std::string& master : entry.header.masters) {
             const auto found = placedByLowerName.find(toLowerAsciiCopy(master));
@@ -313,13 +534,22 @@ bool FalloutLoadOrder::open(
                 m_entries.clear();
                 return false;
             }
-            entry.localToGlobal.push_back(static_cast<std::uint8_t>(found->second));
+            entry.localToGlobal.push_back(m_entries[found->second].slot);
         }
         if (entry.header.format != EsmPluginFormat::kMorrowind) {
-            entry.localToGlobal.push_back(entry.globalIndex);
+            entry.localToGlobal.push_back(entry.slot);
         }
     }
     return true;
+}
+
+bool FalloutLoadOrder::open(
+    const ResolvedContentProfile& profile, std::string& outError) {
+    m_searchRoots.clear();
+    for (const ContentLayer& layer : profile.layers) {
+        if (layer.enabled) m_searchRoots.push_back(layer.root);
+    }
+    return open(profile.dataRoot, profile.plugins, outError);
 }
 
 std::uint32_t FalloutLoadOrder::remapFormId(
@@ -334,15 +564,34 @@ std::uint32_t FalloutLoadOrder::remapFormId(
             // TES3 treats an out-of-range content-file byte as belonging to the
             // current file. Preserve the low 24 bits and make that ownership
             // explicit in global space.
-            return (localFormId & 0x00FFFFFFu) |
-                (static_cast<std::uint32_t>(entry.globalIndex) << 24u);
+            return entry.slot.encode(localFormId & 0x00FFFFFFu);
         }
         // Not an index this plugin declares. Leaving it alone keeps the bad
         // reference identifiable instead of aliasing it onto a real record.
         return localFormId;
     }
-    return (localFormId & 0x00FFFFFFu) |
-        (static_cast<std::uint32_t>(entry.localToGlobal[localIndex]) << 24u);
+    const FalloutPluginSlot target = entry.localToGlobal[localIndex];
+    const std::uint32_t objectId = localFormId & 0x00FFFFFFu;
+    if (target.kind == FalloutPluginSlotKind::Light && objectId > 0xFFFu) {
+        // A light plugin cannot own that object ID. Preserve the malformed raw
+        // value instead of aliasing it onto an unrelated valid record.
+        return localFormId;
+    }
+    return target.encode(objectId);
+}
+
+const FalloutLoadOrderEntry* FalloutLoadOrder::ownerOf(std::uint32_t globalFormId) const {
+    const bool light = (globalFormId >> 24u) == 0xFEu;
+    const std::uint16_t slot = light
+        ? static_cast<std::uint16_t>((globalFormId >> 12u) & 0x0FFFu)
+        : static_cast<std::uint16_t>(globalFormId >> 24u);
+    const FalloutPluginSlotKind kind =
+        light ? FalloutPluginSlotKind::Light : FalloutPluginSlotKind::Regular;
+    const auto found = std::find_if(
+        m_entries.begin(), m_entries.end(), [&](const FalloutLoadOrderEntry& entry) {
+            return entry.slot.kind == kind && entry.slot.index == slot;
+        });
+    return found == m_entries.end() ? nullptr : &*found;
 }
 
 std::string FalloutLoadOrder::fingerprint() const {
@@ -360,6 +609,8 @@ std::string FalloutLoadOrder::fingerprint() const {
     };
     for (const FalloutLoadOrderEntry& entry : m_entries) {
         mix(toLowerAsciiCopy(entry.header.fileName));
+        mix(entry.slot.kind == FalloutPluginSlotKind::Light ? "light" : "regular");
+        mix(std::to_string(entry.slot.index));
         std::error_code error;
         const auto size = std::filesystem::file_size(entry.path, error);
         mix(error ? std::string("?") : std::to_string(size));

@@ -22,7 +22,7 @@
 # looking at empty sky, which reads as "nothing rendered" rather than as a
 # camera in the wrong place.
 #
-#   odai_game_newvegas --stream "<SSE Data>" --plugin Skyrim.esm \
+#   odai --stream "<SSE Data>" --plugin Skyrim.esm \
 #     --worldspace WhiterunWorld --tour-file assets/tours/whiterun.txt \
 #     --flythrough 30 --capture-video whiterun.mp4 30 18
 #

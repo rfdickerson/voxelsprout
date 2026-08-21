@@ -1,311 +1,81 @@
-# Morrowind Engine
+# odai
 
-This repo is being repurposed into a small Vulkan-based Morrowind scene renderer, starting with a Balmora demo pipeline.
+`odai` is an open-source Vulkan runtime for exploring Bethesda Game Studios worlds from
+Morrowind, Oblivion, Fallout 3, Fallout: New Vegas, and Skyrim.
 
-Current implemented scope:
-
-- Offline Balmora scene cooking from vanilla `Morrowind.esm`
-- Terrain extraction from `LAND` records
-- Landscape texture reference extraction from `LTEX`
-- Exterior cell reference extraction for Balmora and a 1-cell border ring
-- Binary imported-scene serialization
-- Terrain OBJ export for inspection
-
-Not implemented yet:
-
-- NIF static object geometry import
-- Runtime in-engine rendering of the imported scene
-- Texture decode/upload path for Morrowind assets
-
-## Data Files Path
-
-The cooker expects the `Data Files` directory inside a Morrowind install.
-
-Typical locations for this machine:
-
-- Windows install root: `C:\GOG Games\Morrowind`
-- Windows data path: `C:\GOG Games\Morrowind\Data Files`
-- WSL2 install root: `/mnt/c/GOG Games/Morrowind`
-- WSL2 data path: `/mnt/c/GOG Games/Morrowind/Data Files`
-
-Use the `Data Files` path as the first cooker argument.
+The engine streams original game archives and plugins into one retained `ImportedScene`
+rendering path. It supports terrain, statics, water, fire, authored weather and clouds,
+local lights, GPU-skinned actors, dialogue records, temporal rendering, and optional
+ray-traced Bethesda scene variants. No original game assets are distributed here.
 
 ## Build
 
-Linux/WSL2 tool-only build:
+Dependencies are supplied by the vcpkg manifest.
 
 ```bash
-cmake -S . -B /tmp/odai-cmake-check \
-  -DODAI_BUILD_APP=OFF \
-  -DODAI_BUILD_TOOLS=ON \
-  -DBUILD_TESTING=ON \
-  -DCMAKE_BUILD_TYPE=Debug
-
-cmake --build /tmp/odai-cmake-check --target odai_balmora_cooker -j 4
-cmake --build /tmp/odai-cmake-check --target odai_imported_scene_tests -j 4
+cmake --preset linux-vcpkg
+cmake --build --preset linux-vcpkg -j
+ctest --test-dir build-linux --output-on-failure
 ```
 
-Windows app builds should continue using `cmake-build-release`.
-Linux builds should continue using `cmake-build-linux`.
+The useful switches are `ODAI_BUILD_RUNTIME`, `ODAI_BUILD_TOOLS`, `BUILD_TESTING`,
+`ODAI_ENABLE_CCACHE`, `ODAI_ENABLE_LTO`, `ODAI_ENABLE_NATIVE_ARCH`, and
+`ODAI_ENABLE_XESS`.
 
-## Cook Balmora
-
-WSL2 example:
+## Run
 
 ```bash
-/tmp/odai-cmake-check/odai_balmora_cooker \
-  "/mnt/c/GOG Games/Morrowind/Data Files" \
-  /tmp/balmora_scene.bin \
-  /tmp/balmora_terrain.obj
+./build-linux/odai --help
+./build-linux/odai --stream "/path/to/Oblivion/Data" \
+  --plugin Oblivion.esm --worldspace Tamriel
 ```
 
-Windows example from PowerShell after building the tool:
+The same command accepts `Morrowind.esm`, `Fallout3.esm`, `FalloutNV.esm`, and
+`Skyrim.esm`. Authored camera tours live in `assets/tours/`.
 
-```powershell
-odai_balmora_cooker.exe `
-  "C:\GOG Games\Morrowind\Data Files" `
-  "C:\temp\balmora_scene.bin" `
-  "C:\temp\balmora_terrain.obj"
-```
-
-Arguments:
-
-- `arg1`: Morrowind `Data Files` path
-- `arg2`: output imported-scene binary
-- `arg3`: optional terrain OBJ output path
-
-## How Path Selection Works
-
-There is no config file or environment variable yet. You specify the Morrowind asset path directly on the command line when running the cooker.
-
-Use:
-
-- `C:\GOG Games\Morrowind\Data Files` on Windows
-- `/mnt/c/GOG Games/Morrowind/Data Files` on WSL2
-
-The cooker reads:
-
-- `Morrowind.esm`
-- referenced terrain texture names from the same `Data Files` tree
-- object model record metadata from `Morrowind.esm`
-
-## Tests
-
-Run the importer-focused test target:
+For Skyrim Special Edition, `odai` resolves the active `plugins.txt` from the
+native or Proton profile and recursively includes its masters. An explicit file
+wins over discovery:
 
 ```bash
-/tmp/odai-cmake-check/odai_imported_scene_tests
+./build-linux/odai --stream "/path/to/Skyrim Special Edition/Data" \
+  --plugin Skyrim.esm --load-order "/path/to/plugins.txt"
 ```
 
-This currently validates imported-scene save/load round-tripping and terrain OBJ export.
+The official fallback preserves Skyrim, Update, installed DLC, and locally
+present `Skyrim.ccc` order; it never enables arbitrary plugins by scanning the
+Data directory. `ODAI_FNV_LOAD_ORDER` is the environment equivalent.
 
-## Fallout: New Vegas Import Pipeline
-
-A second offline cooker, `odai_newvegas_cooker`, targets Fallout: New Vegas —
-a different Bethesda asset stack entirely (Gamebryo-era ESM record format,
-BSA v104 archives, NIF 20.2.0.7 meshes) despite the shared lineage with
-Morrowind. It writes the same `ImportedScene` `.bin` format as the Balmora
-cooker, so it needs no renderer changes either.
-
-Format readers live under `src/import/fnv/`:
-
-- `bsa_archive.{h,cc}` — BSA v104 archive reader (folder/file records, zlib
-  decompression).
-- `esm_reader.{h,cc}` — generic GRUP/record/subrecord walker for the
-  24-byte Fallout record header (compressed records, oversized `XXXX`
-  subrecords).
-- `fallout_records.{h,cc}` — typed extraction: `TES4`, `STAT`, `CELL`,
-  `WRLD`, `LAND` (heightmap), `REFR` (placed statics).
-- `nif_scene.{h,cc}` — minimal Gamebryo NIF reader: `NiNode` transform
-  hierarchy + `NiTriShape`/`NiTriShapeData` geometry.
-
-**Scope cuts, made explicitly:**
-- No texture extraction (`BSShaderPPLightingProperty`'s exact field layout
-  across FO3/FNV patch versions wasn't something this port could verify).
-  Static meshes and terrain both render via the engine's existing
-  hashed-color / height-based vertex-color fallback paths — no missing-DDS
-  crash, just untextured geometry.
-- No skinned/animated meshes, no collision, no interior-cell decal/portal
-  data.
-
-**Important — not validated against real game data.** This was built and
-tested entirely against hand-built synthetic fixtures (see
-`tests/fnv_import_tests.cc`) in an environment with no Fallout: New Vegas
-Data Files available. Every format reader has bounds-checked, fail-closed
-parsing (a misread block is dropped, not silently corrupted — see
-`nif_scene.h`'s design note), but byte-layout details like the VHGT height
-scale constant and the REFR Euler rotation order are best-effort guesses
-from public format documentation. Test against real Data Files before
-trusting cooked output, especially placed-object orientation and terrain
-elevation.
-
-### Usage
+Large existing MO2, OpenMW, and ODAI JSON setups can be loaded read-only as one
+resolved content graph:
 
 ```bash
-odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> --cell <EditorID>
-odai_newvegas_cooker <DataFilesPath> <PluginName.esm> <output.bin> \
-    --worldspace <EditorID> <gridX0> <gridZ0> <gridX1> <gridZ1>
+./build-linux/odai --profile "/path/to/MO2/profiles/Default" \
+  --stream "/path/to/Skyrim Special Edition/Data" --worldspace Tamriel
+./build-linux/odai --profile "$HOME/.config/openmw/openmw.cfg" \
+  --worldspace Vvardenfell
 ```
 
-The cooker scans `<DataFilesPath>` for `*.bsa` archives automatically; loose
-files under `<DataFilesPath>/meshes/` take precedence over archived ones,
-matching Bethesda's own load order.
+Use `--mods-root` for a nonstandard MO2 layout, `--compat-report <json>` for an
+atomic launch report, and `--reindex-content` after manually changing indexed
+files. `--mod` and `--plugin-add` still append at highest priority. See
+[`docs/MOD_PROFILES.md`](docs/MOD_PROFILES.md) for profile formats, precedence,
+diagnostics, and the deliberately unsupported script-runtime boundary.
 
-### Tests
+WASD and the mouse explore, `E` activates actors and real XTEL doors, `F`
+toggles walking, and Escape opens the pause menu and discovered-location list.
+Exterior cells stream continuously; doors fade between interiors and child
+worldspaces such as WhiterunWorld. The runtime saves a native traversal state
+every five seconds while grounded and resumes it on the next launch. Use
+`--state <path>` to relocate that file or `--no-resume` for a fresh session;
+explicit `--worldspace`, `--interior`, or `--spawn` selections take precedence.
 
-```bash
-odai_fnv_import_tests
+Retained inspection and content commands:
+
+```text
+odai_bethesda_probe
+odai_newvegas_cooker
+odai_fnv_texture_pack
 ```
 
-Covers BSA folder/file parsing and zlib inflate, ESM group/record/subrecord
-walking (including nested groups, oversized subrecords, and compressed
-records), typed CELL/WRLD/REFR/LAND extraction with worldspace/cell
-attribution, and NIF transform-hierarchy + geometry extraction.
-
-## Current Workflow
-
-1. Build `odai_balmora_cooker`
-2. Point it at the Morrowind `Data Files` directory
-3. Generate `balmora_scene.bin`
-4. Optionally inspect `balmora_terrain.obj`
-5. Continue implementing NIF mesh import and runtime Vulkan rendering
-
-## Strategic Map Prototype
-
-The repo also hosts the first vertical slice of a Civ / Total War-inspired strategy
-layer: an explorable 3D hex map rendered with the existing Vulkan engine. It is a
-small, self-contained game layer that reuses the imported-scene render path, so no
-renderer or shader changes were required.
-
-### Architecture
-
-Game code lives under `src/game/` and stays free of any Vulkan/renderer types
-(the engine's reusable code remains in `core/`, `math/`, `render/`, `world/`,
-`import/`; offline generators in `tools/`; tests in `tests/`):
-
-- `src/game/strategy_map.{h,cc}` — the data model: a pointy-top hex grid in odd-r
-  offset coordinates, per-tile terrain type, elevation, river/road/border flags,
-  fog-of-war visibility, territory owner, and settlement markers. Pure CPU data.
-- `src/game/strategy_map_io.{h,cc}` — versioned binary serialization (`.smap`).
-- `src/game/strategy_map_mesh.{h,cc}` — meshes a map into an `ImportedScene`
-  (terrain prisms colored per terrain, a debug grid overlay, and settlement
-  markers) using the engine's packed vertex-color render stream.
-
-The map is drawn by feeding the meshed scene to the existing imported-scene
-pipeline, which already provides an angled camera and free-fly pan/zoom/orbit.
-
-### Build
-
-Windows (PowerShell):
-
-```powershell
-cmake -S . -B cmake-build-release
-cmake --build cmake-build-release --target odai_strategy_map_gen
-cmake --build cmake-build-release --target odai_strategy_map_tests
-cmake --build cmake-build-release --target odai            # the runtime viewer
-```
-
-Linux/WSL2 (bash), matching CI — needs the full Vulkan build, not the
-tools-only config, to build the `odai` viewer target:
-
-```bash
-cmake -S . -B cmake-build-linux -G Ninja \
-  -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
-  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-  -DVCPKG_TARGET_TRIPLET=x64-linux
-cmake --build cmake-build-linux --target odai_strategy_map_gen -j
-cmake --build cmake-build-linux --target odai_strategy_map_tests -j
-cmake --build cmake-build-linux --target odai -j            # the runtime viewer
-```
-
-Tools and tests alone also build on Linux/WSL2 with `-DODAI_BUILD_TOOLS=ON
--DBUILD_TESTING=ON` (see the tool-only build above), but that config skips
-the Vulkan-backed `odai` viewer.
-
-### Generate and view a map
-
-Windows (PowerShell):
-
-```powershell
-# 1. Generate a sample hex map: writes strategy_map.smap and strategy_map_scene.bin
-#    Optional args: <smap> <bin> <width> <height> <seed>
-cmake-build-release\odai_strategy_map_gen.exe
-
-# 2. Run the viewer. The app loads strategy_map.smap from the working directory,
-#    or set ODAI_STRATEGY_MAP to an explicit path.
-$env:ODAI_STRATEGY_MAP = "strategy_map.smap"
-cmake-build-release\odai.exe
-```
-
-Linux/WSL2 (bash):
-
-```bash
-# 1. Generate a sample hex map: writes strategy_map.smap and strategy_map_scene.bin
-#    Optional args: <smap> <bin> <width> <height> <seed>
-cmake-build-linux/odai_strategy_map_gen
-
-# 2. Run the viewer. The app loads strategy_map.smap from the working directory,
-#    or set ODAI_STRATEGY_MAP to an explicit path.
-ODAI_STRATEGY_MAP="strategy_map.smap" cmake-build-linux/odai
-```
-
-Camera controls reuse the imported-scene fly camera: `WASD` to pan, mouse to
-orbit/look, `Space` to rise and `Shift` to descend (altitude "zoom"), and `Ctrl`
-to move faster.
-
-The generated `strategy_map_scene.bin` is also a plain imported scene, so it can
-alternatively be viewed via `ODAI_IMPORTED_SCENE=strategy_map_scene.bin` with no
-strategy-map support compiled in.
-
-### Tests
-
-Windows (PowerShell):
-
-```powershell
-cmake-build-release\odai_strategy_map_tests.exe
-# or via CTest:
-ctest --test-dir cmake-build-release -R odai_strategy_map_tests
-```
-
-Linux/WSL2 (bash):
-
-```bash
-cmake-build-linux/odai_strategy_map_tests
-# or via CTest:
-ctest --test-dir cmake-build-linux -R odai_strategy_map_tests
-```
-
-Covers hex indexing/bounds, neighbor symmetry, hex geometry (corner distance and
-elevation), `.smap` serialization round-trip, malformed-file rejection, and that
-the mesher produces a valid, terrain-colored, renderable scene.
-
-### Known limitations
-
-- Square topology was not implemented; the model is hex-only for now.
-- Rivers/roads are shown as tile tint and borders as colored hex edges, rather
-  than true edge-following river/road geometry.
-- The map is meshed offline by the generator and at app startup; there is no
-  in-app map editing or live regeneration yet.
-- Fog-of-war state is stored per tile but not yet consumed by the renderer.
-- The `src/game` + `src/app` runtime wiring was verified by building and running
-  the model, serialization, mesher, and generator headlessly; the full Vulkan app
-  build requires the vcpkg Vulkan/GLFW/imgui dependencies on your machine.
-
-## Custom UI Framework
-
-A first-party, retained-mode UI library (`odai_ui` + `odai_ui_vulkan`) renders the
-game's own interface — ImGui is kept only as a dev/debug overlay, a separate system
-with no code in common. `odai_ui` is Vulkan-free, unit-testable, and packaged to be
-vendored into other Vulkan engines (CMake install/export targets, a standalone
-integration sample). See [`docs/UI_LIBRARY.md`](docs/UI_LIBRARY.md) for the full
-architecture, widget catalog, theming guide, and integration walkthrough, and
-[`examples/vulkan_ui_integration/`](examples/vulkan_ui_integration/) for a from-scratch
-embedding with no dependency on this repo's app/game/world code.
-
-## Next Planned Engine Work
-
-- Minimal NIF static mesh import for Balmora buildings and props
-- Texture loading and mip preparation for Morrowind assets
-- Imported-scene GPU upload path
-- Separate Vulkan terrain/object passes
-- Camera spawn and debug mode for a Balmora scene viewer
+See `docs/index.md` for profile, import, and mod-root usage.

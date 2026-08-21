@@ -11,7 +11,6 @@
 #include <string>
 #include <vector>
 
-#include "import/gpu_scene.h"
 #include "import/dds.h"
 #include "import/imported_scene.h"
 #include "import/imported_scene_query.h"
@@ -139,6 +138,26 @@ void testImportedSceneSerialization() {
     instance.sourceId = "ex_hlaalu_b_01";
     instance.modelPath = "x/ex_hlaalu_b_01.nif";
     scene.instances.push_back(instance);
+
+    odai::importer::ImportedSceneDoor door{};
+    door.position[0] = 10.0f;
+    door.arrivalPosition[2] = 40.0f;
+    door.arrivalYawDegrees = 90.0f;
+    door.targetCellEditorId = "WhiterunBanneredMare";
+    door.sourceReferenceFormId = 0xfe001234u;
+    door.targetCellFormId = 0x000165a8u;
+    door.targetWorldspaceFormId = 0x0000003cu;
+    door.targetWorldspaceEditorId = "WhiterunWorld";
+    door.targetKind = odai::importer::ImportedSceneDoorTargetKind::Interior;
+    door.locked = true;
+    door.lockLevel = 50u;
+    scene.doors.push_back(door);
+
+    odai::importer::ImportedSceneCollisionTriangle collision{};
+    collision.vertices[0] = 1.0f;
+    collision.vertices[4] = 2.0f;
+    collision.vertices[8] = 3.0f;
+    scene.collisionTriangles.push_back(collision);
     odai::importer::buildImportedScenePackedRenderData(scene);
 
     const fs::path scenePath = fs::temp_directory_path() / "odai_imported_scene_roundtrip.bin";
@@ -155,6 +174,17 @@ void testImportedSceneSerialization() {
     expectTrue(loaded.meshes.front().indices == mesh.indices, "Imported scene indices round-trip");
     expectTrue(loaded.instances.size() == 1u, "Imported scene instance count round-trips");
     expectNear(loaded.instances.front().transform[11], instance.transform[11], 1e-6f, "Imported scene instance transform round-trips");
+    expectTrue(loaded.doors.size() == 1u, "Expanded door metadata round-trips");
+    expectTrue(loaded.doors.front().targetKind ==
+                   odai::importer::ImportedSceneDoorTargetKind::Interior,
+               "Door target kind round-trips");
+    expectTrue(loaded.doors.front().sourceReferenceFormId == 0xfe001234u &&
+                   loaded.doors.front().locked && loaded.doors.front().lockLevel == 50u,
+               "Door source and lock state round-trip");
+    expectTrue(loaded.collisionTriangles.size() == 1u,
+               "Authored collision triangle count round-trips");
+    expectNear(loaded.collisionTriangles.front().vertices[8], 3.0f, 1e-6f,
+               "Authored collision coordinates round-trip");
     expectTrue(!loaded.packedVertices.empty(), "Imported scene packed vertices round-trip");
     expectTrue(!loaded.packedIndices.empty(), "Imported scene packed indices round-trip");
     expectTrue(!loaded.packedDraws.empty(), "Imported scene packed draws round-trip");
@@ -207,147 +237,6 @@ void testImportedSceneSerialization() {
     fs::remove(objPath);
 }
 
-void testGpuSceneBuildFromImportedScene() {
-    using odai::importer::GpuSceneAsset;
-    using odai::importer::GpuSceneObjectView;
-    using odai::importer::GpuSceneRuntime;
-    using odai::importer::ImportedScene;
-    using odai::importer::ImportedSceneInstance;
-    using odai::importer::ImportedSceneLight;
-    using odai::importer::ImportedSceneParticleEmitter;
-    using odai::importer::ImportedSceneMesh;
-    using odai::importer::ImportedSceneMeshPart;
-    using odai::importer::ImportedSceneTexture;
-    using odai::importer::ImportedSceneVertex;
-    using odai::importer::ImportedSceneWaterPatch;
-
-    ImportedScene scene{};
-    scene.sourceTag = "gpu_scene_synthetic";
-
-    ImportedSceneTexture texture{};
-    texture.sourcePath = "textures/test/wall.dds";
-    texture.width = 1;
-    texture.height = 1;
-    texture.rgba8 = {255, 255, 255, 255};
-    scene.textures.push_back(texture);
-    ImportedSceneTexture leafTexture{};
-    leafTexture.sourcePath = "textures/test/leaves.dds";
-    leafTexture.width = 2;
-    leafTexture.height = 1;
-    leafTexture.rgba8 = {16, 48, 16, 255, 16, 48, 16, 0};
-    scene.textures.push_back(leafTexture);
-
-    ImportedSceneMesh terrain{};
-    terrain.name = "terrain";
-    terrain.vertices = {
-        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        ImportedSceneVertex{{4.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-        ImportedSceneVertex{{0.0f, 0.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
-    };
-    terrain.indices = {0u, 1u, 2u};
-    terrain.parts = {ImportedSceneMeshPart{0u, 3u, 0u, false}};
-    scene.meshes.push_back(terrain);
-
-    ImportedSceneMesh wall{};
-    wall.name = "wall";
-    wall.vertices = {
-        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-        ImportedSceneVertex{{0.0f, 3.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
-        ImportedSceneVertex{{3.0f, 3.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-        ImportedSceneVertex{{3.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}
-    };
-    wall.indices = {0u, 1u, 2u, 0u, 2u, 3u};
-    wall.parts = {
-        ImportedSceneMeshPart{0u, 3u, 0u, false},
-        ImportedSceneMeshPart{3u, 3u, 1u, false}
-    };
-    scene.meshes.push_back(wall);
-
-    ImportedSceneInstance instance{};
-    instance.meshIndex = 1u;
-    instance.transform[0] = 1.0f;
-    instance.transform[5] = 1.0f;
-    instance.transform[10] = 1.0f;
-    instance.transform[15] = 1.0f;
-    instance.transform[3] = 32.0f;
-    instance.transform[7] = 8.0f;
-    instance.transform[11] = 48.0f;
-    instance.sourceId = "ex_hlaalu_wall_01";
-    instance.modelPath = "x/ex_hlaalu_wall_01.nif";
-    scene.instances.push_back(instance);
-
-    ImportedSceneWaterPatch patch{};
-    patch.originX = 8.0f;
-    patch.originZ = 12.0f;
-    patch.sizeX = 16.0f;
-    patch.sizeZ = 16.0f;
-    patch.waterLevel = 2.0f;
-    scene.waterPatches.push_back(patch);
-
-    ImportedSceneLight light{};
-    light.sourceId = "light_de_lantern_05_128";
-    light.position[1] = 72.0f;
-    light.radius = 256.0f;
-    scene.lights.push_back(light);
-
-    ImportedSceneParticleEmitter emitter{};
-    emitter.sourceId = "refr_fire_02";
-    emitter.position[1] = 8.0f;
-    scene.particleEmitters.push_back(emitter);
-
-    GpuSceneAsset gpuScene{};
-    expectTrue(
-        odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
-        "GPU scene asset builds from imported scene");
-    expectTrue(gpuScene.meshAssets.size() == 2u, "GPU scene preserves mesh asset count");
-    expectTrue(gpuScene.objects.rootTransformIndices.size() == 2u, "GPU scene creates terrain and static objects");
-    expectTrue(gpuScene.instances.objectIndices.size() == 2u, "GPU scene creates terrain and static instances");
-    expectTrue(!gpuScene.pages.empty(), "GPU scene partitions objects into at least one page");
-    expectTrue(!gpuScene.renderCache.packedVertices.empty(), "GPU scene render cache packs vertices");
-    expectTrue(!gpuScene.renderCache.packedIndices.empty(), "GPU scene render cache packs indices");
-    expectTrue(!gpuScene.renderCache.packedDraws.empty(), "GPU scene render cache packs draws");
-    expectTrue(gpuScene.renderCache.terrainDrawCount == 1u, "GPU scene marks terrain draw count");
-    expectTrue(gpuScene.renderCache.drawInstanceIndices.size() == gpuScene.renderCache.packedDraws.size(),
-               "GPU scene draw-instance mapping matches draw count");
-    expectTrue(gpuScene.renderCache.packedDraws.size() == 3u, "GPU scene preserves mesh parts as separate draws");
-    expectTrue(gpuScene.lights.size() == 1u, "GPU scene keeps imported lights");
-    expectTrue(gpuScene.renderCache.lights.size() == 1u, "GPU scene render cache keeps imported lights");
-    expectTrue(gpuScene.particleEmitters.size() == 1u,
-               "GPU scene keeps imported particle emitters");
-    expectTrue(gpuScene.renderCache.particleEmitters.size() == 1u,
-               "GPU scene render cache keeps imported particle emitters");
-    expectTrue(!gpuScene.renderCache.pageDrawRanges.empty(), "GPU scene render cache records page draw ranges");
-    expectTrue(gpuScene.renderCache.pageDrawRanges.front().firstDraw == 0u,
-               "GPU scene page draw ranges start at the first draw");
-    expectTrue(gpuScene.renderCache.pageDrawRanges.front().drawCount >= 1u,
-               "GPU scene page draw ranges cover at least one draw");
-    expectTrue(gpuScene.renderCache.pageDrawRanges.front().terrainDrawCount == 1u,
-               "GPU scene page draw ranges record terrain draws");
-    const auto& opaqueWallDraw = gpuScene.renderCache.packedDraws[1];
-    const auto& alphaWallDraw = gpuScene.renderCache.packedDraws[2];
-    const std::uint32_t opaqueWallVertex =
-        gpuScene.renderCache.packedIndices[opaqueWallDraw.firstIndex];
-    const std::uint32_t alphaWallVertex =
-        gpuScene.renderCache.packedIndices[alphaWallDraw.firstIndex];
-    expectTrue(
-        gpuScene.renderCache.packedVertices[opaqueWallVertex].flags == 0u,
-        "GPU scene render cache keeps opaque part flags isolated");
-    expectTrue(
-        gpuScene.renderCache.packedVertices[alphaWallVertex].flags == 1u,
-        "GPU scene render cache derives alpha-test flags from texture alpha");
-
-    const GpuSceneObjectView wallView = odai::importer::gpuSceneObjectView(gpuScene, 1u);
-    expectTrue(wallView.name == "ex_hlaalu_wall_01", "GPU scene object view exposes object name");
-    expectTrue(wallView.componentCount == 1u, "GPU scene object view exposes component count");
-    expectNear(wallView.appliedTransform[3], 32.0f, 1e-6f, "GPU scene object view exposes applied transform");
-
-    GpuSceneRuntime runtime = odai::importer::createGpuSceneRuntime(gpuScene);
-    odai::importer::rebuildGpuSceneWorldTransforms(runtime);
-    expectTrue(runtime.transforms.worldMatrices.size() == gpuScene.transforms.worldMatrices.size(),
-               "GPU scene runtime keeps transform count");
-    expectNear(runtime.transforms.worldMatrices[1][3], 32.0f, 1e-6f, "GPU scene runtime rebuild keeps translation");
-}
-
 void testImportedSceneSourceTagInteriorClassification() {
     using odai::importer::importedSceneSourceTagIsInterior;
     expectTrue(importedSceneSourceTagIsInterior("morrowind_interior"),
@@ -358,82 +247,6 @@ void testImportedSceneSourceTagInteriorClassification() {
                "Exterior scene tags are not classified as interior");
     expectTrue(!importedSceneSourceTagIsInterior(""),
                "Empty source tag is not classified as interior");
-}
-
-void testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain() {
-    using odai::importer::GpuSceneAsset;
-    using odai::importer::ImportedScene;
-    using odai::importer::ImportedSceneInstance;
-    using odai::importer::ImportedSceneMesh;
-    using odai::importer::ImportedSceneMeshPart;
-    using odai::importer::ImportedSceneVertex;
-
-    ImportedScene scene{};
-    scene.sourceTag = "morrowind_interior";
-
-    ImportedSceneMesh roomMesh{};
-    roomMesh.name = "in_hlaalu_room";
-    roomMesh.vertices = {
-        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-        ImportedSceneVertex{{4.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-        ImportedSceneVertex{{0.0f, 0.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
-    };
-    roomMesh.indices = {0u, 1u, 2u};
-    roomMesh.parts = {ImportedSceneMeshPart{0u, 3u, 0u, false}};
-    scene.meshes.push_back(roomMesh);
-
-    ImportedSceneInstance roomInstance{};
-    roomInstance.meshIndex = 0u;
-    roomInstance.transform[0] = 1.0f;
-    roomInstance.transform[5] = 1.0f;
-    roomInstance.transform[10] = 1.0f;
-    roomInstance.transform[15] = 1.0f;
-    roomInstance.transform[3] = 12.0f;
-    roomInstance.transform[7] = 3.0f;
-    roomInstance.transform[11] = 5.0f;
-    roomInstance.sourceId = "in_hlaalu_room_ref";
-    scene.instances.push_back(roomInstance);
-
-    GpuSceneAsset gpuScene{};
-    expectTrue(
-        odai::importer::buildGpuSceneAssetFromImportedScene(scene, gpuScene),
-        "GPU scene asset builds from interior scene");
-    expectTrue(gpuScene.objects.rootTransformIndices.size() == 1u,
-               "Interior GPU scene does not synthesize terrain object");
-    expectTrue(gpuScene.instances.objectIndices.size() == 1u,
-               "Interior GPU scene only creates placed static instances");
-    expectTrue(gpuScene.renderCache.terrainDrawCount == 0u,
-               "Interior GPU scene does not mark any terrain draws");
-    expectTrue(gpuScene.renderCache.packedDraws.size() == 1u,
-               "Interior GPU scene keeps the placed room draw");
-
-    const odai::importer::ImportedScenePackedDraw& draw = gpuScene.renderCache.packedDraws.front();
-    const std::uint32_t packedVertexIndex = gpuScene.renderCache.packedIndices[draw.firstIndex];
-    expectNear(
-        gpuScene.renderCache.packedVertices[packedVertexIndex].position[0],
-        12.0f,
-        1e-6f,
-        "Interior GPU scene transforms placed mesh vertices");
-    expectNear(
-        gpuScene.renderCache.packedVertices[packedVertexIndex].position[1],
-        3.0f,
-        1e-6f,
-        "Interior GPU scene keeps placed mesh height");
-
-    odai::importer::buildImportedScenePackedRenderData(scene);
-    expectTrue(scene.packedDraws.size() == 1u,
-               "Interior packed scene does not synthesize terrain draw");
-    const std::uint32_t runtimePackedVertexIndex = scene.packedIndices[scene.packedDraws.front().firstIndex];
-    expectNear(
-        scene.packedVertices[runtimePackedVertexIndex].position[0],
-        12.0f,
-        1e-6f,
-        "Interior packed scene transforms placed mesh vertices");
-    expectNear(
-        scene.packedVertices[runtimePackedVertexIndex].position[1],
-        3.0f,
-        1e-6f,
-        "Interior packed scene keeps placed mesh height");
 }
 
 void testTextureFormatRoundTrip() {
@@ -509,6 +322,43 @@ void testLegacyArgbWaterFlowDds() {
                "Legacy water-flow DDS keeps dimensions and becomes RGBA8");
     expectTrue(texture.rgba8 == std::vector<std::uint8_t>({33u, 22u, 11u, 44u}),
                "Legacy water-flow DDS swizzles BGRA storage to RGBA sampling");
+
+    // Generated object LOD atlases use RGBA bytes and ABGR masks instead.
+    // Reuse the same header and pixel so the only changing variable is the
+    // channel declaration.
+    putU32(92u, 0x000000ffu);
+    putU32(96u, 0x0000ff00u);
+    putU32(100u, 0x00ff0000u);
+    dds[128u] = 33u;  // R
+    dds[129u] = 22u;  // G
+    dds[130u] = 11u;  // B
+    dds[131u] = 44u;  // A
+    texture = {};
+    expectTrue(odai::importer::loadDdsFromMemory(dds.data(), dds.size(), texture),
+               "Skyrim generated-object RGBA atlas DDS decodes");
+    expectTrue(texture.format == TextureFormat::RGBA8Srgb,
+               "Generated-object colour atlas is marked for sRGB sampling");
+    expectTrue(texture.rgba8 == std::vector<std::uint8_t>({33u, 22u, 11u, 44u}),
+               "Generated-object atlas keeps RGBA storage in RGBA order");
+
+    // Generated terrain LOD uses opaque BGRX: the same BGR masks as the flow
+    // map, but no alpha mask. The fourth stored byte is padding and must not
+    // make the terrain transparent.
+    putU32(92u, 0x00ff0000u);
+    putU32(96u, 0x0000ff00u);
+    putU32(100u, 0x000000ffu);
+    putU32(104u, 0u);
+    dds[128u] = 11u;  // B
+    dds[129u] = 22u;  // G
+    dds[130u] = 33u;  // R
+    dds[131u] = 0u;   // X
+    texture = {};
+    expectTrue(odai::importer::loadDdsFromMemory(dds.data(), dds.size(), texture),
+               "Skyrim generated-terrain BGRX DDS decodes");
+    expectTrue(texture.format == TextureFormat::RGBA8Srgb,
+               "Generated-terrain colour atlas is marked for sRGB sampling");
+    expectTrue(texture.rgba8 == std::vector<std::uint8_t>({33u, 22u, 11u, 255u}),
+               "Generated-terrain DDS swizzles BGR and synthesizes opaque alpha");
 }
 
 void testBlockCompressedAlphaCutoutDetection() {
@@ -576,6 +426,10 @@ void testBlockCompressedAlphaCutoutDetection() {
     instance.transform[15] = 1.0f;
     scene.instances.push_back(instance);
 
+    ImportedScene authoredScene = scene;
+    authoredScene.sourceTag = "authored_bc_cutout";
+    authoredScene.alphaFlagsAuthored = true;
+
     odai::importer::buildImportedScenePackedRenderData(scene);
     expectTrue(scene.meshes.front().parts[0].alphaTest,
                "BC1 punch-through texture is detected as alpha cutout");
@@ -583,6 +437,13 @@ void testBlockCompressedAlphaCutoutDetection() {
                "BC3 texture with transparent texels is detected as alpha cutout");
     expectTrue(!scene.meshes.front().parts[2].alphaTest,
                "Fully opaque BC3 texture is not flagged as alpha cutout");
+
+    odai::importer::buildImportedScenePackedRenderData(authoredScene);
+    expectTrue(
+        !authoredScene.meshes.front().parts[0].alphaTest &&
+            !authoredScene.meshes.front().parts[1].alphaTest &&
+            !authoredScene.meshes.front().parts[2].alphaTest,
+        "Authored opaque parts are not overridden by texture alpha inference");
 }
 
 void testPageRangeBuildAndRoundTrip() {
@@ -1049,34 +910,49 @@ void testTerrainLayerPacking() {
     layered.layerWeight[0] = 1.0f;
     layered.layerTextureIndex[1] = 9u;
     layered.layerWeight[1] = 0.5f;
+    layered.layerTextureIndex[3] = kImportedSceneTerrainNormalizedBlendMarker;
+    ImportedSceneVertex declaredZero{};
+    declaredZero.position[0] = 2.0f;
+    declaredZero.layerTextureIndex[0] = 12u;
     ImportedSceneVertex plain{};
-    plain.position[0] = 2.0f;
+    plain.position[0] = 3.0f;
 
-    mesh.vertices = {layered, layered, plain};
-    mesh.indices = {0u, 1u, 2u};
-    mesh.parts = {ImportedSceneMeshPart{0u, 3u, 0u, false}};
+    mesh.vertices = {layered, layered, declaredZero, plain};
+    mesh.indices = {0u, 1u, 2u, 1u, 2u, 3u};
+    mesh.parts = {ImportedSceneMeshPart{0u, 6u, 0u, false}};
     scene.meshes.push_back(mesh);
     scene.landscapeCells.resize(1);
 
     buildImportedScenePackedRenderData(scene);
-    expectTrue(scene.packedVertices.size() == 3, "layered terrain packs one vertex per source vertex");
-    if (scene.packedVertices.size() != 3) {
+    expectTrue(scene.packedVertices.size() == 4, "layered terrain packs one vertex per source vertex");
+    if (scene.packedVertices.size() != 4) {
         return;
     }
 
     const ImportedScenePackedVertex& packedLayered = scene.packedVertices[0];
     expectTrue((packedLayered.flags & kImportedSceneMaterialFlagTerrainLayers) != 0u,
                "a vertex with a layer sets the terrain layer flag");
+    expectTrue((packedLayered.flags &
+                    kImportedSceneMaterialFlagTerrainNormalizedLayers) != 0u,
+               "the TES3 normalized-layer marker becomes a packed material semantic");
     expectTrue(packedLayered.layerTextureIndex[0] == 7u, "layer 0 texture index survives packing");
     expectTrue(packedLayered.layerTextureIndex[1] == 9u, "layer 1 texture index survives packing");
     expectTrue(packedLayered.layerTextureIndex[2] == kImportedSceneNoTerrainLayer,
                "unused layer slot stays empty");
+    expectTrue(packedLayered.layerTextureIndex[3] == kImportedSceneNoTerrainLayer,
+               "the transient normalized-layer marker is not serialized as a texture");
     // 8-bit quantization: 1.0 -> 255, 0.5 -> 128 (round-half-up).
     expectTrue((packedLayered.layerWeights & 0xffu) == 255u, "layer 0 weight quantizes to full");
     expectTrue(((packedLayered.layerWeights >> 8) & 0xffu) == 128u, "layer 1 weight quantizes to half");
     expectTrue(((packedLayered.layerWeights >> 16) & 0xffu) == 0u, "unused layer weight is zero");
 
-    const ImportedScenePackedVertex& packedPlain = scene.packedVertices[2];
+    const ImportedScenePackedVertex& packedDeclaredZero = scene.packedVertices[2];
+    expectTrue((packedDeclaredZero.flags & kImportedSceneMaterialFlagTerrainLayers) != 0u,
+               "a declared zero-weight layer keeps the flat triangle semantic enabled");
+    expectTrue((packedDeclaredZero.layerWeights & 0xffu) == 0u,
+               "a declared zero-weight layer remains zero after packing");
+
+    const ImportedScenePackedVertex& packedPlain = scene.packedVertices[3];
     expectTrue((packedPlain.flags & kImportedSceneMaterialFlagTerrainLayers) == 0u,
                "a vertex with no layers does not set the terrain layer flag");
 
@@ -1086,15 +962,18 @@ void testTerrainLayerPacking() {
     expectTrue(saveImportedScene(scene, path), "layered scene saves");
     ImportedScene loaded{};
     expectTrue(loadImportedScene(path, loaded), "layered scene loads");
-    if (loaded.packedVertices.size() == 3) {
+    if (loaded.packedVertices.size() == 4) {
         expectTrue(loaded.packedVertices[0].layerTextureIndex[1] == 9u,
                    "layer texture index round-trips through the file");
         expectTrue(loaded.packedVertices[0].layerWeights == packedLayered.layerWeights,
                    "packed layer weights round-trip through the file");
+        expectTrue((loaded.packedVertices[0].flags &
+                        kImportedSceneMaterialFlagTerrainNormalizedLayers) != 0u,
+                   "normalized TES3 terrain semantics round-trip through the packed flags");
     }
-    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3,
+    expectTrue(loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 4,
                "layered mesh vertices round-trip");
-    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 3) {
+    if (loaded.meshes.size() == 1 && loaded.meshes[0].vertices.size() == 4) {
         expectNear(loaded.meshes[0].vertices[0].layerWeight[1], 0.5f, 1e-5f,
                    "source layer weight round-trips unquantized");
     }
@@ -1348,9 +1227,7 @@ int main() {
     testPreV19VertexLayoutCompatibility();
     testVertexColorTintFlag();
     testTerrainLayerPacking();
-    testGpuSceneBuildFromImportedScene();
     testImportedSceneSourceTagInteriorClassification();
-    testGpuSceneBuildFromInteriorSceneDoesNotCreateTerrain();
     testTextureFormatRoundTrip();
     testLegacyArgbWaterFlowDds();
     testBlockCompressedAlphaCutoutDetection();

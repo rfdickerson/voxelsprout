@@ -3,7 +3,7 @@
 ## Purpose
 FrameArena provides deterministic, per-frame transient allocation for the Vulkan renderer pass chain:
 
-`SSAO -> Shadows -> Voxels -> Objects -> Post -> UI`
+`Prepass -> SSAO -> Shadows -> Imported scene -> Post -> UI`
 
 The goal is stable performance and simple lifetime management:
 - O(1)-style reset behavior when a frame slot is reused.
@@ -38,7 +38,8 @@ Characteristics:
 - Automatically reclaimed when that frame slot is reused (after timeline wait).
 
 ## Current API (Implemented Foundation)
-Implemented in `src/render/buffer_helpers.h` and `src/render/buffer_helpers.cc`.
+Implemented in `src/render/backend/vulkan/buffer_helpers.h` and
+`src/render/backend/vulkan/buffer_helpers.cc`.
 
 - `FrameArenaConfig`
   - `uploadBytesPerFrame`
@@ -72,7 +73,7 @@ This keeps reclamation deterministic and avoids freeing resources still in use b
 ### Done
 - Replaced direct `FrameRingBuffer` usage in renderer with `FrameArena`.
 - Camera UBO dynamic slice allocation uses `FrameArena`.
-- Pipe/transport/preview instance uploads use `FrameArena`.
+- Imported draw, skinning, and per-pass uploads use `FrameArena`.
 - Per-frame transient buffer ownership and reclamation hooks are implemented.
 - Added transient image API in `FrameArena` (VMA-backed when available).
 - Migrated AO normal-depth + SSAO raw/blur targets to `FrameArena` image allocation.

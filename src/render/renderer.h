@@ -1,17 +1,9 @@
 #pragma once
 
-#include "sim/simulation.h"
-#include "import/gpu_scene.h"
-#include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
-#include "world/chunk_grid.h"
-#include "world/chunk_mesher.h"
-#include "world/clipmap_index.h"
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <span>
 
 #include "render/renderer_types.h"
 
@@ -35,11 +27,7 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    bool init(GLFWwindow* window, const odai::world::ChunkGrid& chunkGrid);
-    void clearMagicaVoxelMeshes();
-    bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
-    void clearGpuScene();
-    bool uploadGpuScene(const odai::importer::GpuSceneAsset& scene);
+    bool init(GLFWwindow* window);
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
 
@@ -57,6 +45,9 @@ public:
     static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunk(std::size_t chunkIndex);
+    // Capture-only readiness fence. Waits on the upload timeline values already
+    // signalled by chunk staging; it never drains unrelated device work.
+    bool waitForImportedSceneUploads();
     [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
     [[nodiscard]] std::size_t importedLocalLightCount() const;
 
@@ -89,48 +80,17 @@ public:
     std::vector<std::uint32_t> uploadSkinnedActorTextures(
         std::uint32_t instanceIndex,
         const std::vector<odai::importer::ImportedSceneTexture>& textures);
+    // Removes an actor from skinning and every geometry pass without releasing
+    // its persistent template. Making it visible again resumes from the next
+    // submitted pose, so callers can cheaply cull a town-sized actor set.
+    void setSkinnedActorVisible(std::uint32_t instanceIndex, bool visible);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
     void setSkinningDebugBypass(bool bypass);
     // Temporal AA (camera reprojection; static world). Off by default.
     void setTaaEnabled(bool enabled);
-    // GPU-instanced, tessellated, height-displaced hex land surface (strategy map).
-    // hexTerrainReady() reports whether the device created the pipeline (tessellation
-    // support); the caller keeps the flat imported-static land otherwise.
-    void clearHexTerrain();
-    bool uploadHexTerrain(const odai::importer::HexTerrainData& data);
-    [[nodiscard]] bool hexTerrainReady() const;
-    void setHexTerrainEnabled(bool enabled);
-    void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
-    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
-    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
-    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
-    // Queue meshes built off the render thread (world::ChunkMeshScheduler) for
-    // upload on the next frame; the renderer skips its inline mesher for them.
-    bool uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results);
-    // Meshing mode the renderer's own full-rebuild path uses; mirror it in any
-    // off-thread mesher so both paths produce the same geometry.
-    [[nodiscard]] odai::world::MeshingOptions chunkMeshingOptions() const;
-    bool useSpatialPartitioningQueries() const;
-    odai::world::ClipmapConfig clipmapQueryConfig() const;
-    void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
-    void setStrategyMapMode(bool enabled);
-    // App-level opt-out of the ray-traced BLAS/TLAS scene (shadows/reflections/
-    // voxel GI over ray queries). false unconditionally skips building and
-    // tearing down per-scene acceleration structures on every uploadImportedScene()
-    // call, even on hardware that supports it -- for apps (like CityBuilder) that
-    // never enable ShadowMode::RayTraced/Auto or RT-backed voxel GI, that
-    // per-upload BLAS churn is pure wasted GPU work. true only restores whatever
-    // the hardware/driver capability probe already determined at init() time; it
-    // can never force RT on where it isn't supported. Call any time after init().
+    // Enable or disable the retained Bethesda ray-traced scene variants.
+    // Capability probing still decides whether the device can actually use them.
     void setRayTracingEnabled(bool enabled);
-    // App-level opt-out of the voxel GI dispatch sequence (occupancy, sky exposure,
-    // surface/ReSTIR, inject, propagate). Like setRayTracingEnabled this can only opt
-    // further out, never force GI on where the device can't run it. On by default.
-    //
-    // The GI volume is 64 world units wide and follows the camera, so any world at a
-    // much larger scale gets no contribution from it while still paying for every
-    // dispatch — imported Bethesda scenes run ~70 units/metre, which puts the whole
-    // volume under a metre across. Turn it off for those. Call any time after init().
     // Histogram-driven eye adaptation, off by default. With it off the scene
     // renders at a fixed exposure, so content whose light levels differ from
     // that baseline comes out uniformly too dark or too bright. Worth enabling
@@ -150,17 +110,11 @@ public:
     // the shader always did. Call any time after init().
     void setDebugView(DebugView view);
     [[nodiscard]] DebugView debugView() const;
-    void setVoxelGiEnabled(bool enabled);
-    [[nodiscard]] bool isVoxelGiEnabled() const;
     // App-level opt-out of the sun shaft pass (a 20-tap radial march per pixel at AO
     // resolution). On by default; when off the shaft texture reads as black and the
     // main pass is otherwise unchanged. Call any time after init().
     void setSunShaftsEnabled(bool enabled);
     [[nodiscard]] bool isSunShaftsEnabled() const;
-    // Opt-in UI-only rendering for showcase/tooling executables. Skips building the
-    // 3D scene pipelines (pipe/imported/sky-cloud/water/grass, SSAO, hex terrain)
-    // those tools cannot use. Must be called BEFORE init(); off by default.
-    void setMinimalRenderMode(bool enabled);
     // MSAA sample count (1, 2, 4, 8), clamped to device support. Must be called
     // BEFORE init(): it sizes the render targets and is baked into every
     // pipeline. 4 is the default. On a fill-rate-bound device this is the
@@ -179,7 +133,6 @@ public:
     bool captureFrameRgb(std::vector<std::uint8_t>& outRgb,
                          std::uint32_t& outWidth,
                          std::uint32_t& outHeight);
-    void setGameplayUiState(const GameplayUiState& state);
     // Hand the renderer the UI geometry to draw over the scene this frame.
     void setUiDrawData(const odai::ui::UiDrawData& drawData);
     // Upload the UI font's R8 coverage atlas (call once after init / on font change).
@@ -192,15 +145,7 @@ public:
     odai::ui::UiTextureId registerUiTextureRgba8(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
     // Same as registerUiTextureRgba8 but generates a full mip chain via CPU box-filter.
     odai::ui::UiTextureId registerUiTextureRgba8Mipmapped(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height);
-    void renderFrame(
-        const odai::world::ChunkGrid& chunkGrid,
-        const odai::sim::Simulation& simulation,
-        const CameraPose& camera,
-        const VoxelPreview& preview,
-        float simulationAlpha,
-        std::span<const std::size_t> visibleChunkIndices,
-        const ImportedActorFrameData* importedActors = nullptr
-    );
+    void renderFrame(const CameraPose& camera);
     // Upscaling. Set before init() to take effect on the first swapchain build:
     // the quality preset chooses the internal render resolution, which sizes
     // every render target. upscalerStatus() reports what actually runs, which is

@@ -202,7 +202,10 @@ bool isNodeTypeName(std::string_view typeName) {
 // it. Worth surfacing rather than absorbing — mods and DLC use node types the
 // base game happens not to.
 bool looksLikeUnhandledNodeType(std::string_view typeName) {
-    return !isNodeTypeName(typeName) && typeName.size() > 4u &&
+    // Despite its suffix BSFurnitureMarkerNode is NiExtraData, not NiNode.
+    // Treating it structurally as a node reports every bed/chair as a failed
+    // visible subtree even though the furniture mesh itself is complete.
+    return typeName != "BSFurnitureMarkerNode" && !isNodeTypeName(typeName) && typeName.size() > 4u &&
         typeName.substr(typeName.size() - 4u) == "Node";
 }
 
@@ -522,6 +525,9 @@ struct AvObjectFields {
     // and the geometry lives in the NiSkinPartition two hops away, so this is
     // the only route to it. See linkSkinnedShapesToPartitions.
     std::int32_t skinRef = -1;
+    // NiSwitchNode's authored initial child. -2 means this is not a switch;
+    // -1 means the switch intentionally displays no child.
+    std::int32_t switchChildIndex = -2;
 };
 
 // A NiNode named "EditorMarker" holds geometry the Construction Set draws and
@@ -1142,7 +1148,7 @@ bool readAvObjectPrefix(
 // -- which costs a whole model, the exact outcome this file is trying to avoid.
 bool readNiNode(
     ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
-    AvObjectFields& out) {
+    AvObjectFields& out, std::string_view typeName = {}) {
     if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, morrowind, out)) {
         return false;
     }
@@ -1175,8 +1181,37 @@ bool readNiNode(
     // this block, and reads refuse to run past its end (the same argument the
     // geometry reader's own comment makes). A minimum-trailer check is the
     // form that actually asserts something here.
-    if ((cursor.size() - cursor.pos()) < sizeof(std::uint32_t)) {
+    std::uint32_t numEffects = 0u;
+    if (!cursor.read(numEffects) ||
+        static_cast<std::size_t>(numEffects) * sizeof(std::int32_t) >
+            (cursor.size() - cursor.pos())) {
         return false;
+    }
+    if (!cursor.skip(static_cast<std::size_t>(numEffects) * sizeof(std::int32_t))) {
+        return false;
+    }
+    if (typeName == "NiSwitchNode") {
+        if (morrowind) {
+            // NetImmerse 4.0.0.2 stores only the signed initial-child index.
+            // The 16-bit switch flags were added in later NIF generations.
+            // Reading the modern six-byte tail here consumed two bytes from
+            // the next block (or failed at end-of-block) and dropped the whole
+            // switched subtree. Tamriel Rebuilt uses these nodes extensively
+            // for exterior architecture, including the Narsis arena/temples.
+            std::int32_t initialChild = -1;
+            if (!cursor.read(initialChild)) {
+                return false;
+            }
+            out.switchChildIndex = initialChild;
+        } else {
+            std::uint16_t switchFlags = 0u;
+            std::uint32_t initialChild = 0xffffffffu;
+            if (!cursor.read(switchFlags) || !cursor.read(initialChild)) {
+                return false;
+            }
+            (void)switchFlags;
+            out.switchChildIndex = static_cast<std::int32_t>(initialChild);
+        }
     }
     return true;
 }
@@ -1196,6 +1231,11 @@ bool readNiTriBasedGeom(
 }
 
 struct GeometryBlock {
+    // Kept explicitly because BSDynamicTriShape can store positions in the
+    // shape's dynamic tail while its NiSkinPartition stores every other
+    // vertex attribute. In that case positions is deliberately empty here,
+    // but the partition still has a real vertex count.
+    std::size_t vertexCount = 0;
     std::vector<float> positions;
     std::vector<float> normals;
     std::vector<float> uvs;  // UV set 0 only, 2 floats per vertex
@@ -1211,6 +1251,11 @@ struct GeometryBlock {
     // vertex attribute.
     std::vector<float> colors;
     std::vector<std::uint32_t> triangleIndices;
+    // Skyrim NiSkinPartition stores the influences alongside its shared
+    // packed vertex buffer. Indices address the NiSkinInstance's bone list;
+    // four slots per vertex, matching NifSkinnedShape and the GPU format.
+    std::vector<std::uint16_t> boneIndices;
+    std::vector<float> boneWeights;
     std::uint32_t outOfRangeTriangles = 0;
     std::uint32_t degenerateTriangles = 0;
     bool valid = false;
@@ -1230,7 +1275,9 @@ struct GeometryBlock {
 // Dropping the individual triangle rather than failing the shape is deliberate:
 // one bad index in a rock should cost one triangle, not the rock.
 void rejectUnusableTriangles(GeometryBlock& out) {
-    const std::size_t vertexCount = out.positions.size() / 3u;
+    const std::size_t vertexCount = out.vertexCount != 0u
+        ? out.vertexCount
+        : out.positions.size() / 3u;
     std::vector<std::uint32_t> kept;
     kept.reserve(out.triangleIndices.size());
     for (std::size_t i = 0; i + 2u < out.triangleIndices.size(); i += 3u) {
@@ -1259,7 +1306,8 @@ void rejectUnusableTriangles(GeometryBlock& out) {
 // position precision is taken from the stride rather than from the flag.
 bool readPackedVertexData(
     ByteCursor& cursor, std::uint64_t descriptor, std::size_t vertexSize,
-    std::size_t vertexCount, GeometryBlock& outGeometry) {
+    std::size_t vertexCount, GeometryBlock& outGeometry,
+    bool requirePositions = true, bool forceFullPrecisionPositions = false) {
     const auto nibbleBytes = [descriptor](unsigned shift) {
         return static_cast<std::size_t>((descriptor >> shift) & 0xFull) * 4u;
     };
@@ -1271,10 +1319,19 @@ bool readPackedVertexData(
     constexpr std::uint32_t kHasUvs = 0x0002u;
     constexpr std::uint32_t kHasNormals = 0x0008u;
     constexpr std::uint32_t kHasColors = 0x0020u;
-    if ((vertexFlags & kHasVertices) == 0u || vertexCount == 0u) {
+    constexpr std::uint32_t kFullPrecision = 0x0400u;
+    const bool hasPositions = (vertexFlags & kHasVertices) != 0u;
+    if ((requirePositions && !hasPositions) || vertexCount == 0u) {
         return false;
     }
-    const bool fullPrecision = (vertexSize >= 28u);
+    // Skyrim SE's reader forces Full_Precision for every BSVertexData stream,
+    // even though the serialized descriptor does not set that bit. Most static
+    // meshes hid this because their normal/tangent/color channels make the
+    // stride 28 or 32 bytes. Terrain BTR vertices contain only float3 + padding
+    // + half2 UVs (20 bytes), so using stride as the only precision test reads
+    // each float's low half as zero and collapses the terrain in X/Z.
+    const bool fullPrecision = forceFullPrecisionPositions ||
+        (vertexFlags & kFullPrecision) != 0u || vertexSize >= 28u;
     const std::size_t positionBytes = fullPrecision ? 12u : 6u;
     if (positionBytes > vertexSize) {
         return false;
@@ -1290,7 +1347,10 @@ bool readPackedVertexData(
     if (!cursor.readBytes(vertexBytes.data(), vertexBytes.size())) {
         return false;
     }
-    outGeometry.positions.resize(vertexCount * 3u);
+    outGeometry.vertexCount = vertexCount;
+    if (hasPositions) {
+        outGeometry.positions.resize(vertexCount * 3u);
+    }
     if (hasNormals) {
         outGeometry.normals.resize(vertexCount * 3u);
     }
@@ -1302,16 +1362,18 @@ bool readPackedVertexData(
     }
     for (std::size_t v = 0; v < vertexCount; ++v) {
         const std::uint8_t* vertex = vertexBytes.data() + (v * vertexSize);
-        for (int axis = 0; axis < 3; ++axis) {
-            float value = 0.0f;
-            if (fullPrecision) {
-                std::memcpy(&value, vertex + (axis * 4), sizeof(value));
-            } else {
-                std::uint16_t half = 0;
-                std::memcpy(&half, vertex + (axis * 2), sizeof(half));
-                value = decodeHalfFloat(half);
+        if (hasPositions) {
+            for (int axis = 0; axis < 3; ++axis) {
+                float value = 0.0f;
+                if (fullPrecision) {
+                    std::memcpy(&value, vertex + (axis * 4), sizeof(value));
+                } else {
+                    std::uint16_t half = 0;
+                    std::memcpy(&half, vertex + (axis * 2), sizeof(half));
+                    value = decodeHalfFloat(half);
+                }
+                outGeometry.positions[(v * 3u) + static_cast<std::size_t>(axis)] = value;
             }
-            outGeometry.positions[(v * 3u) + static_cast<std::size_t>(axis)] = value;
         }
         if (hasNormals) {
             for (int axis = 0; axis < 3; ++axis) {
@@ -1378,7 +1440,7 @@ bool readPackedVertexData(
 // out-of-range and zero degenerate.
 bool readBsTriShape(
     ByteCursor& cursor, std::uint32_t userVersion2, bool inlineNames, bool morrowind,
-    AvObjectFields& outFields, GeometryBlock& outGeometry) {
+    AvObjectFields& outFields, GeometryBlock& outGeometry, bool dynamicShape = false) {
     if (!readAvObjectPrefix(cursor, userVersion2, inlineNames, morrowind, outFields)) {
         return false;
     }
@@ -1410,41 +1472,77 @@ bool readBsTriShape(
         return false;
     }
     const std::size_t vertexSize = static_cast<std::size_t>(descriptor & 0xFull) * 4u;
-    // A SKINNED SHAPE STORES NOTHING HERE. dataSize 0 with a skin ref is not a
-    // stripped shape, it is a banner or a cloth whose vertices live in the
-    // NiSkinPartition; report success with no geometry so the shape survives to
-    // be linked up later. Genuinely empty and unskinned is still a drop.
-    if (dataSize == 0u || numVertices == 0u || vertexSize < 12u) {
-        return skinRef >= 0;
-    }
-    // The declared size has to balance, or the descriptor was misread and every
-    // offset inside it is nonsense. Checked rather than trusted, for the same
-    // reason the triangle bounds are.
-    const std::size_t expected =
-        (static_cast<std::size_t>(numVertices) * vertexSize) +
-        (static_cast<std::size_t>(numTriangles) * 6u);
-    if (expected != static_cast<std::size_t>(dataSize)) {
-        return false;
-    }
-    if (!readPackedVertexData(cursor, descriptor, vertexSize, numVertices, outGeometry)) {
+    outGeometry.vertexCount = numVertices;
+    if (dataSize != 0u && numVertices != 0u && vertexSize != 0u) {
+        // The declared size has to balance, or the descriptor was misread and
+        // every offset inside it is nonsense. Dynamic face shapes are allowed
+        // to omit positions from this packed stream; their float4 positions
+        // follow in the BSDynamicTriShape tail below.
+        const std::size_t expected =
+            (static_cast<std::size_t>(numVertices) * vertexSize) +
+            (static_cast<std::size_t>(numTriangles) * 6u);
+        if (expected != static_cast<std::size_t>(dataSize) ||
+            !readPackedVertexData(cursor, descriptor, vertexSize, numVertices,
+                                  outGeometry, !dynamicShape, userVersion2 == 100u)) {
+            return false;
+        }
+
+        outGeometry.triangleIndices.reserve(static_cast<std::size_t>(numTriangles) * 3u);
+        for (std::size_t t = 0; t < numTriangles; ++t) {
+            std::uint16_t a = 0;
+            std::uint16_t b = 0;
+            std::uint16_t c = 0;
+            if (!cursor.read(a) || !cursor.read(b) || !cursor.read(c)) {
+                return false;
+            }
+            outGeometry.triangleIndices.push_back(a);
+            outGeometry.triangleIndices.push_back(b);
+            outGeometry.triangleIndices.push_back(c);
+        }
+        rejectUnusableTriangles(outGeometry);
+        outGeometry.valid = !outGeometry.triangleIndices.empty();
+    } else if (skinRef < 0) {
+        // A skinned banner legitimately stores all geometry in its partition;
+        // an empty unskinned shape has nothing the renderer can use.
         return false;
     }
 
-    outGeometry.triangleIndices.reserve(static_cast<std::size_t>(numTriangles) * 3u);
-    for (std::size_t t = 0; t < numTriangles; ++t) {
-        std::uint16_t a = 0;
-        std::uint16_t b = 0;
-        std::uint16_t c = 0;
-        if (!cursor.read(a) || !cursor.read(b) || !cursor.read(c)) {
+    // Skyrim SE adds a particle-data tail to every BSTriShape. It is normally
+    // empty; consume it so the following BSDynamicTriShape data is read at the
+    // right offset. The arrays are half3 positions, half3 normals and u16
+    // triangle indices when present.
+    if (userVersion2 == 100u) {
+        std::uint32_t particleDataSize = 0;
+        if (!cursor.read(particleDataSize)) {
             return false;
         }
-        outGeometry.triangleIndices.push_back(a);
-        outGeometry.triangleIndices.push_back(b);
-        outGeometry.triangleIndices.push_back(c);
+        if (particleDataSize != 0u &&
+            !cursor.skip((static_cast<std::size_t>(numVertices) * 12u) +
+                         (static_cast<std::size_t>(numTriangles) * 6u))) {
+            return false;
+        }
     }
-    rejectUnusableTriangles(outGeometry);
-    outGeometry.valid = true;
-    return true;
+
+    if (dynamicShape) {
+        std::uint32_t dynamicDataSize = 0;
+        if (!cursor.read(dynamicDataSize) ||
+            dynamicDataSize < static_cast<std::uint32_t>(numVertices) * 16u) {
+            return false;
+        }
+        outGeometry.positions.resize(static_cast<std::size_t>(numVertices) * 3u);
+        for (std::size_t v = 0; v < numVertices; ++v) {
+            float position[4]{};
+            for (float& component : position) {
+                if (!cursor.read(component)) {
+                    return false;
+                }
+            }
+            outGeometry.positions[(v * 3u) + 0u] = position[0];
+            outGeometry.positions[(v * 3u) + 1u] = position[1];
+            outGeometry.positions[(v * 3u) + 2u] = position[2];
+        }
+    }
+    return outGeometry.valid || skinRef >= 0;
 }
 
 // NiSkinInstance: the hop from a skinned BSTriShape to its geometry. Only the
@@ -1454,6 +1552,11 @@ bool readNiSkinInstancePartitionRef(ByteCursor& cursor, std::int32_t& outPartiti
     std::int32_t dataRef = 0;
     return cursor.read(dataRef) && cursor.read(outPartitionRef);
 }
+
+// Shared with the older NiSkinData path below. Defined near the skinned-mesh
+// assembler; declared here because Skyrim's partition reader reaches it first.
+void reduceInfluences(
+    std::vector<std::pair<std::uint16_t, float>>& influences, bool& outTruncated);
 
 // NiSkinPartition, Skyrim's layout: ONE shared vertex buffer for the whole
 // block, in exactly the BSVertexData packing BSTriShape uses, followed by the
@@ -1481,9 +1584,15 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
         return false;
     }
     const std::size_t vertexCount = dataSize / vertexSize;
-    if (!readPackedVertexData(cursor, descriptor, vertexSize, vertexCount, outGeometry)) {
+    // FaceGen partitions intentionally omit positions: they live in the
+    // BSDynamicTriShape tail. Still decode UVs/normals and, below, topology and
+    // weights so the skinned assembler can combine the two halves.
+    if (!readPackedVertexData(cursor, descriptor, vertexSize, vertexCount,
+                              outGeometry, false)) {
         return false;
     }
+
+    std::vector<std::vector<std::pair<std::uint16_t, float>>> influences(vertexCount);
 
     for (std::uint32_t partition = 0; partition < partitionCount; ++partition) {
         std::uint16_t header[5] = {0, 0, 0, 0, 0};
@@ -1497,23 +1606,39 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
         const std::uint16_t stripCount = header[3];
         const std::uint16_t weightsPerVertex = header[4];
         const std::size_t partitionVertices = header[0];
-        if (!cursor.skip(static_cast<std::size_t>(boneCount) * 2u)) {
-            return false;
+        std::vector<std::uint16_t> partitionBones(boneCount);
+        for (std::uint16_t& bone : partitionBones) {
+            if (!cursor.read(bone)) {
+                return false;
+            }
         }
         // Each of these is a presence byte followed by the array it guards.
         std::uint8_t present = 0;
         if (!cursor.read(present)) {
             return false;
         }
-        if (present != 0u && !cursor.skip(partitionVertices * 2u)) {  // vertex map
-            return false;
+        std::vector<std::uint16_t> vertexMap(partitionVertices);
+        for (std::size_t v = 0; v < partitionVertices; ++v) {
+            vertexMap[v] = static_cast<std::uint16_t>(v);
+        }
+        if (present != 0u) {
+            for (std::uint16_t& vertex : vertexMap) {
+                if (!cursor.read(vertex)) {
+                    return false;
+                }
+            }
         }
         if (!cursor.read(present)) {
             return false;
         }
-        if (present != 0u &&
-            !cursor.skip(partitionVertices * weightsPerVertex * 4u)) {  // vertex weights
-            return false;
+        const bool hasWeights = present != 0u;
+        std::vector<float> partitionWeights(partitionVertices * weightsPerVertex, 0.0f);
+        if (hasWeights) {
+            for (float& weight : partitionWeights) {
+                if (!cursor.read(weight)) {
+                    return false;
+                }
+            }
         }
         if (!cursor.skip(static_cast<std::size_t>(stripCount) * 2u)) {  // strip lengths
             return false;
@@ -1528,8 +1653,38 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
         if (!cursor.read(present)) {
             return false;
         }
-        if (present != 0u && !cursor.skip(partitionVertices * weightsPerVertex)) {  // bone indices
+        const bool hasBoneIndices = present != 0u;
+        std::vector<std::uint8_t> partitionBoneIndices(
+            partitionVertices * weightsPerVertex, 0u);
+        if (hasBoneIndices && !cursor.readBytes(
+                partitionBoneIndices.data(), partitionBoneIndices.size())) {
             return false;
+        }
+        if (hasWeights && hasBoneIndices) {
+            for (std::size_t v = 0; v < partitionVertices; ++v) {
+                const std::size_t sharedVertex = vertexMap[v];
+                if (sharedVertex >= influences.size()) {
+                    continue;
+                }
+                for (std::size_t w = 0; w < weightsPerVertex; ++w) {
+                    const std::size_t slot = (v * weightsPerVertex) + w;
+                    const float weight = partitionWeights[slot];
+                    const std::uint8_t localBone = partitionBoneIndices[slot];
+                    if (weight <= 0.0f || localBone >= partitionBones.size()) {
+                        continue;
+                    }
+                    const std::uint16_t skinBone = partitionBones[localBone];
+                    auto& vertexInfluences = influences[sharedVertex];
+                    const auto duplicate = std::find_if(
+                        vertexInfluences.begin(), vertexInfluences.end(),
+                        [skinBone](const auto& influence) { return influence.first == skinBone; });
+                    if (duplicate == vertexInfluences.end()) {
+                        vertexInfluences.emplace_back(skinBone, weight);
+                    } else {
+                        duplicate->second = std::max(duplicate->second, weight);
+                    }
+                }
+            }
         }
         // Skyrim's tail: an unknown short, the vertex descriptor again, then the
         // triangles this partition actually draws.
@@ -1548,6 +1703,16 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
             outGeometry.triangleIndices.push_back(c);
         }
     }
+    outGeometry.boneIndices.assign(vertexCount * kNifMaxBoneInfluences, 0u);
+    outGeometry.boneWeights.assign(vertexCount * kNifMaxBoneInfluences, 0.0f);
+    for (std::size_t v = 0; v < vertexCount; ++v) {
+        bool truncated = false;
+        reduceInfluences(influences[v], truncated);
+        for (std::size_t k = 0; k < influences[v].size(); ++k) {
+            outGeometry.boneIndices[(v * kNifMaxBoneInfluences) + k] = influences[v][k].first;
+            outGeometry.boneWeights[(v * kNifMaxBoneInfluences) + k] = influences[v][k].second;
+        }
+    }
     rejectUnusableTriangles(outGeometry);
     outGeometry.valid = !outGeometry.triangleIndices.empty();
     return outGeometry.valid;
@@ -1563,7 +1728,9 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
 // [refs] controller(4) shaderFlags1(4) shaderFlags2(4) uvOffset(8) uvScale(8),
 // then the texture set ref -- which for that block is 9, the file's own
 // BSShaderTextureSet.
-bool readBsLightingShaderTextureSetRef(ByteCursor& cursor, std::int32_t& outTextureSetRef) {
+bool readBsLightingShaderTextureSetRef(
+    ByteCursor& cursor, std::int32_t& outTextureSetRef, bool& outTwoSided,
+    bool& outTreeAnim, bool& outVertexAlpha) {
     std::uint32_t shaderType = 0;
     std::int32_t nameRef = 0;
     std::uint32_t numExtraData = 0;
@@ -1573,11 +1740,68 @@ bool readBsLightingShaderTextureSetRef(ByteCursor& cursor, std::int32_t& outText
     if (!cursor.skip(static_cast<std::size_t>(numExtraData) * 4u)) {
         return false;
     }
-    // controller, shader flags 1 and 2, UV offset (2 floats), UV scale (2 floats)
-    if (!cursor.skip(4u + 4u + 4u + 8u + 8u)) {
+    std::uint32_t shaderFlags1 = 0;
+    std::uint32_t shaderFlags2 = 0;
+    // The flags are material state, not padding. In particular Skyrim's tree
+    // branch cards set SLSF2_Double_Sided here and carry no NiStencilProperty;
+    // dropping it leaves half the foliage either culled or lit with the wrong
+    // face normal, producing black needle streaks across distant views.
+    if (!cursor.skip(4u) || !cursor.read(shaderFlags1) || !cursor.read(shaderFlags2) ||
+        !cursor.skip(8u + 8u)) {
         return false;
     }
+    outTwoSided = (shaderFlags2 & 0x10u) != 0u;
+    outTreeAnim = (shaderFlags2 & 0x20000000u) != 0u;
+    // SLSF1_Vertex_Alpha is not redundant with the packed vertex descriptor's
+    // colour bit. Skyrim routinely stores an alpha byte on every vertex, then
+    // uses this material flag to say whether that byte is opacity or merely
+    // unused payload. Rock/ground transition meshes are the load-bearing case:
+    // their opaque texture is feathered into the terrain solely by this flag.
+    outVertexAlpha = (shaderFlags1 & 0x8u) != 0u;
     return cursor.read(outTextureSetRef);
+}
+
+// BSEffectShaderProperty does not point at a BSShaderTextureSet. Skyrim stores
+// its source texture inline, after the common shader flags and UV transform.
+// That distinction is visible on WRLODWindowGlow01.nif: the only property is
+// an effect shader, and treating every shader as a texture-set reference leaves
+// a 9,400-unit-wide blended window mesh untextured over distant Whiterun.
+//
+// Skyrim layout (user version 12, Bethesda version 83), block-relative:
+//   NiObjectNET: name ref, extra-data refs, controller ref
+//   shader flags 1/2, UV offset, UV scale
+//   u32-sized source texture string
+//
+// Newer Bethesda generations append more fields after the source string, which
+// are irrelevant here. Older FO3/FNV effect properties use another layout and
+// deliberately remain on their existing paths.
+struct EffectShaderPropertyBlock {
+    std::string sourceTexture;
+    bool twoSided = false;
+    bool valid = false;
+};
+
+bool readBsEffectShaderProperty(
+    ByteCursor& cursor, std::uint32_t userVersion2, EffectShaderPropertyBlock& out) {
+    if (userVersion2 < 83u) {
+        return false;
+    }
+    std::int32_t nameRef = -1;
+    std::uint32_t extraDataCount = 0;
+    std::int32_t controllerRef = -1;
+    std::uint32_t shaderFlags1 = 0;
+    std::uint32_t shaderFlags2 = 0;
+    if (!cursor.read(nameRef) || !cursor.read(extraDataCount) || extraDataCount > 1024u ||
+        !cursor.skip(static_cast<std::size_t>(extraDataCount) * 4u) ||
+        !cursor.read(controllerRef) || !cursor.read(shaderFlags1) ||
+        !cursor.read(shaderFlags2) || !cursor.skip(8u + 8u) ||
+        !cursor.readSizedString<std::uint32_t>(out.sourceTexture)) {
+        return false;
+    }
+    // Shared BS shader flag 2: Double_Sided.
+    out.twoSided = (shaderFlags2 & 0x10u) != 0u;
+    out.valid = true;
+    return true;
 }
 
 // Expands one triangle strip into an indexed triangle list.
@@ -3311,6 +3535,461 @@ bool parseNifBlockSummary(
     return true;
 }
 
+constexpr float kHavokToBethesda = 69.99125f;
+
+Mat4 quaternionTransform(float x, float y, float z, float w, float unitScale) {
+    Mat4 out{};
+    const float xx = x * x;
+    const float yy = y * y;
+    const float zz = z * z;
+    const float xy = x * y;
+    const float xz = x * z;
+    const float yz = y * z;
+    const float wx = w * x;
+    const float wy = w * y;
+    const float wz = w * z;
+    out.m[0] = 1.0f - (2.0f * (yy + zz));
+    out.m[1] = 2.0f * (xy - wz);
+    out.m[2] = 2.0f * (xz + wy);
+    out.m[4] = 2.0f * (xy + wz);
+    out.m[5] = 1.0f - (2.0f * (xx + zz));
+    out.m[6] = 2.0f * (yz - wx);
+    out.m[8] = 2.0f * (xz - wy);
+    out.m[9] = 2.0f * (yz + wx);
+    out.m[10] = 1.0f - (2.0f * (xx + yy));
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            out.m[(row * 4) + col] *= unitScale;
+        }
+    }
+    return out;
+}
+
+void appendCollisionTriangle(
+    std::vector<NifCollisionTriangle>& out, const Mat4& transform,
+    const float a[3], const float b[3], const float c[3]) {
+    NifCollisionTriangle triangle;
+    const float* points[3] = {a, b, c};
+    for (int point = 0; point < 3; ++point) {
+        for (int row = 0; row < 3; ++row) {
+            triangle.vertices[(point * 3) + row] =
+                transform.m[(row * 4) + 0] * points[point][0] +
+                transform.m[(row * 4) + 1] * points[point][1] +
+                transform.m[(row * 4) + 2] * points[point][2] +
+                transform.m[(row * 4) + 3];
+        }
+    }
+    const float ab[3] = {triangle.vertices[3] - triangle.vertices[0],
+                         triangle.vertices[4] - triangle.vertices[1],
+                         triangle.vertices[5] - triangle.vertices[2]};
+    const float ac[3] = {triangle.vertices[6] - triangle.vertices[0],
+                         triangle.vertices[7] - triangle.vertices[1],
+                         triangle.vertices[8] - triangle.vertices[2]};
+    const float areaSq =
+        std::pow((ab[1] * ac[2]) - (ab[2] * ac[1]), 2.0f) +
+        std::pow((ab[2] * ac[0]) - (ab[0] * ac[2]), 2.0f) +
+        std::pow((ab[0] * ac[1]) - (ab[1] * ac[0]), 2.0f);
+    if (areaSq > 1e-8f) {
+        out.push_back(triangle);
+    }
+}
+
+void appendCollisionBox(
+    std::vector<NifCollisionTriangle>& out, const Mat4& transform,
+    const float minPoint[3], const float maxPoint[3]) {
+    const float p[8][3] = {
+        {minPoint[0], minPoint[1], minPoint[2]}, {maxPoint[0], minPoint[1], minPoint[2]},
+        {maxPoint[0], maxPoint[1], minPoint[2]}, {minPoint[0], maxPoint[1], minPoint[2]},
+        {minPoint[0], minPoint[1], maxPoint[2]}, {maxPoint[0], minPoint[1], maxPoint[2]},
+        {maxPoint[0], maxPoint[1], maxPoint[2]}, {minPoint[0], maxPoint[1], maxPoint[2]}};
+    static constexpr std::uint8_t kFaces[12][3] = {
+        {0, 2, 1}, {0, 3, 2}, {4, 5, 6}, {4, 6, 7},
+        {0, 1, 5}, {0, 5, 4}, {3, 7, 6}, {3, 6, 2},
+        {0, 4, 7}, {0, 7, 3}, {1, 2, 6}, {1, 6, 5}};
+    for (const auto& face : kFaces) {
+        appendCollisionTriangle(out, transform, p[face[0]], p[face[1]], p[face[2]]);
+    }
+}
+
+struct CompressedCollisionData {
+    std::vector<NifCollisionTriangle> triangles;
+};
+
+bool readCompressedCollisionData(ByteCursor& cursor, CompressedCollisionData& out) {
+    std::uint32_t bitsPerIndex = 0;
+    std::uint32_t bitsPerWeldingIndex = 0;
+    std::uint32_t maskWeldingIndex = 0;
+    std::uint32_t maskIndex = 0;
+    float error = 0.0f;
+    float ignoredBounds[8];
+    std::uint8_t weldingType = 0;
+    std::uint8_t materialType = 0;
+    if (!cursor.read(bitsPerIndex) || !cursor.read(bitsPerWeldingIndex) ||
+        !cursor.read(maskWeldingIndex) || !cursor.read(maskIndex) ||
+        !cursor.read(error) || !cursor.readBytes(ignoredBounds, sizeof(ignoredBounds)) ||
+        !cursor.read(weldingType) || !cursor.read(materialType)) {
+        return false;
+    }
+    (void)bitsPerIndex;
+    (void)bitsPerWeldingIndex;
+    (void)maskWeldingIndex;
+    (void)weldingType;
+    (void)materialType;
+    for (int array = 0; array < 3; ++array) {
+        std::uint32_t count = 0;
+        if (!cursor.read(count) || count > cursor.size() / 4u || !cursor.skip(count * 4u)) {
+            return false;
+        }
+    }
+    std::uint32_t materialCount = 0;
+    if (!cursor.read(materialCount) || materialCount > cursor.size() / 8u ||
+        !cursor.skip(materialCount * 8u) || !cursor.skip(4u)) {
+        return false;
+    }
+
+    struct QsTransform { float translation[4]; float rotation[4]; };
+    std::uint32_t transformCount = 0;
+    if (!cursor.read(transformCount) || transformCount > 65536u) {
+        return false;
+    }
+    std::vector<QsTransform> transforms(transformCount);
+    for (QsTransform& transform : transforms) {
+        if (!cursor.readBytes(transform.translation, sizeof(transform.translation)) ||
+            !cursor.readBytes(transform.rotation, sizeof(transform.rotation))) {
+            return false;
+        }
+    }
+
+    std::uint32_t bigVertexCount = 0;
+    if (!cursor.read(bigVertexCount) || bigVertexCount > 10000000u) {
+        return false;
+    }
+    std::vector<std::array<float, 3>> bigVertices(bigVertexCount);
+    for (auto& vertex : bigVertices) {
+        float w = 0.0f;
+        if (!cursor.read(vertex[0]) || !cursor.read(vertex[1]) ||
+            !cursor.read(vertex[2]) || !cursor.read(w)) {
+            return false;
+        }
+    }
+    std::uint32_t bigTriangleCount = 0;
+    if (!cursor.read(bigTriangleCount) || bigTriangleCount > 10000000u) {
+        return false;
+    }
+    const Mat4 havokScale = quaternionTransform(0, 0, 0, 1, kHavokToBethesda);
+    for (std::uint32_t i = 0; i < bigTriangleCount; ++i) {
+        std::uint16_t indices[3];
+        std::uint32_t material = 0;
+        std::uint16_t welding = 0;
+        if (!cursor.readBytes(indices, sizeof(indices)) || !cursor.read(material) ||
+            !cursor.read(welding)) {
+            return false;
+        }
+        if (indices[0] >= bigVertices.size() || indices[1] >= bigVertices.size() ||
+            indices[2] >= bigVertices.size()) {
+            return false;
+        }
+        appendCollisionTriangle(out.triangles, havokScale,
+            bigVertices[indices[0]].data(), bigVertices[indices[1]].data(),
+            bigVertices[indices[2]].data());
+    }
+
+    std::uint32_t chunkCount = 0;
+    if (!cursor.read(chunkCount) || chunkCount > 1000000u) {
+        return false;
+    }
+    for (std::uint32_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+        float translation[4];
+        std::uint32_t material = 0;
+        std::uint16_t reference = 0;
+        std::uint16_t transformIndex = 0;
+        if (!cursor.readBytes(translation, sizeof(translation)) || !cursor.read(material) ||
+            !cursor.read(reference) || !cursor.read(transformIndex)) {
+            return false;
+        }
+        auto readU16Vector = [&](std::vector<std::uint16_t>& values) {
+            std::uint32_t count = 0;
+            if (!cursor.read(count) || count > 30000000u) {
+                return false;
+            }
+            values.resize(count);
+            return count == 0u || cursor.readBytes(values.data(), count * sizeof(std::uint16_t));
+        };
+        std::vector<std::uint16_t> packedVertices;
+        std::vector<std::uint16_t> indices;
+        std::vector<std::uint16_t> stripLengths;
+        std::vector<std::uint16_t> welding;
+        if (!readU16Vector(packedVertices) || !readU16Vector(indices) ||
+            !readU16Vector(stripLengths) || !readU16Vector(welding) ||
+            packedVertices.size() % 3u != 0u) {
+            return false;
+        }
+        Mat4 chunkTransform = havokScale;
+        chunkTransform.m[3] = translation[0] * kHavokToBethesda;
+        chunkTransform.m[7] = translation[1] * kHavokToBethesda;
+        chunkTransform.m[11] = translation[2] * kHavokToBethesda;
+        if (transformIndex != 0xffffu && transformIndex < transforms.size()) {
+            const QsTransform& qs = transforms[transformIndex];
+            Mat4 authored = quaternionTransform(
+                qs.rotation[0], qs.rotation[1], qs.rotation[2], qs.rotation[3], 1.0f);
+            authored.m[3] = qs.translation[0] * kHavokToBethesda;
+            authored.m[7] = qs.translation[1] * kHavokToBethesda;
+            authored.m[11] = qs.translation[2] * kHavokToBethesda;
+            chunkTransform = multiply(authored, chunkTransform);
+        }
+        std::vector<std::array<float, 3>> vertices(packedVertices.size() / 3u);
+        for (std::size_t i = 0; i < vertices.size(); ++i) {
+            vertices[i] = {packedVertices[i * 3u] * error,
+                           packedVertices[(i * 3u) + 1u] * error,
+                           packedVertices[(i * 3u) + 2u] * error};
+        }
+        const auto indexValue = [&](std::uint16_t encoded) -> std::uint32_t {
+            return static_cast<std::uint32_t>(encoded) & maskIndex;
+        };
+        std::size_t cursorIndex = 0;
+        const auto appendIndexed = [&](std::uint32_t ia, std::uint32_t ib, std::uint32_t ic) {
+            if (ia >= vertices.size() || ib >= vertices.size() || ic >= vertices.size()) {
+                return false;
+            }
+            appendCollisionTriangle(out.triangles, chunkTransform,
+                vertices[ia].data(), vertices[ib].data(), vertices[ic].data());
+            return true;
+        };
+        for (const std::uint16_t length : stripLengths) {
+            if (length < 3u || cursorIndex + length > indices.size()) {
+                return false;
+            }
+            for (std::size_t k = 2; k < length; ++k) {
+                std::uint32_t ia = indexValue(indices[cursorIndex + k - 2u]);
+                std::uint32_t ib = indexValue(indices[cursorIndex + k - 1u]);
+                const std::uint32_t ic = indexValue(indices[cursorIndex + k]);
+                if ((k & 1u) != 0u) {
+                    std::swap(ia, ib);
+                }
+                if (!appendIndexed(ia, ib, ic)) {
+                    return false;
+                }
+            }
+            cursorIndex += length;
+        }
+        if ((indices.size() - cursorIndex) % 3u != 0u) {
+            return false;
+        }
+        while (cursorIndex < indices.size()) {
+            if (!appendIndexed(indexValue(indices[cursorIndex]),
+                               indexValue(indices[cursorIndex + 1u]),
+                               indexValue(indices[cursorIndex + 2u]))) {
+                return false;
+            }
+            cursorIndex += 3u;
+        }
+    }
+    return cursor.skip(4u);
+}
+
+struct CollisionBlockContext {
+    const std::vector<std::uint8_t>& bytes;
+    const NifHeader& header;
+    const std::vector<std::size_t>& starts;
+    const std::vector<std::size_t>& ends;
+    const std::vector<Mat4>& nodeTransforms;
+    const std::vector<bool>& nodeTransformValid;
+};
+
+bool extractCollisionShape(
+    const CollisionBlockContext& context, std::int32_t blockRef,
+    const Mat4& parentTransform, std::vector<NifCollisionTriangle>& out,
+    std::unordered_set<std::int32_t>& visiting) {
+    if (blockRef < 0 || static_cast<std::size_t>(blockRef) >= context.starts.size() ||
+        !visiting.insert(blockRef).second) {
+        return false;
+    }
+    const std::size_t index = static_cast<std::size_t>(blockRef);
+    const std::string& type =
+        context.header.blockTypeNames[context.header.blockTypeIndex[index]];
+    ByteCursor cursor(context.bytes.data() + context.starts[index],
+                      context.ends[index] - context.starts[index]);
+    const auto finish = [&](bool result) {
+        visiting.erase(blockRef);
+        return result;
+    };
+    if (type == "bhkMoppBvTreeShape") {
+        std::int32_t child = -1;
+        return finish(cursor.read(child) &&
+                      extractCollisionShape(context, child, parentTransform, out, visiting));
+    }
+    if (type == "bhkCompressedMeshShape") {
+        std::int32_t target = -1;
+        std::uint32_t userData = 0;
+        float radius = 0.0f;
+        float scale[4];
+        std::int32_t dataRef = -1;
+        if (!cursor.read(target) || !cursor.read(userData) || !cursor.read(radius) ||
+            !cursor.skip(4u) || !cursor.readBytes(scale, sizeof(scale)) ||
+            !cursor.skip(20u) || !cursor.read(dataRef) || dataRef < 0 ||
+            static_cast<std::size_t>(dataRef) >= context.starts.size()) {
+            return finish(false);
+        }
+        const std::size_t dataIndex = static_cast<std::size_t>(dataRef);
+        const std::string& dataType =
+            context.header.blockTypeNames[context.header.blockTypeIndex[dataIndex]];
+        if (dataType != "bhkCompressedMeshShapeData") {
+            return finish(false);
+        }
+        ByteCursor dataCursor(context.bytes.data() + context.starts[dataIndex],
+                              context.ends[dataIndex] - context.starts[dataIndex]);
+        CompressedCollisionData data;
+        if (!readCompressedCollisionData(dataCursor, data)) {
+            return finish(false);
+        }
+        Mat4 shapeScale{};
+        shapeScale.m[0] = scale[0];
+        shapeScale.m[5] = scale[1];
+        shapeScale.m[10] = scale[2];
+        const Mat4 transform = multiply(parentTransform, shapeScale);
+        for (NifCollisionTriangle triangle : data.triangles) {
+            appendCollisionTriangle(out, transform, &triangle.vertices[0],
+                                    &triangle.vertices[3], &triangle.vertices[6]);
+        }
+        return finish(true);
+    }
+    if (type == "bhkBoxShape") {
+        float radius = 0.0f;
+        float extents[3];
+        if (!cursor.skip(4u) || !cursor.read(radius) || !cursor.skip(8u) ||
+            !cursor.readBytes(extents, sizeof(extents))) {
+            return finish(false);
+        }
+        float minPoint[3];
+        float maxPoint[3];
+        for (int axis = 0; axis < 3; ++axis) {
+            minPoint[axis] = -extents[axis] * kHavokToBethesda;
+            maxPoint[axis] = extents[axis] * kHavokToBethesda;
+        }
+        appendCollisionBox(out, parentTransform, minPoint, maxPoint);
+        return finish(true);
+    }
+    if (type == "bhkConvexVerticesShape") {
+        if (!cursor.skip(32u)) {
+            return finish(false);
+        }
+        std::uint32_t vertexCount = 0;
+        if (!cursor.read(vertexCount) || vertexCount == 0u || vertexCount > 1000000u) {
+            return finish(false);
+        }
+        float minPoint[3] = {std::numeric_limits<float>::max(),
+                             std::numeric_limits<float>::max(),
+                             std::numeric_limits<float>::max()};
+        float maxPoint[3] = {-std::numeric_limits<float>::max(),
+                             -std::numeric_limits<float>::max(),
+                             -std::numeric_limits<float>::max()};
+        for (std::uint32_t i = 0; i < vertexCount; ++i) {
+            float vertex[4];
+            if (!cursor.readBytes(vertex, sizeof(vertex))) {
+                return finish(false);
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                const float value = vertex[axis] * kHavokToBethesda;
+                minPoint[axis] = std::min(minPoint[axis], value);
+                maxPoint[axis] = std::max(maxPoint[axis], value);
+            }
+        }
+        appendCollisionBox(out, parentTransform, minPoint, maxPoint);
+        return finish(true);
+    }
+    if (type == "bhkTransformShape" || type == "bhkConvexTransformShape") {
+        std::int32_t child = -1;
+        float raw[16];
+        if (!cursor.read(child) || !cursor.skip(16u) ||
+            !cursor.readBytes(raw, sizeof(raw))) {
+            return finish(false);
+        }
+        Mat4 transform{};
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                transform.m[(row * 4) + col] = raw[(col * 4) + row];
+            }
+        }
+        transform.m[3] *= kHavokToBethesda;
+        transform.m[7] *= kHavokToBethesda;
+        transform.m[11] *= kHavokToBethesda;
+        return finish(extractCollisionShape(
+            context, child, multiply(parentTransform, transform), out, visiting));
+    }
+    if (type == "bhkListShape" || type == "bhkConvexListShape") {
+        std::uint32_t count = 0;
+        if (!cursor.read(count) || count > 1000000u) {
+            return finish(false);
+        }
+        std::vector<std::int32_t> children(count);
+        if (count != 0u && !cursor.readBytes(children.data(), count * sizeof(std::int32_t))) {
+            return finish(false);
+        }
+        for (const std::int32_t child : children) {
+            if (!extractCollisionShape(context, child, parentTransform, out, visiting)) {
+                return finish(false);
+            }
+        }
+        return finish(true);
+    }
+    if (type == "bhkPackedNiTriStripsShape") {
+        // Skyrim/Fallout's packed-shape block ends with its data reference.
+        if (cursor.size() < 4u) {
+            return finish(false);
+        }
+        cursor.seekAbsolute(cursor.size() - 4u);
+        std::int32_t dataRef = -1;
+        if (!cursor.read(dataRef) || dataRef < 0 ||
+            static_cast<std::size_t>(dataRef) >= context.starts.size()) {
+            return finish(false);
+        }
+        const std::size_t dataIndex = static_cast<std::size_t>(dataRef);
+        const std::string& dataType =
+            context.header.blockTypeNames[context.header.blockTypeIndex[dataIndex]];
+        if (dataType != "hkPackedNiTriStripsData") {
+            return finish(false);
+        }
+        ByteCursor dataCursor(context.bytes.data() + context.starts[dataIndex],
+                              context.ends[dataIndex] - context.starts[dataIndex]);
+        std::uint32_t triangleCount = 0;
+        if (!dataCursor.read(triangleCount) || triangleCount > 10000000u) {
+            return finish(false);
+        }
+        struct PackedTriangle { std::uint16_t index[3]; std::uint16_t welding; };
+        std::vector<PackedTriangle> triangles(triangleCount);
+        if (triangleCount != 0u &&
+            !dataCursor.readBytes(triangles.data(), triangleCount * sizeof(PackedTriangle))) {
+            return finish(false);
+        }
+        std::uint32_t vertexCount = 0;
+        std::uint8_t compressed = 0;
+        if (!dataCursor.read(vertexCount) || !dataCursor.read(compressed) || compressed != 0u ||
+            vertexCount > 10000000u) {
+            return finish(false);
+        }
+        std::vector<std::array<float, 3>> vertices(vertexCount);
+        for (auto& vertex : vertices) {
+            if (!dataCursor.readBytes(vertex.data(), sizeof(float) * 3u)) {
+                return finish(false);
+            }
+            for (float& value : vertex) {
+                value *= kHavokToBethesda;
+            }
+        }
+        for (const PackedTriangle& triangle : triangles) {
+            if (triangle.index[0] >= vertices.size() || triangle.index[1] >= vertices.size() ||
+                triangle.index[2] >= vertices.size()) {
+                return finish(false);
+            }
+            appendCollisionTriangle(out, parentTransform,
+                vertices[triangle.index[0]].data(), vertices[triangle.index[1]].data(),
+                vertices[triangle.index[2]].data());
+        }
+        return finish(true);
+    }
+    return finish(false);
+}
+
 bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outModel, std::string& outError) {
     outModel = NifModel{};
     ByteCursor cursor(bytes.data(), bytes.size());
@@ -3355,6 +4034,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<TextureSetBlock> textureSets(numBlocks);
     // Per shader-property block, the texture set it names (-1 when absent).
     std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
+    std::vector<bool> lightingShaderTwoSided(numBlocks, false);
+    std::vector<bool> lightingShaderTreeAnim(numBlocks, false);
+    std::vector<bool> lightingShaderVertexAlpha(numBlocks, false);
+    std::vector<bool> lightingShaderValid(numBlocks, false);
     // Per NiSkinInstance block, the NiSkinPartition holding its geometry.
     std::vector<std::int32_t> skinPartitionRefs(numBlocks, -1);
     // Diffuse paths reached through the older NiTexturingProperty ->
@@ -3363,6 +4046,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<std::string> texturingPropertyPaths(numBlocks);
     std::vector<std::string> noLightingTexturePaths(numBlocks);
     std::vector<bool> noLightingProperty(numBlocks, false);
+    std::vector<EffectShaderPropertyBlock> effectShaderProperties(numBlocks);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
     std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
     std::unordered_set<std::int32_t> referencedAsChild;
@@ -3394,7 +4078,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // NiNode-derived fails that and is counted, rather than misparsed.
         if (isNodeTypeName(typeName) || looksLikeUnhandledNodeType(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
+                           header.inlineBlockTypes, fields, typeName)) {
                 nodeFields[i] = std::move(fields);
                 isNiNode[i] = true;
                 if (typeName == "NiBSAnimationNode" &&
@@ -3414,6 +4099,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 // are exactly the bytes that cannot be trusted -- so the
                 // subtree is left unreachable and simply not drawn.
                 ++outModel.nodeParseFailedCount;
+                if (std::find(outModel.failedNodeTypes.begin(), outModel.failedNodeTypes.end(),
+                              typeName) == outModel.failedNodeTypes.end()) {
+                    outModel.failedNodeTypes.push_back(typeName);
+                }
             }
         } else if (typeName == "NiTriShape" || typeName == "NiTriStrips" ||
                    typeName == "BSSegmentedTriShape") {
@@ -3446,7 +4135,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             AvObjectFields fields;
             GeometryBlock geom;
             if (readBsTriShape(blockCursor, header.userVersion2, header.inlineNames,
-                               header.inlineBlockTypes, fields, geom)) {
+                               header.inlineBlockTypes, fields, geom,
+                               typeName == "BSDynamicTriShape")) {
                 fields.dataRef = static_cast<std::int32_t>(i);
                 nodeFields[i] = std::move(fields);
                 geometry[i] = std::move(geom);
@@ -3466,8 +4156,16 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
         } else if (typeName == "BSLightingShaderProperty") {
             std::int32_t textureSetRef = -1;
-            if (readBsLightingShaderTextureSetRef(blockCursor, textureSetRef)) {
+            bool twoSided = false;
+            bool treeAnim = false;
+            bool vertexAlpha = false;
+            if (readBsLightingShaderTextureSetRef(
+                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha)) {
                 shaderTextureSetRefs[i] = textureSetRef;
+                lightingShaderTwoSided[i] = twoSided;
+                lightingShaderTreeAnim[i] = treeAnim;
+                lightingShaderVertexAlpha[i] = vertexAlpha;
+                lightingShaderValid[i] = true;
             }
         } else if (typeName == "BSShaderPPLightingProperty") {
             std::int32_t textureSetRef = -1;
@@ -3479,6 +4177,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             std::string fileName;
             if (readBsShaderNoLightingTexture(blockCursor, fileName)) {
                 noLightingTexturePaths[i] = std::move(fileName);
+            }
+        } else if (typeName == "BSEffectShaderProperty") {
+            EffectShaderPropertyBlock effect;
+            if (readBsEffectShaderProperty(blockCursor, header.userVersion2, effect)) {
+                effectShaderProperties[i] = std::move(effect);
             }
         } else if (typeName == "NiSourceTexture") {
             std::string fileName;
@@ -3645,6 +4348,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     inheritedPropertyStack.assign(stack.size(), std::vector<std::int32_t>{});
     std::vector<Mat4> animationParentTransforms(numBlocks);
     std::vector<Mat4> animationBindTransforms(numBlocks);
+    std::vector<Mat4> nodeWorldTransforms(numBlocks);
+    std::vector<bool> nodeWorldTransformValid(numBlocks, false);
 
     std::vector<bool> visited(numBlocks, false);
     while (!stack.empty()) {
@@ -3665,6 +4370,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         const Mat4 localTransform = makeTrs(
             nodeFields[blockIndex].translation, nodeFields[blockIndex].rotation, nodeFields[blockIndex].scale);
         const Mat4 worldTransform = multiply(parentTransform, localTransform);
+        nodeWorldTransforms[blockIndex] = worldTransform;
+        nodeWorldTransformValid[blockIndex] = true;
 
         const AvObjectFields& currentFields = nodeFields[blockIndex];
         const std::string* currentName = &currentFields.name;
@@ -3761,7 +4468,17 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 childInherited.end(),
                 nodeFields[blockIndex].properties.begin(),
                 nodeFields[blockIndex].properties.end());
-            for (const std::int32_t child : nodeFields[blockIndex].children) {
+            const AvObjectFields& node = nodeFields[blockIndex];
+            const bool isSwitch = node.switchChildIndex != -2;
+            if (isSwitch && node.children.size() > 1u) {
+                outModel.inactiveSwitchSubtreeCount +=
+                    static_cast<std::uint32_t>(node.children.size() - 1u);
+            }
+            for (std::size_t childIndex = 0; childIndex < node.children.size(); ++childIndex) {
+                if (isSwitch && static_cast<std::int32_t>(childIndex) != node.switchChildIndex) {
+                    continue;
+                }
+                const std::int32_t child = node.children[childIndex];
                 if (child >= 0 && static_cast<std::size_t>(child) < numBlocks) {
                     stack.push_back(static_cast<std::size_t>(child));
                     transformStack.push_back(worldTransform);
@@ -3780,6 +4497,10 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
             const GeometryBlock& src = geometry[dataRef];
             NifShape shape;
+            if (blockIndex < header.blockTypeIndex.size()) {
+                shape.sourceBlockType =
+                    header.blockTypeNames[header.blockTypeIndex[blockIndex]];
+            }
             const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
             if (!nodeFields[blockIndex].name.empty()) {
                 shape.name = nodeFields[blockIndex].name;
@@ -3828,12 +4549,39 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // in the header comment relies on.
             std::string noLightingFallback;
             bool shapeReversedWinding = false;
+            bool vertexAlphaResolved = false;
+            bool vertexAlphaEnabled = true;  // classic NIFs keep their existing semantics
             const auto applyProperty = [&](std::int32_t propertyRef) {
                 if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
                     return;
                 }
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
                 shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
+                shape.twoSided = shape.twoSided || lightingShaderTwoSided[propertyIndex];
+                // Own properties are visited before inherited ones. The first
+                // BSLightingShaderProperty therefore owns this decision just as
+                // it owns the shape's texture; a parent material cannot turn a
+                // deliberately disabled vertex-alpha channel back on.
+                if (!vertexAlphaResolved && lightingShaderValid[propertyIndex]) {
+                    vertexAlphaEnabled = lightingShaderVertexAlpha[propertyIndex];
+                    vertexAlphaResolved = true;
+                }
+                // Reuse the packed unlit bit as the source-material marker.
+                // The shader distinguishes TreeAnim from a true emissive by
+                // its authored alpha-test + two-sided combination and applies
+                // wrapped foliage lighting instead of taking the unlit exit.
+                shape.unlit = shape.unlit || lightingShaderTreeAnim[propertyIndex];
+                if (effectShaderProperties[propertyIndex].valid) {
+                    // Effect shaders are self-lit by definition. Their source
+                    // texture is inline rather than in a texture-set block.
+                    shape.unlit = true;
+                    shape.twoSided =
+                        shape.twoSided || effectShaderProperties[propertyIndex].twoSided;
+                    if (shape.diffuseTexturePath.empty()) {
+                        shape.diffuseTexturePath =
+                            effectShaderProperties[propertyIndex].sourceTexture;
+                    }
+                }
                 if (noLightingFallback.empty() && !noLightingTexturePaths[propertyIndex].empty()) {
                     noLightingFallback = noLightingTexturePaths[propertyIndex];
                 }
@@ -3850,6 +4598,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     }
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
+                    if (shape.alphaTest) {
+                        shape.alphaSemantic = NifAlphaSemantic::Cutout;
+                    } else if (shape.alphaBlend) {
+                        shape.alphaSemantic = NifAlphaSemantic::ExplicitBlend;
+                    }
                     return;
                 }
                 if (stencilProperties[propertyIndex].valid) {
@@ -3916,6 +4669,34 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
 
             shape.uvs = src.uvs;
             shape.colors = src.colors;
+            if (vertexAlphaResolved && !vertexAlphaEnabled) {
+                // NifSkope/Bethesda semantics: a stored colour alpha is 1.0
+                // unless SLSF1_Vertex_Alpha explicitly enables it. Multiplying
+                // an alpha-tested rock skirt by an inactive channel discarded
+                // authored faces and looked exactly like missing triangles.
+                for (std::size_t i = 3u; i < shape.colors.size(); i += 4u) {
+                    shape.colors[i] = 1.0f;
+                }
+            } else if (vertexAlphaResolved && vertexAlphaEnabled && !shape.alphaTest) {
+                // Skyrim does not need a separate NiAlphaProperty for these
+                // transition skirts. If the material enables vertex alpha and
+                // the channel actually varies, route it through the existing
+                // sorted blended tail instead of painting an opaque sheet over
+                // the rocks/terrain beneath it.
+                const bool hasPartialAlpha = [&]() {
+                    for (std::size_t i = 3u; i < shape.colors.size(); i += 4u) {
+                        if (shape.colors[i] < (254.5f / 255.0f)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }();
+                if (hasPartialAlpha &&
+                    shape.alphaSemantic != NifAlphaSemantic::ExplicitBlend) {
+                    shape.alphaBlend = true;
+                    shape.alphaSemantic = NifAlphaSemantic::VertexFade;
+                }
+            }
             shape.positions.resize(src.positions.size());
             for (std::size_t v = 0; v * 3u < src.positions.size(); ++v) {
                 const float local[3] = {src.positions[v * 3u], src.positions[(v * 3u) + 1], src.positions[(v * 3u) + 2]};
@@ -3935,6 +4716,11 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 }
             }
             shape.triangleIndices = src.triangleIndices;
+            shape.sourceTriangleCount = static_cast<std::uint32_t>(
+                (src.triangleIndices.size() / 3u) + src.outOfRangeTriangles +
+                src.degenerateTriangles);
+            shape.rejectedTriangleCount =
+                src.outOfRangeTriangles + src.degenerateTriangles;
 
             // Mirrored shapes: reverse the winding.
             //
@@ -3968,6 +4754,93 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
 
             outModel.shapes.push_back(std::move(shape));
+        }
+    }
+
+    // Havok collision is a graph parallel to the visible scene graph. A
+    // bhkCollisionObject names its target AVObject and rigid body; the body
+    // names the root shape. Extraction is deliberately all-or-nothing per NIF:
+    // a partially understood graph would leave invisible holes, while the cell
+    // builder can safely fall back to this NIF's opaque visible triangles.
+    if (header.userVersion2 >= 83u) {
+        const CollisionBlockContext collisionContext{
+            bytes, header, blockStart, blockEnd, nodeWorldTransforms,
+            nodeWorldTransformValid};
+        std::vector<NifCollisionTriangle> authoredTriangles;
+        bool foundStaticCollision = false;
+        bool collisionGraphSupported = true;
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            const std::string& type =
+                header.blockTypeNames[header.blockTypeIndex[i]];
+            if (type != "bhkCollisionObject" && type != "bhkBlendCollisionObject") {
+                continue;
+            }
+            ByteCursor objectCursor(bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
+            std::int32_t targetRef = -1;
+            std::uint16_t flags = 0;
+            std::int32_t bodyRef = -1;
+            if (!objectCursor.read(targetRef) || !objectCursor.read(flags) ||
+                !objectCursor.read(bodyRef) || bodyRef < 0 ||
+                static_cast<std::size_t>(bodyRef) >= numBlocks) {
+                collisionGraphSupported = false;
+                break;
+            }
+            const std::size_t bodyIndex = static_cast<std::size_t>(bodyRef);
+            const std::string& bodyType =
+                header.blockTypeNames[header.blockTypeIndex[bodyIndex]];
+            if (bodyType != "bhkRigidBody" && bodyType != "bhkRigidBodyT") {
+                collisionGraphSupported = false;
+                break;
+            }
+            ByteCursor bodyCursor(bytes.data() + blockStart[bodyIndex],
+                                  blockEnd[bodyIndex] - blockStart[bodyIndex]);
+            std::int32_t shapeRef = -1;
+            if (!bodyCursor.read(shapeRef) || bodyCursor.size() <= 224u) {
+                collisionGraphSupported = false;
+                break;
+            }
+            bodyCursor.seekAbsolute(224u);
+            std::uint8_t motionType = 0;
+            if (!bodyCursor.read(motionType)) {
+                collisionGraphSupported = false;
+                break;
+            }
+            // Skyrim's NIF Havok enum uses 1-3 for dynamic bodies and 4-7 for
+            // keyframed/fixed variants. Dynamic clutter and ragdolls must not
+            // become frozen architecture.
+            if (motionType < 4u || motionType > 7u) {
+                continue;
+            }
+            foundStaticCollision = true;
+
+            Mat4 targetTransform{};
+            if (targetRef >= 0 && static_cast<std::size_t>(targetRef) < numBlocks &&
+                nodeWorldTransformValid[static_cast<std::size_t>(targetRef)]) {
+                targetTransform = nodeWorldTransforms[static_cast<std::size_t>(targetRef)];
+            }
+            bodyCursor.seekAbsolute(52u);
+            float translation[4];
+            float rotation[4];
+            if (!bodyCursor.readBytes(translation, sizeof(translation)) ||
+                !bodyCursor.readBytes(rotation, sizeof(rotation))) {
+                collisionGraphSupported = false;
+                break;
+            }
+            Mat4 bodyTransform = quaternionTransform(
+                rotation[0], rotation[1], rotation[2], rotation[3], 1.0f);
+            bodyTransform.m[3] = translation[0] * kHavokToBethesda;
+            bodyTransform.m[7] = translation[1] * kHavokToBethesda;
+            bodyTransform.m[11] = translation[2] * kHavokToBethesda;
+            std::unordered_set<std::int32_t> visiting;
+            if (!extractCollisionShape(collisionContext, shapeRef,
+                                       multiply(targetTransform, bodyTransform),
+                                       authoredTriangles, visiting)) {
+                collisionGraphSupported = false;
+                break;
+            }
+        }
+        if (foundStaticCollision && collisionGraphSupported && !authoredTriangles.empty()) {
+            outModel.collisionTriangles = std::move(authoredTriangles);
         }
     }
 
@@ -4028,7 +4901,8 @@ bool parseNifSkeleton(
         ByteCursor blockCursor(
             bytes.data() + blockStart[i], header.blockSize[i]);
         AvObjectFields fields;
-        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
+        if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
+                       header.inlineBlockTypes, fields, typeName)) {
             nodeFields[i] = std::move(fields);
             isNiNode[i] = true;
         }
@@ -4322,10 +5196,14 @@ bool parseNifSkinnedMesh(
     // to the same skin space.
     std::vector<AvObjectFields> nodeFields(numBlocks);
     std::vector<bool> isTriShape(numBlocks, false);
+    std::vector<bool> isBsTriShape(numBlocks, false);
+    std::vector<bool> isBsDynamicTriShape(numBlocks, false);
     std::vector<GeometryBlock> geometry(numBlocks);
     std::vector<TextureSetBlock> textureSets(numBlocks);
     std::vector<bool> noLightingProperty(numBlocks, false);
     std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
+    std::vector<bool> lightingShaderTwoSided(numBlocks, false);
+    std::vector<bool> lightingShaderTreeAnim(numBlocks, false);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
     std::vector<StencilPropertyBlock> stencilProperties(numBlocks);
     std::vector<SkinInstanceBlock> skinInstances(numBlocks);
@@ -4343,7 +5221,8 @@ bool parseNifSkinnedMesh(
 
         if (isNodeTypeName(typeName)) {
             AvObjectFields fields;
-            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames, header.inlineBlockTypes, fields)) {
+            if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
+                           header.inlineBlockTypes, fields, typeName)) {
                 const std::int32_t nameRef = fields.nameRef;
                 if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
                     nodeNames[i] = header.strings[static_cast<std::size_t>(nameRef)];
@@ -4363,6 +5242,21 @@ bool parseNifSkinnedMesh(
                 nodeFields[i] = std::move(fields);
                 isTriShape[i] = true;
             }
+        } else if (typeName == "BSTriShape" || typeName == "BSDynamicTriShape" ||
+                   typeName == "BSSubIndexTriShape" || typeName == "BSMeshLODTriShape") {
+            AvObjectFields fields;
+            GeometryBlock geom;
+            if (readBsTriShape(blockCursor, header.userVersion2, header.inlineNames,
+                               header.inlineBlockTypes, fields, geom,
+                               typeName == "BSDynamicTriShape")) {
+                fields.dataRef = static_cast<std::int32_t>(i);
+                shapeSkinRefs[i] = fields.skinRef;
+                nodeFields[i] = std::move(fields);
+                geometry[i] = std::move(geom);
+                isTriShape[i] = true;
+                isBsTriShape[i] = true;
+                isBsDynamicTriShape[i] = typeName == "BSDynamicTriShape";
+            }
         } else if (typeName == "NiSkinInstance" || typeName == "BSDismemberSkinInstance") {
             SkinInstanceBlock instance;
             if (readSkinInstance(blockCursor, instance)) {
@@ -4377,6 +5271,17 @@ bool parseNifSkinnedMesh(
             std::int32_t textureSetRef = -1;
             if (readBsShaderTextureSetRef(blockCursor, textureSetRef)) {
                 shaderTextureSetRefs[i] = textureSetRef;
+            }
+        } else if (typeName == "BSLightingShaderProperty") {
+            std::int32_t textureSetRef = -1;
+            bool twoSided = false;
+            bool treeAnim = false;
+            bool vertexAlpha = false;
+            if (readBsLightingShaderTextureSetRef(
+                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha)) {
+                shaderTextureSetRefs[i] = textureSetRef;
+                lightingShaderTwoSided[i] = twoSided;
+                lightingShaderTreeAnim[i] = treeAnim;
             }
         } else if (typeName == "BSShaderNoLightingProperty") {
             noLightingProperty[i] = true;
@@ -4405,6 +5310,11 @@ bool parseNifSkinnedMesh(
                 outModel.degenerateTriangleCount += block.degenerateTriangles;
                 geometry[i] = std::move(block);
             }
+        } else if (typeName == "NiSkinPartition") {
+            GeometryBlock block;
+            if (readNiSkinPartitionGeometry(blockCursor, block)) {
+                geometry[i] = std::move(block);
+            }
         }
     }
 
@@ -4428,14 +5338,6 @@ bool parseNifSkinnedMesh(
         if (!isTriShape[blockIndex]) {
             continue;
         }
-        const std::int32_t dataRef = nodeFields[blockIndex].dataRef;
-        if (dataRef < 0 || static_cast<std::size_t>(dataRef) >= numBlocks ||
-            !geometry[static_cast<std::size_t>(dataRef)].valid) {
-            continue;
-        }
-        const GeometryBlock& src = geometry[static_cast<std::size_t>(dataRef)];
-        const std::size_t vertexCount = src.positions.size() / 3u;
-
         // The skin instance, and through it the skin data. A shape missing
         // either is real geometry that simply is not skinned.
         const std::int32_t skinRef = shapeSkinRefs[blockIndex];
@@ -4445,6 +5347,39 @@ bool parseNifSkinnedMesh(
             continue;
         }
         const SkinInstanceBlock& instance = skinInstances[static_cast<std::size_t>(skinRef)];
+
+        // Older shapes keep geometry in their NiTriShapeData. A Skyrim
+        // BSTriShape with a skin stores none of its own; the NiSkinInstance's
+        // partition is the geometry and influence source.
+        std::int32_t geometryRef = nodeFields[blockIndex].dataRef;
+        if (isBsTriShape[blockIndex]) {
+            geometryRef = instance.partitionRef;
+        }
+        if (geometryRef < 0 || static_cast<std::size_t>(geometryRef) >= numBlocks ||
+            !geometry[static_cast<std::size_t>(geometryRef)].valid) {
+            ++outModel.unskinnedShapeCount;
+            continue;
+        }
+        const GeometryBlock& src = geometry[static_cast<std::size_t>(geometryRef)];
+        const std::size_t vertexCount = src.vertexCount != 0u
+            ? src.vertexCount
+            : src.positions.size() / 3u;
+
+        // FaceGen splits a shape across two blocks: topology, normals, UVs and
+        // weights are in NiSkinPartition, while positions are the morphable
+        // float4 array on BSDynamicTriShape itself. Ordinary skinned geometry
+        // continues to take positions straight from its partition.
+        const GeometryBlock& shapeGeometry = geometry[blockIndex];
+        const std::vector<float>* positions = &src.positions;
+        if (isBsTriShape[blockIndex] &&
+            shapeGeometry.positions.size() == vertexCount * 3u) {
+            positions = &shapeGeometry.positions;
+        }
+        if (positions->size() != vertexCount * 3u) {
+            ++outModel.unskinnedShapeCount;
+            continue;
+        }
+
         const std::int32_t dataBlockRef = instance.dataRef;
         if (dataBlockRef < 0 || static_cast<std::size_t>(dataBlockRef) >= numBlocks ||
             !skinData[static_cast<std::size_t>(dataBlockRef)].valid) {
@@ -4468,10 +5403,11 @@ bool parseNifSkinnedMesh(
         if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
             shape.name = header.strings[static_cast<std::size_t>(nameRef)];
         }
-        shape.positions = src.positions;
+        shape.positions = *positions;
         shape.normals = src.normals;
         shape.uvs = src.uvs;
         shape.triangleIndices = src.triangleIndices;
+        shape.usesDynamicPositions = isBsDynamicTriShape[blockIndex];
 
         const auto applySkinnedProperty = [&](std::int32_t propertyRef) {
             if (propertyRef < 0 || static_cast<std::size_t>(propertyRef) >= numBlocks) {
@@ -4479,6 +5415,8 @@ bool parseNifSkinnedMesh(
             }
             const auto propertyIndex = static_cast<std::size_t>(propertyRef);
             shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
+            shape.twoSided = shape.twoSided || lightingShaderTwoSided[propertyIndex];
+            shape.unlit = shape.unlit || lightingShaderTreeAnim[propertyIndex];
             if (alphaProperties[propertyIndex].valid) {
                 // Accumulate with ||, matching the static path. This used to
                 // assign, which made it last-property-wins: a second alpha
@@ -4540,8 +5478,18 @@ bool parseNifSkinnedMesh(
                 sizeof(float) * 16u);
         }
 
-        // Transpose the weight lists: NiSkinData stores them per bone, the GPU
-        // wants them per vertex.
+        // Skyrim stores weights in NiSkinPartition; older games store them in
+        // NiSkinData per bone. Both normalize to the same four-wide arrays.
+        if (src.boneIndices.size() == vertexCount * kNifMaxBoneInfluences &&
+            src.boneWeights.size() == vertexCount * kNifMaxBoneInfluences) {
+            shape.boneIndices = src.boneIndices;
+            shape.boneWeights = src.boneWeights;
+            outModel.shapes.push_back(std::move(shape));
+            continue;
+        }
+
+        // Transpose the older weight lists: NiSkinData stores them per bone,
+        // the GPU wants them per vertex.
         std::vector<std::vector<std::pair<std::uint16_t, float>>> perVertex(vertexCount);
         for (std::size_t b = 0; b < data.bones.size(); ++b) {
             for (const auto& [vertexIndex, weight] : data.bones[b].weights) {

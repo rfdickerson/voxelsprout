@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <span>
 
 // Public audio facade. Mirrors odai::render::Renderer: a narrow, move-only
 // class hiding the real backend behind a PIMPL pointer so no third-party audio
@@ -72,6 +73,12 @@ public:
     void setMuted(bool muted);
     [[nodiscard]] bool muted() const;
     [[nodiscard]] bool deviceActive() const;             // false when running silent
+    [[nodiscard]] bool offlineMixActive() const;
+    [[nodiscard]] std::uint32_t mixSampleRate() const;
+    [[nodiscard]] std::uint32_t mixChannels() const;
+    // Advances a device-free engine by exactly frameCount PCM frames. The span
+    // must hold frameCount * mixChannels() floats.
+    bool renderOfflineFrames(std::span<float> interleaved, std::uint64_t frameCount);
 
 private:
     std::unique_ptr<AudioBackend> m_backend;

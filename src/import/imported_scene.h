@@ -67,6 +67,13 @@ struct ImportedSceneVertex {
 // byte), which is the whole reason this is a fixed budget and not a list.
 inline constexpr int kImportedSceneMaxTerrainLayers = 4;
 inline constexpr std::uint32_t kImportedSceneNoTerrainLayer = 0xffffffffu;
+// Transient cooker marker used by TES3 LAND. Morrowind's synthetic VTEX
+// weights form a normalized bilinear partition, unlike TES4/TES5's authored
+// ordered opacity stack. The packer consumes this value from the otherwise
+// unused fourth layer slot, clears the slot, and emits the material flag below;
+// it is never serialized as a texture index and does not widen either vertex
+// structure.
+inline constexpr std::uint32_t kImportedSceneTerrainNormalizedBlendMarker = 0xfffffffeu;
 
 struct ImportedSceneMeshPart {
     std::uint32_t firstIndex = 0;
@@ -147,11 +154,32 @@ struct ImportedSceneMesh {
 // stays valid however the cooked .bin files are laid out on disk -- the loader
 // applies whatever naming convention the cooker used (see
 // importedSceneInteriorFileName).
+enum class ImportedSceneDoorTargetKind : std::uint8_t {
+    CookedLegacy = 0,
+    Interior = 1,
+    Exterior = 2,
+};
+
 struct ImportedSceneDoor {
     float position[3] = {};
     float arrivalPosition[3] = {};
     float arrivalYawDegrees = 0.0f;
     std::string targetCellEditorId;
+    std::uint32_t sourceReferenceFormId = 0u;
+    std::uint32_t targetCellFormId = 0u;
+    std::uint32_t targetWorldspaceFormId = 0u;
+    std::string targetWorldspaceEditorId;
+    ImportedSceneDoorTargetKind targetKind = ImportedSceneDoorTargetKind::CookedLegacy;
+    bool locked = false;
+    std::uint8_t lockLevel = 0u;
+};
+
+// Static authored collision in engine/world space. It is deliberately a
+// triangle payload: CollisionWorld already buckets triangles, so preserving a
+// second hierarchy of Bethesda/Havok shape types would add machinery without
+// changing runtime behavior.
+struct ImportedSceneCollisionTriangle {
+    float vertices[9] = {};
 };
 
 // Where a cooked interior lives relative to its exterior scene. One convention,
@@ -186,6 +214,10 @@ enum class TextureFormat : std::uint8_t {
     // as DXT1 even though they are vectors, and an sRGB image view bends those
     // vectors before the shader can decode them.
     BC1Linear = 7,
+    // Same byte layout as RGBA8, but colour data sampled through an sRGB
+    // image view. Skyrim's generated-object atlases are uncompressed colour;
+    // treating them as linear makes distant cities roughly twice too bright.
+    RGBA8Srgb = 8,
 };
 
 struct ImportedSceneTexture {
@@ -329,8 +361,10 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 //   bit 2      PBR material present: bits 8..23 carry metallic/roughness
 //   bit 3      modulate the diffuse texture by the vertex colour
 //   bit 4      terrain layer blend: layerTextureIndex/layerWeights are live
-//   bits 5-7   free
-//   bits 8-15  roughness, 8-bit quantized over [0,1]
+//   bits 5-7   alpha blend, two sided, unlit
+//   bit 8      normalized terrain layers when PBR is clear; otherwise the
+//              low bit of roughness
+//   bits 8-15  roughness, 8-bit quantized over [0,1], when PBR is set
 //   bits 16-23 metallic, 8-bit quantized over [0,1]
 //   bits 24-31 free
 //
@@ -375,6 +409,13 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagTwoSided = 1u << 6;
 // the sun happens to make it, which rendered Victor's face -- a lit screen
 // facing away from the sun -- as a black rectangle in a bezel.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagUnlit = 1u << 7;
+
+// TES3 VTEX names one texture per block rather than an ordered opacity stack.
+// Cell building reconstructs a normalized bilinear mixture from neighbouring
+// blocks and opts it out of the noise/sharpen transform intended for VTXT.
+// Terrain vertices never set the PBR bit, so sharing bit 8 with the conditional
+// roughness payload preserves the serialized flags layout.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainNormalizedLayers = 1u << 8;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;
@@ -561,6 +602,7 @@ struct ImportedScene {
     std::vector<ImportedSceneLight> lights;
     std::vector<ImportedSceneParticleEmitter> particleEmitters;
     std::vector<ImportedSceneDoor> doors;
+    std::vector<ImportedSceneCollisionTriangle> collisionTriangles;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
     std::vector<std::uint32_t> packedIndices;

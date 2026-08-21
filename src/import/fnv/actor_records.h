@@ -60,12 +60,20 @@ struct FalloutActorBase {
     std::string fullName;
     std::string recordType;   // "CREA" or "NPC_"
     std::string skeletonPath; // MODL -- the skeleton for a CREA, and for an NPC_ too
+    // TES5 stores each NPC's generated head as a separate mesh named by the
+    // NPC record's LOCAL form ID. It is not referenced by a subrecord, so the
+    // path must be captured before load-order remapping changes the form ID.
+    std::string faceGeometryPath;
     std::vector<std::string> bodyPartPaths;  // NIFZ, relative to the skeleton's directory
     std::uint32_t templateFormId = 0;        // TPLT
     std::uint32_t raceFormId = 0;            // RNAM
     // Worn/carried items (CNTO). An NPC_'s clothing lives here; resolving these
     // to ARMO biped models is what stops the townsfolk rendering naked.
     std::vector<std::uint32_t> inventoryFormIds;
+    // TES5 DOFT. Skyrim moved an NPC's worn set out of CNTO and into an OTFT
+    // record; guards usually carry only weapons in CNTO, so ignoring this
+    // leaves every otherwise-valid actor undressed.
+    std::uint32_t defaultOutfitFormId = 0;
     bool isFemale = false;  // ACBS flag bit 0, picks RACE's FNAM parts over MNAM
     // VTCK. Names a VTYP record whose EditorID IS the voice folder under
     // sound\voice\<plugin>\ -- so this, not the actor's name, is what finds a
@@ -109,6 +117,10 @@ struct FalloutRaceParts {
     // An actor with no VTCK of its own takes whichever its sex selects.
     std::uint32_t maleVoiceTypeFormId = 0;
     std::uint32_t femaleVoiceTypeFormId = 0;
+    // TES5 RACE stores the male/female skeleton directly in ANAM after the
+    // corresponding MNAM/FNAM marker. Earlier generations leave these empty.
+    std::string maleSkeletonPath;
+    std::string femaleSkeletonPath;
     std::string maleHeadModels[kRaceHeadPartCount];
     std::string femaleHeadModels[kRaceHeadPartCount];
     std::string maleBodyModels[kRaceBodyPartCount];
@@ -131,6 +143,22 @@ struct FalloutArmorPiece {
     std::uint32_t bipedFlags = 0;  // BMDT
     std::string maleModel;         // MODL -- the male BIPED model, not the ground model
     std::string femaleModel;       // MOD3
+    // TES5 ARMO names one or more ARMA records in binary MODL subrecords.
+    // The ARMA, not ARMO's MOD2 ground model, owns the skinned third-person
+    // body mesh.
+    std::vector<std::uint32_t> armatureFormIds;
+};
+
+struct SkyrimArmorAddon {
+    std::uint32_t formId = 0;
+    std::string editorId;
+    std::uint32_t bipedFlags = 0;
+    std::string maleModel;    // ARMA MOD2
+    std::string femaleModel;  // ARMA MOD3
+    // RNAM plus the binary MODL tail. Several ARMA records can hang off one
+    // helmet ARMO (human, Argonian, Khajiit); only the addon naming the actor's
+    // race is applicable.
+    std::vector<std::uint32_t> raceFormIds;
 };
 
 struct FalloutActorPlacement {
@@ -174,8 +202,16 @@ struct FalloutActorScan {
     // inventory walk that does not expand them dresses half the town in
     // underwear. Entries can themselves be lists, so expansion recurses.
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> leveledItems;
+    // LVLF bit 2 is "use all". A set such as ArmorStormcloakSet contributes
+    // boots + cuirass + gloves + helmet; its parent OutfitListSoldierSons has
+    // the bit clear and chooses one complete set. Flattening both kinds puts
+    // every mutually-exclusive outfit on the actor at once.
+    std::unordered_map<std::uint32_t, bool> leveledItemUseAll;
     std::unordered_map<std::uint32_t, FalloutRaceParts> races;
     std::unordered_map<std::uint32_t, FalloutArmorPiece> armors;
+    // OTFT formID -> its INAM item list.
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> outfits;
+    std::unordered_map<std::uint32_t, SkyrimArmorAddon> armorAddons;
     // VTYP formID -> its EditorID, which is the voice folder's name verbatim
     // ("MaleAdult11", "RobotVictor"). Collected wholesale for the same reason
     // the bases are: resolving them one at a time would be one walk each.

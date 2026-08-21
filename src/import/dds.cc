@@ -113,12 +113,26 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
     // not block-compressed textures. Decode their complete mip chain to RGBA8;
     // the masks are checked explicitly so this cannot reinterpret unrelated
     // legacy DDS layouts by accident.
-    if ((hdr.ddspf.flags & kDdpfRgb) != 0u &&
-        hdr.ddspf.rgbBitCnt == 32u &&
-        hdr.ddspf.rMask == 0x00ff0000u &&
-        hdr.ddspf.gMask == 0x0000ff00u &&
-        hdr.ddspf.bMask == 0x000000ffu &&
-        hdr.ddspf.aMask == 0xff000000u) {
+    const bool legacyBgra =
+        hdr.ddspf.rMask == 0x00ff0000u && hdr.ddspf.gMask == 0x0000ff00u &&
+        hdr.ddspf.bMask == 0x000000ffu && hdr.ddspf.aMask == 0xff000000u;
+    // Skyrim terrain LOD uses the same byte order without an alpha mask. It is
+    // opaque display-colour data (Tamriel.<tier>.<x>.<y>.DDS), so synthesize
+    // alpha=255 and retain sRGB sampling. Rejecting this exact XRGB layout made
+    // every newly-loaded BTR surface a white fallback despite valid geometry.
+    const bool legacyBgrx =
+        hdr.ddspf.rMask == 0x00ff0000u && hdr.ddspf.gMask == 0x0000ff00u &&
+        hdr.ddspf.bMask == 0x000000ffu && hdr.ddspf.aMask == 0u;
+    // Skyrim's generated-object atlases use the other common 32-bit layout:
+    // RGBA bytes with ABGR masks. Tamriel.Objects.DDS is the load-bearing case
+    // (2048 square, eleven mips); rejecting it turns every BTO building into a
+    // white silhouette, which is why distant Whiterun looked worse as soon as
+    // its previously-unused generated geometry was enabled.
+    const bool legacyRgba =
+        hdr.ddspf.rMask == 0x000000ffu && hdr.ddspf.gMask == 0x0000ff00u &&
+        hdr.ddspf.bMask == 0x00ff0000u && hdr.ddspf.aMask == 0xff000000u;
+    if ((hdr.ddspf.flags & kDdpfRgb) != 0u && hdr.ddspf.rgbBitCnt == 32u &&
+        (legacyBgra || legacyBgrx || legacyRgba)) {
         const std::uint32_t mipCount = std::max(1u, hdr.mipMapCount);
         std::size_t chainBytes = 0u;
         std::uint32_t mw = hdr.width;
@@ -132,14 +146,18 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
         out.width = hdr.width;
         out.height = hdr.height;
         out.mipLevelCount = mipCount;
-        out.format = TextureFormat::RGBA8;
+        out.format = (legacyRgba || legacyBgrx) ? TextureFormat::RGBA8Srgb : TextureFormat::RGBA8;
         out.rgba8.resize(chainBytes);
-        for (std::size_t offset = 0u; offset < chainBytes; offset += 4u) {
-            // Stored byte order is BGRA on little-endian hosts.
-            out.rgba8[offset + 0u] = data[dataOffset + offset + 2u];
-            out.rgba8[offset + 1u] = data[dataOffset + offset + 1u];
-            out.rgba8[offset + 2u] = data[dataOffset + offset + 0u];
-            out.rgba8[offset + 3u] = data[dataOffset + offset + 3u];
+        if (legacyRgba) {
+            std::memcpy(out.rgba8.data(), data + dataOffset, chainBytes);
+        } else {
+            for (std::size_t offset = 0u; offset < chainBytes; offset += 4u) {
+                // Stored byte order is BGRA on little-endian hosts.
+                out.rgba8[offset + 0u] = data[dataOffset + offset + 2u];
+                out.rgba8[offset + 1u] = data[dataOffset + offset + 1u];
+                out.rgba8[offset + 2u] = data[dataOffset + offset + 0u];
+                out.rgba8[offset + 3u] = legacyBgrx ? 255u : data[dataOffset + offset + 3u];
+            }
         }
         return true;
     }
