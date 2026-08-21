@@ -150,7 +150,7 @@ if(SLANGC_EXECUTABLE)
     foreach(name skybox.vert skybox.frag sky_cloud.vert sky_cloud.frag tone_map.vert tone_map.frag
                  ui.vert ui.frag shadow_depth.vert shadow_depth.frag pipe_shadow.vert pipe_shadow.frag
                  imported_static_shadow.vert imported_static_shadow.frag
-                 pipe_instanced.vert pipe_instanced.frag imported_static.vert
+                 pipe_instanced.vert pipe_instanced.frag imported_static.vert imported_static.frag
                  imported_fire_particle.vert imported_fire_particle.frag imported_water.vert
                  imported_water.frag imported_static_normaldepth.frag imported_static_depthonly.frag
                  imported_water_normaldepth.frag pipe_normaldepth.frag skinned_velocity.vert
