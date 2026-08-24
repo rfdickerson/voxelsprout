@@ -119,7 +119,7 @@ void testOpenMwProfile(const fs::path& root) {
     write(tr / "TR_Mainland.esm");
     write(childDir / "openmw.cfg", "data=../../mw/TR\ncontent=Tamriel_Data.esm\n");
     write(cfg,
-          "data=../mw/Data Files\nconfig=child\ncontent=Morrowind.esm\n"
+          "data=../mw/Data Files\nconfig=child\nencoding=win1252\ncontent=Morrowind.esm\n"
           "content=TR_Mainland.esm\ncontent=ignored.omwscripts\n"
           "fallback-archive=Morrowind.bsa\ndata-local=../mw/generated\n");
 
@@ -133,8 +133,17 @@ void testOpenMwProfile(const fs::path& root) {
     check(profile.plugins.size() == 3u, "OpenMW content order combines included configs");
     check(profile.archives.size() == 1u && profile.archives[0].required,
           "OpenMW fallback archives are explicit and required");
-    check(!profile.diagnostics.empty() && profile.diagnostics[0].code == "unsupported-script-runtime",
-          "OpenMW Lua is inventoried rather than executed");
+    check(profile.encoding == "win1252", "OpenMW text encoding is retained");
+    check(profile.openMwScripts.size() == 1u && profile.openMwScripts[0] == "ignored.omwscripts",
+          "OpenMW Lua manifests retain content order");
+
+    const std::string fingerprint = profile.fingerprint;
+    write(cfg,
+          "data=../mw/Data Files\nconfig=child\nencoding=win1250\ncontent=Morrowind.esm\n"
+          "content=TR_Mainland.esm\ncontent=ignored.omwscripts\n"
+          "fallback-archive=Morrowind.bsa\ndata-local=../mw/generated\n");
+    check(resolveContentProfile(cfg, {}, profile, error), error.c_str());
+    check(profile.fingerprint != fingerprint, "encoding participates in the content fingerprint");
 
     write(childDir / "openmw.cfg", "config=..\n");
     check(!resolveContentProfile(cfg, {}, profile, error) && error.find("cycle") != std::string::npos,

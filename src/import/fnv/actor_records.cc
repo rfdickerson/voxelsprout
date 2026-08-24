@@ -504,6 +504,48 @@ const FalloutActorBase* FalloutActorScan::inheritedFrom(
     return current;
 }
 
+std::vector<std::uint32_t> FalloutActorScan::materializeInventory(
+    std::uint32_t baseFormId,
+    std::uint32_t seed) const {
+    const FalloutActorBase* source =
+        inheritedFrom(baseFormId, kActorTemplateUseInventory);
+    if (source == nullptr) return {};
+    std::vector<std::uint32_t> pending = source->inventoryFormIds;
+    std::vector<std::uint32_t> resolved;
+    std::uint32_t expansionCount = 0u;
+    for (std::size_t cursor = 0u;
+         cursor < pending.size() && cursor < 256u && resolved.size() < 256u;
+         ++cursor) {
+        const std::uint32_t token = pending[cursor];
+        const auto list = leveledItems.find(token);
+        if (list == leveledItems.end()) {
+            if (token != 0u) resolved.push_back(token);
+            continue;
+        }
+        ++expansionCount;
+        if (list->second.empty()) continue;
+        const auto useAll = leveledItemUseAll.find(token);
+        if (useAll != leveledItemUseAll.end() && useAll->second) {
+            if (pending.size() < 256u) {
+                const std::size_t remaining = 256u - pending.size();
+                pending.insert(pending.end(), list->second.begin(),
+                    list->second.begin() + static_cast<std::ptrdiff_t>(
+                        std::min(remaining, list->second.size())));
+            }
+        } else {
+            std::uint32_t choice = seed ^ token ^
+                (expansionCount * 0x9e3779b9u);
+            choice ^= choice << 13u;
+            choice ^= choice >> 17u;
+            choice ^= choice << 5u;
+            if (pending.size() < 256u) {
+                pending.push_back(list->second[choice % list->second.size()]);
+            }
+        }
+    }
+    return resolved;
+}
+
 namespace {
 
 // Rewrites every formID one plugin's scan produced into the load order's global
@@ -528,6 +570,9 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
     for (FalloutActorPlacement& placement : scan.placements) {
         placement.refFormId = remap(placement.refFormId);
         placement.baseFormId = remap(placement.baseFormId);
+        for (std::uint32_t& referenceType : placement.referenceTypeFormIds) {
+            referenceType = remap(referenceType);
+        }
     }
     remapKeyed(scan.bases, [&](FalloutActorBase& base) {
         base.formId = remap(base.formId);
@@ -665,6 +710,18 @@ bool findActorsNearAcrossOrder(
     return true;
 }
 
+bool findAllActorsAcrossOrder(
+    const FalloutLoadOrder& order,
+    FalloutActorScan& outScan,
+    std::unordered_map<std::uint32_t, std::string>& outVoiceFolderPlugin,
+    std::string& outError) {
+    // A negative radius is the private sentinel consumed by findActorsNear's
+    // placement pass. Keeping the full-content operation behind a named API
+    // prevents callers from relying on that implementation detail.
+    return findActorsNearAcrossOrder(
+        order, 0.0f, 0.0f, -1.0f, outScan, outVoiceFolderPlugin, outError);
+}
+
 bool findActorsNear(
     const std::filesystem::path& pluginPath,
     float centreX,
@@ -743,13 +800,18 @@ bool findActorsNear(
                         addon.maleModel = subrecordText(sub);
                     } else if (sub.type == "MOD3") {
                         addon.femaleModel = subrecordText(sub);
+                    } else if (sub.type == "MOD4") {
+                        addon.maleFirstPersonModel = subrecordText(sub);
+                    } else if (sub.type == "MOD5") {
+                        addon.femaleFirstPersonModel = subrecordText(sub);
                     } else if (sub.type == "RNAM" && sub.size >= 4u) {
                         addon.raceFormIds.push_back(readU32(sub));
                     } else if (sub.type == "MODL" && sub.size == 4u) {
                         addon.raceFormIds.push_back(readU32(sub));
                     }
                 }
-                if (!addon.maleModel.empty() || !addon.femaleModel.empty()) {
+                if (!addon.maleModel.empty() || !addon.femaleModel.empty() ||
+                    !addon.maleFirstPersonModel.empty() || !addon.femaleFirstPersonModel.empty()) {
                     outScan.armorAddons[record.formId] = std::move(addon);
                 }
                 return;
@@ -850,6 +912,8 @@ bool findActorsNear(
             for (const EsmSubrecordView& sub : record.subrecords) {
                 if (sub.type == "NAME") {
                     placement.baseFormId = readU32(sub);
+                } else if (sub.type == "XLRT" && sub.size >= 4u) {
+                    placement.referenceTypeFormIds.push_back(readU32(sub));
                 } else if (sub.type == "DATA" && sub.size >= 24u) {
                     std::memcpy(placement.position, sub.data, sizeof(placement.position));
                     std::memcpy(
@@ -860,9 +924,15 @@ bool findActorsNear(
             if (!hasPosition || placement.baseFormId == 0u) {
                 return;
             }
+            std::sort(placement.referenceTypeFormIds.begin(),
+                placement.referenceTypeFormIds.end());
+            placement.referenceTypeFormIds.erase(std::unique(
+                placement.referenceTypeFormIds.begin(),
+                placement.referenceTypeFormIds.end()),
+                placement.referenceTypeFormIds.end());
             const float dx = placement.position[0] - centreX;
             const float dy = placement.position[1] - centreY;
-            if (((dx * dx) + (dy * dy)) > (radius * radius)) {
+            if (radius >= 0.0f && ((dx * dx) + (dy * dy)) > (radius * radius)) {
                 return;
             }
             outScan.placements.push_back(placement);
@@ -885,6 +955,13 @@ bool findActorsNear(
             return ((ax * ax) + (ay * ay)) < ((bx * bx) + (by * by));
         });
     return true;
+}
+
+bool findAllActors(
+    const std::filesystem::path& pluginPath,
+    FalloutActorScan& outScan,
+    std::string& outError) {
+    return findActorsNear(pluginPath, 0.0f, 0.0f, -1.0f, outScan, outError);
 }
 
 }  // namespace odai::importer::fnv

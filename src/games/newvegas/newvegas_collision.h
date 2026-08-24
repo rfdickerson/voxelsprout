@@ -103,11 +103,11 @@ public:
         float worldX, float worldZ, const std::function<void(const Triangle&)>& visit) const;
 
 private:
-    // Per cell, an 8x8 grid of 512-unit buckets. A query touches at most a 3x3
+    // Per cell, an 8x8 grid of spatial buckets. A query touches at most a 3x3
     // ring of these, so cost follows what is near the player rather than how
-    // much is resident.
+    // much is resident. TES3 cells are 8192 units wide while the later games
+    // use 4096, so the physical dimensions are derived from the terrain mesh.
     static constexpr int kBucketGrid = 8;
-    static constexpr float kBucketSize = 4096.0f / static_cast<float>(kBucketGrid);
 
     struct CellCollision {
         // 33x33 terrain posts, engine Y, row-major (gridZ * 33 + gridX). Empty
@@ -115,6 +115,9 @@ private:
         std::vector<float> heights;
         float originX = 0.0f;  // engine-space corner of the cell
         float originZ = 0.0f;
+        float cellSize = 4096.0f;
+        float postSpacing = 128.0f;
+        float bucketSize = 512.0f;
         std::vector<Triangle> triangles;
         std::vector<std::vector<std::uint32_t>> buckets;
     };

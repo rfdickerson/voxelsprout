@@ -1,5 +1,6 @@
 #include "import/fnv/dialogue_records.h"
 
+#include "bethesda/condition.h"
 #include "import/fnv/esm_reader.h"
 
 #include <algorithm>
@@ -7,6 +8,8 @@
 #include <cstring>
 #include <map>
 #include <iostream>
+#include <optional>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -79,33 +82,28 @@ struct RawInfo {
 inline constexpr std::uint32_t kCtdaFunctionGetQuestVariable = 79u;
 
 bool passesUnplayedState(const EsmRecordView& record) {
+    std::vector<bethesda::Condition> conditions;
     for (const auto& sub : record.subrecords) {
         if (sub.type != "CTDA" || sub.size < 28u) {
             continue;
         }
-        if (readU32(sub.data + 8) != kCtdaFunctionGetQuestVariable) {
-            continue;
-        }
-        float wanted = 0.0f;
-        std::memcpy(&wanted, sub.data + 4, sizeof(wanted));
-        // Top 3 bits of the type byte: 0 ==, 1 !=, 2 >, 3 >=, 4 <, 5 <=.
-        // The left-hand side is the variable's value, which is 0 unplayed.
-        const auto op = static_cast<std::uint8_t>((sub.data[0] >> 5) & 0x7u);
-        bool holds = true;
-        switch (op) {
-            case 0u: holds = 0.0f == wanted; break;
-            case 1u: holds = 0.0f != wanted; break;
-            case 2u: holds = 0.0f > wanted; break;
-            case 3u: holds = 0.0f >= wanted; break;
-            case 4u: holds = 0.0f < wanted; break;
-            case 5u: holds = 0.0f <= wanted; break;
-            default: holds = true; break;  // an operator we do not know
-        }
-        if (!holds) {
-            return false;
+        bethesda::Condition condition;
+        std::string error;
+        if (bethesda::readCondition(
+                std::span<const std::uint8_t>(sub.data, sub.size), condition, error)) {
+            conditions.push_back(condition);
         }
     }
-    return true;
+    // The imported dialogue preview has only one known piece of simulation
+    // state: all quest variables are zero before play. Unknown functions remain
+    // permissive here, but they now go through the same CTDA parser, comparison,
+    // and OR-chain semantics as the gameplay session.
+    return bethesda::evaluateConditions(
+        conditions,
+        [](const bethesda::Condition& condition) -> std::optional<float> {
+            if (condition.function == kCtdaFunctionGetQuestVariable) return 0.0f;
+            return std::nullopt;
+        }, false).matched;
 }
 
 }  // namespace

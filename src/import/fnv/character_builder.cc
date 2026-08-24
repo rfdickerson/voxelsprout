@@ -383,6 +383,17 @@ bool appendFalloutCharacterMesh(
                 changeMatrixBasis(shape.inverseBindMatrices.data() + (b * 16u)) *
                 changeMatrixBasis(shape.skinTransform);
             authoredBindSkin[b] = skeletonBindWorld[boneSlot] * inverseBind;
+            if (shape.requiresCanonicalBindBake) {
+                const Matrix4 canonicalInverse = inverse(skeletonBindWorld[boneSlot]);
+                if (!inverseBindWritten[boneSlot]) {
+                    character.inverseBindMatrices[boneSlot] = canonicalInverse;
+                    inverseBindWritten[boneSlot] = true;
+                } else if (matricesDiffer(
+                               character.inverseBindMatrices[boneSlot], canonicalInverse)) {
+                    ++character.conflictingInverseBindCount;
+                }
+                continue;
+            }
             if (shape.usesDynamicPositions) {
                 if (!inverseBindWritten[boneSlot]) {
                     character.inverseBindMatrices[boneSlot] = inverse(skeletonBindWorld[boneSlot]);
@@ -417,7 +428,9 @@ bool appendFalloutCharacterMesh(
         // the right shape, in the wrong place. Every creature part in the game
         // has an identity skinTransform, which is why the actors built before
         // the townsfolk never showed it.
-        const Matrix4 geometryToCharacter = inverse(changeMatrixBasis(shape.skinTransform));
+        const Matrix4 geometryToCharacter = shape.requiresCanonicalBindBake
+            ? Matrix4::identity()
+            : inverse(changeMatrixBasis(shape.skinTransform));
         const bool moveGeometry = matricesDiffer(geometryToCharacter, Matrix4::identity());
 
         const auto baseVertex = static_cast<std::uint32_t>(character.vertices.size());
@@ -441,7 +454,7 @@ bool appendFalloutCharacterMesh(
             if (moveGeometry) {
                 position = transformPoint(geometryToCharacter, position);
             }
-            if (shape.usesDynamicPositions) {
+            if (shape.usesDynamicPositions || shape.requiresCanonicalBindBake) {
                 Vector3 baked{0.0f, 0.0f, 0.0f};
                 float totalWeight = 0.0f;
                 for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
@@ -474,7 +487,7 @@ bool appendFalloutCharacterMesh(
                     // A direction, so translation must not apply.
                     normal = normalize(transformDirection(geometryToCharacter, normal));
                 }
-                if (shape.usesDynamicPositions) {
+                if (shape.usesDynamicPositions || shape.requiresCanonicalBindBake) {
                     Vector3 baked{0.0f, 0.0f, 0.0f};
                     for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
                         const std::size_t slot =

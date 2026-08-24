@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <limits>
 
 int main(int argc, char** argv) {
     // MSAA off by default for this game: TAA (taa.comp.slang) does the
@@ -101,6 +102,12 @@ int main(int argc, char** argv) {
             app.setTraversalStatePath(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-resume") == 0) {
             app.setResumeEnabled(false);
+        } else if (std::strcmp(argv[i], "--scenario") == 0 && i + 1 < argc) {
+            app.setScenario(argv[++i]);
+        } else if (std::strcmp(argv[i], "--save-game") == 0 && i + 1 < argc) {
+            app.setGameplaySavePath(argv[++i]);
+        } else if (std::strcmp(argv[i], "--load-game") == 0 && i + 1 < argc) {
+            app.setGameplayLoadPath(argv[++i]);
         } else if (std::strcmp(argv[i], "--worldspace") == 0 && i + 1 < argc) {
             app.setStreamWorldspace(argv[++i]);
         } else if (std::strcmp(argv[i], "--plugin-add") == 0 && i + 1 < argc) {
@@ -161,6 +168,17 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
             // Interior cell whose doorstep to start on, e.g. GSDocMitchellHouse.
             app.setStreamSpawnInterior(argv[++i]);
+        } else if (std::strcmp(argv[i], "--tes3-start-quest") == 0 && i + 2 < argc) {
+            const std::string questId = argv[++i];
+            char* end = nullptr;
+            const long index = std::strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' ||
+                index < std::numeric_limits<std::int32_t>::min() ||
+                index > std::numeric_limits<std::int32_t>::max()) {
+                std::cout << "--tes3-start-quest requires <journal-id> <index>\n";
+                return 1;
+            }
+            app.setTes3StartQuest(questId, static_cast<std::int32_t>(index));
         } else if (std::strcmp(argv[i], "--character") == 0) {
             // Optional: a skeleton path, then any number of body-part paths,
             // all relative to Data\Meshes. No arguments means the default male
@@ -284,7 +302,12 @@ int main(int argc, char** argv) {
                       << "  back to installed official content. Also $ODAI_FNV_LOAD_ORDER.\n"
                       << "  --state <path> overrides the traversal save; --no-resume skips\n"
                       << "  loading it without deleting it. Explicit world/interior/spawn wins.\n"
+                      << "  --scenario skyrim-bleak-falls starts the Skyrim-first gameplay\n"
+                      << "  scenario at Riverwood with MQ101 post-Helgen and authored MQ102:10 startup. F5/F9 save/load\n"
+                      << "  a checksummed ODAI save; --save-game/--load-game override its path.\n"
                       << "  --weather <EditorID> forces one weather by name.\n"
+                      << "  --tes3-start-quest <journal-id> <index> seeds an authored TES3 journal entry;\n"
+                      << "  press J for the journal and E while facing an actor to talk.\n"
                       << "  --profile <path> loads an ODAI JSON, MO2 profile directory,\n"
                       << "  or OpenMW openmw.cfg as one authoritative content graph.\n"
                       << "  --mods-root <dir> resolves nonstandard MO2 instances; --mod and\n"

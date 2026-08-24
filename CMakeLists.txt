@@ -204,6 +204,7 @@ add_library(odai_ui STATIC
     src/ui/widgets/modal.cc src/ui/widgets/toast.cc src/ui/widgets/icon_button.cc
     src/ui/widgets/minimap_panel.cc src/ui/widgets/dialogue_panel.cc
     src/ui/widgets/event_tracker_panel.cc src/ui/widgets/faction_panel.cc
+    src/ui/widgets/tes3_journal_panel.cc
     src/ui/widgets/grid_picker_panel.cc src/ui/widgets/resource_bar_panel.cc
     src/ui/widgets/selection_inspector_panel.cc)
 odai_source_includes(odai_ui)
@@ -225,7 +226,8 @@ if(ODAI_MINIAUDIO_INCLUDE_DIR)
 endif()
 odai_warnings(odai_audio)
 
-add_library(odai_anim STATIC src/anim/animation_sampler.cc src/anim/skeleton_io.cc)
+add_library(odai_anim STATIC src/anim/animation_sampler.cc src/anim/skeleton_io.cc
+    src/anim/hkx_packfile.cc src/anim/skyrim_animation.cc)
 odai_source_includes(odai_anim)
 target_link_libraries(odai_anim PRIVATE nlohmann_json::nlohmann_json)
 odai_warnings(odai_anim)
@@ -247,6 +249,7 @@ endif()
 odai_warnings(odai_upscale)
 
 add_library(odai_bethesda_import STATIC
+    src/bethesda/condition.cc
     src/import/dds.cc src/import/imported_scene.cc src/import/imported_scene_query.cc
     src/import/cell_residency_planner.cc
     src/import/fnv/actor_records.cc src/import/fnv/asset_source.cc
@@ -257,11 +260,28 @@ add_library(odai_bethesda_import STATIC
     src/import/fnv/esm_reader.cc src/import/fnv/fallout_records.cc
     src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/lz4_frame.cc
     src/import/fnv/nif_scene.cc src/import/fnv/plugin_load_order.cc
+    src/import/fnv/skyrim_animation_assets.cc
     src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc)
 odai_source_includes(odai_bethesda_import)
 target_link_libraries(odai_bethesda_import PUBLIC odai_core odai_anim odai_dialogue
     ZLIB::ZLIB Jolt::Jolt nlohmann_json::nlohmann_json)
 odai_warnings(odai_bethesda_import)
+
+add_library(odai_bethesda_runtime STATIC
+    src/bethesda/runtime_ids.cc src/bethesda/record_resolver.cc src/bethesda/tes3_content.cc
+    src/bethesda/tes3_script.cc src/bethesda/tes3_runtime.cc
+    src/bethesda/fixed_step_clock.cc
+    src/bethesda/runtime_world.cc src/bethesda/vmad_reader.cc src/bethesda/skyrim_quest.cc
+    src/bethesda/skyrim_dialogue.cc
+    src/bethesda/skyrim_runtime_records.cc
+    src/bethesda/skyrim_scenario_content.cc
+    src/bethesda/pex_reader.cc src/bethesda/papyrus_vm.cc
+    src/bethesda/scenario.cc src/bethesda/bethesda_session.cc
+    src/bethesda/save_game.cc src/bethesda/bethesda_physics_world.cc)
+odai_source_includes(odai_bethesda_runtime)
+target_link_libraries(odai_bethesda_runtime PUBLIC
+    odai_core odai_bethesda_import nlohmann_json::nlohmann_json)
+odai_warnings(odai_bethesda_runtime)
 
 # The Vulkan renderer is compiled once. Until the imported-only API pruning is
 # complete, its old world helper sources remain here rather than being repeated
@@ -288,8 +308,11 @@ add_library(odai_renderer STATIC
     src/render/backend/vulkan/shadow_culling_utils.cc src/render/backend/vulkan/skinning_resources.cc
     src/render/backend/vulkan/swapchain_targets.cc src/render/backend/vulkan/ui_panels.cc
     src/render/backend/vulkan/ui_renderer.cc src/render/backend/vulkan/vma_usage.cc
-    src/world/world.cc src/world/chunk_grid_worldgen.cc src/world/chunk_mesher.cc
-    src/world/clipmap_index.cc src/world/magica_voxel.cc)
+    # PackedVoxelVertex and the legacy chunk entry points are still referenced
+    # inside the Vulkan backend. The procedural world, clipmap, and MagicaVoxel
+    # implementations are unreachable from Renderer/ImportedScene and are not
+    # part of the Bethesda runtime target.
+    src/world/chunk_mesher.cc)
 odai_source_includes(odai_renderer)
 target_include_directories(odai_renderer PRIVATE ${Stb_INCLUDE_DIR})
 target_compile_definitions(odai_renderer PUBLIC ODAI_HAS_VULKAN=1)
@@ -321,13 +344,13 @@ if(ODAI_BUILD_RUNTIME)
     target_include_directories(odai PRIVATE src ${Stb_INCLUDE_DIR})
     target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
         ODAI_PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    target_link_libraries(odai PRIVATE odai_renderer odai_audio odai_traversal)
+    target_link_libraries(odai PRIVATE odai_renderer odai_audio odai_traversal odai_bethesda_runtime)
     odai_warnings(odai)
 endif()
 
 if(ODAI_BUILD_TOOLS)
     add_executable(odai_bethesda_probe src/tools/newvegas_probe_main.cc)
-    target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import)
+    target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
     odai_source_includes(odai_bethesda_probe)
     odai_warnings(odai_bethesda_probe)
 
@@ -355,6 +378,10 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_fnv_import_tests tests/fnv_import_tests.cc)
     target_link_libraries(odai_fnv_import_tests PRIVATE odai_bethesda_import)
+
+    odai_plain_test(odai_skyrim_animation_tests tests/skyrim_animation_tests.cc)
+    target_link_libraries(odai_skyrim_animation_tests PRIVATE
+        odai_anim odai_bethesda_import odai_bethesda_runtime)
 
     odai_plain_test(odai_content_profile_tests tests/content_profile_tests.cc)
     target_link_libraries(odai_content_profile_tests PRIVATE odai_bethesda_import)
@@ -402,6 +429,38 @@ if(BUILD_TESTING)
     odai_plain_test(odai_engine_stats_tests tests/engine_frame_stats_tests.cc)
 
     odai_plain_test(odai_core_types_tests tests/core_types_tests.cc)
+
+    odai_plain_test(odai_bethesda_runtime_tests tests/bethesda_runtime_tests.cc)
+    target_link_libraries(odai_bethesda_runtime_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_tes3_content_tests tests/tes3_content_tests.cc)
+    target_link_libraries(odai_tes3_content_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_tes3_script_tests tests/tes3_script_tests.cc)
+    target_link_libraries(odai_tes3_script_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_tes3_runtime_tests tests/tes3_runtime_tests.cc)
+    target_link_libraries(odai_tes3_runtime_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_navigation_tests tests/newvegas_navigation_tests.cc)
+    target_sources(odai_navigation_tests PRIVATE
+        src/games/newvegas/newvegas_navigation.cc)
+    target_link_libraries(odai_navigation_tests PRIVATE odai_bethesda_import)
+
+    odai_plain_test(odai_actor_movement_tests tests/newvegas_actor_movement_tests.cc)
+    target_sources(odai_actor_movement_tests PRIVATE
+        src/games/newvegas/newvegas_actors.cc
+        src/games/newvegas/newvegas_navigation.cc
+        src/games/newvegas/newvegas_ogg.cc)
+    target_include_directories(odai_actor_movement_tests PRIVATE ${Stb_INCLUDE_DIR})
+    target_link_libraries(odai_actor_movement_tests PRIVATE
+        odai_bethesda_import odai_bethesda_runtime odai_audio)
+
+    odai_plain_test(odai_papyrus_vm_tests tests/papyrus_vm_tests.cc)
+    target_link_libraries(odai_papyrus_vm_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_save_tests tests/odai_save_tests.cc)
+    target_link_libraries(odai_save_tests PRIVATE odai_bethesda_runtime)
 
     odai_plain_test(odai_ui_tests tests/ui_tests.cc)
     target_compile_definitions(odai_ui_tests PRIVATE ODAI_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")

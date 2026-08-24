@@ -155,6 +155,8 @@ struct SkyrimArmorAddon {
     std::uint32_t bipedFlags = 0;
     std::string maleModel;    // ARMA MOD2
     std::string femaleModel;  // ARMA MOD3
+    std::string maleFirstPersonModel;    // ARMA MOD4
+    std::string femaleFirstPersonModel;  // ARMA MOD5
     // RNAM plus the binary MODL tail. Several ARMA records can hang off one
     // helmet ARMO (human, Argonian, Khajiit); only the addon naming the actor's
     // race is applicable.
@@ -164,6 +166,8 @@ struct SkyrimArmorAddon {
 struct FalloutActorPlacement {
     std::uint32_t refFormId = 0;
     std::uint32_t baseFormId = 0;
+    // TES5 XLRT location-reference types used by quest alias filling.
+    std::vector<std::uint32_t> referenceTypeFormIds;
     float position[3] = {};         // Bethesda space, as stored
     float rotationRadians[3] = {};
     // Record header flag 0x800. These are dormant until quest state enables
@@ -234,6 +238,12 @@ struct FalloutActorScan {
     [[nodiscard]] const FalloutActorBase* inheritedFrom(
         std::uint32_t baseFormId, std::uint16_t templateUseFlag) const;
 
+    // Resolves inherited CNTO inventory and deterministically expands nested
+    // LVLI records. List records themselves are never returned. `seed` should
+    // be the persistent placed-reference ID so stream order cannot alter loot.
+    [[nodiscard]] std::vector<std::uint32_t> materializeInventory(
+        std::uint32_t baseFormId, std::uint32_t seed) const;
+
     // The VTYP an actor speaks with, or 0. Its own VTCK first, then its RACE's
     // male/female pair by sex -- most actors carry no VTCK and would otherwise
     // resolve to nothing. Both are inheritable from a TPLT.
@@ -282,6 +292,23 @@ bool findActorsNearAcrossOrder(
     float centreX,
     float centreY,
     float radius,
+    FalloutActorScan& outScan,
+    std::unordered_map<std::uint32_t, std::string>& outVoiceFolderPlugin,
+    std::string& outError);
+
+// Builds the immutable actor-content catalog for a plugin/load order. Unlike
+// findActorsNear*, these retain every winning ACRE/ACHR placement regardless
+// of its authored coordinates. Runtime streaming must start from this catalog:
+// a package or MoveTo can put an interior-owned actor into a distant exterior
+// cell, and filtering the authored placement before consulting runtime state
+// makes that actor impossible to discover.
+bool findAllActors(
+    const std::filesystem::path& pluginPath,
+    FalloutActorScan& outScan,
+    std::string& outError);
+
+bool findAllActorsAcrossOrder(
+    const FalloutLoadOrder& order,
     FalloutActorScan& outScan,
     std::unordered_map<std::uint32_t, std::string>& outVoiceFolderPlugin,
     std::string& outError);

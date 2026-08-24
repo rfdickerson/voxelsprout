@@ -379,8 +379,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         // vertex/index buffer, so bind is resolved per-draw rather than once
         // for the whole span (see skinning_resources.cc).
         if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE &&
-            !skinnedActorMeshDraws.empty() &&
-            m_debugShowImportedStatics) {
+            !skinnedActorMeshDraws.empty()) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_importedStaticNormalDepthPipeline);
             bindGraphicsDescriptorBuffers(commandBuffer);
             VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;

@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -56,6 +57,17 @@ namespace render {
 class Renderer;
 }
 namespace importer::fnv {
+
+struct ReferenceCellOwnership {
+    std::uint32_t cellFormId = 0u;
+    std::uint32_t worldspaceFormId = 0u;
+    std::uint32_t locationFormId = 0u;
+    std::int32_t gridX = 0;
+    std::int32_t gridZ = 0;
+    bool hasGridCoords = false;
+    bool interior = false;
+    std::string editorId;
+};
 
 struct CellStreamerStats {
     CellResidencyStats residency{};
@@ -147,8 +159,20 @@ public:
     // it into the current exterior population.
     [[nodiscard]] bool referenceBelongsToCurrentWorldspace(
         std::uint32_t referenceFormId) const;
+    // True only while the exterior cell owning this placed reference is in the
+    // planner's resident set. Gameplay population uses this instead of the
+    // renderer chunk table because a legitimately geometry-empty cell can
+    // still own actors, triggers, and quest references.
+    [[nodiscard]] bool referenceBelongsToResidentExteriorCell(
+        std::uint32_t referenceFormId) const;
     [[nodiscard]] bool referenceBelongsToInterior(
         std::uint32_t referenceFormId, const std::string& interiorEditorId) const;
+    [[nodiscard]] std::optional<ReferenceCellOwnership> referenceCellOwnership(
+        std::uint32_t referenceFormId) const;
+    [[nodiscard]] bool isExteriorCellResident(
+        std::uint32_t worldspaceFormId,
+        std::int32_t gridX,
+        std::int32_t gridZ) const;
 
     // Directory for the on-disk cache of built cells. A cell built once is
     // written here and loaded straight back on later visits and later runs,
@@ -289,6 +313,10 @@ public:
         // It is reported because "centre of the bounding box" can land in a
         // wall where "middle of the largest floor" cannot.
         bool spawnFromBounds = false;
+        // Authored navigation for this room. Unlike exterior NAVM, this is not
+        // delivered through residency callbacks, so it travels with the
+        // synchronous interior result.
+        std::vector<FalloutNavMeshRecord> navMeshes;
     };
 
     // Builds one INTERIOR cell into a scene, synchronously -- interiors are one
@@ -303,6 +331,25 @@ public:
         InteriorScene& outInterior,
         std::string& outError);
     [[nodiscard]] bool hasInterior(const std::string& interiorEditorId) const;
+    [[nodiscard]] std::uint32_t locationFormIdAtFallout(
+        float falloutX, float falloutY) const;
+    [[nodiscard]] std::uint32_t cellFormIdAtFallout(
+        float falloutX, float falloutY) const;
+    [[nodiscard]] std::uint32_t locationFormIdForInterior(
+        const std::string& interiorEditorId) const;
+    [[nodiscard]] std::uint32_t cellFormIdForInterior(
+        const std::string& interiorEditorId) const;
+    [[nodiscard]] std::vector<std::uint32_t> residentLocationFormIds() const;
+    [[nodiscard]] bool referencePositionEngineSpace(
+        std::uint32_t resolvedReferenceFormId,
+        float outPosition[3],
+        std::string& outError) const;
+    [[nodiscard]] bool referenceGameplayData(
+        std::uint32_t resolvedReferenceFormId,
+        std::uint32_t& outBaseFormId,
+        std::vector<std::uint8_t>& outVmadBytes,
+        std::size_t& outSourcePluginIndex,
+        std::string& outError) const;
 
     // Spawn on the doorstep of a named interior, in ENGINE space -- e.g.
     // "GSDocMitchellHouse" for where Fallout: New Vegas actually starts you.

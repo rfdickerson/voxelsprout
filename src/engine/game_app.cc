@@ -55,11 +55,11 @@ bool GameApp::init(const char* title) {
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-    // Windowed at a fixed default rather than maximized to the monitor. Maximizing
-    // on a 4K display gave a ~3840x2038 swapchain, and every full-resolution pass
-    // (HDR scene at 4x MSAA, SSAO, sun shafts, ReSTIR surface GI) scales with it —
-    // enough to blow past the driver's hang-check timeout on an integrated GPU and
-    // take a VK_ERROR_DEVICE_LOST. Override with ODAI_WINDOW_SIZE=WxH.
+    // Explicit capture/benchmark sizes stay fixed. Interactive launches maximize
+    // to the desktop work area and retain GLFW's platform-native HiDPI framebuffer
+    // scaling, so a 1920x1080 logical window on a 2x display gets a true 3840x2160
+    // presentation surface. The temporal upscaler keeps the expensive 3D passes
+    // below that resolution; UI is composited afterward at the framebuffer extent.
     int winW = 1600, winH = 900;
     bool explicitWindowSize = false;
     if (const char* sizeEnv = std::getenv("ODAI_WINDOW_SIZE")) {
@@ -83,6 +83,9 @@ bool GameApp::init(const char* title) {
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
     }
 #endif
+    if (!explicitWindowSize) {
+        glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+    }
     // Never open larger than the monitor's logical (content-scaled) size.
     if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
         float xs = 1.0f, ys = 1.0f;
@@ -99,6 +102,17 @@ bool GameApp::init(const char* title) {
         glfwTerminate();
         return false;
     }
+
+    int actualWindowWidth = 0, actualWindowHeight = 0;
+    int actualFramebufferWidth = 0, actualFramebufferHeight = 0;
+    float actualScaleX = 1.0f, actualScaleY = 1.0f;
+    glfwGetWindowSize(m_window, &actualWindowWidth, &actualWindowHeight);
+    glfwGetFramebufferSize(m_window, &actualFramebufferWidth, &actualFramebufferHeight);
+    glfwGetWindowContentScale(m_window, &actualScaleX, &actualScaleY);
+    VOX_LOGI("engine") << "window: logical " << actualWindowWidth << "x"
+                        << actualWindowHeight << ", framebuffer "
+                        << actualFramebufferWidth << "x" << actualFramebufferHeight
+                        << ", content scale " << actualScaleX << "x" << actualScaleY;
 
     glfwSetWindowUserPointer(m_window, this);
     // Hide the OS cursor; the custom-rendered one takes over (see submitFrame).
@@ -394,10 +408,15 @@ bool GameApp::loadFonts(const std::string& regularPath,
                         const std::string& numericPath,
                         float bodySize, float numericSize, float captionSize,
                         float displaySize) {
-    if (!m_uiFont.loadFromFile(regularPath, bodySize)    ||
-        !m_uiFontBold.loadFromFile(boldPath, bodySize)   ||
-        !m_uiFontItalic.loadFromFile(italicPath, bodySize) ||
-        !m_uiFontNumeric.loadFromFile(numericPath, numericSize)) {
+    const float density = std::clamp(contentScale(), 1.0f, 4.0f);
+    std::uint32_t atlasSize = 1024u;
+    while (static_cast<float>(atlasSize) < 1024.0f * density) {
+        atlasSize *= 2u;
+    }
+    if (!m_uiFont.loadFromFile(regularPath, bodySize * density, atlasSize)    ||
+        !m_uiFontBold.loadFromFile(boldPath, bodySize * density, atlasSize)   ||
+        !m_uiFontItalic.loadFromFile(italicPath, bodySize * density, atlasSize) ||
+        !m_uiFontNumeric.loadFromFile(numericPath, numericSize * density, atlasSize)) {
         VOX_LOGE("engine") << "font load failed";
         return false;
     }
@@ -420,12 +439,14 @@ bool GameApp::loadFonts(const std::string& regularPath,
 
     // Optional type-scale steps. A failed bake is not fatal: the game falls back
     // to body size for that step, which loses hierarchy but never the text.
-    if (captionSize > 0.0f && m_uiFontCaption.loadFromFile(regularPath, captionSize)) {
+    if (captionSize > 0.0f &&
+        m_uiFontCaption.loadFromFile(regularPath, captionSize * density, atlasSize)) {
         m_uiFontCaption.setTextureId(m_renderer.registerUiFontAtlas(
             m_uiFontCaption.atlasPixels().data(), m_uiFontCaption.atlasWidth(),
             m_uiFontCaption.atlasHeight()));
     }
-    if (displaySize > 0.0f && m_uiFontDisplay.loadFromFile(boldPath, displaySize)) {
+    if (displaySize > 0.0f &&
+        m_uiFontDisplay.loadFromFile(boldPath, displaySize * density, atlasSize)) {
         m_uiFontDisplay.setTextureId(m_renderer.registerUiFontAtlas(
             m_uiFontDisplay.atlasPixels().data(), m_uiFontDisplay.atlasWidth(),
             m_uiFontDisplay.atlasHeight()));

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace odai::games::newvegas {
 
@@ -32,6 +33,85 @@ std::string toLowerAscii(std::string value) {
 std::string directoryOf(const std::string& path) {
     const std::size_t slash = path.find_last_of("\\/");
     return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+
+bool textKeyContainsLabel(std::string_view text, std::string_view wanted) {
+    std::size_t lineStart = 0u;
+    while (lineStart <= text.size()) {
+        const std::size_t lineEnd = text.find_first_of("\r\n", lineStart);
+        std::string line(text.substr(
+            lineStart, lineEnd == std::string_view::npos
+                ? text.size() - lineStart
+                : lineEnd - lineStart));
+        const auto first = std::find_if_not(line.begin(), line.end(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        });
+        const auto last = std::find_if_not(line.rbegin(), line.rend(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        }).base();
+        line = first < last ? std::string(first, last) : std::string();
+        if (toLowerAscii(std::move(line)) == wanted) {
+            return true;
+        }
+        if (lineEnd == std::string_view::npos) {
+            break;
+        }
+        lineStart = lineEnd + 1u;
+        while (lineStart < text.size() &&
+               (text[lineStart] == '\r' || text[lineStart] == '\n')) {
+            ++lineStart;
+        }
+    }
+    return false;
+}
+
+template <typename Key, typename Interpolate>
+std::vector<Key> sliceKeyRange(
+    const std::vector<Key>& keys, float startTime, float stopTime,
+    Interpolate interpolate) {
+    if (keys.empty() || !(stopTime > startTime)) {
+        return {};
+    }
+    const auto sample = [&](float time) {
+        if (time <= keys.front().time) return keys.front().value;
+        if (time >= keys.back().time) return keys.back().value;
+        const auto upper = std::upper_bound(
+            keys.begin(), keys.end(), time,
+            [](float value, const Key& key) { return value < key.time; });
+        const Key& right = *upper;
+        const Key& left = *(upper - 1);
+        const float span = right.time - left.time;
+        const float fraction = span > 0.0f ? (time - left.time) / span : 0.0f;
+        return interpolate(left.value, right.value, fraction);
+    };
+
+    const float duration = stopTime - startTime;
+    std::vector<Key> sliced;
+    sliced.reserve(keys.size() + 2u);
+    sliced.push_back(Key{0.0f, sample(startTime)});
+    for (const Key& key : keys) {
+        if (key.time > startTime && key.time < stopTime) {
+            Key copied = key;
+            copied.time -= startTime;
+            sliced.push_back(std::move(copied));
+        }
+    }
+    sliced.push_back(Key{duration, sample(stopTime)});
+    return sliced;
+}
+
+void sliceTes3Track(
+    importer::fnv::KfBoneTrack& track, float startTime, float stopTime) {
+    const auto lerpVector = [](const odai::math::Vector3& a,
+                               const odai::math::Vector3& b, float t) {
+        return a + ((b - a) * t);
+    };
+    track.translationKeys = sliceKeyRange(
+        track.translationKeys, startTime, stopTime, lerpVector);
+    track.rotationKeys = sliceKeyRange(
+        track.rotationKeys, startTime, stopTime, odai::math::slerp);
+    track.scaleKeys = sliceKeyRange(
+        track.scaleKeys, startTime, stopTime, lerpVector);
 }
 
 odai::math::Quaternion multiplyQuaternion(
@@ -318,7 +398,8 @@ bool buildSkinnedActor(
     importer::fnv::FalloutCharacter& outCharacter,
     std::vector<odai::importer::ImportedSceneTexture>& outTextures,
     std::vector<odai::importer::ImportedScenePackedDraw>& outDraws,
-    std::string& outWhy
+    std::string& outWhy,
+    const std::vector<std::string>* rigidAttachmentBones
 ) {
     outCharacter = importer::fnv::FalloutCharacter{};
     outTextures.clear();
@@ -349,7 +430,15 @@ bool buildSkinnedActor(
         }
     }
 
-    for (const std::string& partPath : bodyPartPaths) {
+    std::unordered_set<std::string> appendedSkinnedPaths;
+    for (std::size_t bodyPartIndex = 0u;
+         bodyPartIndex < bodyPartPaths.size(); ++bodyPartIndex) {
+        const std::string& partPath = bodyPartPaths[bodyPartIndex];
+        const std::string authoredAttachment =
+            rigidAttachmentBones != nullptr &&
+                bodyPartIndex < rigidAttachmentBones->size()
+                ? (*rigidAttachmentBones)[bodyPartIndex]
+                : std::string();
         const std::string lowered = toLowerAscii(partPath);
         // Effect billboards: the opaque path draws them as grey sheets.
         if (lowered.find("smoketrail") != std::string::npos) {
@@ -359,21 +448,38 @@ bool buildSkinnedActor(
             continue;
         }
         importer::fnv::NifSkinnedModel model;
-        if (!assets.resolveMesh(partPath, bytes, error) ||
-            !importer::fnv::parseNifSkinnedMesh(bytes, model, error)) {
+        if (!assets.resolveMesh(partPath, bytes, error)) {
             continue;
         }
-        // Every human body NIF ships its own DISMEMBERMENT CAPS -- "bodycaps",
-        // "limbcaps", "meatneck01", "meathead01", the raw meat the game reveals
-        // when a limb comes off. They are ordinary skinned shapes in the same
-        // file as the skin, so drawing the file literally hangs slabs of gore
-        // off an otherwise fine settler. The one thing they all share is the
-        // gore texture folder.
-        std::erase_if(model.shapes, [](const importer::fnv::NifSkinnedShape& shape) {
-            return toLowerAscii(shape.diffuseTexturePath).find("\\gore\\") != std::string::npos;
-        });
+        const std::size_t firstAddedPart = outCharacter.parts.size();
         std::string bindError;
-        if (importer::fnv::appendFalloutCharacterMesh(model, outCharacter, bindError)) {
+        const bool parsedSkinned =
+            importer::fnv::parseNifSkinnedMesh(bytes, model, bindError);
+        if (parsedSkinned) {
+            // Every human body NIF ships its own DISMEMBERMENT CAPS --
+            // "bodycaps", "limbcaps", "meatneck01", "meathead01", the raw
+            // meat the game reveals when a limb comes off. They are ordinary
+            // skinned shapes in the same file as the skin, so drawing the file
+            // literally hangs slabs of gore off an otherwise fine settler.
+            std::erase_if(model.shapes, [](const importer::fnv::NifSkinnedShape& shape) {
+                return toLowerAscii(shape.diffuseTexturePath).find("\\gore\\") !=
+                    std::string::npos;
+            });
+            // TES3 equipment can name the same aggregate weighted mesh for
+            // several covered BODY slots (a cuirass skin commonly includes
+            // chest and both hands). Its slot attachment is irrelevant once
+            // the NIF's real weights bind, so appending it once per slot stacks
+            // duplicate surfaces and wastes the actor palette/upload budget.
+            if (!model.shapes.empty() && appendedSkinnedPaths.contains(lowered)) {
+                continue;
+            }
+        }
+        if (parsedSkinned &&
+            importer::fnv::appendFalloutCharacterMesh(model, outCharacter, bindError)) {
+            appendedSkinnedPaths.insert(lowered);
+            for (std::size_t part = firstAddedPart; part < outCharacter.parts.size(); ++part) {
+                outCharacter.parts[part].sourcePath = partPath;
+            }
             continue;
         }
         // No skinned shapes: a rigid prop parented to a bone. Re-read it as a
@@ -381,19 +487,35 @@ bool buildSkinnedActor(
         importer::fnv::NifSkeleton partNodes;
         importer::fnv::NifModel staticModel;
         std::string rigidError;
-        if (!importer::fnv::parseNifSkeleton(bytes, partNodes, rigidError) ||
-            partNodes.bones.empty() ||
-            !importer::fnv::parseNifStaticMesh(bytes, staticModel, rigidError)) {
+        if (!importer::fnv::parseNifStaticMesh(bytes, staticModel, rigidError)) {
             continue;
         }
-        std::erase_if(staticModel.shapes, [](const importer::fnv::NifShape& shape) {
-            return shape.alphaBlend;
-        });
+        if (authoredAttachment.empty() &&
+            (!importer::fnv::parseNifSkeleton(bytes, partNodes, rigidError) ||
+             partNodes.bones.empty())) {
+            continue;
+        }
+        // Fallout glare/effect cards are not body parts. TES3 hair and several
+        // armour fringes are also alpha blended, but their BODY slot supplies
+        // an explicit bone attachment and makes them unambiguously wearable.
+        if (authoredAttachment.empty()) {
+            std::erase_if(staticModel.shapes, [](const importer::fnv::NifShape& shape) {
+                return shape.alphaBlend;
+            });
+        }
         if (staticModel.shapes.empty()) {
             continue;
         }
-        importer::fnv::appendFalloutCharacterRigidMesh(
-            staticModel, partNodes.bones.front().name, outCharacter, rigidError);
+        if (importer::fnv::appendFalloutCharacterRigidMesh(
+                staticModel,
+                authoredAttachment.empty()
+                    ? partNodes.bones.front().name
+                    : authoredAttachment,
+                outCharacter, rigidError)) {
+            for (std::size_t part = firstAddedPart; part < outCharacter.parts.size(); ++part) {
+                outCharacter.parts[part].sourcePath = partPath;
+            }
+        }
     }
     if (outCharacter.vertices.empty()) {
         outWhy = "no geometry bound to the skeleton";
@@ -573,6 +695,67 @@ bool loadActorIdleClip(
     anim::AnimationClip& outClip,
     std::string& outWhy
 ) {
+    // TES3 keeps the humanoid animation bank inside base_anim.nif rather than
+    // in external KF files. Every bone's NiKeyframeController spans the whole
+    // bank, while NiTextKeyExtraData is the authoritative clip directory.
+    // Merge the tracks, select the exact authored Idle interval, and rebase its
+    // keys to zero. Sampling an assumed interval leaves the actor in the first
+    // bank pose and is especially visible as horizontal upper arms.
+    std::string normalizedSkeleton = toLowerAscii(skeletonPath);
+    std::replace(normalizedSkeleton.begin(), normalizedSkeleton.end(), '/', '\\');
+    if (normalizedSkeleton == "base_anim.nif" ||
+        normalizedSkeleton.ends_with("\\base_anim.nif")) {
+        std::vector<std::uint8_t> skeletonBytes;
+        if (assets.resolveMesh(skeletonPath, skeletonBytes, outWhy)) {
+            importer::fnv::NifModel skeletonModel;
+            if (importer::fnv::parseNifStaticMesh(
+                    skeletonBytes, skeletonModel, outWhy) &&
+                !skeletonModel.embeddedAnimations.empty()) {
+                float idleStart = -1.0f;
+                float idleStop = -1.0f;
+                for (const importer::fnv::NifTextKey& key : skeletonModel.textKeys) {
+                    if (idleStart < 0.0f &&
+                        textKeyContainsLabel(key.text, "idle: start")) {
+                        idleStart = key.time;
+                        continue;
+                    }
+                    if (idleStart >= 0.0f && key.time > idleStart &&
+                        textKeyContainsLabel(key.text, "idle: stop")) {
+                        idleStop = key.time;
+                        break;
+                    }
+                }
+                if (!(idleStart >= 0.0f && idleStop > idleStart)) {
+                    outWhy = "base_anim.nif has no complete Idle text-key interval";
+                    return false;
+                }
+                importer::fnv::KfAnimation idle;
+                idle.name = "Morrowind Idle";
+                idle.startTime = 0.0f;
+                idle.stopTime = idleStop - idleStart;
+                idle.cycleType = 0u;
+                for (const importer::fnv::KfAnimation& controller :
+                     skeletonModel.embeddedAnimations) {
+                    for (const importer::fnv::KfBoneTrack& sourceTrack :
+                         controller.tracks) {
+                        importer::fnv::KfBoneTrack track = sourceTrack;
+                        sliceTes3Track(track, idleStart, idleStop);
+                        idle.tracks.push_back(std::move(track));
+                    }
+                }
+                importer::fnv::FalloutAnimationStats stats;
+                if (importer::fnv::buildFalloutAnimationClip(
+                        idle, skeleton, outClip, stats) &&
+                    outClip.tracks.size() >= 8u) {
+                    outClip.loop = true;
+                    outWhy = std::to_string(outClip.tracks.size()) +
+                        " authored TES3 idle tracks";
+                    return true;
+                }
+            }
+        }
+    }
+
     // The conversation idles, which are what a Fallout human does when standing
     // still and not walking anywhere. The "listen" variants hold a pose; the
     // "talk" ones gesture, which reads as odd on someone standing alone.
@@ -780,35 +963,63 @@ bool loadGoodspringsActors(
     const std::vector<std::uint32_t>& excludeBaseFormIds,
     const std::function<bool(std::uint32_t referenceFormId)>& placementFilter,
     std::vector<SkinnedActor>& outActors,
-    ActorPopulationStats& outStats
+    ActorPopulationStats& outStats,
+    const importer::fnv::FalloutActorScan* actorCatalog,
+    const std::unordered_map<std::uint32_t, std::string>* catalogVoiceFolderPlugin,
+    const ActorPlacementRuntimeResolver& placementRuntimeResolver
 ) {
     outActors.clear();
     outStats = ActorPopulationStats{};
 
-    importer::fnv::FalloutActorScan scan;
+    importer::fnv::FalloutActorScan scannedContent;
     std::string error;
     // A companion mod defines its NPC, its placement, its race and its armour in
     // ITS OWN plugin, so scanning only the worldspace's finds nothing of it.
     // voiceFolderPlugin remembers which file each base came from, because a
     // voice path's first component is the DEFINING plugin's own name
     // (sound\voice\NVWillow.esp\...), not the load order's first entry.
-    std::unordered_map<std::uint32_t, std::string> voiceFolderPlugin;
-    const bool scanned =
-        (loadOrder != nullptr && !loadOrder->empty())
-            ? importer::fnv::findActorsNearAcrossOrder(
-                  *loadOrder, bethesdaCentre[0], bethesdaCentre[1], radius, scan,
-                  voiceFolderPlugin, error)
-            : importer::fnv::findActorsNear(
-                  pluginPath, bethesdaCentre[0], bethesdaCentre[1], radius, scan, error);
-    if (!scanned) {
-        outStats.detail = "scan failed: " + error;
-        return false;
+    std::unordered_map<std::uint32_t, std::string> scannedVoiceFolderPlugin;
+    if (actorCatalog == nullptr) {
+        const bool scanned =
+            (loadOrder != nullptr && !loadOrder->empty())
+                ? importer::fnv::findActorsNearAcrossOrder(
+                      *loadOrder, bethesdaCentre[0], bethesdaCentre[1], radius,
+                      scannedContent, scannedVoiceFolderPlugin, error)
+                : importer::fnv::findActorsNear(
+                      pluginPath, bethesdaCentre[0], bethesdaCentre[1], radius,
+                      scannedContent, error);
+        if (!scanned) {
+            outStats.detail = "scan failed: " + error;
+            return false;
+        }
+        actorCatalog = &scannedContent;
+        catalogVoiceFolderPlugin = &scannedVoiceFolderPlugin;
     }
+    const importer::fnv::FalloutActorScan& scan = *actorCatalog;
+    static const std::unordered_map<std::uint32_t, std::string> kNoVoicePlugins;
+    const auto& voiceFolderPlugin = catalogVoiceFolderPlugin != nullptr
+        ? *catalogVoiceFolderPlugin : kNoVoicePlugins;
+    std::vector<importer::fnv::FalloutActorPlacement> placements = scan.placements;
     if (placementFilter) {
-        std::erase_if(scan.placements, [&](const importer::fnv::FalloutActorPlacement& placement) {
+        std::erase_if(placements, [&](const importer::fnv::FalloutActorPlacement& placement) {
             return placement.refFormId != 0u && !placementFilter(placement.refFormId);
         });
     }
+    if (placementRuntimeResolver) {
+        std::erase_if(placements, [&](importer::fnv::FalloutActorPlacement& placement) {
+            return !placementRuntimeResolver(placement);
+        });
+    }
+    std::sort(placements.begin(), placements.end(), [&](const auto& left, const auto& right) {
+        const float leftX = left.position[0] - bethesdaCentre[0];
+        const float leftY = left.position[1] - bethesdaCentre[1];
+        const float rightX = right.position[0] - bethesdaCentre[0];
+        const float rightY = right.position[1] - bethesdaCentre[1];
+        const float leftDistance = (leftX * leftX) + (leftY * leftY);
+        const float rightDistance = (rightX * rightX) + (rightY * rightY);
+        if (leftDistance != rightDistance) return leftDistance < rightDistance;
+        return left.refFormId < right.refFormId;
+    });
 
     // ODAI_FNV_SPAWN_ACTOR=<EditorID>[,<EditorID>...] places a named actor in
     // front of the player whether or not the world places it anywhere.
@@ -868,7 +1079,7 @@ bool loadGoodspringsActors(
             // Front of the list: placements are nearest-first and the slot
             // budget cuts from the back, so a deliberately requested actor must
             // not lose its slot to whatever happens to be standing nearby.
-            scan.placements.insert(scan.placements.begin(), placement);
+            placements.insert(placements.begin(), placement);
             VOX_LOGI("newvegas") << "spawn actor: " << match->editorId
                                  << (match->fullName.empty() ? "" : (" \"" + match->fullName + "\""))
                                  << " base 0x" << std::hex << match->formId << std::dec
@@ -876,7 +1087,7 @@ bool loadGoodspringsActors(
             ++placed;
         }
     }
-    outStats.placementsConsidered = scan.placements.size();
+    outStats.placementsConsidered = placements.size();
 
     // One build per distinct base: Goodsprings places six bighorners, and
     // parsing the same NIF six times is six times the cost for one result. Each
@@ -900,7 +1111,7 @@ bool loadGoodspringsActors(
     std::unordered_map<std::uint32_t, BuiltBase> builtByBase;
     std::uint32_t nextSlot = firstInstanceSlot;
 
-    for (const importer::fnv::FalloutActorPlacement& placement : scan.placements) {
+    for (const importer::fnv::FalloutActorPlacement& placement : placements) {
         if (placement.initiallyDisabled) {
             ++outStats.skippedDisabled;
             continue;
@@ -1005,9 +1216,14 @@ bool loadGoodspringsActors(
             actor.voice.voicePlugin = voicePluginIt->second;
         }
         actor.baseFormId = placement.baseFormId;
+        actor.referenceFormId = placement.refFormId;
+        actor.referenceTypeFormIds = placement.referenceTypeFormIds;
+        actor.inventoryFormIds =
+            scan.materializeInventory(placement.baseFormId, placement.refFormId);
         actor.placed = true;
         actor.character = built.character;
         actor.standingHeightUnits = actorStandingHeight(built.character);
+        actor.humanoid = resolved.base != nullptr && resolved.base->recordType == "NPC_";
         findActorHeadAnchor(built.character, actor.headAnchorBone, actor.headAnchorLocal,
                             actor.headHeightUnits);
         actor.textures = built.textures;
@@ -1398,6 +1614,7 @@ void updateActorWandering(
 
     for (std::size_t i = 0; i < actors.size(); ++i) {
         SkinnedActor& actor = actors[i];
+        actor.runtimeRequestedVelocity = {};
         if (!actor.placed) {
             continue;
         }
@@ -1410,6 +1627,10 @@ void updateActorWandering(
             actor.walking = false;
             continue;
         }
+        if (actor.runtimeDead) {
+            actor.walking = false;
+            continue;
+        }
 
         const bool authoredNavigationAvailable =
             navigation != nullptr && navigation->meshCount() != 0u;
@@ -1419,6 +1640,8 @@ void updateActorWandering(
         // The wider first projection moves an authored rock-top placement to
         // the nearby street. Subsequent projections are a small height settle
         // that cannot jump the actor sideways to a different route.
+        const odai::math::Vector3 positionBeforeSettle{
+            actor.position[0], actor.position[1], actor.position[2]};
         bool settledByNavigation = false;
         if (authoredNavigationAvailable && !actor.projectedToNavigation) {
             odai::math::Vector3 point;
@@ -1459,11 +1682,17 @@ void updateActorWandering(
         // authored height forever, and anything repositioned from outside (the
         // diagnostic parade, the spawn-side placement) arrives with a height
         // that came from wherever the PLAYER was standing.
-        if (!settledByNavigation) {
+        if (!settledByNavigation && !actor.runtimeControllerOwned) {
             float ground = 0.0f;
             if (groundHeightAt(actor.position[0], actor.position[2], actor.position[1], ground)) {
                 actor.position[1] = ground;
             }
+        }
+        if (actor.runtimeControllerOwned &&
+            (actor.position[0] != positionBeforeSettle.x ||
+             actor.position[1] != positionBeforeSettle.y ||
+             actor.position[2] != positionBeforeSettle.z)) {
+            actor.runtimeControllerNeedsRelocation = true;
         }
 
         // Everything past here is the walk itself, and only it is what these
@@ -1496,17 +1725,70 @@ void updateActorWandering(
             continue;
         }
 
+        if (actor.runtimeControllerOwned && actor.runtimeControllerBlocked) {
+            actor.wanderPath.clear();
+            actor.wanderPathIndex = 0u;
+            actor.wanderTarget[0] = actor.position[0];
+            actor.wanderTarget[1] = actor.position[1];
+            actor.wanderTarget[2] = actor.position[2];
+            actor.wanderPauseSeconds = 0.0f;
+            if (actor.scriptedMoveActive) {
+                // Force the package bridge to request a fresh path on the next
+                // frame instead of declaring arrival at the obstruction.
+                actor.scriptedMoveActive = false;
+                actor.scriptedMoveRevision = 0u;
+            }
+            actor.walking = false;
+            continue;
+        }
+
         const float toTargetX = actor.wanderTarget[0] - actor.position[0];
         const float toTargetZ = actor.wanderTarget[2] - actor.position[2];
         const float distance = std::sqrt((toTargetX * toTargetX) + (toTargetZ * toTargetZ));
         if (distance < kArriveDistance) {
+            if (authoredNavigationAvailable && actor.wanderPathIndex > 0u &&
+                actor.wanderPathIndex <= actor.wanderPath.size()) {
+                ActorNavigationStep& reached =
+                    actor.wanderPath[actor.wanderPathIndex - 1u];
+                if (reached.kind == ActorNavigationStepKind::ActivateDoor) {
+                    // This is an authored off-mesh link, not movement through
+                    // the gap. Relocate the character controller to XTEL's
+                    // projected arrival and consume the action exactly once.
+                    actor.position[0] = reached.arrivalPosition.x;
+                    actor.position[1] = reached.arrivalPosition.y;
+                    actor.position[2] = reached.arrivalPosition.z;
+                    actor.runtimeControllerNeedsRelocation =
+                        actor.runtimeControllerOwned;
+                    reached.kind = ActorNavigationStepKind::Walk;
+                    if (actor.wanderPathIndex < actor.wanderPath.size()) {
+                        const ActorNavigationStep& waypoint =
+                            actor.wanderPath[actor.wanderPathIndex++];
+                        actor.wanderTarget[0] = waypoint.position.x;
+                        actor.wanderTarget[1] = waypoint.position.y;
+                        actor.wanderTarget[2] = waypoint.position.z;
+                    } else {
+                        actor.wanderTarget[0] = actor.position[0];
+                        actor.wanderTarget[1] = actor.position[1];
+                        actor.wanderTarget[2] = actor.position[2];
+                    }
+                    actor.walking = false;
+                    continue;
+                }
+            }
             if (authoredNavigationAvailable &&
                 actor.wanderPathIndex < actor.wanderPath.size()) {
-                const odai::math::Vector3& waypoint =
+                const ActorNavigationStep& waypoint =
                     actor.wanderPath[actor.wanderPathIndex++];
-                actor.wanderTarget[0] = waypoint.x;
-                actor.wanderTarget[1] = waypoint.y;
-                actor.wanderTarget[2] = waypoint.z;
+                actor.wanderTarget[0] = waypoint.position.x;
+                actor.wanderTarget[1] = waypoint.position.y;
+                actor.wanderTarget[2] = waypoint.position.z;
+                actor.walking = false;
+                continue;
+            }
+
+            if (actor.scriptedMoveActive) {
+                actor.scriptedMoveActive = false;
+                actor.scriptedMoveArrived = true;
                 actor.walking = false;
                 continue;
             }
@@ -1526,10 +1808,10 @@ void updateActorWandering(
                 if (navigation->buildWanderPath(
                         start, origin, kWanderRadius, rng.next24(), actor.wanderPath) &&
                     !actor.wanderPath.empty()) {
-                    const odai::math::Vector3& waypoint = actor.wanderPath.front();
-                    actor.wanderTarget[0] = waypoint.x;
-                    actor.wanderTarget[1] = waypoint.y;
-                    actor.wanderTarget[2] = waypoint.z;
+                    const ActorNavigationStep& waypoint = actor.wanderPath.front();
+                    actor.wanderTarget[0] = waypoint.position.x;
+                    actor.wanderTarget[1] = waypoint.position.y;
+                    actor.wanderTarget[2] = waypoint.position.z;
                     actor.wanderPathIndex = 1u;
                 }
             } else {
@@ -1566,12 +1848,19 @@ void updateActorWandering(
         const float fromX = actor.position[0];
         const float fromZ = actor.position[2];
         const float stride = step * alignment;
-        actor.position[0] = fromX + (facing.x * stride);
-        actor.position[2] = fromZ + (facing.z * stride);
-        if (authoredNavigationAvailable && distance > 1e-3f) {
-            const float routeFraction = std::min(stride / distance, 1.0f);
-            actor.position[1] +=
-                (actor.wanderTarget[1] - actor.position[1]) * routeFraction;
+        if (actor.runtimeControllerOwned) {
+            actor.runtimeRequestedVelocity = {
+                facing.x * actor.walkSpeedUnitsPerSecond * alignment,
+                0.0f,
+                facing.z * actor.walkSpeedUnitsPerSecond * alignment};
+        } else {
+            actor.position[0] = fromX + (facing.x * stride);
+            actor.position[2] = fromZ + (facing.z * stride);
+            if (authoredNavigationAvailable && distance > 1e-3f) {
+                const float routeFraction = std::min(stride / distance, 1.0f);
+                actor.position[1] +=
+                    (actor.wanderTarget[1] - actor.position[1]) * routeFraction;
+            }
         }
 
         // Push back out of anything solid. The capsule is the actor's own: the
@@ -1579,7 +1868,7 @@ void updateActorWandering(
         // keeps a bighorner wide and a radroach narrow rather than giving every
         // creature a person's girth. Clamped because a rig that failed to
         // measure would otherwise be either intangible or a moving wall.
-        if (slideOutOfWalls) {
+        if (!actor.runtimeControllerOwned && slideOutOfWalls) {
             const float height =
                 actor.standingHeightUnits > 1.0f ? actor.standingHeightUnits : 120.0f;
             const float radius = std::clamp(height * 0.28f, 12.0f, 48.0f);
@@ -1596,7 +1885,7 @@ void updateActorWandering(
         const float movedX = actor.position[0] - fromX;
         const float movedZ = actor.position[2] - fromZ;
         const float moved = std::sqrt((movedX * movedX) + (movedZ * movedZ));
-        if (stride > 1e-3f && moved < (stride * 0.35f)) {
+        if (!actor.runtimeControllerOwned && stride > 1e-3f && moved < (stride * 0.35f)) {
             actor.wanderPauseSeconds = 0.0f;
             actor.wanderTarget[0] = actor.position[0];
             actor.wanderTarget[2] = actor.position[2];  // counts as arrived: repick next tick
@@ -1635,24 +1924,46 @@ float conversationFaceHeight(const SkinnedActor& actor) {
             (matrix(1, 1) * actor.headAnchorLocal[1]) +
             (matrix(1, 2) * actor.headAnchorLocal[2]) + matrix(1, 3);
         const float aboveFeet = worldY - actor.position[1];
-        // Guard against a pose that has not been written yet, or a rig whose
+        // A positive result alone is not enough. TES3 animation controllers
+        // can expose a skin matrix whose pivot is valid for the vertices but
+        // not an anatomical bone-space point. Such a matrix put a nominal
+        // "head" anchor around the pelvis: dialogue then narrowed the lens
+        // around the actor's crotch while the real face left the top edge.
+        //
+        // The bind-pose head height was measured through the same skinned
+        // geometry at import time, so it is the stable anatomical reference.
+        // An idle may bob or turn the head, but it must not move it by a large
+        // fraction of the actor's entire standing height. Keep creature rigs
+        // working too by validating displacement from their own authored head
+        // rather than imposing a human-only height fraction.
+        const float allowedPoseDisplacement = std::max(
+            12.0f, (actor.standingHeightUnits > 1.0f
+                       ? actor.standingHeightUnits
+                       : actor.headHeightUnits) * 0.20f);
+        const bool agreesWithBindPose = actor.headHeightUnits <= 1.0f ||
+            std::abs(aboveFeet - actor.headHeightUnits) <= allowedPoseDisplacement;
+        // Also guards a pose that has not been written yet, or a rig whose
         // head lands below its own feet: either would aim at the ground.
-        if (aboveFeet > 1.0f) {
+        if (aboveFeet > 1.0f && agreesWithBindPose) {
             return aboveFeet;
         }
     }
     if (actor.headHeightUnits > 1.0f) {
         return actor.headHeightUnits;  // measured, but bind pose only
     }
-    // NO HEAD BONE at all -- a radroach, a floating eyebot. The old fraction,
-    // which keeps them framed exactly as they were rather than at their feet.
-    // 0.65 came from Victor, whose face is a SCREEN mounted low on a ball on a
-    // wheel; a human's head is at ~0.88 of their height, which is why a single
-    // fraction was never going to serve both and the bone is looked for first.
-    constexpr float kFaceFraction = 0.65f;
+    // NO USABLE HEAD BONE. Legacy TES3 body parts can leave the named head bone
+    // with no dominantly weighted vertices, so this path is common for NPCs,
+    // not just radroaches and eyebots. An upright person's face is near 88% of
+    // standing height; 65% remains the useful fallback for creatures and for
+    // Victor's low screen-on-a-wheel silhouette.
+    constexpr float kHumanoidFaceFraction = 0.88f;
+    constexpr float kCreatureFaceFraction = 0.65f;
     constexpr float kFallbackUnits = 150.0f;
-    return actor.standingHeightUnits > 1.0f ? (actor.standingHeightUnits * kFaceFraction)
-                                            : kFallbackUnits;
+    const float faceFraction =
+        actor.humanoid ? kHumanoidFaceFraction : kCreatureFaceFraction;
+    return actor.standingHeightUnits > 1.0f
+        ? (actor.standingHeightUnits * faceFraction)
+        : kFallbackUnits;
 }
 
 bool actorIsInReach(

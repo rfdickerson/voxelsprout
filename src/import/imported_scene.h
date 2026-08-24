@@ -180,6 +180,11 @@ struct ImportedSceneDoor {
 // changing runtime behavior.
 struct ImportedSceneCollisionTriangle {
     float vertices[9] = {};
+    // Resolved load-order form ID of the placed reference that contributed
+    // this triangle. Zero denotes non-reference geometry such as terrain.
+    // Runtime persistence still uses RecordKey; this field is only an
+    // attribution key within the immutable scene and its active load order.
+    std::uint32_t sourceReferenceFormId = 0u;
 };
 
 // Where a cooked interior lives relative to its exterior scene. One convention,
@@ -193,6 +198,11 @@ struct ImportedSceneInstance {
     float transform[16] = {};
     std::string sourceId;
     std::string modelPath;
+    // Load-order-independent runtime identity when one can be resolved, plus
+    // the raw active-order ID used by existing collision/presentation paths.
+    std::uint32_t sourceReferenceFormId = 0u;
+    std::string sourceReferenceIdentity;
+    bool initiallyVisible = true;
 };
 
 // Pixel or block-compression format of a texture's data blob.

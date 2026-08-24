@@ -40,7 +40,9 @@
 #include "ui/nav_focus.h"
 #include "ui/nav_input.h"
 #include "ui/toast_host.h"
+#include "ui/widgets/tes3_journal_panel.h"
 #include "import/imported_scene.h"
+#include "bethesda/bethesda_session.h"
 
 #include <filesystem>
 #include <memory>
@@ -174,6 +176,13 @@ public:
     }
     void setTraversalStatePath(std::string path) { m_traversalStatePath = std::move(path); }
     void setResumeEnabled(bool enabled) { m_resumeEnabled = enabled; }
+    void setScenario(std::string id);
+    void setGameplaySavePath(std::string path) { m_gameplaySavePath = std::move(path); }
+    void setGameplayLoadPath(std::string path) { m_gameplayLoadPath = std::move(path); }
+    void setTes3StartQuest(std::string id, std::int32_t index) {
+        m_tes3StartQuest = std::move(id);
+        m_tes3StartQuestIndex = index;
+    }
     // Stand one GPU-skinned character in bind pose against the sky, instead of
     // loading a world at all.
     //
@@ -210,6 +219,35 @@ protected:
     audio::AudioConfig audioConfig() const override;
     bool initStreaming();
     bool resolveConfiguredContentProfile();
+    bool initBethesdaSession();
+    bool loadScenarioQuestDefinitions(const bethesda::ScenarioDefinition& scenario);
+    bool saveGameplayState();
+    bool loadGameplayState();
+    bool registerBethesdaPlayerController();
+    void pullBethesdaPlayerControllerState();
+    void relocateBethesdaPlayerControllerToCamera();
+    void unregisterBethesdaActorControllers();
+    void pullBethesdaActorControllerStates();
+    void stepBethesdaActorControllers(float fixedDeltaSeconds);
+    void submitBethesdaActorControllerIntents();
+    void syncBethesdaPlayerState(bool applyNow);
+    void syncBethesdaActors(bool addMissing, bool applyNow);
+    void restoreBethesdaActorsFromSession();
+    bool ensureSkyrimActorCatalog();
+    bool bindAndMaterializeScenarioReferences(std::string& outError);
+    [[nodiscard]] bool runtimeOriginSpaceForReference(
+        std::uint32_t referenceFormId,
+        bethesda::RuntimeSpaceState& outSpace) const;
+    [[nodiscard]] bool runtimeSpaceForPosition(
+        const float enginePosition[3],
+        bethesda::RuntimeSpaceState& outSpace) const;
+    [[nodiscard]] bool runtimeSpaceIsResident(
+        const bethesda::RuntimeSpaceState& space) const;
+    void cacheBethesdaCollisionCell(
+        const importer::CellCoord& cell, const importer::ImportedScene& scene);
+    void removeBethesdaCollisionCell(const importer::CellCoord& cell);
+    void registerBethesdaCollisionCell(const importer::CellCoord& cell);
+    void registerCachedBethesdaCollision();
     // Loads the skeleton and body parts, binds them, and uploads the result to
     // skinned instance slot 0. Also frames the camera on the bind-pose bounds,
     // because the character's own extent is the only sensible thing to point at
@@ -277,6 +315,7 @@ private:
     // Escape, and making them exclusive means whichever the game guessed wrong
     // about simply stops working.
     void pollNavInput(float deltaSeconds);
+    void updateGiftMenu();
     // Checks the regions covering the camera and toasts any not seen before.
     void updateRegionDiscovery();
     void saveTraversalState(bool force);
@@ -288,6 +327,10 @@ private:
     // The pause menu. Controller-navigable; returns nothing because every entry
     // acts on app state directly.
     void drawPauseMenu();
+    void drawGiftMenu();
+    void updateTes3JournalInput();
+    void syncTes3JournalPanel();
+    void drawTes3Journal();
     void updateCamera(float deltaSeconds);
     // Advances the scripted tour and points the camera. Returns false once the
     // path has run out, which hands the camera back to the player.
@@ -309,9 +352,25 @@ private:
     // Nearest door the camera is close to and facing, or -1. Also what the HUD
     // prompt reads.
     [[nodiscard]] int findUsableDoor() const;
+    [[nodiscard]] int findLootableActorInReach() const;
+    bool lootActor(int actorIndex);
+    bool configureGoldenClawPuzzleForCurrentSpace(std::string& outError);
+    [[nodiscard]] bool goldenClawPuzzleInReach() const;
+    bool rotateGoldenClawRing(std::size_t ringIndex);
+    bool useGoldenClawPuzzle();
+    bool refreshGoldenClawPresentation(std::string& outError);
     void useDoor(const importer::ImportedSceneDoor& door);
     bool completeDoorTransition(const importer::ImportedSceneDoor& door, std::string& outError);
+    // Diagnostic/demo placement shared by startup and Skyrim space reloads.
+    // Keeping it here prevents Skyrim's deferred population pass from silently
+    // bypassing ODAI_FNV_ACTORS_PARADE.
+    void arrangeActorParadeIfRequested();
     void reloadActorsForCurrentSpace();
+    // Realize CPU-built actor meshes on the GPU over multiple frames. A whole
+    // town can contain dozens of unique bodies and textures; uploading all of
+    // them in one onTick starves GLFW event polling and makes close/input look
+    // frozen even though the process is still doing useful work.
+    void queueActorUploads();
     void updateDoorTransition(float deltaSeconds);
     void rebuildStreamDoors();
     // Bilinear ground height at a world XZ. false outside the cooked terrain or
@@ -331,7 +390,21 @@ private:
     DoorTransitionPhase m_doorTransitionPhase = DoorTransitionPhase::None;
     std::optional<importer::ImportedSceneDoor> m_pendingDoor;
     float m_doorTransitionAlpha = 0.0f;
+    struct GoldenClawPuzzleBinding {
+        bethesda::ObjectId door;
+        bethesda::RecordKey requiredItem;
+        bethesda::RecordKey quest;
+        std::int32_t successStage = 0;
+        std::uint32_t keyholeReferenceFormId = 0u;
+        std::vector<std::uint32_t> collisionReferenceFormIds;
+        float position[3] = {};
+    };
+    std::optional<GoldenClawPuzzleBinding> m_goldenClawPuzzle;
+    bool m_goldenClawRingKeyLatch[3] = {};
     std::size_t m_interiorChunk = render::Renderer::kInvalidImportedChunkIndex;
+    // Full immutable imported payload retained while a presentation-only copy
+    // filters persistent references such as the opened claw mechanism.
+    std::optional<importer::ImportedScene> m_currentInteriorSourceScene;
     std::string m_currentInteriorEditorId;
     std::filesystem::path m_sceneDirectory;
     std::string m_exteriorStem;
@@ -346,6 +419,12 @@ private:
     // hierarchy but never the text.
     ui::Font m_dialogueFont;        // what Victor says
     ui::Font m_dialogueChoiceFont;  // what the player can say back
+    // Morrowind's journal is a reading surface, not a HUD card. A dedicated
+    // serif family gives its long authored entries the book-like cadence of
+    // the original game without changing the sans-serif combat/HUD language.
+    ui::Font m_tes3JournalFont;
+    ui::Font m_tes3JournalBoldFont;
+    ui::Font m_tes3JournalItalicFont;
     // Which reply is highlighted. Reset whenever the conversation moves to a
     // new node, tracked by id rather than by a "node changed" flag because the
     // runtime offers no such signal.
@@ -379,6 +458,13 @@ private:
     // The streaming load order, kept so actor discovery and dialogue can use the
     // same one the cell streamer does. Empty when no extra plugins were loaded.
     importer::fnv::FalloutLoadOrder m_streamLoadOrder;
+    // Immutable winning-record catalog. Authored ACHR ownership is provenance,
+    // not live residency: packages can move an interior-owned actor outside.
+    // It is scanned once, then filtered by BethesdaWorld::currentSpace on every
+    // settled streaming-ring refresh.
+    importer::fnv::FalloutActorScan m_skyrimActorCatalog;
+    std::unordered_map<std::uint32_t, std::string> m_skyrimActorVoiceFolderPlugin;
+    bool m_skyrimActorCatalogReady = false;
     bool m_streamIsMorrowind = false;
     bool m_streamIsSkyrim = false;
     // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
@@ -502,6 +588,10 @@ private:
     // lifetime because a skinned template is uploaded from spans into these.
     std::vector<SkinnedActor> m_actors;
     bool m_actorsUploadPending = false;
+    std::size_t m_nextActorUploadIndex = 0u;
+    std::size_t m_actorUploadSuccessCount = 0u;
+    std::size_t m_actorUploadedTextureCount = 0u;
+    std::size_t m_actorTotalTextureCount = 0u;
     // Victor's index in m_actors, or -1. He is an ordinary actor now; this
     // exists only for his spawn-side placement and the log lines that name him.
     int m_victorIndex = -1;
@@ -521,13 +611,43 @@ private:
             : nullptr;
     }
     void beginConversation(int actorIndex);
+    [[nodiscard]] bool beginTes3Conversation(int actorIndex);
+    [[nodiscard]] bool beginBethesdaConversation(int actorIndex);
+    void rebuildTes3ConversationTree(
+        SkinnedActor& actor, const bethesda::Tes3DialogueResponse& response);
+    void rebuildBethesdaConversationTree(
+        SkinnedActor& actor, std::vector<bethesda::SkyrimDialogueChoice> choices);
+    [[nodiscard]] int findBethesdaDialogueActorInReach(
+        const float cameraPosition[3], float cameraYawRadians);
+    [[nodiscard]] int findTes3DialogueActorInReach(
+        const float cameraPosition[3], float cameraYawRadians) const;
+    void chooseConversationChoice(std::size_t index);
     void endConversation();
+    bool m_bethesdaDialogueActive = false;
+    enum class Tes3DialogueActionKind : std::uint8_t { Topic, Choice, Goodbye };
+    struct Tes3DialogueAction {
+        Tes3DialogueActionKind kind = Tes3DialogueActionKind::Goodbye;
+        std::string topic;
+        std::int32_t choice = 0;
+    };
+    bool m_tes3DialogueActive = false;
+    std::vector<Tes3DialogueAction> m_tes3DialogueActions;
+    bethesda::ObjectId m_bethesdaDialogueSpeaker;
+    bethesda::ObjectId m_bethesdaDialoguePlayer;
+    std::vector<bethesda::SkyrimDialogueChoice> m_bethesdaDialogueChoices;
+    bethesda::RecordKey m_bethesdaDialoguePendingEndInfo;
+    std::vector<bethesda::RecordKey> m_bethesdaDialogueNextTopics;
+    // Set by main-thread cell callbacks and consumed once the asynchronous
+    // ring settles. This keeps Skyrim actor/quest residency aligned with the
+    // streamer's planner without rescanning the plugin once per arriving cell.
+    bool m_skyrimActorResidencyDirty = false;
     // Engine space; y == 0 means "use his authored ACRE position".
     float m_victorSpawnPosition[3] = {};
     // The actor "press E to talk" is currently offering, or -1. Resolved once
     // per tick by findActorInReach so the prompt and the keypress can never
     // disagree about who is being addressed.
     int m_activationActor = -1;
+    int m_activationLootActor = -1;
     bool m_mouseCaptured = true;
 
     // Time of day in hours [0, 24). Drives the sun angle, and through it the
@@ -646,6 +766,15 @@ private:
     ui::UiNavStickMapper m_navStick;
     ui::NavFocusRing m_menuFocus;
     bool m_menuOpen = false;
+    std::unique_ptr<ui::Tes3JournalPanel> m_tes3JournalPanel;
+    bool m_tes3JournalOpen = false;
+    bool m_tes3JournalKeyLatch = false;
+    std::string m_tes3StartQuest;
+    std::int32_t m_tes3StartQuestIndex = 0;
+    std::string m_tes3PinnedQuest;
+    std::size_t m_tes3JournalSyncedVisits = 0u;
+    int m_giftMenuChoice = 0;
+    std::uint64_t m_presentedGiftMenuSequence = 0u;
     // Weather picker, a sub-page of the pause menu. Choices are remapped
     // formIDs into m_weatherTables, built once on first open.
     ui::NavFocusRing m_weatherFocus;
@@ -697,6 +826,15 @@ private:
     // using the older height field built from the whole scene.
     CollisionWorld m_collision;
     ActorNavigationWorld m_actorNavigation;
+    struct BethesdaCollisionMesh {
+        std::vector<odai::math::Vector3> vertices;
+        std::vector<std::uint32_t> indices;
+        // One entry per triangle, parallel to indices in groups of three.
+        std::vector<std::uint32_t> triangleSourceReferenceFormIds;
+    };
+    std::unordered_map<importer::CellCoord, BethesdaCollisionMesh,
+        importer::CellCoordHash> m_bethesdaCollisionByCell;
+    std::unordered_set<std::uint32_t> m_disabledBethesdaCollisionReferences;
     // Previous frame's camera position, differenced to get the velocity the
     // planner predicts with. Cheaper and more honest than plumbing the movement
     // code's own velocity, which is reset by collision and jumping.
@@ -706,6 +844,18 @@ private:
     bool m_hasPreviousCameraPosition = false;
     float m_streamStatsLogTimer = 0.0f;
     bool m_collisionSelfTestDone = false;
+    bethesda::BethesdaSession m_bethesdaSession;
+    bool m_bethesdaSessionConfigured = false;
+    bool m_bethesdaPlayerControllerRegistered = false;
+    bool m_bethesdaControllerOwnsCamera = false;
+    std::string m_scenarioId;
+    std::string m_scenarioStartMarker;
+    std::filesystem::path m_gameplaySavePath;
+    std::filesystem::path m_gameplayLoadPath;
+    bool m_gameplaySaveKeyLatch = false;
+    bool m_gameplayLoadKeyLatch = false;
+    bool m_meleeAttackPending = false;
+    bool m_meleeAttackButtonLatch = false;
 };
 
 }  // namespace odai::games::newvegas

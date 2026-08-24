@@ -951,9 +951,11 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // out exactly like ImportedMeshVertex). Up to kMaxSkinnedInstances
     // independent instance slots means each draw may come from a different
     // vertex/index buffer, so bind is resolved per-draw.
+    // Skinned actors are not imported world statics. The statics visibility
+    // toggle is used by actor-only animation probes and must not suppress the
+    // character draw path along with buildings and clutter.
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
-        !skinnedActorMeshDraws.empty() &&
-        m_debugShowImportedStatics) {
+        !skinnedActorMeshDraws.empty()) {
         vkCmdBindPipeline(
             commandBuffer,
             VK_PIPELINE_BIND_POINT_GRAPHICS,

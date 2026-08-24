@@ -97,6 +97,10 @@ struct FalloutWorldTables {
     // scan handed that record. Empty for every later generation, where a
     // reference carries the formID directly.
     std::unordered_map<std::string, std::uint32_t> baseFormIdsByEditorId;
+    // Stable source plugin spelling by global regular slot, used to serialize
+    // placed-reference identities into ImportedScene v31.
+    std::unordered_map<std::uint16_t, std::string> pluginFileNamesByRegularSlot;
+    bool morrowind = false;
     // LIGH formID -> its light parameters. A LIGH also appears in the maps
     // above when it carries a MODL (29 of 501 do), because the lamp mesh and
     // the light it casts are both wanted.

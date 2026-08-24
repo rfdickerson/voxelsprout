@@ -71,6 +71,22 @@ void Renderer::setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSk
     m_backend->setSkinnedActorPose(instanceIndex, pose);
 }
 
+RuntimeDeltaApplyStats Renderer::applyRuntimeRenderDeltas(
+    const odai::bethesda::RuntimeRenderDeltaBatch& deltas) {
+    RuntimeDeltaApplyStats stats;
+    stats.received = deltas.size();
+    for (const odai::bethesda::RuntimeRenderDelta& delta : deltas) {
+        if (delta.skinningSlot != 0xffffffffu &&
+            (delta.changes & odai::bethesda::RuntimeRenderVisibility) != 0u) {
+            m_backend->setSkinnedActorVisible(delta.skinningSlot, delta.visible);
+            ++stats.skinnedVisibilityApplied;
+        } else {
+            ++stats.unresolved;
+        }
+    }
+    return stats;
+}
+
 void Renderer::setSkinningDebugBypass(bool bypass) {
     m_backend->setSkinningDebugBypass(bypass);
 }

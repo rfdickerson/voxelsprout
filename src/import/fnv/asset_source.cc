@@ -21,6 +21,17 @@ std::string toLowerAsciiCopy(std::string text) {
     return text;
 }
 
+std::string byteFingerprint(const std::vector<std::uint8_t>& bytes) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (std::uint8_t byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    std::ostringstream text;
+    text << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return text.str();
+}
+
 bool readWholeFile(
     const std::filesystem::path& path, std::vector<std::uint8_t>& outBytes, std::string& outError) {
     std::ifstream input(path, std::ios::binary | std::ios::ate);
@@ -422,6 +433,10 @@ bool FalloutAssetSource::open(
         if (layer.enabled && !addModDirectory(layer.root)) {
             return false;
         }
+        if (layer.enabled) {
+            m_modDirectories.back().id = layer.id;
+            m_modDirectories.back().name = layer.name;
+        }
     }
     return true;
 }
@@ -429,6 +444,8 @@ bool FalloutAssetSource::open(
 bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory) {
     ModDirectory mod;
     mod.root = directory;
+    mod.id = toLowerAsciiCopy(directory.filename().string());
+    mod.name = directory.filename().string();
     std::size_t caseCollisions = 0;
     std::vector<std::filesystem::path> archivePaths;
     CachedLayerIndex cached;
@@ -590,7 +607,21 @@ bool FalloutAssetSource::resolve(
     const std::filesystem::path& looseRoot,
     const std::string& archiveVirtualPath,
     std::vector<std::uint8_t>& outBytes,
-    std::string& outError) const {
+    std::string& outError, ResolvedAsset* outAsset) const {
+    const auto resolved = [&](const std::string& providerId, const std::string& providerName,
+                              const std::filesystem::path& providerRoot,
+                              const std::filesystem::path& physicalPath,
+                              const std::string& archiveName) {
+        if (outAsset == nullptr) return;
+        outAsset->bytes = outBytes;
+        outAsset->canonicalVirtualPath = toLowerAsciiCopy(normalizeModelPath(archiveVirtualPath));
+        outAsset->providerId = providerId;
+        outAsset->providerName = providerName;
+        outAsset->providerRoot = providerRoot;
+        outAsset->physicalPath = physicalPath;
+        outAsset->archiveName = archiveName;
+        outAsset->contentFingerprint = byteFingerprint(outBytes);
+    };
     // Mods win over everything the game shipped. Reverse, for the same reason
     // the archive loop below is reversed: m_modDirectories is in load order.
     if (!m_modDirectories.empty()) {
@@ -602,6 +633,7 @@ bool FalloutAssetSource::resolve(
             if (found != it->filesByLowerPath.end()) {
                 std::string modError;
                 if (readWholeFile(found->second, outBytes, modError)) {
+                    resolved(it->id, it->name, it->root, found->second, {});
                     return true;
                 }
                 // Indexed but unreadable is worth reporting even if something
@@ -616,6 +648,7 @@ bool FalloutAssetSource::resolve(
                 }
                 std::string archiveError;
                 if (archiveIt->extract(*entry, outBytes, archiveError)) {
+                    resolved(it->id, it->name, it->root, {}, archiveIt->path().filename().string());
                     return true;
                 }
                 outError = archiveError;
@@ -628,6 +661,7 @@ bool FalloutAssetSource::resolve(
     if (std::filesystem::exists(loosePath, existsError) && !existsError) {
         std::string looseError;
         if (readWholeFile(loosePath, outBytes, looseError)) {
+            resolved("base-loose", "Base game loose files", m_dataFilesPath, loosePath, {});
             return true;
         }
         // A loose file that exists but will not read is worth reporting even if
@@ -644,6 +678,8 @@ bool FalloutAssetSource::resolve(
         }
         std::string archiveError;
         if (it->extract(*entry, outBytes, archiveError)) {
+            resolved("base-archive", "Base game archive", m_dataFilesPath, {},
+                     it->path().filename().string());
             return true;
         }
         outError = archiveError;
@@ -662,6 +698,15 @@ bool FalloutAssetSource::resolveAsset(
     // Loose root is the Data directory itself, because the path is already
     // rooted there -- exactly the texture rule, minus the prefix insertion.
     return resolve(normalized, m_dataFilesPath, normalized, outBytes, outError);
+}
+
+bool FalloutAssetSource::resolveAssetWithProvider(
+    const std::string& virtualPath, ResolvedAsset& outAsset, std::string& outError) const {
+    outAsset = ResolvedAsset{};
+    outError.clear();
+    std::vector<std::uint8_t> bytes;
+    const std::string normalized = normalizeModelPath(virtualPath);
+    return resolve(normalized, m_dataFilesPath, normalized, bytes, outError, &outAsset);
 }
 
 bool FalloutAssetSource::resolveMesh(

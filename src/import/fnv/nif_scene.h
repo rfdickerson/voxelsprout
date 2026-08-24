@@ -123,9 +123,19 @@ struct NifCollisionTriangle {
     float vertices[9]{};
 };
 
+// Authored animation event carried by NiTextKeyExtraData. TES3 stores its
+// complete humanoid animation bank in base_anim.nif and uses these labels to
+// delimit clips such as Idle; controller start/stop times alone cover the
+// entire bank and therefore cannot select a usable pose.
+struct NifTextKey {
+    float time = 0.0f;
+    std::string text;
+};
+
 struct NifModel {
     std::vector<NifShape> shapes;
     std::vector<NifCollisionTriangle> collisionTriangles;
+    std::vector<NifTextKey> textKeys;
     // All controller sequences carried by this mesh. Static importers can
     // ignore them; Bethesda environmental machinery selects one clip and
     // turns its targeted shape groups into runtime rigid animations.
@@ -319,6 +329,12 @@ struct NifSkinnedShape {
     // spaces, so the character assembler bakes their bind pose before sharing
     // the actor's one GPU bone palette.
     bool usesDynamicPositions = false;
+
+    // TES3 body NIFs retain a scene path around the skinned drawable. The
+    // runtime merges those files under one skeleton, so their authored
+    // per-shape bind must be evaluated once into the canonical character bind
+    // pose before the common GPU palette can animate them.
+    bool requiresCanonicalBindBake = false;
 
     // Per vertex, kNifMaxBoneInfluences entries each. Index is into boneNames,
     // NOT into a skeleton. Weights sum to 1 for any vertex with any influence;

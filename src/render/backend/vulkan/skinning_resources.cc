@@ -231,7 +231,10 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
     // Same staged device-local upload shape as uploadImportedSceneInternal's
     // local uploadDeviceLocalBuffer lambda (chunk_upload.cc) -- duplicated
     // rather than shared, matching how every other upload call site in this
-    // backend already does its own local copy of this pattern.
+    // backend already does its own local copy of this pattern. Retain the last
+    // transfer value so failed multi-buffer uploads and replaced templates can
+    // retire buffers only after every earlier queue use has completed.
+    std::uint64_t latestUploadTimelineValue = 0u;
     auto uploadDeviceLocalBuffer = [&](
                                        const void* sourceData,
                                        VkDeviceSize bufferSize,
@@ -320,25 +323,37 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             }
         }
 
+        std::uint64_t uploadTimelineValue = 0u;
         if (!uploadFailed) {
-            result = submitCommandBufferOneShot(m_graphicsQueue, commandBuffer, VK_NULL_HANDLE);
+            uploadTimelineValue = m_nextTimelineValue++;
+            VkSemaphoreSubmitInfo signalInfo{};
+            signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            signalInfo.semaphore = m_renderTimelineSemaphore;
+            signalInfo.value = uploadTimelineValue;
+            signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            VkCommandBufferSubmitInfo commandBufferInfo{};
+            commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+            commandBufferInfo.commandBuffer = commandBuffer;
+            VkSubmitInfo2 submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+            submitInfo.commandBufferInfoCount = 1u;
+            submitInfo.pCommandBufferInfos = &commandBufferInfo;
+            submitInfo.signalSemaphoreInfoCount = 1u;
+            submitInfo.pSignalSemaphoreInfos = &signalInfo;
+            result = vkQueueSubmit2(m_graphicsQueue, 1u, &submitInfo, VK_NULL_HANDLE);
             if (result != VK_SUCCESS) {
                 logVkFailure("vkQueueSubmit2(skinnedMeshUpload)", result);
+                uploadTimelineValue = 0u;
                 uploadFailed = true;
-            }
-        }
-        if (!uploadFailed) {
-            result = vkQueueWaitIdle(m_graphicsQueue);
-            if (result != VK_SUCCESS) {
-                logVkFailure("vkQueueWaitIdle(skinnedMeshUpload)", result);
-                uploadFailed = true;
+            } else {
+                latestUploadTimelineValue = uploadTimelineValue;
+                m_pendingTransferTimelineValue =
+                    std::max(m_pendingTransferTimelineValue, uploadTimelineValue);
             }
         }
 
-        if (commandPool != VK_NULL_HANDLE) {
-            vkDestroyCommandPool(m_device, commandPool, nullptr);
-        }
-        m_bufferAllocator.destroyBuffer(stagingHandle);
+        scheduleCommandPoolRelease(commandPool, uploadTimelineValue);
+        scheduleBufferRelease(stagingHandle, uploadTimelineValue);
         if (uploadFailed) {
             m_bufferAllocator.destroyBuffer(outHandle);
             outHandle = kInvalidBufferHandle;
@@ -397,7 +412,7 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             "skinned mesh index",
             newIndexHandle)) {
-        m_bufferAllocator.destroyBuffer(newRestPoseHandle);
+        scheduleBufferRelease(newRestPoseHandle, latestUploadTimelineValue);
         return false;
     }
 
@@ -445,8 +460,8 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             "skinned mesh output",
             newOutputHandle)) {
         VOX_LOGE("render") << "skinned mesh output buffer allocation failed";
-        m_bufferAllocator.destroyBuffer(newRestPoseHandle);
-        m_bufferAllocator.destroyBuffer(newIndexHandle);
+        scheduleBufferRelease(newRestPoseHandle, latestUploadTimelineValue);
+        scheduleBufferRelease(newIndexHandle, latestUploadTimelineValue);
         return false;
     }
 
@@ -463,9 +478,12 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             static_cast<VkDeviceSize>(restOutputVertices.size() * sizeof(ImportedMeshVertex)));
     }
 
-    m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
-    m_bufferAllocator.destroyBuffer(slot.indexBufferHandle);
-    m_bufferAllocator.destroyBuffer(slot.outputVertexBufferHandle);
+    // The old template may still be referenced by an in-flight frame. The
+    // upload submissions are ordered after that frame on the same graphics
+    // queue, so their final timeline signal is also a safe retirement point.
+    scheduleBufferRelease(slot.restPoseVertexBufferHandle, latestUploadTimelineValue);
+    scheduleBufferRelease(slot.indexBufferHandle, latestUploadTimelineValue);
+    scheduleBufferRelease(slot.outputVertexBufferHandle, latestUploadTimelineValue);
 
     slot.restPoseVertexBufferHandle = newRestPoseHandle;
     slot.indexBufferHandle = newIndexHandle;

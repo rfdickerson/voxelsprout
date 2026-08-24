@@ -30,7 +30,7 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // This file used to carry every layout back to v15 -- a legacy stride table,
 // three field-by-field expansion paths, and a version gate on every section.
 // That machinery served files nobody has. A cooked scene is either a cell
-// cache, keyed by kCellBuildVersion (46) AND the plugin/load-order fingerprint, or a
+// cache, keyed by kCellBuildVersion AND the plugin/load-order fingerprint, or a
 // hand-cooked .bin from a tree old enough to predate several vertex widenings;
 // in both cases the current build cannot consult it and would rebuild anyway.
 // The reader rejects anything below the floor cleanly and the caller rebuilds,
@@ -49,7 +49,12 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v29 resolves streamed door destinations and appends authored static
 // collision triangles. Cell caches carrying the old cooked-scene-only door
 // shape cannot be interpreted as the new one, so this is a real format bump.
-constexpr std::uint32_t kImportedSceneVersion = 29u;
+// v30 attributes each authored collision triangle to its placed reference so
+// runtime object state can suppress collision without mutating ImportedScene.
+// v31 gives every placed instance an explicit source-reference identity and
+// initial visibility. Initially-disabled quest objects remain in the cache and
+// can be materialized by runtime state instead of disappearing at cook time.
+constexpr std::uint32_t kImportedSceneVersion = 31u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
@@ -615,6 +620,7 @@ void writeSceneCollision(
     for (const ImportedSceneCollisionTriangle& triangle : triangles) {
         output.write(
             reinterpret_cast<const char*>(triangle.vertices), sizeof(triangle.vertices));
+        writeValue(output, triangle.sourceReferenceFormId);
     }
 }
 
@@ -626,7 +632,8 @@ bool readSceneCollision(
     }
     out.resize(count);
     for (ImportedSceneCollisionTriangle& triangle : out) {
-        if (!readExact(input, triangle.vertices, sizeof(triangle.vertices))) {
+        if (!readExact(input, triangle.vertices, sizeof(triangle.vertices)) ||
+            !readValue(input, triangle.sourceReferenceFormId)) {
             return false;
         }
     }
@@ -1379,6 +1386,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
     }
 
     for (const ImportedSceneInstance& instance : scene.instances) {
+        if (!instance.initiallyVisible) continue;
         if ((hasTerrainMesh && instance.meshIndex == 0u) || instance.meshIndex >= scene.meshes.size()) {
             continue;
         }
@@ -1670,6 +1678,9 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
         output.write(reinterpret_cast<const char*>(instance.transform), static_cast<std::streamsize>(sizeof(instance.transform)));
         writeString(output, instance.sourceId);
         writeString(output, instance.modelPath);
+        writeValue(output, instance.sourceReferenceFormId);
+        writeString(output, instance.sourceReferenceIdentity);
+        writeValue(output, static_cast<std::uint8_t>(instance.initiallyVisible ? 1u : 0u));
     }
 
     for (const ImportedSceneLandscapeCell& cell : scene.landscapeCells) {
@@ -1891,12 +1902,17 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
 
     scene.instances.resize(instanceCount);
     for (ImportedSceneInstance& instance : scene.instances) {
+        std::uint8_t initiallyVisible = 1u;
         if (!readValue(input, instance.meshIndex) ||
             !readExact(input, instance.transform, sizeof(instance.transform)) ||
             !readString(input, instance.sourceId) ||
-            !readString(input, instance.modelPath)) {
+            !readString(input, instance.modelPath) ||
+            !readValue(input, instance.sourceReferenceFormId) ||
+            !readString(input, instance.sourceReferenceIdentity) ||
+            !readValue(input, initiallyVisible) || initiallyVisible > 1u) {
             return false;
         }
+        instance.initiallyVisible = initiallyVisible != 0u;
     }
 
     scene.landscapeCells.resize(landscapeCellCount);
@@ -2149,11 +2165,16 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
 
     for (std::uint32_t i = 0; i < instanceCount; ++i) {
         std::uint32_t meshIndex = 0;
+        std::uint32_t sourceReferenceFormId = 0u;
+        std::uint8_t initiallyVisible = 1u;
         float transform[16] = {};
         if (!readValue(input, meshIndex) ||
             !readExact(input, transform, sizeof(transform)) ||
             !skipString(input) ||
-            !skipString(input)) {
+            !skipString(input) ||
+            !readValue(input, sourceReferenceFormId) ||
+            !skipString(input) ||
+            !readValue(input, initiallyVisible) || initiallyVisible > 1u) {
             return false;
         }
     }

@@ -31,6 +31,10 @@ namespace odai::importer::fnv {
 // texture and the renderer draws one texture per packed draw.
 struct FalloutCharacterPart {
     std::string name;
+    // Asset provenance is presentation-only metadata, but retaining it here
+    // makes a malformed assembled actor diagnosable one authored BODY NIF at
+    // a time instead of as one anonymous merged vertex buffer.
+    std::string sourcePath;
     std::string diffuseTexturePath;
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;

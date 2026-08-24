@@ -49,6 +49,17 @@ std::string normalizeTexturePath(const std::string& path);
 
 class FalloutAssetSource {
 public:
+    struct ResolvedAsset {
+        std::vector<std::uint8_t> bytes;
+        std::string canonicalVirtualPath;
+        std::string providerId;
+        std::string providerName;
+        std::filesystem::path providerRoot;
+        std::filesystem::path physicalPath;
+        std::string archiveName;
+        std::string contentFingerprint;
+    };
+
     // Indexes the BSA archives in `dataFilesPath`. `contentMask` is a mask of
     // BsaContentFlags; archives declaring none of those bits are skipped
     // without being indexed, which matters because indexing builds a string and
@@ -115,6 +126,14 @@ public:
         const std::string& virtualPath, std::vector<std::uint8_t>& outBytes,
         std::string& outError) const;
 
+    // As resolveAsset(), but also identifies the exact winning profile layer
+    // (or base-game loose/archive provider) and fingerprints the immutable
+    // bytes. Animation uses this for FNIS/Nemesis bundle coherence and cache
+    // invalidation; existing mesh/texture callers keep their byte-only API.
+    bool resolveAssetWithProvider(
+        const std::string& virtualPath, ResolvedAsset& outAsset,
+        std::string& outError) const;
+
     // Both are const and thread safe once open() has returned. outError is
     // written only on failure.
     bool resolveMesh(
@@ -131,6 +150,8 @@ public:
 private:
     struct ModDirectory {
         std::filesystem::path root;
+        std::string id;
+        std::string name;
         // Lowercased "textures\foo\bar.dds" -> where it actually is on disk.
         std::unordered_map<std::string, std::filesystem::path> filesByLowerPath;
         // .bsa archives found at the mod root, in name order. A mod that ships
@@ -147,7 +168,7 @@ private:
         const std::filesystem::path& looseRoot,
         const std::string& archiveVirtualPath,
         std::vector<std::uint8_t>& outBytes,
-        std::string& outError) const;
+        std::string& outError, ResolvedAsset* outAsset = nullptr) const;
     bool openDataFiles(
         const std::filesystem::path& dataFilesPath, std::uint32_t contentMask);
 
