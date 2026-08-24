@@ -137,6 +137,9 @@ void testImportedSceneSerialization() {
     instance.transform[11] = 64.0f;
     instance.sourceId = "ex_hlaalu_b_01";
     instance.modelPath = "x/ex_hlaalu_b_01.nif";
+    instance.sourceReferenceFormId = 0x01001234u;
+    instance.sourceReferenceIdentity = "frmr:morrowind.esm:0x00001234";
+    instance.initiallyVisible = true;
     scene.instances.push_back(instance);
 
     odai::importer::ImportedSceneDoor door{};
@@ -157,6 +160,7 @@ void testImportedSceneSerialization() {
     collision.vertices[0] = 1.0f;
     collision.vertices[4] = 2.0f;
     collision.vertices[8] = 3.0f;
+    collision.sourceReferenceFormId = 0xfe009876u;
     scene.collisionTriangles.push_back(collision);
     odai::importer::buildImportedScenePackedRenderData(scene);
 
@@ -174,6 +178,10 @@ void testImportedSceneSerialization() {
     expectTrue(loaded.meshes.front().indices == mesh.indices, "Imported scene indices round-trip");
     expectTrue(loaded.instances.size() == 1u, "Imported scene instance count round-trips");
     expectNear(loaded.instances.front().transform[11], instance.transform[11], 1e-6f, "Imported scene instance transform round-trips");
+    expectTrue(loaded.instances.front().sourceReferenceFormId == instance.sourceReferenceFormId &&
+                   loaded.instances.front().sourceReferenceIdentity == instance.sourceReferenceIdentity &&
+                   loaded.instances.front().initiallyVisible,
+               "Imported scene v31 source identity and initial visibility round-trip");
     expectTrue(loaded.doors.size() == 1u, "Expanded door metadata round-trips");
     expectTrue(loaded.doors.front().targetKind ==
                    odai::importer::ImportedSceneDoorTargetKind::Interior,
@@ -185,6 +193,8 @@ void testImportedSceneSerialization() {
                "Authored collision triangle count round-trips");
     expectNear(loaded.collisionTriangles.front().vertices[8], 3.0f, 1e-6f,
                "Authored collision coordinates round-trip");
+    expectTrue(loaded.collisionTriangles.front().sourceReferenceFormId == 0xfe009876u,
+               "Authored collision reference attribution round-trips");
     expectTrue(!loaded.packedVertices.empty(), "Imported scene packed vertices round-trip");
     expectTrue(!loaded.packedIndices.empty(), "Imported scene packed indices round-trip");
     expectTrue(!loaded.packedDraws.empty(), "Imported scene packed draws round-trip");

@@ -89,11 +89,12 @@ content changes select a different cell-cache namespace.
 
 ## Compatibility boundary
 
-The current target is large-world exploration: records, archives, meshes,
-textures, streamed cells, collision, doors, actors, dialogue data, weather,
-and audio. ODAI inventories but does not execute TES3/TES4 scripts, Papyrus,
-VMAD behavior, OpenMW Lua, MWSE, SKSE, OBSE, or native extender DLLs. It is not
-a LOOT replacement and never downloads content.
+The current target includes Bethesda gameplay runtimes as well as large-world
+exploration. ODAI executes clean-room TES3 MWScript and Skyrim Papyrus/VMAD
+behavior through generation-specific deterministic VMs. Unsupported commands
+remain visible in strict profile reports; they are not silently accepted.
+OpenMW Lua, MWSE, SKSE, OBSE, and native extender DLLs remain disabled. It is
+not a LOOT replacement and never downloads content.
 
 That boundary supports rendering and traversing Tamriel Rebuilt-, Morroblivion-,
 and Skywind-scale worlds without claiming quest or gameplay parity.

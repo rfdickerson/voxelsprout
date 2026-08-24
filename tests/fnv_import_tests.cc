@@ -1244,10 +1244,14 @@ void testFalloutRecordExtraction() {
         std::vector<std::uint8_t> xclwPayload;
         appendPod(xclwPayload, -2147483648.0f);
         const auto xclw = buildSubrecord("XCLW", xclwPayload);
+        std::vector<std::uint8_t> xlcnPayload;
+        appendPod(xlcnPayload, static_cast<std::uint32_t>(0x00009100u));
+        const auto xlcn = buildSubrecord("XLCN", xlcnPayload);
         out.insert(out.end(), edid.begin(), edid.end());
         out.insert(out.end(), data.begin(), data.end());
         out.insert(out.end(), xclc.begin(), xclc.end());
         out.insert(out.end(), xclw.begin(), xclw.end());
+        out.insert(out.end(), xlcn.begin(), xlcn.end());
         return out;
     }();
     const auto extCellRecord = buildRecord("CELL", kExtCellFormId, 0u, extCellSubrecords);
@@ -1298,9 +1302,13 @@ void testFalloutRecordExtraction() {
         appendPod(xcllPayload, 125.0f);
         appendPod(xcllPayload, 6300.0f);
         const auto xcll = buildSubrecord("XCLL", xcllPayload);
+        std::vector<std::uint8_t> xlcnPayload;
+        appendPod(xlcnPayload, static_cast<std::uint32_t>(0x00009101u));
+        const auto xlcn = buildSubrecord("XLCN", xlcnPayload);
         out.insert(out.end(), edid.begin(), edid.end());
         out.insert(out.end(), data.begin(), data.end());
         out.insert(out.end(), xcll.begin(), xcll.end());
+        out.insert(out.end(), xlcn.begin(), xlcn.end());
         return out;
     }();
     const auto intCellRecord = buildRecord("CELL", kIntCellFormId, 0u, intCellSubrecords);
@@ -1373,8 +1381,12 @@ void testFalloutRecordExtraction() {
     expectTrue(extCell != nullptr && !extCell->isInterior && extCell->worldspaceFormId == kWorldFormId &&
                extCell->hasGridCoords && extCell->gridX == 5 && extCell->gridZ == -3,
                "Exterior cell attributes (worldspace, grid coords, interior flag) round-trip");
+    expectTrue(extCell != nullptr && extCell->locationFormId == 0x00009100u,
+               "Exterior CELL XLCN location ownership round-trips");
     expectTrue(intCell != nullptr && intCell->isInterior && intCell->worldspaceFormId == 0u,
                "Interior cell is flagged interior and attributed to no worldspace");
+    expectTrue(intCell != nullptr && intCell->locationFormId == 0x00009101u,
+               "Interior CELL XLCN location ownership round-trips");
     const auto actorOwner = scene.cellIndexByReferenceFormId.find(kIntActorRefFormId);
     expectTrue(
         actorOwner != scene.cellIndexByReferenceFormId.end() &&
@@ -1707,7 +1719,8 @@ void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmP
                 entry.cellFlags == expected->cellFlags &&
                 entry.hasGridCoords == expected->hasGridCoords &&
                 entry.gridX == expected->gridX && entry.gridZ == expected->gridZ &&
-                entry.worldspaceFormId == expected->worldspaceFormId,
+                entry.worldspaceFormId == expected->worldspaceFormId &&
+                entry.locationFormId == expected->locationFormId,
             "indexed cell metadata matches the full extraction");
 
         FalloutCellRecord streamed;
@@ -1720,6 +1733,7 @@ void testFalloutCellIndexMatchesFullExtraction(const std::filesystem::path& esmP
             "streamed cell has the same reference count as the full extraction");
         expectTrue(
             streamed.cellFlags == expected->cellFlags &&
+                streamed.locationFormId == expected->locationFormId &&
                 streamed.hasLighting == expected->hasLighting &&
                 streamed.ambientColor[0] == expected->ambientColor[0] &&
                 streamed.directionalColor[2] == expected->directionalColor[2] &&
@@ -4059,6 +4073,7 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
     writePlugin("Morrowind.esm", {}, true, {
         ltexRecord("ground", 0u, "base_ground.dds"),
         statRecord("crate", "base_crate.nif"),
+        statRecord("guar", "r\\Guar.NIF", "CREA"),
         record("CELL", baseExterior), landRecord(5, -28, 1u), record("CELL", baseInterior),
         landRecord(6, -28, 1u)});
 
@@ -4148,6 +4163,17 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
                ("the merged TES3 exterior extracts: " + error).c_str());
     expectTrue(merged.references.size() == 2u,
                "DELE removes the base placement while later TR references remain");
+    expectTrue(std::any_of(merged.references.begin(), merged.references.end(),
+                   [](const FalloutPlacedReference& reference) {
+                       return reference.formId == 0x04000020u &&
+                           reference.sourcePluginIndex == 4u;
+                   }) &&
+                   std::any_of(merged.references.begin(), merged.references.end(),
+                   [](const FalloutPlacedReference& reference) {
+                       return reference.formId == 0x05000030u &&
+                           reference.sourcePluginIndex == 5u;
+                   }),
+               "placed references retain the winning plugin index for VMAD remapping");
     expectTrue(merged.land != nullptr && merged.land->sourcePluginIndex == 4u,
                "the later TR LAND wins and a reference-only factions patch retains it");
     expectTrue(merged.land != nullptr && !merged.land->morrowindTextureGrid.empty() &&
@@ -4183,6 +4209,11 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
     expectTrue(crate != tables.baseFormIdsByEditorId.end() &&
                    tables.staticRecordTypes.at(crate->second) == "ACTI",
                "a later TES3 base definition overrides the type behind that ID");
+    const auto guar = tables.baseFormIdsByEditorId.find("guar");
+    expectTrue(guar != tables.baseFormIdsByEditorId.end() &&
+                   tables.staticModelPaths.at(guar->second) == "r\\Guar.NIF" &&
+                   tables.staticRecordTypes.at(guar->second) == "CREA",
+               "TES3 creature models enter the placed imported-scene tables");
     const std::uint64_t tdPalette = (3ull << 32u) | 8u;
     const std::uint64_t trPalette = (4ull << 32u) | 8u;
     expectTrue(tables.morrowindLandTexturePaths.at(tdPalette) == "other_ground.dds" &&
@@ -5036,6 +5067,18 @@ void testTemplateSkeletonThroughNestedLeveledLists() {
     expectTrue(
         scan.leveledLists.size() == 2u, "both LVLN levels are collected as levelled actor lists");
 
+    FalloutActorScan distantScan;
+    expectTrue(
+        findActorsNear(esmPath, 10000.0f, 10000.0f, 10.0f, distantScan, error) &&
+            distantScan.placements.empty(),
+        "the legacy proximity query excludes an authored placement outside its radius");
+    FalloutActorScan catalog;
+    expectTrue(
+        findAllActors(esmPath, catalog, error) &&
+            catalog.placements.size() == 1u &&
+            catalog.placements.front().refFormId == kPlacementFormId,
+        "the runtime actor catalog retains a placement regardless of authored distance");
+
     const ResolvedActorBase resolved = scan.resolve(kMarkerActorFormId);
     expectTrue(
         resolved.geometrySource == ActorGeometrySource::Race,
@@ -5053,6 +5096,42 @@ void testTemplateSkeletonThroughNestedLeveledLists() {
         "an actor owning its model is unaffected by the template walk");
 
     fs::remove(esmPath);
+}
+
+void testDeterministicActorInventoryExpansion() {
+    using namespace odai::importer::fnv;
+    FalloutActorScan scan;
+    FalloutActorBase actor;
+    actor.formId = 0x10u;
+    actor.inventoryFormIds = {0x100u, 0x200u};
+    scan.bases.emplace(actor.formId, actor);
+    scan.leveledItems[0x100u] = {0x101u, 0x200u};
+    scan.leveledItemUseAll[0x100u] = true;
+    scan.leveledItems[0x101u] = {0x201u, 0x202u};
+    scan.leveledItemUseAll[0x101u] = false;
+
+    const std::vector<std::uint32_t> first =
+        scan.materializeInventory(actor.formId, 0x13482u);
+    const std::vector<std::uint32_t> replay =
+        scan.materializeInventory(actor.formId, 0x13482u);
+    expectTrue(first == replay,
+        "actor LVLI materialization is deterministic for a persistent reference");
+    expectTrue(std::count(first.begin(), first.end(), 0x200u) == 2 &&
+            std::count_if(first.begin(), first.end(), [](std::uint32_t value) {
+                return value == 0x201u || value == 0x202u;
+            }) == 1,
+        "use-all and choose-one LVLI semantics materialize leaves without list tokens");
+    expectTrue(std::find(first.begin(), first.end(), 0x100u) == first.end() &&
+            std::find(first.begin(), first.end(), 0x101u) == first.end(),
+        "materialized inventory never exposes an LVLI record as an item");
+
+    FalloutActorBase cyclic;
+    cyclic.formId = 0x20u;
+    cyclic.inventoryFormIds = {0x300u};
+    scan.bases.emplace(cyclic.formId, cyclic);
+    scan.leveledItems[0x300u] = {0x300u};
+    expectTrue(scan.materializeInventory(cyclic.formId, 1u).empty(),
+        "cyclic LVLI data terminates and contributes no raw list item");
 }
 
 // An INFO names who says it in one of TWO ways, and a reader that knows only
@@ -5587,6 +5666,206 @@ void testAnimatedBannerSettlesUnderJoltGravity() {
         "a banner without embedded animation keeps its authored static pose");
 }
 
+void testMorrowindSkeletonNamesAndSkinLayout() {
+    using namespace odai::importer::fnv;
+
+    const float identity[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    const auto appendTransform = [&](std::vector<std::uint8_t>& bytes,
+                                     const std::array<float, 3>& translation) {
+        for (float value : identity) appendPod(bytes, value);
+        for (float value : translation) appendPod(bytes, value);
+        appendPod(bytes, 1.0f);
+    };
+    const auto appendAvObject = [&](std::vector<std::uint8_t>& bytes,
+                                    const std::string& name,
+                                    const std::array<float, 3>& translation) {
+        appendSizedString32(bytes, name);
+        appendPod(bytes, static_cast<std::int32_t>(-1));  // extra data
+        appendPod(bytes, static_cast<std::int32_t>(-1));  // controller
+        appendPod(bytes, static_cast<std::uint16_t>(0));  // flags
+        for (float value : translation) appendPod(bytes, value);
+        for (float value : identity) appendPod(bytes, value);
+        appendPod(bytes, 1.0f);                           // scale
+        for (int i = 0; i < 3; ++i) appendPod(bytes, 0.0f);  // velocity
+        appendPod(bytes, static_cast<std::uint32_t>(0));  // properties
+        appendPod(bytes, static_cast<std::uint32_t>(0));  // has bounds (wide bool)
+    };
+    const auto appendNode = [&](std::vector<std::uint8_t>& bytes,
+                                const std::string& name,
+                                const std::array<float, 3>& translation,
+                                const std::vector<std::int32_t>& children) {
+        appendAvObject(bytes, name, translation);
+        appendPod(bytes, static_cast<std::uint32_t>(children.size()));
+        for (std::int32_t child : children) appendPod(bytes, child);
+        appendPod(bytes, static_cast<std::uint32_t>(0));  // effects
+    };
+
+    std::vector<std::uint8_t> root;
+    appendNode(root, "Bip01", {0.0f, 0.0f, 1.0f}, {1, 2});
+    std::vector<std::uint8_t> bone;
+    appendNode(bone, "Bip01 Head", {0.0f, 0.0f, 2.0f}, {});
+
+    std::vector<std::uint8_t> shape;
+    appendAvObject(shape, "Head", {0.0f, 0.0f, 0.0f});
+    appendPod(shape, static_cast<std::int32_t>(3));  // NiTriShapeData
+    appendPod(shape, static_cast<std::int32_t>(4));  // NiSkinInstance
+
+    std::vector<std::uint8_t> geometry;
+    appendPod(geometry, static_cast<std::uint16_t>(3));
+    appendPod(geometry, static_cast<std::uint32_t>(1));  // has vertices
+    const float positions[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    for (float value : positions) appendPod(geometry, value);
+    appendPod(geometry, static_cast<std::uint32_t>(1));  // has normals
+    const float normals[9] = {0, 0, 1, 0, 0, 1, 0, 0, 1};
+    for (float value : normals) appendPod(geometry, value);
+    for (int i = 0; i < 4; ++i) appendPod(geometry, 0.0f);  // bounding sphere
+    appendPod(geometry, static_cast<std::uint32_t>(0));  // has colours
+    appendPod(geometry, static_cast<std::uint16_t>(1));  // UV set count
+    appendPod(geometry, static_cast<std::uint32_t>(1));  // has UVs
+    const float uvs[6] = {0, 0, 1, 0, 0, 1};
+    for (float value : uvs) appendPod(geometry, value);
+    appendPod(geometry, static_cast<std::uint16_t>(1));  // triangles
+    appendPod(geometry, static_cast<std::uint32_t>(3));  // indices
+    appendPod(geometry, static_cast<std::uint16_t>(0));
+    appendPod(geometry, static_cast<std::uint16_t>(1));
+    appendPod(geometry, static_cast<std::uint16_t>(2));
+    appendPod(geometry, static_cast<std::uint16_t>(0));  // match groups
+
+    // Morrowind's NiSkinInstance has no partition ref. If a modern-layout
+    // reader consumes one here, the bone count and pointer both shift.
+    std::vector<std::uint8_t> skinInstance;
+    appendPod(skinInstance, static_cast<std::int32_t>(5));  // NiSkinData
+    appendPod(skinInstance, static_cast<std::int32_t>(0));  // skeleton root
+    appendPod(skinInstance, static_cast<std::uint32_t>(1));
+    appendPod(skinInstance, static_cast<std::int32_t>(1));  // Bip01 Head
+
+    std::vector<std::uint8_t> skinData;
+    appendTransform(skinData, {7.0f, 8.0f, 9.0f});
+    appendPod(skinData, static_cast<std::uint32_t>(1));
+    appendPod(skinData, static_cast<std::int32_t>(-1));  // legacy partition ref
+    appendTransform(skinData, {4.0f, 5.0f, 6.0f});      // inverse bind
+    for (int i = 0; i < 4; ++i) appendPod(skinData, 0.0f);  // bounding sphere
+    appendPod(skinData, static_cast<std::uint16_t>(3));
+    for (std::uint16_t vertex = 0; vertex < 3; ++vertex) {
+        appendPod(skinData, vertex);
+        appendPod(skinData, 1.0f);
+    }
+
+    std::vector<std::uint8_t> fileBytes;
+    const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
+    fileBytes.insert(fileBytes.end(), header.begin(), header.end());
+    appendPod(fileBytes, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(fileBytes, static_cast<std::uint32_t>(6));
+    const auto appendBlock = [&](const std::string& type,
+                                 const std::vector<std::uint8_t>& block) {
+        appendSizedString32(fileBytes, type);
+        fileBytes.insert(fileBytes.end(), block.begin(), block.end());
+    };
+    appendBlock("NiNode", root);
+    appendBlock("NiNode", bone);
+    appendBlock("NiTriShape", shape);
+    appendBlock("NiTriShapeData", geometry);
+    appendBlock("NiSkinInstance", skinInstance);
+    appendBlock("NiSkinData", skinData);
+
+    std::string error;
+    NifSkeleton skeleton;
+    expectTrue(
+        parseNifSkeleton(fileBytes, skeleton, error),
+        ("Morrowind inline-name skeleton parses: " + error).c_str());
+    expectTrue(
+        skeleton.bones.size() == 2u && skeleton.bones[0].name == "Bip01" &&
+            skeleton.bones[1].name == "Bip01 Head" && skeleton.bones[1].parentIndex == 0,
+        "Morrowind inline skeleton names and hierarchy preserve authored pivots");
+
+    NifSkinnedModel skinned;
+    error.clear();
+    expectTrue(
+        parseNifSkinnedMesh(fileBytes, skinned, error),
+        ("Morrowind legacy skin blocks parse: " + error).c_str());
+    expectTrue(
+        skinned.shapes.size() == 1u && skinned.shapes[0].name == "Head" &&
+            skinned.shapes[0].boneNames == std::vector<std::string>{"Bip01 Head"},
+        "Morrowind skin preserves inline shape and bone names");
+    if (skinned.shapes.size() == 1u) {
+        const auto& parsed = skinned.shapes[0];
+        expectTrue(parsed.requiresCanonicalBindBake,
+                   "Morrowind shape requests a canonical authored-bind bake");
+        expectNear(parsed.positions[2], 0.0f, 1e-5f,
+                   "Morrowind skin vertices remain in authored geometry space");
+        expectNear(parsed.skinTransform[3], 7.0f, 1e-5f,
+                   "Morrowind overall skin pivot stays aligned");
+        expectNear(parsed.inverseBindMatrices[3], 4.0f, 1e-5f,
+                   "Morrowind inverse-bind pivot stays aligned");
+        expectTrue(
+            parsed.boneIndices.size() == 12u && parsed.boneWeights.size() == 12u &&
+                parsed.boneWeights[0] == 1.0f && parsed.boneWeights[4] == 1.0f &&
+                parsed.boneWeights[8] == 1.0f,
+            "Morrowind per-bone weights transpose into per-vertex GPU influences");
+
+        FalloutCharacter character;
+        expectTrue(buildFalloutSkeleton(skeleton, character.skeleton),
+                   "Morrowind skeleton converts to the runtime basis");
+        error.clear();
+        expectTrue(appendFalloutCharacterMesh(skinned, character, error),
+                   ("Morrowind skin canonicalizes: " + error).c_str());
+        if (!character.vertices.empty()) {
+            // bind bone world (z=3) * bone inverse (4,5,6) * overall skin
+            // (7,8,9), then Bethesda Z-up -> engine Y-up.
+            expectNear(character.vertices[0].position[0], 11.0f, 1e-5f,
+                       "TES3 authored bind places the vertex on the right pivot X");
+            expectNear(character.vertices[0].position[1], 18.0f, 1e-5f,
+                       "TES3 authored bind places the vertex on the right pivot height");
+            expectNear(character.vertices[0].position[2], -13.0f, 1e-5f,
+                       "TES3 authored bind places the vertex on the right pivot depth");
+            std::vector<odai::math::Matrix4> bindPose;
+            computeFalloutBindPose(character, bindPose);
+            const auto& vertex = character.vertices[0];
+            const odai::math::Vector3 roundTrip = odai::math::transformPoint(
+                bindPose[vertex.boneIndices[0]],
+                {vertex.position[0], vertex.position[1], vertex.position[2]});
+            expectNear(roundTrip.x, vertex.position[0], 1e-4f,
+                       "TES3 canonical inverse bind round-trips X");
+            expectNear(roundTrip.y, vertex.position[1], 1e-4f,
+                       "TES3 canonical inverse bind round-trips height");
+            expectNear(roundTrip.z, vertex.position[2], 1e-4f,
+                       "TES3 canonical inverse bind round-trips depth");
+        }
+    }
+
+    // TES3 BODY parts commonly make the NiTriShape itself the declared root;
+    // there is no wrapper NiNode. A footer-root walk that admits only nodes
+    // silently drops these rigid feet, wrists, legs, and clothing pieces.
+    std::vector<std::uint8_t> rigidShape;
+    appendAvObject(rigidShape, "Rigid Foot", {3.0f, 4.0f, 5.0f});
+    appendPod(rigidShape, static_cast<std::int32_t>(1));   // NiTriShapeData
+    appendPod(rigidShape, static_cast<std::int32_t>(-1));  // no skin instance
+    std::vector<std::uint8_t> rigidFile;
+    rigidFile.insert(rigidFile.end(), header.begin(), header.end());
+    appendPod(rigidFile, static_cast<std::uint32_t>(0x04000002u));
+    appendPod(rigidFile, static_cast<std::uint32_t>(2));
+    appendSizedString32(rigidFile, "NiTriShape");
+    rigidFile.insert(rigidFile.end(), rigidShape.begin(), rigidShape.end());
+    appendSizedString32(rigidFile, "NiTriShapeData");
+    rigidFile.insert(rigidFile.end(), geometry.begin(), geometry.end());
+    appendPod(rigidFile, static_cast<std::uint32_t>(1));  // footer roots
+    appendPod(rigidFile, static_cast<std::int32_t>(0));
+
+    NifModel rigidModel;
+    error.clear();
+    expectTrue(
+        parseNifStaticMesh(rigidFile, rigidModel, error),
+        ("Morrowind rigid root shape parses: " + error).c_str());
+    expectTrue(
+        rigidModel.usedFooterRoots && rigidModel.shapes.size() == 1u,
+        "Morrowind NiTriShape footer root remains reachable without a wrapper node");
+    if (rigidModel.shapes.size() == 1u) {
+        expectNear(
+            rigidModel.shapes[0].positions[0], 3.0f, 1e-5f,
+            "rigid BODY part keeps its authored attachment-local pivot");
+    }
+}
+
 void testMorrowindNifLodNodeSubtypeTail() {
     const auto appendMorrowindNodeBase = [](std::vector<std::uint8_t>& bytes) {
         appendPod(bytes, static_cast<std::uint32_t>(0));   // name length
@@ -5700,11 +5979,21 @@ void testMorrowindDirectKeyframeAndStencilSizing() {
     const std::string header = "NetImmerse File Format, Version 4.0.0.2\n";
     animationFile.insert(animationFile.end(), header.begin(), header.end());
     appendPod(animationFile, static_cast<std::uint32_t>(0x04000002u));
-    appendPod(animationFile, static_cast<std::uint32_t>(2));
+    appendPod(animationFile, static_cast<std::uint32_t>(3));
     appendSizedString32(animationFile, "NiKeyframeController");
     animationFile.insert(animationFile.end(), controller.begin(), controller.end());
     appendSizedString32(animationFile, "NiKeyframeData");
     animationFile.insert(animationFile.end(), keyData.begin(), keyData.end());
+    std::vector<std::uint8_t> textKeys;
+    appendPod(textKeys, static_cast<std::int32_t>(-1));  // next extra data
+    appendPod(textKeys, static_cast<std::uint32_t>(0));  // legacy record size
+    appendPod(textKeys, static_cast<std::uint32_t>(2));
+    appendPod(textKeys, 3.25f);
+    appendSizedString32(textKeys, "Idle: Start");
+    appendPod(textKeys, 5.75f);
+    appendSizedString32(textKeys, "Idle: Stop\r\n");
+    appendSizedString32(animationFile, "NiTextKeyExtraData");
+    animationFile.insert(animationFile.end(), textKeys.begin(), textKeys.end());
 
     std::vector<KfAnimation> animations;
     std::string error;
@@ -5717,6 +6006,23 @@ void testMorrowindDirectKeyframeAndStencilSizing() {
             animations[0].loops() && animations[0].tracks.size() == 1u &&
             animations[0].tracks[0].rotationKeys.size() == 2u,
         "Morrowind direct controller becomes one named looping rigid track");
+
+    NifModel textKeyModel;
+    error.clear();
+    expectTrue(
+        parseNifStaticMesh(animationFile, textKeyModel, error),
+        ("Morrowind animation text keys parse: " + error).c_str());
+    expectTrue(
+        textKeyModel.textKeys.size() == 2u &&
+            textKeyModel.textKeys[0].text == "Idle: Start" &&
+            textKeyModel.textKeys[1].text == "Idle: Stop\r\n",
+        "TES3 animation boundaries retain their authored times and labels");
+    if (textKeyModel.textKeys.size() == 2u) {
+        expectNear(textKeyModel.textKeys[0].time, 3.25f, 1e-6f,
+                   "TES3 text-key start time is decoded");
+        expectNear(textKeyModel.textKeys[1].time, 5.75f, 1e-6f,
+                   "TES3 text-key stop time is decoded");
+    }
 
     // NiStencilProperty has seven trailing u32 fields in 4.0.0.2. Omitting
     // drawMode leaves the unsized walk four bytes before the next type name.
@@ -5871,10 +6177,12 @@ int main() {
     testSkyrimActorSkeletonAndOutfitAssembly();
     testDialogueAttributionByActorAndVoiceType();
     testTemplateSkeletonThroughNestedLeveledLists();
+    testDeterministicActorInventoryExpansion();
     testOblivionWeatherFogAndCloudTints();
     testSkyrimWeatherCloudLayers();
     testBethesdaFireParticleEffectClassification();
     testAnimatedBannerSettlesUnderJoltGravity();
+    testMorrowindSkeletonNamesAndSkinLayout();
     testMorrowindNifLodNodeSubtypeTail();
     testMorrowindDirectKeyframeAndStencilSizing();
 

@@ -1,5 +1,11 @@
 #include "games/newvegas/newvegas_app.h"
 
+#include "bethesda/save_game.h"
+#include "bethesda/record_resolver.h"
+#include "bethesda/scenario.h"
+#include "bethesda/skyrim_scenario_content.h"
+#include "bethesda/vmad_reader.h"
+
 #include "import/fnv/land_lod.h"
 
 #include "render/upscale/upscale_policy.h"
@@ -14,6 +20,8 @@
 #include <sstream>
 #include <random>
 #include <chrono>
+#include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "core/log.h"
@@ -26,6 +34,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <cctype>
@@ -65,13 +74,392 @@ std::string toLowerAscii(std::string value) {
     return value;
 }
 
+const bethesda::Tes3SubrecordData* tes3Subrecord(
+    const bethesda::Tes3NamedRecord& record, std::string_view type) {
+    const auto found = std::find_if(
+        record.subrecords.begin(), record.subrecords.end(),
+        [&](const bethesda::Tes3SubrecordData& subrecord) {
+            return subrecord.type == type;
+        });
+    return found == record.subrecords.end() ? nullptr : &*found;
+}
+
+std::string tes3SubrecordText(
+    const bethesda::Tes3NamedRecord& record, std::string_view type,
+    std::string_view encoding) {
+    const bethesda::Tes3SubrecordData* subrecord = tes3Subrecord(record, type);
+    if (subrecord == nullptr) return {};
+    std::string_view bytes(
+        reinterpret_cast<const char*>(subrecord->data.data()), subrecord->data.size());
+    while (!bytes.empty() && bytes.back() == '\0') bytes.remove_suffix(1u);
+    return bethesda::decodeTes3Text(bytes, encoding);
+}
+
+// TES3 humanoids are assembled from BODY records rather than naming one NPC
+// model. Keep that authored assembly at the presentation boundary: the content
+// store remains immutable and the resulting figure still uses the same actor
+// upload path as every later Bethesda game.
+bool tes3ActorGeometry(
+    const bethesda::Tes3ContentStore& content,
+    const bethesda::Tes3ActorDefinition& actor,
+    std::string& outSkeleton, std::vector<std::string>& outParts,
+    std::vector<std::string>& outRigidAttachmentBones,
+    std::string& outWhy) {
+    outSkeleton.clear();
+    outParts.clear();
+    outRigidAttachmentBones.clear();
+    const bethesda::Tes3NamedRecord* actorRecord = content.findRecord(
+        actor.creature ? "CREA" : "NPC_", actor.id);
+    if (actorRecord == nullptr) {
+        outWhy = "actor definition has no retained source record";
+        return false;
+    }
+    if (actor.creature) {
+        const std::string model =
+            tes3SubrecordText(*actorRecord, "MODL", content.encoding());
+        if (model.empty()) {
+            outWhy = "creature has no MODL";
+            return false;
+        }
+        outSkeleton = model;
+        outParts.push_back(model);
+        outRigidAttachmentBones.emplace_back();
+        return true;
+    }
+
+    outSkeleton = "base_anim.nif";
+    const auto appendBodyModel = [&](std::string_view bodyId,
+                                     std::string_view rigidAttachmentBone) {
+        if (bodyId.empty()) return;
+        const bethesda::Tes3NamedRecord* body = content.findRecord("BODY", bodyId);
+        if (body == nullptr) return;
+        const std::string model = tes3SubrecordText(*body, "MODL", content.encoding());
+        if (model.empty()) return;
+        // A single rigid model is commonly reused for the left and right
+        // equipment slots. Deduplicating on path alone deletes one limb; the
+        // authored attachment pivot is part of the identity of an assembled
+        // BODY piece. Fully skinned parts use an empty attachment and still
+        // deduplicate exactly as before.
+        for (std::size_t part = 0u; part < outParts.size(); ++part) {
+            if (outParts[part] == model &&
+                outRigidAttachmentBones[part] == rigidAttachmentBone) {
+                return;
+            }
+        }
+        outParts.push_back(model);
+        outRigidAttachmentBones.emplace_back(rigidAttachmentBone);
+    };
+
+    // The NPC selects its authored face and hair explicitly.
+    appendBodyModel(
+        tes3SubrecordText(*actorRecord, "BNAM", content.encoding()), "Head");
+    appendBodyModel(
+        tes3SubrecordText(*actorRecord, "KNAM", content.encoding()), "Head");
+
+    bool female = false;
+    if (const bethesda::Tes3SubrecordData* flags = tes3Subrecord(*actorRecord, "FLAG");
+        flags != nullptr && flags->data.size() >= sizeof(std::uint32_t)) {
+        std::uint32_t value = 0u;
+        std::memcpy(&value, flags->data.data(), sizeof(value));
+        female = (value & 0x1u) != 0u;
+    }
+
+    // NPCO inventory is also the authored outfit in TES3. CLOT/ARMO records
+    // map each covered body slot to a male BNAM and female CNAM BODY record.
+    // Resolve those before bare skin so robes and uniforms replace, rather
+    // than z-fight with, the body parts they cover.
+    std::array<bool, 13> covered{};
+    for (const auto& [itemKey, count] : actor.inventory) {
+        if (count <= 0 || (itemKey.recordType != "CLOT" && itemKey.recordType != "ARMO")) {
+            continue;
+        }
+        const auto itemIt = content.namedRecords().find(itemKey);
+        if (itemIt == content.namedRecords().end()) continue;
+        std::array<std::string, 32> maleParts;
+        std::array<std::string, 32> femaleParts;
+        std::uint32_t currentPart = 0xffffffffu;
+        for (const bethesda::Tes3SubrecordData& subrecord : itemIt->second.subrecords) {
+            if (subrecord.type == "INDX" && !subrecord.data.empty()) {
+                currentPart = subrecord.data[0];
+                continue;
+            }
+            if (currentPart >= maleParts.size() ||
+                (subrecord.type != "BNAM" && subrecord.type != "CNAM")) continue;
+            std::string_view bytes(
+                reinterpret_cast<const char*>(subrecord.data.data()), subrecord.data.size());
+            while (!bytes.empty() && bytes.back() == '\0') bytes.remove_suffix(1u);
+            std::string& destination = subrecord.type == "BNAM"
+                ? maleParts[currentPart]
+                : femaleParts[currentPart];
+            destination = bethesda::decodeTes3Text(bytes, content.encoding());
+        }
+        // Equipment distinguishes left/right slots while BODY skin records do
+        // not. Collapse the equipment slot to the BODY part it replaces.
+        static constexpr std::array<std::uint8_t, 25> kEquipmentToBody = {
+            0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 5, 7, 7,
+            8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 8, 8};
+        static constexpr std::array<std::string_view, 25>
+            kEquipmentAttachmentBone = {
+                "Head", "Head", "Neck", "Chest", "Groin", "Groin",
+                "Right Hand", "Left Hand", "Right Wrist", "Left Wrist",
+                "Shield", "Right Forearm", "Left Forearm",
+                "Right Upper Arm", "Left Upper Arm", "Right Foot", "Left Foot",
+                "Right Ankle", "Left Ankle", "Right Knee", "Left Knee",
+                "Right Upper Leg", "Left Upper Leg", "Right Clavicle",
+                "Left Clavicle"};
+        for (std::size_t part = 0u; part < maleParts.size(); ++part) {
+            const std::string& bodyId = female && !femaleParts[part].empty()
+                ? femaleParts[part]
+                : maleParts[part];
+            if (bodyId.empty()) continue;
+            const std::size_t before = outParts.size();
+            appendBodyModel(
+                bodyId,
+                part < kEquipmentAttachmentBone.size()
+                    ? kEquipmentAttachmentBone[part]
+                    : std::string_view{});
+            if (part < kEquipmentToBody.size()) {
+                const std::size_t bodyPart = kEquipmentToBody[part];
+                covered[bodyPart] = covered[bodyPart] || outParts.size() != before;
+            }
+        }
+    }
+
+    // One normal skin part for each authored body slot. BYDT is
+    // {part, vampire, flags, type}; type 0 is skin and flag bit 0 is female.
+    // Head/hair (slots 0/1) stay under the NPC's explicit BNAM/KNAM choice.
+    //
+    // Unlike later games, the attachment is not named by the BODY NIF. The
+    // small rigid meshes are authored around the origin of the BODY slot and
+    // the engine parents them to the corresponding helper node in base_anim.
+    // Bilateral slots deliberately append the same mesh twice with different
+    // attachment identities. Fully skinned aggregate records (notably the
+    // hand/chest skin bundle) ignore the attachment in buildSkinnedActor and
+    // therefore remain a single part.
+    const auto appendBareBodyModel = [&](std::string_view bodyId, std::uint8_t part) {
+        switch (part) {
+            case 2u: appendBodyModel(bodyId, "Neck"); break;
+            case 3u: appendBodyModel(bodyId, "Chest"); break;
+            case 4u: appendBodyModel(bodyId, "Groin"); break;
+            case 6u:
+                appendBodyModel(bodyId, "Right Wrist");
+                appendBodyModel(bodyId, "Left Wrist");
+                break;
+            case 7u:
+                appendBodyModel(bodyId, "Right Forearm");
+                appendBodyModel(bodyId, "Left Forearm");
+                break;
+            case 8u:
+                appendBodyModel(bodyId, "Right Upper Arm");
+                appendBodyModel(bodyId, "Left Upper Arm");
+                break;
+            case 9u:
+                appendBodyModel(bodyId, "Right Foot");
+                appendBodyModel(bodyId, "Left Foot");
+                break;
+            case 10u:
+                appendBodyModel(bodyId, "Right Ankle");
+                appendBodyModel(bodyId, "Left Ankle");
+                break;
+            case 11u:
+                appendBodyModel(bodyId, "Right Knee");
+                appendBodyModel(bodyId, "Left Knee");
+                break;
+            case 12u:
+                appendBodyModel(bodyId, "Right Upper Leg");
+                appendBodyModel(bodyId, "Left Upper Leg");
+                break;
+            default:
+                // Some races bundle multiple weighted regions in one skin
+                // BODY record. Leave those on their authored NiSkin weights.
+                appendBodyModel(bodyId, {});
+                break;
+        }
+    };
+    std::array<bool, 13> selected = covered;
+    for (const auto& [key, candidate] : content.namedRecords()) {
+        (void)key;
+        if (candidate.record.recordType != "BODY") continue;
+        const bethesda::Tes3SubrecordData* bydt = tes3Subrecord(candidate, "BYDT");
+        if (bydt == nullptr || bydt->data.size() < 4u) continue;
+        const std::uint8_t part = bydt->data[0];
+        const bool candidateFemale = (bydt->data[2] & 0x1u) != 0u;
+        const std::uint8_t bodyType = bydt->data[3];
+        if (part < 2u || part >= selected.size() || selected[part] ||
+            candidateFemale != female || bodyType != 0u) continue;
+        const std::string race = tes3SubrecordText(candidate, "FNAM", content.encoding());
+        if (toLowerAscii(race) != toLowerAscii(actor.race)) continue;
+        const std::size_t before = outParts.size();
+        appendBareBodyModel(candidate.id, part);
+        selected[part] = outParts.size() != before;
+    }
+    if (outParts.empty()) {
+        outWhy = "NPC head, hair and race BODY records resolve no models";
+        return false;
+    }
+    return true;
+}
+
+const bethesda::VmadScriptAttachment* findVmadScript(
+    const bethesda::VmadAttachments& attachments, std::string_view className) {
+    const std::string wanted = toLowerAscii(std::string(className));
+    const auto found = std::find_if(
+        attachments.scripts.begin(), attachments.scripts.end(),
+        [&](const bethesda::VmadScriptAttachment& script) {
+            return toLowerAscii(script.className) == wanted;
+        });
+    return found == attachments.scripts.end() ? nullptr : &*found;
+}
+
+const bethesda::VmadProperty* findVmadProperty(
+    const bethesda::VmadScriptAttachment& script, std::string_view propertyName) {
+    const std::string wanted = toLowerAscii(std::string(propertyName));
+    const auto found = std::find_if(
+        script.properties.begin(), script.properties.end(),
+        [&](const bethesda::VmadProperty& property) {
+            return toLowerAscii(property.name) == wanted;
+        });
+    return found == script.properties.end() ? nullptr : &*found;
+}
+
+bool readVmadObjectProperty(
+    const bethesda::VmadScriptAttachment& script, std::string_view propertyName,
+    std::uint32_t& outFormId) {
+    const bethesda::VmadProperty* property = findVmadProperty(script, propertyName);
+    if (property == nullptr || property->value.type != bethesda::VmadValueType::Object ||
+        property->value.object.formId == 0u ||
+        property->value.object.alias != 0xffffu) {
+        return false;
+    }
+    outFormId = property->value.object.formId;
+    return true;
+}
+
+bool readVmadIntegerProperty(
+    const bethesda::VmadScriptAttachment& script, std::string_view propertyName,
+    std::int32_t& outValue) {
+    const bethesda::VmadProperty* property = findVmadProperty(script, propertyName);
+    if (property == nullptr || property->value.type != bethesda::VmadValueType::Integer) {
+        return false;
+    }
+    outValue = property->value.integer;
+    return true;
+}
+
+std::string importedReferenceSourceId(std::uint32_t resolvedFormId) {
+    std::ostringstream out;
+    out << "refr_" << std::hex << std::uppercase << resolvedFormId;
+    return out.str();
+}
+
 bool keyDown(GLFWwindow* window, int key) {
     return glfwGetKey(window, key) == GLFW_PRESS;
+}
+
+// A demo row should contain complete walking silhouettes, not every partially
+// resolvable record near the spawn. A missing torso is detectable without
+// knowing an actor's EditorID: complete humanoid geometry has meaningful
+// vertex coverage through the middle of its standing bounds, while a detached
+// head plus boots leaves that entire band empty.
+bool hasHumanoidTorsoCoverage(const SkinnedActor& actor) {
+    if (!actor.wanders || actor.character.vertices.size() < 100u) {
+        return false;
+    }
+    float minY = std::numeric_limits<float>::max();
+    float maxY = std::numeric_limits<float>::lowest();
+    for (const render::ImportedSkinnedMeshVertex& vertex : actor.character.vertices) {
+        minY = std::min(minY, vertex.position[1]);
+        maxY = std::max(maxY, vertex.position[1]);
+    }
+    const float height = maxY - minY;
+    if (!(height > 1.0f)) {
+        return false;
+    }
+    const float torsoMin = minY + (height * 0.35f);
+    const float torsoMax = minY + (height * 0.70f);
+    std::size_t torsoVertices = 0u;
+    for (const render::ImportedSkinnedMeshVertex& vertex : actor.character.vertices) {
+        torsoVertices += vertex.position[1] >= torsoMin && vertex.position[1] <= torsoMax ? 1u : 0u;
+    }
+    return torsoVertices >= 100u &&
+        torsoVertices * 20u >= actor.character.vertices.size();
 }
 
 float srgbChannelToLinear(float srgb) {
     return srgb <= 0.04045f ? (srgb / 12.92f)
                             : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+}
+
+std::uint64_t physicsResidencyToken(const importer::CellCoord& cell) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cell.x)) << 32u) |
+        static_cast<std::uint32_t>(cell.z);
+}
+
+bethesda::RuntimeAiState runtimeAiStateFor(
+    const SkinnedActor& actor,
+    const importer::fnv::FalloutLoadOrder& loadOrder) {
+    bethesda::RuntimeAiState state;
+    state.walking = actor.walking;
+    state.projectedToNavigation = actor.projectedToNavigation;
+    std::copy_n(actor.wanderOrigin, 3u, state.wanderOrigin.begin());
+    std::copy_n(actor.wanderTarget, 3u, state.wanderTarget.begin());
+    state.path.reserve(actor.wanderPath.size());
+    for (const ActorNavigationStep& step : actor.wanderPath) {
+        bethesda::RuntimePathStep saved;
+        saved.kind = step.kind == ActorNavigationStepKind::ActivateDoor
+            ? bethesda::RuntimePathStepKind::ActivateDoor
+            : bethesda::RuntimePathStepKind::Walk;
+        saved.position = {step.position.x, step.position.y, step.position.z};
+        saved.arrivalPosition = {
+            step.arrivalPosition.x, step.arrivalPosition.y, step.arrivalPosition.z};
+        if (step.doorReferenceFormId != 0u) {
+            std::string error;
+            (void)bethesda::stableRecordKey(
+                loadOrder, step.doorReferenceFormId, saved.door, error);
+        }
+        state.path.push_back(std::move(saved));
+    }
+    state.pathIndex = actor.wanderPathIndex;
+    state.pauseSeconds = std::max(0.0f, actor.wanderPauseSeconds);
+    state.randomState = actor.wanderRng;
+    state.scriptedMoveActive = actor.scriptedMoveActive;
+    state.scriptedMoveArrived = actor.scriptedMoveArrived;
+    state.scriptedMoveRevision = actor.scriptedMoveRevision;
+    return state;
+}
+
+void restoreRuntimeAiState(
+    const bethesda::RuntimeAiState& state,
+    const importer::fnv::FalloutLoadOrder& loadOrder,
+    SkinnedActor& actor) {
+    actor.walking = state.walking;
+    actor.projectedToNavigation = state.projectedToNavigation;
+    std::copy(state.wanderOrigin.begin(), state.wanderOrigin.end(), actor.wanderOrigin);
+    std::copy(state.wanderTarget.begin(), state.wanderTarget.end(), actor.wanderTarget);
+    actor.wanderPath.clear();
+    actor.wanderPath.reserve(state.path.size());
+    for (const bethesda::RuntimePathStep& saved : state.path) {
+        ActorNavigationStep step;
+        step.kind = saved.kind == bethesda::RuntimePathStepKind::ActivateDoor
+            ? ActorNavigationStepKind::ActivateDoor
+            : ActorNavigationStepKind::Walk;
+        step.position = {saved.position[0], saved.position[1], saved.position[2]};
+        step.arrivalPosition = {saved.arrivalPosition[0], saved.arrivalPosition[1],
+            saved.arrivalPosition[2]};
+        if (saved.door.valid()) {
+            std::string error;
+            (void)bethesda::resolvedFormId(
+                loadOrder, saved.door, step.doorReferenceFormId, error);
+        }
+        actor.wanderPath.push_back(std::move(step));
+    }
+    actor.wanderPathIndex = static_cast<std::size_t>(
+        std::min<std::uint64_t>(state.pathIndex, actor.wanderPath.size()));
+    actor.wanderPauseSeconds = state.pauseSeconds;
+    actor.wanderRng = state.randomState;
+    actor.scriptedMoveActive = state.scriptedMoveActive;
+    actor.scriptedMoveArrived = state.scriptedMoveArrived;
+    actor.scriptedMoveRevision = state.scriptedMoveRevision;
 }
 
 }  // namespace
@@ -380,14 +768,445 @@ int NewVegasApp::findUsableDoor() const {
     return best;
 }
 
+int NewVegasApp::findLootableActorInReach() const {
+    const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    const float yaw = m_yawDegrees * (kPi / 180.0f);
+    int best = -1;
+    float bestDistanceSquared = std::numeric_limits<float>::max();
+    for (std::size_t index = 0u; index < m_actors.size(); ++index) {
+        const SkinnedActor& actor = m_actors[index];
+        if (!actor.runtimeDead ||
+            !actorIsInReach(actor, cameraPosition, yaw)) {
+            continue;
+        }
+        const float dx = actor.position[0] - m_cameraX;
+        const float dy = actor.position[1] - m_cameraY;
+        const float dz = actor.position[2] - m_cameraZ;
+        const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+        if (distanceSquared < bestDistanceSquared) {
+            best = static_cast<int>(index);
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+    return best;
+}
+
+bool NewVegasApp::lootActor(int actorIndex) {
+    if (!m_bethesdaSessionConfigured || actorIndex < 0 ||
+        actorIndex >= static_cast<int>(m_actors.size())) {
+        return false;
+    }
+    const SkinnedActor& actor = m_actors[static_cast<std::size_t>(actorIndex)];
+    bethesda::RecordKey actorReference;
+    std::string error;
+    if (actor.referenceFormId == 0u ||
+        !bethesda::stableRecordKey(
+            m_streamLoadOrder, actor.referenceFormId, actorReference, error)) {
+        m_toasts.push("Cannot search", error, "loot");
+        return false;
+    }
+    const bethesda::ScenarioDefinition* scenario =
+        bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) return false;
+    const bethesda::LootTransferResult result = m_bethesdaSession.lootObject(
+        bethesda::ObjectId::persistent(
+            bethesda::makeRecordKey(scenario->basePlugin, 0x14u)),
+        bethesda::ObjectId::persistent(std::move(actorReference)));
+    if (!result.accepted) {
+        m_toasts.push("Cannot search", result.diagnostic, "loot");
+        return false;
+    }
+    if (result.transferred.empty()) {
+        m_toasts.push(actor.displayName(), result.diagnostic, "loot");
+        return true;
+    }
+    bethesda::RecordKey goldenClawItem;
+    if (const bethesda::QuestRuntimeState* ms13 =
+            m_bethesdaSession.findQuest("MS13")) {
+        const auto clawAlias = std::find_if(
+            ms13->aliases.begin(), ms13->aliases.end(),
+            [](const bethesda::QuestAliasRuntimeState& alias) {
+                return toLowerAscii(alias.name) == "goldenclaw";
+            });
+        if (clawAlias != ms13->aliases.end()) {
+            goldenClawItem = clawAlias->createdObject;
+        }
+    }
+    for (const bethesda::InventoryEntry& entry : result.transferred) {
+        const bool goldenClaw = goldenClawItem.valid() && entry.item == goldenClawItem;
+        const std::string itemName = goldenClaw ? "Golden Claw" : entry.item.toString();
+        m_toasts.push("Item added", itemName +
+            (entry.count == 1 ? std::string{} : " x" + std::to_string(entry.count)),
+            "loot:" + entry.item.toString());
+    }
+    return true;
+}
+
+bool NewVegasApp::configureGoldenClawPuzzleForCurrentSpace(std::string& outError) {
+    const bool replacingBinding = m_goldenClawPuzzle.has_value();
+    if (m_goldenClawPuzzle.has_value()) {
+        for (const std::uint32_t reference :
+             m_goldenClawPuzzle->collisionReferenceFormIds) {
+            m_disabledBethesdaCollisionReferences.erase(reference);
+        }
+        registerCachedBethesdaCollision();
+    }
+    m_goldenClawPuzzle.reset();
+    if (!m_bethesdaSessionConfigured || m_streamer == nullptr ||
+        !m_interiorStarted || m_currentInteriorEditorId.empty()) {
+        outError.clear();
+        return true;
+    }
+    const bethesda::QuestRuntimeState* questState =
+        m_bethesdaSession.findQuest("MS13");
+    if (questState == nullptr) {
+        outError = "Golden Claw runtime requires the installed MS13 quest";
+        return false;
+    }
+    const auto alias = std::find_if(
+        questState->aliases.begin(), questState->aliases.end(),
+        [](const bethesda::QuestAliasRuntimeState& candidate) {
+            return toLowerAscii(candidate.name) == "hallofstoriesdoor";
+        });
+    if (alias == questState->aliases.end() ||
+        alias->target.kind != bethesda::ObjectIdKind::PersistentReference) {
+        outError = "MS13 HallofStoriesDoor alias has no persistent target";
+        return false;
+    }
+
+    std::uint32_t keyholeReferenceFormId = 0u;
+    if (!bethesda::resolvedFormId(
+            m_streamLoadOrder, alias->target.reference,
+            keyholeReferenceFormId, outError)) {
+        return false;
+    }
+    if (!m_streamer->referenceBelongsToInterior(
+            keyholeReferenceFormId, m_currentInteriorEditorId)) {
+        // MS13 is globally registered, but its keyhole matters only while its
+        // owning interior is resident.
+        outError.clear();
+        return true;
+    }
+
+    std::uint32_t keyholeBaseFormId = 0u;
+    std::size_t keyholeSourcePluginIndex = 0u;
+    std::vector<std::uint8_t> keyholeVmadBytes;
+    if (!m_streamer->referenceGameplayData(
+            keyholeReferenceFormId, keyholeBaseFormId, keyholeVmadBytes,
+            keyholeSourcePluginIndex, outError)) {
+        return false;
+    }
+    bethesda::VmadAttachments keyholeAttachments;
+    if (!bethesda::readVmadAttachments(
+            keyholeVmadBytes, keyholeAttachments, outError)) {
+        outError = "Hall of Stories keyhole VMAD: " + outError;
+        return false;
+    }
+    const bethesda::VmadScriptAttachment* keyholeScript =
+        findVmadScript(keyholeAttachments, "HallofStoriesKeyholeScript");
+    if (keyholeScript == nullptr) {
+        outError = "Hall of Stories keyhole lacks HallofStoriesKeyholeScript";
+        return false;
+    }
+
+    const auto remapKeyholeProperty = [&](std::uint32_t raw) {
+        return m_streamLoadOrder.remapFormId(keyholeSourcePluginIndex, raw);
+    };
+    std::uint32_t requiredItemRaw = 0u;
+    std::uint32_t questRaw = 0u;
+    std::uint32_t doorBaseRaw = 0u;
+    std::int32_t successStage = 0;
+    if (!readVmadObjectProperty(*keyholeScript, "myMiscObject", requiredItemRaw) ||
+        !readVmadObjectProperty(*keyholeScript, "myQuest", questRaw) ||
+        !readVmadObjectProperty(*keyholeScript, "doorBase", doorBaseRaw) ||
+        !readVmadIntegerProperty(
+            *keyholeScript, "myQuestStageSuccess", successStage) ||
+        successStage < 0) {
+        outError = "HallofStoriesKeyholeScript has incomplete item, quest, door, or stage properties";
+        return false;
+    }
+
+    static constexpr std::array<std::string_view, 3> kRingProperties = {
+        "largeRing", "mediumRing", "smallRing"};
+    std::array<std::uint32_t, 3> ringReferenceFormIds{};
+    bethesda::RuntimeActivatorState activator;
+    activator.puzzleStates.reserve(kRingProperties.size());
+    activator.puzzleSolution.reserve(kRingProperties.size());
+    for (std::size_t ring = 0u; ring < kRingProperties.size(); ++ring) {
+        std::uint32_t ringRaw = 0u;
+        if (!readVmadObjectProperty(*keyholeScript, kRingProperties[ring], ringRaw)) {
+            outError = "HallofStoriesKeyholeScript is missing " +
+                std::string(kRingProperties[ring]);
+            return false;
+        }
+        ringReferenceFormIds[ring] = remapKeyholeProperty(ringRaw);
+        std::uint32_t unusedRingBase = 0u;
+        std::size_t ringSourcePluginIndex = 0u;
+        std::vector<std::uint8_t> ringVmadBytes;
+        if (!m_streamer->referenceGameplayData(
+                ringReferenceFormIds[ring], unusedRingBase, ringVmadBytes,
+                ringSourcePluginIndex, outError)) {
+            outError = std::string(kRingProperties[ring]) + ": " + outError;
+            return false;
+        }
+        bethesda::VmadAttachments ringAttachments;
+        if (!bethesda::readVmadAttachments(
+                ringVmadBytes, ringAttachments, outError)) {
+            outError = std::string(kRingProperties[ring]) + " VMAD: " + outError;
+            return false;
+        }
+        const bethesda::VmadScriptAttachment* ringScript =
+            findVmadScript(ringAttachments, "HallofStoriesDiskScript");
+        std::int32_t initialState = 0;
+        std::int32_t solveState = 0;
+        if (ringScript == nullptr ||
+            !readVmadIntegerProperty(*ringScript, "initialState", initialState) ||
+            !readVmadIntegerProperty(*ringScript, "solveState", solveState) ||
+            initialState <= 0 || solveState <= 0) {
+            outError = std::string(kRingProperties[ring]) +
+                " lacks valid HallofStoriesDiskScript states";
+            return false;
+        }
+        (void)ringSourcePluginIndex;
+        activator.puzzleStates.push_back(initialState);
+        activator.puzzleSolution.push_back(solveState);
+        activator.puzzleStateCount = std::max(
+            activator.puzzleStateCount, std::max(initialState, solveState));
+    }
+
+    bethesda::RecordKey keyholeBase;
+    bethesda::RecordKey requiredItem;
+    bethesda::RecordKey quest;
+    if (!bethesda::stableRecordKey(
+            m_streamLoadOrder, keyholeBaseFormId, keyholeBase, outError) ||
+        !bethesda::stableRecordKey(
+            m_streamLoadOrder, remapKeyholeProperty(requiredItemRaw),
+            requiredItem, outError) ||
+        !bethesda::stableRecordKey(
+            m_streamLoadOrder, remapKeyholeProperty(questRaw), quest, outError)) {
+        return false;
+    }
+    float keyholePosition[3] = {};
+    if (!m_streamer->referencePositionEngineSpace(
+            keyholeReferenceFormId, keyholePosition, outError)) {
+        return false;
+    }
+
+    const bethesda::ObjectId keyholeObject = alias->target;
+    const bethesda::RuntimeObject* existing =
+        m_bethesdaSession.world().find(keyholeObject);
+    if (existing == nullptr) {
+        bethesda::RuntimeObject runtime;
+        runtime.id = keyholeObject;
+        runtime.base = std::move(keyholeBase);
+        runtime.kind = bethesda::RuntimeObjectKind::Activator;
+        runtime.persistent = true;
+        runtime.interior = true;
+        runtime.transform.position = {
+            keyholePosition[0], keyholePosition[1], keyholePosition[2]};
+        runtime.activatorState = activator;
+        if (!m_bethesdaSession.world().addInitialObject(
+                std::move(runtime), outError)) {
+            return false;
+        }
+        existing = m_bethesdaSession.world().find(keyholeObject);
+    }
+    if (existing == nullptr ||
+        existing->kind != bethesda::RuntimeObjectKind::Activator ||
+        !existing->activatorState.has_value() ||
+        existing->activatorState->puzzleStates.size() != kRingProperties.size() ||
+        existing->activatorState->puzzleSolution.size() != kRingProperties.size()) {
+        outError = "Hall of Stories keyhole save state is incompatible with installed VMAD";
+        return false;
+    }
+
+    GoldenClawPuzzleBinding binding;
+    binding.door = keyholeObject;
+    binding.requiredItem = std::move(requiredItem);
+    binding.quest = std::move(quest);
+    binding.successStage = successStage;
+    binding.keyholeReferenceFormId = keyholeReferenceFormId;
+    std::copy_n(keyholePosition, 3u, binding.position);
+    binding.collisionReferenceFormIds = {
+        keyholeReferenceFormId, remapKeyholeProperty(doorBaseRaw),
+        ringReferenceFormIds[0], ringReferenceFormIds[1], ringReferenceFormIds[2]};
+    std::uint32_t doorFxRaw = 0u;
+    if (readVmadObjectProperty(*keyholeScript, "doorFX", doorFxRaw)) {
+        binding.collisionReferenceFormIds.push_back(remapKeyholeProperty(doorFxRaw));
+    }
+    std::sort(binding.collisionReferenceFormIds.begin(),
+        binding.collisionReferenceFormIds.end());
+    binding.collisionReferenceFormIds.erase(
+        std::unique(binding.collisionReferenceFormIds.begin(),
+            binding.collisionReferenceFormIds.end()),
+        binding.collisionReferenceFormIds.end());
+    m_goldenClawPuzzle = std::move(binding);
+
+    if (existing->activatorState->opened) {
+        m_disabledBethesdaCollisionReferences.insert(
+            m_goldenClawPuzzle->collisionReferenceFormIds.begin(),
+            m_goldenClawPuzzle->collisionReferenceFormIds.end());
+    }
+    registerCachedBethesdaCollision();
+    if ((existing->activatorState->opened || replacingBinding) &&
+        !refreshGoldenClawPresentation(outError)) {
+        return false;
+    }
+    VOX_LOGI("scenario")
+        << "configured installed Golden Claw keyhole "
+        << m_goldenClawPuzzle->door.toString() << " states="
+        << existing->activatorState->puzzleStates[0] << ","
+        << existing->activatorState->puzzleStates[1] << ","
+        << existing->activatorState->puzzleStates[2] << " solution="
+        << existing->activatorState->puzzleSolution[0] << ","
+        << existing->activatorState->puzzleSolution[1] << ","
+        << existing->activatorState->puzzleSolution[2];
+    outError.clear();
+    return true;
+}
+
+bool NewVegasApp::goldenClawPuzzleInReach() const {
+    if (!m_goldenClawPuzzle.has_value()) return false;
+    const bethesda::RuntimeObject* keyhole =
+        m_bethesdaSession.world().find(m_goldenClawPuzzle->door);
+    if (keyhole == nullptr || !keyhole->activatorState.has_value() ||
+        keyhole->activatorState->opened) {
+        return false;
+    }
+    constexpr float kMaxDistance = 300.0f;
+    constexpr float kMinFacingDot = 0.25f;
+    const float dx = m_goldenClawPuzzle->position[0] - m_cameraX;
+    const float dy = m_goldenClawPuzzle->position[1] - m_cameraY;
+    const float dz = m_goldenClawPuzzle->position[2] - m_cameraZ;
+    if ((dx * dx) + (dy * dy) + (dz * dz) > kMaxDistance * kMaxDistance) {
+        return false;
+    }
+    const float horizontal = std::sqrt((dx * dx) + (dz * dz));
+    if (horizontal <= 1e-3f) return true;
+    const float yaw = m_yawDegrees * (kPi / 180.0f);
+    return ((dx / horizontal) * std::cos(yaw)) +
+        ((dz / horizontal) * std::sin(yaw)) >= kMinFacingDot;
+}
+
+bool NewVegasApp::rotateGoldenClawRing(std::size_t ringIndex) {
+    if (!m_goldenClawPuzzle.has_value()) return false;
+    std::string error;
+    if (!m_bethesdaSession.rotatePuzzleRing(
+            m_goldenClawPuzzle->door, ringIndex, error)) {
+        m_toasts.push("Claw mechanism", error, "golden-claw");
+        return false;
+    }
+    static constexpr std::array<const char*, 3> kRingNames = {
+        "Large ring", "Medium ring", "Small ring"};
+    m_toasts.push(kRingNames[ringIndex], "Rotated", "golden-claw");
+    return true;
+}
+
+bool NewVegasApp::useGoldenClawPuzzle() {
+    if (!m_goldenClawPuzzle.has_value()) return false;
+    const bethesda::ScenarioDefinition* scenario =
+        bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) return false;
+    const bethesda::PuzzleDoorActivationResult result =
+        m_bethesdaSession.activatePuzzleDoor(
+            bethesda::ObjectId::persistent(
+                bethesda::makeRecordKey(scenario->basePlugin, 0x14u)),
+            m_goldenClawPuzzle->door,
+            m_goldenClawPuzzle->requiredItem,
+            m_goldenClawPuzzle->quest,
+            m_goldenClawPuzzle->successStage);
+    if (!result.accepted) {
+        m_toasts.push("Claw mechanism", result.diagnostic, "golden-claw");
+    } else if (result.missingRequiredItem) {
+        m_toasts.push("Claw mechanism", "The Golden Claw is required", "golden-claw");
+    } else if (result.incorrectCombination) {
+        m_toasts.push("Claw mechanism", "The rings are not aligned", "golden-claw");
+    } else if (result.opened) {
+        m_disabledBethesdaCollisionReferences.insert(
+            m_goldenClawPuzzle->collisionReferenceFormIds.begin(),
+            m_goldenClawPuzzle->collisionReferenceFormIds.end());
+        registerCachedBethesdaCollision();
+        std::string presentationError;
+        if (!refreshGoldenClawPresentation(presentationError)) {
+            VOX_LOGE("render") << presentationError;
+            m_toasts.push("Compatibility error", presentationError,
+                "golden-claw-presentation");
+        }
+        m_toasts.push("Quest updated", "The Hall of Stories is open", "golden-claw");
+    }
+    return result.accepted;
+}
+
+bool NewVegasApp::refreshGoldenClawPresentation(std::string& outError) {
+    if (!m_currentInteriorSourceScene.has_value() ||
+        m_interiorChunk == render::Renderer::kInvalidImportedChunkIndex) {
+        outError = "Golden Claw presentation has no resident interior source scene";
+        return false;
+    }
+    importer::ImportedScene presentation = *m_currentInteriorSourceScene;
+    std::unordered_set<std::string> hiddenSources;
+    if (m_goldenClawPuzzle.has_value()) {
+        if (m_disabledBethesdaCollisionReferences.contains(
+                m_goldenClawPuzzle->keyholeReferenceFormId)) {
+            for (const std::uint32_t reference :
+                 m_goldenClawPuzzle->collisionReferenceFormIds) {
+                hiddenSources.insert(importedReferenceSourceId(reference));
+            }
+        }
+    }
+    std::erase_if(presentation.instances,
+        [&](const importer::ImportedSceneInstance& instance) {
+            return hiddenSources.contains(instance.sourceId);
+        });
+    std::erase_if(presentation.particleEmitters,
+        [&](const importer::ImportedSceneParticleEmitter& emitter) {
+            return hiddenSources.contains(emitter.sourceId);
+        });
+    std::erase_if(presentation.lights,
+        [&](const importer::ImportedSceneLight& light) {
+            return std::any_of(hiddenSources.begin(), hiddenSources.end(),
+                [&](const std::string& source) {
+                    return light.sourceId == source ||
+                        light.sourceId.starts_with(source + "_");
+                });
+        });
+    importer::buildImportedScenePackedRenderData(presentation);
+    const std::size_t replacement = m_renderer.addImportedSceneChunk(presentation);
+    if (replacement == render::Renderer::kInvalidImportedChunkIndex) {
+        outError = "renderer rejected Golden Claw presentation refresh";
+        return false;
+    }
+    m_renderer.removeImportedSceneChunk(m_interiorChunk);
+    m_interiorChunk = replacement;
+    outError.clear();
+    return true;
+}
+
 void NewVegasApp::beginConversation(int actorIndex) {
     if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) {
+        return;
+    }
+    if (beginTes3Conversation(actorIndex) || beginBethesdaConversation(actorIndex)) {
+        return;
+    }
+    // A Skyrim scenario must never fall through to the TES4/Fallout dialogue
+    // importer. That format happens to produce a few structurally valid but
+    // empty nodes from TES5 records, yielding a blank modal and no authored
+    // effects. No matching retail INFO means the actor simply has no available
+    // topic in the current quest state.
+    if (m_bethesdaSessionConfigured && m_streamIsSkyrim) {
         return;
     }
     SkinnedActor& actor = m_actors[static_cast<std::size_t>(actorIndex)];
     if (!actor.canTalk()) {
         return;
     }
+    m_bethesdaDialogueActive = false;
+    m_bethesdaDialogueChoices.clear();
+    m_bethesdaDialogueSpeaker = {};
+    m_bethesdaDialoguePlayer = {};
+    m_bethesdaDialoguePendingEndInfo = {};
+    m_bethesdaDialogueNextTopics.clear();
     m_talkingActor = actorIndex;
     actor.talking = true;
     actor.runtime.begin(actor.tree, actor.context);
@@ -402,16 +1221,382 @@ void NewVegasApp::beginConversation(int actorIndex) {
                          << " finished=" << actor.runtime.isFinished();
 }
 
+bool NewVegasApp::beginTes3Conversation(int actorIndex) {
+    if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
+        actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) {
+        return false;
+    }
+    SkinnedActor& actor = m_actors[static_cast<std::size_t>(actorIndex)];
+    if (!actor.placed || actor.runtimeDead) return false;
+    const auto& content = m_bethesdaSession.tes3().content();
+    if (content == nullptr) return false;
+    const bethesda::Tes3ActorDefinition* definition =
+        content->findActor("NPC_", actor.name);
+    if (definition == nullptr) definition = content->findActor("CREA", actor.name);
+    if (definition == nullptr) return false;
+
+    bethesda::Tes3DialogueActorState state;
+    state.object = bethesda::ObjectId::persistent(definition->record);
+    state.id = definition->id;
+    state.race = definition->race;
+    state.actorClass = definition->actorClass;
+    state.faction = definition->faction.textId;
+    state.rank = static_cast<std::int8_t>(std::clamp(definition->rank, -1, 127));
+
+    // Prefer the placed FRMR identity when the presentation actor corresponds
+    // to one. Result scripts then mutate the actual streamed object instead of
+    // an actor-base surrogate. Synthetic diagnostic actors deliberately fall
+    // back to the named base object.
+    float nearestDistanceSquared = std::numeric_limits<float>::max();
+    const bethesda::Tes3ReferenceDefinition* nearestReference = nullptr;
+    for (const auto& [id, reference] : content->references()) {
+        (void)id;
+        if (reference.base != definition->record || !reference.hasTransform) continue;
+        const float dx = actor.position[0] - reference.position[0];
+        const float dy = actor.position[1] - reference.position[2];
+        const float dz = actor.position[2] + reference.position[1];
+        const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+        if (distanceSquared < nearestDistanceSquared) {
+            nearestDistanceSquared = distanceSquared;
+            nearestReference = &reference;
+        }
+    }
+    if (nearestReference != nullptr && nearestDistanceSquared < 1600.0f * 1600.0f) {
+        state.object = nearestReference->id;
+        state.cell = nearestReference->cell.textId;
+    }
+    if (m_interiorStarted && !m_currentInteriorEditorId.empty()) {
+        state.cell = m_currentInteriorEditorId;
+    } else if (!m_streamSpawnInterior.empty()) {
+        // A doorstep spawn names the authored interior ("Almas Thirr,
+        // Temple"). TES3 exterior dialogue filters name the settlement prefix.
+        const std::size_t comma = m_streamSpawnInterior.find(',');
+        state.cell = m_streamSpawnInterior.substr(0u, comma);
+    }
+
+    if (m_bethesdaSession.world().find(state.object) == nullptr) {
+        bethesda::RuntimeObject runtimeActor;
+        runtimeActor.id = state.object;
+        runtimeActor.base = definition->record;
+        runtimeActor.kind = bethesda::RuntimeObjectKind::Actor;
+        runtimeActor.persistent = true;
+        runtimeActor.transform.position = {
+            actor.position[0], actor.position[1], actor.position[2]};
+        runtimeActor.actorValues.emplace();
+        std::string addError;
+        if (!m_bethesdaSession.world().addInitialObject(std::move(runtimeActor), addError)) {
+            VOX_LOGW("tes3") << "could not bind dialogue actor " << actor.name
+                              << ": " << addError;
+        }
+    }
+
+    bethesda::Tes3DialoguePlayerState player =
+        m_bethesdaSession.tes3().playerState();
+    player.object = m_bethesdaSession.playerObject();
+    const bethesda::Tes3DialogueResponse response =
+        m_bethesdaSession.startTes3Dialogue(std::move(state), std::move(player), false);
+    for (const std::string& diagnostic : response.diagnostics) {
+        VOX_LOGW("tes3-dialogue") << diagnostic;
+    }
+    if (!response.accepted) return false;
+
+    m_tes3DialogueActive = true;
+    m_bethesdaDialogueActive = false;
+    m_talkingActor = actorIndex;
+    actor.talking = true;
+    rebuildTes3ConversationTree(actor, response);
+    VOX_LOGI("tes3-dialogue") << "conversation: " << actor.name
+                               << " cell=\"" <<
+        m_bethesdaSession.tes3().dialogue().actor.cell << "\" topics="
+                               << m_bethesdaSession.tes3DialogueTopics(false).size()
+                               << " faceHeight=" << conversationFaceHeight(actor)
+                               << " bindFaceHeight=" << actor.headHeightUnits
+                               << " standingHeight=" << actor.standingHeightUnits;
+    return true;
+}
+
+void NewVegasApp::rebuildTes3ConversationTree(
+    SkinnedActor& actor, const bethesda::Tes3DialogueResponse& response) {
+    actor.tree = {};
+    actor.tree.id = "tes3-dynamic-dialogue";
+    actor.tree.startNode = "tes3-response";
+    dialogue::DialogueNode node;
+    node.id = actor.tree.startNode;
+    node.speaker = actor.displayName();
+    node.text = response.text.empty() ? "..." : response.text;
+    m_tes3DialogueActions.clear();
+    for (const bethesda::Tes3DialogueChoice& choice : response.choices) {
+        node.choices.push_back({choice.label, node.id, {}, {}});
+        m_tes3DialogueActions.push_back(
+            {Tes3DialogueActionKind::Choice, {}, choice.value});
+    }
+    for (const std::string& topic : m_bethesdaSession.tes3DialogueTopics(false)) {
+        if (m_tes3DialogueActions.size() >= 8u) break;
+        node.choices.push_back({topic, node.id, {}, {}});
+        m_tes3DialogueActions.push_back(
+            {Tes3DialogueActionKind::Topic, topic, 0});
+    }
+    node.choices.push_back({"Goodbye", node.id, {}, {}});
+    m_tes3DialogueActions.push_back(
+        {Tes3DialogueActionKind::Goodbye, {}, 0});
+    actor.tree.nodes.emplace(node.id, std::move(node));
+    actor.runtime.begin(actor.tree, actor.context);
+    m_dialogueChoice = 0;
+    m_dialogueChoiceNodeId.clear();
+}
+
+bool NewVegasApp::beginBethesdaConversation(int actorIndex) {
+    if (!m_bethesdaSessionConfigured || !m_streamIsSkyrim ||
+        actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) {
+        return false;
+    }
+    SkinnedActor& actor = m_actors[static_cast<std::size_t>(actorIndex)];
+    if (!actor.placed || actor.runtimeDead || actor.referenceFormId == 0u) return false;
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) return false;
+    bethesda::RecordKey speakerRecord;
+    std::string error;
+    if (!bethesda::stableRecordKey(
+            m_streamLoadOrder, actor.referenceFormId, speakerRecord, error)) {
+        VOX_LOGW("dialogue") << "could not resolve Skyrim speaker " << actor.name
+                              << ": " << error;
+        return false;
+    }
+    const bethesda::ObjectId speaker =
+        bethesda::ObjectId::persistent(std::move(speakerRecord));
+    const bethesda::ObjectId player = bethesda::ObjectId::persistent(
+        bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+    std::vector<bethesda::SkyrimDialogueChoice> choices =
+        m_bethesdaSession.availableDialogueChoices(speaker, player, true);
+    if (choices.empty()) return false;
+
+    m_bethesdaDialogueActive = true;
+    m_bethesdaDialogueSpeaker = speaker;
+    m_bethesdaDialoguePlayer = player;
+    m_bethesdaDialoguePendingEndInfo = {};
+    m_bethesdaDialogueNextTopics.clear();
+    rebuildBethesdaConversationTree(actor, std::move(choices));
+    m_talkingActor = actorIndex;
+    actor.talking = true;
+    m_dialogueChoice = 0;
+    m_dialogueChoiceNodeId.clear();
+    VOX_LOGI("dialogue") << "Skyrim conversation: " << actor.name << " topics="
+                          << m_bethesdaDialogueChoices.size();
+    return true;
+}
+
+void NewVegasApp::rebuildBethesdaConversationTree(
+    SkinnedActor& actor, std::vector<bethesda::SkyrimDialogueChoice> choices) {
+    // The immediate-mode conversation panel supplies selection, scrolling,
+    // controller input and camera framing. This tree is presentation-only;
+    // branch eligibility, conditions and effects remain in BethesdaSession.
+    actor.tree = {};
+    actor.tree.id = "skyrim-retail-dialogue";
+    actor.tree.startNode = "topics";
+    dialogue::DialogueNode topics;
+    topics.id = "topics";
+    topics.speaker = actor.displayName();
+    topics.text = " ";
+    topics.choices.reserve(choices.size());
+    for (std::size_t index = 0u; index < choices.size(); ++index) {
+        const std::string responseId = "response_" + std::to_string(index);
+        topics.choices.push_back(dialogue::DialogueChoice{
+            choices[index].prompt, responseId, {}, {}});
+        dialogue::DialogueNode response;
+        response.id = responseId;
+        response.speaker = actor.displayName();
+        response.text = "[Waiting for authored response]";
+        actor.tree.nodes.emplace(responseId, std::move(response));
+    }
+    actor.tree.nodes.emplace(topics.id, std::move(topics));
+    m_bethesdaDialogueChoices = std::move(choices);
+    actor.runtime.begin(actor.tree, actor.context);
+    m_dialogueChoice = 0;
+    m_dialogueChoiceNodeId.clear();
+}
+
+int NewVegasApp::findBethesdaDialogueActorInReach(
+    const float cameraPosition[3], float cameraYawRadians) {
+    if (!m_bethesdaSessionConfigured || !m_streamIsSkyrim) return -1;
+    int best = -1;
+    float bestDistanceSquared = 0.0f;
+    for (std::size_t index = 0u; index < m_actors.size(); ++index) {
+        const SkinnedActor& actor = m_actors[index];
+        if (actor.runtimeDead || actor.referenceFormId == 0u ||
+            !actorIsInReach(actor, cameraPosition, cameraYawRadians)) continue;
+        bethesda::RecordKey speakerRecord;
+        std::string error;
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, actor.referenceFormId, speakerRecord, error)) continue;
+        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+        if (scenario == nullptr) return -1;
+        const bethesda::ObjectId speaker =
+            bethesda::ObjectId::persistent(std::move(speakerRecord));
+        const bethesda::ObjectId player = bethesda::ObjectId::persistent(
+            bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+        if (m_bethesdaSession.availableDialogueChoices(speaker, player, true).empty()) continue;
+        const float dx = actor.position[0] - cameraPosition[0];
+        const float dy = actor.position[1] - cameraPosition[1];
+        const float dz = actor.position[2] - cameraPosition[2];
+        const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+        if (best < 0 || distanceSquared < bestDistanceSquared) {
+            best = static_cast<int>(index);
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+    return best;
+}
+
+int NewVegasApp::findTes3DialogueActorInReach(
+    const float cameraPosition[3], float cameraYawRadians) const {
+    if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
+        m_bethesdaSession.tes3().content() == nullptr) return -1;
+    int best = -1;
+    float bestDistanceSquared = std::numeric_limits<float>::max();
+    for (std::size_t index = 0u; index < m_actors.size(); ++index) {
+        const SkinnedActor& actor = m_actors[index];
+        if (!actor.placed || actor.runtimeDead ||
+            !actorIsInReach(actor, cameraPosition, cameraYawRadians)) continue;
+        const auto& content = m_bethesdaSession.tes3().content();
+        if (content->findActor("NPC_", actor.name) == nullptr &&
+            content->findActor("CREA", actor.name) == nullptr) continue;
+        const float dx = actor.position[0] - cameraPosition[0];
+        const float dy = actor.position[1] - cameraPosition[1];
+        const float dz = actor.position[2] - cameraPosition[2];
+        const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
+        if (distanceSquared < bestDistanceSquared) {
+            best = static_cast<int>(index);
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+    return best;
+}
+
+void NewVegasApp::chooseConversationChoice(std::size_t index) {
+    SkinnedActor* actor = talkingActor();
+    if (actor == nullptr) return;
+    const auto visibleChoices = actor->runtime.availableChoices();
+    if (index >= visibleChoices.size()) return;
+    if (m_tes3DialogueActive) {
+        if (index >= m_tes3DialogueActions.size()) return;
+        const Tes3DialogueAction action = m_tes3DialogueActions[index];
+        if (action.kind == Tes3DialogueActionKind::Goodbye) {
+            endConversation();
+            return;
+        }
+        const bethesda::Tes3DialogueResponse response =
+            action.kind == Tes3DialogueActionKind::Choice
+                ? m_bethesdaSession.answerTes3Choice(action.choice, false)
+                : m_bethesdaSession.selectTes3Topic(action.topic, false);
+        for (const std::string& diagnostic : response.diagnostics) {
+            VOX_LOGW("tes3-dialogue") << diagnostic;
+        }
+        if (!response.accepted || response.goodbye) {
+            endConversation();
+            return;
+        }
+        rebuildTes3ConversationTree(*actor, response);
+        syncTes3JournalPanel();
+        return;
+    }
+    if (!m_bethesdaDialogueActive) {
+        actor->runtime.choose(*visibleChoices[index]);
+        return;
+    }
+    if (m_bethesdaDialoguePendingEndInfo.valid()) {
+        const bethesda::RecordKey completedInfo = m_bethesdaDialoguePendingEndInfo;
+        m_bethesdaDialoguePendingEndInfo = {};
+        bethesda::SkyrimDialogueSelectionResult end =
+            m_bethesdaSession.selectDialogueInfo(completedInfo,
+                m_bethesdaDialogueSpeaker, m_bethesdaDialoguePlayer, 2u, true);
+        for (const std::string& diagnostic : end.diagnostics) {
+            VOX_LOGW("dialogue") << completedInfo.toString() << ": " << diagnostic;
+        }
+        std::vector<bethesda::SkyrimDialogueChoice> choices =
+            m_bethesdaSession.availableDialogueChoices(
+                m_bethesdaDialogueSpeaker, m_bethesdaDialoguePlayer, true,
+                m_bethesdaDialogueNextTopics);
+        m_bethesdaDialogueNextTopics.clear();
+        if (choices.empty()) {
+            choices = m_bethesdaSession.availableDialogueChoices(
+                m_bethesdaDialogueSpeaker, m_bethesdaDialoguePlayer, true);
+        }
+        if (choices.empty()) {
+            endConversation();
+            return;
+        }
+        rebuildBethesdaConversationTree(*actor, std::move(choices));
+        return;
+    }
+    if (index >= m_bethesdaDialogueChoices.size()) return;
+    const bethesda::SkyrimDialogueChoice& choice = m_bethesdaDialogueChoices[index];
+    bethesda::SkyrimDialogueSelectionResult begin = m_bethesdaSession.selectDialogueInfo(
+        choice.info, m_bethesdaDialogueSpeaker, m_bethesdaDialoguePlayer, 1u, true);
+    for (const std::string& diagnostic : begin.diagnostics) {
+        VOX_LOGW("dialogue") << choice.info.toString() << ": " << diagnostic;
+    }
+    std::vector<std::string> responses = begin.responses;
+    std::string text;
+    for (const std::string& response : responses) {
+        if (!text.empty()) text += "  ";
+        text += response;
+    }
+    if (text.empty()) {
+        text = "[Compatibility error: the selected INFO has no localized response]";
+    }
+    const std::string responseId = "response_" + std::to_string(index);
+    if (auto response = actor->tree.nodes.find(responseId);
+        response != actor->tree.nodes.end()) {
+        response->second.text = std::move(text);
+        if (begin.accepted) {
+            response->second.choices.push_back(
+                dialogue::DialogueChoice{"Continue", "topics", {}, {}});
+        }
+    }
+    if (begin.accepted) {
+        m_bethesdaDialoguePendingEndInfo = choice.info;
+        m_bethesdaDialogueNextTopics = std::move(begin.nextTopics);
+    }
+    actor->runtime.choose(*visibleChoices[index]);
+}
+
 void NewVegasApp::endConversation() {
+    if (m_tes3DialogueActive) {
+        m_bethesdaSession.tes3().endDialogue();
+    }
+    if (m_bethesdaDialogueActive && m_bethesdaDialoguePendingEndInfo.valid()) {
+        const bethesda::RecordKey completedInfo = m_bethesdaDialoguePendingEndInfo;
+        m_bethesdaDialoguePendingEndInfo = {};
+        const bethesda::SkyrimDialogueSelectionResult end =
+            m_bethesdaSession.selectDialogueInfo(completedInfo,
+                m_bethesdaDialogueSpeaker, m_bethesdaDialoguePlayer, 2u, true);
+        for (const std::string& diagnostic : end.diagnostics) {
+            VOX_LOGW("dialogue") << completedInfo.toString() << ": " << diagnostic;
+        }
+    }
     if (SkinnedActor* actor = talkingActor()) {
         actor->talking = false;
         // Forget which line was spoken, so returning to this actor replays the
         // greeting instead of opening on a silent node.
         actor->spokenNodeId.clear();
     }
+    if (m_bethesdaDialogueActive && m_bethesdaDialogueSpeaker.valid()) {
+        bethesda::WorldCommand context;
+        context.type = bethesda::WorldCommandType::SetActorContext;
+        context.target = m_bethesdaDialogueSpeaker;
+        context.inDialogueWithPlayer = false;
+        (void)m_bethesdaSession.world().queue(std::move(context));
+    }
     m_talkingActor = -1;
     m_dialogueChoice = 0;
     m_dialogueChoiceNodeId.clear();
+    m_bethesdaDialogueActive = false;
+    m_tes3DialogueActive = false;
+    m_tes3DialogueActions.clear();
+    m_bethesdaDialogueSpeaker = {};
+    m_bethesdaDialoguePlayer = {};
+    m_bethesdaDialogueChoices.clear();
+    m_bethesdaDialogueNextTopics.clear();
 }
 
 void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
@@ -426,6 +1611,9 @@ void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
         m_cameraZ = door.arrivalPosition[2];
         m_yawDegrees = door.arrivalYawDegrees;
         m_pitchDegrees = 0.0f;
+        if (m_bethesdaPlayerControllerRegistered) {
+            relocateBethesdaPlayerControllerToCamera();
+        }
         reloadActorsForCurrentSpace();
         return;
     }
@@ -434,6 +1622,17 @@ void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
             m_pendingDoor = door;
             m_doorTransitionPhase = DoorTransitionPhase::FadeOut;
             m_doorTransitionAlpha = 0.0f;
+            if (m_bethesdaPlayerControllerRegistered) {
+                const bethesda::ScenarioDefinition* scenario =
+                    bethesda::findScenario(m_scenarioId);
+                if (scenario != nullptr) {
+                    const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
+                        bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+                    (void)m_bethesdaSession.setActorControllerInput(
+                        playerId, bethesda::PhysicsCharacterInput{});
+                }
+                m_bethesdaControllerOwnsCamera = false;
+            }
             if (door.locked) {
                 m_toasts.push("Lock bypassed", door.targetCellEditorId.empty()
                     ? std::string("Exploration mode") : door.targetCellEditorId);
@@ -466,6 +1665,17 @@ void NewVegasApp::rebuildStreamDoors() {
         (void)cell;
         m_doors.insert(m_doors.end(), doors.begin(), doors.end());
     }
+    std::vector<importer::ImportedSceneDoor> residentLinks;
+    if (!m_interiorStarted) {
+        for (const importer::ImportedSceneDoor& door : m_doors) {
+            if (door.targetKind == importer::ImportedSceneDoorTargetKind::Exterior &&
+                !door.targetWorldspaceEditorId.empty() &&
+                door.targetWorldspaceEditorId == m_streamWorldspace) {
+                residentLinks.push_back(door);
+            }
+        }
+    }
+    m_actorNavigation.setResidentDoors(residentLinks);
 }
 
 bool NewVegasApp::completeDoorTransition(
@@ -497,6 +1707,10 @@ bool NewVegasApp::completeDoorTransition(
             outError = "renderer rejected the destination interior";
             return false;
         }
+        const std::size_t previousInteriorChunk = m_interiorChunk;
+
+        m_goldenClawPuzzle.reset();
+        m_disabledBethesdaCollisionReferences.clear();
 
         m_streamer->waitIdle();
         std::string clearError;
@@ -510,6 +1724,10 @@ bool NewVegasApp::completeDoorTransition(
         m_doors.clear();
         m_collision.clear();
         m_actorNavigation.clear();
+        m_bethesdaCollisionByCell.clear();
+        if (m_bethesdaSessionConfigured) {
+            m_bethesdaSession.physics().clearStreamedStaticCollision();
+        }
         if (m_distantLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
             m_renderer.removeImportedSceneChunk(m_distantLodChunk);
             m_distantLodChunk = render::Renderer::kInvalidImportedChunkIndex;
@@ -523,12 +1741,20 @@ bool NewVegasApp::completeDoorTransition(
         for (const SkinnedActor& actor : m_actors) {
             m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
         }
+        if (previousInteriorChunk != render::Renderer::kInvalidImportedChunkIndex &&
+            previousInteriorChunk != destinationChunk) {
+            m_renderer.removeImportedSceneChunk(previousInteriorChunk);
+        }
 
         m_interiorChunk = destinationChunk;
+        m_currentInteriorSourceScene = scene;
         const importer::CellCoord collisionCell{
             static_cast<std::int32_t>(std::floor(door.arrivalPosition[0] / 4096.0f)),
             static_cast<std::int32_t>(std::floor(door.arrivalPosition[2] / 4096.0f))};
         m_collision.addCell(collisionCell, scene);
+        m_actorNavigation.addCell(collisionCell, interior.navMeshes);
+        m_actorNavigation.setResidentDoors({});
+        if (m_bethesdaSessionConfigured) cacheBethesdaCollisionCell(collisionCell, scene);
         m_doors = scene.doors;
         m_currentInteriorEditorId = door.targetCellEditorId;
         m_interiorStarted = true;
@@ -562,13 +1788,20 @@ bool NewVegasApp::completeDoorTransition(
                        door.targetWorldspaceEditorId;
             return false;
         }
+        m_goldenClawPuzzle.reset();
+        m_disabledBethesdaCollisionReferences.clear();
         m_streamer->waitIdle();
         if (m_interiorChunk != render::Renderer::kInvalidImportedChunkIndex) {
             m_renderer.removeImportedSceneChunk(m_interiorChunk);
             m_interiorChunk = render::Renderer::kInvalidImportedChunkIndex;
         }
+        m_currentInteriorSourceScene.reset();
         m_collision.clear();
         m_actorNavigation.clear();
+        m_bethesdaCollisionByCell.clear();
+        if (m_bethesdaSessionConfigured) {
+            m_bethesdaSession.physics().clearStreamedStaticCollision();
+        }
         m_streamDoorsByCell.clear();
         m_doors.clear();
         if (m_distantLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
@@ -609,6 +1842,9 @@ bool NewVegasApp::completeDoorTransition(
     m_yawDegrees = door.arrivalYawDegrees;
     m_pitchDegrees = 0.0f;
     m_walkMode = true;
+    if (m_bethesdaPlayerControllerRegistered) {
+        relocateBethesdaPlayerControllerToCamera();
+    }
 
     if (!m_interiorStarted) {
         const float engine[3] = {m_cameraX, m_cameraY, m_cameraZ};
@@ -626,6 +1862,512 @@ bool NewVegasApp::completeDoorTransition(
     return true;
 }
 
+void NewVegasApp::arrangeActorParadeIfRequested() {
+    const char* parade = std::getenv("ODAI_FNV_ACTORS_PARADE");
+    if (parade == nullptr || m_actors.empty()) {
+        return;
+    }
+
+    const char* drawMode = std::getenv("ODAI_FNV_DRAW");
+    if (drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) {
+        const std::size_t before = m_actors.size();
+        std::erase_if(m_actors, [](const SkinnedActor& actor) {
+            return !hasHumanoidTorsoCoverage(actor);
+        });
+        VOX_LOGI("newvegas") << "actor-only parade: retained " << m_actors.size()
+                              << "/" << before
+                              << " complete walking humanoids";
+    }
+    if (m_actors.empty()) {
+        VOX_LOGW("newvegas") << "actor parade: no complete walking humanoids available";
+        return;
+    }
+
+    if (m_streamIsMorrowind && m_interiorStarted) {
+        // Interior coordinates are local to one authored room complex. The
+        // exterior diagnostic below used the camera's geometry-bounds spawn as
+        // its anchor and terrain-only height sampling; in Almas Thirr that put
+        // the camera between shell pieces and the actors over the void. Anchor
+        // this showcase on a resident's authored foot position instead, then
+        // choose the nearby direction with the most actual collision floor.
+        std::erase_if(m_actors, [](const SkinnedActor& actor) {
+            return actor.character.vertices.empty() || actor.draws.empty();
+        });
+        if (m_actors.empty()) {
+            VOX_LOGW("newvegas") << "TES3 interior parade: no renderable residents";
+            return;
+        }
+
+        constexpr std::size_t kDemoActors = 6u;
+        constexpr std::array<float, kDemoActors> kForward = {
+            150.0f, 150.0f, 150.0f, 260.0f, 260.0f, 260.0f};
+        constexpr std::array<float, kDemoActors> kSide = {
+            -70.0f, 0.0f, 70.0f, -70.0f, 0.0f, 70.0f};
+        const float anchorX = m_actors.front().position[0];
+        const float anchorZ = m_actors.front().position[2];
+        float anchorY = m_actors.front().position[1];
+        (void)m_collision.groundHeight(anchorX, anchorZ, anchorY, anchorY);
+
+        struct DemoSlot {
+            float x = 0.0f;
+            float y = 0.0f;
+            float z = 0.0f;
+        };
+        std::vector<DemoSlot> bestSlots;
+        float bestForwardX = 1.0f;
+        float bestForwardZ = 0.0f;
+        bool usedAuthoredFloorPlane = false;
+        for (int direction = 0; direction < 16; ++direction) {
+            const float angle = static_cast<float>(direction) * (2.0f * kPi / 16.0f);
+            const float forwardX = std::cos(angle);
+            const float forwardZ = std::sin(angle);
+            const float rightX = -forwardZ;
+            const float rightZ = forwardX;
+            std::vector<DemoSlot> slots;
+            for (std::size_t slot = 0u; slot < kDemoActors; ++slot) {
+                const float x = anchorX + forwardX * kForward[slot] + rightX * kSide[slot];
+                const float z = anchorZ + forwardZ * kForward[slot] + rightZ * kSide[slot];
+                float ground = anchorY;
+                if (m_collision.groundHeight(x, z, anchorY, ground) &&
+                    std::abs(ground - anchorY) <= 80.0f) {
+                    slots.push_back({x, ground, z});
+                }
+            }
+            if (slots.size() > bestSlots.size()) {
+                bestSlots = std::move(slots);
+                bestForwardX = forwardX;
+                bestForwardZ = forwardZ;
+            }
+        }
+        if (bestSlots.empty()) {
+            // Some legacy interiors expose visible floor geometry only through
+            // retained instances and therefore have no queryable collision
+            // triangles yet. The anchor itself is an authored NPC foot point,
+            // so a compact formation on that same plane is still materially
+            // safer than the old geometry-bounds/camera plane. Follow the
+            // resident's authored facing direction: NPCs are normally oriented
+            // into their room rather than into its wall.
+            bestForwardX = -std::sin(m_actors.front().yawRadians);
+            bestForwardZ = -std::cos(m_actors.front().yawRadians);
+            const float rightX = -bestForwardZ;
+            const float rightZ = bestForwardX;
+            for (std::size_t slot = 0u; slot < kDemoActors; ++slot) {
+                bestSlots.push_back({
+                    anchorX + bestForwardX * kForward[slot] + rightX * kSide[slot],
+                    anchorY,
+                    anchorZ + bestForwardZ * kForward[slot] + rightZ * kSide[slot]});
+            }
+            usedAuthoredFloorPlane = true;
+            VOX_LOGW("newvegas")
+                << "TES3 interior parade: collision floor unavailable; using compact "
+                   "authored-resident floor plane";
+        }
+
+        const std::size_t actorCount = std::min(m_actors.size(), bestSlots.size());
+        m_actors.resize(actorCount);
+        for (std::size_t i = 0u; i < actorCount; ++i) {
+            SkinnedActor& actor = m_actors[i];
+            actor.position[0] = bestSlots[i].x;
+            actor.position[1] = bestSlots[i].y;
+            actor.position[2] = bestSlots[i].z;
+            actor.wanderOrigin[0] = actor.wanderTarget[0] = actor.position[0];
+            actor.wanderOrigin[1] = actor.wanderTarget[1] = actor.position[1];
+            actor.wanderOrigin[2] = actor.wanderTarget[2] = actor.position[2];
+            actor.projectedToNavigation = false;
+            actor.wanderPath.clear();
+            actor.wanderPathIndex = 0u;
+            actor.wanderPauseSeconds = 0.0f;
+            actor.yawRadians = std::atan2(bestForwardX, bestForwardZ);
+        }
+        m_cameraX = anchorX;
+        m_cameraY = anchorY + kEyeHeightUnits;
+        m_cameraZ = anchorZ;
+        m_yawDegrees = std::atan2(bestForwardZ, bestForwardX) * (180.0f / kPi);
+        m_pitchDegrees = 0.0f;
+        VOX_LOGI("newvegas") << "TES3 interior parade: placed " << actorCount
+                              << " actors on "
+                              << (usedAuthoredFloorPlane
+                                      ? "the authored resident floor plane"
+                                      : "collision floor")
+                              << " around authored anchor ("
+                              << anchorX << ", " << anchorY << ", " << anchorZ << ")";
+        return;
+    }
+
+    // Lay the crowd across the camera's view at a fixed distance. This is a
+    // diagnostic/demo arrangement: the normal runtime preserves authored
+    // placements when the environment switch is absent.
+    constexpr float spacing = 130.0f;
+    const float distance = std::max(200.0f, static_cast<float>(std::atof(parade)));
+    const float yaw = m_yawDegrees * (kPi / 180.0f);
+    const float forwardX = std::cos(yaw);
+    const float forwardZ = std::sin(yaw);
+    const float centreX = m_cameraX + (forwardX * distance);
+    const float centreZ = m_cameraZ + (forwardZ * distance);
+    for (std::size_t i = 0; i < m_actors.size(); ++i) {
+        SkinnedActor& actor = m_actors[i];
+        const float offset =
+            (static_cast<float>(i) -
+             (static_cast<float>(m_actors.size() - 1) * 0.5f)) * spacing;
+        actor.position[0] = centreX + (forwardZ * offset);
+        actor.position[2] = centreZ - (forwardX * offset);
+
+        float ground = 0.0f;
+        const bool onGround = m_streamer
+            ? m_collision.terrainHeight(actor.position[0], actor.position[2], ground)
+            : groundHeightAt(actor.position[0], actor.position[2], ground);
+        actor.position[1] = onGround ? ground : (m_cameraY - kEyeHeightUnits);
+
+        // The navigation pass may make a small local correction on its next
+        // tick, but its new wander centre must be the parade position rather
+        // than the actor's distant authored placement.
+        actor.wanderOrigin[0] = actor.position[0];
+        actor.wanderOrigin[1] = actor.position[1];
+        actor.wanderOrigin[2] = actor.position[2];
+        actor.wanderTarget[0] = actor.position[0];
+        actor.wanderTarget[1] = actor.position[1];
+        actor.wanderTarget[2] = actor.position[2];
+        actor.projectedToNavigation = false;
+        actor.wanderPath.clear();
+        actor.wanderPathIndex = 0u;
+        actor.wanderPauseSeconds = 0.0f;
+        actor.yawRadians = std::atan2(forwardX, forwardZ);
+    }
+    VOX_LOGI("newvegas") << "actor parade: placed " << m_actors.size()
+                          << " actors " << distance << " units ahead of the camera";
+}
+
+bool NewVegasApp::ensureSkyrimActorCatalog() {
+    if (m_skyrimActorCatalogReady) return true;
+    if (!m_streamIsSkyrim || m_streamer == nullptr) return false;
+    std::string error;
+    const std::filesystem::path pluginPath =
+        std::filesystem::path(m_streamDirectory) / m_streamPlugin;
+    const bool loaded = !m_streamLoadOrder.empty()
+        ? importer::fnv::findAllActorsAcrossOrder(
+              m_streamLoadOrder, m_skyrimActorCatalog,
+              m_skyrimActorVoiceFolderPlugin, error)
+        : importer::fnv::findAllActors(pluginPath, m_skyrimActorCatalog, error);
+    if (!loaded) {
+        VOX_LOGE("runtime") << "Skyrim actor catalog failed: " << error;
+        return false;
+    }
+    m_skyrimActorCatalogReady = true;
+    VOX_LOGI("runtime") << "Skyrim actor catalog: "
+                         << m_skyrimActorCatalog.placements.size()
+                         << " winning placements, "
+                         << m_skyrimActorCatalog.bases.size() << " bases";
+    return true;
+}
+
+bool NewVegasApp::bindAndMaterializeScenarioReferences(std::string& outError) {
+    outError.clear();
+    if (!m_bethesdaSessionConfigured || !ensureSkyrimActorCatalog() ||
+        m_streamer == nullptr || m_streamLoadOrder.empty()) {
+        outError = "scenario reference materialization has no resolved Skyrim content";
+        return false;
+    }
+
+    // QUST ALUA identifies a unique ACTOR BASE, while Papyrus aliases hold the
+    // live placed reference. The generic form resolver cannot infer that
+    // distinction and initially produces an ObjectId for the base. Resolve it
+    // through the immutable winning ACHR catalog before any startup fragment
+    // executes. Forced-reference aliases already name a catalog ref directly.
+    std::unordered_map<std::uint32_t,
+        std::vector<const importer::fnv::FalloutActorPlacement*>> placementsByBase;
+    std::unordered_set<std::uint32_t> placedReferences;
+    for (const auto& placement : m_skyrimActorCatalog.placements) {
+        placedReferences.insert(placement.refFormId);
+        placementsByBase[placement.baseFormId].push_back(&placement);
+    }
+    std::size_t reboundAliases = 0u;
+    for (const auto& [questName, quest] : m_bethesdaSession.quests()) {
+        (void)questName;
+        for (const bethesda::QuestAliasRuntimeState& alias : quest.aliases) {
+            if (alias.sourceFormId == 0u ||
+                placedReferences.contains(alias.sourceFormId)) {
+                continue;
+            }
+            const auto candidates = placementsByBase.find(alias.sourceFormId);
+            if (candidates == placementsByBase.end() ||
+                candidates->second.size() != 1u) {
+                continue;
+            }
+            bethesda::RecordKey reference;
+            std::string error;
+            if (!bethesda::stableRecordKey(
+                    m_streamLoadOrder, candidates->second.front()->refFormId,
+                    reference, error) ||
+                !m_bethesdaSession.bindQuestAliasTarget(
+                    bethesda::ObjectId::persistent(quest.record), alias.id,
+                    bethesda::ObjectId::persistent(std::move(reference)), error)) {
+                outError = "could not bind unique actor alias " + quest.editorId + ":" +
+                    std::to_string(alias.id) + ": " + error;
+                return false;
+            }
+            ++reboundAliases;
+        }
+    }
+
+    std::vector<bethesda::ObjectId> referencedObjects;
+    const auto addObject = [&](const bethesda::ObjectId& object) {
+        if (object.kind == bethesda::ObjectIdKind::PersistentReference) {
+            referencedObjects.push_back(object);
+        }
+    };
+    for (const auto& [questName, quest] : m_bethesdaSession.quests()) {
+        (void)questName;
+        for (const bethesda::QuestAliasRuntimeState& alias : quest.aliases) {
+            addObject(alias.target);
+        }
+    }
+    std::function<void(const bethesda::PapyrusValue&)> collectValue;
+    collectValue = [&](const bethesda::PapyrusValue& value) {
+        if (value.type == bethesda::PapyrusValueType::Object) {
+            addObject(value.object);
+        } else if (value.type == bethesda::PapyrusValueType::Array) {
+            for (const bethesda::PapyrusValue& element : value.array) {
+                collectValue(element);
+            }
+        }
+    };
+    for (const bethesda::PapyrusScriptInstanceSnapshot& instance :
+         m_bethesdaSession.papyrus().snapshot().instances) {
+        for (const auto& [name, value] : instance.properties) {
+            (void)name;
+            collectValue(value);
+        }
+    }
+    std::sort(referencedObjects.begin(), referencedObjects.end(),
+        [](const auto& left, const auto& right) {
+            return left.toString() < right.toString();
+        });
+    referencedObjects.erase(std::unique(
+        referencedObjects.begin(), referencedObjects.end()), referencedObjects.end());
+
+    std::size_t materialized = 0u;
+    for (const bethesda::ObjectId& id : referencedObjects) {
+        if (m_bethesdaSession.world().find(id) != nullptr) continue;
+        std::uint32_t resolvedReferenceFormId = 0u;
+        std::string error;
+        if (!bethesda::resolvedFormId(
+                m_streamLoadOrder, id.reference,
+                resolvedReferenceFormId, error)) {
+            continue;
+        }
+        const auto actorPlacement = std::find_if(
+            m_skyrimActorCatalog.placements.begin(),
+            m_skyrimActorCatalog.placements.end(), [&](const auto& placement) {
+                return placement.refFormId == resolvedReferenceFormId;
+            });
+
+        bethesda::RuntimeObject object;
+        object.id = id;
+        object.persistent = true;
+        std::uint32_t baseFormId = 0u;
+        if (actorPlacement != m_skyrimActorCatalog.placements.end()) {
+            baseFormId = actorPlacement->baseFormId;
+            object.kind = bethesda::RuntimeObjectKind::Actor;
+            object.enabled = !actorPlacement->initiallyDisabled;
+            object.actorValues.emplace();
+            object.referenceTypes.reserve(actorPlacement->referenceTypeFormIds.size());
+            for (const std::uint32_t referenceTypeFormId :
+                 actorPlacement->referenceTypeFormIds) {
+                bethesda::RecordKey referenceType;
+                if (bethesda::stableRecordKey(
+                        m_streamLoadOrder, referenceTypeFormId,
+                        referenceType, error)) {
+                    object.referenceTypes.push_back(std::move(referenceType));
+                }
+            }
+            const std::vector<std::uint32_t> inventory =
+                m_skyrimActorCatalog.materializeInventory(
+                    baseFormId, resolvedReferenceFormId);
+            for (const std::uint32_t itemFormId : inventory) {
+                bethesda::RecordKey item;
+                if (!bethesda::stableRecordKey(
+                        m_streamLoadOrder, itemFormId, item, error)) {
+                    continue;
+                }
+                auto entry = std::find_if(object.inventory.begin(), object.inventory.end(),
+                    [&](const bethesda::InventoryEntry& value) {
+                        return value.item == item;
+                    });
+                if (entry == object.inventory.end()) {
+                    object.inventory.push_back({std::move(item), 1, false});
+                } else {
+                    ++entry->count;
+                }
+            }
+            const float bethesdaPosition[3] = {
+                actorPlacement->position[0], actorPlacement->position[1],
+                actorPlacement->position[2]};
+            float enginePosition[3] = {};
+            importer::fnv::CellStreamer::falloutToEngine(
+                bethesdaPosition, enginePosition);
+            object.transform.position = {
+                enginePosition[0], enginePosition[1], enginePosition[2]};
+            object.transform.rotationRadians[1] =
+                -actorPlacement->rotationRadians[2];
+        } else {
+            std::vector<std::uint8_t> vmad;
+            std::size_t sourcePluginIndex = 0u;
+            if (!m_streamer->referenceGameplayData(
+                    resolvedReferenceFormId, baseFormId, vmad,
+                    sourcePluginIndex, error)) {
+                continue;  // Form, quest, scene, faction, or other non-reference.
+            }
+            (void)vmad;
+            (void)sourcePluginIndex;
+            object.kind = bethesda::RuntimeObjectKind::Activator;
+            float enginePosition[3] = {};
+            if (!m_streamer->referencePositionEngineSpace(
+                    resolvedReferenceFormId, enginePosition, error)) {
+                continue;
+            }
+            object.transform.position = {
+                enginePosition[0], enginePosition[1], enginePosition[2]};
+        }
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, baseFormId, object.base, error)) {
+            continue;
+        }
+        bethesda::RuntimeSpaceState origin;
+        if (runtimeOriginSpaceForReference(resolvedReferenceFormId, origin)) {
+            object.originSpace = origin;
+            object.currentSpace = origin;
+            object.interior = origin.kind == bethesda::RuntimeSpaceKind::Interior;
+        }
+        if (const auto ownership =
+                m_streamer->referenceCellOwnership(resolvedReferenceFormId);
+            ownership.has_value() && ownership->locationFormId != 0u) {
+            (void)bethesda::stableRecordKey(
+                m_streamLoadOrder, ownership->locationFormId,
+                object.location, error);
+        }
+        std::sort(object.inventory.begin(), object.inventory.end(),
+            [](const auto& left, const auto& right) {
+                return left.item < right.item;
+            });
+        std::sort(object.referenceTypes.begin(), object.referenceTypes.end());
+        const bethesda::RecordKey materializedBase = object.base;
+        if (!m_bethesdaSession.world().addInitialObject(std::move(object), error)) {
+            outError = "could not materialize scenario reference " +
+                id.toString() + ": " + error;
+            return false;
+        }
+        if (actorPlacement != m_skyrimActorCatalog.placements.end()) {
+            (void)m_bethesdaSession.bindQuestInventoryForActor(
+                id, materializedBase, error);
+            // The alias-created inventory path reports separately and does not
+            // make the actor materialization itself invalid.
+            error.clear();
+        }
+        ++materialized;
+    }
+    VOX_LOGI("scenario") << "scenario runtime closure: " << reboundAliases
+                          << " unique actor aliases rebound, " << materialized
+                          << " placed references materialized before VM startup";
+    return true;
+}
+
+bool NewVegasApp::runtimeOriginSpaceForReference(
+    std::uint32_t referenceFormId,
+    bethesda::RuntimeSpaceState& outSpace) const {
+    outSpace = {};
+    if (m_streamer == nullptr || m_streamLoadOrder.empty()) return false;
+    const auto ownership = m_streamer->referenceCellOwnership(referenceFormId);
+    if (!ownership.has_value()) return false;
+    std::string error;
+    if (ownership->cellFormId != 0u &&
+        !bethesda::stableRecordKey(
+            m_streamLoadOrder, ownership->cellFormId, outSpace.cell, error)) {
+        return false;
+    }
+    if (ownership->interior) {
+        if (!outSpace.cell.valid()) return false;
+        outSpace.kind = bethesda::RuntimeSpaceKind::Interior;
+        return true;
+    }
+    if (ownership->worldspaceFormId == 0u ||
+        !bethesda::stableRecordKey(
+            m_streamLoadOrder, ownership->worldspaceFormId,
+            outSpace.worldspace, error)) {
+        return false;
+    }
+    outSpace.kind = bethesda::RuntimeSpaceKind::Exterior;
+    outSpace.gridX = ownership->gridX;
+    outSpace.gridZ = ownership->gridZ;
+    return true;
+}
+
+bool NewVegasApp::runtimeSpaceForPosition(
+    const float enginePosition[3],
+    bethesda::RuntimeSpaceState& outSpace) const {
+    outSpace = {};
+    if (m_streamer == nullptr || m_streamLoadOrder.empty()) return false;
+    std::string error;
+    if (m_interiorStarted) {
+        const std::uint32_t cellFormId =
+            m_streamer->cellFormIdForInterior(m_currentInteriorEditorId);
+        if (cellFormId == 0u ||
+            !bethesda::stableRecordKey(
+                m_streamLoadOrder, cellFormId, outSpace.cell, error)) {
+            return false;
+        }
+        outSpace.kind = bethesda::RuntimeSpaceKind::Interior;
+        return true;
+    }
+    const std::uint32_t worldspaceFormId = m_streamer->currentWorldspaceFormId();
+    if (worldspaceFormId == 0u ||
+        !bethesda::stableRecordKey(
+            m_streamLoadOrder, worldspaceFormId, outSpace.worldspace, error)) {
+        return false;
+    }
+    float fallout[3] = {};
+    importer::fnv::CellStreamer::engineToFallout(enginePosition, fallout);
+    const float cellSize = m_streamer->cellWorldSize();
+    if (cellSize <= 0.0f) return false;
+    outSpace.kind = bethesda::RuntimeSpaceKind::Exterior;
+    outSpace.gridX = static_cast<std::int32_t>(std::floor(fallout[0] / cellSize));
+    outSpace.gridZ = static_cast<std::int32_t>(std::floor(fallout[1] / cellSize));
+    const std::uint32_t cellFormId =
+        m_streamer->cellFormIdAtFallout(fallout[0], fallout[1]);
+    if (cellFormId != 0u) {
+        bethesda::RecordKey cell;
+        if (bethesda::stableRecordKey(
+                m_streamLoadOrder, cellFormId, cell, error)) {
+            outSpace.cell = std::move(cell);
+        }
+    }
+    return true;
+}
+
+bool NewVegasApp::runtimeSpaceIsResident(
+    const bethesda::RuntimeSpaceState& space) const {
+    if (m_streamer == nullptr || m_streamLoadOrder.empty()) return false;
+    std::string error;
+    if (space.kind == bethesda::RuntimeSpaceKind::Interior) {
+        if (!m_interiorStarted || !space.cell.valid()) return false;
+        const std::uint32_t currentCellFormId =
+            m_streamer->cellFormIdForInterior(m_currentInteriorEditorId);
+        bethesda::RecordKey currentCell;
+        return currentCellFormId != 0u &&
+            bethesda::stableRecordKey(
+                m_streamLoadOrder, currentCellFormId, currentCell, error) &&
+            currentCell == space.cell;
+    }
+    if (space.kind == bethesda::RuntimeSpaceKind::Exterior) {
+        if (m_interiorStarted || !space.worldspace.valid()) return false;
+        std::uint32_t worldspaceFormId = 0u;
+        return bethesda::resolvedFormId(
+                   m_streamLoadOrder, space.worldspace, worldspaceFormId, error) &&
+            m_streamer->isExteriorCellResident(
+                worldspaceFormId, space.gridX, space.gridZ);
+    }
+    return false;
+}
+
 void NewVegasApp::reloadActorsForCurrentSpace() {
     // Fallout/New Vegas still give Victor special startup treatment. Skyrim's
     // streamed traversal has no fixed companion and can rebuild the nearby
@@ -635,7 +2377,11 @@ void NewVegasApp::reloadActorsForCurrentSpace() {
     }
 
     endConversation();
-    for (const SkinnedActor& actor : m_actors) {
+    unregisterBethesdaActorControllers();
+    for (SkinnedActor& actor : m_actors) {
+        // Cell eviction is not an authored Disable. The persistent runtime
+        // object's enabled bit belongs to quest/scripts and must survive this
+        // presentation residency change unchanged.
         if (actor.uploaded) {
             m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
         }
@@ -643,18 +2389,51 @@ void NewVegasApp::reloadActorsForCurrentSpace() {
     m_actors.clear();
     m_victorIndex = -1;
     m_activationActor = -1;
-    m_actorsUploadPending = false;
+    m_activationLootActor = -1;
+    queueActorUploads();
 
     const float engineCentre[3] = {m_cameraX, m_cameraY, m_cameraZ};
     float bethesdaCentre[3] = {};
     importer::fnv::CellStreamer::engineToFallout(engineCentre, bethesdaCentre);
     ActorPopulationStats actorStats;
-    const auto placementFilter = [this](std::uint32_t referenceFormId) {
-        if (m_interiorStarted) {
-            return m_streamer->referenceBelongsToInterior(
-                referenceFormId, m_currentInteriorEditorId);
+    if (!ensureSkyrimActorCatalog()) return;
+    const auto runtimePlacementResolver = [this, &bethesdaCentre](
+            importer::fnv::FalloutActorPlacement& placement) {
+        const bethesda::RuntimeObject* runtime = nullptr;
+        if (m_bethesdaSessionConfigured && placement.refFormId != 0u) {
+            bethesda::RecordKey reference;
+            std::string error;
+            if (bethesda::stableRecordKey(
+                    m_streamLoadOrder, placement.refFormId, reference, error)) {
+                runtime = m_bethesdaSession.world().find(
+                    bethesda::ObjectId::persistent(std::move(reference)));
+            }
         }
-        return m_streamer->referenceBelongsToCurrentWorldspace(referenceFormId);
+        if (runtime != nullptr &&
+            runtime->currentSpace.kind != bethesda::RuntimeSpaceKind::Unknown) {
+            if (!runtimeSpaceIsResident(runtime->currentSpace)) return false;
+            const float engine[3] = {
+                static_cast<float>(runtime->transform.position[0]),
+                static_cast<float>(runtime->transform.position[1]),
+                static_cast<float>(runtime->transform.position[2])};
+            importer::fnv::CellStreamer::engineToFallout(engine, placement.position);
+            placement.rotationRadians[2] =
+                -static_cast<float>(runtime->transform.rotationRadians[1]);
+            // Authored Initially Disabled is only the initial state. A quest
+            // that enabled this persistent object must be able to materialize
+            // its presentation on a later residency refresh.
+            placement.initiallyDisabled = !runtime->enabled;
+        } else {
+            const bool resident = m_interiorStarted
+                ? m_streamer->referenceBelongsToInterior(
+                      placement.refFormId, m_currentInteriorEditorId)
+                : m_streamer->referenceBelongsToResidentExteriorCell(
+                      placement.refFormId);
+            if (!resident) return false;
+        }
+        const float dx = placement.position[0] - bethesdaCentre[0];
+        const float dy = placement.position[1] - bethesdaCentre[1];
+        return ((dx * dx) + (dy * dy)) <= (kActorLoadRadius * kActorLoadRadius);
     };
     const std::filesystem::path dataPath(m_streamDirectory);
     loadGoodspringsActors(
@@ -663,26 +2442,55 @@ void NewVegasApp::reloadActorsForCurrentSpace() {
         m_streamer->assets(), bethesdaCentre, kActorLoadRadius,
         kFirstCrowdSkinnedInstance,
         render::kMaxSkinnedInstances - kFirstCrowdSkinnedInstance,
-        {}, placementFilter, m_actors, actorStats);
+        {}, {}, m_actors, actorStats,
+        &m_skyrimActorCatalog, &m_skyrimActorVoiceFolderPlugin,
+        runtimePlacementResolver);
+
+    arrangeActorParadeIfRequested();
 
     if (!m_actors.empty()) {
         std::string dialogueDetail;
-        loadActorDialogue(
-            dataPath / m_streamPlugin,
-            m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
-            m_actors, dialogueDetail);
+        if (m_scenarioId.empty() || !m_streamIsSkyrim) {
+            loadActorDialogue(
+                dataPath / m_streamPlugin,
+                m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
+                m_actors, dialogueDetail);
+        } else {
+            dialogueDetail = "retail Skyrim dialogue owned by BethesdaSession";
+        }
         VOX_LOGI("newvegas") << "actor dialogue after transition: " << dialogueDetail;
 
         std::string voiceDetail;
         loadActorVoices(
             dataPath, m_streamPlugin, m_modDirectories, m_actors, voiceDetail);
         VOX_LOGI("newvegas") << "actor voices after transition: " << voiceDetail;
-        m_actorsUploadPending = true;
+        queueActorUploads();
     }
     VOX_LOGI("newvegas")
         << "actors after transition into "
         << (m_interiorStarted ? m_currentInteriorEditorId : m_streamWorldspace)
         << ": " << actorStats.detail;
+    // Existing ObjectIds restore their runtime transform before controllers
+    // are registered. New catalog entries are registered from authored data.
+    restoreBethesdaActorsFromSession();
+    m_skyrimActorResidencyDirty = false;
+    std::string puzzleError;
+    if (!configureGoldenClawPuzzleForCurrentSpace(puzzleError)) {
+        VOX_LOGE("scenario") << "Golden Claw compatibility error: " << puzzleError;
+        m_toasts.push("Compatibility error", puzzleError, "golden-claw-compatibility");
+    }
+}
+
+void NewVegasApp::queueActorUploads() {
+    m_nextActorUploadIndex = 0u;
+    m_actorUploadSuccessCount = 0u;
+    m_actorUploadedTextureCount = 0u;
+    m_actorTotalTextureCount = 0u;
+    m_actorsUploadPending = std::any_of(
+        m_actors.begin(), m_actors.end(), [](const SkinnedActor& actor) {
+            return !actor.character.vertices.empty() && !actor.draws.empty() &&
+                actor.instanceSlot != 0u;
+        });
 }
 
 void NewVegasApp::updateDoorTransition(float deltaSeconds) {
@@ -743,9 +2551,36 @@ std::string findFalloutDataDirectory() {
     return {};
 }
 
+std::string findSkyrimDataDirectory() {
+    std::vector<std::filesystem::path> candidates;
+    if (const char* home = std::getenv("HOME")) {
+        const std::filesystem::path homePath(home);
+        candidates.push_back(
+            homePath / ".steam/steam/steamapps/common/Skyrim Special Edition/Data");
+        candidates.push_back(
+            homePath / ".local/share/Steam/steamapps/common/Skyrim Special Edition/Data");
+    }
+    candidates.emplace_back(
+        "/mnt/c/Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition/Data");
+    candidates.emplace_back(
+        "C:/Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition/Data");
+    for (const std::filesystem::path& candidate : candidates) {
+        std::error_code existsError;
+        if (std::filesystem::exists(candidate / "Skyrim.esm", existsError) && !existsError) {
+            return candidate.string();
+        }
+    }
+    return {};
+}
+
 }  // namespace
 
 bool NewVegasApp::onInit() {
+    if (!m_scenarioId.empty() && bethesda::findScenario(m_scenarioId) == nullptr) {
+        VOX_LOGE("scenario") << "unknown scenario '" << m_scenarioId
+                              << "' (available: skyrim-bleak-falls)";
+        return false;
+    }
     // Without this the font atlas is empty, so every addText() emits zero
     // quads and GameApp::drawPerfOverlay bails outright — the HUD and F3 both
     // render nothing, silently, with no error anywhere.
@@ -781,17 +2616,75 @@ bool NewVegasApp::onInit() {
     // the previous pass drew both at body size in a corner.
     constexpr float kDialogueLineSize = 48.0f;
     constexpr float kDialogueChoiceSize = 40.0f;
+    const float uiDensity = std::clamp(contentScale(), 1.0f, 4.0f);
+    std::uint32_t uiFontAtlasSize = 1024u;
+    while (static_cast<float>(uiFontAtlasSize) < 1024.0f * uiDensity) {
+        uiFontAtlasSize *= 2u;
+    }
     const std::string regularFontPath = resolveAssetPath("assets/fonts/Inter-Regular.ttf");
-    if (m_dialogueFont.loadFromFile(regularFontPath, kDialogueLineSize)) {
+    if (m_dialogueFont.loadFromFile(
+            regularFontPath, kDialogueLineSize * uiDensity, uiFontAtlasSize)) {
         m_dialogueFont.setTextureId(m_renderer.registerUiFontAtlas(
             m_dialogueFont.atlasPixels().data(), m_dialogueFont.atlasWidth(),
             m_dialogueFont.atlasHeight()));
     }
-    if (m_dialogueChoiceFont.loadFromFile(regularFontPath, kDialogueChoiceSize)) {
+    if (m_dialogueChoiceFont.loadFromFile(
+            regularFontPath, kDialogueChoiceSize * uiDensity, uiFontAtlasSize)) {
         m_dialogueChoiceFont.setTextureId(m_renderer.registerUiFontAtlas(
             m_dialogueChoiceFont.atlasPixels().data(), m_dialogueChoiceFont.atlasWidth(),
             m_dialogueChoiceFont.atlasHeight()));
     }
+    // Prefer a packaged serif family when one is present. Linux development
+    // builds also use the metrically compatible Liberation Serif installed by
+    // the base image; every face falls back independently so a missing system
+    // font can never make the journal disappear.
+    const auto journalFontPath = [&](std::string_view packaged, std::string_view system) {
+        const std::string asset = resolveAssetPath(std::string(packaged));
+        std::error_code fontError;
+        if (std::filesystem::exists(asset, fontError) && !fontError) return asset;
+        return std::string(system);
+    };
+    const auto loadJournalFace = [&](ui::Font& font, const std::string& path, float size) {
+        // Load from memory because a system font directory is intentionally
+        // read-only; Font::loadFromFile otherwise tries to place its optional
+        // atlas cache beside the TTF and emits a misleading startup warning.
+        std::ifstream input(path, std::ios::binary | std::ios::ate);
+        if (!input) return false;
+        const std::streamoff byteCount = input.tellg();
+        if (byteCount <= 0) return false;
+        input.seekg(0, std::ios::beg);
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byteCount));
+        if (!input.read(reinterpret_cast<char*>(bytes.data()), byteCount) ||
+            !font.loadFromMemory(bytes.data(), bytes.size(), size * uiDensity,
+                                 uiFontAtlasSize)) return false;
+        font.setTextureId(m_renderer.registerUiFontAtlas(
+            font.atlasPixels().data(), font.atlasWidth(), font.atlasHeight()));
+        return true;
+    };
+    constexpr float kJournalTextSize = 34.0f;
+    const bool journalRegular = loadJournalFace(
+        m_tes3JournalFont,
+        journalFontPath("assets/fonts/LiberationSerif-Regular.ttf",
+                        "/usr/share/fonts/liberation-serif-fonts/LiberationSerif-Regular.ttf"),
+        kJournalTextSize);
+    const bool journalBold = loadJournalFace(
+        m_tes3JournalBoldFont,
+        journalFontPath("assets/fonts/LiberationSerif-Bold.ttf",
+                        "/usr/share/fonts/liberation-serif-fonts/LiberationSerif-Bold.ttf"),
+        kJournalTextSize);
+    const bool journalItalic = loadJournalFace(
+        m_tes3JournalItalicFont,
+        journalFontPath("assets/fonts/LiberationSerif-Italic.ttf",
+                        "/usr/share/fonts/liberation-serif-fonts/LiberationSerif-Italic.ttf"),
+        kJournalTextSize);
+    const ui::Font* journalRegularFace = journalRegular ? &m_tes3JournalFont : &m_uiFont;
+    const ui::Font* journalBoldFace = journalBold ? &m_tes3JournalBoldFont
+        : (m_uiFontBold.valid() ? &m_uiFontBold : journalRegularFace);
+    const ui::Font* journalItalicFace = journalItalic ? &m_tes3JournalItalicFont
+        : (m_uiFontItalic.valid() ? &m_uiFontItalic : journalRegularFace);
+    m_tes3JournalPanel = std::make_unique<ui::Tes3JournalPanel>(ui::FontSet{
+        journalRegularFace, journalBoldFace, journalItalicFace,
+        journalBoldFace, &m_uiFontNumeric});
 
     if (m_streamDirectory.empty()) {
         if (const char* fromEnv = std::getenv("ODAI_FNV_STREAM_DIR")) {
@@ -807,9 +2700,11 @@ bool NewVegasApp::onInit() {
         // stream from it. Streaming needs no cooked assets, so a bare launch now
         // has a sensible thing to do -- which it did not when a cooked scene was
         // the only possible source.
-        m_streamDirectory = findFalloutDataDirectory();
+        m_streamDirectory = m_scenarioId.empty()
+            ? findFalloutDataDirectory()
+            : findSkyrimDataDirectory();
         if (!m_streamDirectory.empty()) {
-            VOX_LOGI("newvegas") << "found Fallout: New Vegas data at " << m_streamDirectory;
+            VOX_LOGI("newvegas") << "found Bethesda data at " << m_streamDirectory;
         }
     }
     // NOTE: streaming init happens further down, AFTER the renderer pass-stack
@@ -1050,15 +2945,16 @@ bool NewVegasApp::onInit() {
         }
         m_renderer.setDebugView(view);
     }
-    // ODAI_FNV_DRAW=terrain|statics splits the imported draw list the way the
+    // ODAI_FNV_DRAW=terrain|statics|actors splits the imported draw list the way the
     // F4 panel's checkboxes do, for the same reason the debug views have an env
     // var: a --screenshot run cannot operate ImGui, and "is this artifact
     // terrain or a static" is unanswerable from a lit frame when the two draw
     // on top of each other.
     if (const char* drawEnv = std::getenv("ODAI_FNV_DRAW")) {
         const std::string requested = drawEnv;
-        const bool showTerrain = requested != "statics";
-        const bool showStatics = requested != "terrain";
+        const bool actorsOnly = requested == "actors";
+        const bool showTerrain = !actorsOnly && requested != "statics";
+        const bool showStatics = !actorsOnly && requested != "terrain";
         m_renderer.setImportedSceneDebugState(
             showTerrain, showStatics, /*showTextures=*/true, /*flatShading=*/false,
             /*waterDebug=*/false);
@@ -1224,6 +3120,9 @@ bool NewVegasApp::onInit() {
     if (streamingMode && !initStreaming()) {
         return false;
     }
+    if ((!m_scenarioId.empty() || m_streamIsMorrowind) && !initBethesdaSession()) {
+        return false;
+    }
     // Skyrim's exterior art was authored around a restrained, contrasty
     // display curve. Leaving it on the shared neutral viewer grade makes the
     // pale WTHR horizon occupy most of the midtone range, so stone, timber and
@@ -1306,11 +3205,13 @@ bool NewVegasApp::onInit() {
         if (demoMode == "weather") {
             openWeatherPicker();
         }
-        if (!m_menuOpen) {
+        if (!m_menuOpen && demoMode != "journal") {
             m_banner.push("Goodsprings", "Location discovered", "region:Goodsprings");
         }
-        m_toasts.push("Stimpak", "Added to inventory");
-        m_toasts.push("Quest updated", "Back in the Saddle");
+        if (demoMode != "journal") {
+            m_toasts.push("Stimpak", "Added to inventory");
+            m_toasts.push("Quest updated", "Back in the Saddle");
+        }
     }
 
     setMouseCaptured(true);
@@ -2418,6 +4319,59 @@ void NewVegasApp::updateSkyrimAmbience(float deltaSeconds) {
 }
 
 void NewVegasApp::applyWeather() {
+    if (m_streamIsMorrowind) {
+        // TES3 does not have Fallout-style WTHR records, but publishing no
+        // atmosphere at all is not neutral in the imported renderer.  It makes
+        // the skybox use its procedural horizon while aerial perspective and
+        // volumetric fog use a separate clear-sky fallback palette.  The two
+        // meet as grey haze over a nearly black strip immediately below y=0.
+        //
+        // Publish one coherent TES3 atmosphere instead.  These are linear HDR
+        // radiance stops, not display-referred Morrowind.ini bytes.  The sun
+        // disk and scattering remain procedural; only the gradient, horizon,
+        // and the fog it fades into are tied together here.
+        const float hour = std::fmod(std::max(m_timeOfDayHours, 0.0f), 24.0f);
+        const float sunHeight = std::sin(((hour - 6.0f) / 12.0f) * kPi);
+        const auto smoothUnit = [](float value) {
+            const float t = std::clamp(value, 0.0f, 1.0f);
+            return t * t * (3.0f - (2.0f * t));
+        };
+        const float daylight = smoothUnit((sunHeight + 0.08f) / 0.58f);
+        const float twilight =
+            1.0f - smoothUnit(std::fabs(sunHeight) / 0.34f);
+
+        constexpr float nightUpper[3] = {0.012f, 0.024f, 0.065f};
+        constexpr float nightLower[3] = {0.025f, 0.045f, 0.105f};
+        constexpr float nightHorizon[3] = {0.055f, 0.070f, 0.120f};
+        constexpr float nightFog[3] = {0.040f, 0.055f, 0.090f};
+        constexpr float dayUpper[3] = {0.105f, 0.300f, 0.680f};
+        constexpr float dayLower[3] = {0.430f, 0.700f, 1.050f};
+        constexpr float dayHorizon[3] = {0.720f, 0.835f, 0.960f};
+        constexpr float dayFog[3] = {0.480f, 0.625f, 0.760f};
+        constexpr float duskUpper[3] = {0.150f, 0.175f, 0.360f};
+        constexpr float duskLower[3] = {0.600f, 0.350f, 0.400f};
+        constexpr float duskHorizon[3] = {0.920f, 0.500f, 0.300f};
+        constexpr float duskFog[3] = {0.500f, 0.365f, 0.380f};
+
+        render::WeatherSkyParams params;
+        params.weight = 1.0f;
+        for (int channel = 0; channel < 3; ++channel) {
+            const float baseUpper = std::lerp(nightUpper[channel], dayUpper[channel], daylight);
+            const float baseLower = std::lerp(nightLower[channel], dayLower[channel], daylight);
+            const float baseHorizon = std::lerp(nightHorizon[channel], dayHorizon[channel], daylight);
+            const float baseFog = std::lerp(nightFog[channel], dayFog[channel], daylight);
+            const float twilightWeight = twilight * 0.78f;
+            params.skyUpper[channel] = std::lerp(baseUpper, duskUpper[channel], twilightWeight);
+            params.skyLower[channel] = std::lerp(baseLower, duskLower[channel], twilightWeight);
+            params.horizon[channel] = std::lerp(baseHorizon, duskHorizon[channel], twilightWeight);
+            params.fogColor[channel] = std::lerp(baseFog, duskFog[channel], twilightWeight);
+        }
+        params.fogFarDistance = std::lerp(100000.0f, 160000.0f, daylight);
+        params.sunGlare = std::lerp(0.55f, 1.0f, daylight);
+        m_renderer.setWeatherSky(params);
+        return;
+    }
+
     const importer::fnv::FalloutWeatherRecord* weather =
         m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
     if (weather == nullptr) {
@@ -3234,7 +5188,22 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     // so the first frame after the card closes applies no delta at all instead
     // of one worth however far the mouse travelled while it was open.
     const bool inConversation = talkingActor() != nullptr;
-    if (m_mouseCaptured && !suppressMouseLook && !inConversation) {
+    bool playerDead = false;
+    if (m_bethesdaSessionConfigured) {
+        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+        if (scenario != nullptr) {
+            const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(
+                bethesda::ObjectId::persistent(
+                    bethesda::makeRecordKey(scenario->basePlugin, 0x14u)));
+            playerDead = player != nullptr && player->actorValues.has_value() &&
+                player->actorValues->dead;
+        }
+    }
+    const bool giftMenuOpen = m_bethesdaSessionConfigured &&
+        !m_bethesdaSession.giftMenuRequests().empty();
+    const bool canControlPlayer =
+        !inConversation && !m_menuOpen && !giftMenuOpen && !playerDead;
+    if (m_mouseCaptured && !suppressMouseLook && !inConversation && !giftMenuOpen) {
         if (m_hasCursorSample) {
             m_yawDegrees += static_cast<float>(cursorX - m_lastCursorX) * kMouseSensitivity;
             m_pitchDegrees -= static_cast<float>(cursorY - m_lastCursorY) * kMouseSensitivity;
@@ -3317,8 +5286,15 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
                 // edge; 0.30 is where a typical four-reply card starts.
                 const float panelTopPx =
                     m_dialoguePanelTopPx > 1.0f ? m_dialoguePanelTopPx : (heightPx * 0.30f);
+                // This is the FACE CENTRE, not the top of the skull. Putting
+                // the centre at 10% left no room for the forehead once the
+                // portrait lens narrowed, so the torso/crotch filled the shot
+                // while the face was technically aimed just beyond the frame.
+                // Reserve a fifth of the image above the centre, while still
+                // preferring the clear strip immediately over the dialogue
+                // card when that strip is taller.
                 const float faceTargetPx =
-                    std::max(heightPx * 0.10f, panelTopPx - (heightPx * 0.07f));
+                    std::max(heightPx * 0.20f, panelTopPx - (heightPx * 0.07f));
                 const float halfHeights =
                     std::clamp(((heightPx * 0.5f) - faceTargetPx) / (heightPx * 0.5f), 0.0f, 0.9f);
                 // The LIVE fov, not the default: it is easing while this runs,
@@ -3439,7 +5415,7 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     // still runs: gravity, the terrain pin and the collision push-out all keep
     // working, so a conversation opened while stepping off a kerb still settles
     // the player onto the ground rather than freezing them mid-air.
-    if (!inConversation) {
+    if (canControlPlayer) {
         if (keyDown(m_window, GLFW_KEY_W)) { moveX += forwardX; moveZ += forwardZ; }
         if (keyDown(m_window, GLFW_KEY_S)) { moveX -= forwardX; moveZ -= forwardZ; }
         if (keyDown(m_window, GLFW_KEY_D)) { moveX += rightX;   moveZ += rightZ; }
@@ -3458,6 +5434,36 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     float speed = kWalkUnitsPerSecond;
     if (keyDown(m_window, GLFW_KEY_LEFT_SHIFT)) {
         speed *= kSprintMultiplier;
+    }
+    if (m_bethesdaPlayerControllerRegistered && m_walkMode) {
+        if (!m_bethesdaControllerOwnsCamera) {
+            relocateBethesdaPlayerControllerToCamera();
+        }
+        bethesda::PhysicsCharacterInput input;
+        input.desiredVelocity = {moveX * speed, 0.0f, moveZ * speed};
+        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+        if (scenario != nullptr) {
+            const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
+                bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+            const auto physical = m_bethesdaSession.physics().characterState(playerId);
+            if (canControlPlayer && keyDown(m_window, GLFW_KEY_SPACE) &&
+                physical.has_value() && physical->grounded) {
+                input.desiredVelocity.y = kJumpUnitsPerSecond;
+            }
+            (void)m_bethesdaSession.setActorControllerInput(playerId, input);
+        }
+        m_bethesdaControllerOwnsCamera = true;
+        return;
+    }
+    if (m_bethesdaPlayerControllerRegistered) {
+        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+        if (scenario != nullptr) {
+            const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
+                bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+            (void)m_bethesdaSession.setActorControllerInput(
+                playerId, bethesda::PhysicsCharacterInput{});
+        }
+        m_bethesdaControllerOwnsCamera = false;
     }
     m_cameraX += moveX * speed * deltaSeconds;
     m_cameraZ += moveZ * speed * deltaSeconds;
@@ -3888,6 +5894,7 @@ bool NewVegasApp::initStreaming() {
     // update() so no cell can become resident without collision knowing.
     m_collision.clear();
     m_actorNavigation.clear();
+    m_bethesdaCollisionByCell.clear();
     m_streamer->setCellCallbacks(
         [this](
             const importer::CellCoord& cell,
@@ -3895,8 +5902,10 @@ bool NewVegasApp::initStreaming() {
             const std::vector<importer::fnv::FalloutNavMeshRecord>& navMeshes) {
             m_collision.addCell(cell, scene);
             m_actorNavigation.addCell(cell, navMeshes);
+            if (!m_scenarioId.empty()) cacheBethesdaCollisionCell(cell, scene);
             m_streamDoorsByCell[cell] = scene.doors;
             rebuildStreamDoors();
+            if (m_streamIsSkyrim) m_skyrimActorResidencyDirty = true;
             if (std::getenv("ODAI_FNV_LOG_NAVIGATION") != nullptr) {
                 VOX_LOGI("newvegas") << "navigation cell " << cell.x << "," << cell.z
                                      << ": " << navMeshes.size() << " meshes, resident total "
@@ -3907,8 +5916,10 @@ bool NewVegasApp::initStreaming() {
         [this](const importer::CellCoord& cell) {
             m_collision.removeCell(cell);
             m_actorNavigation.removeCell(cell);
+            removeBethesdaCollisionCell(cell);
             m_streamDoorsByCell.erase(cell);
             rebuildStreamDoors();
+            if (m_streamIsSkyrim) m_skyrimActorResidencyDirty = true;
         });
     m_streamAmbientEmittersByCell.clear();
     m_streamer->setAmbientEmitterCallbacks(
@@ -4029,6 +6040,7 @@ bool NewVegasApp::initStreaming() {
             VOX_LOGE("newvegas") << "failed to upload interior " << m_startInsideInterior;
             return false;
         }
+        m_currentInteriorSourceScene = interiorScene;
         // An interior has its own coordinate space with no grid, so it gets one
         // synthetic cell of its own. The coordinate only has to be consistent
         // and not collide with a streamed exterior cell, and an interior sits
@@ -4037,6 +6049,8 @@ bool NewVegasApp::initStreaming() {
             static_cast<std::int32_t>(std::floor(interior.spawnPosition[0] / 4096.0f)),
             static_cast<std::int32_t>(std::floor(interior.spawnPosition[2] / 4096.0f))};
         m_collision.addCell(interiorCell, interiorScene);
+        m_actorNavigation.addCell(interiorCell, interior.navMeshes);
+        m_actorNavigation.setResidentDoors({});
         m_doors = interiorScene.doors;
         m_currentInteriorEditorId = m_startInsideInterior;
 
@@ -4114,19 +6128,44 @@ bool NewVegasApp::initStreaming() {
     // Doc Mitchell's doorstep first -- that is where New Vegas actually begins.
     // Fall back to the middle of the worldspace if the cell is missing, so a
     // different plugin or a trimmed install still starts somewhere sensible.
+    bool spawnedAtScenarioMarker = false;
+    if (!m_interiorStarted && !m_scenarioStartMarker.empty()) {
+        const std::string wantedMarker = toLowerAscii(m_scenarioStartMarker);
+        const auto marker = std::find_if(
+            m_streamer->mapMarkers().begin(), m_streamer->mapMarkers().end(),
+            [&](const importer::fnv::FalloutMapMarkerRecord& candidate) {
+                return !candidate.deleted && !candidate.initiallyDisabled &&
+                    candidate.worldspaceFormId == m_streamer->currentWorldspaceFormId() &&
+                    toLowerAscii(candidate.name) == wantedMarker;
+            });
+        if (marker != m_streamer->mapMarkers().end()) {
+            spawn[0] = marker->position[0];
+            spawn[1] = marker->position[2] + kEyeHeightUnits;
+            spawn[2] = -marker->position[1];
+            spawnedAtScenarioMarker = true;
+            VOX_LOGI("scenario") << "spawn marker " << marker->name << " resolved at ref 0x"
+                                  << std::hex << marker->referenceFormId << std::dec;
+        } else {
+            VOX_LOGE("scenario") << "required start marker '" << m_scenarioStartMarker
+                                  << "' is unavailable in " << m_streamWorldspace;
+            return false;
+        }
+    }
     const bool spawnedAtDoorstep =
         !m_interiorStarted && !m_streamSpawnInterior.empty() &&
         m_streamer->spawnAtInteriorDoorEngineSpace(m_streamSpawnInterior, spawn);
     const bool haveSpawn =
-        !m_interiorStarted && (spawnedAtDoorstep || m_streamer->suggestedSpawnEngineSpace(spawn));
+        !m_interiorStarted && (spawnedAtScenarioMarker || spawnedAtDoorstep ||
+                               m_streamer->suggestedSpawnEngineSpace(spawn));
     if (haveSpawn) {
+        bool spawnedAtExplicitPosition = false;
         m_cameraX = spawn[0];
         m_cameraY = spawn[1];  // height
         m_cameraZ = spawn[2];
         // A doorstep spawn is at eye height on the ground, so look at the
         // horizon; the worldspace-centre fallback is well above the terrain and
         // wants to look down at it.
-        m_pitchDegrees = spawnedAtDoorstep ? 0.0f : -20.0f;
+        m_pitchDegrees = (spawnedAtScenarioMarker || spawnedAtDoorstep) ? 0.0f : -20.0f;
         // Same diagnostic override the cooked-scene path has: being able to
         // look straight down separates "above the ground" from "inside it".
         if (const char* pitchEnv = std::getenv("ODAI_FNV_PITCH")) {
@@ -4151,6 +6190,7 @@ bool NewVegasApp::initStreaming() {
                 m_cameraX = px;
                 m_cameraY = py;
                 m_cameraZ = pz;
+                spawnedAtExplicitPosition = true;
             }
         }
         VOX_LOGI("newvegas") << "spawn (engine space): x=" << m_cameraX
@@ -4159,7 +6199,7 @@ bool NewVegasApp::initStreaming() {
         // from the streamed cells, so there is ground to stand on. The
         // worldspace-centre fallback still starts in fly mode, because it aims
         // the camera from well above the terrain.
-        m_walkMode = spawnedAtDoorstep;
+        m_walkMode = spawnedAtScenarioMarker || spawnedAtDoorstep || spawnedAtExplicitPosition;
         // Stand Victor beside wherever the player starts, rather than at his
         // ACRE reference ~7400 units away. Talking to him is the thing being
         // built; a hike across Goodsprings before every test is friction with
@@ -4214,23 +6254,28 @@ bool NewVegasApp::initStreaming() {
                     {victor.baseFormId},
                     [this](std::uint32_t referenceFormId) {
                         return m_streamer != nullptr &&
-                               m_streamer->referenceBelongsToCurrentWorldspace(referenceFormId);
+                               m_streamer->referenceBelongsToCurrentWorldspace(
+                                   referenceFormId);
                     },
                     m_actors, actorStats);
                 if (victorLoaded) {
                     m_victorIndex = static_cast<int>(m_actors.size());
                     m_actors.push_back(std::move(victor));
                 }
-                m_actorsUploadPending = !m_actors.empty();
+                queueActorUploads();
                 // Dialogue for everybody who has any, in one plugin walk. Runs
                 // after Victor joins the list so his own tree is left alone and
                 // his base is not asked for a second time.
                 {
                     std::string dialogueDetail;
-                    loadActorDialogue(
-                        dataPath / m_streamPlugin,
-                        m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder, m_actors,
-                        dialogueDetail);
+                    if (m_scenarioId.empty() || !m_streamIsSkyrim) {
+                        loadActorDialogue(
+                            dataPath / m_streamPlugin,
+                            m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder, m_actors,
+                            dialogueDetail);
+                    } else {
+                        dialogueDetail = "retail Skyrim dialogue owned by BethesdaSession";
+                    }
                     VOX_LOGI("newvegas") << "actor dialogue: " << dialogueDetail;
                     // AFTER the dialogue: an actor with nothing to say needs no
                     // voice index, and skipping those is most of the town.
@@ -4239,50 +6284,7 @@ bool NewVegasApp::initStreaming() {
                         dataPath, m_streamPlugin, m_modDirectories, m_actors, voiceDetail);
                     VOX_LOGI("newvegas") << "actor voices: " << voiceDetail;
                 }
-                // ODAI_FNV_ACTORS_PARADE lines every built actor up in front of
-                // the spawn, for the same reason Victor stands beside it: the
-                // town's people are spread over 12000 units and a screenshot
-                // run cannot walk to them, so without this a change to how a
-                // body is assembled cannot be looked at at all.
-                if (const char* parade = std::getenv("ODAI_FNV_ACTORS_PARADE")) {
-                    // Laid out along the camera's own right vector at a fixed
-                    // distance ahead of it, so ODAI_FNV_YAW alone chooses what
-                    // the parade stands in front of -- a fixed compass
-                    // direction puts them behind Doc Mitchell's house.
-                    const float spacing = 130.0f;
-                    const float distance = std::max(200.0f, static_cast<float>(std::atof(parade)));
-                    const float yaw = m_yawDegrees * (kPi / 180.0f);
-                    const float forwardX = std::cos(yaw);
-                    const float forwardZ = std::sin(yaw);
-                    const float centreX = m_cameraX + (forwardX * distance);
-                    const float centreZ = m_cameraZ + (forwardZ * distance);
-                    for (std::size_t i = 0; i < m_actors.size(); ++i) {
-                        SkinnedActor& actor = m_actors[i];
-                        const float offset =
-                            (static_cast<float>(i) -
-                             (static_cast<float>(m_actors.size() - 1) * 0.5f)) * spacing;
-                        // Right vector is forward rotated -90 degrees in XZ.
-                        actor.position[0] = centreX + (forwardZ * offset);
-                        actor.position[2] = centreZ - (forwardX * offset);
-                        // The terrain under THIS actor, not under the player.
-                        // groundHeightAt resolves against the camera's own foot
-                        // height, so over a valley it stood the whole parade in
-                        // the air at the player's altitude -- which is what
-                        // "the actors are floating in the sky" was.
-                        float ground = 0.0f;
-                        const bool onGround = m_streamer
-                            ? m_collision.terrainHeight(actor.position[0], actor.position[2], ground)
-                            : groundHeightAt(actor.position[0], actor.position[2], ground);
-                        actor.position[1] =
-                            onGround ? ground : (m_cameraY - kEyeHeightUnits);
-                        actor.projectedToNavigation = false;
-                        actor.wanderPath.clear();
-                        actor.wanderPathIndex = 0u;
-                        // Facing the camera, so a face that failed to build is
-                        // visible as a face and not as the back of a head.
-                        actor.yawRadians = std::atan2(forwardX, forwardZ);
-                    }
-                }
+                arrangeActorParadeIfRequested();
                 VOX_LOGI("newvegas") << "actors: " << actorStats.detail;
                 for (const SkinnedActor& actor : m_actors) {
                     VOX_LOGI("newvegas")
@@ -4311,7 +6313,8 @@ bool NewVegasApp::initStreaming() {
         // silently undone here, so every headless fly capture stayed ON FOOT.
         // F toggles this interactively; these are the same switch for a
         // headless run, which cannot press a key.
-        if (std::getenv("ODAI_FNV_SPAWN_POS") != nullptr) {
+        if (std::getenv("ODAI_FNV_SPAWN_POS") != nullptr &&
+            std::getenv("ODAI_FNV_WALK") == nullptr) {
             // Placing the camera explicitly implies flying it: walk mode
             // re-snaps Y to the ground every frame, so an authored height
             // survived exactly one frame.
@@ -4456,6 +6459,13 @@ void NewVegasApp::loadDistantLandLod() {
 }
 
 void NewVegasApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
+    // A walking-character demo deliberately has no world subject. Avoid
+    // parsing and uploading the 49-tile BTR ring merely to hide it again in
+    // the renderer; that work dominated both startup and steady-state memory.
+    const char* drawMode = std::getenv("ODAI_FNV_DRAW");
+    if (drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) {
+        return;
+    }
     if (!m_streamIsSkyrim || m_streamer == nullptr) {
         return;
     }
@@ -4608,6 +6618,12 @@ void NewVegasApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
 }
 
 void NewVegasApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
+    // See updateSkyrimTerrainLod: actor-only runs should not build the 49-tile
+    // BTO skyline behind a deliberately hidden world.
+    const char* drawMode = std::getenv("ODAI_FNV_DRAW");
+    if (drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) {
+        return;
+    }
     if (!m_streamIsSkyrim || m_streamer == nullptr) {
         return;
     }
@@ -4914,6 +6930,20 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
     updateSkyrimTerrainLod(falloutPosition);
     updateSkyrimObjectLod(falloutPosition);
 
+    // Actor placements and quest aliases are gameplay residency, not renderer
+    // payload. Rebuild the nearby Skyrim population only after the asynchronous
+    // cell ring settles; syncBethesdaActors then publishes stable RecordKeys,
+    // XLCN and XLRT to BethesdaSession before any alias can materialize loot.
+    // Persistent runtime state remains in BethesdaWorld when an actor leaves;
+    // reloadActorsForCurrentSpace disables presentation/physics and a later
+    // revisit re-enables the same ObjectId instead of creating a duplicate.
+    if (m_streamIsSkyrim && m_skyrimActorResidencyDirty &&
+        m_streamer->stats().residency.loadingCount == 0u &&
+        m_doorTransitionPhase == DoorTransitionPhase::None &&
+        talkingActor() == nullptr && m_bethesdaSession.giftMenuRequests().empty()) {
+        reloadActorsForCurrentSpace();
+    }
+
     // Once, after the first ring has settled.
     if (!m_collisionSelfTestDone && std::getenv("ODAI_FNV_COLLISION_TEST") != nullptr &&
         m_streamer->stats().residency.loadingCount == 0u &&
@@ -4954,6 +6984,54 @@ void NewVegasApp::onTick(float deltaSeconds) {
     if (m_captureFixedDt > 0.0f) {
         deltaSeconds = m_captureFixedDt;
     }
+    if (m_bethesdaSessionConfigured) {
+        syncBethesdaPlayerState(false);
+        const bethesda::BethesdaSessionStep sessionStep =
+            m_bethesdaSession.advance(static_cast<double>(deltaSeconds),
+                [this](std::uint64_t, double fixedStepSeconds) {
+                    stepBethesdaActorControllers(
+                        static_cast<float>(fixedStepSeconds));
+                    if (m_meleeAttackPending) {
+                        const bethesda::ScenarioDefinition* scenario =
+                            bethesda::findScenario(m_scenarioId);
+                        if (scenario != nullptr) {
+                            const float yaw = m_yawDegrees * (kPi / 180.0f);
+                            const float pitch = m_pitchDegrees * (kPi / 180.0f);
+                            const float horizontal = std::cos(pitch);
+                            const bethesda::MeleeAttackResult attack =
+                                m_bethesdaSession.performMeleeAttack(
+                                    bethesda::ObjectId::persistent(
+                                        bethesda::makeRecordKey(
+                                            scenario->basePlugin, 0x14u)),
+                                    {std::cos(yaw) * horizontal, std::sin(pitch),
+                                        std::sin(yaw) * horizontal});
+                            if (attack.accepted) {
+                                m_toasts.push(
+                                    attack.hit ? (attack.killed ? "Enemy defeated" : "Hit")
+                                               : "Attack missed",
+                                    attack.hit ? attack.target.toString() : std::string{},
+                                    "melee-attack");
+                            }
+                        }
+                        m_meleeAttackPending = false;
+                    }
+                });
+        if (m_bethesdaControllerOwnsCamera) pullBethesdaPlayerControllerState();
+        pullBethesdaActorControllerStates();
+        if (sessionStep.residencyChanged && m_streamIsSkyrim) {
+            m_skyrimActorResidencyDirty = true;
+        }
+        (void)m_renderer.applyRuntimeRenderDeltas(sessionStep.renderDeltas);
+        for (const std::string& diagnostic : sessionStep.diagnostics) {
+            VOX_LOGW("runtime") << diagnostic;
+        }
+        const bool saveDown = keyDown(m_window, GLFW_KEY_F5);
+        const bool loadDown = keyDown(m_window, GLFW_KEY_F9);
+        if (saveDown && !m_gameplaySaveKeyLatch) (void)saveGameplayState();
+        if (loadDown && !m_gameplayLoadKeyLatch) (void)loadGameplayState();
+        m_gameplaySaveKeyLatch = saveDown;
+        m_gameplayLoadKeyLatch = loadDown;
+    }
     // Keep renderer-side water and rigid machinery on the tour's fixed clock.
     // During capture pre-roll, hold phase zero while streaming, TAA, and
     // exposure warm up. Frame zero then starts camera and machinery together,
@@ -4966,6 +7044,18 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // Before anything reads input: the menu toggle decided here gates whether
     // camera movement runs at all this frame.
     pollNavInput(deltaSeconds);
+    updateTes3JournalInput();
+    updateGiftMenu();
+    const bool giftMenuOpen = m_bethesdaSessionConfigured &&
+        !m_bethesdaSession.giftMenuRequests().empty();
+    const bool meleeDown =
+        glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (meleeDown && !m_meleeAttackButtonLatch && m_bethesdaSessionConfigured &&
+        !m_menuOpen && !m_tes3JournalOpen && !giftMenuOpen && m_talkingActor < 0 &&
+        m_doorTransitionPhase == DoorTransitionPhase::None) {
+        m_meleeAttackPending = true;
+    }
+    m_meleeAttackButtonLatch = meleeDown;
     m_toasts.update(deltaSeconds);
     // The banner is a WORLD event, so it pauses with the world. Letting it run
     // under an open menu means a discovery fades in and out behind a modal
@@ -4976,7 +7066,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // A conversation counts for the same reason, and now more literally: the
     // dialogue card is centred large type, and "Goodsprings / Location
     // discovered" landed straight across Victor's first two replies.
-    if (!m_menuOpen && m_talkingActor < 0) {
+    if (!m_menuOpen && !m_tes3JournalOpen && !giftMenuOpen && m_talkingActor < 0) {
         m_banner.update(deltaSeconds);
     }
     // Region lookup walks the cell index, so it is polled a few times a second
@@ -4999,18 +7089,29 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // this block until the town arrived, and the two had already drifted apart
     // (his remapped texture slots through a helper, the crowd's inline).
     if (m_actorsUploadPending) {
-        m_actorsUploadPending = false;
-        std::size_t uploaded = 0;
-        std::size_t texturedSlots = 0;
-        std::size_t textureSlotCount = 0;
-        for (SkinnedActor& actor : m_actors) {
+        // One GPU realization per frame is deliberate. Each actor can own
+        // several decoded textures and three device-local mesh buffers. Doing
+        // a 40-person cell in one tick prevented the loop from returning to
+        // glfwPollEvents, so movement and even the window close button appeared
+        // dead until the entire crowd had uploaded.
+        bool submittedActor = false;
+        while (m_nextActorUploadIndex < m_actors.size() && !submittedActor) {
+            SkinnedActor& actor = m_actors[m_nextActorUploadIndex++];
+            // TES3 keeps activation proxies even when an optional creature or
+            // modded body mesh cannot be assembled. Those proxies must not
+            // upload an empty template into renderer slot zero.
+            if (actor.character.vertices.empty() || actor.draws.empty() ||
+                actor.instanceSlot == 0u) {
+                continue;
+            }
+            submittedActor = true;
             const std::vector<std::uint32_t> slots =
                 m_renderer.uploadSkinnedActorTextures(actor.instanceSlot, actor.textures);
             remapActorTextureSlots(actor, slots);
             for (const std::uint32_t slot : slots) {
-                texturedSlots += (slot != 0xffffffffu) ? 1u : 0u;
+                m_actorUploadedTextureCount += (slot != 0xffffffffu) ? 1u : 0u;
             }
-            textureSlotCount += slots.size();
+            m_actorTotalTextureCount += slots.size();
 
             render::ImportedSkinnedMeshTemplate meshTemplate{};
             meshTemplate.vertices = actor.character.vertices;
@@ -5019,10 +7120,15 @@ void NewVegasApp::onTick(float deltaSeconds) {
             meshTemplate.boneCount =
                 static_cast<std::uint32_t>(actor.character.skeleton.bones.size());
             actor.uploaded = m_renderer.uploadSkinnedMeshTemplate(actor.instanceSlot, meshTemplate);
-            uploaded += actor.uploaded ? 1u : 0u;
+            m_actorUploadSuccessCount += actor.uploaded ? 1u : 0u;
         }
-        VOX_LOGI("newvegas") << "actors uploaded: " << uploaded << "/" << m_actors.size() << ", "
-                             << texturedSlots << "/" << textureSlotCount << " textures bound";
+        if (m_nextActorUploadIndex >= m_actors.size()) {
+            m_actorsUploadPending = false;
+            VOX_LOGI("newvegas")
+                << "actors uploaded: " << m_actorUploadSuccessCount << "/"
+                << m_actors.size() << ", " << m_actorUploadedTextureCount << "/"
+                << m_actorTotalTextureCount << " textures bound";
+        }
     }
 
     // Pose every actor every frame, whether or not it is being talked to -- the
@@ -5077,26 +7183,28 @@ void NewVegasApp::onTick(float deltaSeconds) {
         // Do not bind an actor to the first NAVM cell that happens to finish.
         // Streaming workers complete out of order; until the initial resident
         // set is idle, the actor's own/nearest mesh may simply not have arrived.
-        const ActorNavigationWorld* actorNavigation =
-            (m_streamer && m_streamer->isStreamingIdle()) ? &m_actorNavigation : nullptr;
-        updateActorWandering(
-            m_actors, deltaSeconds, actorNavigation,
-            [this](float x, float z, float referenceY, float& outHeight) {
-                // The ACTOR's own foot height is the reference, not the
-                // camera's. groundHeight uses it to reject ceilings and to
-                // raise onto walkable geometry, so someone on a porch stays
-                // on the porch instead of sinking to the terrain under it.
-                return m_streamer
-                    ? m_collision.groundHeight(x, z, referenceY, outHeight)
-                    : false;
-            },
-            [this](float& x, float& z, float feetY, float headY, float radius) {
-                if (m_streamer) {
-                    m_collision.resolveHorizontalFor(
-                        x, z, feetY, headY, radius, m_collision.tuning().stepHeight);
-                }
-            },
-            m_talkingActor);
+        if (!m_bethesdaSessionConfigured) {
+            const ActorNavigationWorld* actorNavigation =
+                (m_streamer && m_streamer->isStreamingIdle()) ? &m_actorNavigation : nullptr;
+            updateActorWandering(
+                m_actors, deltaSeconds, actorNavigation,
+                [this](float x, float z, float referenceY, float& outHeight) {
+                    // The ACTOR's own foot height is the reference, not the
+                    // camera's. groundHeight uses it to reject ceilings and to
+                    // raise onto walkable geometry, so someone on a porch stays
+                    // on the porch instead of sinking to the terrain under it.
+                    return m_streamer
+                        ? m_collision.groundHeight(x, z, referenceY, outHeight)
+                        : false;
+                },
+                [this](float& x, float& z, float feetY, float headY, float radius) {
+                    if (m_streamer) {
+                        m_collision.resolveHorizontalFor(
+                            x, z, feetY, headY, radius, m_collision.tuning().stepHeight);
+                    }
+                },
+                m_talkingActor);
+        }
 
         updateActorPoses(m_actors, deltaSeconds);
         for (const SkinnedActor& actor : m_actors) {
@@ -5120,14 +7228,19 @@ void NewVegasApp::onTick(float deltaSeconds) {
             autoTalkEnv = std::getenv("ODAI_FNV_VICTOR_TALK");
         }
         static bool autoTalked = false;
-        if (autoTalkEnv != nullptr && !autoTalked && m_talkingActor < 0) {
+        if (autoTalkEnv != nullptr && !autoTalked && m_talkingActor < 0 &&
+            !m_tes3JournalOpen && !m_actors.empty() &&
+            (m_streamer == nullptr || m_streamer->isStreamingIdle())) {
             autoTalked = true;
             const std::string wanted = toLowerAscii(autoTalkEnv);
             // "1" is the historical value of ODAI_FNV_VICTOR_TALK and names
             // nobody, so it means "whoever the default speaker is".
             const bool wantsDefault = wanted.empty() || wanted == "1";
             for (std::size_t i = 0; i < m_actors.size(); ++i) {
-                if (!m_actors[i].canTalk()) {
+                const bool mayHaveBethesdaTopics = m_bethesdaSessionConfigured &&
+                    (m_streamIsSkyrim || m_streamIsMorrowind) &&
+                    m_actors[i].placed && !m_actors[i].runtimeDead;
+                if (!m_actors[i].canTalk() && !mayHaveBethesdaTopics) {
                     continue;
                 }
                 if (wantsDefault ? (static_cast<int>(i) == m_victorIndex)
@@ -5160,7 +7273,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
         }
         const auto choices = speaker->runtime.availableChoices();
         if (static_cast<std::size_t>(slot) < choices.size()) {
-            speaker->runtime.choose(*choices[static_cast<std::size_t>(slot)]);
+            chooseConversationChoice(static_cast<std::size_t>(slot));
         }
     }
     // Highlight-and-confirm, alongside the number keys rather than instead of
@@ -5202,7 +7315,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
             }
             m_dialogueChoice = std::clamp(m_dialogueChoice, 0, choiceCount - 1);
             if (m_nav.pressed(ui::UiNavAction::Accept)) {
-                speaker->runtime.choose(*choices[static_cast<std::size_t>(m_dialogueChoice)]);
+                chooseConversationChoice(static_cast<std::size_t>(m_dialogueChoice));
                 m_dialogueChoice = 0;
             }
         } else {
@@ -5243,7 +7356,7 @@ void NewVegasApp::onTick(float deltaSeconds) {
     }
 
     updateDoorTransition(deltaSeconds);
-    if (m_doorTransitionPhase == DoorTransitionPhase::None) {
+    if (!m_tes3JournalOpen && m_doorTransitionPhase == DoorTransitionPhase::None) {
         updateCamera(deltaSeconds);
         updateStreaming(deltaSeconds);
     }
@@ -5286,9 +7399,33 @@ void NewVegasApp::onTick(float deltaSeconds) {
     // stands a step from Doc Mitchell's porch, and a player pressing E while
     // facing him means to talk, not to go inside.
     const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
-    m_activationActor = (m_talkingActor >= 0)
-        ? -1
-        : findActorInReach(m_actors, cameraPosition, m_yawDegrees * (kPi / 180.0f));
+    m_activationLootActor = (m_talkingActor >= 0 || m_tes3JournalOpen)
+        ? -1 : findLootableActorInReach();
+    m_activationActor = -1;
+    if (!m_tes3JournalOpen && m_talkingActor < 0 && m_activationLootActor < 0) {
+        m_activationActor = (m_bethesdaSessionConfigured && m_streamIsMorrowind)
+            ? findTes3DialogueActorInReach(
+                  cameraPosition, m_yawDegrees * (kPi / 180.0f))
+            : (m_bethesdaSessionConfigured && m_streamIsSkyrim)
+            ? findBethesdaDialogueActorInReach(
+                  cameraPosition, m_yawDegrees * (kPi / 180.0f))
+            : findActorInReach(
+                  m_actors, cameraPosition, m_yawDegrees * (kPi / 180.0f));
+    }
+    const bool clawPuzzleInReach = m_activationLootActor < 0 &&
+        m_activationActor < 0 && !m_menuOpen &&
+        m_talkingActor < 0 && goldenClawPuzzleInReach();
+    static constexpr std::array<int, 3> kClawRingKeys = {
+        GLFW_KEY_1, GLFW_KEY_2, GLFW_KEY_3};
+    bool rotatedClawRing = false;
+    for (std::size_t ring = 0u; ring < kClawRingKeys.size(); ++ring) {
+        const bool ringDown = keyDown(m_window, kClawRingKeys[ring]);
+        const bool ringEdge = ringDown && !m_goldenClawRingKeyLatch[ring];
+        m_goldenClawRingKeyLatch[ring] = ringDown;
+        if (clawPuzzleInReach && ringEdge && !rotatedClawRing) {
+            rotatedClawRing = rotateGoldenClawRing(ring);
+        }
+    }
     // Latch BEFORE the branch below. It used to be updated after an early
     // return that the Victor path took, so the latch stayed false while E was
     // held: the next frame saw a fresh "press" and walked the player through
@@ -5297,13 +7434,19 @@ void NewVegasApp::onTick(float deltaSeconds) {
     const bool doorPressed = keyDown(m_window, GLFW_KEY_E);
     const bool doorEdge = doorPressed && !m_doorKeyLatch;
     m_doorKeyLatch = doorPressed;
-    if (doorEdge && m_activationActor >= 0) {
+    if (!m_tes3JournalOpen && doorEdge && m_activationLootActor >= 0) {
+        (void)lootActor(m_activationLootActor);
+        return;
+    }
+    if (!m_tes3JournalOpen && doorEdge && m_activationActor >= 0) {
         beginConversation(m_activationActor);
         // The line itself is started by the single speakActorLine poll above,
         // on the next tick.
         return;  // E opened a conversation; do not also walk through a door
     }
-    if (doorEdge) {
+    if (!m_tes3JournalOpen && doorEdge && clawPuzzleInReach) {
+        (void)useGoldenClawPuzzle();
+    } else if (!m_tes3JournalOpen && doorEdge) {
         const int doorIndex = findUsableDoor();
         if (doorIndex >= 0) {
             useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
@@ -5311,13 +7454,13 @@ void NewVegasApp::onTick(float deltaSeconds) {
     }
 
     const bool walkPressed = keyDown(m_window, GLFW_KEY_F);
-    if (walkPressed && !m_walkModeLatch) {
+    if (!m_tes3JournalOpen && walkPressed && !m_walkModeLatch) {
         m_walkMode = !m_walkMode;
     }
     m_walkModeLatch = walkPressed;
 
     const bool tabPressed = keyDown(m_window, GLFW_KEY_TAB);
-    if (tabPressed && !m_tabLatch) {
+    if (!m_tes3JournalOpen && tabPressed && !m_tabLatch) {
         m_mouseCaptured = !m_mouseCaptured;
         setMouseCaptured(m_mouseCaptured);
     }
@@ -5335,10 +7478,12 @@ void NewVegasApp::onTick(float deltaSeconds) {
 
 namespace {
 
-// Pip-Boy phosphor. One palette, used by every piece of chrome below, so the
-// HUD reads as one instrument rather than a pile of independently styled boxes.
-constexpr ui::UiColor kPipGreen{0.42f, 1.00f, 0.52f, 1.00f};
-constexpr ui::UiColor kPipGreenDim{0.26f, 0.66f, 0.32f, 1.00f};
+// One palette, used by every piece of chrome below, so the HUD reads as one
+// instrument rather than a pile of independently styled boxes. Fallout keeps
+// its Pip-Boy phosphor; TES3 switches these four values to warm parchment when
+// its runtime is configured.
+ui::UiColor kPipGreen{0.42f, 1.00f, 0.52f, 1.00f};
+ui::UiColor kPipGreenDim{0.26f, 0.66f, 0.32f, 1.00f};
 
 // Greedy word wrap against a baked font's own metrics.
 //
@@ -5389,8 +7534,15 @@ std::vector<std::string> wrapTextToWidth(
     }
     return lines;
 }
-constexpr ui::UiColor kPipPanel{0.02f, 0.07f, 0.03f, 0.82f};
-constexpr ui::UiColor kPipPanelSolid{0.02f, 0.07f, 0.03f, 0.95f};
+ui::UiColor kPipPanel{0.02f, 0.07f, 0.03f, 0.82f};
+ui::UiColor kPipPanelSolid{0.02f, 0.07f, 0.03f, 0.95f};
+
+void useMorrowindUiPalette() {
+    kPipGreen = {0.88f, 0.78f, 0.60f, 1.00f};
+    kPipGreenDim = {0.64f, 0.59f, 0.50f, 1.00f};
+    kPipPanel = {0.10f, 0.09f, 0.075f, 0.86f};
+    kPipPanelSolid = {0.10f, 0.09f, 0.075f, 0.96f};
+}
 
 float deadzone(float value, float threshold) {
     if (value > -threshold && value < threshold) {
@@ -5472,7 +7624,10 @@ void NewVegasApp::pollNavInput(float deltaSeconds) {
     // Backing out of a conversation therefore closed it AND opened the menu in
     // one press -- two modal states toggled by one key, which reads as the menu
     // appearing for no reason.
-    if (m_nav.pressed(ui::UiNavAction::Menu) && m_talkingActor < 0) {
+    const bool giftMenuOpen = m_bethesdaSessionConfigured &&
+        !m_bethesdaSession.giftMenuRequests().empty();
+    if (m_nav.pressed(ui::UiNavAction::Menu) &&
+        m_talkingActor < 0 && !giftMenuOpen && !m_tes3JournalOpen) {
         // The weather picker is a sub-page of the menu, so Escape backs out of
         // it one level rather than closing everything. Closing straight to the
         // world would make the picker feel like a separate mode the player had
@@ -5487,6 +7642,149 @@ void NewVegasApp::pollNavInput(float deltaSeconds) {
             // Releasing the mouse with the menu up is what makes it usable on
             // PC; on a controller it costs nothing.
             setMouseCaptured(!m_menuOpen);
+        }
+    }
+}
+
+void NewVegasApp::syncTes3JournalPanel() {
+    if (!m_streamIsMorrowind || !m_bethesdaSessionConfigured ||
+        m_tes3JournalPanel == nullptr ||
+        m_bethesdaSession.tes3().content() == nullptr) return;
+    const auto& runtime = m_bethesdaSession.tes3();
+    const auto& content = runtime.content();
+    std::vector<ui::Tes3JournalPanel::Entry> entries;
+    entries.reserve(runtime.journal().chronology().size());
+    for (const bethesda::Tes3JournalVisit& visit : runtime.journal().chronology()) {
+        const auto questIt = content->dialogues().find(visit.quest);
+        if (questIt == content->dialogues().end()) continue;
+        const bethesda::Tes3DialogueDefinition& quest = questIt->second;
+        const auto info = std::find_if(quest.infos.begin(), quest.infos.end(),
+            [&](const bethesda::Tes3DialogueInfo& item) { return item.record == visit.info; });
+        const bethesda::Tes3JournalQuestState* state = runtime.journal().find(quest.id);
+        ui::Tes3JournalPanel::Entry entry;
+        entry.sequence = visit.sequence;
+        entry.questId = quest.id;
+        entry.title = bethesda::normalizeTes3Symbol(quest.id) == "tr_m3_tt_bloodstone"
+            ? "Bloodstone Pilgrimage" : quest.id;
+        entry.text = info != quest.infos.end() ? info->response : std::string{};
+        entry.index = visit.index;
+        if (state != nullptr) {
+            entry.hasStatusFlags = state->hasStatusFlags;
+            if (state->classification == bethesda::Tes3JournalQuestClassification::Active) {
+                entry.state = ui::Tes3JournalPanel::QuestState::Active;
+            } else if (state->classification ==
+                       bethesda::Tes3JournalQuestClassification::Completed) {
+                entry.state = ui::Tes3JournalPanel::QuestState::Completed;
+            }
+        }
+        entries.push_back(std::move(entry));
+    }
+    std::vector<std::string> topics;
+    topics.reserve(runtime.knownTopics().size());
+    for (const bethesda::RecordKey& topic : runtime.knownTopics()) {
+        topics.push_back(topic.textId);
+    }
+    m_tes3JournalPanel->setJournal(std::move(entries), std::move(topics));
+    m_tes3JournalSyncedVisits = runtime.journal().chronology().size();
+    if (!m_tes3PinnedQuest.empty()) {
+        (void)m_tes3JournalPanel->pinQuest(m_tes3PinnedQuest);
+    }
+}
+
+void NewVegasApp::updateTes3JournalInput() {
+    bool journalDown = keyDown(m_window, GLFW_KEY_J);
+    GLFWgamepadstate journalPad{};
+    if (glfwJoystickIsGamepad(GLFW_JOYSTICK_1) == GLFW_TRUE &&
+        glfwGetGamepadState(GLFW_JOYSTICK_1, &journalPad) == GLFW_TRUE) {
+        // The controller's View/Back button is the natural journal shortcut;
+        // Start remains the pause menu and B remains modal cancel.
+        const bool controllerJournal =
+            journalPad.buttons[GLFW_GAMEPAD_BUTTON_BACK] == GLFW_PRESS;
+        journalDown = journalDown || controllerJournal;
+        m_navDriving = m_navDriving || controllerJournal;
+    }
+    const bool journalEdge = journalDown && !m_tes3JournalKeyLatch;
+    m_tes3JournalKeyLatch = journalDown;
+    if (journalEdge && m_streamIsMorrowind && m_bethesdaSessionConfigured &&
+        m_talkingActor < 0 && !m_menuOpen) {
+        m_tes3JournalOpen = !m_tes3JournalOpen;
+        if (m_tes3JournalOpen) syncTes3JournalPanel();
+        setMouseCaptured(!m_tes3JournalOpen);
+    }
+    if (!m_tes3JournalOpen || m_tes3JournalPanel == nullptr) return;
+    if (m_nav.pressed(ui::UiNavAction::Up)) m_tes3JournalPanel->moveSelection(-1);
+    if (m_nav.pressed(ui::UiNavAction::Down)) m_tes3JournalPanel->moveSelection(1);
+    if (m_nav.pressed(ui::UiNavAction::PrevTab) ||
+        m_nav.pressed(ui::UiNavAction::Left)) {
+        const int current = static_cast<int>(m_tes3JournalPanel->view());
+        m_tes3JournalPanel->setView(
+            static_cast<ui::Tes3JournalPanel::View>((current + 3) % 4));
+    }
+    if (m_nav.pressed(ui::UiNavAction::NextTab) ||
+        m_nav.pressed(ui::UiNavAction::Right)) {
+        const int current = static_cast<int>(m_tes3JournalPanel->view());
+        m_tes3JournalPanel->setView(
+            static_cast<ui::Tes3JournalPanel::View>((current + 1) % 4));
+    }
+    if (m_nav.pressed(ui::UiNavAction::Accept)) {
+        m_tes3JournalPanel->pinSelected();
+        m_tes3PinnedQuest = m_tes3JournalPanel->pinnedQuest();
+    }
+    if (m_nav.pressed(ui::UiNavAction::Cancel)) {
+        m_tes3JournalOpen = false;
+        setMouseCaptured(true);
+    }
+}
+
+void NewVegasApp::updateGiftMenu() {
+    if (!m_bethesdaSessionConfigured ||
+        m_bethesdaSession.giftMenuRequests().empty()) {
+        m_presentedGiftMenuSequence = 0u;
+        m_giftMenuChoice = 0;
+        return;
+    }
+    const bethesda::GiftMenuRequestState request =
+        m_bethesdaSession.giftMenuRequests().front();
+    if (m_presentedGiftMenuSequence != request.sequence) {
+        m_presentedGiftMenuSequence = request.sequence;
+        m_giftMenuChoice = 0;
+        endConversation();
+        setMouseCaptured(false);
+    }
+    const bethesda::ObjectId sourceId =
+        request.playerGives ? request.player : request.actor;
+    const bethesda::RuntimeObject* source =
+        m_bethesdaSession.world().find(sourceId);
+    const int itemCount = source == nullptr
+        ? 0 : static_cast<int>(source->inventory.size());
+    m_giftMenuChoice = std::clamp(m_giftMenuChoice, 0, std::max(0, itemCount - 1));
+    if (itemCount > 0 && m_nav.pressed(ui::UiNavAction::Up)) {
+        m_giftMenuChoice = (m_giftMenuChoice + itemCount - 1) % itemCount;
+    }
+    if (itemCount > 0 && m_nav.pressed(ui::UiNavAction::Down)) {
+        m_giftMenuChoice = (m_giftMenuChoice + 1) % itemCount;
+    }
+    if (itemCount > 0 && m_nav.pressed(ui::UiNavAction::Accept)) {
+        const bethesda::InventoryEntry entry =
+            source->inventory[static_cast<std::size_t>(m_giftMenuChoice)];
+        const bethesda::GiftTransferResult transfer =
+            m_bethesdaSession.transferGiftMenuItem(request.sequence, entry.item, 1);
+        if (transfer.accepted) {
+            m_toasts.push(
+                request.playerGives ? "Item given" : "Item received",
+                entry.item.toString(), "gift-transfer:" + entry.item.toString());
+        } else {
+            m_toasts.push("Gift transfer unavailable", transfer.diagnostic, "gift-transfer-error");
+        }
+    }
+    if (m_nav.pressed(ui::UiNavAction::Cancel)) {
+        std::string error;
+        if (!m_bethesdaSession.closeGiftMenu(request.sequence, error)) {
+            m_toasts.push("Could not close gift menu", error, "gift-menu-close");
+        } else {
+            m_presentedGiftMenuSequence = 0u;
+            m_giftMenuChoice = 0;
+            setMouseCaptured(!m_menuOpen && m_talkingActor < 0);
         }
     }
 }
@@ -5554,7 +7852,10 @@ void NewVegasApp::updateRegionDiscovery() {
 }
 
 void NewVegasApp::saveTraversalState(bool force) {
-    if (!m_streamer || m_traversalStatePath.empty() ||
+    // Scenario sessions are persisted exclusively through the versioned ODAI
+    // save. Keeping the legacy camera-only traversal JSON beside it would
+    // create two competing authorities for player position and world time.
+    if (!m_scenarioId.empty() || !m_streamer || m_traversalStatePath.empty() ||
         m_doorTransitionPhase != DoorTransitionPhase::None) {
         return;
     }
@@ -5589,11 +7890,1298 @@ void NewVegasApp::saveTraversalState(bool force) {
 }
 
 void NewVegasApp::onShutdown() {
+    if (m_bethesdaSessionConfigured && !m_gameplaySavePath.empty()) {
+        (void)saveGameplayState();
+    }
     saveTraversalState(true);
     clearSkyrimAmbience();
     if (m_streamer) {
         m_streamer->waitIdle();
     }
+}
+
+void NewVegasApp::setScenario(std::string id) {
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(id);
+    if (scenario == nullptr) {
+        m_scenarioId = std::move(id);
+        return;
+    }
+    m_scenarioId = scenario->id;
+    m_scenarioStartMarker = scenario->startMarker;
+    m_streamPlugin = scenario->basePlugin;
+    m_streamWorldspace = scenario->worldspace;
+    m_streamWorldspaceExplicit = true;
+    m_resumeEnabled = false;
+    m_explicitStart = true;
+}
+
+void NewVegasApp::cacheBethesdaCollisionCell(
+    const importer::CellCoord& cell, const importer::ImportedScene& scene) {
+    BethesdaCollisionMesh mesh;
+    for (const importer::ImportedSceneInstance& instance : scene.instances) {
+        if (!instance.initiallyVisible && instance.sourceReferenceFormId != 0u) {
+            m_disabledBethesdaCollisionReferences.insert(instance.sourceReferenceFormId);
+        }
+        if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
+            instance.sourceReferenceIdentity.empty()) continue;
+        bethesda::RecordKey referenceKey;
+        if (!bethesda::parseRecordKey(instance.sourceReferenceIdentity, referenceKey) ||
+            referenceKey.kind != bethesda::RecordKeyKind::Tes3Reference) continue;
+        const bethesda::ObjectId id = bethesda::ObjectId::persistent(referenceKey);
+        if (m_bethesdaSession.world().find(id) != nullptr) continue;
+        const auto definition = m_bethesdaSession.tes3().content()->references().find(id);
+        if (definition == m_bethesdaSession.tes3().content()->references().end()) continue;
+        bethesda::RuntimeObject object;
+        object.id = id;
+        object.base = definition->second.base;
+        object.persistent = true;
+        object.enabled = instance.initiallyVisible && definition->second.enabled;
+        object.transform.position = {
+            instance.transform[3], instance.transform[7], instance.transform[11]};
+        const float scaleX = std::sqrt(
+            (instance.transform[0] * instance.transform[0]) +
+            (instance.transform[4] * instance.transform[4]) +
+            (instance.transform[8] * instance.transform[8]));
+        object.transform.scale = scaleX;
+        const auto savedOverride = m_bethesdaSession.tes3().referenceOverrides().find(id);
+        if (savedOverride != m_bethesdaSession.tes3().referenceOverrides().end()) {
+            if (savedOverride->second.deleted) continue;
+            if (savedOverride->second.enabled.has_value()) {
+                object.enabled = *savedOverride->second.enabled;
+            }
+            if (savedOverride->second.transform.has_value()) {
+                object.transform = *savedOverride->second.transform;
+            }
+        }
+        const std::string type = object.base.recordType;
+        const bethesda::Tes3ActorDefinition* actorDefinition = nullptr;
+        if (type == "NPC_" || type == "CREA") {
+            object.kind = bethesda::RuntimeObjectKind::Actor;
+            object.actorValues.emplace();
+            const auto actor = m_bethesdaSession.tes3().content()->actors().find(object.base);
+            if (actor != m_bethesdaSession.tes3().content()->actors().end()) {
+                actorDefinition = &actor->second;
+                object.actorValues->health = actorDefinition->health;
+                object.actorValues->magicka = actorDefinition->magicka;
+                object.actorValues->stamina = actorDefinition->fatigue;
+                object.actorValues->maxHealth = actorDefinition->health;
+                object.actorValues->maxMagicka = actorDefinition->magicka;
+                object.actorValues->maxStamina = actorDefinition->fatigue;
+                if (actorDefinition->faction.valid()) {
+                    object.factions.push_back(actorDefinition->faction);
+                }
+                for (const auto& [item, count] : actorDefinition->inventory) {
+                    object.inventory.push_back({item, count, false});
+                }
+            }
+        } else if (type == "CONT") object.kind = bethesda::RuntimeObjectKind::Container;
+        else if (type == "DOOR") object.kind = bethesda::RuntimeObjectKind::Door;
+        else if (type == "ACTI") object.kind = bethesda::RuntimeObjectKind::Activator;
+        else object.kind = bethesda::RuntimeObjectKind::Item;
+        std::string bindError;
+        if (!m_bethesdaSession.world().addInitialObject(std::move(object), bindError)) {
+            VOX_LOGW("tes3") << "could not bind streamed reference "
+                               << instance.sourceReferenceIdentity << ": " << bindError;
+        } else if (actorDefinition != nullptr && actorDefinition->script.valid()) {
+            std::string scriptError;
+            const std::uint64_t threadId = m_bethesdaSession.tes3().scripts().start(
+                actorDefinition->script.textId, id, scriptError);
+            if (threadId == 0u) {
+                VOX_LOGW("tes3") << "could not start local script "
+                    << actorDefinition->script.toString() << " for "
+                    << instance.sourceReferenceIdentity << ": " << scriptError;
+            } else if (savedOverride != m_bethesdaSession.tes3().referenceOverrides().end()) {
+                auto thread = m_bethesdaSession.tes3().scripts().threadsForRestore().find(threadId);
+                if (thread != m_bethesdaSession.tes3().scripts().threadsForRestore().end()) {
+                    for (const auto& [name, value] : savedOverride->second.locals) {
+                        thread->second.locals.insert_or_assign(name, value);
+                    }
+                }
+            }
+        }
+    }
+    const auto appendTriangle = [&](const float* vertices, std::uint32_t sourceReferenceFormId) {
+        if (mesh.vertices.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - 3u) return;
+        const std::uint32_t first = static_cast<std::uint32_t>(mesh.vertices.size());
+        mesh.vertices.push_back({vertices[0], vertices[1], vertices[2]});
+        mesh.vertices.push_back({vertices[3], vertices[4], vertices[5]});
+        mesh.vertices.push_back({vertices[6], vertices[7], vertices[8]});
+        mesh.indices.insert(mesh.indices.end(), {first, first + 1u, first + 2u});
+        mesh.triangleSourceReferenceFormIds.push_back(sourceReferenceFormId);
+    };
+    for (const importer::ImportedSceneCollisionTriangle& triangle :
+         scene.collisionTriangles) {
+        appendTriangle(triangle.vertices, triangle.sourceReferenceFormId);
+    }
+    if (!scene.meshes.empty() && scene.meshes.front().name == "terrain") {
+        const importer::ImportedSceneMesh& terrain = scene.meshes.front();
+        for (std::size_t offset = 0u; offset + 2u < terrain.indices.size(); offset += 3u) {
+            const std::uint32_t a = terrain.indices[offset];
+            const std::uint32_t b = terrain.indices[offset + 1u];
+            const std::uint32_t c = terrain.indices[offset + 2u];
+            if (a >= terrain.vertices.size() || b >= terrain.vertices.size() ||
+                c >= terrain.vertices.size()) continue;
+            float vertices[9] = {};
+            std::copy_n(terrain.vertices[a].position, 3u, vertices);
+            std::copy_n(terrain.vertices[b].position, 3u, vertices + 3u);
+            std::copy_n(terrain.vertices[c].position, 3u, vertices + 6u);
+            appendTriangle(vertices, 0u);
+        }
+    }
+    if (mesh.indices.empty()) {
+        m_bethesdaCollisionByCell.erase(cell);
+        return;
+    }
+    m_bethesdaCollisionByCell.insert_or_assign(cell, std::move(mesh));
+    if (!m_bethesdaSessionConfigured) return;
+    registerBethesdaCollisionCell(cell);
+}
+
+void NewVegasApp::removeBethesdaCollisionCell(const importer::CellCoord& cell) {
+    m_bethesdaCollisionByCell.erase(cell);
+    if (m_bethesdaSessionConfigured) {
+        (void)m_bethesdaSession.physics().removeStreamedStaticCollision(
+            physicsResidencyToken(cell));
+    }
+}
+
+void NewVegasApp::registerBethesdaCollisionCell(const importer::CellCoord& cell) {
+    if (!m_bethesdaSessionConfigured) return;
+    const auto found = m_bethesdaCollisionByCell.find(cell);
+    if (found == m_bethesdaCollisionByCell.end()) return;
+    const BethesdaCollisionMesh& mesh = found->second;
+    std::vector<odai::math::Vector3> filteredVertices;
+    std::vector<std::uint32_t> filteredIndices;
+    filteredVertices.reserve(mesh.vertices.size());
+    filteredIndices.reserve(mesh.indices.size());
+    const std::size_t triangleCount = mesh.indices.size() / 3u;
+    for (std::size_t triangle = 0u; triangle < triangleCount; ++triangle) {
+        const std::uint32_t source =
+            triangle < mesh.triangleSourceReferenceFormIds.size()
+                ? mesh.triangleSourceReferenceFormIds[triangle]
+                : 0u;
+        if (source != 0u && m_disabledBethesdaCollisionReferences.contains(source)) {
+            continue;
+        }
+        const std::size_t indexOffset = triangle * 3u;
+        const std::uint32_t a = mesh.indices[indexOffset];
+        const std::uint32_t b = mesh.indices[indexOffset + 1u];
+        const std::uint32_t c = mesh.indices[indexOffset + 2u];
+        if (a >= mesh.vertices.size() || b >= mesh.vertices.size() ||
+            c >= mesh.vertices.size()) {
+            continue;
+        }
+        const std::uint32_t first = static_cast<std::uint32_t>(filteredVertices.size());
+        filteredVertices.push_back(mesh.vertices[a]);
+        filteredVertices.push_back(mesh.vertices[b]);
+        filteredVertices.push_back(mesh.vertices[c]);
+        filteredIndices.insert(
+            filteredIndices.end(), {first, first + 1u, first + 2u});
+    }
+    const std::uint64_t token = physicsResidencyToken(cell);
+    if (filteredIndices.empty()) {
+        (void)m_bethesdaSession.physics().removeStreamedStaticCollision(token);
+        return;
+    }
+    std::string error;
+    if (!m_bethesdaSession.physics().addStreamedStaticCollision(
+            token, filteredVertices, filteredIndices, error)) {
+        VOX_LOGW("physics") << "could not restore collision cell " << cell.x << ","
+                            << cell.z << ": " << error;
+    }
+}
+
+void NewVegasApp::registerCachedBethesdaCollision() {
+    if (!m_bethesdaSessionConfigured) return;
+    std::vector<importer::CellCoord> cells;
+    cells.reserve(m_bethesdaCollisionByCell.size());
+    for (const auto& [cell, mesh] : m_bethesdaCollisionByCell) {
+        (void)mesh;
+        cells.push_back(cell);
+    }
+    std::sort(cells.begin(), cells.end(), [](const auto& left, const auto& right) {
+        return std::tie(left.x, left.z) < std::tie(right.x, right.z);
+    });
+    for (const importer::CellCoord& cell : cells) {
+        registerBethesdaCollisionCell(cell);
+    }
+}
+
+bool NewVegasApp::loadScenarioQuestDefinitions(const bethesda::ScenarioDefinition& scenario) {
+    bethesda::SkyrimScenarioContentReport report;
+    std::string error;
+    if (!bethesda::loadSkyrimScenarioContent(
+            scenario, m_streamLoadOrder, m_streamer->assets(),
+            m_bethesdaSession, report, error)) {
+        VOX_LOGE("scenario") << error;
+        return false;
+    }
+    for (const std::string& diagnostic : report.diagnostics) {
+        VOX_LOGW("scenario") << diagnostic;
+    }
+    for (const std::string& blocker : report.runtimeBlockers) {
+        VOX_LOGW("scenario") << "runtime blocker: " << blocker;
+    }
+    for (const bethesda::ScenarioQuestLoadDetail& quest : report.quests) {
+        VOX_LOGI("scenario") << "quest " << quest.editorId << " registered: "
+                              << quest.stages << " stages, "
+                              << quest.objectives << " objectives, "
+                              << quest.aliases << " aliases, "
+                              << quest.referencedRecords << " referenced records, "
+                              << quest.unresolvedCalls << " unresolved call bindings";
+    }
+    return true;
+}
+bool NewVegasApp::initBethesdaSession() {
+    m_bethesdaPlayerControllerRegistered = false;
+    m_bethesdaControllerOwnsCamera = false;
+    std::string fingerprint = m_loadOrderFingerprint;
+    if (fingerprint.empty() && m_contentProfile.has_value()) fingerprint = m_contentProfile->fingerprint;
+    if (fingerprint.empty()) fingerprint = "unfingerprinted:" + toLowerAscii(m_streamPlugin);
+    std::string error;
+    if (m_streamIsMorrowind) {
+        useMorrowindUiPalette();
+        if (!m_bethesdaSession.configure(
+                bethesda::BethesdaSessionConfig{
+                    importer::fnv::BethesdaGame::Morrowind, fingerprint, {},
+                    m_captureSeed == 0u ? 1u : m_captureSeed}, error)) {
+            VOX_LOGE("tes3") << "runtime session failed: " << error;
+            return false;
+        }
+        auto content = std::make_shared<bethesda::Tes3ContentStore>();
+        const std::string encoding = m_contentProfile.has_value()
+            ? m_contentProfile->encoding : std::string("windows-1252");
+        if (!content->load(m_streamLoadOrder, encoding, error) ||
+            !m_bethesdaSession.configureTes3Content(content, error)) {
+            VOX_LOGE("tes3") << "content runtime failed: " << error;
+            return false;
+        }
+        bethesda::RuntimeObject player;
+        player.id = m_bethesdaSession.playerObject();
+        player.base = bethesda::makeTes3RecordKey("NPC_", "player");
+        player.kind = bethesda::RuntimeObjectKind::Actor;
+        player.persistent = true;
+        player.actorValues.emplace();
+        if (const bethesda::Tes3ActorDefinition* authoredPlayer =
+                content->findActor("NPC_", "player"); authoredPlayer != nullptr) {
+            player.actorValues->health = authoredPlayer->health;
+            player.actorValues->magicka = authoredPlayer->magicka;
+            player.actorValues->stamina = authoredPlayer->fatigue;
+            player.actorValues->maxHealth = authoredPlayer->health;
+            player.actorValues->maxMagicka = authoredPlayer->magicka;
+            player.actorValues->maxStamina = authoredPlayer->fatigue;
+            if (authoredPlayer->faction.valid()) player.factions.push_back(authoredPlayer->faction);
+            for (const auto& [item, count] : authoredPlayer->inventory) {
+                player.inventory.push_back({item, count, false});
+                m_bethesdaSession.tes3().playerState().inventory[item] += count;
+            }
+            for (const auto& [name, value] : authoredPlayer->attributes) {
+                m_bethesdaSession.tes3().playerState().numericFilters[name] = value;
+            }
+            for (const auto& [name, value] : authoredPlayer->skills) {
+                m_bethesdaSession.tes3().playerState().numericFilters[name] = value;
+            }
+            m_bethesdaSession.tes3().playerState().numericFilters["level"] = authoredPlayer->level;
+            m_bethesdaSession.tes3().playerState().numericFilters["reputation"] = 0.0;
+        }
+        player.transform.position = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+        const float feet[3] = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+        bethesda::RuntimeSpaceState playerSpace;
+        if (runtimeSpaceForPosition(feet, playerSpace)) {
+            player.originSpace = playerSpace;
+            player.currentSpace = std::move(playerSpace);
+        }
+        if (!m_bethesdaSession.world().addInitialObject(std::move(player), error)) {
+            VOX_LOGE("tes3") << "could not create player runtime object: " << error;
+            return false;
+        }
+        m_bethesdaSessionConfigured = true;
+        const bethesda::Tes3ScriptCheckReport& report =
+            m_bethesdaSession.tes3().scriptCheckReport();
+        VOX_LOGI("tes3") << "runtime active: " << content->dialogues().size()
+                          << " dialogues, " << content->scripts().size() << " scripts, "
+                          << report.unsupportedCommands.size() << " unsupported commands";
+        for (const std::string& diagnostic : report.diagnostics) {
+            VOX_LOGW("tes3") << diagnostic;
+        }
+        if (!m_tes3StartQuest.empty()) {
+            const bethesda::Tes3DialogueDefinition* quest =
+                content->findDialogue(m_tes3StartQuest);
+            std::string journalError;
+            if (quest == nullptr || quest->type != bethesda::Tes3DialogueType::Journal) {
+                VOX_LOGE("tes3") << "start quest not found: " << m_tes3StartQuest;
+                return false;
+            }
+            if (!m_bethesdaSession.tes3().journal().addEntry(
+                    *quest, m_tes3StartQuestIndex, 0u, journalError)) {
+                VOX_LOGE("tes3") << "could not start quest " << m_tes3StartQuest
+                                   << ": " << journalError;
+                return false;
+            }
+            m_tes3PinnedQuest = quest->id;
+            if (bethesda::normalizeTes3Symbol(quest->id) == "tr_m3_tt_bloodstone") {
+                (void)m_bethesdaSession.tes3().addTopic("Bloodstone Pilgrimage");
+            }
+            syncTes3JournalPanel();
+            m_toasts.push("Quest started", quest->id, "tes3-quest-start:" + quest->id);
+            VOX_LOGI("tes3") << "quest started: " << quest->id
+                              << " index=" << m_tes3StartQuestIndex;
+            if (const char* demo = std::getenv("ODAI_FNV_UI_DEMO");
+                demo != nullptr && std::string_view(demo) == "journal") {
+                m_tes3JournalOpen = true;
+                m_navDriving = true;
+                setMouseCaptured(false);
+            }
+        }
+
+        // TES3 NPCs/creatures are FRMR attachments inside CELL records rather
+        // than the ACHR/ACRE records used by the later games. Publish actors at
+        // those exact transforms so activation and dynamic dialogue address the
+        // visible resident, not a second synthetic scan-order identity.
+        m_actors.clear();
+        constexpr float kTes3ActorProxyRadius = 7000.0f;
+        const std::string currentInteriorKey =
+            bethesda::normalizeTes3Symbol(m_currentInteriorEditorId);
+        std::size_t scannedReferences = 0u;
+        for (const auto& [referenceId, reference] : content->references()) {
+            (void)referenceId;
+            // Content construction owns tens of thousands of references and
+            // runs before GameApp::run starts. Service the platform queue while
+            // selecting presentation actors so a close request during startup
+            // is not forced to wait for the whole catalog walk.
+            if ((++scannedReferences & 1023u) == 0u) {
+                glfwPollEvents();
+                if (m_window != nullptr && glfwWindowShouldClose(m_window)) {
+                    VOX_LOGI("tes3") << "actor population canceled by window close";
+                    return false;
+                }
+            }
+            if (!reference.enabled || reference.deleted || !reference.hasTransform) continue;
+            const auto definition = content->actors().find(reference.base);
+            if (definition == content->actors().end()) continue;
+            const std::string& cellId = reference.cell.textId;
+            const bool exteriorCell = !cellId.empty() && cellId.front() == '#';
+            if (m_interiorStarted) {
+                // Interior transforms are cell-local. Comparing them to the
+                // player's local coordinates without first matching the CELL
+                // made actors from every interior in Morrowind/TR look nearby:
+                // Almas Thirr alone queued 12,605 activation proxies.
+                if (currentInteriorKey.empty() ||
+                    bethesda::normalizeTes3Symbol(cellId) != currentInteriorKey) {
+                    continue;
+                }
+            } else if (!exteriorCell) {
+                // Exterior transforms are world-space and may legitimately
+                // cross a neighboring cell within the radius; interior-local
+                // coordinates must never enter that distance test.
+                continue;
+            }
+            const float engineX = reference.position[0];
+            const float engineY = reference.position[2];
+            const float engineZ = -reference.position[1];
+            const float dx = engineX - m_cameraX;
+            const float dz = engineZ - m_cameraZ;
+            if ((dx * dx) + (dz * dz) > kTes3ActorProxyRadius * kTes3ActorProxyRadius) continue;
+            SkinnedActor actor;
+            actor.name = definition->second.id;
+            actor.fullName = definition->second.name;
+            actor.position[0] = engineX;
+            actor.position[1] = engineY;
+            actor.position[2] = engineZ;
+            actor.yawRadians = -reference.rotationRadians[2];
+            actor.standingHeightUnits = 120.0f;
+            actor.humanoid = !definition->second.creature;
+            actor.placed = true;
+            actor.renderVisible = true;
+            m_actors.push_back(std::move(actor));
+        }
+        std::sort(m_actors.begin(), m_actors.end(), [&](const SkinnedActor& left,
+                                                        const SkinnedActor& right) {
+            const float ldx = left.position[0] - m_cameraX;
+            const float ldz = left.position[2] - m_cameraZ;
+            const float rdx = right.position[0] - m_cameraX;
+            const float rdz = right.position[2] - m_cameraZ;
+            return (ldx * ldx) + (ldz * ldz) < (rdx * rdx) + (rdz * rdz);
+        });
+        std::uint32_t nextSlot = kFirstCrowdSkinnedInstance;
+        std::size_t builtActors = 0u;
+        std::unordered_map<std::string, anim::AnimationClip> idleBySkeleton;
+        std::unordered_set<std::string> unavailableIdleSkeletons;
+        std::size_t actorBuildCount = 0u;
+        for (SkinnedActor& actor : m_actors) {
+            if ((actorBuildCount++ & 3u) == 0u) {
+                glfwPollEvents();
+                if (m_window != nullptr && glfwWindowShouldClose(m_window)) {
+                    VOX_LOGI("tes3") << "actor assembly canceled by window close";
+                    return false;
+                }
+            }
+            if (nextSlot >= render::kMaxSkinnedInstances) break;
+            const bethesda::Tes3ActorDefinition* definition =
+                content->findActor("NPC_", actor.name);
+            if (definition == nullptr) definition = content->findActor("CREA", actor.name);
+            if (definition == nullptr) continue;
+            std::string skeleton;
+            std::vector<std::string> parts;
+            std::vector<std::string> rigidAttachmentBones;
+            std::string why;
+            if (!tes3ActorGeometry(
+                    *content, *definition, skeleton, parts,
+                    rigidAttachmentBones, why)) {
+                VOX_LOGW("tes3") << "actor " << actor.name
+                                  << " remains activation-only: " << why;
+                continue;
+            }
+            const char* requestedTrace = std::getenv("ODAI_TES3_ACTOR_TRACE");
+            const bool traceActor = requestedTrace != nullptr &&
+                toLowerAscii(requestedTrace) == toLowerAscii(actor.name);
+            if (traceActor) {
+                const bethesda::Tes3NamedRecord* source = content->findRecord(
+                    definition->creature ? "CREA" : "NPC_", definition->id);
+                VOX_LOGI("tes3") << "actor trace " << actor.name
+                                  << ": position=(" << actor.position[0] << ", "
+                                  << actor.position[1] << ", " << actor.position[2]
+                                  << ") skeleton=" << skeleton << " explicitModel="
+                                  << (source != nullptr
+                                          ? tes3SubrecordText(
+                                                *source, "MODL", content->encoding())
+                                          : std::string());
+                for (std::size_t part = 0u; part < parts.size(); ++part) {
+                    VOX_LOGI("tes3") << "actor trace " << actor.name << " part["
+                                      << part << "]=" << parts[part];
+                }
+                if (const char* requestedPart =
+                        std::getenv("ODAI_TES3_ACTOR_PART_FILTER")) {
+                    const std::string wantedPart = toLowerAscii(requestedPart);
+                    // Rebuild both arrays together: their indices are the
+                    // authored BODY-slot association.
+                    std::vector<std::string> filteredParts;
+                    std::vector<std::string> filteredAttachments;
+                    for (std::size_t part = 0u; part < parts.size(); ++part) {
+                        if (toLowerAscii(parts[part]).find(wantedPart) ==
+                            std::string::npos) {
+                            continue;
+                        }
+                        filteredParts.push_back(parts[part]);
+                        filteredAttachments.push_back(rigidAttachmentBones[part]);
+                    }
+                    parts = std::move(filteredParts);
+                    rigidAttachmentBones = std::move(filteredAttachments);
+                    VOX_LOGI("tes3") << "actor trace " << actor.name
+                                      << ": retained " << parts.size()
+                                      << " matching part(s) for diagnostic capture";
+                }
+            }
+            if (!buildSkinnedActor(
+                    m_streamer->assets(), skeleton, parts, actor.character,
+                    actor.textures, actor.draws, why, &rigidAttachmentBones)) {
+                VOX_LOGW("tes3") << "actor " << actor.name
+                                  << " remains activation-only: " << why;
+                continue;
+            }
+            if (traceActor && std::getenv("ODAI_TES3_ACTOR_VERBOSE") != nullptr) {
+                std::vector<odai::math::Matrix4> bindPose;
+                importer::fnv::computeFalloutBindPose(actor.character, bindPose);
+                for (std::size_t partIndex = 0u;
+                     partIndex < actor.character.parts.size(); ++partIndex) {
+                    const importer::fnv::FalloutCharacterPart& part =
+                        actor.character.parts[partIndex];
+                    float minimum[3] = {
+                        std::numeric_limits<float>::max(),
+                        std::numeric_limits<float>::max(),
+                        std::numeric_limits<float>::max()};
+                    float maximum[3] = {
+                        std::numeric_limits<float>::lowest(),
+                        std::numeric_limits<float>::lowest(),
+                        std::numeric_limits<float>::lowest()};
+                    for (std::uint32_t offset = 0u; offset < part.indexCount; ++offset) {
+                        const std::size_t indexOffset =
+                            static_cast<std::size_t>(part.firstIndex) + offset;
+                        if (indexOffset >= actor.character.indices.size()) break;
+                        const std::uint32_t vertexIndex = actor.character.indices[indexOffset];
+                        if (vertexIndex >= actor.character.vertices.size()) continue;
+                        const auto& vertex = actor.character.vertices[vertexIndex];
+                        odai::math::Vector4 posed{0.0f, 0.0f, 0.0f, 0.0f};
+                        float totalWeight = 0.0f;
+                        for (int influence = 0; influence < 4; ++influence) {
+                            const float weight = vertex.boneWeights[influence];
+                            const std::size_t bone = vertex.boneIndices[influence];
+                            if (weight <= 0.0f || bone >= bindPose.size()) continue;
+                            const odai::math::Vector4 transformed = bindPose[bone] *
+                                odai::math::Vector4{
+                                    vertex.position[0], vertex.position[1],
+                                    vertex.position[2], 1.0f};
+                            posed.x += transformed.x * weight;
+                            posed.y += transformed.y * weight;
+                            posed.z += transformed.z * weight;
+                            totalWeight += weight;
+                        }
+                        if (totalWeight <= 1e-6f) {
+                            posed = {vertex.position[0], vertex.position[1],
+                                     vertex.position[2], 1.0f};
+                        }
+                        minimum[0] = std::min(minimum[0], posed.x);
+                        minimum[1] = std::min(minimum[1], posed.y);
+                        minimum[2] = std::min(minimum[2], posed.z);
+                        maximum[0] = std::max(maximum[0], posed.x);
+                        maximum[1] = std::max(maximum[1], posed.y);
+                        maximum[2] = std::max(maximum[2], posed.z);
+                    }
+                    VOX_LOGI("tes3")
+                        << "actor trace " << actor.name << " boundPart[" << partIndex
+                        << "] source=" << part.sourcePath << " shape=" << part.name
+                        << " bounds=(" << minimum[0] << ".." << maximum[0] << ", "
+                        << minimum[1] << ".." << maximum[1] << ", "
+                        << minimum[2] << ".." << maximum[2] << ") texture="
+                        << part.diffuseTexturePath;
+                }
+            }
+            actor.instanceSlot = nextSlot++;
+            actor.standingHeightUnits = actorStandingHeight(actor.character);
+            findActorHeadAnchor(
+                actor.character, actor.headAnchorBone, actor.headAnchorLocal,
+                actor.headHeightUnits);
+            actor.sampler.bindSkeleton(
+                actor.character.skeleton, actor.character.inverseBindMatrices);
+            std::string idleWhy;
+            const std::string idleKey = toLowerAscii(skeleton);
+            if (const auto idle = idleBySkeleton.find(idleKey);
+                idle != idleBySkeleton.end()) {
+                actor.idleClip = idle->second;
+            } else if (!unavailableIdleSkeletons.contains(idleKey)) {
+                if (loadActorIdleClip(
+                        m_streamer->assets(), skeleton, actor.character.skeleton,
+                        builtActors, actor.idleClip, idleWhy)) {
+                    idleBySkeleton.emplace(idleKey, actor.idleClip);
+                } else {
+                    unavailableIdleSkeletons.insert(idleKey);
+                }
+            }
+            if (traceActor && std::getenv("ODAI_TES3_ACTOR_VERBOSE") != nullptr &&
+                !actor.idleClip.tracks.empty()) {
+                for (const float sampleTime : {0.0f, 0.65f, 1.3f, 1.95f}) {
+                    std::vector<odai::math::Matrix4> sampledPose;
+                    actor.sampler.sample(
+                        actor.character.skeleton, actor.idleClip, sampleTime, sampledPose);
+                    float minimum[3] = {
+                        std::numeric_limits<float>::max(),
+                        std::numeric_limits<float>::max(),
+                        std::numeric_limits<float>::max()};
+                    float maximum[3] = {
+                        std::numeric_limits<float>::lowest(),
+                        std::numeric_limits<float>::lowest(),
+                        std::numeric_limits<float>::lowest()};
+                    for (const auto& vertex : actor.character.vertices) {
+                        odai::math::Vector4 posed{0.0f, 0.0f, 0.0f, 0.0f};
+                        float totalWeight = 0.0f;
+                        for (int influence = 0; influence < 4; ++influence) {
+                            const float weight = vertex.boneWeights[influence];
+                            const std::size_t bone = vertex.boneIndices[influence];
+                            if (weight <= 0.0f || bone >= sampledPose.size()) continue;
+                            const odai::math::Vector4 transformed = sampledPose[bone] *
+                                odai::math::Vector4{
+                                    vertex.position[0], vertex.position[1],
+                                    vertex.position[2], 1.0f};
+                            posed.x += transformed.x * weight;
+                            posed.y += transformed.y * weight;
+                            posed.z += transformed.z * weight;
+                            totalWeight += weight;
+                        }
+                        if (totalWeight <= 1e-6f) continue;
+                        minimum[0] = std::min(minimum[0], posed.x);
+                        minimum[1] = std::min(minimum[1], posed.y);
+                        minimum[2] = std::min(minimum[2], posed.z);
+                        maximum[0] = std::max(maximum[0], posed.x);
+                        maximum[1] = std::max(maximum[1], posed.y);
+                        maximum[2] = std::max(maximum[2], posed.z);
+                    }
+                    VOX_LOGI("tes3") << "actor trace " << actor.name
+                                      << " idle t=" << sampleTime << " bounds=("
+                                      << minimum[0] << ".." << maximum[0] << ", "
+                                      << minimum[1] << ".." << maximum[1] << ", "
+                                      << minimum[2] << ".." << maximum[2] << ")";
+                }
+                for (const char* boneName : {
+                         "Bip01 Pelvis", "Bip01 Spine1", "Bip01 Head",
+                         "Bip01 L UpperArm", "Bip01 L Forearm", "Bip01 L Hand"}) {
+                    const int boneIndex = actor.character.skeleton.findBone(boneName);
+                    if (boneIndex < 0) continue;
+                    const auto& bone = actor.character.skeleton.bones[
+                        static_cast<std::size_t>(boneIndex)];
+                    const auto track = std::find_if(
+                        actor.idleClip.tracks.begin(), actor.idleClip.tracks.end(),
+                        [boneIndex](const anim::BoneTrack& candidate) {
+                            return candidate.boneIndex == boneIndex;
+                        });
+                    VOX_LOGI("tes3") << "actor trace " << actor.name << " bone="
+                                      << boneName << " bindT=(" << bone.localTranslation.x
+                                      << ", " << bone.localTranslation.y << ", "
+                                      << bone.localTranslation.z << ") bindQ=("
+                                      << bone.localRotation.x << ", " << bone.localRotation.y
+                                      << ", " << bone.localRotation.z << ", "
+                                      << bone.localRotation.w << ") keys="
+                                      << (track != actor.idleClip.tracks.end()
+                                              ? track->rotationKeys.size()
+                                              : 0u);
+                    if (track != actor.idleClip.tracks.end() &&
+                        !track->rotationKeys.empty()) {
+                        const auto& key = track->rotationKeys.front();
+                        VOX_LOGI("tes3") << "actor trace " << actor.name << " bone="
+                                          << boneName << " firstQ=(" << key.value.x << ", "
+                                          << key.value.y << ", " << key.value.z << ", "
+                                          << key.value.w << ")";
+                    }
+                }
+            }
+            ++builtActors;
+            VOX_LOGI("tes3") << "  actor " << actor.name << " slot="
+                              << actor.instanceSlot << " verts="
+                              << actor.character.vertices.size() << " parts="
+                              << actor.character.parts.size();
+        }
+        arrangeActorParadeIfRequested();
+        queueActorUploads();
+        VOX_LOGI("tes3") << "bound " << m_actors.size()
+                          << " nearby FRMR actor(s) for activation/dialogue; built "
+                          << builtActors << " visible actor(s)";
+        return true;
+    }
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) {
+        VOX_LOGE("scenario") << "unknown scenario '" << m_scenarioId << "'";
+        return false;
+    }
+    if (!m_streamIsSkyrim) {
+        VOX_LOGE("scenario") << scenario->id << " requires Skyrim Special Edition content";
+        return false;
+    }
+    if (!m_bethesdaSession.configure(
+            bethesda::BethesdaSessionConfig{scenario->game, fingerprint, scenario->id,
+                                            m_captureSeed == 0u ? 1u : m_captureSeed}, error)) {
+        VOX_LOGE("scenario") << "runtime session failed: " << error;
+        return false;
+    }
+    m_bethesdaSessionConfigured = true;
+    if (!loadScenarioQuestDefinitions(*scenario)) {
+        m_bethesdaSessionConfigured = false;
+        return false;
+    }
+    registerCachedBethesdaCollision();
+    if (m_gameplaySavePath.empty()) {
+        if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
+            m_gameplaySavePath = std::filesystem::path(xdg) / "odai/saves/" /
+                (scenario->id + ".odai.json");
+        } else if (const char* home = std::getenv("HOME")) {
+            m_gameplaySavePath = std::filesystem::path(home) / ".local/share/odai/saves/" /
+                (scenario->id + ".odai.json");
+        }
+    }
+    if (!m_gameplayLoadPath.empty()) {
+        if (!loadGameplayState()) return false;
+    } else {
+        bethesda::RuntimeObject player;
+        player.id = m_bethesdaSession.playerObject();
+        player.base = bethesda::makeRecordKey(scenario->basePlugin, 0x7u);
+        player.kind = bethesda::RuntimeObjectKind::Actor;
+        player.persistent = true;
+        player.actorValues.emplace();
+        player.transform.position = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+        const float playerFeet[3] = {
+            m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+        bethesda::RuntimeSpaceState playerSpace;
+        if (runtimeSpaceForPosition(playerFeet, playerSpace)) {
+            player.originSpace = playerSpace;
+            player.currentSpace = std::move(playerSpace);
+            player.interior = m_interiorStarted;
+        }
+        if (!m_bethesdaSession.world().addInitialObject(std::move(player), error)) {
+            VOX_LOGE("scenario") << "could not create scenario player: " << error;
+            return false;
+        }
+        syncBethesdaActors(true, true);
+    }
+    if (!configureGoldenClawPuzzleForCurrentSpace(error)) {
+        VOX_LOGE("scenario") << "Golden Claw compatibility error: " << error;
+        return false;
+    }
+    if (!registerBethesdaPlayerController()) return false;
+    VOX_LOGI("scenario") << scenario->id
+                         << " active; MQ101 post-Helgen bootstrap plus authored MQ102:10; "
+                            "F5 saves, F9 loads";
+    return true;
+}
+
+bool NewVegasApp::registerBethesdaPlayerController() {
+    if (!m_bethesdaSessionConfigured) return false;
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) return false;
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
+    if (player == nullptr) {
+        VOX_LOGE("physics") << "scenario player is missing from the runtime world";
+        return false;
+    }
+    bethesda::PhysicsCharacterConfig config;
+    config.position = {
+        static_cast<float>(player->transform.position[0]),
+        static_cast<float>(player->transform.position[1]),
+        static_cast<float>(player->transform.position[2])};
+    std::string error;
+    if (!m_bethesdaSession.registerActorController(playerId, config, error)) {
+        VOX_LOGE("physics") << "could not register scenario player controller: " << error;
+        return false;
+    }
+    m_bethesdaPlayerControllerRegistered = true;
+    m_bethesdaControllerOwnsCamera = m_walkMode;
+    if (m_bethesdaControllerOwnsCamera) pullBethesdaPlayerControllerState();
+    return true;
+}
+
+void NewVegasApp::pullBethesdaPlayerControllerState() {
+    if (!m_bethesdaPlayerControllerRegistered) return;
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) return;
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const auto physical = m_bethesdaSession.physics().characterState(playerId);
+    if (!physical.has_value()) return;
+    m_cameraX = physical->position.x;
+    m_cameraY = physical->position.y + kEyeHeightUnits;
+    m_cameraZ = physical->position.z;
+}
+
+void NewVegasApp::relocateBethesdaPlayerControllerToCamera() {
+    if (!m_bethesdaPlayerControllerRegistered) return;
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario == nullptr) return;
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const auto physical = m_bethesdaSession.physics().characterState(playerId);
+    if (!physical.has_value()) return;
+    bethesda::PhysicsCharacterSnapshot saved;
+    saved.object = playerId;
+    saved.position = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+    saved.rotation = physical->rotation;
+    saved.groundNormal = {0.0f, 1.0f, 0.0f};
+    std::string error;
+    if (!m_bethesdaSession.physics().restoreCharacter(saved, error)) {
+        VOX_LOGW("physics") << "could not relocate scenario player controller: " << error;
+        return;
+    }
+    m_bethesdaControllerOwnsCamera = true;
+    syncBethesdaPlayerState(true);
+}
+
+void NewVegasApp::unregisterBethesdaActorControllers() {
+    if (!m_bethesdaSessionConfigured) return;
+    for (SkinnedActor& actor : m_actors) {
+        actor.runtimeRequestedVelocity = {};
+        if (actor.referenceFormId == 0u) continue;
+        bethesda::RecordKey reference;
+        std::string error;
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, actor.referenceFormId, reference, error)) continue;
+        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        if (m_bethesdaSession.physics().hasCharacter(id)) {
+            (void)m_bethesdaSession.unregisterActorController(id);
+        }
+        actor.runtimeControllerOwned = false;
+        actor.runtimeControllerNeedsRelocation = false;
+        actor.runtimeControllerBlocked = false;
+    }
+}
+
+void NewVegasApp::pullBethesdaActorControllerStates() {
+    if (!m_bethesdaSessionConfigured) return;
+    for (SkinnedActor& actor : m_actors) {
+        if (actor.referenceFormId == 0u) continue;
+        bethesda::RecordKey reference;
+        std::string error;
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, actor.referenceFormId, reference, error)) continue;
+        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        const auto physical = m_bethesdaSession.physics().characterState(id);
+        if (!physical.has_value()) {
+            actor.runtimeControllerOwned = false;
+            continue;
+        }
+        actor.runtimeControllerOwned = true;
+        actor.position[0] = physical->position.x;
+        actor.position[1] = physical->position.y;
+        actor.position[2] = physical->position.z;
+        actor.runtimeControllerBlocked = physical->blocked;
+    }
+}
+
+void NewVegasApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
+    if (!m_bethesdaSessionConfigured) return;
+    pullBethesdaActorControllerStates();
+    for (SkinnedActor& actor : m_actors) {
+        if (actor.referenceFormId == 0u) continue;
+        bethesda::RecordKey reference;
+        std::string error;
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, actor.referenceFormId, reference, error)) continue;
+        const bethesda::RuntimeObject* runtime = m_bethesdaSession.world().find(
+            bethesda::ObjectId::persistent(std::move(reference)));
+        actor.runtimeDead = runtime != nullptr && runtime->actorValues.has_value() &&
+            runtime->actorValues->dead;
+        if (actor.runtimeDead) {
+            actor.walking = false;
+            actor.runtimeRequestedVelocity = {};
+        }
+    }
+    const ActorNavigationWorld* navigation =
+        (m_streamer && m_streamer->isStreamingIdle()) ? &m_actorNavigation : nullptr;
+    updateActorWandering(
+        m_actors, fixedDeltaSeconds, navigation,
+        [this](float x, float z, float referenceY, float& outHeight) {
+            return m_streamer
+                ? m_collision.groundHeight(x, z, referenceY, outHeight)
+                : false;
+        },
+        [this](float& x, float& z, float feetY, float headY, float radius) {
+            if (m_streamer) {
+                m_collision.resolveHorizontalFor(
+                    x, z, feetY, headY, radius, m_collision.tuning().stepHeight);
+            }
+        },
+        m_talkingActor);
+    submitBethesdaActorControllerIntents();
+    syncBethesdaActors(false, false);
+}
+
+void NewVegasApp::submitBethesdaActorControllerIntents() {
+    if (!m_bethesdaSessionConfigured) return;
+    for (SkinnedActor& actor : m_actors) {
+        if (actor.referenceFormId == 0u) continue;
+        bethesda::RecordKey reference;
+        std::string identityError;
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, actor.referenceFormId, reference, identityError)) continue;
+        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        if (m_bethesdaSession.world().find(id) == nullptr) continue;
+
+        if (!m_bethesdaSession.physics().hasCharacter(id)) {
+            const float height = std::clamp(
+                actor.standingHeightUnits > 1.0f ? actor.standingHeightUnits : 128.0f,
+                48.0f, 256.0f);
+            const float radius = std::clamp(height * 0.28f, 12.0f, 48.0f);
+            bethesda::PhysicsCharacterConfig config;
+            config.position = {actor.position[0], actor.position[1], actor.position[2]};
+            config.boundsHalfExtents = {radius, height * 0.5f, radius};
+            std::string error;
+            if (!m_bethesdaSession.registerActorController(id, config, error)) {
+                VOX_LOGW("physics") << "could not register actor controller "
+                                     << actor.name << ": " << error;
+                actor.runtimeControllerOwned = false;
+                continue;
+            }
+            actor.runtimeControllerOwned = true;
+            if (const auto restored = m_bethesdaSession.physics().characterState(id)) {
+                actor.position[0] = restored->position.x;
+                actor.position[1] = restored->position.y;
+                actor.position[2] = restored->position.z;
+                actor.runtimeControllerBlocked = restored->blocked;
+            }
+        }
+
+        if (actor.runtimeControllerNeedsRelocation) {
+            if (const auto physical = m_bethesdaSession.physics().characterState(id)) {
+                bethesda::PhysicsCharacterSnapshot relocated;
+                relocated.object = id;
+                relocated.position = {
+                    actor.position[0], actor.position[1], actor.position[2]};
+                relocated.rotation = physical->rotation;
+                relocated.groundNormal = {0.0f, 1.0f, 0.0f};
+                std::string error;
+                if (!m_bethesdaSession.physics().restoreCharacter(relocated, error)) {
+                    VOX_LOGW("physics") << "could not project actor controller "
+                                         << actor.name << ": " << error;
+                }
+            }
+            actor.runtimeControllerNeedsRelocation = false;
+        }
+
+        bethesda::PhysicsCharacterInput input;
+        input.desiredVelocity = actor.runtimeRequestedVelocity;
+        (void)m_bethesdaSession.setActorControllerInput(id, input);
+    }
+}
+
+void NewVegasApp::syncBethesdaPlayerState(bool applyNow) {
+    if (!m_bethesdaSessionConfigured) return;
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
+    if (player == nullptr) return;
+    bethesda::WorldCommand command;
+    command.type = bethesda::WorldCommandType::SetTransform;
+    command.target = playerId;
+    float feetPosition[3] = {};
+    if (const auto physical = m_bethesdaSession.physics().characterState(playerId)) {
+        command.transform.position = {
+            physical->position.x, physical->position.y, physical->position.z};
+        feetPosition[0] = physical->position.x;
+        feetPosition[1] = physical->position.y;
+        feetPosition[2] = physical->position.z;
+    } else {
+        command.transform.position = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+        feetPosition[0] = m_cameraX;
+        feetPosition[1] = m_cameraY - kEyeHeightUnits;
+        feetPosition[2] = m_cameraZ;
+    }
+    command.transform.rotationRadians = {
+        m_pitchDegrees * (kPi / 180.0f), m_yawDegrees * (kPi / 180.0f), 0.0f};
+    (void)m_bethesdaSession.world().queue(std::move(command));
+    bethesda::RuntimeSpaceState space;
+    if (runtimeSpaceForPosition(feetPosition, space) &&
+        player->currentSpace != space) {
+        bethesda::WorldCommand spaceCommand;
+        spaceCommand.type = bethesda::WorldCommandType::SetCurrentSpace;
+        spaceCommand.target = playerId;
+        spaceCommand.currentSpace = std::move(space);
+        (void)m_bethesdaSession.world().queue(std::move(spaceCommand));
+    }
+    if (applyNow) (void)m_bethesdaSession.world().applyQueuedCommands();
+}
+
+void NewVegasApp::syncBethesdaActors(bool addMissing, bool applyNow) {
+    if (!m_bethesdaSessionConfigured || m_streamLoadOrder.empty()) return;
+    m_bethesdaSession.clearLoadedLocations();
+    std::vector<std::uint32_t> loadedLocationFormIds =
+        m_streamer->residentLocationFormIds();
+    if (m_interiorStarted) {
+        const std::uint32_t interiorLocation =
+            m_streamer->locationFormIdForInterior(m_currentInteriorEditorId);
+        if (interiorLocation != 0u) loadedLocationFormIds.push_back(interiorLocation);
+    }
+    for (const std::uint32_t locationFormId : loadedLocationFormIds) {
+        bethesda::RecordKey location;
+        std::string locationError;
+        if (bethesda::stableRecordKey(
+                m_streamLoadOrder, locationFormId, location, locationError)) {
+            m_bethesdaSession.setLocationLoaded(location, true);
+        }
+    }
+    for (SkinnedActor& actor : m_actors) {
+        if (actor.referenceFormId == 0u || actor.baseFormId == 0u) continue;
+        bethesda::RecordKey reference;
+        bethesda::RecordKey base;
+        std::string error;
+        if (!bethesda::stableRecordKey(m_streamLoadOrder, actor.referenceFormId, reference, error) ||
+            !bethesda::stableRecordKey(m_streamLoadOrder, actor.baseFormId, base, error)) {
+            VOX_LOGW("runtime") << "actor identity unavailable for " << actor.name << ": " << error;
+            continue;
+        }
+        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        bethesda::RuntimeTransform transform;
+        transform.position = {actor.position[0], actor.position[1], actor.position[2]};
+        transform.rotationRadians[1] = actor.yawRadians;
+        const float enginePosition[3] = {
+            actor.position[0], actor.position[1], actor.position[2]};
+        float falloutPosition[3] = {};
+        importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
+        const std::uint32_t locationFormId = m_interiorStarted
+            ? m_streamer->locationFormIdForInterior(m_currentInteriorEditorId)
+            : m_streamer->locationFormIdAtFallout(falloutPosition[0], falloutPosition[1]);
+        bethesda::RecordKey location;
+        if (locationFormId != 0u &&
+            !bethesda::stableRecordKey(m_streamLoadOrder, locationFormId, location, error)) {
+            VOX_LOGW("runtime") << "location identity unavailable for " << actor.name
+                                 << ": " << error;
+            location = {};
+        }
+        bethesda::RuntimeSpaceState originSpace;
+        const bool hasOriginSpace =
+            runtimeOriginSpaceForReference(actor.referenceFormId, originSpace);
+        bethesda::RuntimeSpaceState currentSpace;
+        const bool hasCurrentSpace =
+            runtimeSpaceForPosition(enginePosition, currentSpace);
+        const bethesda::RuntimeObject* existing = m_bethesdaSession.world().find(id);
+        if (existing == nullptr) {
+            if (!addMissing) continue;
+            bethesda::RuntimeObject object;
+            object.id = id;
+            object.base = base;
+            object.kind = bethesda::RuntimeObjectKind::Actor;
+            object.transform = transform;
+            if (hasOriginSpace) object.originSpace = originSpace;
+            if (hasCurrentSpace) object.currentSpace = currentSpace;
+            object.enabled = actor.renderVisible;
+            object.persistent = true;
+            object.interior = m_interiorStarted;
+            object.inDialogueWithPlayer = actor.talking;
+            object.location = location;
+            for (const std::uint32_t itemFormId : actor.inventoryFormIds) {
+                bethesda::RecordKey item;
+                if (!bethesda::stableRecordKey(
+                        m_streamLoadOrder, itemFormId, item, error)) {
+                    VOX_LOGW("runtime") << "inventory identity unavailable for "
+                                         << actor.name << ": " << error;
+                    continue;
+                }
+                const auto existingItem = std::find_if(
+                    object.inventory.begin(), object.inventory.end(),
+                    [&](const bethesda::InventoryEntry& entry) {
+                        return entry.item == item;
+                    });
+                if (existingItem == object.inventory.end()) {
+                    object.inventory.push_back({std::move(item), 1, false});
+                } else {
+                    ++existingItem->count;
+                }
+            }
+            std::sort(object.inventory.begin(), object.inventory.end(),
+                [](const bethesda::InventoryEntry& left,
+                   const bethesda::InventoryEntry& right) {
+                    return left.item < right.item;
+                });
+            for (const std::uint32_t referenceTypeFormId : actor.referenceTypeFormIds) {
+                bethesda::RecordKey referenceType;
+                if (!bethesda::stableRecordKey(
+                        m_streamLoadOrder, referenceTypeFormId, referenceType, error)) {
+                    VOX_LOGW("runtime") << "reference type identity unavailable for "
+                                         << actor.name << ": " << error;
+                    continue;
+                }
+                object.referenceTypes.push_back(std::move(referenceType));
+            }
+            std::sort(object.referenceTypes.begin(), object.referenceTypes.end());
+            object.referenceTypes.erase(std::unique(
+                object.referenceTypes.begin(), object.referenceTypes.end()),
+                object.referenceTypes.end());
+            object.aiState = runtimeAiStateFor(actor, m_streamLoadOrder);
+            object.actorValues.emplace();
+            if (!m_bethesdaSession.world().addInitialObject(std::move(object), error)) {
+                VOX_LOGW("runtime") << "could not register actor " << actor.name << ": " << error;
+            } else {
+                const std::size_t materialized =
+                    m_bethesdaSession.bindQuestInventoryForActor(id, base, error);
+                if (!error.empty()) {
+                    VOX_LOGW("runtime") << "could not bind quest inventory for "
+                                         << actor.name << ": " << error;
+                } else if (materialized != 0u) {
+                    VOX_LOGI("runtime") << "materialized " << materialized
+                                         << " quest-created item(s) on " << actor.name;
+                }
+            }
+            continue;
+        }
+        (void)m_bethesdaSession.bindQuestInventoryForActor(id, base, error);
+        actor.renderVisible = existing->enabled;
+        if (actor.scriptedMoveArrived && existing->navigationRequest.has_value() &&
+            existing->navigationRequest->revision == actor.scriptedMoveRevision) {
+            bethesda::WorldCommand arrived;
+            arrived.type = bethesda::WorldCommandType::SetNavigationStatus;
+            arrived.target = id;
+            arrived.navigationRevision = actor.scriptedMoveRevision;
+            arrived.navigationStatus = bethesda::NavigationRequestStatus::Arrived;
+            (void)m_bethesdaSession.world().queue(std::move(arrived));
+            actor.scriptedMoveArrived = false;
+        }
+        if (existing->navigationRequest.has_value() &&
+            existing->navigationRequest->status != bethesda::NavigationRequestStatus::Arrived &&
+            existing->navigationRequest->status != bethesda::NavigationRequestStatus::Failed &&
+            actor.scriptedMoveRevision != existing->navigationRequest->revision &&
+            existing->navigationRequest->destination.kind ==
+                bethesda::ObjectIdKind::PersistentReference) {
+            std::uint32_t destinationFormId = 0u;
+            float destination[3] = {};
+            std::string navigationError;
+            if (bethesda::resolvedFormId(
+                    m_streamLoadOrder, existing->navigationRequest->destination.reference,
+                    destinationFormId, navigationError) &&
+                m_streamer->referencePositionEngineSpace(
+                    destinationFormId, destination, navigationError)) {
+                std::vector<ActorNavigationStep> path;
+                if (m_actorNavigation.buildPath(
+                        odai::math::Vector3{
+                            actor.position[0], actor.position[1], actor.position[2]},
+                        odai::math::Vector3{destination[0], destination[1], destination[2]}, path) &&
+                    !path.empty()) {
+                    actor.wanderPath = std::move(path);
+                    actor.wanderPathIndex = 1u;
+                    actor.wanderTarget[0] = actor.wanderPath.front().position.x;
+                    actor.wanderTarget[1] = actor.wanderPath.front().position.y;
+                    actor.wanderTarget[2] = actor.wanderPath.front().position.z;
+                    actor.wanderPauseSeconds = 0.0f;
+                    actor.wanders = true;
+                    actor.scriptedMoveActive = true;
+                    actor.scriptedMoveArrived = false;
+                    actor.scriptedMoveRevision = existing->navigationRequest->revision;
+                    bethesda::WorldCommand moving;
+                    moving.type = bethesda::WorldCommandType::SetNavigationStatus;
+                    moving.target = id;
+                    moving.navigationRevision = actor.scriptedMoveRevision;
+                    moving.navigationStatus = bethesda::NavigationRequestStatus::Moving;
+                    (void)m_bethesdaSession.world().queue(std::move(moving));
+                }
+            }
+        }
+        if (existing->transform != transform) {
+            bethesda::WorldCommand move;
+            move.type = bethesda::WorldCommandType::SetTransform;
+            move.target = id;
+            move.transform = transform;
+            (void)m_bethesdaSession.world().queue(std::move(move));
+        }
+        if (existing->originSpace.kind == bethesda::RuntimeSpaceKind::Unknown &&
+            hasOriginSpace) {
+            bethesda::WorldCommand origin;
+            origin.type = bethesda::WorldCommandType::SetOriginSpace;
+            origin.target = id;
+            origin.originSpace = originSpace;
+            (void)m_bethesdaSession.world().queue(std::move(origin));
+        }
+        if (hasCurrentSpace && existing->currentSpace != currentSpace) {
+            bethesda::WorldCommand space;
+            space.type = bethesda::WorldCommandType::SetCurrentSpace;
+            space.target = id;
+            space.currentSpace = currentSpace;
+            (void)m_bethesdaSession.world().queue(std::move(space));
+        }
+        if (existing->interior != m_interiorStarted ||
+            existing->inDialogueWithPlayer != actor.talking ||
+            existing->location != location) {
+            bethesda::WorldCommand context;
+            context.type = bethesda::WorldCommandType::SetActorContext;
+            context.target = id;
+            context.interior = m_interiorStarted;
+            context.inDialogueWithPlayer = actor.talking;
+            context.location = location;
+            (void)m_bethesdaSession.world().queue(std::move(context));
+        }
+        const bethesda::RuntimeAiState aiState =
+            runtimeAiStateFor(actor, m_streamLoadOrder);
+        if (!existing->aiState.has_value() || *existing->aiState != aiState) {
+            bethesda::WorldCommand ai;
+            ai.type = bethesda::WorldCommandType::SetAiState;
+            ai.target = id;
+            ai.aiState = aiState;
+            (void)m_bethesdaSession.world().queue(std::move(ai));
+        }
+    }
+    if (applyNow) {
+        const bethesda::CommandApplyResult applied =
+            m_bethesdaSession.world().applyQueuedCommands();
+        for (const std::string& diagnostic : applied.diagnostics) {
+            VOX_LOGW("runtime") << diagnostic;
+        }
+        (void)m_renderer.applyRuntimeRenderDeltas(applied.renderDeltas);
+    }
+}
+
+void NewVegasApp::restoreBethesdaActorsFromSession() {
+    if (!m_bethesdaSessionConfigured || m_streamLoadOrder.empty()) return;
+    for (SkinnedActor& actor : m_actors) {
+        bethesda::RecordKey reference;
+        std::string error;
+        if (actor.referenceFormId == 0u ||
+            !bethesda::stableRecordKey(m_streamLoadOrder, actor.referenceFormId, reference, error)) {
+            continue;
+        }
+        const bethesda::RuntimeObject* object = m_bethesdaSession.world().find(
+            bethesda::ObjectId::persistent(std::move(reference)));
+        if (object == nullptr) continue;
+        actor.position[0] = static_cast<float>(object->transform.position[0]);
+        actor.position[1] = static_cast<float>(object->transform.position[1]);
+        actor.position[2] = static_cast<float>(object->transform.position[2]);
+        actor.yawRadians = object->transform.rotationRadians[1];
+        actor.renderVisible = object->enabled;
+        if (object->aiState.has_value()) {
+            restoreRuntimeAiState(*object->aiState, m_streamLoadOrder, actor);
+        }
+    }
+    syncBethesdaActors(true, true);
+    submitBethesdaActorControllerIntents();
+    pullBethesdaActorControllerStates();
+}
+
+bool NewVegasApp::saveGameplayState() {
+    if (!m_bethesdaSessionConfigured || m_gameplaySavePath.empty()) return false;
+    syncBethesdaPlayerState(true);
+    std::string error;
+    if (!bethesda::saveOdaiGameAtomic(m_gameplaySavePath, m_bethesdaSession, error)) {
+        VOX_LOGE("save") << error;
+        return false;
+    }
+    VOX_LOGI("save") << "saved ODAI gameplay state to " << m_gameplaySavePath.string();
+    m_toasts.push("Game saved", m_gameplaySavePath.filename().string(), "gameplay-save");
+    return true;
+}
+
+bool NewVegasApp::loadGameplayState() {
+    const std::filesystem::path path = m_gameplayLoadPath.empty()
+        ? m_gameplaySavePath : m_gameplayLoadPath;
+    if (!m_bethesdaSessionConfigured || path.empty()) return false;
+    const bool controllerWasRegistered = m_bethesdaPlayerControllerRegistered;
+    bethesda::SaveLoadReport report;
+    std::string error;
+    bethesda::SaveLoadOptions options;
+    options.recordAvailable = [this](const bethesda::RecordKey& key) {
+        if (m_streamLoadOrder.empty()) return false;
+        std::uint32_t formId = 0u;
+        std::string resolutionError;
+        return bethesda::resolvedFormId(m_streamLoadOrder, key, formId, resolutionError);
+    };
+    if (!bethesda::loadOdaiGame(path, m_bethesdaSession, options, report, error)) {
+        VOX_LOGE("save") << error;
+        return false;
+    }
+    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario != nullptr) {
+        const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
+            bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+        const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
+        if (player != nullptr) {
+            m_cameraX = static_cast<float>(player->transform.position[0]);
+            m_cameraY = static_cast<float>(player->transform.position[1]);
+            m_cameraZ = static_cast<float>(player->transform.position[2]);
+            m_pitchDegrees = player->transform.rotationRadians[0] * (180.0f / kPi);
+            m_yawDegrees = player->transform.rotationRadians[1] * (180.0f / kPi);
+        }
+        const std::vector<bethesda::PhysicsCharacterSnapshot> physicalActors =
+            m_bethesdaSession.physicsSnapshots();
+        const auto savedPhysical = std::find_if(
+            physicalActors.begin(), physicalActors.end(),
+            [&](const bethesda::PhysicsCharacterSnapshot& value) {
+                return value.object == playerId;
+            });
+        if (savedPhysical != physicalActors.end()) {
+            m_cameraX = savedPhysical->position.x;
+            m_cameraY = savedPhysical->position.y + kEyeHeightUnits;
+            m_cameraZ = savedPhysical->position.z;
+        } else if (player != nullptr) {
+            // Controller-less V2 saves predate feet-origin ownership: their
+            // player transform was the eye camera. Normalize it once before a
+            // controller is registered and all future saves carry physics.
+            syncBethesdaPlayerState(true);
+            report.diagnostics.push_back(
+                "normalized legacy controller-less player transform to feet origin");
+        }
+        if (controllerWasRegistered &&
+            !m_bethesdaSession.physics().hasCharacter(playerId)) {
+            m_bethesdaPlayerControllerRegistered = false;
+            if (!registerBethesdaPlayerController()) return false;
+        }
+        m_bethesdaControllerOwnsCamera = m_walkMode;
+        if (m_bethesdaControllerOwnsCamera) pullBethesdaPlayerControllerState();
+    }
+    restoreBethesdaActorsFromSession();
+    std::string puzzleError;
+    if (!configureGoldenClawPuzzleForCurrentSpace(puzzleError)) {
+        VOX_LOGE("save") << "Golden Claw compatibility error after load: "
+                          << puzzleError;
+        return false;
+    }
+    for (const std::string& diagnostic : report.diagnostics) {
+        VOX_LOGW("save") << diagnostic;
+    }
+    VOX_LOGI("save") << "loaded ODAI gameplay state from " << path.string();
+    const std::string loadTitle = report.recoveredPrevious
+        ? "Recovered previous save"
+        : (report.contentReconciled ? "Game loaded with content changes" : "Game loaded");
+    m_toasts.push(loadTitle, path.filename().string(), "gameplay-load");
+    return true;
 }
 
 void NewVegasApp::drawPipBoyHud() {
@@ -5602,6 +9190,20 @@ void NewVegasApp::drawPipBoyHud() {
     int screenHeight = 0;
     framebufferSize(screenWidth, screenHeight);
     const float margin = 16.0f * scale;
+
+    // Skyrim's best dialogue decision is modal visual focus: once a
+    // conversation begins, the compass, status meters, interaction prompts and
+    // quest tracker stop competing with the person speaking. Preserve that
+    // hierarchy for the remastered TES3 presentation while retaining
+    // Morrowind's warm serif language inside the dialogue surface itself.
+    if (m_streamIsMorrowind) {
+        if (const SkinnedActor* speaker = talkingActor()) {
+            if (const dialogue::DialogueNode* node = speaker->runtime.currentNode()) {
+                drawDialoguePanel(*node, screenWidth, screenHeight, scale);
+            }
+            return;
+        }
+    }
 
     // Status strip, bottom-left: the readouts that belong on screen all the
     // time. Kept to one line so it never competes with the world.
@@ -5630,8 +9232,27 @@ void NewVegasApp::drawPipBoyHud() {
 
     // Interaction prompt, centred low -- where an action prompt belongs, and
     // labelled for whichever device is driving.
-    const int usableDoor = findUsableDoor();
-    if (usableDoor >= 0 && !m_menuOpen) {
+    const bool clawPuzzleInReach = !m_menuOpen && m_activationLootActor < 0 &&
+        m_activationActor < 0 &&
+        goldenClawPuzzleInReach();
+    if (clawPuzzleInReach) {
+        const bethesda::RuntimeObject* keyhole =
+            m_bethesdaSession.world().find(m_goldenClawPuzzle->door);
+        const std::vector<std::int32_t>& states =
+            keyhole->activatorState->puzzleStates;
+        char prompt[192];
+        std::snprintf(prompt, sizeof(prompt),
+            "[1] Large %d   [2] Medium %d   [3] Small %d   [E] Use Golden Claw",
+            states[0], states[1], states[2]);
+        const float promptWidth = m_uiFont.measureText(prompt);
+        m_uiDrawList.addText(
+            m_uiFont, prompt,
+            ui::UiVec2{(static_cast<float>(screenWidth) - promptWidth) * 0.5f,
+                       static_cast<float>(screenHeight) - (96.0f * scale)},
+            kPipGreen);
+    } else if (const int usableDoor = findUsableDoor();
+               usableDoor >= 0 && !m_menuOpen &&
+               m_activationLootActor < 0 && m_activationActor < 0) {
         const importer::ImportedSceneDoor& door = m_doors[static_cast<std::size_t>(usableDoor)];
         char prompt[192];
         std::snprintf(
@@ -5734,6 +9355,90 @@ void NewVegasApp::drawPipBoyHud() {
         }
     }
 
+    // TES3 does not invent objective markers. The tracker is the latest
+    // authored journal entry from the quest the player pinned in the journal.
+    if (m_streamIsMorrowind && m_bethesdaSessionConfigured &&
+        !m_tes3JournalOpen && m_tes3JournalPanel != nullptr) {
+        if (m_bethesdaSession.tes3().journal().chronology().size() !=
+            m_tes3JournalSyncedVisits) {
+            syncTes3JournalPanel();
+        }
+        if (const auto tracked = m_tes3JournalPanel->latestPinnedEntry();
+            tracked.has_value()) {
+            const float width = std::min(620.0f * scale,
+                static_cast<float>(screenWidth) * 0.36f);
+            const float padding = 16.0f * scale;
+            const std::vector<std::string> lines =
+                wrapTextToWidth(m_uiFont, tracked->text, width - (padding * 2.0f));
+            const std::size_t shown = std::min<std::size_t>(lines.size(), 4u);
+            const float lineHeight = m_uiFont.lineHeightPx() * 1.12f;
+            ui::UiRect tracker;
+            tracker.maxX = static_cast<float>(screenWidth) - margin;
+            tracker.minX = tracker.maxX - width;
+            tracker.minY = 88.0f * scale;
+            tracker.maxY = tracker.minY + padding * 2.0f +
+                lineHeight * static_cast<float>(shown + 1u);
+            m_uiDrawList.addRoundRectFilled(tracker, kPipPanel, 4.0f * scale);
+            m_uiDrawList.addRoundRect(tracker, kPipGreenDim, 4.0f * scale, 1.0f * scale);
+            m_uiDrawList.addText(m_uiFontBold.valid() ? m_uiFontBold : m_uiFont,
+                tracked->title.c_str(),
+                {tracker.minX + padding, tracker.minY + padding * 0.65f}, kPipGreen);
+            for (std::size_t line = 0u; line < shown; ++line) {
+                m_uiDrawList.addText(m_uiFont, lines[line].c_str(),
+                    {tracker.minX + padding,
+                     tracker.minY + padding + lineHeight * static_cast<float>(line + 1u)},
+                    kPipGreenDim);
+            }
+        }
+    }
+
+    // Runtime quest objectives are deliberately separate from imported scene
+    // data. Skyrim wording is resolved from the owning plugin's localized
+    // STRINGS table; stable identities remain a visible fallback for mods with
+    // absent or malformed localization data.
+    if (m_bethesdaSessionConfigured && !m_menuOpen) {
+        std::vector<std::string> objectiveLines;
+        for (const auto& [editorId, quest] : m_bethesdaSession.quests()) {
+            for (const bethesda::QuestObjectiveState& objective : quest.objectives) {
+                if (!objective.displayed || objective.completed) continue;
+                const std::string label = objective.displayText.empty()
+                    ? editorId + " objective " + std::to_string(objective.index)
+                    : objective.displayText;
+                objectiveLines.push_back(
+                    std::string(objective.failed ? "[!] " : "[ ] ") + label);
+            }
+        }
+        if (!objectiveLines.empty()) {
+            constexpr std::size_t kMaxVisibleObjectives = 6u;
+            if (objectiveLines.size() > kMaxVisibleObjectives) {
+                objectiveLines.resize(kMaxVisibleObjectives);
+            }
+            float width = m_uiFont.measureText("ACTIVE OBJECTIVES");
+            for (const std::string& line : objectiveLines) {
+                width = std::max(width, m_uiFont.measureText(line));
+            }
+            const float padding = 12.0f * scale;
+            const float lineHeight = m_uiFont.lineHeightPx() + (4.0f * scale);
+            ui::UiRect panel;
+            panel.maxX = static_cast<float>(screenWidth) - margin;
+            panel.minX = panel.maxX - width - (padding * 2.0f);
+            panel.minY = 88.0f * scale;
+            panel.maxY = panel.minY +
+                lineHeight * static_cast<float>(objectiveLines.size() + 1u) + padding;
+            m_uiDrawList.addRoundRectFilled(panel, kPipPanel, 3.0f * scale);
+            m_uiDrawList.addRoundRect(panel, kPipGreenDim, 3.0f * scale, 1.0f * scale);
+            m_uiDrawList.addText(m_uiFont, "ACTIVE OBJECTIVES",
+                ui::UiVec2{panel.minX + padding, panel.minY + (6.0f * scale)}, kPipGreen);
+            for (std::size_t index = 0u; index < objectiveLines.size(); ++index) {
+                m_uiDrawList.addText(m_uiFont, objectiveLines[index].c_str(),
+                    ui::UiVec2{panel.minX + padding,
+                        panel.minY + lineHeight * static_cast<float>(index + 1u) +
+                            (6.0f * scale)},
+                    objectiveLines[index].starts_with("[!]") ? kPipGreenDim : kPipGreen);
+            }
+        }
+    }
+
     // Victor. The conversation is drawn straight onto the HUD draw list rather
     // than through DialoguePanel: the panel wants a widget tree, and this app's
     // HUD is immediate-mode text, so one path is simpler than bridging two.
@@ -5741,6 +9446,15 @@ void NewVegasApp::drawPipBoyHud() {
         if (const dialogue::DialogueNode* node = speaker->runtime.currentNode()) {
             drawDialoguePanel(*node, screenWidth, screenHeight, scale);
         }
+    } else if (m_activationLootActor >= 0 &&
+               m_activationLootActor < static_cast<int>(m_actors.size())) {
+        const std::string prompt =
+            "E  search " +
+            m_actors[static_cast<std::size_t>(m_activationLootActor)].displayName();
+        m_uiDrawList.addText(m_uiFont, prompt,
+            ui::UiVec2{64.0f * scale,
+                static_cast<float>(screenHeight) - (132.0f * scale)},
+            kPipGreen);
     } else if (m_activationActor >= 0 &&
                m_activationActor < static_cast<int>(m_actors.size())) {
         const std::string prompt =
@@ -5754,8 +9468,8 @@ void NewVegasApp::drawPipBoyHud() {
     // showing "Tab" to someone holding a controller is worse than showing
     // nothing.
     const char* hint = m_navDriving
-        ? "(Start) menu   (LS) move   (A) use"
-        : "Esc menu   [ ] time   P quit   Tab cursor";
+        ? "(Start) menu   (LS) move   (A) use   J journal"
+        : "J journal   Esc menu   [ ] time   P quit   Tab cursor";
     m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
 }
 
@@ -6186,31 +9900,53 @@ void NewVegasApp::drawPauseMenu() {
 void NewVegasApp::drawDialoguePanel(
     const dialogue::DialogueNode& node, int screenWidth, int screenHeight, float scale
 ) {
+    const bool compactTes3 = m_streamIsMorrowind;
     // Fall back to the body face when a dialogue bake failed; the layout below
     // measures whatever font it is handed, so it stays correct either way.
-    const ui::Font& lineFont = m_dialogueFont.valid() ? m_dialogueFont : m_uiFont;
-    const ui::Font& choiceFont = m_dialogueChoiceFont.valid() ? m_dialogueChoiceFont : m_uiFont;
+    const ui::Font& lineFont = compactTes3 && m_tes3JournalFont.valid()
+        ? m_tes3JournalFont
+        : (m_dialogueFont.valid() ? m_dialogueFont : m_uiFont);
+    const ui::Font& choiceFont = compactTes3 && m_tes3JournalFont.valid()
+        ? m_tes3JournalFont
+        : (m_dialogueChoiceFont.valid() ? m_dialogueChoiceFont : m_uiFont);
+    const ui::Font& speakerFont = compactTes3 && m_tes3JournalBoldFont.valid()
+        ? m_tes3JournalBoldFont
+        : (m_uiFontBold.valid() ? m_uiFontBold : m_uiFont);
+    const ui::Font& footerFont = compactTes3 && m_tes3JournalFont.valid()
+        ? m_tes3JournalFont : m_uiFont;
 
     const auto width = static_cast<float>(screenWidth);
     const auto height = static_cast<float>(screenHeight);
+    const ui::UiColor dialogueText = compactTes3
+        ? ui::UiColor{0.91f, 0.83f, 0.68f, 1.0f} : kPipGreen;
+    const ui::UiColor dialogueMuted = compactTes3
+        ? ui::UiColor{0.68f, 0.61f, 0.50f, 1.0f} : kPipGreenDim;
+    const ui::UiColor dialogueBorder = compactTes3
+        ? ui::UiColor{0.58f, 0.48f, 0.34f, 0.96f} : kPipGreenDim;
+    const ui::UiColor dialoguePanel = compactTes3
+        ? ui::UiColor{0.075f, 0.065f, 0.052f, 0.91f} : kPipPanelSolid;
 
     // Width is capped in *scaled* units as well as as a fraction of the screen.
     // A line of text that spans an entire 4K width is unreadable no matter how
     // big the glyphs are -- the eye loses the start of the next line -- so the
     // card stops growing once it is wide enough for a comfortable measure.
-    const float panelWidth = std::min(width * 0.74f, 1500.0f * scale);
-    const float padding = 40.0f * scale;
+    const float panelWidth = compactTes3
+        ? std::min(width * 0.68f, 1280.0f * scale)
+        : std::min(width * 0.74f, 1500.0f * scale);
+    const float padding = (compactTes3 ? 22.0f : 40.0f) * scale;
     const float innerWidth = panelWidth - (padding * 2.0f);
 
     const std::vector<std::string> spokenLines =
         wrapTextToWidth(lineFont, node.text, innerWidth);
-    const float spokenLineHeight = lineFont.lineHeightPx() * 1.18f;
+    const float spokenLineHeight =
+        lineFont.lineHeightPx() * (compactTes3 ? 1.04f : 1.18f);
 
     // Replies are indented past their number, and the wrap has to account for
     // that or a long reply overruns the card it is measured against.
-    const float choiceIndent = 56.0f * scale;
-    const float choiceRowPadding = 14.0f * scale;
-    const float choiceLineHeight = choiceFont.lineHeightPx() * 1.15f;
+    const float choiceIndent = (compactTes3 ? 44.0f : 56.0f) * scale;
+    const float choiceRowPadding = (compactTes3 ? 8.0f : 14.0f) * scale;
+    const float choiceLineHeight =
+        choiceFont.lineHeightPx() * (compactTes3 ? 1.05f : 1.15f);
     const SkinnedActor* speakingActor = talkingActor();
     const auto choices = speakingActor != nullptr
         ? speakingActor->runtime.availableChoices()
@@ -6227,15 +9963,16 @@ void NewVegasApp::drawDialoguePanel(
         choiceHeights.push_back((rows * choiceLineHeight) + (choiceRowPadding * 2.0f));
     }
 
-    const float speakerHeight = m_uiFontBold.valid() ? m_uiFontBold.lineHeightPx()
-                                                     : m_uiFont.lineHeightPx();
+    const float speakerHeight = speakerFont.lineHeightPx();
     // Weighted toward the replies: the rule belongs to the block above it, and
     // an equal gap on both sides made the first reply's highlight border read
     // as if it were touching the rule.
-    const float ruleGapAbove = 22.0f * scale;
-    const float ruleGapBelow = 30.0f * scale;
+    const float ruleGapAbove = (compactTes3 ? 10.0f : 22.0f) * scale;
+    const float ruleGapBelow = (compactTes3 ? 12.0f : 30.0f) * scale;
     const float ruleGap = ruleGapAbove + ruleGapBelow;
-    const float footerHeight = m_uiFont.lineHeightPx() + (18.0f * scale);
+    const float footerHeight =
+        footerFont.lineHeightPx() + ((compactTes3 ? 8.0f : 18.0f) * scale);
+    const float speakerGap = (compactTes3 ? 5.0f : 12.0f) * scale;
     const float spokenHeight =
         static_cast<float>(std::max<std::size_t>(spokenLines.size(), 1u)) * spokenLineHeight;
 
@@ -6251,9 +9988,10 @@ void NewVegasApp::drawDialoguePanel(
     //
     // 0.62 leaves the top third of the screen clear, which at this card's width
     // is enough for a head and shoulders at conversation distance.
-    const float fixedHeight = (padding * 2.0f) + speakerHeight + (12.0f * scale) + spokenHeight +
+    const float fixedHeight = (padding * 2.0f) + speakerHeight + speakerGap + spokenHeight +
                               ruleGap + footerHeight;
-    const float choiceBudget = std::max(0.0f, (height * 0.62f) - fixedHeight);
+    const float maxPanelHeight = height * (compactTes3 ? 0.43f : 0.62f);
+    const float choiceBudget = std::max(0.0f, maxPanelHeight - fixedHeight);
 
     // The window of replies that fits, slid just far enough to keep the
     // highlighted one inside it. Sliding by one rather than paging keeps the
@@ -6283,13 +10021,20 @@ void NewVegasApp::drawDialoguePanel(
     }
     const bool choicesClipped = visibleChoices < choiceCount;
 
-    const float panelHeight = (padding * 2.0f) + speakerHeight + (12.0f * scale) + spokenHeight +
+    const float panelHeight = (padding * 2.0f) + speakerHeight + speakerGap + spokenHeight +
                               ruleGap + choicesHeight + footerHeight;
 
     const float panelX = (width - panelWidth) * 0.5f;
-    const float panelY = (height - panelHeight) * 0.5f;
+    // Keep the portrait area above the text, especially at native HiDPI where
+    // the correctly density-scaled type makes this card physically tall.
+    // Centring a 62%-high card left only ~19% of the frame for the speaker;
+    // even a correct face aim then cropped the head and presented the torso.
+    // A small bottom safe area preserves the HUD separation while giving the
+    // camera an honest head-and-shoulders viewport.
+    const float panelY = std::max(
+        0.0f, height - panelHeight - (height * (compactTes3 ? 0.02f : 0.035f)));
     const ui::UiRect panel{panelX, panelY, panelX + panelWidth, panelY + panelHeight};
-    const float corner = 10.0f * scale;
+    const float corner = (compactTes3 ? 4.0f : 10.0f) * scale;
     // Published for updateCamera, which frames Victor's face above this edge.
     m_dialoguePanelTopPx = panelY;
 
@@ -6298,8 +10043,19 @@ void NewVegasApp::drawDialoguePanel(
     // text never competes with a bright sky, and a phosphor edge to tie it to
     // the rest of the HUD.
     m_uiDrawList.addDropShadow(panel, ui::UiColor{0.0f, 0.0f, 0.0f, 0.55f}, 18.0f * scale, corner);
-    m_uiDrawList.addRoundRectFilled(panel, kPipPanelSolid, corner);
-    m_uiDrawList.addRoundRect(panel, kPipGreenDim, corner, 2.0f * scale);
+    m_uiDrawList.addRoundRectFilled(panel, dialoguePanel, corner);
+    m_uiDrawList.addRoundRect(panel, dialogueBorder, corner, 2.0f * scale);
+    if (compactTes3) {
+        // A restrained inset rule gives the window the layered carved-frame
+        // read of Morrowind's menus without spending portrait space on a large
+        // ornamental bitmap or introducing another texture dependency.
+        const float inset = 5.0f * scale;
+        m_uiDrawList.addRoundRect(
+            ui::UiRect{panel.minX + inset, panel.minY + inset,
+                       panel.maxX - inset, panel.maxY - inset},
+            ui::UiColor{dialogueBorder.r, dialogueBorder.g, dialogueBorder.b, 0.38f},
+            corner * 0.65f, 1.0f * scale);
+    }
 
     float y = panel.minY + padding;
 
@@ -6311,12 +10067,11 @@ void NewVegasApp::drawDialoguePanel(
     for (char& c : speaker) {
         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
-    const ui::Font& speakerFont = m_uiFontBold.valid() ? m_uiFontBold : m_uiFont;
     m_uiDrawList.addText(
         speakerFont, speaker,
         ui::UiVec2{panel.minX + ((panelWidth - speakerFont.measureText(speaker)) * 0.5f), y},
-        kPipGreenDim);
-    y += speakerHeight + (12.0f * scale);
+        dialogueMuted);
+    y += speakerHeight + speakerGap;
 
     // What Victor says: centred, because it is one short block and centring it
     // under the name reads as a single unit.
@@ -6324,14 +10079,14 @@ void NewVegasApp::drawDialoguePanel(
         m_uiDrawList.addText(
             lineFont, text,
             ui::UiVec2{panel.minX + ((panelWidth - lineFont.measureText(text)) * 0.5f), y},
-            kPipGreen);
+            dialogueText);
         y += spokenLineHeight;
     }
 
     y += ruleGapAbove;
     m_uiDrawList.addRectFilled(
         ui::UiRect{panel.minX + padding, y, panel.maxX - padding, y + (1.0f * scale)},
-        ui::UiColor{kPipGreenDim.r, kPipGreenDim.g, kPipGreenDim.b, 0.45f});
+        ui::UiColor{dialogueMuted.r, dialogueMuted.g, dialogueMuted.b, 0.45f});
     y += ruleGapBelow;
 
     // The replies: LEFT aligned, unlike the block above. They are a list to be
@@ -6350,25 +10105,28 @@ void NewVegasApp::drawDialoguePanel(
         // TV distance.
         if (selected) {
             m_uiDrawList.addRoundRectFilled(
-                row, ui::UiColor{kPipGreen.r, kPipGreen.g, kPipGreen.b, 0.20f}, corner * 0.6f);
-            m_uiDrawList.addRoundRect(row, kPipGreen, corner * 0.6f, 2.0f * scale);
+                row, ui::UiColor{dialogueText.r, dialogueText.g, dialogueText.b,
+                                 compactTes3 ? 0.13f : 0.20f}, corner * 0.6f);
+            m_uiDrawList.addRoundRect(
+                row, dialogueText, corner * 0.6f,
+                (compactTes3 ? 1.25f : 2.0f) * scale);
             m_uiDrawList.addText(
                 choiceFont, ">",
-                ui::UiVec2{row.minX + (16.0f * scale), y + choiceRowPadding}, kPipGreen);
+                ui::UiVec2{row.minX + (16.0f * scale), y + choiceRowPadding}, dialogueText);
         }
 
         const std::string number = std::to_string(i + 1) + ".";
         m_uiDrawList.addText(
             choiceFont, number,
             ui::UiVec2{row.minX + (40.0f * scale), y + choiceRowPadding},
-            selected ? kPipGreen : kPipGreenDim);
+            selected ? dialogueText : dialogueMuted);
 
         float choiceY = y + choiceRowPadding;
         for (const std::string& text : choiceLines[i]) {
             m_uiDrawList.addText(
                 choiceFont, text,
                 ui::UiVec2{row.minX + choiceIndent + (30.0f * scale), choiceY},
-                selected ? kPipGreen : kPipGreenDim);
+                selected ? dialogueText : dialogueMuted);
             choiceY += choiceLineHeight;
         }
         y += rowHeight;
@@ -6378,19 +10136,29 @@ void NewVegasApp::drawDialoguePanel(
     // cannot see is a reply they do not know to scroll to -- and the numbers on
     // the visible rows are the TRUE indices, so "7." appearing first is only
     // legible next to "of 9".
-    std::string footer = choiceCount == 0
-        ? std::string("Esc  end conversation")
-        : std::string("Up/Down  select     Enter  choose     Esc  leave");
+    std::string footer;
+    if (m_navDriving) {
+        footer = choiceCount == 0
+            ? std::string("B  end conversation")
+            : std::string("D-pad  select     A  choose     B  leave");
+    } else {
+        footer = choiceCount == 0
+            ? std::string("Esc  end conversation")
+            : std::string("Up/Down  select     Enter  choose     Esc  leave");
+    }
     if (choicesClipped) {
-        footer = "Up/Down  select (" + std::to_string(firstChoice + 1u) + "-" +
-            std::to_string(firstChoice + visibleChoices) + " of " + std::to_string(choiceCount) +
-            ")     Enter  choose     Esc  leave";
+        const std::string range = " (" + std::to_string(firstChoice + 1u) + "-" +
+            std::to_string(firstChoice + visibleChoices) + " of " +
+            std::to_string(choiceCount) + ")";
+        footer = m_navDriving
+            ? "D-pad  select" + range + "     A  choose     B  leave"
+            : "Up/Down  select" + range + "     Enter  choose     Esc  leave";
     }
     m_uiDrawList.addText(
-        m_uiFont, footer,
-        ui::UiVec2{panel.minX + ((panelWidth - m_uiFont.measureText(footer)) * 0.5f),
-                   panel.maxY - padding - m_uiFont.lineHeightPx() + (10.0f * scale)},
-        kPipGreenDim);
+        footerFont, footer,
+        ui::UiVec2{panel.minX + ((panelWidth - footerFont.measureText(footer)) * 0.5f),
+                   panel.maxY - padding - footerFont.lineHeightPx() + (10.0f * scale)},
+        dialogueMuted);
 }
 
 void NewVegasApp::drawHud() {
@@ -6418,6 +10186,8 @@ void NewVegasApp::drawHud() {
     }
     drawPipBoyHud();
     drawPauseMenu();
+    drawGiftMenu();
+    drawTes3Journal();
 
     // Toasts last so they sit above the menu: a discovery that fires while the
     // menu is open must not be hidden behind it.
@@ -6426,12 +10196,16 @@ void NewVegasApp::drawHud() {
     framebufferSize(screenWidth, screenHeight);
     const ui::UiRect screen{
         0.0f, 0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
-    m_toasts.draw(m_uiDrawList, m_uiFont, screen, contentScale());
+    // Journal entries are read at length. Hold transient world notifications
+    // until it closes rather than covering the tabs or the authored prose.
+    if (!m_tes3JournalOpen) {
+        m_toasts.draw(m_uiDrawList, m_uiFont, screen, contentScale());
+    }
     // The banner draws its title in the display face and its subtitle in the
     // body face -- the size jump between them is what makes the location name
     // read as the headline rather than as another line of HUD text. Falls back
     // to the body face if loadFonts was not given a display size.
-    if (!m_menuOpen && m_talkingActor < 0) {
+    if (!m_menuOpen && !m_tes3JournalOpen && m_talkingActor < 0) {
         const ui::Font& bannerFont = m_uiFontDisplay.valid() ? m_uiFontDisplay : m_uiFont;
         m_banner.draw(m_uiDrawList, bannerFont, m_uiFont, screen, contentScale());
     }
@@ -6439,6 +10213,118 @@ void NewVegasApp::drawHud() {
         m_uiDrawList.addRectFilled(
             screen, ui::UiColor{0.0f, 0.0f, 0.0f, m_doorTransitionAlpha});
     }
+}
+
+void NewVegasApp::drawTes3Journal() {
+    if (!m_tes3JournalOpen || m_tes3JournalPanel == nullptr) return;
+    if (m_bethesdaSession.tes3().journal().chronology().size() !=
+        m_tes3JournalSyncedVisits) {
+        syncTes3JournalPanel();
+    }
+    int screenWidth = 0;
+    int screenHeight = 0;
+    framebufferSize(screenWidth, screenHeight);
+    const float scale = contentScale();
+    const ui::UiRect screen{
+        0.0f, 0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
+    m_uiDrawList.addRectFilled(screen, {0.0f, 0.0f, 0.0f, 0.68f});
+    const float marginX = std::max(48.0f * scale, screen.width() * 0.12f);
+    const float marginY = std::max(44.0f * scale, screen.height() * 0.09f);
+    const ui::UiRect panel{
+        marginX, marginY, screen.maxX - marginX, screen.maxY - marginY};
+    m_tes3JournalPanel->rebuild(panel, scale);
+    m_tes3JournalPanel->draw(m_uiDrawList);
+    const char* footer = m_navDriving
+        ? "D-pad  Browse     LB / RB  Pages     A  Pin quest     B  Close"
+        : "Up / Down  Browse     Left / Right  Pages     Enter  Pin     J / Esc  Close";
+    const ui::Font& footerFont = m_tes3JournalFont.valid()
+        ? m_tes3JournalFont : m_uiFont;
+    m_uiDrawList.addText(footerFont, footer,
+        {panel.minX + (42.0f * scale), panel.maxY - (54.0f * scale)},
+        ui::UiColor{0.20f, 0.14f, 0.09f, 0.92f});
+}
+
+void NewVegasApp::drawGiftMenu() {
+    if (!m_bethesdaSessionConfigured ||
+        m_bethesdaSession.giftMenuRequests().empty()) {
+        return;
+    }
+    const bethesda::GiftMenuRequestState& request =
+        m_bethesdaSession.giftMenuRequests().front();
+    const bethesda::ObjectId sourceId =
+        request.playerGives ? request.player : request.actor;
+    const bethesda::RuntimeObject* source =
+        m_bethesdaSession.world().find(sourceId);
+
+    int screenWidth = 0;
+    int screenHeight = 0;
+    framebufferSize(screenWidth, screenHeight);
+    const float scale = contentScale();
+    const float width = std::min(720.0f * scale, static_cast<float>(screenWidth) * 0.72f);
+    const float padding = 28.0f * scale;
+    const float lineHeight = m_uiFont.lineHeightPx() + (10.0f * scale);
+    const std::size_t itemCount = source == nullptr ? 0u : source->inventory.size();
+    const std::size_t visibleCount = std::min<std::size_t>(itemCount, 10u);
+    const float height = padding * 2.0f + lineHeight *
+        static_cast<float>(visibleCount + 3u);
+    const ui::UiRect screen{0.0f, 0.0f,
+        static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
+    const ui::UiRect panel{
+        (screen.maxX - width) * 0.5f,
+        (screen.maxY - height) * 0.5f,
+        (screen.maxX + width) * 0.5f,
+        (screen.maxY + height) * 0.5f};
+    m_uiDrawList.addRectFilled(screen, ui::UiColor{0.0f, 0.0f, 0.0f, 0.62f});
+    m_uiDrawList.addDropShadow(
+        panel, ui::UiColor{0.0f, 0.0f, 0.0f, 0.65f}, 18.0f * scale, 8.0f * scale);
+    m_uiDrawList.addRoundRectFilled(panel, kPipPanelSolid, 8.0f * scale);
+    m_uiDrawList.addRoundRect(panel, kPipGreen, 8.0f * scale, 2.0f * scale);
+
+    const std::string title = request.playerGives ? "GIVE ITEMS" : "TAKE SUPPLIES";
+    m_uiDrawList.addText(m_uiFontBold.valid() ? m_uiFontBold : m_uiFont, title,
+        ui::UiVec2{panel.minX + padding, panel.minY + padding}, kPipGreen);
+    float y = panel.minY + padding + lineHeight;
+    if (source == nullptr || source->inventory.empty()) {
+        m_uiDrawList.addText(m_uiFont, "No available items",
+            ui::UiVec2{panel.minX + padding, y}, kPipGreenDim);
+        y += lineHeight;
+    } else {
+        std::size_t first = 0u;
+        if (source->inventory.size() > visibleCount &&
+            m_giftMenuChoice >= static_cast<int>(visibleCount)) {
+            first = static_cast<std::size_t>(m_giftMenuChoice) - visibleCount + 1u;
+        }
+        for (std::size_t row = 0u; row < visibleCount; ++row) {
+            const std::size_t index = first + row;
+            const bethesda::InventoryEntry& entry = source->inventory[index];
+            const bool selected = static_cast<int>(index) == m_giftMenuChoice;
+            const ui::UiRect rowRect{
+                panel.minX + (padding * 0.5f), y,
+                panel.maxX - (padding * 0.5f), y + lineHeight};
+            if (selected) {
+                m_uiDrawList.addRoundRectFilled(
+                    rowRect,
+                    ui::UiColor{kPipGreen.r, kPipGreen.g, kPipGreen.b, 0.20f},
+                    3.0f * scale);
+            }
+            const std::string label = (selected ? "> " : "  ") +
+                entry.item.toString() + "  x" + std::to_string(entry.count);
+            m_uiDrawList.addText(m_uiFont, label,
+                ui::UiVec2{panel.minX + padding, y + (4.0f * scale)},
+                selected ? kPipGreen : kPipGreenDim);
+            y += lineHeight;
+        }
+    }
+    if (request.filterList.valid()) {
+        m_uiDrawList.addText(m_uiFont,
+            "Compatibility: this menu requires FLST filtering before transfer",
+            ui::UiVec2{panel.minX + padding, panel.maxY - padding - lineHeight},
+            kPipGreenDim);
+    }
+    const std::string footer =
+        "Up/Down  select     Enter  transfer one     Esc  done";
+    m_uiDrawList.addText(m_uiFont, footer,
+        ui::UiVec2{panel.minX + padding, panel.maxY - padding}, kPipGreenDim);
 }
 
 void NewVegasApp::updateDebugStats() {

@@ -14,6 +14,13 @@
 //   odai_bethesda_probe <DataFilesPath> --nif <virtualPath>
 //   odai_bethesda_probe <DataFilesPath> --plugin <Plugin.esm>
 
+#include "bethesda/papyrus_vm.h"
+#include "bethesda/save_game.h"
+#include "bethesda/skyrim_quest.h"
+#include "bethesda/skyrim_scenario_content.h"
+#include "bethesda/tes3_content.h"
+#include "bethesda/tes3_runtime.h"
+#include "bethesda/vmad_reader.h"
 #include "import/dds.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
@@ -27,6 +34,9 @@
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
+#include "import/fnv/skyrim_animation_assets.h"
+#include "import/fnv/strings_table.h"
+#include "bethesda/bethesda_physics_world.h"
 #include "import/imported_scene.h"
 
 #include <algorithm>
@@ -42,6 +52,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -3759,6 +3770,41 @@ int probeFormId(const std::filesystem::path& pluginPath, std::uint32_t wantedFor
                 std::cout << " = " << std::hex << value << std::dec;
             }
             std::cout << "\n";
+            if (sub.type == "VMAD") {
+                odai::bethesda::VmadAttachments attachments;
+                std::string vmadError;
+                if (!odai::bethesda::readVmadAttachments(
+                        std::span<const std::uint8_t>(sub.data, sub.size),
+                        attachments, vmadError)) {
+                    std::cout << "    decode error: " << vmadError << "\n";
+                    continue;
+                }
+                for (const odai::bethesda::VmadScriptAttachment& script : attachments.scripts) {
+                    std::cout << "    script " << script.className << "\n";
+                    for (const odai::bethesda::VmadProperty& property : script.properties) {
+                        std::cout << "      " << property.name << " type="
+                                  << static_cast<unsigned>(property.value.type);
+                        switch (property.value.type) {
+                            case odai::bethesda::VmadValueType::Object:
+                                std::cout << " form=0x" << std::hex
+                                          << property.value.object.formId << std::dec
+                                          << " alias=" << property.value.object.alias;
+                                break;
+                            case odai::bethesda::VmadValueType::Integer:
+                                std::cout << " value=" << property.value.integer; break;
+                            case odai::bethesda::VmadValueType::Float:
+                                std::cout << " value=" << property.value.real; break;
+                            case odai::bethesda::VmadValueType::Boolean:
+                                std::cout << " value=" << property.value.boolean; break;
+                            case odai::bethesda::VmadValueType::String:
+                                std::cout << " value=\"" << property.value.string << "\""; break;
+                            default:
+                                std::cout << " count=" << property.value.array.size(); break;
+                        }
+                        std::cout << "\n";
+                    }
+                }
+            }
         }
     };
     reader.walk(visitor);
@@ -4541,12 +4587,1216 @@ int probeScene(const std::filesystem::path& scenePath) {
     return 0;
 }
 
+int scriptCheck(
+    const std::filesystem::path& dataPath, std::string virtualPath, bool strict) {
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    const std::filesystem::path directPath = virtualPath;
+    if (std::filesystem::is_regular_file(directPath)) {
+        std::ifstream input(directPath, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    } else {
+        std::replace(virtualPath.begin(), virtualPath.end(), '/', '\\');
+        if (virtualPath.find('\\') == std::string::npos) virtualPath = "scripts\\" + virtualPath;
+        if (!toLowerAscii(virtualPath).ends_with(".pex")) virtualPath += ".pex";
+        odai::importer::fnv::FalloutAssetSource assets;
+        if (!assets.open(dataPath, odai::importer::fnv::kBsaContentMisc)) {
+            std::cout << nlohmann::json({{"ok", false}, {"script", virtualPath},
+                {"compatibility_errors", {"could not index the Data directory"}}}).dump(2) << '\n';
+            return 1;
+        }
+        if (!assets.resolveAsset(virtualPath, bytes, error)) {
+            std::cout << nlohmann::json({{"ok", false}, {"script", virtualPath},
+                {"compatibility_errors", {error}}}).dump(2) << '\n';
+            return 1;
+        }
+    }
+
+    odai::bethesda::PexScript script;
+    if (!odai::bethesda::readPexScript(bytes, script, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"script", virtualPath},
+            {"size", bytes.size()}, {"compatibility_errors", {error}}}).dump(2) << '\n';
+        return 1;
+    }
+
+    const odai::bethesda::PexCompatibilityReport report =
+        odai::bethesda::inspectPexCompatibility(script);
+    const bool compatible = report.compatibilityErrors.empty() && report.unresolvedCalls.empty();
+    nlohmann::json objectProperties = nlohmann::json::array();
+    for (const odai::bethesda::PexObjectInfo& object : script.objectInfo) {
+        for (const odai::bethesda::PexPropertyInfo& property : object.properties) {
+            objectProperties.push_back({{"object", object.name}, {"name", property.name},
+                {"type", property.type}, {"auto_variable", property.autoVariable},
+                {"flags", property.flags}});
+        }
+    }
+    nlohmann::json functions = nlohmann::json::array();
+    for (const odai::bethesda::PexFunctionInfo& function : script.functions) {
+        nlohmann::json instructions = nlohmann::json::array();
+        for (std::size_t index = 0u; index < function.instructions.size(); ++index) {
+            const odai::bethesda::PexInstructionInfo& instruction =
+                function.instructions[index];
+            nlohmann::json arguments = nlohmann::json::array();
+            for (const odai::bethesda::PexValue& value : instruction.arguments) {
+                nlohmann::json argument{{"kind", static_cast<std::uint8_t>(value.kind)}};
+                if (value.kind == odai::bethesda::PexValueKind::Integer) {
+                    argument["integer"] = value.integer;
+                } else if (value.kind == odai::bethesda::PexValueKind::Float) {
+                    argument["float"] = value.real;
+                } else if (value.kind == odai::bethesda::PexValueKind::Boolean) {
+                    argument["boolean"] = value.boolean;
+                } else if (value.kind != odai::bethesda::PexValueKind::None) {
+                    argument["text"] = value.text;
+                }
+                arguments.push_back(std::move(argument));
+            }
+            instructions.push_back({{"index", index},
+                {"opcode", odai::bethesda::pexOpcodeName(instruction.opcode)},
+                {"arguments", std::move(arguments)}});
+        }
+        functions.push_back({{"qualified_name", function.qualifiedName()},
+            {"state", function.stateName}, {"name", function.name},
+            {"native", function.native()}, {"parameters", function.parameters},
+            {"parameter_types", function.parameterTypes},
+            {"instructions", std::move(instructions)}});
+    }
+    std::cout << nlohmann::json({
+        {"ok", !strict || compatible}, {"strict", strict}, {"script", virtualPath},
+        {"size", bytes.size()},
+        {"pex", {{"major", script.module.majorVersion}, {"minor", script.module.minorVersion},
+                 {"game_id", script.module.gameId},
+                 {"byte_order", script.module.bigEndian ? "big" : "little"},
+                 {"compilation_time", script.module.compilationTime},
+                 {"source", script.module.sourceFile}, {"user", script.module.userName},
+                 {"machine", script.module.machineName},
+                 {"string_count", script.module.strings.size()},
+                 {"object_count", script.objects.size()},
+                 {"function_count", script.functions.size()}}},
+        {"opcode_histogram", report.opcodeHistogram},
+        {"declared_natives", report.declaredNatives},
+        {"called_functions", report.calledFunctions},
+        {"functions", std::move(functions)},
+        {"properties", std::move(objectProperties)},
+        {"unresolved_calls", report.unresolvedCalls},
+        {"executable_compatible", compatible},
+        {"compatibility_errors", report.compatibilityErrors}}).dump(2) << '\n';
+    return strict && !compatible ? 1 : 0;
+}
+
+int questTrace(
+    const std::filesystem::path& dataPath,
+    const std::string& pluginName,
+    const std::string& questEditorId) {
+    odai::importer::fnv::EsmReader reader;
+    if (!reader.open(dataPath / pluginName)) {
+        std::cout << nlohmann::json({{"ok", false}, {"plugin", pluginName},
+            {"quest", questEditorId}, {"compatibility_errors", {reader.lastError()}}}).dump(2) << '\n';
+        return 1;
+    }
+
+    nlohmann::json foundRecord;
+    bool found = false;
+    std::vector<std::uint8_t> questVmad;
+    odai::importer::fnv::EsmReader::Visitor visitor;
+    visitor.onRecordHeader = [](const odai::importer::fnv::EsmRecordHeaderView& header) {
+        return header.type == "QUST";
+    };
+    visitor.onRecord = [&](const odai::importer::fnv::EsmRecordView& record) {
+        std::string editorId;
+        for (const auto& subrecord : record.subrecords) {
+            if (subrecord.type != "EDID") continue;
+            editorId.assign(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
+            while (!editorId.empty() && editorId.back() == '\0') editorId.pop_back();
+            break;
+        }
+        if (toLowerAscii(editorId) != toLowerAscii(questEditorId)) return;
+
+        found = true;
+        std::map<std::string, std::size_t> counts;
+        std::map<std::string, std::uint64_t> bytesByType;
+        for (const auto& subrecord : record.subrecords) {
+            ++counts[subrecord.type];
+            bytesByType[subrecord.type] += subrecord.size;
+            if (subrecord.type == "VMAD" && questVmad.empty()) {
+                questVmad.assign(subrecord.data, subrecord.data + subrecord.size);
+            }
+        }
+        nlohmann::json subrecords = nlohmann::json::object();
+        for (const auto& [type, count] : counts) {
+            subrecords[type] = {{"count", count}, {"bytes", bytesByType[type]}};
+        }
+        foundRecord = {
+            {"ok", true}, {"plugin", pluginName}, {"quest", editorId},
+            {"form_id", record.formId}, {"record_flags", record.flags},
+            {"vmad_bytes", bytesByType["VMAD"]}, {"condition_count", counts["CTDA"]},
+            {"alias_markers", counts["ALST"] + counts["ALLS"]},
+            {"subrecords", std::move(subrecords)},
+            {"compatibility_errors", nlohmann::json::array()}
+        };
+        odai::bethesda::SkyrimQuestDefinition definition;
+        std::string definitionError;
+        if (!odai::bethesda::readSkyrimQuest(
+                record,
+                odai::bethesda::makeRecordKey(pluginName, record.formId & 0x00ffffffu),
+                definition, definitionError)) {
+            foundRecord["compatibility_errors"].push_back(definitionError);
+        } else {
+            nlohmann::json aliases = nlohmann::json::array();
+            for (const odai::bethesda::SkyrimQuestAliasDefinition& alias : definition.aliases) {
+                aliases.push_back({{"id", alias.id}, {"name", alias.name},
+                    {"forced_reference_form_id", alias.forcedReferenceFormId},
+                    {"unique_actor_form_id", alias.uniqueActorFormId},
+                    {"created_object_form_id", alias.createdObjectFormId},
+                    {"created_in_alias_id", alias.createdInAliasId},
+                    {"created_level", alias.createdLevel}});
+            }
+            nlohmann::json fragments = nlohmann::json::array();
+            for (const odai::bethesda::VmadQuestFragment& fragment :
+                 definition.stageFragments) {
+                fragments.push_back({{"stage", fragment.stage},
+                    {"log_entry", fragment.logEntry},
+                    {"script_class", fragment.scriptClass},
+                    {"function", fragment.function}});
+            }
+            std::size_t aliasScriptCount = 0u;
+            nlohmann::json aliasScriptAttachments = nlohmann::json::array();
+            for (const odai::bethesda::VmadQuestAliasAttachment& alias :
+                 definition.aliasScripts) {
+                aliasScriptCount += alias.scripts.size();
+                nlohmann::json scriptClasses = nlohmann::json::array();
+                for (const odai::bethesda::VmadScriptAttachment& script : alias.scripts) {
+                    nlohmann::json properties = nlohmann::json::array();
+                    for (const odai::bethesda::VmadProperty& property : script.properties) {
+                        nlohmann::json value{{"type",
+                            static_cast<std::uint8_t>(property.value.type)}};
+                        if (property.value.type == odai::bethesda::VmadValueType::Object) {
+                            value["form_id"] = property.value.object.formId;
+                            value["alias"] = property.value.object.alias;
+                        } else if (property.value.type ==
+                                odai::bethesda::VmadValueType::Integer) {
+                            value["integer"] = property.value.integer;
+                        } else if (property.value.type ==
+                                odai::bethesda::VmadValueType::Float) {
+                            value["float"] = property.value.real;
+                        } else if (property.value.type ==
+                                odai::bethesda::VmadValueType::Boolean) {
+                            value["boolean"] = property.value.boolean;
+                        } else if (property.value.type ==
+                                odai::bethesda::VmadValueType::String) {
+                            value["string"] = property.value.string;
+                        }
+                        properties.push_back({{"name", property.name},
+                            {"value", std::move(value)}});
+                    }
+                    scriptClasses.push_back({{"class", script.className},
+                        {"properties", std::move(properties)}});
+                }
+                aliasScriptAttachments.push_back({{"form_id", alias.object.formId},
+                    {"alias", alias.object.alias},
+                    {"version", alias.version},
+                    {"object_format", alias.objectFormat},
+                    {"scripts", std::move(scriptClasses)}});
+            }
+            nlohmann::json stages = nlohmann::json::array();
+            for (const odai::bethesda::SkyrimQuestStageDefinition& stage : definition.stages) {
+                nlohmann::json entries = nlohmann::json::array();
+                for (const odai::bethesda::SkyrimQuestLogEntryDefinition& entry :
+                     stage.logEntries) {
+                    nlohmann::json conditions = nlohmann::json::array();
+                    for (const odai::bethesda::Condition& condition : entry.conditions) {
+                        conditions.push_back({{"function", condition.function},
+                            {"comparison", static_cast<std::uint8_t>(condition.comparison)},
+                            {"value", condition.comparisonValue},
+                            {"parameter_1", condition.parameter1},
+                            {"parameter_2", condition.parameter2},
+                            {"string_parameter_1", condition.stringParameter1},
+                            {"string_parameter_2", condition.stringParameter2},
+                            {"run_on", condition.runOn},
+                            {"reference", condition.reference},
+                            {"or_with_next", condition.orWithNext}});
+                    }
+                    entries.push_back({{"flags", entry.flags},
+                        {"conditions", std::move(conditions)}});
+                }
+                stages.push_back({{"stage", stage.index},
+                    {"log_entries", std::move(entries)}});
+            }
+            foundRecord["runtime_definition"] = {
+                {"record_key", definition.record.toString()},
+                {"stage_count", definition.stages.size()},
+                {"stages", std::move(stages)},
+                {"objective_count", definition.objectives.size()},
+                {"alias_count", definition.aliases.size()},
+                {"stage_fragment_count", definition.stageFragments.size()},
+                {"stage_fragments", std::move(fragments)},
+                {"alias_attachment_count", definition.aliasScripts.size()},
+                {"alias_script_count", aliasScriptCount},
+                {"alias_script_attachments", std::move(aliasScriptAttachments)},
+                {"referenced_form_count", definition.referencedFormIds.size()},
+                {"script_count", definition.scripts.scripts.size()},
+                {"aliases", std::move(aliases)}};
+        }
+    };
+    if (!reader.walk(visitor)) {
+        std::cout << nlohmann::json({{"ok", false}, {"plugin", pluginName},
+            {"quest", questEditorId}, {"compatibility_errors", {reader.lastError()}}}).dump(2) << '\n';
+        return 1;
+    }
+    if (!found) {
+        std::cout << nlohmann::json({{"ok", false}, {"plugin", pluginName},
+            {"quest", questEditorId},
+            {"compatibility_errors", {"quest EditorID not found"}}}).dump(2) << '\n';
+        return 1;
+    }
+    if (questVmad.empty()) {
+        foundRecord["compatibility_errors"].push_back(
+            "quest has no VMAD attachment in this record");
+        foundRecord["attached_scripts"] = nlohmann::json::array();
+    } else {
+        odai::bethesda::VmadAttachments attachments;
+        std::string vmadError;
+        if (!odai::bethesda::readVmadAttachments(questVmad, attachments, vmadError)) {
+            foundRecord["compatibility_errors"].push_back(vmadError);
+        } else {
+            odai::importer::fnv::FalloutAssetSource assets;
+            const bool assetsOpen = assets.open(dataPath, odai::importer::fnv::kBsaContentMisc);
+            nlohmann::json attachedScripts = nlohmann::json::array();
+            for (const odai::bethesda::VmadScriptAttachment& attachment : attachments.scripts) {
+                nlohmann::json scriptJson{{"class", attachment.className},
+                    {"property_count", attachment.properties.size()}};
+                nlohmann::json objectProperties = nlohmann::json::array();
+                for (const odai::bethesda::VmadProperty& property : attachment.properties) {
+                    if (property.value.type == odai::bethesda::VmadValueType::Object) {
+                        objectProperties.push_back({{"name", property.name},
+                            {"form_id", property.value.object.formId},
+                            {"alias", property.value.object.alias}});
+                    }
+                }
+                scriptJson["object_properties"] = std::move(objectProperties);
+                std::vector<std::uint8_t> pexBytes;
+                std::string pexError;
+                const std::string scriptPath = "scripts\\" + attachment.className + ".pex";
+                odai::bethesda::PexScript script;
+                if (!assetsOpen || !assets.resolveAsset(scriptPath, pexBytes, pexError)) {
+                    scriptJson["pex"] = "missing";
+                    scriptJson["error"] = assetsOpen ? pexError : "could not index script archives";
+                    foundRecord["compatibility_errors"].push_back(
+                        "missing script " + attachment.className);
+                } else if (!odai::bethesda::readPexScript(pexBytes, script, pexError)) {
+                    scriptJson["pex"] = "malformed";
+                    scriptJson["error"] = pexError;
+                    foundRecord["compatibility_errors"].push_back(
+                        attachment.className + ": " + pexError);
+                } else {
+                    const odai::bethesda::PexCompatibilityReport report =
+                        odai::bethesda::inspectPexCompatibility(script);
+                    scriptJson["pex"] = "decoded";
+                    scriptJson["opcode_histogram"] = report.opcodeHistogram;
+                    scriptJson["called_functions"] = report.calledFunctions;
+                    scriptJson["unresolved_calls"] = report.unresolvedCalls;
+                    scriptJson["compatibility_errors"] = report.compatibilityErrors;
+                    for (const std::string& compatibilityError : report.compatibilityErrors) {
+                        foundRecord["compatibility_errors"].push_back(
+                            attachment.className + ": " + compatibilityError);
+                    }
+                    for (const std::string& unresolvedCall : report.unresolvedCalls) {
+                        foundRecord["compatibility_errors"].push_back(
+                            attachment.className + ": unresolved call binding " + unresolvedCall);
+                    }
+                }
+                attachedScripts.push_back(std::move(scriptJson));
+            }
+            foundRecord["vmad"] = {{"version", attachments.version},
+                {"object_format", attachments.objectFormat},
+                {"trailing_bytes", questVmad.size() - attachments.trailingOffset}};
+            foundRecord["attached_scripts"] = std::move(attachedScripts);
+        }
+    }
+    std::cout << foundRecord.dump(2) << '\n';
+    return 0;
+}
+
+// Dumps the authored Skyrim dialogue closure for one quest. Unlike the older
+// Fallout speaker probe, this follows TES5's DIAL QNAM -> QUST ownership and
+// topic-children GRUP labels, resolves INFO response IDs through ILSTRINGS,
+// and preserves every CTDA/VMAD gate for runtime compatibility work.
+int skyrimDialogueTrace(
+    const std::filesystem::path& dataPath,
+    const std::string& pluginName,
+    const std::string& questEditorId) {
+    using namespace odai::importer::fnv;
+    EsmReader reader;
+    if (!reader.open(dataPath / pluginName)) {
+        std::cout << nlohmann::json({{"ok", false}, {"plugin", pluginName},
+            {"quest", questEditorId}, {"compatibility_errors", {reader.lastError()}}}).dump(2)
+                  << '\n';
+        return 1;
+    }
+
+    std::uint32_t questFormId = 0u;
+    EsmReader::Visitor questVisitor;
+    questVisitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
+        return header.type == "QUST";
+    };
+    questVisitor.onRecord = [&](const EsmRecordView& record) {
+        for (const EsmSubrecordView& subrecord : record.subrecords) {
+            if (subrecord.type != "EDID") continue;
+            std::string editorId(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
+            while (!editorId.empty() && editorId.back() == '\0') editorId.pop_back();
+            if (toLowerAscii(editorId) == toLowerAscii(questEditorId)) questFormId = record.formId;
+            break;
+        }
+    };
+    if (!reader.walk(questVisitor) || questFormId == 0u) {
+        std::cout << nlohmann::json({{"ok", false}, {"plugin", pluginName},
+            {"quest", questEditorId}, {"compatibility_errors",
+                {questFormId == 0u ? "quest EditorID not found" : reader.lastError()}}}).dump(2)
+                  << '\n';
+        return 1;
+    }
+
+    FalloutStringTable strings;
+    FalloutStringTable ilStrings;
+    FalloutAssetSource assets;
+    std::string stringError;
+    const bool assetsOpened = assets.open(dataPath, kBsaContentMisc);
+    std::string promptStringError;
+    const bool promptStringsLoaded = assetsOpened &&
+        loadFalloutStringTable(assets, pluginName, falloutStringLanguage(),
+            FalloutStringFileKind::Strings, strings, promptStringError);
+    const bool stringsLoaded = assetsOpened &&
+        loadFalloutStringTable(assets, pluginName, falloutStringLanguage(),
+            FalloutStringFileKind::IlStrings, ilStrings, stringError);
+
+    std::set<std::uint32_t> questTopics;
+    nlohmann::json branches = nlohmann::json::array();
+    nlohmann::json topics = nlohmann::json::array();
+    nlohmann::json infos = nlohmann::json::array();
+    std::uint32_t currentTopic = 0u;
+    EsmReader::Visitor dialogueVisitor;
+    dialogueVisitor.onGroupEnter = [&](const EsmGroupView& group) {
+        if (group.groupType == 7 && group.rawLabel.size() == 4u) {
+            std::memcpy(&currentTopic, group.rawLabel.data(), sizeof(currentTopic));
+        }
+        return true;
+    };
+    dialogueVisitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
+        return header.type == "DLBR" || header.type == "DIAL" ||
+            header.type == "INFO";
+    };
+    dialogueVisitor.onRecord = [&](const EsmRecordView& record) {
+        const auto readU32 = [](const EsmSubrecordView& subrecord) {
+            std::uint32_t value = 0u;
+            if (subrecord.size >= 4u) std::memcpy(&value, subrecord.data, sizeof(value));
+            return value;
+        };
+        if (record.type == "DLBR") {
+            std::uint32_t owner = 0u;
+            std::uint32_t startTopic = 0u;
+            std::uint32_t flags = 0u;
+            std::string editorId;
+            for (const EsmSubrecordView& subrecord : record.subrecords) {
+                if (subrecord.type == "QNAM") owner = readU32(subrecord);
+                else if (subrecord.type == "SNAM") startTopic = readU32(subrecord);
+                else if (subrecord.type == "DNAM") flags = readU32(subrecord);
+                else if (subrecord.type == "EDID") {
+                    editorId.assign(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
+                    while (!editorId.empty() && editorId.back() == '\0') editorId.pop_back();
+                }
+            }
+            if (owner == questFormId) {
+                branches.push_back({{"form_id", record.formId}, {"editor_id", editorId},
+                    {"start_topic", startTopic}, {"flags", flags}});
+            }
+            return;
+        }
+        if (record.type == "DIAL") {
+            std::uint32_t owner = 0u;
+            std::string editorId;
+            std::uint32_t fullStringId = 0u;
+            std::uint32_t branch = 0u;
+            std::uint8_t type = 0xffu;
+            for (const EsmSubrecordView& subrecord : record.subrecords) {
+                if (subrecord.type == "QNAM") owner = readU32(subrecord);
+                else if (subrecord.type == "FULL") fullStringId = readU32(subrecord);
+                else if (subrecord.type == "BNAM") branch = readU32(subrecord);
+                else if (subrecord.type == "DATA" && subrecord.size != 0u) type = subrecord.data[0];
+                else if (subrecord.type == "EDID") {
+                    editorId.assign(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
+                    while (!editorId.empty() && editorId.back() == '\0') editorId.pop_back();
+                }
+            }
+            if (owner != questFormId) return;
+            questTopics.insert(record.formId);
+            const std::string* prompt = promptStringsLoaded
+                ? strings.find(fullStringId) : nullptr;
+            topics.push_back({{"form_id", record.formId}, {"editor_id", editorId},
+                {"type", type}, {"full_string_id", fullStringId},
+                {"branch_form_id", branch},
+                {"prompt", prompt == nullptr ? std::string() : *prompt}});
+            return;
+        }
+        if (!questTopics.contains(currentTopic)) return;
+
+        nlohmann::json responses = nlohmann::json::array();
+        nlohmann::json conditions = nlohmann::json::array();
+        nlohmann::json links = nlohmann::json::array();
+        nlohmann::json subrecords = nlohmann::json::array();
+        std::uint32_t flags = 0u;
+        std::uint32_t previous = 0u;
+        std::uint32_t promptStringId = 0u;
+        std::size_t vmadBytes = 0u;
+        std::uint8_t vmadFlags = 0u;
+        nlohmann::json vmadFragments = nlohmann::json::array();
+        std::string vmadError;
+        std::optional<std::size_t> currentConditionIndex;
+        for (const EsmSubrecordView& subrecord : record.subrecords) {
+            subrecords.push_back({{"type", subrecord.type}, {"size", subrecord.size}});
+            if (subrecord.type == "ENAM") flags = readU32(subrecord);
+            else if (subrecord.type == "RNAM") promptStringId = readU32(subrecord);
+            else if (subrecord.type == "PNAM") previous = readU32(subrecord);
+            else if (subrecord.type == "TCLT") links.push_back(readU32(subrecord));
+            else if (subrecord.type == "NAM1") {
+                const std::uint32_t stringId = readU32(subrecord);
+                const std::string* text = stringsLoaded ? ilStrings.find(stringId) : nullptr;
+                responses.push_back({{"string_id", stringId},
+                    {"text", text == nullptr ? std::string() : *text}});
+            } else if (subrecord.type == "CTDA") {
+                odai::bethesda::Condition condition;
+                std::string error;
+                if (odai::bethesda::readCondition(
+                        std::span<const std::uint8_t>(subrecord.data, subrecord.size),
+                        condition, error)) {
+                    conditions.push_back({{"function", condition.function},
+                        {"comparison", static_cast<std::uint8_t>(condition.comparison)},
+                        {"value", condition.comparisonValue},
+                        {"parameter_1", condition.parameter1},
+                        {"parameter_2", condition.parameter2},
+                        {"string_parameter_1", std::string()},
+                        {"string_parameter_2", std::string()},
+                        {"run_on", condition.runOn}, {"reference", condition.reference},
+                        {"or_with_next", condition.orWithNext}});
+                    currentConditionIndex = conditions.size() - 1u;
+                } else {
+                    conditions.push_back({{"error", error}});
+                    currentConditionIndex.reset();
+                }
+            } else if ((subrecord.type == "CIS1" || subrecord.type == "CIS2") &&
+                       currentConditionIndex.has_value()) {
+                std::string value(
+                    reinterpret_cast<const char*>(subrecord.data), subrecord.size);
+                while (!value.empty() && value.back() == '\0') value.pop_back();
+                conditions[*currentConditionIndex][subrecord.type == "CIS1"
+                        ? "string_parameter_1" : "string_parameter_2"] = std::move(value);
+            } else if (subrecord.type == "VMAD") {
+                vmadBytes += subrecord.size;
+                odai::bethesda::VmadInfoAttachments attachments;
+                if (odai::bethesda::readVmadInfoAttachments(
+                        std::span<const std::uint8_t>(subrecord.data, subrecord.size),
+                        attachments, vmadError)) {
+                    vmadFlags = attachments.flags;
+                    for (const odai::bethesda::VmadInfoFragment& fragment :
+                         attachments.fragments) {
+                        vmadFragments.push_back({{"script_class", fragment.scriptClass},
+                            {"function", fragment.function}});
+                    }
+                }
+            }
+        }
+        infos.push_back({{"form_id", record.formId}, {"topic_form_id", currentTopic},
+            {"flags", flags}, {"previous_info", previous},
+            {"rnam_string_id", promptStringId},
+            {"prompt", promptStringsLoaded && strings.find(promptStringId) != nullptr
+                ? *strings.find(promptStringId) : std::string()},
+            {"responses", std::move(responses)}, {"conditions", std::move(conditions)},
+            {"linked_topics", std::move(links)}, {"vmad_bytes", vmadBytes},
+            {"vmad_flags", vmadFlags}, {"vmad_fragments", std::move(vmadFragments)},
+            {"vmad_error", vmadError},
+            {"subrecords", std::move(subrecords)}});
+    };
+    if (!reader.walk(dialogueVisitor)) {
+        std::cout << nlohmann::json({{"ok", false}, {"plugin", pluginName},
+            {"quest", questEditorId}, {"compatibility_errors", {reader.lastError()}}}).dump(2)
+                  << '\n';
+        return 1;
+    }
+    std::cout << nlohmann::json({{"ok", true}, {"plugin", pluginName},
+        {"quest", questEditorId}, {"quest_form_id", questFormId},
+        {"localized_prompts", promptStringsLoaded},
+        {"localized_responses", stringsLoaded}, {"string_error", stringError},
+        {"prompt_string_error", promptStringError},
+        {"branches", std::move(branches)}, {"topics", std::move(topics)},
+        {"infos", std::move(infos)}}).dump(2) << '\n';
+    return 0;
+}
+
+int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scenarioId) {
+    const odai::bethesda::ScenarioDefinition* scenario =
+        odai::bethesda::findScenario(scenarioId);
+    if (scenario == nullptr) {
+        std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
+            {"compatibility_errors", {"unknown scenario"}}}).dump(2) << '\n';
+        return 1;
+    }
+    odai::importer::fnv::FalloutLoadOrder loadOrder;
+    std::string error;
+    if (!loadOrder.open(dataPath, {scenario->basePlugin, "Update.esm"}, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
+            {"compatibility_errors", {error}}}).dump(2) << '\n';
+        return 1;
+    }
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath, odai::importer::fnv::kBsaContentMisc)) {
+        std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
+            {"compatibility_errors", {"could not index Skyrim script archives"}}}).dump(2) << '\n';
+        return 1;
+    }
+    odai::bethesda::BethesdaSession session;
+    if (!session.configure({scenario->game, loadOrder.fingerprint(), scenario->id, 1u}, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
+            {"compatibility_errors", {error}}}).dump(2) << '\n';
+        return 1;
+    }
+    odai::bethesda::SkyrimScenarioContentReport report;
+    if (!odai::bethesda::loadSkyrimScenarioContent(
+            *scenario, loadOrder, assets, session, report, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
+            {"compatibility_errors", {error}}, {"diagnostics", report.diagnostics}}).dump(2) << '\n';
+        return 1;
+    }
+    std::vector<std::string> bootstrapDiagnostics;
+    for (int tick = 0; tick < 4; ++tick) {
+        odai::bethesda::BethesdaSessionStep step = session.advance(1.0 / 60.0);
+        bootstrapDiagnostics.insert(bootstrapDiagnostics.end(),
+            std::make_move_iterator(step.diagnostics.begin()),
+            std::make_move_iterator(step.diagnostics.end()));
+    }
+    const odai::bethesda::QuestRuntimeState* mq102Bootstrap = session.findQuest("MQ102");
+    const odai::bethesda::QuestRuntimeState* mq103BeforeRoute = session.findQuest("MQ103");
+    bool mq102ObjectiveDisplayed = false;
+    if (mq102Bootstrap != nullptr) {
+        const auto objective = std::find_if(
+            mq102Bootstrap->objectives.begin(), mq102Bootstrap->objectives.end(),
+            [](const auto& value) { return value.index == 10; });
+        mq102ObjectiveDisplayed = objective != mq102Bootstrap->objectives.end() &&
+            objective->displayed;
+    }
+    const nlohmann::json beforeTheStormBootstrapCheck = {
+        {"ok", bootstrapDiagnostics.empty() && mq102Bootstrap != nullptr &&
+            mq102Bootstrap->stage == 10 && mq102Bootstrap->running &&
+            mq102ObjectiveDisplayed && mq103BeforeRoute != nullptr &&
+            mq103BeforeRoute->stage == 0},
+        {"mq102_stage", mq102Bootstrap == nullptr ? 0 : mq102Bootstrap->stage},
+        {"mq102_running", mq102Bootstrap != nullptr && mq102Bootstrap->running},
+        {"objective_10_displayed", mq102ObjectiveDisplayed},
+        {"mq103_stage", mq103BeforeRoute == nullptr ? 0 : mq103BeforeRoute->stage},
+        {"diagnostics", bootstrapDiagnostics}};
+    nlohmann::json goldenClawAliasCheck = {
+        {"ok", false}, {"materialized_items", 0u}, {"transferred_items", 0u},
+        {"ms13_stage", 0}, {"diagnostics", nlohmann::json::array()}};
+    if (const odai::bethesda::QuestRuntimeState* ms13 = session.findQuest("MS13")) {
+        const auto arvelAlias = std::find_if(
+            ms13->aliases.begin(), ms13->aliases.end(), [](const auto& alias) {
+                return toLowerAscii(alias.name) == "arvel";
+            });
+        if (arvelAlias != ms13->aliases.end() &&
+            arvelAlias->target.kind == odai::bethesda::ObjectIdKind::PersistentReference) {
+            odai::bethesda::RuntimeObject player;
+            player.id = odai::bethesda::ObjectId::persistent(
+                odai::bethesda::makeRecordKey("Skyrim.esm", 0x14u));
+            player.base = odai::bethesda::makeRecordKey("Skyrim.esm", 0x7u);
+            player.kind = odai::bethesda::RuntimeObjectKind::Actor;
+            player.actorValues.emplace();
+            odai::bethesda::RuntimeObject arvel;
+            arvel.id = session.world().allocateRuntimeId();
+            arvel.base = arvelAlias->target.reference;
+            arvel.kind = odai::bethesda::RuntimeObjectKind::Actor;
+            arvel.actorValues.emplace();
+            arvel.actorValues->health = 0.0f;
+            arvel.actorValues->dead = true;
+            std::string checkError;
+            if (session.world().addInitialObject(player, checkError) &&
+                session.world().addInitialObject(arvel, checkError)) {
+                // Exercise MQ103's authored dynamic alias fill: alias 52 finds
+                // the sole Boss XLRT inside the forced Bleak Falls location;
+                // alias 18 then creates the Dragonstone in that actor. The
+                // harness injects residency, but kill/loot/stage progression
+                // use the shared physical/runtime paths with no stage or item grant.
+                nlohmann::json dragonstoneBossCheck = {
+                    {"ok", false}, {"diagnostics", nlohmann::json::array()}};
+                // MQ103 stage 10 enables/disables persistent quest references and
+                // resolves Irileth's unique-actor alias. A headless probe has no
+                // streamed Whiterun/Riverwood cells, so make that exact authored
+                // dependency set resident before running the fragment.
+                const auto addQuestReference = [&](std::uint32_t formId) {
+                    odai::bethesda::RuntimeObject object;
+                    object.id = odai::bethesda::ObjectId::persistent(
+                        odai::bethesda::makeRecordKey("Skyrim.esm", formId));
+                    object.base = object.id.reference;
+                    object.kind = odai::bethesda::RuntimeObjectKind::Activator;
+                    return session.world().addInitialObject(std::move(object), checkError);
+                };
+                const bool farengarLabResident = addQuestReference(0x000d50feu);
+                const bool sleepingGiantResident = addQuestReference(0x000bcf06u);
+                const bool riverwoodReferenceResident = addQuestReference(0x000fdb32u);
+                odai::bethesda::RuntimeObject irileth;
+                irileth.id = odai::bethesda::ObjectId::persistent(
+                    odai::bethesda::makeRecordKey("Skyrim.esm", 0x0001a67fu));
+                irileth.base =
+                    odai::bethesda::makeRecordKey("Skyrim.esm", 0x00013bb8u);
+                irileth.kind = odai::bethesda::RuntimeObjectKind::Actor;
+                irileth.actorValues.emplace();
+                const bool irilethResident =
+                    session.world().addInitialObject(irileth, checkError);
+                if (irilethResident) {
+                    (void)session.bindQuestInventoryForActor(
+                        irileth.id, irileth.base, checkError);
+                }
+                session.setQuestStage("MQ103", 10);
+                odai::bethesda::RuntimeObject boss;
+                boss.id = odai::bethesda::ObjectId::persistent(
+                    odai::bethesda::makeRecordKey("Skyrim.esm", 0x0009bcd6u));
+                boss.base = odai::bethesda::makeRecordKey("Skyrim.esm", 0x000b7989u);
+                boss.kind = odai::bethesda::RuntimeObjectKind::Actor;
+                boss.location =
+                    odai::bethesda::makeRecordKey("Skyrim.esm", 0x00018ee9u);
+                boss.referenceTypes = {
+                    odai::bethesda::makeRecordKey("Skyrim.esm", 0x000130f7u)};
+                boss.actorValues.emplace();
+                if (session.world().addInitialObject(boss, checkError)) {
+                    const std::size_t bossItems = session.bindQuestInventoryForActor(
+                        boss.id, boss.base, checkError);
+                    std::vector<std::string> bossDiagnostics;
+                    for (int tick = 0; tick < 3; ++tick) {
+                        odai::bethesda::BethesdaSessionStep step =
+                            session.advance(1.0 / 60.0);
+                        bossDiagnostics.insert(bossDiagnostics.end(),
+                            std::make_move_iterator(step.diagnostics.begin()),
+                            std::make_move_iterator(step.diagnostics.end()));
+                    }
+                    odai::bethesda::PhysicsCharacterConfig controller;
+                    controller.position = {0.0f, 0.0f, 0.0f};
+                    const bool playerPhysics = session.registerActorController(
+                        player.id, controller, checkError);
+                    controller.position = {100.0f, 0.0f, 0.0f};
+                    const bool bossPhysics = session.registerActorController(
+                        boss.id, controller, checkError);
+                    odai::bethesda::MeleeAttackResult attack;
+                    if (playerPhysics && bossPhysics) {
+                        (void)session.advance(1.0 / 60.0,
+                            [&](std::uint64_t, double) {
+                                attack = session.performMeleeAttack(
+                                    player.id, {1.0f, 0.0f, 0.0f}, 1000.0f);
+                            });
+                    }
+                    const odai::bethesda::LootTransferResult bossLoot =
+                        session.lootObject(player.id, boss.id);
+                    for (int tick = 0; tick < 10; ++tick) {
+                        odai::bethesda::BethesdaSessionStep step =
+                            session.advance(1.0 / 60.0);
+                        bossDiagnostics.insert(bossDiagnostics.end(),
+                            std::make_move_iterator(step.diagnostics.begin()),
+                            std::make_move_iterator(step.diagnostics.end()));
+                    }
+                    const auto* mq103AfterLoot = session.findQuest("MQ103");
+                    bool bossAliasBound = false;
+                    if (mq103AfterLoot != nullptr) {
+                        const auto bossAlias = std::find_if(
+                            mq103AfterLoot->aliases.begin(), mq103AfterLoot->aliases.end(),
+                            [](const auto& alias) {
+                                return toLowerAscii(alias.name) == "bleakfallsboss";
+                            });
+                        bossAliasBound = bossAlias != mq103AfterLoot->aliases.end() &&
+                            bossAlias->target == boss.id;
+                    }
+                    const auto dragonstone = std::find_if(
+                        bossLoot.transferred.begin(), bossLoot.transferred.end(),
+                        [](const auto& item) {
+                            return item.item == odai::bethesda::makeRecordKey(
+                                "Skyrim.esm", 0x000df202u);
+                        });
+                    dragonstoneBossCheck = {
+                        {"ok", farengarLabResident && sleepingGiantResident &&
+                            riverwoodReferenceResident && irilethResident &&
+                            checkError.empty() && bossDiagnostics.empty() &&
+                            bossItems >= 1u && bossAliasBound && attack.accepted &&
+                            attack.hit && attack.killed && bossLoot.accepted &&
+                            dragonstone != bossLoot.transferred.end() &&
+                            mq103AfterLoot != nullptr && mq103AfterLoot->stage >= 180},
+                        {"boss_alias_bound", bossAliasBound},
+                        {"materialized_items", bossItems},
+                        {"combat_kill", attack.killed},
+                        {"dragonstone_looted", dragonstone != bossLoot.transferred.end()},
+                        {"mq103_stage", mq103AfterLoot == nullptr ? 0 : mq103AfterLoot->stage},
+                        {"diagnostics", bossDiagnostics}};
+                } else {
+                    dragonstoneBossCheck["diagnostics"].push_back(checkError);
+                }
+                goldenClawAliasCheck["dragonstone_boss_alias_check"] =
+                    std::move(dragonstoneBossCheck);
+                // Start MS13 through Lucan's actual stage-0 player topic. The
+                // old probe jumped straight to the dungeon and therefore never
+                // completed stage 10; at hand-in time that made the correct
+                // "I have the golden claw" INFO fail and accidentally selected
+                // the unrelated volunteer prompt instead.
+                nlohmann::json questStartCheck = {
+                    {"ok", false}, {"diagnostics", nlohmann::json::array()}};
+                odai::bethesda::ObjectId lucanRuntime;
+                odai::bethesda::ObjectId camillaRuntime;
+                const auto addResidentAliasActor = [&](std::string_view wanted,
+                                                       odai::bethesda::ObjectId& outId) {
+                    const auto alias = std::find_if(
+                        ms13->aliases.begin(), ms13->aliases.end(), [&](const auto& candidate) {
+                            return toLowerAscii(candidate.name) == wanted;
+                        });
+                    if (alias == ms13->aliases.end() ||
+                        alias->target.kind !=
+                            odai::bethesda::ObjectIdKind::PersistentReference) return false;
+                    odai::bethesda::RuntimeObject actor;
+                    actor.id = session.world().allocateRuntimeId();
+                    actor.base = alias->target.reference;
+                    actor.kind = odai::bethesda::RuntimeObjectKind::Actor;
+                    actor.actorValues.emplace();
+                    if (!session.world().addInitialObject(actor, checkError)) return false;
+                    (void)session.bindQuestInventoryForActor(actor.id, actor.base, checkError);
+                    outId = actor.id;
+                    return true;
+                };
+                if (addResidentAliasActor("lucan", lucanRuntime) &&
+                    addResidentAliasActor("camilla", camillaRuntime)) {
+                    const auto startChoices = session.availableDialogueChoices(
+                        lucanRuntime, player.id, true);
+                    const auto volunteer = std::find_if(
+                        startChoices.begin(), startChoices.end(), [](const auto& choice) {
+                            return toLowerAscii(choice.prompt) ==
+                                "i could help you get the claw back.";
+                        });
+                    if (volunteer != startChoices.end()) {
+                        odai::bethesda::SkyrimDialogueSelectionResult selection =
+                            session.selectDialogueInfo(
+                                volunteer->info, lucanRuntime, player.id, 2u);
+                        std::vector<std::string> diagnostics = selection.diagnostics;
+                        for (int tick = 0; tick < 8; ++tick) {
+                            odai::bethesda::BethesdaSessionStep step =
+                                session.advance(1.0 / 60.0);
+                            diagnostics.insert(diagnostics.end(),
+                                std::make_move_iterator(step.diagnostics.begin()),
+                                std::make_move_iterator(step.diagnostics.end()));
+                        }
+                        const auto* started = session.findQuest("MS13");
+                        questStartCheck = {{"ok", selection.accepted && diagnostics.empty() &&
+                                                started != nullptr && started->stage == 10},
+                            {"prompt", volunteer->prompt},
+                            {"info", volunteer->info.toString()},
+                            {"stage", started == nullptr ? 0 : started->stage},
+                            {"diagnostics", diagnostics}};
+                    } else {
+                        questStartCheck["diagnostics"].push_back(
+                            "retail Lucan volunteer topic was not strictly available");
+                    }
+                } else {
+                    questStartCheck["diagnostics"].push_back(
+                        "Lucan/Camilla retail aliases could not be made resident");
+                }
+                goldenClawAliasCheck["quest_start_dialogue_check"] =
+                    std::move(questStartCheck);
+                const std::size_t materialized = session.bindQuestInventoryForActor(
+                    arvel.id, arvel.base, checkError);
+                goldenClawAliasCheck["materialized_items"] = materialized;
+                std::vector<std::string> checkDiagnostics;
+                for (int tick = 0; tick < 2; ++tick) {
+                    odai::bethesda::BethesdaSessionStep step =
+                        session.advance(1.0 / 60.0);
+                    checkDiagnostics.insert(checkDiagnostics.end(),
+                        std::make_move_iterator(step.diagnostics.begin()),
+                        std::make_move_iterator(step.diagnostics.end()));
+                }
+                const odai::bethesda::LootTransferResult looted =
+                    session.lootObject(player.id, arvel.id);
+                goldenClawAliasCheck["transferred_items"] = looted.transferred.size();
+                for (int tick = 0; tick < 4; ++tick) {
+                    odai::bethesda::BethesdaSessionStep step =
+                        session.advance(1.0 / 60.0);
+                    checkDiagnostics.insert(checkDiagnostics.end(),
+                        std::make_move_iterator(step.diagnostics.begin()),
+                        std::make_move_iterator(step.diagnostics.end()));
+                }
+                const odai::bethesda::QuestRuntimeState* advanced =
+                    session.findQuest("MS13");
+                const std::int32_t stage = advanced == nullptr ? 0 : advanced->stage;
+                goldenClawAliasCheck["ms13_stage"] = stage;
+                nlohmann::json objectives = nlohmann::json::array();
+                if (advanced != nullptr) {
+                    for (const odai::bethesda::QuestObjectiveState& objective :
+                         advanced->objectives) {
+                        objectives.push_back({{"index", objective.index},
+                            {"text", objective.displayText},
+                            {"displayed", objective.displayed},
+                            {"completed", objective.completed},
+                            {"failed", objective.failed}});
+                    }
+                }
+                goldenClawAliasCheck["objectives"] = std::move(objectives);
+                session.setQuestStage("MS13", 50);
+                std::vector<std::string> stage50Diagnostics;
+                for (int tick = 0; tick < 2; ++tick) {
+                    odai::bethesda::BethesdaSessionStep step =
+                        session.advance(1.0 / 60.0);
+                    stage50Diagnostics.insert(stage50Diagnostics.end(),
+                        std::make_move_iterator(step.diagnostics.begin()),
+                        std::make_move_iterator(step.diagnostics.end()));
+                }
+                const odai::bethesda::QuestRuntimeState* stage50 =
+                    session.findQuest("MS13");
+                goldenClawAliasCheck["stage_50_fragment_check"] = {
+                    {"ok", stage50Diagnostics.empty() && stage50 != nullptr &&
+                        stage50->stage == 50},
+                    {"stage", stage50 == nullptr ? 0 : stage50->stage},
+                    {"diagnostics", stage50Diagnostics}};
+                nlohmann::json dialogueHandIns = {
+                    {"ok", false}, {"golden_claw", nlohmann::json::object()},
+                    {"dragonstone", nlohmann::json::object()}};
+                session.setQuestStage("MS13", 60);
+                for (int tick = 0; tick < 3; ++tick) {
+                    (void)session.advance(1.0 / 60.0);
+                }
+                const odai::bethesda::QuestRuntimeState* ms13HandIn =
+                    session.findQuest("MS13");
+                if (ms13HandIn != nullptr && lucanRuntime.valid() &&
+                    session.world().find(lucanRuntime) != nullptr) {
+                        // Stage 100 queries Camilla's death state and enables
+                        // the authored shop-display claw. Both are ordinarily
+                        // resident in Riverwood while Lucan can be spoken to.
+                        const auto displayAlias = std::find_if(
+                            ms13HandIn->aliases.begin(), ms13HandIn->aliases.end(),
+                            [](const auto& alias) {
+                                return toLowerAscii(alias.name) == "lucanclaw";
+                            });
+                        if (displayAlias != ms13HandIn->aliases.end() &&
+                            displayAlias->target.valid()) {
+                            odai::bethesda::RuntimeObject displayClaw;
+                            displayClaw.id = displayAlias->target;
+                            displayClaw.base = displayAlias->target.reference;
+                            displayClaw.kind = odai::bethesda::RuntimeObjectKind::Activator;
+                            displayClaw.enabled = false;
+                            (void)session.world().addInitialObject(
+                                std::move(displayClaw), checkError);
+                        }
+                        const auto choices = session.availableDialogueChoices(
+                            lucanRuntime, player.id, true);
+                        const auto handIn = std::find_if(
+                            choices.begin(), choices.end(), [](const auto& choice) {
+                                return toLowerAscii(choice.prompt) ==
+                                    "i have the golden claw.";
+                            });
+                        if (handIn != choices.end()) {
+                            odai::bethesda::SkyrimDialogueSelectionResult selection =
+                                session.selectDialogueInfo(
+                                    handIn->info, lucanRuntime, player.id, 2u);
+                            std::vector<std::string> diagnostics = selection.diagnostics;
+                            for (int tick = 0; tick < 8; ++tick) {
+                                odai::bethesda::BethesdaSessionStep step =
+                                    session.advance(1.0 / 60.0);
+                                diagnostics.insert(diagnostics.end(),
+                                    std::make_move_iterator(step.diagnostics.begin()),
+                                    std::make_move_iterator(step.diagnostics.end()));
+                            }
+                            const auto* completed = session.findQuest("MS13");
+                            dialogueHandIns["golden_claw"] = {
+                                {"ok", selection.accepted && diagnostics.empty() &&
+                                    completed != nullptr && completed->stage == 100},
+                                {"prompt", handIn->prompt}, {"responses", selection.responses},
+                                {"info", handIn->info.toString()},
+                                {"stage", completed == nullptr ? 0 : completed->stage},
+                                {"diagnostics", diagnostics}};
+                        } else {
+                            dialogueHandIns["golden_claw"] = {
+                                {"ok", false}, {"diagnostics",
+                                    {"no strictly available retail 'I have the golden claw.' "
+                                     "hand-in topic"}}};
+                        }
+                }
+
+                const odai::bethesda::QuestRuntimeState* mq103 =
+                    session.findQuest("MQ103");
+                if (mq103 != nullptr) {
+                    const auto dragonstoneAlias = std::find_if(
+                        mq103->aliases.begin(), mq103->aliases.end(), [](const auto& alias) {
+                            return toLowerAscii(alias.name) == "dragonstone";
+                        });
+                    const auto farengarAlias = std::find_if(
+                        mq103->aliases.begin(), mq103->aliases.end(), [](const auto& alias) {
+                            return toLowerAscii(alias.name) == "farengar";
+                        });
+                    if (dragonstoneAlias != mq103->aliases.end() &&
+                        dragonstoneAlias->createdObject.valid() &&
+                        farengarAlias != mq103->aliases.end() &&
+                        farengarAlias->target.kind ==
+                            odai::bethesda::ObjectIdKind::PersistentReference) {
+                        odai::bethesda::RuntimeObject farengar;
+                        farengar.id = session.world().allocateRuntimeId();
+                        farengar.base = farengarAlias->target.reference;
+                        farengar.kind = odai::bethesda::RuntimeObjectKind::Actor;
+                        farengar.actorValues.emplace();
+                        if (session.world().addInitialObject(farengar, checkError)) {
+                            (void)session.bindQuestInventoryForActor(
+                                farengar.id, farengar.base, checkError);
+                            // MQ103 stage 190 immediately starts MQ104. At a
+                            // real Farengar hand-in, Irileth, the messenger,
+                            // and the captain marker are resident in the
+                            // Dragonsreach scene, so mirror that residency in
+                            // this headless route.
+                            if (const auto* mq104 = session.findQuest("MQ104")) {
+                                for (const std::string_view wanted :
+                                     {std::string_view("irileth"),
+                                      std::string_view("messenger")}) {
+                                    const auto alias = std::find_if(
+                                        mq104->aliases.begin(), mq104->aliases.end(),
+                                        [&](const auto& candidate) {
+                                            return toLowerAscii(candidate.name) == wanted;
+                                        });
+                                    if (alias == mq104->aliases.end() ||
+                                        alias->target.kind != odai::bethesda::
+                                            ObjectIdKind::PersistentReference) continue;
+                                    odai::bethesda::RuntimeObject actor;
+                                    actor.id = session.world().allocateRuntimeId();
+                                    actor.base = alias->target.reference;
+                                    actor.kind = odai::bethesda::RuntimeObjectKind::Actor;
+                                    actor.actorValues.emplace();
+                                    if (session.world().addInitialObject(actor, checkError)) {
+                                        (void)session.bindQuestInventoryForActor(
+                                            actor.id, actor.base, checkError);
+                                    }
+                                }
+                                const odai::bethesda::ObjectId mq104Object =
+                                    odai::bethesda::ObjectId::persistent(mq104->record);
+                                const odai::bethesda::PapyrusValue* marker =
+                                    session.papyrus().findProperty(
+                                        mq104Object, "QF_MQ104B_0002610C",
+                                        "CaptainStartMarker");
+                                if (marker != nullptr && marker->type ==
+                                        odai::bethesda::PapyrusValueType::Object &&
+                                    marker->object.kind == odai::bethesda::
+                                        ObjectIdKind::PersistentReference &&
+                                    session.world().find(marker->object) == nullptr) {
+                                    odai::bethesda::RuntimeObject markerObject;
+                                    markerObject.id = marker->object;
+                                    markerObject.base = marker->object.reference;
+                                    markerObject.kind =
+                                        odai::bethesda::RuntimeObjectKind::Activator;
+                                    (void)session.world().addInitialObject(
+                                        std::move(markerObject), checkError);
+                                }
+                            }
+                            for (int tick = 0; tick < 4; ++tick) {
+                                (void)session.advance(1.0 / 60.0);
+                            }
+                            const auto choices = session.availableDialogueChoices(
+                                farengar.id, player.id, true);
+                            const auto handIn = std::find_if(
+                                choices.begin(), choices.end(), [](const auto& choice) {
+                                    const std::string prompt =
+                                        toLowerAscii(choice.prompt);
+                                    return prompt.find("stone tablet you wanted") !=
+                                            std::string::npos ||
+                                        prompt.find("give dragonstone") !=
+                                            std::string::npos;
+                                });
+                            if (handIn != choices.end()) {
+                                const auto itemCount = [&](const odai::bethesda::RuntimeObject* object,
+                                                           const odai::bethesda::RecordKey& item) {
+                                    if (object == nullptr) return 0;
+                                    const auto found = std::find_if(object->inventory.begin(),
+                                        object->inventory.end(), [&](const auto& entry) {
+                                            return entry.item == item;
+                                        });
+                                    return found == object->inventory.end() ? 0 : found->count;
+                                };
+                                const odai::bethesda::ObjectId aliasIdentityBefore =
+                                    dragonstoneAlias->target;
+                                const odai::bethesda::RecordKey dragonstoneItem =
+                                    dragonstoneAlias->createdObject;
+                                const int itemCountBefore = itemCount(
+                                    session.world().find(player.id),
+                                    dragonstoneItem);
+                                odai::bethesda::SkyrimDialogueSelectionResult selection =
+                                    session.selectDialogueInfo(
+                                        handIn->info, farengar.id, player.id, 1u);
+                                std::vector<std::string> diagnostics = selection.diagnostics;
+                                for (int tick = 0; tick < 8; ++tick) {
+                                    odai::bethesda::BethesdaSessionStep step =
+                                        session.advance(1.0 / 60.0);
+                                    diagnostics.insert(diagnostics.end(),
+                                        std::make_move_iterator(step.diagnostics.begin()),
+                                        std::make_move_iterator(step.diagnostics.end()));
+                                }
+                                const auto* completed = session.findQuest("MQ103");
+                                odai::bethesda::ObjectId aliasIdentityAfter;
+                                if (completed != nullptr) {
+                                    const auto completedAlias = std::find_if(
+                                        completed->aliases.begin(),
+                                        completed->aliases.end(), [](const auto& alias) {
+                                            return toLowerAscii(alias.name) == "dragonstone";
+                                        });
+                                    if (completedAlias != completed->aliases.end()) {
+                                        aliasIdentityAfter = completedAlias->target;
+                                    }
+                                }
+                                const int itemCountAfter = itemCount(
+                                    session.world().find(player.id),
+                                    dragonstoneItem);
+                                const bool aliasIdentityStable =
+                                    aliasIdentityAfter == aliasIdentityBefore;
+                                bool saveReloadOk = false;
+                                std::string saveError;
+                                const std::filesystem::path savePath =
+                                    std::filesystem::temp_directory_path() /
+                                    "odai-skyrim-bleak-falls-probe-v7.json";
+                                if (odai::bethesda::saveOdaiGameAtomic(
+                                        savePath, session, saveError)) {
+                                    odai::bethesda::SaveLoadReport saveReport;
+                                    saveReloadOk = odai::bethesda::loadOdaiGame(
+                                        savePath, session, {}, saveReport, saveError);
+                                }
+                                const auto* reloadedQuest = session.findQuest("MQ103");
+                                odai::bethesda::ObjectId reloadedAliasIdentity;
+                                if (reloadedQuest != nullptr) {
+                                    const auto reloadedAlias = std::find_if(
+                                        reloadedQuest->aliases.begin(),
+                                        reloadedQuest->aliases.end(), [](const auto& alias) {
+                                            return toLowerAscii(alias.name) == "dragonstone";
+                                        });
+                                    if (reloadedAlias != reloadedQuest->aliases.end()) {
+                                        reloadedAliasIdentity = reloadedAlias->target;
+                                    }
+                                }
+                                saveReloadOk = saveReloadOk && reloadedQuest != nullptr &&
+                                    reloadedQuest->stage == 190 &&
+                                    reloadedAliasIdentity == aliasIdentityBefore &&
+                                    itemCount(session.world().find(player.id),
+                                        dragonstoneItem) == 0;
+                                if (!saveError.empty()) diagnostics.push_back(saveError);
+                                dialogueHandIns["dragonstone"] = {
+                                    {"ok", selection.accepted && diagnostics.empty() &&
+                                        completed != nullptr && completed->stage == 190 &&
+                                        itemCountBefore == 1 && itemCountAfter == 0 &&
+                                        aliasIdentityStable && saveReloadOk},
+                                    {"prompt", handIn->prompt},
+                                    {"responses", selection.responses},
+                                    {"info", handIn->info.toString()},
+                                    {"stage", completed == nullptr ? 0 : completed->stage},
+                                    {"item_count_before", itemCountBefore},
+                                    {"item_count_after", itemCountAfter},
+                                    {"alias_identity_stable", aliasIdentityStable},
+                                    {"save_reload_ok", saveReloadOk},
+                                    {"diagnostics", diagnostics}};
+                            } else {
+                                nlohmann::json prompts = nlohmann::json::array();
+                                for (const auto& choice : choices) {
+                                    prompts.push_back(choice.prompt);
+                                }
+                                dialogueHandIns["dragonstone"] = {
+                                    {"ok", false}, {"diagnostics",
+                                        {"no strictly available Dragonstone hand-in topic"}},
+                                    {"available_prompts", std::move(prompts)}};
+                            }
+                        }
+                    }
+                }
+                dialogueHandIns["ok"] =
+                    dialogueHandIns["golden_claw"].value("ok", false) &&
+                    dialogueHandIns["dragonstone"].value("ok", false);
+                goldenClawAliasCheck["dialogue_handin_check"] =
+                    std::move(dialogueHandIns);
+                goldenClawAliasCheck["diagnostics"] = checkDiagnostics;
+                goldenClawAliasCheck["ok"] = checkError.empty() &&
+                    checkDiagnostics.empty() && materialized >= 1u &&
+                    looted.accepted && !looted.transferred.empty() && stage >= 30 &&
+                    stage50Diagnostics.empty() && stage50 != nullptr &&
+                    stage50->stage >= 50 &&
+                    goldenClawAliasCheck["quest_start_dialogue_check"].value("ok", false) &&
+                    goldenClawAliasCheck["dragonstone_boss_alias_check"].value("ok", false) &&
+                    goldenClawAliasCheck["dialogue_handin_check"].value("ok", false);
+            } else {
+                goldenClawAliasCheck["diagnostics"].push_back(checkError);
+            }
+        } else {
+            goldenClawAliasCheck["diagnostics"].push_back(
+                "retail MS13 Arvel alias did not resolve to a stable actor base");
+        }
+    } else {
+        goldenClawAliasCheck["diagnostics"].push_back("MS13 runtime state is missing");
+    }
+    nlohmann::json quests = nlohmann::json::array();
+    const std::size_t unresolved = report.unresolvedCallBindings.size();
+    for (const odai::bethesda::ScenarioQuestLoadDetail& detail : report.quests) {
+        quests.push_back({{"editor_id", detail.editorId}, {"stages", detail.stages},
+            {"objectives", detail.objectives}, {"aliases", detail.aliases},
+            {"stage_fragments", detail.stageFragments},
+            {"alias_script_attachments", detail.aliasScriptAttachments},
+            {"referenced_records", detail.referencedRecords}, {"scripts", detail.scripts},
+            {"unresolved_calls", detail.unresolvedCalls}});
+    }
+    const bool fixtureAssertionsOk = beforeTheStormBootstrapCheck.value("ok", false) &&
+        goldenClawAliasCheck.value("ok", false) && unresolved == 0u;
+    const nlohmann::json fixtureSetup = {
+        {"scenario_bootstrap", {"MQ101:900 (post-Helgen prerequisite)",
+            "MQ102:10 (authored Riverwood startup fragment replayed after VMAD attachment)"}},
+        {"injected_actor_state", {
+            "Lucan and Camilla made resident in Riverwood Trader",
+            "Arvel created already dead",
+            "Installed Bleak Falls Boss reference made resident for physical alias/combat assertion",
+            "MQ103 stage-10 persistent references and Irileth made resident",
+            "Lucan display claw made resident",
+            "Farengar, Irileth, messenger, and captain marker made resident"}},
+        {"direct_stage_setup", {"MQ103:10", "MS13:50", "MS13:60"}},
+        {"direct_inventory_setup", nlohmann::json::array()}};
+    const nlohmann::json unverifiedRouteSegments = {
+        "MQ102 Riverwood-friend conversation, travel, and Balgruuf/Farengar introduction",
+        "Bleak Falls streaming traversal and authored triggers",
+        "Arvel web activation, escape package, combat, and death",
+        "Golden Claw door animation/audio and Hall of Stories stage progression",
+        "authored boss encounter/package and streamed residency before the verified combat/loot path",
+        "pre-acquired Dragonstone alternate Farengar dialogue branch",
+        "save/reload during retail dialogue and dungeon traversal"};
+    std::cout << nlohmann::json({{"ok", fixtureAssertionsOk}, {"scenario", scenarioId},
+        {"content_loaded", true},
+        {"gate_kind", "fixture-assisted retail content/fragment assertions"},
+        {"fixture_assisted", true},
+        {"fixture_assertions_ok", fixtureAssertionsOk},
+        {"automated_playable_route_complete", false},
+        {"release_gate_passed", false},
+        {"setup", fixtureSetup},
+        {"before_the_storm_bootstrap_check", beforeTheStormBootstrapCheck},
+        {"unverified_route_segments", unverifiedRouteSegments},
+        {"strict_ready", unresolved == 0u && report.runtimeBlockers.empty()},
+        {"unresolved_calls", unresolved}, {"quests", std::move(quests)},
+        {"transitive_script_classes", report.transitiveScriptClasses},
+        {"transitive_script_instances", report.transitiveScriptInstances},
+        {"locations_registered", report.locationsRegistered},
+        {"global_variables_registered", report.globalVariablesRegistered},
+        {"dialogue_topics_registered", report.dialogueTopicsRegistered},
+        {"dialogue_branches_registered", report.dialogueBranchesRegistered},
+        {"dialogue_infos_registered", report.dialogueInfosRegistered},
+        {"dialogue_fragments_loaded", report.dialogueFragmentsLoaded},
+        {"golden_claw_alias_event_check", std::move(goldenClawAliasCheck)},
+        {"runtime_blockers", report.runtimeBlockers},
+        {"unresolved_call_bindings", report.unresolvedCallBindings},
+        {"diagnostics", report.diagnostics}}).dump(2) << '\n';
+    return fixtureAssertionsOk ? 0 : 1;
+}
+
 void printUsage() {
     std::cout << "Usage:\n"
               << "  odai_bethesda_probe --profilecheck <profile> [--data <Data>] [--mods-root <dir>]\n"
               << "  odai_bethesda_probe --why <profile> <virtualPath|formID> [--data <Data>]\n"
               << "  odai_bethesda_probe --conflicts <profile> [--data <Data>]\n"
               << "  odai_bethesda_probe --export-profile <profile> <out.json> [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-scriptcheck <profile> [--strict] [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-script-source <profile> <script-id> [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-dialogue-trace <profile> <actor-or-topic> [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-quest-trace <profile> <journal-id> [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-quest-suite <profile> [--quest <journal-id>] [--data <Data>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --archives\n"
               << "  odai_bethesda_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --nif <virtualPath>\n"
@@ -4563,6 +5813,12 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --skeleton <virtualPath>\n"
               << "  odai_bethesda_probe <DataFilesPath> --skinned <virtualPath>\n"
               << "  odai_bethesda_probe <DataFilesPath> --character <skeleton.nif> <part.nif>...\n"
+              << "  odai_bethesda_probe <DataFilesPath> --scriptcheck <script.pex> [--strict]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --animationcheck\n"
+              << "  odai_bethesda_probe <DataFilesPath> --animation-strict\n"
+              << "  odai_bethesda_probe <DataFilesPath> --quest-trace <Plugin.esm> <QuestEditorID>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --skyrim-dialogue-trace <Plugin.esm> <QuestEditorID>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --scenario-check <scenario>\n"
               // Modes that existed but were never listed here.
               << "  odai_bethesda_probe <DataFilesPath> --find <substring> [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --cellindex <Plugin.esm> [worldspace] [limit]\n"
@@ -4581,6 +5837,60 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
               << "  odai_bethesda_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
               << "  odai_bethesda_probe <anyDir> --scene <cooked.bin>\n";
+}
+
+int animationCheck(const std::filesystem::path& dataPath, bool strict) {
+    using namespace odai::importer::fnv;
+    FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << nlohmann::json({{"ok", false},
+            {"error", "could not open virtual Data asset source"}}).dump(2) << '\n';
+        return 1;
+    }
+    // Preserve virtual-Data case insensitivity for directly extracted mods.
+    (void)assets.addModDirectory(dataPath);
+    if (const char* mods = std::getenv("ODAI_FNV_MODS")) {
+        std::string root;
+        for (const char* cursor = mods;; ++cursor) {
+            if (*cursor == ':' || *cursor == '\0') {
+                if (!root.empty()) {
+                    (void)assets.addModDirectory(root);
+                    root.clear();
+                }
+                if (*cursor == '\0') break;
+            } else {
+                root.push_back(*cursor);
+            }
+        }
+    }
+    SkyrimAnimationAssetReport report;
+    std::string error;
+    const bool inspected = inspectSkyrimAnimationBundle(assets, report, strict, error);
+    nlohmann::json roots = nlohmann::json::array();
+    for (const FalloutAssetSource::ResolvedAsset& asset : report.roots) {
+        roots.push_back({{"path", asset.canonicalVirtualPath},
+            {"provider_id", asset.providerId}, {"provider", asset.providerName},
+            {"fingerprint", asset.contentFingerprint}, {"archive", asset.archiveName}});
+    }
+    odai::bethesda::BethesdaPhysicsWorld physics;
+    std::string joltError;
+    bool joltCharacter = physics.initialize(joltError);
+    if (joltCharacter) {
+        odai::bethesda::PhysicsCharacterConfig config;
+        joltCharacter = physics.addCharacter(
+            odai::bethesda::ObjectId::runtime(1u), config, joltError);
+    }
+    std::cout << nlohmann::json({{"ok", inspected && (!strict || report.strictCompatible)},
+        {"strict", strict}, {"coherent", report.coherent},
+        {"strict_ready", report.strictCompatible},
+        {"generator", odai::anim::hkxGeneratorName(report.generator)},
+        {"generator_provider", report.generatorProvider}, {"roots", std::move(roots)},
+        {"missing_assets", report.missingAssets},
+        {"unsupported_classes", report.unsupportedClasses},
+        {"jolt_character_constructed", joltCharacter}, {"jolt_error", joltError},
+        {"fallback", report.strictCompatible ? "none" : "per-actor procedural"},
+        {"diagnostics", report.diagnostics}, {"error", error}}).dump(2) << '\n';
+    return inspected && (!strict || report.strictCompatible) && joltCharacter ? 0 : 1;
 }
 
 }  // namespace
@@ -5271,6 +6581,281 @@ bool openProfileLoadOrder(
     return order.open(profile, error);
 }
 
+struct Tes3ProbeContext {
+    odai::importer::fnv::ResolvedContentProfile profile;
+    std::shared_ptr<odai::bethesda::Tes3ContentStore> content;
+    odai::bethesda::Tes3Runtime runtime;
+};
+
+bool loadTes3ProbeContext(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart,
+    Tes3ProbeContext& out, std::string& error) {
+    using namespace odai::bethesda;
+    using namespace odai::importer::fnv;
+    if (!resolveProbeContentProfile(source, argc, argv, optionStart, out.profile, error)) {
+        return false;
+    }
+    if (out.profile.game != BethesdaGame::Morrowind) {
+        error = "TES3 probe requires a Morrowind content profile";
+        return false;
+    }
+    FalloutLoadOrder order;
+    if (!openProfileLoadOrder(out.profile, order, error)) return false;
+    out.content = std::make_shared<Tes3ContentStore>();
+    if (!out.content->load(order, out.profile.encoding, error)) return false;
+    return out.runtime.configure(out.content,
+        ObjectId::persistent(makeTes3RecordKey("NPC_", "player")), error);
+}
+
+const char* tes3QuestStatusName(odai::bethesda::Tes3QuestStatus status) {
+    using odai::bethesda::Tes3QuestStatus;
+    switch (status) {
+        case Tes3QuestStatus::None: return "none";
+        case Tes3QuestStatus::Name: return "start";
+        case Tes3QuestStatus::Finished: return "finish";
+        case Tes3QuestStatus::Restart: return "restart";
+    }
+    return "none";
+}
+
+nlohmann::json tes3InfoTrace(const odai::bethesda::Tes3DialogueInfo& info) {
+    nlohmann::json conditions = nlohmann::json::array();
+    for (const odai::bethesda::Tes3DialogueCondition& condition : info.conditions) {
+        conditions.push_back({{"rule", condition.rawRule},
+            {"valid", condition.valid}, {"variable", condition.variable}});
+    }
+    return {{"id", info.id}, {"record", info.record.toString()},
+        {"previous", info.previousId}, {"next", info.nextId},
+        {"index", info.dispositionOrJournalIndex},
+        {"status", tes3QuestStatusName(info.questStatus)},
+        {"actor", info.actor}, {"faction", info.faction}, {"cell", info.cell},
+        {"source", info.sourcePlugin}, {"conditions", std::move(conditions)},
+        {"has_result_script", !info.resultScript.empty()}};
+}
+
+int tes3ScriptCheckCommand(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    Tes3ProbeContext context;
+    std::string error;
+    nlohmann::json output;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    const Tes3ScriptCheckReport& report = context.runtime.scriptCheckReport();
+    const bool strict = std::any_of(argv + optionStart, argv + argc,
+        [](const char* value) { return std::strcmp(value, "--strict") == 0; });
+    const bool ok = !strict || report.strictPass();
+    output = {{"version", 1}, {"ok", ok}, {"strict", strict},
+        {"strict_pass", report.strictPass()}, {"profile", context.profile.name},
+        {"fingerprint", context.profile.fingerprint}, {"encoding", context.profile.encoding},
+        {"scripts", report.scripts}, {"result_scripts", report.resultScripts},
+        {"compiled", report.compiled}, {"command_use", report.commandUse},
+        {"unsupported_commands", report.unsupportedCommands},
+        {"diagnostics", report.diagnostics},
+        {"content", {{"records", context.content->stats().recordsRead},
+            {"dialogues", context.content->stats().dialogues},
+            {"infos", context.content->stats().infos},
+            {"references", context.content->stats().references}}}};
+    std::cout << output.dump(2) << '\n';
+    return ok ? 0 : 1;
+}
+
+int tes3ScriptSourceCommand(
+    const std::filesystem::path& source, std::string_view scriptId,
+    int argc, char** argv, int optionStart) {
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << "TES3 profile failed: " << error << '\n';
+        return 1;
+    }
+    const odai::bethesda::Tes3ScriptDefinition* script = context.content->findScript(scriptId);
+    if (script == nullptr) {
+        std::cout << "TES3 script not found: " << scriptId << '\n';
+        return 1;
+    }
+    std::cout << script->source;
+    if (script->source.empty() || script->source.back() != '\n') std::cout << '\n';
+    return 0;
+}
+
+int tes3SpellTraceCommand(
+    const std::filesystem::path& source, std::string_view spellId,
+    int argc, char** argv, int optionStart) {
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    const odai::bethesda::Tes3SpellDefinition* spell = context.content->findSpell(spellId);
+    if (spell == nullptr) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", "spell id not found"},
+            {"spell", spellId}}).dump(2) << '\n';
+        return 1;
+    }
+    nlohmann::json effects = nlohmann::json::array();
+    for (const odai::bethesda::Tes3SpellEffect& effect : spell->effects) {
+        effects.push_back({{"effect_id", effect.effectId}, {"skill", effect.skill},
+            {"attribute", effect.attribute}, {"range", effect.range}, {"area", effect.area},
+            {"duration", effect.duration}, {"magnitude_min", effect.magnitudeMin},
+            {"magnitude_max", effect.magnitudeMax}});
+    }
+    std::cout << nlohmann::json({{"version", 1}, {"ok", true},
+        {"record", spell->record.toString()}, {"id", spell->id}, {"name", spell->name},
+        {"type", spell->type}, {"cost", spell->cost}, {"flags", spell->flags},
+        {"source", spell->sourcePlugin}, {"effects", std::move(effects)}}).dump(2) << '\n';
+    return 0;
+}
+
+int tes3DialogueTraceCommand(
+    const std::filesystem::path& source, std::string_view actorOrTopic,
+    int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    nlohmann::json output = {{"version", 1}, {"ok", true},
+        {"query", actorOrTopic}, {"profile", context.profile.name}};
+    if (const Tes3DialogueDefinition* topic = context.content->findDialogue(actorOrTopic)) {
+        nlohmann::json infos = nlohmann::json::array();
+        for (const Tes3DialogueInfo& info : topic->infos) infos.push_back(tes3InfoTrace(info));
+        output["kind"] = "topic";
+        output["topic"] = topic->record.toString();
+        output["type"] = static_cast<std::int32_t>(topic->type);
+        output["infos"] = std::move(infos);
+    } else {
+        Tes3DialogueActorState actor;
+        actor.object = ObjectId::persistent(makeTes3ReferenceKey("probe", 1u));
+        actor.id = std::string(actorOrTopic);
+        Tes3DialoguePlayerState player;
+        player.object = context.runtime.playerObject();
+        const Tes3DialogueResponse greeting = context.runtime.startDialogue(actor, player, true);
+        output["kind"] = "actor";
+        output["accepted"] = greeting.accepted;
+        output["greeting_topic"] = greeting.topic.toString();
+        output["greeting_info"] = greeting.info.toString();
+        output["discovered_topics"] = greeting.discoveredTopics;
+        output["available_topics"] = context.runtime.availableTopics(true);
+        output["diagnostics"] = greeting.diagnostics;
+    }
+    std::cout << output.dump(2) << '\n';
+    return 0;
+}
+
+int tes3QuestTraceCommand(
+    const std::filesystem::path& source, std::string_view questId,
+    int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    const Tes3DialogueDefinition* quest = context.content->findDialogue(questId);
+    if (quest == nullptr || quest->type != Tes3DialogueType::Journal) {
+        std::cout << nlohmann::json({{"ok", false},
+            {"error", "journal id not found"}, {"quest", questId}}).dump(2) << '\n';
+        return 1;
+    }
+    nlohmann::json entries = nlohmann::json::array();
+    for (const Tes3DialogueInfo& info : quest->infos) entries.push_back(tes3InfoTrace(info));
+    nlohmann::json resultEdges = nlohmann::json::array();
+    const std::string normalizedQuest = normalizeTes3Symbol(questId);
+    for (const auto& [programId, program] : context.runtime.scripts().programs()) {
+        for (const Tes3Instruction& instruction : program.instructions) {
+            if (instruction.op != Tes3OpCode::Call || instruction.command != "journal" ||
+                instruction.arguments.empty()) continue;
+            std::string target = instruction.arguments.front();
+            target.erase(std::remove(target.begin(), target.end(), '"'), target.end());
+            if (normalizeTes3Symbol(target) != normalizedQuest) continue;
+            nlohmann::json nativeCalls = nlohmann::json::array();
+            for (const Tes3Instruction& native : program.instructions) {
+                if (native.op != Tes3OpCode::Call) continue;
+                nativeCalls.push_back({{"line", native.sourceLine}, {"target", native.target},
+                    {"command", native.command}, {"arguments", native.arguments}});
+            }
+            resultEdges.push_back({{"program", programId}, {"line", instruction.sourceLine},
+                {"arguments", instruction.arguments}, {"program_commands", program.commands},
+                {"native_calls", std::move(nativeCalls)}});
+        }
+    }
+    std::cout << nlohmann::json({{"version", 1}, {"ok", true},
+        {"profile", context.profile.name}, {"fingerprint", context.profile.fingerprint},
+        {"quest", quest->record.toString()}, {"entries", std::move(entries)},
+        {"result_script_transitions", std::move(resultEdges)}}).dump(2) << '\n';
+    return 0;
+}
+
+int tes3QuestSuiteCommand(
+    const std::filesystem::path& source, std::optional<std::string> onlyQuest,
+    int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    nlohmann::json quests = nlohmann::json::array();
+    std::map<std::string, std::set<std::string>> journalCommands;
+    for (const auto& [programId, program] : context.runtime.scripts().programs()) {
+        (void)programId;
+        for (const Tes3Instruction& instruction : program.instructions) {
+            if (instruction.op != Tes3OpCode::Call || instruction.command != "journal" ||
+                instruction.arguments.empty()) continue;
+            std::string journal = instruction.arguments.front();
+            journal.erase(std::remove(journal.begin(), journal.end(), '"'), journal.end());
+            auto& commands = journalCommands[normalizeTes3Symbol(journal)];
+            commands.insert(program.commands.begin(), program.commands.end());
+        }
+    }
+    std::uint64_t entryCount = 0u;
+    std::uint64_t starts = 0u;
+    std::uint64_t terminals = 0u;
+    for (const auto& [key, quest] : context.content->dialogues()) {
+        (void)key;
+        if (quest.type != Tes3DialogueType::Journal) continue;
+        if (onlyQuest.has_value() &&
+            normalizeTes3Symbol(quest.id) != normalizeTes3Symbol(*onlyQuest)) continue;
+        std::uint64_t questStarts = 0u;
+        std::uint64_t questTerminals = 0u;
+        for (const Tes3DialogueInfo& info : quest.infos) {
+            ++entryCount;
+            if (info.questStatus == Tes3QuestStatus::Name) ++questStarts;
+            if (info.questStatus == Tes3QuestStatus::Finished ||
+                info.questStatus == Tes3QuestStatus::Restart) ++questTerminals;
+        }
+        starts += questStarts;
+        terminals += questTerminals;
+        quests.push_back({{"id", quest.id}, {"record", quest.record.toString()},
+            {"entries", quest.infos.size()}, {"starts", questStarts},
+            {"terminals", questTerminals},
+            {"direct_transition_commands", journalCommands[normalizeTes3Symbol(quest.id)]}});
+    }
+    const bool selectionFound = !onlyQuest.has_value() || !quests.empty();
+    const bool closurePass = context.runtime.scriptCheckReport().strictPass();
+    // This report is deliberately not a release-gate pass: structural journal
+    // enumeration and script closure are inputs to, not substitutes for, the
+    // authored event-driven transition explorer described by the TR gate.
+    std::cout << nlohmann::json({{"version", 1}, {"ok", selectionFound},
+        {"profile", context.profile.name}, {"fingerprint", context.profile.fingerprint},
+        {"selected_quest", onlyQuest.value_or("")}, {"quest_count", quests.size()},
+        {"entry_count", entryCount}, {"start_count", starts},
+        {"terminal_count", terminals}, {"script_closure_pass", closurePass},
+        {"transition_explorer_complete", false}, {"release_gate_passed", false},
+        {"quests", std::move(quests)},
+        {"runtime_blockers", nlohmann::json::array({
+            "authored event-driven transition explorer is not complete"})}}).dump(2) << '\n';
+    return selectionFound ? 0 : 1;
+}
+
 int profileCheckCommand(
     const std::filesystem::path& source, int argc, char** argv, int optionStart) {
     using namespace odai::importer::fnv;
@@ -5470,6 +7055,28 @@ int main(int argc, char** argv) {
         }
         std::cout << "wrote " << argv[3] << '\n'; return 0;
     }
+    if (argc >= 3 && std::strcmp(argv[1], "--tes3-scriptcheck") == 0) {
+        return tes3ScriptCheckCommand(argv[2], argc, argv, 3);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-script-source") == 0) {
+        return tes3ScriptSourceCommand(argv[2], argv[3], argc, argv, 4);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-spell-trace") == 0) {
+        return tes3SpellTraceCommand(argv[2], argv[3], argc, argv, 4);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-dialogue-trace") == 0) {
+        return tes3DialogueTraceCommand(argv[2], argv[3], argc, argv, 4);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-quest-trace") == 0) {
+        return tes3QuestTraceCommand(argv[2], argv[3], argc, argv, 4);
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--tes3-quest-suite") == 0) {
+        std::optional<std::string> quest;
+        for (int i = 3; i + 1 < argc; ++i) {
+            if (std::strcmp(argv[i], "--quest") == 0) quest = argv[i + 1];
+        }
+        return tes3QuestSuiteCommand(argv[2], std::move(quest), argc, argv, 3);
+    }
     if (argc < 3) {
         printUsage();
         return 2;
@@ -5484,6 +7091,22 @@ int main(int argc, char** argv) {
 
     if (mode == "--archives") {
         return probeArchives(dataPath);
+    }
+    if (mode == "--animationcheck" || mode == "--animation-strict") {
+        return animationCheck(dataPath, mode == "--animation-strict");
+    }
+    if (mode == "--scriptcheck" && argc >= 4) {
+        return scriptCheck(
+            dataPath, argv[3], argc >= 5 && std::strcmp(argv[4], "--strict") == 0);
+    }
+    if (mode == "--quest-trace" && argc >= 5) {
+        return questTrace(dataPath, argv[3], argv[4]);
+    }
+    if (mode == "--skyrim-dialogue-trace" && argc >= 5) {
+        return skyrimDialogueTrace(dataPath, argv[3], argv[4]);
+    }
+    if (mode == "--scenario-check" && argc >= 4) {
+        return scenarioCheck(dataPath, argv[3]);
     }
     if (mode == "--nifs") {
         const std::size_t limit = argc >= 4 ? static_cast<std::size_t>(std::stoull(argv[3])) : 500u;

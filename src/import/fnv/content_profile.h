@@ -60,6 +60,12 @@ struct ResolvedContentProfile {
     std::filesystem::path dataRoot;
     std::vector<ContentLayer> layers;
     std::vector<std::string> plugins;
+    // TES3 strings are decoded according to the profile. OpenMW defaults
+    // Western content to Windows-1252 when no encoding is specified.
+    std::string encoding = "windows-1252";
+    // Ordered OpenMW Lua manifests from `content=` entries. They are data in
+    // the immutable content graph even when the Lua runtime is not enabled.
+    std::vector<std::string> openMwScripts;
     std::vector<ContentArchive> archives;
     std::vector<ContentDiagnostic> diagnostics;
     std::string fingerprint;

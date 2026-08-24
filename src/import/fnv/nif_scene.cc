@@ -4062,6 +4062,31 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         ByteCursor blockCursor(
             bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
 
+        if (header.version == kMorrowindNifVersion &&
+            typeName == "NiTextKeyExtraData") {
+            std::int32_t nextExtraData = -1;
+            std::uint32_t recordSize = 0u;
+            std::uint32_t keyCount = 0u;
+            if (!blockCursor.read(nextExtraData) || !blockCursor.read(recordSize) ||
+                !blockCursor.read(keyCount) || keyCount > 100000u) {
+                outError = "Morrowind NiTextKeyExtraData header is malformed";
+                return false;
+            }
+            (void)nextExtraData;
+            (void)recordSize;
+            outModel.textKeys.reserve(outModel.textKeys.size() + keyCount);
+            for (std::uint32_t keyIndex = 0u; keyIndex < keyCount; ++keyIndex) {
+                NifTextKey key;
+                if (!blockCursor.read(key.time) || !std::isfinite(key.time) ||
+                    !blockCursor.readSizedString<std::uint32_t>(key.text)) {
+                    outError = "Morrowind NiTextKeyExtraData key is malformed";
+                    return false;
+                }
+                outModel.textKeys.push_back(std::move(key));
+            }
+            continue;
+        }
+
         // Any type whose name ends in "Node" is ATTEMPTED as a node even when
         // it is not in the list above. That collapses the old "unhandled node
         // type" case into the parse-failure case, which matters because the two
@@ -4281,7 +4306,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // among the roots "even if it is not a root object", and NiCamera
             // derives from NiAVObject, not NiNode -- it has no children list.
             if (root >= 0 && static_cast<std::size_t>(root) < numBlocks &&
-                isNiNode[static_cast<std::size_t>(root)]) {
+                (isNiNode[static_cast<std::size_t>(root)] ||
+                 isTriShape[static_cast<std::size_t>(root)])) {
                 stack.push_back(static_cast<std::size_t>(root));
                 transformStack.push_back(Mat4{});
                 animationOwnerStack.push_back(-1);
@@ -4871,24 +4897,30 @@ bool parseNifSkeleton(
         return false;
     }
 
-    if (header.sequentialBlocks) {
-        // 20.0.0.4 has no block-size table, and only the static-mesh path has a
-        // sequential walker. Saying so beats returning an empty skeleton, which
-        // reads downstream as "this actor has no bones" rather than as an
-        // unsupported format.
-        outError = "Skinned/skeleton NIF parsing is not implemented for 20.0.0.4 yet";
-        return false;
-    }
     const std::size_t numBlocks = header.blockSize.size();
     std::vector<std::size_t> blockStart(numBlocks);
-    std::size_t cursorPos = cursor.pos();
-    for (std::size_t i = 0; i < numBlocks; ++i) {
-        blockStart[i] = cursorPos;
-        if (cursorPos + header.blockSize[i] > bytes.size()) {
-            outError = "NIF block size table overruns the file";
+    std::vector<std::size_t> blockEnd(numBlocks);
+    if (header.inlineBlockTypes) {
+        if (!computeMorrowindBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
             return false;
         }
-        cursorPos += header.blockSize[i];
+    } else if (header.sequentialBlocks) {
+        if (!computeSequentialBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
+            return false;
+        }
+    } else {
+        std::size_t cursorPos = cursor.pos();
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            blockStart[i] = cursorPos;
+            blockEnd[i] = cursorPos + header.blockSize[i];
+            if (blockEnd[i] > bytes.size()) {
+                outError = "NIF block size table overruns the file";
+                return false;
+            }
+            cursorPos = blockEnd[i];
+        }
     }
 
     std::vector<AvObjectFields> nodeFields(numBlocks);
@@ -4899,7 +4931,7 @@ bool parseNifSkeleton(
             continue;
         }
         ByteCursor blockCursor(
-            bytes.data() + blockStart[i], header.blockSize[i]);
+            bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
         AvObjectFields fields;
         if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
                        header.inlineBlockTypes, fields, typeName)) {
@@ -4942,11 +4974,18 @@ bool parseNifSkeleton(
         stack.pop_back();
 
         NifSkeletonBone bone;
-        const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
-        if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+        const AvObjectFields& fields = nodeFields[blockIndex];
+        // NetImmerse 4.0.0.2 (Morrowind) stores NiAVObject names inline and
+        // has no header string table. Losing that inline name makes every
+        // BODY-part pivot resolve to the same empty-name/root bone, assembling
+        // an actor's limbs at the origin even though every authored transform
+        // is otherwise correct.
+        bone.name = fields.name;
+        const std::int32_t nameRef = fields.nameRef;
+        if (bone.name.empty() && nameRef >= 0 &&
+            static_cast<std::size_t>(nameRef) < header.strings.size()) {
             bone.name = header.strings[static_cast<std::size_t>(nameRef)];
         }
-        const AvObjectFields& fields = nodeFields[blockIndex];
         std::memcpy(bone.translation, fields.translation, sizeof(bone.translation));
         std::memcpy(bone.rotation, fields.rotation, sizeof(bone.rotation));
         bone.scale = fields.scale;
@@ -4992,12 +5031,16 @@ namespace {
 
 // NiSkinInstance, and its FNV subclass BSDismemberSkinInstance.
 //
-// NiSkinInstance layout (20.2.0.7):
+// NiSkinInstance layout (10.1.0.101+):
 //   data          ref  -> NiSkinData
 //   skinPartition ref  -> NiSkinPartition
 //   skeletonRoot  ptr  -> NiNode (a POINTER, same 4 bytes on disk as a ref)
 //   numBones      u32
 //   bones[]       ptr  -> NiNode, one per bone
+//
+// NetImmerse 4.0.0.2 predates NiSkinPartition and omits the second field. Its
+// skeletonRoot immediately follows data. Reading a partition ref there shifts
+// the count and the complete bone pointer array by four bytes.
 //
 // BSDismemberSkinInstance appends numPartitions + a partition array AFTER all
 // of that, so the prefix above decodes identically and the dismemberment data
@@ -5010,11 +5053,17 @@ struct SkinInstanceBlock {
     bool valid = false;
 };
 
-bool readSkinInstance(ByteCursor& cursor, SkinInstanceBlock& out) {
+bool readSkinInstance(
+    ByteCursor& cursor, std::uint32_t version, SkinInstanceBlock& out) {
     std::int32_t skeletonRoot = 0;
     std::uint32_t numBones = 0;
-    if (!cursor.read(out.dataRef) || !cursor.read(out.partitionRef) ||
-        !cursor.read(skeletonRoot) || !cursor.read(numBones)) {
+    if (!cursor.read(out.dataRef)) {
+        return false;
+    }
+    if (version >= kGamebryo10MinVersion && !cursor.read(out.partitionRef)) {
+        return false;
+    }
+    if (!cursor.read(skeletonRoot) || !cursor.read(numBones)) {
         return false;
     }
     // A body mesh binds a few dozen bones. Anything past this is a misparse,
@@ -5062,12 +5111,11 @@ void composeInverseBind(
     outMatrix[15] = 1.0f;
 }
 
-// NiSkinData layout (20.2.0.7, userVersion2 = 34):
+// NiSkinData layout (10.1.0.101+):
 //   skinTransform      rotation 3x3, translation 3, scale 1   (36 + 12 + 4)
 //   numBones           u32
 //   skinPartition      ref     -- present only when version <= 10.1.0.0, so
-//                                 NOT present here. Reading it anyway shifts
-//                                 every bone by four bytes.
+//                                 NOT present in supported 10.x/20.x files.
 //   hasVertexWeights   u8
 //   boneList[numBones]:
 //       skinTransform  rotation 3x3, translation 3, scale 1
@@ -5083,14 +5131,27 @@ void composeInverseBind(
 // exactly when the last bone's weight array ends, and readSkinData rejects the
 // parse otherwise. On upperbody.nif the NiSkinData blocks are 10477 / 8517 /
 // ... bytes and every one of them closes.
-bool readSkinData(ByteCursor& cursor, SkinDataBlock& out) {
+//
+// NetImmerse 4.0.0.2 instead stores a four-byte skin-partition ref after the
+// bone count and has no hasVertexWeights byte (weights are always present).
+// Using the modern layout on Morrowind starts the first inverse-bind matrix
+// three bytes early, corrupting both its pivot and every following weight list.
+bool readSkinData(ByteCursor& cursor, std::uint32_t version, SkinDataBlock& out) {
     float rootRotation[9] = {};
     float rootTranslation[3] = {};
     float rootScale = 1.0f;
     std::uint32_t numBones = 0;
-    std::uint8_t hasVertexWeights = 0;
+    std::uint8_t hasVertexWeights = 1;
     if (!cursor.read(rootRotation) || !cursor.read(rootTranslation) || !cursor.read(rootScale) ||
-        !cursor.read(numBones) || !cursor.read(hasVertexWeights)) {
+        !cursor.read(numBones)) {
+        return false;
+    }
+    if (version == kMorrowindNifVersion) {
+        std::int32_t partitionRef = -1;
+        if (!cursor.read(partitionRef)) {
+            return false;
+        }
+    } else if (!cursor.read(hasVertexWeights)) {
         return false;
     }
     composeInverseBind(rootRotation, rootTranslation, rootScale, out.skinTransform);
@@ -5168,24 +5229,30 @@ bool parseNifSkinnedMesh(
         return false;
     }
 
-    if (header.sequentialBlocks) {
-        // 20.0.0.4 has no block-size table, and only the static-mesh path has a
-        // sequential walker. Saying so beats returning an empty skeleton, which
-        // reads downstream as "this actor has no bones" rather than as an
-        // unsupported format.
-        outError = "Skinned/skeleton NIF parsing is not implemented for 20.0.0.4 yet";
-        return false;
-    }
     const std::size_t numBlocks = header.blockSize.size();
     std::vector<std::size_t> blockStart(numBlocks);
-    std::size_t cursorPos = cursor.pos();
-    for (std::size_t i = 0; i < numBlocks; ++i) {
-        blockStart[i] = cursorPos;
-        if (cursorPos + header.blockSize[i] > bytes.size()) {
-            outError = "NIF block size table overruns the file";
+    std::vector<std::size_t> blockEnd(numBlocks);
+    if (header.inlineBlockTypes) {
+        if (!computeMorrowindBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
             return false;
         }
-        cursorPos += header.blockSize[i];
+    } else if (header.sequentialBlocks) {
+        if (!computeSequentialBlockBounds(
+                bytes, header, cursor.pos(), blockStart, blockEnd, outError)) {
+            return false;
+        }
+    } else {
+        std::size_t cursorPos = cursor.pos();
+        for (std::size_t i = 0; i < numBlocks; ++i) {
+            blockStart[i] = cursorPos;
+            blockEnd[i] = cursorPos + header.blockSize[i];
+            if (blockEnd[i] > bytes.size()) {
+                outError = "NIF block size table overruns the file";
+                return false;
+            }
+            cursorPos = blockEnd[i];
+        }
     }
 
     // A skinned shape's vertices are in SKIN space already -- the whole point
@@ -5209,6 +5276,10 @@ bool parseNifSkinnedMesh(
     std::vector<SkinInstanceBlock> skinInstances(numBlocks);
     std::vector<SkinDataBlock> skinData(numBlocks);
     std::vector<std::string> nodeNames(numBlocks);
+    // Classic NiTexturingProperty -> NiSourceTexture chain. Morrowind actor
+    // parts use this rather than a Bethesda shader texture set.
+    std::vector<std::string> sourceTexturePaths(numBlocks);
+    std::vector<std::string> texturingPropertyPaths(numBlocks);
     // Which skin instance each shape names. Read here rather than in
     // readNiTriBasedGeom because the static path has no use for it and the
     // field sits immediately after the data ref that path already reads.
@@ -5217,14 +5288,16 @@ bool parseNifSkinnedMesh(
     for (std::size_t i = 0; i < numBlocks; ++i) {
         const std::string& typeName = header.blockTypeNames[header.blockTypeIndex[i]];
         ByteCursor blockCursor(
-            bytes.data() + blockStart[i], header.blockSize[i]);
+            bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
 
         if (isNodeTypeName(typeName)) {
             AvObjectFields fields;
             if (readNiNode(blockCursor, header.userVersion2, header.inlineNames,
                            header.inlineBlockTypes, fields, typeName)) {
+                nodeNames[i] = fields.name;
                 const std::int32_t nameRef = fields.nameRef;
-                if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+                if (nodeNames[i].empty() && nameRef >= 0 &&
+                    static_cast<std::size_t>(nameRef) < header.strings.size()) {
                     nodeNames[i] = header.strings[static_cast<std::size_t>(nameRef)];
                 }
                 nodeFields[i] = std::move(fields);
@@ -5259,12 +5332,12 @@ bool parseNifSkinnedMesh(
             }
         } else if (typeName == "NiSkinInstance" || typeName == "BSDismemberSkinInstance") {
             SkinInstanceBlock instance;
-            if (readSkinInstance(blockCursor, instance)) {
+            if (readSkinInstance(blockCursor, header.version, instance)) {
                 skinInstances[i] = std::move(instance);
             }
         } else if (typeName == "NiSkinData") {
             SkinDataBlock data;
-            if (readSkinData(blockCursor, data)) {
+            if (readSkinData(blockCursor, header.version, data)) {
                 skinData[i] = std::move(data);
             }
         } else if (typeName == "BSShaderPPLightingProperty") {
@@ -5289,6 +5362,11 @@ bool parseNifSkinnedMesh(
             TextureSetBlock set;
             if (readBsShaderTextureSet(blockCursor, set)) {
                 textureSets[i] = std::move(set);
+            }
+        } else if (typeName == "NiSourceTexture") {
+            std::string fileName;
+            if (findSourceTextureFileName(blockCursor, header.strings, fileName)) {
+                sourceTexturePaths[i] = std::move(fileName);
             }
         } else if (typeName == "NiAlphaProperty") {
             AlphaPropertyBlock alpha;
@@ -5315,6 +5393,20 @@ bool parseNifSkinnedMesh(
             if (readNiSkinPartitionGeometry(blockCursor, block)) {
                 geometry[i] = std::move(block);
             }
+        }
+    }
+
+    // Source textures normally follow the property that points to them, so
+    // resolve classic material links only after every block has been scanned.
+    for (std::size_t i = 0; i < numBlocks; ++i) {
+        if (header.blockTypeNames[header.blockTypeIndex[i]] != "NiTexturingProperty") {
+            continue;
+        }
+        ByteCursor propertyCursor(
+            bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
+        std::string fileName;
+        if (findTexturingPropertySource(propertyCursor, sourceTexturePaths, fileName)) {
+            texturingPropertyPaths[i] = std::move(fileName);
         }
     }
 
@@ -5400,11 +5492,21 @@ bool parseNifSkinnedMesh(
 
         NifSkinnedShape shape;
         const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
-        if (nameRef >= 0 && static_cast<std::size_t>(nameRef) < header.strings.size()) {
+        shape.name = nodeFields[blockIndex].name;
+        if (shape.name.empty() && nameRef >= 0 &&
+            static_cast<std::size_t>(nameRef) < header.strings.size()) {
             shape.name = header.strings[static_cast<std::size_t>(nameRef)];
         }
         shape.positions = *positions;
         shape.normals = src.normals;
+        // OpenMW cancels the retained NiNode/NiTriShape path from the skin
+        // root to this drawable and then evaluates per-bone inverse bind plus
+        // NiSkinData's overall transform. Baking the scene path here did the
+        // opposite: it applied a transform the reference evaluator cancels,
+        // rotating heads and sleeves away from their pivots. The character
+        // builder evaluates the actual authored skin product into one shared
+        // bind pose instead.
+        shape.requiresCanonicalBindBake = header.version == kMorrowindNifVersion;
         shape.uvs = src.uvs;
         shape.triangleIndices = src.triangleIndices;
         shape.usesDynamicPositions = isBsDynamicTriShape[blockIndex];
@@ -5434,6 +5536,10 @@ bool parseNifSkinnedMesh(
                 return;
             }
             if (!shape.diffuseTexturePath.empty()) {
+                return;
+            }
+            if (!texturingPropertyPaths[propertyIndex].empty()) {
+                shape.diffuseTexturePath = texturingPropertyPaths[propertyIndex];
                 return;
             }
             const std::int32_t textureSetRef = shaderTextureSetRefs[propertyIndex];

@@ -107,6 +107,7 @@ void finishProfile(ResolvedContentProfile& profile) {
     };
     mix(std::to_string(profile.version));
     mix(bethesdaGameName(profile.game));
+    mix(lower(profile.encoding));
     mix(metadata(profile.sourcePath));
     mix(metadata(profile.dataRoot));
     for (const ContentLayer& layer : profile.layers) {
@@ -118,6 +119,16 @@ void finishProfile(ResolvedContentProfile& profile) {
         for (auto it = profile.layers.rbegin(); it != profile.layers.rend(); ++it) {
             std::error_code ec;
             const fs::path inLayer = it->root / plugin;
+            if (fs::is_regular_file(inLayer, ec) && !ec) { candidate = inLayer; break; }
+        }
+        mix(metadata(candidate));
+    }
+    for (const std::string& scripts : profile.openMwScripts) {
+        mix(lower(scripts));
+        fs::path candidate = profile.dataRoot / scripts;
+        for (auto it = profile.layers.rbegin(); it != profile.layers.rend(); ++it) {
+            std::error_code ec;
+            const fs::path inLayer = it->root / scripts;
             if (fs::is_regular_file(inLayer, ec) && !ec) { candidate = inLayer; break; }
         }
         mix(metadata(candidate));
@@ -142,6 +153,10 @@ bool parseJsonProfile(
         profile.name = json.value("name", path.stem().string());
         if (!parseBethesdaGame(json.value("game", std::string{}), profile.game)) {
             error = "unknown or missing profile game"; return false;
+        }
+        profile.encoding = json.value("encoding", std::string("windows-1252"));
+        for (const auto& item : json.value("openmw_scripts", nlohmann::json::array())) {
+            profile.openMwScripts.push_back(item.get<std::string>());
         }
         const fs::path base = path.parent_path();
         if (options.dataRootOverride) profile.dataRoot = absoluteFrom(base, *options.dataRootOverride);
@@ -380,6 +395,7 @@ struct OpenMwValues {
     std::vector<std::string> archives;
     std::vector<std::string> content;
     std::optional<fs::path> dataLocal;
+    std::string encoding = "windows-1252";
 };
 
 std::string replaceAll(std::string value, const std::string& token, const std::string& replacement) {
@@ -442,6 +458,8 @@ bool parseOpenMwConfigRecursive(
             values.archives.push_back(raw);
         } else if (option == "content") {
             values.content.push_back(raw);
+        } else if (option == "encoding") {
+            values.encoding = raw.empty() ? "windows-1252" : lower(raw);
         }
     }
     active.erase(key);
@@ -457,6 +475,7 @@ bool parseOpenMwProfile(
     if (values.dataLocal) values.data.push_back(*values.dataLocal);
     profile.name = path.parent_path().filename().string().empty() ? "OpenMW" : path.parent_path().filename().string();
     profile.game = BethesdaGame::Morrowind;
+    profile.encoding = values.encoding;
 
     std::size_t baseIndex = values.data.size();
     if (options.dataRootOverride) profile.dataRoot = absoluteFrom(path.parent_path(), *options.dataRootOverride);
@@ -484,8 +503,7 @@ bool parseOpenMwProfile(
         const std::string ext = lower(fs::path(content).extension().string());
         if (ext == ".esm" || ext == ".esp" || ext == ".omwaddon") profile.plugins.push_back(content);
         else if (ext == ".omwscripts") {
-            addDiagnostic(profile, ContentDiagnosticSeverity::Warning, "unsupported-script-runtime",
-                          "OpenMW Lua content is not executed: " + content, path);
+            profile.openMwScripts.push_back(content);
         }
     }
     std::vector<fs::path> roots{profile.dataRoot};
@@ -581,6 +599,7 @@ bool writeOdaiContentProfile(
         {"path", archive.path.string()}, {"layer", archive.layerId}, {"required", archive.required}});
     const nlohmann::json json = {{"version", ResolvedContentProfile::kVersion},
         {"name", profile.name}, {"game", bethesdaGameName(profile.game)},
+        {"encoding", profile.encoding}, {"openmw_scripts", profile.openMwScripts},
         {"data_root", profile.dataRoot.string()}, {"layers", std::move(layers)},
         {"plugins", profile.plugins}, {"archives", std::move(archives)}};
     std::error_code ec;
@@ -609,6 +628,7 @@ bool writeContentCompatibilityReport(
         {"game", bethesdaGameName(profile.game)}, {"source", profile.sourcePath.string()},
         {"data_root", profile.dataRoot.string()}, {"fingerprint", profile.fingerprint},
         {"layer_count", profile.layers.size()}, {"plugin_count", profile.plugins.size()},
+        {"encoding", profile.encoding}, {"openmw_script_count", profile.openMwScripts.size()},
         {"archive_count", profile.archives.size()}, {"diagnostics", std::move(diagnostics)}};
     std::error_code ec;
     if (!path.parent_path().empty()) fs::create_directories(path.parent_path(), ec);

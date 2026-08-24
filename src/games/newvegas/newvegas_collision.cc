@@ -11,17 +11,6 @@ namespace odai::games::newvegas {
 namespace {
 
 constexpr int kTerrainGrid = odai::importer::fnv::kLandGridSize;       // 33
-constexpr float kPostSpacing = odai::importer::fnv::kLandPostSpacing;  // 128
-constexpr float kCellSize = odai::importer::fnv::kExteriorCellSize;    // 4096
-
-// A cell's engine-space corner. Engine X is Fallout X; engine Z is -Fallout Y,
-// so the cell spanning Fallout Y [z, z+1) spans engine Z [-(z+1), -z) -- the
-// corner is the MORE NEGATIVE end, not z * size.
-void cellEngineOrigin(const importer::CellCoord& cell, float& outX, float& outZ) {
-    outX = static_cast<float>(cell.x) * kCellSize;
-    outZ = -static_cast<float>(cell.z + 1) * kCellSize;
-}
-
 // Closest point on segment ab to p, in 2D.
 void closestPointOnSegment(
     float px, float pz, float ax, float az, float bx, float bz, float& outX, float& outZ) {
@@ -44,7 +33,6 @@ void closestPointOnSegment(
 void CollisionWorld::addCell(
     const importer::CellCoord& cell, const importer::ImportedScene& scene) {
     CellCollision collision;
-    cellEngineOrigin(cell, collision.originX, collision.originZ);
 
     // Terrain, read from the scene's own terrain mesh rather than the LAND
     // record: the mesh is what is drawn, and reading it here means a cell
@@ -52,14 +40,34 @@ void CollisionWorld::addCell(
     // built. No second decode path to drift.
     if (!scene.meshes.empty() && scene.meshes[0].name == "terrain" &&
         !scene.meshes[0].vertices.empty()) {
+        float minX = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float minZ = std::numeric_limits<float>::max();
+        float maxZ = std::numeric_limits<float>::lowest();
+        for (const importer::ImportedSceneVertex& vertex : scene.meshes[0].vertices) {
+            minX = std::min(minX, vertex.position[0]);
+            maxX = std::max(maxX, vertex.position[0]);
+            minZ = std::min(minZ, vertex.position[2]);
+            maxZ = std::max(maxZ, vertex.position[2]);
+        }
+        const float span = std::max(maxX - minX, maxZ - minZ);
+        if (std::isfinite(span) && span > 1.0f) {
+            collision.originX = minX;
+            collision.originZ = minZ;
+            collision.cellSize = span;
+            collision.postSpacing = span / static_cast<float>(kTerrainGrid - 1);
+            collision.bucketSize = span / static_cast<float>(kBucketGrid);
+        }
         collision.heights.assign(
             static_cast<std::size_t>(kTerrainGrid) * kTerrainGrid,
             -std::numeric_limits<float>::max());
         for (const importer::ImportedSceneVertex& vertex : scene.meshes[0].vertices) {
             const int gx =
-                static_cast<int>(std::lround((vertex.position[0] - collision.originX) / kPostSpacing));
+                static_cast<int>(std::lround(
+                    (vertex.position[0] - collision.originX) / collision.postSpacing));
             const int gz =
-                static_cast<int>(std::lround((vertex.position[2] - collision.originZ) / kPostSpacing));
+                static_cast<int>(std::lround(
+                    (vertex.position[2] - collision.originZ) / collision.postSpacing));
             if (gx < 0 || gx >= kTerrainGrid || gz < 0 || gz >= kTerrainGrid) {
                 continue;
             }
@@ -116,7 +124,7 @@ void CollisionWorld::addCell(
         const float maxZ = std::max({triangle.v[2], triangle.v[5], triangle.v[8]});
         const auto bucketIndex = [&](float value, float origin) {
             return std::clamp(
-                static_cast<int>((value - origin) / kBucketSize), 0, kBucketGrid - 1);
+                static_cast<int>((value - origin) / collision.bucketSize), 0, kBucketGrid - 1);
         };
         const int bx0 = bucketIndex(minX, collision.originX);
         const int bx1 = bucketIndex(maxX, collision.originX);
@@ -206,22 +214,22 @@ std::size_t CollisionWorld::triangleCount() const {
 
 void CollisionWorld::forEachNearbyTriangle(
     float worldX, float worldZ, const std::function<void(const Triangle&)>& visit) const {
-    // The player can stand near a boundary while the geometry belongs to the
-    // neighbouring cell, so walk the 3x3 block.
-    const importer::CellCoord centre{
-        static_cast<std::int32_t>(std::floor(worldX / kCellSize)),
-        static_cast<std::int32_t>(std::floor(-worldZ / kCellSize))};
-    for (std::int32_t dz = -1; dz <= 1; ++dz) {
-        for (std::int32_t dx = -1; dx <= 1; ++dx) {
-            const auto found = m_cells.find(importer::CellCoord{centre.x + dx, centre.z + dz});
-            if (found == m_cells.end() || found->second.buckets.empty()) {
+    // Derive coverage from each imported scene rather than assuming the later
+    // games' 4096-unit grid. Only the resident ring is examined (normally 49
+    // cells), after which the per-cell buckets keep triangle work local.
+    for (const auto& [cell, collision] : m_cells) {
+            (void)cell;
+            if (collision.buckets.empty() ||
+                worldX < collision.originX - collision.bucketSize ||
+                worldX > collision.originX + collision.cellSize + collision.bucketSize ||
+                worldZ < collision.originZ - collision.bucketSize ||
+                worldZ > collision.originZ + collision.cellSize + collision.bucketSize) {
                 continue;
             }
-            const CellCollision& collision = found->second;
             const int bx =
-                static_cast<int>(std::floor((worldX - collision.originX) / kBucketSize));
+                static_cast<int>(std::floor((worldX - collision.originX) / collision.bucketSize));
             const int bz =
-                static_cast<int>(std::floor((worldZ - collision.originZ) / kBucketSize));
+                static_cast<int>(std::floor((worldZ - collision.originZ) / collision.bucketSize));
             // One bucket ring, so a query near a bucket edge still sees the
             // geometry just across it.
             for (int oz = -1; oz <= 1; ++oz) {
@@ -237,23 +245,28 @@ void CollisionWorld::forEachNearbyTriangle(
                     }
                 }
             }
-        }
     }
 }
 
 bool CollisionWorld::terrainHeight(float worldX, float worldZ, float& outHeight) const {
-    const importer::CellCoord cell{
-        static_cast<std::int32_t>(std::floor(worldX / kCellSize)),
-        static_cast<std::int32_t>(std::floor(-worldZ / kCellSize))};
-    const auto found = m_cells.find(cell);
-    if (found == m_cells.end() || found->second.heights.empty()) {
-        return false;
+    const CellCollision* found = nullptr;
+    for (const auto& [cell, collision] : m_cells) {
+        (void)cell;
+        if (!collision.heights.empty() && worldX >= collision.originX &&
+            worldX <= collision.originX + collision.cellSize && worldZ >= collision.originZ &&
+            worldZ <= collision.originZ + collision.cellSize) {
+            found = &collision;
+            break;
+        }
     }
-    const CellCollision& collision = found->second;
+    if (found == nullptr) return false;
+    const CellCollision& collision = *found;
     const float gx = std::clamp(
-        (worldX - collision.originX) / kPostSpacing, 0.0f, static_cast<float>(kTerrainGrid - 1));
+        (worldX - collision.originX) / collision.postSpacing,
+        0.0f, static_cast<float>(kTerrainGrid - 1));
     const float gz = std::clamp(
-        (worldZ - collision.originZ) / kPostSpacing, 0.0f, static_cast<float>(kTerrainGrid - 1));
+        (worldZ - collision.originZ) / collision.postSpacing,
+        0.0f, static_cast<float>(kTerrainGrid - 1));
     const int x0 = static_cast<int>(gx);
     const int z0 = static_cast<int>(gz);
     const int x1 = std::min(x0 + 1, kTerrainGrid - 1);

@@ -193,7 +193,14 @@ std::string toLowerAscii(std::string value) {
 // 51: NetImmerse 4.0.0.2 NiSwitchNode reads its four-byte initial-child tail
 //     instead of the six-byte Skyrim spelling. Existing cells can otherwise
 //     retain missing switched architectural subtrees after the importer fix.
-constexpr int kCellBuildVersion = 51;
+// 52: authored collision triangles carry their placed-reference form ID so
+//     persistent runtime state can filter a door or activator from Jolt.
+// 53: imported instances retain source-reference identity and initial quest
+//     visibility for runtime binding.
+// 54: TES3 CREA and explicit-model NPC_ placements enter the imported scene.
+// 55: nested TES3 editor-marker models (including TR's NPC marker) are no
+//     longer serialized as visible world geometry.
+constexpr int kCellBuildVersion = 55;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -528,6 +535,19 @@ bool CellStreamer::referenceBelongsToCurrentWorldspace(
     return !cell.isInterior && cell.worldspaceFormId == m_currentWorldspaceFormId;
 }
 
+bool CellStreamer::referenceBelongsToResidentExteriorCell(
+    std::uint32_t referenceFormId) const {
+    const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(referenceFormId);
+    if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
+        owner->second >= m_cellIndex.cells.size()) {
+        return false;
+    }
+    const FalloutCellIndexEntry& cell = m_cellIndex.cells[owner->second];
+    return !cell.isInterior && cell.hasGridCoords &&
+           cell.worldspaceFormId == m_currentWorldspaceFormId &&
+           m_planner.isResident(CellCoord{cell.gridX, cell.gridZ});
+}
+
 bool CellStreamer::referenceBelongsToInterior(
     std::uint32_t referenceFormId, const std::string& interiorEditorId) const {
     const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(referenceFormId);
@@ -538,6 +558,172 @@ bool CellStreamer::referenceBelongsToInterior(
     const FalloutCellIndexEntry& cell = m_cellIndex.cells[owner->second];
     return cell.isInterior &&
            toLowerAscii(cell.editorId) == toLowerAscii(interiorEditorId);
+}
+
+std::optional<ReferenceCellOwnership> CellStreamer::referenceCellOwnership(
+    std::uint32_t referenceFormId) const {
+    const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(referenceFormId);
+    if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
+        owner->second >= m_cellIndex.cells.size()) {
+        return std::nullopt;
+    }
+    const FalloutCellIndexEntry& cell = m_cellIndex.cells[owner->second];
+    return ReferenceCellOwnership{
+        cell.cellFormId, cell.worldspaceFormId, cell.locationFormId,
+        cell.gridX, cell.gridZ, cell.hasGridCoords, cell.isInterior,
+        cell.editorId};
+}
+
+bool CellStreamer::isExteriorCellResident(
+    std::uint32_t worldspaceFormId,
+    std::int32_t gridX,
+    std::int32_t gridZ) const {
+    return worldspaceFormId != 0u &&
+        worldspaceFormId == m_currentWorldspaceFormId &&
+        m_planner.isResident(CellCoord{gridX, gridZ});
+}
+
+std::uint32_t CellStreamer::locationFormIdAtFallout(
+    float falloutX, float falloutY) const {
+    if (!std::isfinite(falloutX) || !std::isfinite(falloutY) ||
+        m_cellIndex.cellWorldSize <= 0.0f) {
+        return 0u;
+    }
+    const CellCoord coordinate{
+        static_cast<std::int32_t>(std::floor(falloutX / m_cellIndex.cellWorldSize)),
+        static_cast<std::int32_t>(std::floor(falloutY / m_cellIndex.cellWorldSize))};
+    const auto found = m_availableCells.find(coordinate);
+    return found == m_availableCells.end()
+        ? 0u : m_cellIndex.cells[found->second].locationFormId;
+}
+
+std::uint32_t CellStreamer::cellFormIdAtFallout(
+    float falloutX, float falloutY) const {
+    if (!std::isfinite(falloutX) || !std::isfinite(falloutY) ||
+        m_cellIndex.cellWorldSize <= 0.0f) {
+        return 0u;
+    }
+    const CellCoord coordinate{
+        static_cast<std::int32_t>(std::floor(falloutX / m_cellIndex.cellWorldSize)),
+        static_cast<std::int32_t>(std::floor(falloutY / m_cellIndex.cellWorldSize))};
+    const auto found = m_availableCells.find(coordinate);
+    return found == m_availableCells.end()
+        ? 0u : m_cellIndex.cells[found->second].cellFormId;
+}
+
+std::uint32_t CellStreamer::locationFormIdForInterior(
+    const std::string& interiorEditorId) const {
+    const std::string wanted = toLowerAscii(interiorEditorId);
+    for (const FalloutCellIndexEntry& entry : m_cellIndex.cells) {
+        if (entry.isInterior && toLowerAscii(entry.editorId) == wanted) {
+            return entry.locationFormId;
+        }
+    }
+    return 0u;
+}
+
+std::uint32_t CellStreamer::cellFormIdForInterior(
+    const std::string& interiorEditorId) const {
+    const std::string wanted = toLowerAscii(interiorEditorId);
+    for (const FalloutCellIndexEntry& entry : m_cellIndex.cells) {
+        if (entry.isInterior && toLowerAscii(entry.editorId) == wanted) {
+            return entry.cellFormId;
+        }
+    }
+    return 0u;
+}
+
+std::vector<std::uint32_t> CellStreamer::residentLocationFormIds() const {
+    std::vector<std::uint32_t> locations;
+    locations.reserve(m_residentChunks.size());
+    for (const auto& [coordinate, chunk] : m_residentChunks) {
+        (void)chunk;
+        const auto available = m_availableCells.find(coordinate);
+        if (available == m_availableCells.end()) continue;
+        const std::uint32_t location = m_cellIndex.cells[available->second].locationFormId;
+        if (location != 0u) locations.push_back(location);
+    }
+    std::sort(locations.begin(), locations.end());
+    locations.erase(std::unique(locations.begin(), locations.end()), locations.end());
+    return locations;
+}
+
+bool CellStreamer::referencePositionEngineSpace(
+    std::uint32_t resolvedReferenceFormId,
+    float outPosition[3],
+    std::string& outError) const {
+    const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(resolvedReferenceFormId);
+    if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
+        owner->second >= m_cellIndex.cells.size()) {
+        outError = "reference has no indexed owning cell";
+        return false;
+    }
+    FalloutCellRecord cell;
+    if (m_useLoadOrder) {
+        if (!extractFalloutCellMerged(
+                m_cellIndex, m_loadOrder, m_cellIndex.cells[owner->second], cell, outError)) {
+            return false;
+        }
+    } else {
+        EsmReader reader;
+        if (!reader.open(m_esmPath) || !extractFalloutCellAt(
+                reader, m_cellIndex.cells[owner->second], cell, outError)) {
+            if (outError.empty()) outError = reader.lastError();
+            return false;
+        }
+    }
+    const auto found = std::find_if(cell.references.begin(), cell.references.end(),
+        [&](const FalloutPlacedReference& reference) {
+            return reference.formId == resolvedReferenceFormId;
+        });
+    if (found == cell.references.end()) {
+        outError = "reference is indexed but absent after winning-record merge";
+        return false;
+    }
+    falloutToEngine(found->position, outPosition);
+    outError.clear();
+    return true;
+}
+
+bool CellStreamer::referenceGameplayData(
+    std::uint32_t resolvedReferenceFormId,
+    std::uint32_t& outBaseFormId,
+    std::vector<std::uint8_t>& outVmadBytes,
+    std::size_t& outSourcePluginIndex,
+    std::string& outError) const {
+    const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(resolvedReferenceFormId);
+    if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
+        owner->second >= m_cellIndex.cells.size()) {
+        outError = "reference has no indexed owning cell";
+        return false;
+    }
+    FalloutCellRecord cell;
+    if (m_useLoadOrder) {
+        if (!extractFalloutCellMerged(
+                m_cellIndex, m_loadOrder, m_cellIndex.cells[owner->second], cell, outError)) {
+            return false;
+        }
+    } else {
+        EsmReader reader;
+        if (!reader.open(m_esmPath) || !extractFalloutCellAt(
+                reader, m_cellIndex.cells[owner->second], cell, outError)) {
+            if (outError.empty()) outError = reader.lastError();
+            return false;
+        }
+    }
+    const auto found = std::find_if(cell.references.begin(), cell.references.end(),
+        [&](const FalloutPlacedReference& reference) {
+            return reference.formId == resolvedReferenceFormId;
+        });
+    if (found == cell.references.end()) {
+        outError = "reference is indexed but absent after winning-record merge";
+        return false;
+    }
+    outBaseFormId = found->baseFormId;
+    outVmadBytes = found->vmadBytes;
+    outSourcePluginIndex = found->sourcePluginIndex;
+    outError.clear();
+    return true;
 }
 
 void CellStreamer::update(
@@ -907,6 +1093,7 @@ bool CellStreamer::buildInteriorScene(
     builder.addCellStatics(record);
     builder.finish(outScene);
     appendResolvedDoors(record, m_cellIndex, outScene);
+    outInterior.navMeshes = record.navMeshes;
 
     outInterior.hasLighting = record.hasLighting;
     outInterior.cellFlags = record.cellFlags;

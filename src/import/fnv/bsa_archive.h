@@ -101,6 +101,7 @@ public:
     std::uint32_t contentFlags() const { return m_fileFlags; }
 
     const std::vector<BsaFileEntry>& files() const { return m_files; }
+    const std::filesystem::path& path() const { return m_path; }
 
     // Case-insensitive lookup by virtual path (backslash or forward-slash
     // separators both accepted).

@@ -46,6 +46,22 @@ The official fallback preserves Skyrim, Update, installed DLC, and locally
 present `Skyrim.ccc` order; it never enables arbitrary plugins by scanning the
 Data directory. `ODAI_FNV_LOAD_ORDER` is the environment equivalent.
 
+The Skyrim-first gameplay session has an explicit native-save entry point:
+
+```bash
+./build-linux/odai --scenario skyrim-bleak-falls \
+  --stream "/path/to/Skyrim Special Edition/Data"
+```
+
+It starts at Riverwood, seeds the completed MQ101/Helgen prerequisite, then
+replays MQ102's authored Riverwood startup stage after its retail VMAD is
+attached, and uses checksummed ODAI saves (`F5`/`F9`, or
+`--save-game`/`--load-game`). It does
+not read or write Skyrim `.ess` files. The deterministic session, world registry,
+VMAD/PEX readers, strict script diagnostics, and save lifecycle are implemented;
+the Golden Claw/Dragonstone route is not yet release-gate complete. See
+[`docs/SKYRIM_FIRST_RUNTIME.md`](docs/SKYRIM_FIRST_RUNTIME.md) for exact gate status.
+
 Large existing MO2, OpenMW, and ODAI JSON setups can be loaded read-only as one
 resolved content graph:
 
@@ -77,5 +93,24 @@ odai_bethesda_probe
 odai_newvegas_cooker
 odai_fnv_texture_pack
 ```
+
+For Skyrim compatibility work, `odai_bethesda_probe <Data> --scriptcheck
+<script.pex> --strict` reports decoded opcodes/calls, while `--quest-trace
+<Plugin.esm> <QuestEditorID>` follows QUST → VMAD → attached PEX scripts without
+redistributing installed data. `--skyrim-dialogue-trace <Plugin.esm>
+<QuestEditorID>` reports localized DIAL/INFO, CTDA, links, and INFO fragment
+metadata. `--scenario-check skyrim-bleak-falls` loads the same retail
+QUST/DLBR/DIAL/INFO/VMAD/PEX closure as the runtime and runs fixture-assisted
+Golden Claw alias/event and hand-in assertions without starting Vulkan. Its boss
+fixture uses the exact installed ACHR identity plus authored location/XLRT data,
+matches MQ103's forced-location/reference-type alias, kills that runtime actor
+through the physical combat path, loots the authored Dragonstone, and proves
+Farengar's fragment changes its player count from one to zero across save/reload.
+This does not yet prove natural streamed boss residency. Its JSON
+separates injected setup from verified behavior, lists unverified route segments,
+and leaves `release_gate_passed` false until the continuous route exists. In the
+scenario UI, nearby actors expose localized retail branch roots whose INFO
+conditions pass; `INFO.RNAM` overrides the topic prompt, `TCLT` gates linked
+choices, and begin/end fragments are separated by response completion.
 
 See `docs/index.md` for profile, import, and mod-root usage.

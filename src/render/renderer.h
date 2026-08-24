@@ -1,5 +1,6 @@
 #pragma once
 
+#include "bethesda/runtime_render_delta.h"
 #include "import/imported_scene.h"
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,12 @@ using UiTextureId = std::uint32_t;
 namespace odai::render {
 
 class RendererBackend;
+
+struct RuntimeDeltaApplyStats {
+    std::size_t received = 0u;
+    std::size_t skinnedVisibilityApplied = 0u;
+    std::size_t unresolved = 0u;
+};
 
 class Renderer {
 public:
@@ -85,6 +92,12 @@ public:
     // submitted pose, so callers can cheaply cull a town-sized actor set.
     void setSkinnedActorVisible(std::uint32_t instanceIndex, bool visible);
     void setSkinnedActorPose(std::uint32_t instanceIndex, const ImportedSkinnedActorFrameData& pose);
+    // Consumes presentation-only Bethesda deltas without mutating ImportedScene.
+    // A skinningSlot resolves visibility immediately; other object bindings are
+    // deliberately reported unresolved until their streamed render handles
+    // exist, rather than silently treating gameplay state as scene data.
+    RuntimeDeltaApplyStats applyRuntimeRenderDeltas(
+        const odai::bethesda::RuntimeRenderDeltaBatch& deltas);
     void setSkinningDebugBypass(bool bypass);
     // Temporal AA (camera reprojection; static world). Off by default.
     void setTaaEnabled(bool enabled);

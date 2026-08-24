@@ -18,6 +18,7 @@
 #include "import/fnv/asset_source.h"
 #include "import/fnv/character_builder.h"
 #include "import/imported_scene.h"
+#include "games/newvegas/newvegas_navigation.h"
 #include "math/math.h"
 
 #include <cstdint>
@@ -28,8 +29,6 @@
 #include <vector>
 
 namespace odai::games::newvegas {
-
-class ActorNavigationWorld;
 
 // How close, and how squarely faced, an actor has to be for "press E to talk".
 // Generous on both: a conversation the player has to hunt for the exact angle
@@ -117,6 +116,14 @@ struct SkinnedActor {
     // dialogue_records.h), and the generic town scan skips bases handled
     // elsewhere by it.
     std::uint32_t baseFormId = 0;
+    // The placed ACHR/ACRE reference after load-order remapping. This is the
+    // persistent gameplay identity; baseFormId identifies what the actor is.
+    std::uint32_t referenceFormId = 0;
+    std::vector<std::uint32_t> referenceTypeFormIds;
+    // Deterministically materialized CNTO inventory. LVLI tokens are expanded
+    // during actor construction so runtime never exposes a list record as if
+    // it were a takeable item.
+    std::vector<std::uint32_t> inventoryFormIds;
     odai::importer::fnv::FalloutCharacter character;
     std::vector<odai::importer::ImportedSceneTexture> textures;
     std::vector<odai::importer::ImportedScenePackedDraw> draws;
@@ -149,16 +156,33 @@ struct SkinnedActor {
     bool projectedToNavigation = false;
     float wanderOrigin[3] = {};
     float wanderTarget[3] = {};
-    std::vector<odai::math::Vector3> wanderPath;
+    std::vector<ActorNavigationStep> wanderPath;
     std::size_t wanderPathIndex = 0u;
     float wanderPauseSeconds = 0.0f;
     std::uint32_t wanderRng = 0;
+    bool scriptedMoveActive = false;
+    bool scriptedMoveArrived = false;
+    std::uint64_t scriptedMoveRevision = 0u;
+    // Skyrim scenario actors hand translation to BethesdaSession/Jolt after
+    // their initial authored-navmesh projection. The legacy actor planner then
+    // produces velocity intent only; these fields bridge that intent without
+    // giving presentation a second transform authority.
+    bool runtimeControllerOwned = false;
+    bool runtimeControllerNeedsRelocation = false;
+    bool runtimeControllerBlocked = false;
+    bool runtimeDead = false;
+    odai::math::Vector3 runtimeRequestedVelocity{};
     // Top of the actor's own rest-pose geometry, above its feet. A conversation
     // aims at a fraction of this rather than at a constant, because a bighorner,
     // a settler and a Securitron are not the same height and a placement's
     // origin is at the FEET -- aiming at the origin points the camera at the
     // ground.
     float standingHeightUnits = 0.0f;
+    // NPC_ records have an upright humanoid body even when their legacy rig
+    // has no vertices dominantly weighted to a bone literally named "Head".
+    // That distinction matters to the dialogue fallback: 65% is sensible for
+    // a low creature head, but is a humanoid's pelvis.
+    bool humanoid = false;
     // Where the actor's HEAD is, as a point the live pose can carry.
     //
     // A bone index plus the centroid of that bone's own vertices, in the space
@@ -197,13 +221,21 @@ struct SkinnedActor {
     // only symptom a forgotten onRecordHeader filter produces.
     std::string timing;
 
-    [[nodiscard]] bool canTalk() const { return placed && !tree.nodes.empty(); }
+    [[nodiscard]] bool canTalk() const {
+        return placed && !runtimeDead && !tree.nodes.empty();
+    }
     // What to put on screen. Falls back to the EditorID rather than to nothing,
     // because an unnamed actor still has to be addressable in a prompt.
     [[nodiscard]] const std::string& displayName() const {
         return fullName.empty() ? name : fullName;
     }
 };
+
+// Called on a copy of one immutable catalog placement. Returning false makes
+// it non-resident; returning true may also replace position/rotation with the
+// persistent runtime transform before the presentation actor is built.
+using ActorPlacementRuntimeResolver =
+    std::function<bool(odai::importer::fnv::FalloutActorPlacement&)>;
 
 // Builds the skinned geometry, textures and draws for one actor from its
 // skeleton and body-part list. Does not touch the renderer.
@@ -219,7 +251,11 @@ bool buildSkinnedActor(
     odai::importer::fnv::FalloutCharacter& outCharacter,
     std::vector<odai::importer::ImportedSceneTexture>& outTextures,
     std::vector<odai::importer::ImportedScenePackedDraw>& outDraws,
-    std::string& outWhy);
+    std::string& outWhy,
+    // TES3 BODY records carry the rigid attachment slot outside the NIF. One
+    // optional skeleton-node name per bodyPartPaths entry restores that
+    // authored pivot; later Bethesda formats keep deriving it from the NIF.
+    const std::vector<std::string>* rigidAttachmentBones = nullptr);
 
 // Loads a standing idle for an actor, resolved against `skeleton`. Silent
 // failure is fine and expected: not every actor has one, and an actor without a
@@ -291,7 +327,13 @@ bool loadGoodspringsActors(
     // overlapping coordinate ranges.
     const std::function<bool(std::uint32_t referenceFormId)>& placementFilter,
     std::vector<SkinnedActor>& outActors,
-    ActorPopulationStats& outStats);
+    ActorPopulationStats& outStats,
+    // Optional immutable full-placement catalog. When present, `radius` is not
+    // applied to authored coordinates; placementRuntimeResolver owns residency
+    // and may substitute the saved/runtime transform. This is the Skyrim path.
+    const odai::importer::fnv::FalloutActorScan* actorCatalog = nullptr,
+    const std::unordered_map<std::uint32_t, std::string>* catalogVoiceFolderPlugin = nullptr,
+    const ActorPlacementRuntimeResolver& placementRuntimeResolver = {});
 
 // Attaches a conversation to every actor that has one, in ONE walk over the
 // plugin. Actors that already carry a tree are left alone, and actors the

@@ -335,6 +335,9 @@ struct FalloutSoundEmitterRecord {
 struct FalloutPlacedReference {
     std::uint32_t formId = 0;
     std::uint32_t baseFormId = 0;  // NAME: the STAT (or other base record) this instance places
+    // Winning contribution that supplied this placed record. VMAD object
+    // properties are expressed in that plugin's local master-index space.
+    std::size_t sourcePluginIndex = 0u;
     // MORROWIND NAMES ITS BASE BY STRING. TES3 has no formIDs at all, so a
     // reference's NAME subrecord is the base record's own id text. Empty for
     // every later generation; when it is set, baseFormId is 0 and the caller
@@ -354,6 +357,9 @@ struct FalloutPlacedReference {
     float position[3] = {};        // DATA, world units
     float rotationRadians[3] = {};  // DATA
     float scale = 1.0f;             // XSCL, defaults to 1 when absent
+    // TES5 compiled script attachments. Gameplay adapters decode this outside
+    // ImportedScene; retaining bytes avoids coupling import to Papyrus types.
+    std::vector<std::uint8_t> vmadBytes;
     // XTEL: this reference is a teleport door. The target is another REFR (the
     // door on the far side), and the position/rotation are where the player
     // arrives -- expressed in the TARGET cell's space, not this one. Resolving
@@ -516,6 +522,9 @@ struct FalloutCellRecord {
     std::int32_t gridX = 0;
     std::int32_t gridZ = 0;
     std::uint32_t worldspaceFormId = 0;  // 0 for interior cells
+    // TES5 XLCN: authored LCTN owning this cell. Kept out of ImportedScene;
+    // gameplay consumes it from the streamed record index.
+    std::uint32_t locationFormId = 0;
 
     // XCLL: how an INTERIOR is lit. An interior has no sun and, in Fallout's
     // own data, usually no LIGH placements either -- Doc Mitchell's house has
@@ -706,6 +715,7 @@ struct FalloutCellIndexEntry {
     // name instead of by grid coordinate.
     std::string editorId;
     std::uint32_t worldspaceFormId = 0;  // 0 for interior cells
+    std::uint32_t locationFormId = 0;
     std::int32_t gridX = 0;
     std::int32_t gridZ = 0;
     bool hasGridCoords = false;

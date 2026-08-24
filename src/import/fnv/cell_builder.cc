@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -1087,6 +1088,14 @@ bool buildFalloutWorldTables(
     std::uint32_t nextMorrowindBaseFormId = 0x80000000u;
     std::unordered_map<std::uint64_t, std::string> morrowindPaletteEditorIds;
     std::unordered_map<std::string, std::string> morrowindTexturePathsByEditorId;
+    for (const FalloutLoadOrderEntry& entry : order.entries()) {
+        if (entry.slot.kind == FalloutPluginSlotKind::Regular) {
+            outTables.pluginFileNamesByRegularSlot.insert_or_assign(
+                entry.slot.index, entry.header.fileName);
+        }
+        outTables.morrowind = outTables.morrowind ||
+            entry.header.format == EsmPluginFormat::kMorrowind;
+    }
 
     // Ascending load order: each plugin's records replace what an earlier one
     // offered, which is what an override plugin is for. A base record a patch
@@ -1739,10 +1748,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
         // WITHOUT carrying the flag itself still draws; measured across the
         // Skyrim spawn cells that is scenery (ferns under a bridge), not
         // barriers.
-        if ((ref.recordFlags & 0x00000800u) != 0u) {
-            ++m_stats.disabledReferencesSkipped;
-            continue;
-        }
+        const bool initiallyVisible = (ref.recordFlags & 0x00000800u) == 0u;
+        if (!initiallyVisible) ++m_stats.disabledReferencesSkipped;
             // Lights first, and deliberately ahead of the m_failedStatics gate:
             // only 29 of 501 LIGH records carry a MODL, so the other 472 have no
             // model path, land in m_failedStatics on first sight, and would be
@@ -1824,6 +1831,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 // start with those six letters is not caught.
                 const bool isRootLevelModel = lastSlash == std::string::npos;
                 if ((isRootLevelModel && modelBaseName.rfind("marker", 0) == 0) ||
+                    modelBaseName.find("editormarker") != std::string::npos ||
+                    modelBaseName.find("editor_marker") != std::string::npos ||
                     lowerModelPath.find("\\markers\\") != std::string::npos) {
                     ++m_stats.editorMarkerModelsSkipped;
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
@@ -2282,6 +2291,20 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             ImportedSceneInstance instance;
             instance.meshIndex = meshIt->second;
             instance.sourceId = "refr_" + formIdHex(ref.formId);
+            instance.sourceReferenceFormId = ref.formId;
+            instance.initiallyVisible = initiallyVisible;
+            const std::uint16_t ownerSlot = static_cast<std::uint16_t>(ref.formId >> 24u);
+            const auto owner = m_tables.pluginFileNamesByRegularSlot.find(ownerSlot);
+            if (owner != m_tables.pluginFileNamesByRegularSlot.end()) {
+                const std::uint32_t localId = ref.formId & 0x00ffffffu;
+                instance.sourceReferenceIdentity =
+                    std::string(m_tables.morrowind ? "frmr:" : "") +
+                    toLowerAsciiCopy(owner->second) + ":0x" + [&]() {
+                        std::ostringstream text;
+                        text << std::hex << std::setfill('0') << std::setw(8) << localId;
+                        return text.str();
+                    }();
+            }
             if (const std::string* modelPath = staticModelPathFor(ref.baseFormId)) {
                 instance.modelPath = *modelPath;
             }
@@ -2294,6 +2317,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 collisionIt != m_collisionByStaticFormId.end()) {
                 for (const NifCollisionTriangle& local : collisionIt->second) {
                     ImportedSceneCollisionTriangle world;
+                    world.sourceReferenceFormId = ref.formId;
                     for (int point = 0; point < 3; ++point) {
                         for (int row = 0; row < 3; ++row) {
                             world.vertices[(point * 3) + row] =

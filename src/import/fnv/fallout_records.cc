@@ -110,6 +110,16 @@ bool isModelBearingBaseType(std::string_view type) {
     // pale slab lying across the scene.
 }
 
+// TES3 stores actor placements in the same inline FRMR stream as every other
+// placed object. CREA always carries a complete authored NIF, and a small
+// number of NPC_ records carry an explicit model (corpses and other special
+// actors). Later plugin generations have dedicated ACRE/ACHR presentation and
+// must not enter the static scene path, so this widening is deliberately
+// confined to the Morrowind extractor.
+bool isMorrowindPlacedModelType(std::string_view type) {
+    return isModelBearingBaseType(type) || type == "CREA" || type == "NPC_";
+}
+
 // True when the bytes read as a model path a filesystem could hold: printable
 // ASCII, NUL-terminated or not. SKYRIM'S ARMO REPURPOSED "MODL" -- in TES5 that
 // subrecord holds the ARMA armature formID LIST, four binary bytes per entry,
@@ -322,6 +332,8 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
             entry.hasGridCoords = true;
             entry.gridX = readI32(sub.data);
             entry.gridZ = readI32(sub.data + 4);
+        } else if (sub.type == "XLCN" && sub.size >= 4u) {
+            entry.locationFormId = readU32(sub.data);
         } else if (sub.type == "XCLL" && sub.size >= 20u) {
             // Bytes are sRGB as authored; the renderer works in linear, and the
             // decode belongs with the consumer rather than here, so these stay
@@ -388,6 +400,8 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             hasData = true;
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             ref.scale = readF32(sub.data);
+        } else if (sub.type == "VMAD") {
+            ref.vmadBytes.assign(sub.data, sub.data + sub.size);
         } else if (sub.type == "XESP" && sub.size >= 8u) {
             // Enable parent: this reference's enabled state follows another
             // reference's, optionally inverted (flag bit 0). Bethesda uses it to
@@ -1229,6 +1243,7 @@ bool buildFalloutCellIndex(
         entry.cellFormId = parsed.formId;
         entry.editorId = parsed.editorId;
         entry.worldspaceFormId = parsed.worldspaceFormId;
+        entry.locationFormId = parsed.locationFormId;
         entry.gridX = parsed.gridX;
         entry.gridZ = parsed.gridZ;
         entry.hasGridCoords = parsed.hasGridCoords;
@@ -1397,6 +1412,7 @@ bool buildFalloutCellIndex(
             const std::uint32_t cellFormId = remap(cell.cellFormId);
             cell.cellFormId = cellFormId;
             cell.worldspaceFormId = remap(cell.worldspaceFormId);
+            cell.locationFormId = remap(cell.locationFormId);
             for (std::uint32_t& regionFormId : cell.regionFormIds) {
                 regionFormId = remap(regionFormId);
             }
@@ -1434,6 +1450,7 @@ bool buildFalloutCellIndex(
             }
             merged.isInterior = cell.isInterior;
             merged.cellFlags = cell.cellFlags;
+            merged.locationFormId = cell.locationFormId;
             merged.hasLighting = cell.hasLighting;
             for (int channel = 0; channel < 3; ++channel) {
                 merged.ambientColor[channel] = cell.ambientColor[channel];
@@ -1502,10 +1519,12 @@ void remapCellFormIds(const FalloutLoadOrder& order, std::size_t pluginIndex,
     };
     cell.formId = remap(cell.formId);
     cell.worldspaceFormId = remap(cell.worldspaceFormId);
+    cell.locationFormId = remap(cell.locationFormId);
     for (std::uint32_t& regionFormId : cell.regionFormIds) {
         regionFormId = remap(regionFormId);
     }
     for (FalloutPlacedReference& ref : cell.references) {
+        ref.sourcePluginIndex = pluginIndex;
         ref.formId = remap(ref.formId);
         ref.baseFormId = remap(ref.baseFormId);
         ref.teleportTargetRefFormId = remap(ref.teleportTargetRefFormId);
@@ -1536,6 +1555,7 @@ bool extractFalloutCellMerged(
     outCell.formId = entry.cellFormId;
     outCell.editorId = entry.editorId;
     outCell.worldspaceFormId = entry.worldspaceFormId;
+    outCell.locationFormId = entry.locationFormId;
     outCell.gridX = entry.gridX;
     outCell.gridZ = entry.gridZ;
     outCell.hasGridCoords = entry.hasGridCoords;
@@ -1660,6 +1680,7 @@ bool extractFalloutCellAt(
     outCell.gridX = entry.gridX;
     outCell.gridZ = entry.gridZ;
     outCell.worldspaceFormId = entry.worldspaceFormId;
+    outCell.locationFormId = entry.locationFormId;
     outCell.hasLighting = entry.hasLighting;
     for (int channel = 0; channel < 3; ++channel) {
         outCell.ambientColor[channel] = entry.ambientColor[channel];
@@ -1720,7 +1741,7 @@ bool extractFalloutScene(
         std::uint32_t nextFormId = 0x01000000u;
         EsmReader::Visitor visitor{};
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
-            return isModelBearingBaseType(header.type) || header.type == "LTEX" ||
+            return isMorrowindPlacedModelType(header.type) || header.type == "LTEX" ||
                    header.type == "STAT";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {

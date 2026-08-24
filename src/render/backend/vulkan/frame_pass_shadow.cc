@@ -639,8 +639,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
             // independent instance slots means each draw may come from a
             // different vertex/index buffer, so bind is resolved per-draw.
             if (m_importedStaticShadowPipeline != VK_NULL_HANDLE &&
-                !skinnedActorMeshDraws.empty() &&
-                m_debugShowImportedStatics) {
+                !skinnedActorMeshDraws.empty()) {
                 vkCmdSetDepthBias(
                     commandBuffer,
                     -(constantBias * kImportedShadowConstantBiasScale),

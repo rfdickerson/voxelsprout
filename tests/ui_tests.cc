@@ -9,6 +9,7 @@
 #include "ui/widget.h"
 #include "ui/widgets/button.h"
 #include "ui/widgets/slider.h"
+#include "ui/widgets/tes3_journal_panel.h"
 #include "ui/widgets/toggle.h"
 
 namespace {
@@ -42,6 +43,32 @@ void testDrawListAndFont() {
     drawList.addText(font, "HP", {8.0f, 8.0f}, {1, 1, 1, 1});
     expect(!drawList.data().vertices.empty() && !drawList.data().commands.empty(),
            "retained primitives and text emit draw data");
+}
+
+void testNativeFramebufferCoordinateContract() {
+    using namespace odai::ui;
+    // The world may render at a lower temporal-upscale input extent, but custom
+    // UI is built in physical framebuffer pixels and composited onto the native
+    // presentation image. Keep that distinction explicit in the retained data.
+    constexpr UiVec2 nativeFramebuffer{1920.0f, 1080.0f};
+    constexpr UiVec2 scaledWorldBuffer{864.0f, 486.0f};
+    UiDrawList drawList;
+    drawList.reset(nativeFramebuffer);
+    drawList.addRectFilled(
+        UiRect::fromXYWH(0.0f, 0.0f, nativeFramebuffer.x, nativeFramebuffer.y),
+        {1.0f, 1.0f, 1.0f, 1.0f});
+
+    const UiDrawData& data = drawList.data();
+    expect(data.framebufferSizePx.x == nativeFramebuffer.x &&
+               data.framebufferSizePx.y == nativeFramebuffer.y,
+           "UI draw data retains the native physical framebuffer extent");
+    expect(data.framebufferSizePx.x != scaledWorldBuffer.x &&
+               data.framebufferSizePx.y != scaledWorldBuffer.y,
+           "UI coordinate space is independent of the scaled 3D buffer");
+    expect(!data.commands.empty() &&
+               data.commands.front().clipRect.maxX == nativeFramebuffer.x &&
+               data.commands.front().clipRect.maxY == nativeFramebuffer.y,
+           "UI clipping covers the native presentation image");
 }
 
 void testButtonAndControls() {
@@ -108,13 +135,47 @@ void testToastLifetime() {
     expect(host.visibleCount() == 0, "toast expires");
 }
 
+void testTes3JournalPanelModel() {
+    using namespace odai::ui;
+    const Font font = makeFont();
+    Tes3JournalPanel panel(FontSet{&font, &font, &font, &font});
+    panel.setJournal({
+        {1u, "TR_Quest", "Temple Work", "The first authored entry", 10,
+            Tes3JournalPanel::QuestState::Active, true},
+        {2u, "Legacy", "An Old Matter", "A legacy entry", 5,
+            Tes3JournalPanel::QuestState::Legacy, false},
+        {3u, "TR_Quest", "Temple Work", "The latest authored entry", 20,
+            Tes3JournalPanel::QuestState::Active, true},
+        {4u, "Done", "Finished Work", "The final entry", 100,
+            Tes3JournalPanel::QuestState::Completed, true}},
+        {"Almas Thirr", "Bloodstone"});
+    expect(panel.visibleCount() == 4u, "TES3 journal chronology retains every visit");
+    panel.setView(Tes3JournalPanel::View::Active);
+    expect(panel.visibleCount() == 1u && panel.visibleEntries()[0].index == 20,
+           "active quest view shows the latest authored entry without objectives");
+    panel.pinSelected();
+    expect(panel.latestPinnedEntry().has_value() && panel.latestPinnedEntry()->index == 20,
+           "pinned tracker resolves the quest's latest journal entry");
+    panel.setView(Tes3JournalPanel::View::KnownTopics);
+    panel.setSearch("blood");
+    expect(panel.visibleCount() == 1u && panel.visibleEntries()[0].title == "Bloodstone",
+           "known-topic view supports case-insensitive search");
+    panel.rebuild(UiRect::fromXYWH(0.0f, 0.0f, 420.0f, 320.0f), 1.0f);
+    UiDrawList drawList;
+    drawList.reset({420.0f, 320.0f});
+    panel.draw(drawList);
+    expect(!drawList.data().vertices.empty(), "TES3 journal emits native retained UI geometry");
+}
+
 }  // namespace
 
 int main() {
     testDrawListAndFont();
+    testNativeFramebufferCoordinateContract();
     testButtonAndControls();
     testNavigation();
     testToastLifetime();
+    testTes3JournalPanelModel();
     if (failures != 0) {
         return 1;
     }
