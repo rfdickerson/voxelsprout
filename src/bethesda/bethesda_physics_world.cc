@@ -253,7 +253,6 @@ bool BethesdaPhysicsWorld::addStreamedStaticCollision(
         return false;
     }
     m_impl->streamedStaticBodies.emplace(residencyToken, body);
-    m_impl->physics.OptimizeBroadPhase();
     outError.clear();
     return true;
 }
@@ -277,6 +276,11 @@ void BethesdaPhysicsWorld::clearStreamedStaticCollision() {
         bodies.DestroyBody(id);
     }
     m_impl->streamedStaticBodies.clear();
+}
+
+void BethesdaPhysicsWorld::optimizeBroadPhase() {
+    if (!m_impl->initialized) return;
+    m_impl->physics.OptimizeBroadPhase();
 }
 
 bool BethesdaPhysicsWorld::addCharacter(

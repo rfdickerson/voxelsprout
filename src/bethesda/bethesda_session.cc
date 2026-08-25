@@ -722,14 +722,11 @@ ConditionEvaluation BethesdaSession::evaluateDialogueConditions(
     const auto liveObject = [&](ObjectId id) -> const RuntimeObject* {
         if (const RuntimeObject* direct = m_world.find(id)) return direct;
         if (id.kind != ObjectIdKind::PersistentReference) return nullptr;
-        const std::vector<RuntimeObject> objects = m_world.orderedObjects();
-        const auto found = std::find_if(objects.begin(), objects.end(), [&](const auto& object) {
-            return object.base == id.reference;
-        });
-        if (found == objects.end()) return nullptr;
-        // orderedObjects is a copy; only scalar reads occur inside this call,
-        // but returning a pointer to it would dangle. Resolve the real object.
-        return m_world.find(found->id);
+        for (const ObjectId& residentId : m_world.orderedObjectIds()) {
+            const RuntimeObject* object = m_world.find(residentId);
+            if (object != nullptr && object->base == id.reference) return object;
+        }
+        return nullptr;
     };
     const auto sameRuntimeIdentity = [&](ObjectId actual, ObjectId expected) {
         if (actual == expected) return true;
@@ -808,9 +805,10 @@ ConditionEvaluation BethesdaSession::evaluateDialogueConditions(
                 if (!expected.has_value() ||
                     expected->kind != ObjectIdKind::PersistentReference) return std::nullopt;
                 std::size_t dead = 0u;
-                for (const RuntimeObject& object : m_world.orderedObjects()) {
-                    if (object.base == expected->reference && object.actorValues.has_value() &&
-                        object.actorValues->dead) ++dead;
+                for (const ObjectId& actorId : m_world.orderedActorIds()) {
+                    const RuntimeObject* actor = m_world.find(actorId);
+                    if (actor != nullptr && actor->base == expected->reference &&
+                        actor->actorValues.has_value() && actor->actorValues->dead) ++dead;
                 }
                 return static_cast<float>(dead);
             }
@@ -2470,11 +2468,11 @@ void BethesdaSession::registerSkyrimNatives() {
                                    const ObjectId& identity) -> std::optional<RuntimeObject> {
         if (const RuntimeObject* direct = world.find(identity)) return *direct;
         if (identity.kind != ObjectIdKind::PersistentReference) return std::nullopt;
-        const std::vector<RuntimeObject> objects = world.orderedObjects();
-        const auto found = std::find_if(objects.begin(), objects.end(), [&](const auto& object) {
-            return object.base == identity.reference;
-        });
-        return found == objects.end() ? std::nullopt : std::optional<RuntimeObject>{*found};
+        for (const ObjectId& residentId : world.orderedObjectIds()) {
+            const RuntimeObject* object = world.find(residentId);
+            if (object != nullptr && object->base == identity.reference) return *object;
+        }
+        return std::nullopt;
     };
     m_papyrus.registerNative("ObjectReference.Is3DLoaded",
         [residentObject](std::span<const PapyrusValue> arguments,
@@ -2954,10 +2952,12 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         RecordKey serialized;
         if (parseRecordKey(authored, serialized)) return ObjectId::persistent(std::move(serialized));
         const std::string wanted = makeTes3RecordKey("REFR", authored).textId;
-        for (const RuntimeObject& object : m_world.orderedObjects()) {
-            if ((object.id.kind == ObjectIdKind::PersistentReference &&
-                 object.id.reference.textId == wanted) || object.base.textId == wanted) {
-                return object.id;
+        for (const ObjectId& residentId : m_world.orderedObjectIds()) {
+            const RuntimeObject* object = m_world.find(residentId);
+            if (object != nullptr &&
+                ((object->id.kind == ObjectIdKind::PersistentReference &&
+                  object->id.reference.textId == wanted) || object->base.textId == wanted)) {
+                return object->id;
             }
         }
         if (m_tes3.content() != nullptr) {
@@ -3804,7 +3804,10 @@ void BethesdaSession::simulateTick(
     // Combat packages and Actor.StartCombat converge here. Rendering never
     // selects targets: fixed-tick AI aims from one Jolt character to the other
     // and uses the same cone/occlusion/cooldown path as player input.
-    for (const RuntimeObject& actor : m_world.orderedObjects()) {
+    for (const ObjectId& actorId : m_world.orderedActorIds()) {
+        const RuntimeObject* actorObject = m_world.find(actorId);
+        if (actorObject == nullptr) continue;
+        const RuntimeObject& actor = *actorObject;
         if (!actor.combatState.has_value() ||
             !actor.combatState->combatTarget.valid() ||
             (actor.actorValues.has_value() && actor.actorValues->dead)) {

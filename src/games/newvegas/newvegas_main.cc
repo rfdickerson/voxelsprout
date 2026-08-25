@@ -1,4 +1,4 @@
-#include "games/newvegas/newvegas_app.h"
+#include "games/newvegas/bethesda_app.h"
 
 #include "render/upscale/upscale_policy.h"
 
@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     // like that are a strong hint that something upstream is pinning the value.
     //
     // The renderer now caps at its own far plane; see frame_run.cc.
-    odai::games::newvegas::NewVegasApp app;
+    odai::games::newvegas::BethesdaApp app;
     bool profileSpecified = false;
     bool loadOrderSpecified = false;
     bool listProfiles = false;

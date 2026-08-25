@@ -1,4 +1,4 @@
-#include "games/newvegas/newvegas_app.h"
+#include "games/newvegas/bethesda_app.h"
 
 #include "bethesda/save_game.h"
 #include "bethesda/record_resolver.h"
@@ -464,7 +464,7 @@ void restoreRuntimeAiState(
 
 }  // namespace
 
-float NewVegasApp::verticalFovDegreesFor(float horizontalFovDegrees, float aspectRatio) {
+float BethesdaApp::verticalFovDegreesFor(float horizontalFovDegrees, float aspectRatio) {
     // Guard the degenerate frame: a zero or negative aspect would otherwise
     // divide the tangent into infinity and hand the projection a NaN, which
     // renders as an empty screen rather than as an error.
@@ -475,7 +475,7 @@ float NewVegasApp::verticalFovDegreesFor(float horizontalFovDegrees, float aspec
     return halfVerticalRadians * 2.0f * (180.0f / kPi);
 }
 
-audio::AudioConfig NewVegasApp::audioConfig() const {
+audio::AudioConfig BethesdaApp::audioConfig() const {
     audio::AudioConfig config;
     if (m_captureAudioRequested) {
         config.offlineMix = true;
@@ -486,7 +486,7 @@ audio::AudioConfig NewVegasApp::audioConfig() const {
     return config;
 }
 
-void NewVegasApp::buildGroundHeightField(const importer::ImportedScene& scene) {
+void BethesdaApp::buildGroundHeightField(const importer::ImportedScene& scene) {
     m_groundHeights.clear();
     if (scene.meshes.empty() || scene.meshes.front().name != "terrain") {
         VOX_LOGW("newvegas") << "no terrain mesh; camera will not be ground-clamped";
@@ -537,7 +537,7 @@ void NewVegasApp::buildGroundHeightField(const importer::ImportedScene& scene) {
                          << " posts at " << kGroundGridSpacing << " units";
 }
 
-bool NewVegasApp::groundHeightAt(float x, float z, float& outHeight) const {
+bool BethesdaApp::groundHeightAt(float x, float z, float& outHeight) const {
     // Streaming owns its own terrain: the whole-scene height field below is
     // built once from a loaded .bin and has nothing in it when cells arrive and
     // leave continuously.
@@ -577,7 +577,7 @@ bool NewVegasApp::groundHeightAt(float x, float z, float& outHeight) const {
     return true;
 }
 
-bool NewVegasApp::loadScene(
+bool BethesdaApp::loadScene(
     const std::filesystem::path& path, const float* arrivalPosition, const float* arrivalYawDegrees
 ) {
     // Local, not a member: uploadImportedScene deep-copies the whole scene, so
@@ -739,7 +739,7 @@ bool NewVegasApp::loadScene(
     return true;
 }
 
-int NewVegasApp::findUsableDoor() const {
+int BethesdaApp::findUsableDoor() const {
     // Near, and roughly in front. Both matter: a doorway you have walked past
     // should not keep offering itself, and Fallout's doors come in pairs close
     // enough that distance alone picks the wrong one.
@@ -768,7 +768,7 @@ int NewVegasApp::findUsableDoor() const {
     return best;
 }
 
-int NewVegasApp::findLootableActorInReach() const {
+int BethesdaApp::findLootableActorInReach() const {
     const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
     const float yaw = m_yawDegrees * (kPi / 180.0f);
     int best = -1;
@@ -791,7 +791,7 @@ int NewVegasApp::findLootableActorInReach() const {
     return best;
 }
 
-bool NewVegasApp::lootActor(int actorIndex) {
+bool BethesdaApp::lootActor(int actorIndex) {
     if (!m_bethesdaSessionConfigured || actorIndex < 0 ||
         actorIndex >= static_cast<int>(m_actors.size())) {
         return false;
@@ -842,7 +842,7 @@ bool NewVegasApp::lootActor(int actorIndex) {
     return true;
 }
 
-bool NewVegasApp::configureGoldenClawPuzzleForCurrentSpace(std::string& outError) {
+bool BethesdaApp::configureGoldenClawPuzzleForCurrentSpace(std::string& outError) {
     const bool replacingBinding = m_goldenClawPuzzle.has_value();
     if (m_goldenClawPuzzle.has_value()) {
         for (const std::uint32_t reference :
@@ -1065,7 +1065,7 @@ bool NewVegasApp::configureGoldenClawPuzzleForCurrentSpace(std::string& outError
     return true;
 }
 
-bool NewVegasApp::goldenClawPuzzleInReach() const {
+bool BethesdaApp::goldenClawPuzzleInReach() const {
     if (!m_goldenClawPuzzle.has_value()) return false;
     const bethesda::RuntimeObject* keyhole =
         m_bethesdaSession.world().find(m_goldenClawPuzzle->door);
@@ -1088,7 +1088,7 @@ bool NewVegasApp::goldenClawPuzzleInReach() const {
         ((dz / horizontal) * std::sin(yaw)) >= kMinFacingDot;
 }
 
-bool NewVegasApp::rotateGoldenClawRing(std::size_t ringIndex) {
+bool BethesdaApp::rotateGoldenClawRing(std::size_t ringIndex) {
     if (!m_goldenClawPuzzle.has_value()) return false;
     std::string error;
     if (!m_bethesdaSession.rotatePuzzleRing(
@@ -1102,7 +1102,7 @@ bool NewVegasApp::rotateGoldenClawRing(std::size_t ringIndex) {
     return true;
 }
 
-bool NewVegasApp::useGoldenClawPuzzle() {
+bool BethesdaApp::useGoldenClawPuzzle() {
     if (!m_goldenClawPuzzle.has_value()) return false;
     const bethesda::ScenarioDefinition* scenario =
         bethesda::findScenario(m_scenarioId);
@@ -1137,7 +1137,7 @@ bool NewVegasApp::useGoldenClawPuzzle() {
     return result.accepted;
 }
 
-bool NewVegasApp::refreshGoldenClawPresentation(std::string& outError) {
+bool BethesdaApp::refreshGoldenClawPresentation(std::string& outError) {
     if (!m_currentInteriorSourceScene.has_value() ||
         m_interiorChunk == render::Renderer::kInvalidImportedChunkIndex) {
         outError = "Golden Claw presentation has no resident interior source scene";
@@ -1182,7 +1182,7 @@ bool NewVegasApp::refreshGoldenClawPresentation(std::string& outError) {
     return true;
 }
 
-void NewVegasApp::beginConversation(int actorIndex) {
+void BethesdaApp::beginConversation(int actorIndex) {
     if (actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) {
         return;
     }
@@ -1221,7 +1221,7 @@ void NewVegasApp::beginConversation(int actorIndex) {
                          << " finished=" << actor.runtime.isFinished();
 }
 
-bool NewVegasApp::beginTes3Conversation(int actorIndex) {
+bool BethesdaApp::beginTes3Conversation(int actorIndex) {
     if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
         actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) {
         return false;
@@ -1315,7 +1315,7 @@ bool NewVegasApp::beginTes3Conversation(int actorIndex) {
     return true;
 }
 
-void NewVegasApp::rebuildTes3ConversationTree(
+void BethesdaApp::rebuildTes3ConversationTree(
     SkinnedActor& actor, const bethesda::Tes3DialogueResponse& response) {
     actor.tree = {};
     actor.tree.id = "tes3-dynamic-dialogue";
@@ -1345,7 +1345,7 @@ void NewVegasApp::rebuildTes3ConversationTree(
     m_dialogueChoiceNodeId.clear();
 }
 
-bool NewVegasApp::beginBethesdaConversation(int actorIndex) {
+bool BethesdaApp::beginBethesdaConversation(int actorIndex) {
     if (!m_bethesdaSessionConfigured || !m_streamIsSkyrim ||
         actorIndex < 0 || actorIndex >= static_cast<int>(m_actors.size())) {
         return false;
@@ -1385,7 +1385,7 @@ bool NewVegasApp::beginBethesdaConversation(int actorIndex) {
     return true;
 }
 
-void NewVegasApp::rebuildBethesdaConversationTree(
+void BethesdaApp::rebuildBethesdaConversationTree(
     SkinnedActor& actor, std::vector<bethesda::SkyrimDialogueChoice> choices) {
     // The immediate-mode conversation panel supplies selection, scrolling,
     // controller input and camera framing. This tree is presentation-only;
@@ -1415,7 +1415,7 @@ void NewVegasApp::rebuildBethesdaConversationTree(
     m_dialogueChoiceNodeId.clear();
 }
 
-int NewVegasApp::findBethesdaDialogueActorInReach(
+int BethesdaApp::findBethesdaDialogueActorInReach(
     const float cameraPosition[3], float cameraYawRadians) {
     if (!m_bethesdaSessionConfigured || !m_streamIsSkyrim) return -1;
     int best = -1;
@@ -1447,7 +1447,7 @@ int NewVegasApp::findBethesdaDialogueActorInReach(
     return best;
 }
 
-int NewVegasApp::findTes3DialogueActorInReach(
+int BethesdaApp::findTes3DialogueActorInReach(
     const float cameraPosition[3], float cameraYawRadians) const {
     if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
         m_bethesdaSession.tes3().content() == nullptr) return -1;
@@ -1472,7 +1472,7 @@ int NewVegasApp::findTes3DialogueActorInReach(
     return best;
 }
 
-void NewVegasApp::chooseConversationChoice(std::size_t index) {
+void BethesdaApp::chooseConversationChoice(std::size_t index) {
     SkinnedActor* actor = talkingActor();
     if (actor == nullptr) return;
     const auto visibleChoices = actor->runtime.availableChoices();
@@ -1560,7 +1560,7 @@ void NewVegasApp::chooseConversationChoice(std::size_t index) {
     actor->runtime.choose(*visibleChoices[index]);
 }
 
-void NewVegasApp::endConversation() {
+void BethesdaApp::endConversation() {
     if (m_tes3DialogueActive) {
         m_bethesdaSession.tes3().endDialogue();
     }
@@ -1599,7 +1599,7 @@ void NewVegasApp::endConversation() {
     m_bethesdaDialogueNextTopics.clear();
 }
 
-void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
+void BethesdaApp::useDoor(const importer::ImportedSceneDoor& door) {
     if (door.targetKind == importer::ImportedSceneDoorTargetKind::Exterior &&
         !m_interiorStarted && m_streamer != nullptr &&
         door.targetWorldspaceEditorId == m_streamer->currentWorldspaceEditorId()) {
@@ -1623,14 +1623,8 @@ void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
             m_doorTransitionPhase = DoorTransitionPhase::FadeOut;
             m_doorTransitionAlpha = 0.0f;
             if (m_bethesdaPlayerControllerRegistered) {
-                const bethesda::ScenarioDefinition* scenario =
-                    bethesda::findScenario(m_scenarioId);
-                if (scenario != nullptr) {
-                    const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
-                        bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
-                    (void)m_bethesdaSession.setActorControllerInput(
-                        playerId, bethesda::PhysicsCharacterInput{});
-                }
+                (void)m_bethesdaSession.setActorControllerInput(
+                    m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
                 m_bethesdaControllerOwnsCamera = false;
             }
             if (door.locked) {
@@ -1659,7 +1653,7 @@ void NewVegasApp::useDoor(const importer::ImportedSceneDoor& door) {
     }
 }
 
-void NewVegasApp::rebuildStreamDoors() {
+void BethesdaApp::rebuildStreamDoors() {
     m_doors.clear();
     for (const auto& [cell, doors] : m_streamDoorsByCell) {
         (void)cell;
@@ -1678,7 +1672,7 @@ void NewVegasApp::rebuildStreamDoors() {
     m_actorNavigation.setResidentDoors(residentLinks);
 }
 
-bool NewVegasApp::completeDoorTransition(
+bool BethesdaApp::completeDoorTransition(
     const importer::ImportedSceneDoor& door, std::string& outError) {
     outError.clear();
     if (m_streamer == nullptr) {
@@ -1753,6 +1747,9 @@ bool NewVegasApp::completeDoorTransition(
             static_cast<std::int32_t>(std::floor(door.arrivalPosition[2] / 4096.0f))};
         m_collision.addCell(collisionCell, scene);
         m_actorNavigation.addCell(collisionCell, interior.navMeshes);
+        if (interior.navMeshes.empty() && m_streamIsMorrowind) {
+            m_actorNavigation.addGeneratedCell(collisionCell, scene);
+        }
         m_actorNavigation.setResidentDoors({});
         if (m_bethesdaSessionConfigured) cacheBethesdaCollisionCell(collisionCell, scene);
         m_doors = scene.doors;
@@ -1776,6 +1773,16 @@ bool NewVegasApp::completeDoorTransition(
             lighting.directionalColor[channel] =
                 srgbChannelToLinear(interior.directionalColor[channel]);
             lighting.fogColor[channel] = srgbChannelToLinear(interior.fogColor[channel]);
+            if (m_streamIsSkyrim) {
+                // TES5's XCLL colors assumed the original game's brighter
+                // ambient/exposure response. Lift their linear contribution,
+                // while retaining the authored hue and all local-light shadow
+                // contrast, instead of adding a flat unshadowed light floor.
+                lighting.ambientColor[channel] =
+                    std::min(lighting.ambientColor[channel] * 1.55f, 1.0f);
+                lighting.directionalColor[channel] =
+                    std::min(lighting.directionalColor[channel] * 1.18f, 1.0f);
+            }
         }
         m_renderer.setImportedInteriorLighting(lighting);
     } else if (door.targetKind == importer::ImportedSceneDoorTargetKind::Exterior) {
@@ -1862,7 +1869,7 @@ bool NewVegasApp::completeDoorTransition(
     return true;
 }
 
-void NewVegasApp::arrangeActorParadeIfRequested() {
+void BethesdaApp::arrangeActorParadeIfRequested() {
     const char* parade = std::getenv("ODAI_FNV_ACTORS_PARADE");
     if (parade == nullptr || m_actors.empty()) {
         return;
@@ -1947,8 +1954,10 @@ void NewVegasApp::arrangeActorParadeIfRequested() {
             // safer than the old geometry-bounds/camera plane. Follow the
             // resident's authored facing direction: NPCs are normally oriented
             // into their room rather than into its wall.
-            bestForwardX = -std::sin(m_actors.front().yawRadians);
-            bestForwardZ = -std::cos(m_actors.front().yawRadians);
+            const odai::math::Vector3 authoredFacing =
+                actorFacing(m_actors.front().yawRadians);
+            bestForwardX = authoredFacing.x;
+            bestForwardZ = authoredFacing.z;
             const float rightX = -bestForwardZ;
             const float rightZ = bestForwardX;
             for (std::size_t slot = 0u; slot < kDemoActors; ++slot) {
@@ -1977,7 +1986,7 @@ void NewVegasApp::arrangeActorParadeIfRequested() {
             actor.wanderPath.clear();
             actor.wanderPathIndex = 0u;
             actor.wanderPauseSeconds = 0.0f;
-            actor.yawRadians = std::atan2(bestForwardX, bestForwardZ);
+            actor.yawRadians = actorYawForDirection(-bestForwardX, -bestForwardZ);
         }
         m_cameraX = anchorX;
         m_cameraY = anchorY + kEyeHeightUnits;
@@ -2031,13 +2040,13 @@ void NewVegasApp::arrangeActorParadeIfRequested() {
         actor.wanderPath.clear();
         actor.wanderPathIndex = 0u;
         actor.wanderPauseSeconds = 0.0f;
-        actor.yawRadians = std::atan2(forwardX, forwardZ);
+        actor.yawRadians = actorYawForDirection(-forwardX, -forwardZ);
     }
     VOX_LOGI("newvegas") << "actor parade: placed " << m_actors.size()
                           << " actors " << distance << " units ahead of the camera";
 }
 
-bool NewVegasApp::ensureSkyrimActorCatalog() {
+bool BethesdaApp::ensureSkyrimActorCatalog() {
     if (m_skyrimActorCatalogReady) return true;
     if (!m_streamIsSkyrim || m_streamer == nullptr) return false;
     std::string error;
@@ -2060,7 +2069,7 @@ bool NewVegasApp::ensureSkyrimActorCatalog() {
     return true;
 }
 
-bool NewVegasApp::bindAndMaterializeScenarioReferences(std::string& outError) {
+bool BethesdaApp::bindAndMaterializeScenarioReferences(std::string& outError) {
     outError.clear();
     if (!m_bethesdaSessionConfigured || !ensureSkyrimActorCatalog() ||
         m_streamer == nullptr || m_streamLoadOrder.empty()) {
@@ -2271,7 +2280,7 @@ bool NewVegasApp::bindAndMaterializeScenarioReferences(std::string& outError) {
     return true;
 }
 
-bool NewVegasApp::runtimeOriginSpaceForReference(
+bool BethesdaApp::runtimeOriginSpaceForReference(
     std::uint32_t referenceFormId,
     bethesda::RuntimeSpaceState& outSpace) const {
     outSpace = {};
@@ -2301,7 +2310,7 @@ bool NewVegasApp::runtimeOriginSpaceForReference(
     return true;
 }
 
-bool NewVegasApp::runtimeSpaceForPosition(
+bool BethesdaApp::runtimeSpaceForPosition(
     const float enginePosition[3],
     bethesda::RuntimeSpaceState& outSpace) const {
     outSpace = {};
@@ -2343,7 +2352,7 @@ bool NewVegasApp::runtimeSpaceForPosition(
     return true;
 }
 
-bool NewVegasApp::runtimeSpaceIsResident(
+bool BethesdaApp::runtimeSpaceIsResident(
     const bethesda::RuntimeSpaceState& space) const {
     if (m_streamer == nullptr || m_streamLoadOrder.empty()) return false;
     std::string error;
@@ -2368,7 +2377,7 @@ bool NewVegasApp::runtimeSpaceIsResident(
     return false;
 }
 
-void NewVegasApp::reloadActorsForCurrentSpace() {
+void BethesdaApp::reloadActorsForCurrentSpace() {
     // Fallout/New Vegas still give Victor special startup treatment. Skyrim's
     // streamed traversal has no fixed companion and can rebuild the nearby
     // population uniformly whenever a door changes ownership space.
@@ -2481,7 +2490,7 @@ void NewVegasApp::reloadActorsForCurrentSpace() {
     }
 }
 
-void NewVegasApp::queueActorUploads() {
+void BethesdaApp::queueActorUploads() {
     m_nextActorUploadIndex = 0u;
     m_actorUploadSuccessCount = 0u;
     m_actorUploadedTextureCount = 0u;
@@ -2493,7 +2502,7 @@ void NewVegasApp::queueActorUploads() {
         });
 }
 
-void NewVegasApp::updateDoorTransition(float deltaSeconds) {
+void BethesdaApp::updateDoorTransition(float deltaSeconds) {
     constexpr float kFadeSeconds = 0.22f;
     if (m_doorTransitionPhase == DoorTransitionPhase::None) {
         return;
@@ -2575,7 +2584,7 @@ std::string findSkyrimDataDirectory() {
 
 }  // namespace
 
-bool NewVegasApp::onInit() {
+bool BethesdaApp::onInit() {
     if (!m_scenarioId.empty() && bethesda::findScenario(m_scenarioId) == nullptr) {
         VOX_LOGE("scenario") << "unknown scenario '" << m_scenarioId
                               << "' (available: skyrim-bleak-falls)";
@@ -3218,7 +3227,7 @@ bool NewVegasApp::onInit() {
     return true;
 }
 
-bool NewVegasApp::initCharacter(const std::filesystem::path& dataFilesPath) {
+bool BethesdaApp::initCharacter(const std::filesystem::path& dataFilesPath) {
     importer::fnv::FalloutAssetSource assets;
     if (!assets.open(dataFilesPath)) {
         VOX_LOGE("newvegas") << "could not index archives under " << dataFilesPath;
@@ -3433,7 +3442,7 @@ bool NewVegasApp::initCharacter(const std::filesystem::path& dataFilesPath) {
     return true;
 }
 
-void NewVegasApp::updateCharacterPose() {
+void BethesdaApp::updateCharacterPose() {
     if (m_characterBindPose.empty()) {
         return;
     }
@@ -3481,7 +3490,7 @@ void NewVegasApp::updateCharacterPose() {
     m_renderer.setSkinnedActorPose(0u, pose);
 }
 
-void NewVegasApp::applyTimeOfDay() {
+void BethesdaApp::applyTimeOfDay() {
     // Map 0..24h onto a sun that rises in the east and sets in the west.
     //
     // Sign convention, which is easy to get backwards: setSunAngles takes the
@@ -3501,7 +3510,7 @@ void NewVegasApp::applyTimeOfDay() {
     applyWeather();
 }
 
-void NewVegasApp::initWeather() {
+void BethesdaApp::initWeather() {
     if (m_streamDirectory.empty()) {
         return;  // a cooked scene has no plugin to read weather from
     }
@@ -3680,7 +3689,7 @@ void NewVegasApp::initWeather() {
 // through the weather path -- the symptom was an env var that measured
 // byte-identical to unset and looked like a broken tonemap rather than a
 // missing call.
-void NewVegasApp::applyTonemapSettings() {
+void BethesdaApp::applyTonemapSettings() {
     // ODAI_FNV_WHITEPOINT=<scene linear>[,<shoulder>] pins a scene value to
     // display white on the ACES path. Off by default, because it is a look
     // change and every other game shares this curve.
@@ -3783,7 +3792,7 @@ void applySkyrimCloudBand(importer::fnv::FalloutCloudBand band,
 // m_activeWeatherFormId alone leaves the previous weather's cloud textures on
 // the GPU and its rain still playing, which reads as "the picker only half
 // works" rather than as a missing call.
-void NewVegasApp::selectWeather(std::uint32_t weatherFormId) {
+void BethesdaApp::selectWeather(std::uint32_t weatherFormId) {
     m_activeWeatherFormId = weatherFormId;
 
     // Cloud layers. These come out of the mod's own BSA, which the streamer's
@@ -3917,7 +3926,7 @@ std::filesystem::path cacheWeatherSound(
 
 }  // namespace
 
-void NewVegasApp::initWeatherAudio() {
+void BethesdaApp::initWeatherAudio() {
     const importer::fnv::FalloutWeatherRecord* weather =
         m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
     if (weather == nullptr || m_streamDirectory.empty() || m_streamer == nullptr) {
@@ -4089,7 +4098,7 @@ void NewVegasApp::initWeatherAudio() {
     }
 }
 
-audio::SoundHandle NewVegasApp::loadAmbientDescriptor(std::uint32_t descriptorFormId) {
+audio::SoundHandle BethesdaApp::loadAmbientDescriptor(std::uint32_t descriptorFormId) {
     if (descriptorFormId == 0u || m_streamer == nullptr) {
         return {};
     }
@@ -4159,7 +4168,7 @@ audio::SoundHandle NewVegasApp::loadAmbientDescriptor(std::uint32_t descriptorFo
     return sound;
 }
 
-void NewVegasApp::clearSkyrimAmbience() {
+void BethesdaApp::clearSkyrimAmbience() {
     for (const auto& [reference, active] : m_activePlacedAmbients) {
         (void)reference;
         m_audio.stopAmbient(active.handle, 0.75f);
@@ -4172,7 +4181,7 @@ void NewVegasApp::clearSkyrimAmbience() {
     m_activeRegionAmbients.clear();
 }
 
-void NewVegasApp::updateSkyrimAmbience(float deltaSeconds) {
+void BethesdaApp::updateSkyrimAmbience(float deltaSeconds) {
     if (m_streamer == nullptr || m_interiorStarted) {
         if (!m_activePlacedAmbients.empty() || !m_activeRegionAmbients.empty()) {
             clearSkyrimAmbience();
@@ -4318,7 +4327,7 @@ void NewVegasApp::updateSkyrimAmbience(float deltaSeconds) {
     }
 }
 
-void NewVegasApp::applyWeather() {
+void BethesdaApp::applyWeather() {
     if (m_streamIsMorrowind) {
         // TES3 does not have Fallout-style WTHR records, but publishing no
         // atmosphere at all is not neutral in the imported renderer.  It makes
@@ -4906,7 +4915,7 @@ int loadTourFile(const std::string& path) {
     return static_cast<int>(g_runtimeTour.size());
 }
 
-bool NewVegasApp::updateFlythrough(float deltaSeconds) {
+bool BethesdaApp::updateFlythrough(float deltaSeconds) {
     m_flythroughTime += deltaSeconds;
     const float raw = std::clamp(m_flythroughTime / m_flythroughSeconds, 0.0f, 1.0f);
     // Ease only the ENDS, at constant speed in between.
@@ -5095,7 +5104,7 @@ bool NewVegasApp::updateFlythrough(float deltaSeconds) {
     return raw < 1.0f;
 }
 
-void NewVegasApp::updateCamera(float deltaSeconds) {
+void BethesdaApp::updateCamera(float deltaSeconds) {
     // The scripted tour owns the camera outright -- no input, no collision, no
     // ground clamp. It flies over rooftops on purpose.
     if (m_flythroughSeconds > 0.0f) {
@@ -5190,14 +5199,10 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     const bool inConversation = talkingActor() != nullptr;
     bool playerDead = false;
     if (m_bethesdaSessionConfigured) {
-        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-        if (scenario != nullptr) {
-            const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(
-                bethesda::ObjectId::persistent(
-                    bethesda::makeRecordKey(scenario->basePlugin, 0x14u)));
-            playerDead = player != nullptr && player->actorValues.has_value() &&
-                player->actorValues->dead;
-        }
+        const bethesda::RuntimeObject* player =
+            m_bethesdaSession.world().find(m_bethesdaSession.playerObject());
+        playerDead = player != nullptr && player->actorValues.has_value() &&
+            player->actorValues->dead;
     }
     const bool giftMenuOpen = m_bethesdaSessionConfigured &&
         !m_bethesdaSession.giftMenuRequests().empty();
@@ -5441,28 +5446,19 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
         }
         bethesda::PhysicsCharacterInput input;
         input.desiredVelocity = {moveX * speed, 0.0f, moveZ * speed};
-        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-        if (scenario != nullptr) {
-            const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
-                bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
-            const auto physical = m_bethesdaSession.physics().characterState(playerId);
-            if (canControlPlayer && keyDown(m_window, GLFW_KEY_SPACE) &&
-                physical.has_value() && physical->grounded) {
-                input.desiredVelocity.y = kJumpUnitsPerSecond;
-            }
-            (void)m_bethesdaSession.setActorControllerInput(playerId, input);
+        const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+        const auto physical = m_bethesdaSession.physics().characterState(playerId);
+        if (canControlPlayer && keyDown(m_window, GLFW_KEY_SPACE) &&
+            physical.has_value() && physical->grounded) {
+            input.desiredVelocity.y = kJumpUnitsPerSecond;
         }
+        (void)m_bethesdaSession.setActorControllerInput(playerId, input);
         m_bethesdaControllerOwnsCamera = true;
         return;
     }
     if (m_bethesdaPlayerControllerRegistered) {
-        const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-        if (scenario != nullptr) {
-            const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
-                bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
-            (void)m_bethesdaSession.setActorControllerInput(
-                playerId, bethesda::PhysicsCharacterInput{});
-        }
+        (void)m_bethesdaSession.setActorControllerInput(
+            m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
         m_bethesdaControllerOwnsCamera = false;
     }
     m_cameraX += moveX * speed * deltaSeconds;
@@ -5508,7 +5504,7 @@ void NewVegasApp::updateCamera(float deltaSeconds) {
     }
 }
 
-bool NewVegasApp::resolveConfiguredContentProfile() {
+bool BethesdaApp::resolveConfiguredContentProfile() {
     if (m_contentProfilePath.empty()) {
         return true;
     }
@@ -5608,7 +5604,7 @@ bool NewVegasApp::resolveConfiguredContentProfile() {
     return true;
 }
 
-bool NewVegasApp::initStreaming() {
+bool BethesdaApp::initStreaming() {
     std::string requestedWorldspaceBeforeResume = m_streamWorldspace;
     // One worker per core minus the main thread and a little headroom, floored
     // at 2. Streaming is latency-sensitive rather than throughput-bound, so
@@ -5902,7 +5898,12 @@ bool NewVegasApp::initStreaming() {
             const std::vector<importer::fnv::FalloutNavMeshRecord>& navMeshes) {
             m_collision.addCell(cell, scene);
             m_actorNavigation.addCell(cell, navMeshes);
-            if (!m_scenarioId.empty()) cacheBethesdaCollisionCell(cell, scene);
+            if (navMeshes.empty() && m_streamIsMorrowind) {
+                m_actorNavigation.addGeneratedCell(cell, scene);
+            }
+            if (!m_scenarioId.empty() || m_streamIsMorrowind) {
+                cacheBethesdaCollisionCell(cell, scene);
+            }
             m_streamDoorsByCell[cell] = scene.doors;
             rebuildStreamDoors();
             if (m_streamIsSkyrim) m_skyrimActorResidencyDirty = true;
@@ -5910,7 +5911,9 @@ bool NewVegasApp::initStreaming() {
                 VOX_LOGI("newvegas") << "navigation cell " << cell.x << "," << cell.z
                                      << ": " << navMeshes.size() << " meshes, resident total "
                                      << m_actorNavigation.meshCount() << " meshes / "
-                                     << m_actorNavigation.triangleCount() << " triangles";
+                                     << m_actorNavigation.triangleCount() << " triangles / "
+                                     << m_actorNavigation.generatedNodeCount()
+                                     << " generated nodes";
             }
         },
         [this](const importer::CellCoord& cell) {
@@ -5940,6 +5943,16 @@ bool NewVegasApp::initStreaming() {
     // expressed in cells, so a grid built on the wrong figure loads a quarter
     // of the world it believes it is loading.
     config.cellSize = m_streamer->cellWorldSize();
+    // TES3 cells are twice as wide as the later games. A radius of four was
+    // therefore loading 81 detailed cells (roughly a kilometre-square region),
+    // including collision/nav/gameplay for references that cannot affect the
+    // player. Five by five still covers several city blocks and cuts detailed
+    // residency to 25 cells; explicit compatibility env overrides keep their
+    // historical spelling.
+    if (m_streamIsMorrowind) {
+        config.loadRadius = 2;
+        config.unloadRadius = 4;
+    }
     if (const char* radiusEnv = std::getenv("ODAI_FNV_LOAD_RADIUS")) {
         config.loadRadius = std::max(0, std::atoi(radiusEnv));
         config.unloadRadius = config.loadRadius + 2;
@@ -6049,7 +6062,19 @@ bool NewVegasApp::initStreaming() {
             static_cast<std::int32_t>(std::floor(interior.spawnPosition[0] / 4096.0f)),
             static_cast<std::int32_t>(std::floor(interior.spawnPosition[2] / 4096.0f))};
         m_collision.addCell(interiorCell, interiorScene);
+        // Direct interior starts are built before BethesdaSession exists. Keep
+        // their authored collision mesh so initBethesdaSession() can register
+        // it with Jolt before the player character controller is created.
+        // Door transitions already call this path after the session exists;
+        // omitting it here gave the player gravity but no floor body and made
+        // them fall through cells such as WhiterunDragonsreach.
+        if (!m_scenarioId.empty() || m_streamIsMorrowind) {
+            cacheBethesdaCollisionCell(interiorCell, interiorScene);
+        }
         m_actorNavigation.addCell(interiorCell, interior.navMeshes);
+        if (interior.navMeshes.empty() && m_streamIsMorrowind) {
+            m_actorNavigation.addGeneratedCell(interiorCell, interiorScene);
+        }
         m_actorNavigation.setResidentDoors({});
         m_doors = interiorScene.doors;
         m_currentInteriorEditorId = m_startInsideInterior;
@@ -6115,6 +6140,12 @@ bool NewVegasApp::initStreaming() {
             lighting.ambientColor[channel] = srgbChannelToLinear(interior.ambientColor[channel]);
             lighting.directionalColor[channel] = srgbChannelToLinear(interior.directionalColor[channel]);
             lighting.fogColor[channel] = srgbChannelToLinear(interior.fogColor[channel]);
+            if (m_streamIsSkyrim) {
+                lighting.ambientColor[channel] =
+                    std::min(lighting.ambientColor[channel] * 1.55f, 1.0f);
+                lighting.directionalColor[channel] =
+                    std::min(lighting.directionalColor[channel] * 1.18f, 1.0f);
+            }
         }
         m_renderer.setImportedInteriorLighting(lighting);
         VOX_LOGI("newvegas") << "started inside " << m_startInsideInterior
@@ -6392,7 +6423,7 @@ bool NewVegasApp::initStreaming() {
 // naming scheme with a single 32-cell tier, so this currently covers FNV and
 // Fallout 3 only. An absent tier is not an error here -- it logs and leaves the
 // horizon as it was.
-void NewVegasApp::loadDistantLandLod() {
+void BethesdaApp::loadDistantLandLod() {
     if (m_streamer == nullptr) {
         return;
     }
@@ -6458,7 +6489,7 @@ void NewVegasApp::loadDistantLandLod() {
                          << " textures, sink " << sinkUnits << " units, in " << ms << " ms";
 }
 
-void NewVegasApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
+void BethesdaApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
     // A walking-character demo deliberately has no world subject. Avoid
     // parsing and uploading the 49-tile BTR ring merely to hide it again in
     // the renderer; that work dominated both startup and steady-state memory.
@@ -6617,7 +6648,7 @@ void NewVegasApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
                          << " triangles, " << stats.textures << " textures, in " << ms << " ms";
 }
 
-void NewVegasApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
+void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     // See updateSkyrimTerrainLod: actor-only runs should not build the 49-tile
     // BTO skyline behind a deliberately hidden world.
     const char* drawMode = std::getenv("ODAI_FNV_DRAW");
@@ -6810,7 +6841,7 @@ void NewVegasApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
 // everywhere the player can stand (otherwise they fall through), and a point
 // placed inside an obstacle has to come back out (otherwise buildings are
 // scenery).
-void NewVegasApp::runCollisionSelfTest() {
+void BethesdaApp::runCollisionSelfTest() {
     const float step = 256.0f;
     int sampled = 0;
     int grounded = 0;
@@ -6898,8 +6929,15 @@ void NewVegasApp::runCollisionSelfTest() {
                          << " cells";
 }
 
-void NewVegasApp::updateStreaming(float deltaSeconds) {
-    if (!m_streamer || m_interiorStarted) {
+void BethesdaApp::updateStreaming(float deltaSeconds) {
+    if (!m_streamer) {
+        return;
+    }
+    if (m_interiorStarted) {
+        if (m_bethesdaCollisionBroadPhaseDirty && m_bethesdaSessionConfigured) {
+            m_bethesdaSession.physics().optimizeBroadPhase();
+            m_bethesdaCollisionBroadPhaseDirty = false;
+        }
         return;
     }
 
@@ -6927,6 +6965,14 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
     importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
     importer::fnv::CellStreamer::engineToFallout(velocity, falloutVelocity);
     m_streamer->update(m_renderer, falloutPosition, falloutVelocity);
+    // Mesh bodies are usable immediately; the global Jolt broad-phase rebuild
+    // is only an acceleration pass. Batch it after the load ring settles so a
+    // 25-cell arrival performs one rebuild rather than one per rendered frame.
+    if (m_bethesdaCollisionBroadPhaseDirty &&
+        m_streamer->isStreamingIdle() && m_bethesdaSessionConfigured) {
+        m_bethesdaSession.physics().optimizeBroadPhase();
+        m_bethesdaCollisionBroadPhaseDirty = false;
+    }
     updateSkyrimTerrainLod(falloutPosition);
     updateSkyrimObjectLod(falloutPosition);
 
@@ -6976,7 +7022,7 @@ void NewVegasApp::updateStreaming(float deltaSeconds) {
     }
 }
 
-void NewVegasApp::onTick(float deltaSeconds) {
+void BethesdaApp::onTick(float deltaSeconds) {
     // A recording runs on its own clock. Everything downstream of here -- the
     // tour, the wander, the animation, the day cycle -- takes this dt, so the
     // world advances one authored frame per rendered frame however long the
@@ -7544,6 +7590,16 @@ void useMorrowindUiPalette() {
     kPipPanelSolid = {0.10f, 0.09f, 0.075f, 0.96f};
 }
 
+void useSkyrimUiPalette() {
+    // Skyrim's menus are restrained and nearly monochrome. Keep the shared HUD
+    // widgets, but replace Fallout's phosphor green with cool silver over a
+    // charcoal translucent panel.
+    kPipGreen = {0.88f, 0.90f, 0.94f, 1.00f};
+    kPipGreenDim = {0.58f, 0.62f, 0.69f, 1.00f};
+    kPipPanel = {0.035f, 0.040f, 0.050f, 0.86f};
+    kPipPanelSolid = {0.035f, 0.040f, 0.050f, 0.96f};
+}
+
 float deadzone(float value, float threshold) {
     if (value > -threshold && value < threshold) {
         return 0.0f;
@@ -7553,7 +7609,7 @@ float deadzone(float value, float threshold) {
 
 }  // namespace
 
-void NewVegasApp::pollNavInput(float deltaSeconds) {
+void BethesdaApp::pollNavInput(float deltaSeconds) {
     m_nav.beginFrame();
 
     const bool keyUp = keyDown(m_window, GLFW_KEY_UP);
@@ -7646,7 +7702,7 @@ void NewVegasApp::pollNavInput(float deltaSeconds) {
     }
 }
 
-void NewVegasApp::syncTes3JournalPanel() {
+void BethesdaApp::syncTes3JournalPanel() {
     if (!m_streamIsMorrowind || !m_bethesdaSessionConfigured ||
         m_tes3JournalPanel == nullptr ||
         m_bethesdaSession.tes3().content() == nullptr) return;
@@ -7691,7 +7747,7 @@ void NewVegasApp::syncTes3JournalPanel() {
     }
 }
 
-void NewVegasApp::updateTes3JournalInput() {
+void BethesdaApp::updateTes3JournalInput() {
     bool journalDown = keyDown(m_window, GLFW_KEY_J);
     GLFWgamepadstate journalPad{};
     if (glfwJoystickIsGamepad(GLFW_JOYSTICK_1) == GLFW_TRUE &&
@@ -7736,7 +7792,7 @@ void NewVegasApp::updateTes3JournalInput() {
     }
 }
 
-void NewVegasApp::updateGiftMenu() {
+void BethesdaApp::updateGiftMenu() {
     if (!m_bethesdaSessionConfigured ||
         m_bethesdaSession.giftMenuRequests().empty()) {
         m_presentedGiftMenuSequence = 0u;
@@ -7789,7 +7845,7 @@ void NewVegasApp::updateGiftMenu() {
     }
 }
 
-void NewVegasApp::updateRegionDiscovery() {
+void BethesdaApp::updateRegionDiscovery() {
     if (!m_streamer) {
         return;
     }
@@ -7851,7 +7907,7 @@ void NewVegasApp::updateRegionDiscovery() {
     }
 }
 
-void NewVegasApp::saveTraversalState(bool force) {
+void BethesdaApp::saveTraversalState(bool force) {
     // Scenario sessions are persisted exclusively through the versioned ODAI
     // save. Keeping the legacy camera-only traversal JSON beside it would
     // create two competing authorities for player position and world time.
@@ -7889,7 +7945,7 @@ void NewVegasApp::saveTraversalState(bool force) {
     }
 }
 
-void NewVegasApp::onShutdown() {
+void BethesdaApp::onShutdown() {
     if (m_bethesdaSessionConfigured && !m_gameplaySavePath.empty()) {
         (void)saveGameplayState();
     }
@@ -7900,7 +7956,7 @@ void NewVegasApp::onShutdown() {
     }
 }
 
-void NewVegasApp::setScenario(std::string id) {
+void BethesdaApp::setScenario(std::string id) {
     const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(id);
     if (scenario == nullptr) {
         m_scenarioId = std::move(id);
@@ -7915,7 +7971,7 @@ void NewVegasApp::setScenario(std::string id) {
     m_explicitStart = true;
 }
 
-void NewVegasApp::cacheBethesdaCollisionCell(
+void BethesdaApp::cacheBethesdaCollisionCell(
     const importer::CellCoord& cell, const importer::ImportedScene& scene) {
     BethesdaCollisionMesh mesh;
     for (const importer::ImportedSceneInstance& instance : scene.instances) {
@@ -7931,6 +7987,20 @@ void NewVegasApp::cacheBethesdaCollisionCell(
         if (m_bethesdaSession.world().find(id) != nullptr) continue;
         const auto definition = m_bethesdaSession.tes3().content()->references().find(id);
         if (definition == m_bethesdaSession.tes3().content()->references().end()) continue;
+        // Visible architecture and terrain belong to rendering/collision, not
+        // the mutable gameplay world. Register only placed records that can be
+        // activated, carried, scripted, or simulated. Treating every STAT as
+        // an Item produced ~13k heavyweight RuntimeObjects around Balmora and
+        // made every fixed tick copy/sort inventories for decorative walls.
+        const std::string& type = definition->second.base.recordType;
+        const bool gameplayReference =
+            type == "NPC_" || type == "CREA" || type == "CONT" ||
+            type == "DOOR" || type == "ACTI" || type == "ALCH" ||
+            type == "APPA" || type == "ARMO" || type == "BOOK" ||
+            type == "CLOT" || type == "INGR" || type == "LIGH" ||
+            type == "LOCK" || type == "MISC" || type == "PROB" ||
+            type == "REPA" || type == "WEAP";
+        if (!gameplayReference) continue;
         bethesda::RuntimeObject object;
         object.id = id;
         object.base = definition->second.base;
@@ -7953,7 +8023,6 @@ void NewVegasApp::cacheBethesdaCollisionCell(
                 object.transform = *savedOverride->second.transform;
             }
         }
-        const std::string type = object.base.recordType;
         const bethesda::Tes3ActorDefinition* actorDefinition = nullptr;
         if (type == "NPC_" || type == "CREA") {
             object.kind = bethesda::RuntimeObjectKind::Actor;
@@ -8038,7 +8107,7 @@ void NewVegasApp::cacheBethesdaCollisionCell(
     registerBethesdaCollisionCell(cell);
 }
 
-void NewVegasApp::removeBethesdaCollisionCell(const importer::CellCoord& cell) {
+void BethesdaApp::removeBethesdaCollisionCell(const importer::CellCoord& cell) {
     m_bethesdaCollisionByCell.erase(cell);
     if (m_bethesdaSessionConfigured) {
         (void)m_bethesdaSession.physics().removeStreamedStaticCollision(
@@ -8046,7 +8115,7 @@ void NewVegasApp::removeBethesdaCollisionCell(const importer::CellCoord& cell) {
     }
 }
 
-void NewVegasApp::registerBethesdaCollisionCell(const importer::CellCoord& cell) {
+void BethesdaApp::registerBethesdaCollisionCell(const importer::CellCoord& cell) {
     if (!m_bethesdaSessionConfigured) return;
     const auto found = m_bethesdaCollisionByCell.find(cell);
     if (found == m_bethesdaCollisionByCell.end()) return;
@@ -8089,10 +8158,17 @@ void NewVegasApp::registerBethesdaCollisionCell(const importer::CellCoord& cell)
             token, filteredVertices, filteredIndices, error)) {
         VOX_LOGW("physics") << "could not restore collision cell " << cell.x << ","
                             << cell.z << ": " << error;
+    } else {
+        m_bethesdaCollisionBroadPhaseDirty = true;
+        // The controller can be created before asynchronous exterior collision
+        // reaches residency. If this cell introduced a floor through the
+        // capsule, repair it immediately; waiting for CharacterVirtual::Update
+        // leaves contradictory contacts that reject every movement direction.
+        (void)recoverBethesdaPlayerControllerFromIntersectingFloor();
     }
 }
 
-void NewVegasApp::registerCachedBethesdaCollision() {
+void BethesdaApp::registerCachedBethesdaCollision() {
     if (!m_bethesdaSessionConfigured) return;
     std::vector<importer::CellCoord> cells;
     cells.reserve(m_bethesdaCollisionByCell.size());
@@ -8108,7 +8184,7 @@ void NewVegasApp::registerCachedBethesdaCollision() {
     }
 }
 
-bool NewVegasApp::loadScenarioQuestDefinitions(const bethesda::ScenarioDefinition& scenario) {
+bool BethesdaApp::loadScenarioQuestDefinitions(const bethesda::ScenarioDefinition& scenario) {
     bethesda::SkyrimScenarioContentReport report;
     std::string error;
     if (!bethesda::loadSkyrimScenarioContent(
@@ -8133,7 +8209,7 @@ bool NewVegasApp::loadScenarioQuestDefinitions(const bethesda::ScenarioDefinitio
     }
     return true;
 }
-bool NewVegasApp::initBethesdaSession() {
+bool BethesdaApp::initBethesdaSession() {
     m_bethesdaPlayerControllerRegistered = false;
     m_bethesdaControllerOwnsCamera = false;
     std::string fingerprint = m_loadOrderFingerprint;
@@ -8244,6 +8320,10 @@ bool NewVegasApp::initBethesdaSession() {
         const std::string currentInteriorKey =
             bethesda::normalizeTes3Symbol(m_currentInteriorEditorId);
         std::size_t scannedReferences = 0u;
+        std::size_t actorReferences = 0u;
+        std::size_t exteriorActorReferences = 0u;
+        float nearestActorDistanceSquared = std::numeric_limits<float>::max();
+        std::string nearestActorId;
         for (const auto& [referenceId, reference] : content->references()) {
             (void)referenceId;
             // Content construction owns tens of thousands of references and
@@ -8260,8 +8340,9 @@ bool NewVegasApp::initBethesdaSession() {
             if (!reference.enabled || reference.deleted || !reference.hasTransform) continue;
             const auto definition = content->actors().find(reference.base);
             if (definition == content->actors().end()) continue;
+            ++actorReferences;
             const std::string& cellId = reference.cell.textId;
-            const bool exteriorCell = !cellId.empty() && cellId.front() == '#';
+            const bool exteriorCell = !reference.interior;
             if (m_interiorStarted) {
                 // Interior transforms are cell-local. Comparing them to the
                 // player's local coordinates without first matching the CELL
@@ -8277,12 +8358,18 @@ bool NewVegasApp::initBethesdaSession() {
                 // coordinates must never enter that distance test.
                 continue;
             }
+            ++exteriorActorReferences;
             const float engineX = reference.position[0];
             const float engineY = reference.position[2];
             const float engineZ = -reference.position[1];
             const float dx = engineX - m_cameraX;
             const float dz = engineZ - m_cameraZ;
-            if ((dx * dx) + (dz * dz) > kTes3ActorProxyRadius * kTes3ActorProxyRadius) continue;
+            const float distanceSquared = (dx * dx) + (dz * dz);
+            if (distanceSquared < nearestActorDistanceSquared) {
+                nearestActorDistanceSquared = distanceSquared;
+                nearestActorId = definition->second.id;
+            }
+            if (distanceSquared > kTes3ActorProxyRadius * kTes3ActorProxyRadius) continue;
             SkinnedActor actor;
             actor.name = definition->second.id;
             actor.fullName = definition->second.name;
@@ -8308,6 +8395,12 @@ bool NewVegasApp::initBethesdaSession() {
         std::size_t builtActors = 0u;
         std::unordered_map<std::string, anim::AnimationClip> idleBySkeleton;
         std::unordered_set<std::string> unavailableIdleSkeletons;
+        struct CachedWalk {
+            anim::AnimationClip clip;
+            float speedUnitsPerSecond = 0.0f;
+        };
+        std::unordered_map<std::string, CachedWalk> walkBySkeleton;
+        std::unordered_set<std::string> unavailableWalkSkeletons;
         std::size_t actorBuildCount = 0u;
         for (SkinnedActor& actor : m_actors) {
             if ((actorBuildCount++ & 3u) == 0u) {
@@ -8458,6 +8551,33 @@ bool NewVegasApp::initBethesdaSession() {
                     unavailableIdleSkeletons.insert(idleKey);
                 }
             }
+            if (const auto walk = walkBySkeleton.find(idleKey);
+                walk != walkBySkeleton.end()) {
+                actor.walkClip = walk->second.clip;
+                actor.walkSpeedUnitsPerSecond = walk->second.speedUnitsPerSecond;
+            } else if (!unavailableWalkSkeletons.contains(idleKey)) {
+                CachedWalk walk;
+                std::string walkWhy;
+                if (loadActorWalkClip(
+                        m_streamer->assets(), skeleton, actor.character.skeleton,
+                        false, walk.clip, walk.speedUnitsPerSecond, walkWhy)) {
+                    actor.walkClip = walk.clip;
+                    actor.walkSpeedUnitsPerSecond = walk.speedUnitsPerSecond;
+                    walkBySkeleton.emplace(idleKey, std::move(walk));
+                } else {
+                    unavailableWalkSkeletons.insert(idleKey);
+                }
+            }
+            actor.wanders = !actor.walkClip.tracks.empty() &&
+                actor.walkSpeedUnitsPerSecond > 1.0f;
+            for (int axis = 0; axis < 3; ++axis) {
+                actor.wanderOrigin[axis] = actor.position[axis];
+                actor.wanderTarget[axis] = actor.position[axis];
+            }
+            actor.wanderRng = 0x9e3779b9u ^
+                (static_cast<std::uint32_t>(builtActors + 1u) * 2654435761u);
+            actor.wanderPauseSeconds =
+                static_cast<float>(builtActors % 7u) * 0.9f;
             if (traceActor && std::getenv("ODAI_TES3_ACTOR_VERBOSE") != nullptr &&
                 !actor.idleClip.tracks.empty()) {
                 for (const float sampleTime : {0.0f, 0.65f, 1.3f, 1.95f}) {
@@ -8544,7 +8664,15 @@ bool NewVegasApp::initBethesdaSession() {
         queueActorUploads();
         VOX_LOGI("tes3") << "bound " << m_actors.size()
                           << " nearby FRMR actor(s) for activation/dialogue; built "
-                          << builtActors << " visible actor(s)";
+                          << builtActors << " visible actor(s); actor refs="
+                          << actorReferences << " exterior=" << exteriorActorReferences
+                          << " nearest=" << (nearestActorId.empty() ? "<none>" : nearestActorId)
+                          << " distance="
+                          << (nearestActorId.empty()
+                                  ? -1.0f
+                                  : std::sqrt(nearestActorDistanceSquared));
+        registerCachedBethesdaCollision();
+        if (!registerBethesdaPlayerController()) return false;
         return true;
     }
     const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
@@ -8556,6 +8684,7 @@ bool NewVegasApp::initBethesdaSession() {
         VOX_LOGE("scenario") << scenario->id << " requires Skyrim Special Edition content";
         return false;
     }
+    useSkyrimUiPalette();
     if (!m_bethesdaSession.configure(
             bethesda::BethesdaSessionConfig{scenario->game, fingerprint, scenario->id,
                                             m_captureSeed == 0u ? 1u : m_captureSeed}, error)) {
@@ -8612,14 +8741,12 @@ bool NewVegasApp::initBethesdaSession() {
     return true;
 }
 
-bool NewVegasApp::registerBethesdaPlayerController() {
+bool BethesdaApp::registerBethesdaPlayerController() {
     if (!m_bethesdaSessionConfigured) return false;
-    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-    if (scenario == nullptr) return false;
     const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
     const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
     if (player == nullptr) {
-        VOX_LOGE("physics") << "scenario player is missing from the runtime world";
+        VOX_LOGE("physics") << "player is missing from the runtime world";
         return false;
     }
     bethesda::PhysicsCharacterConfig config;
@@ -8629,19 +8756,51 @@ bool NewVegasApp::registerBethesdaPlayerController() {
         static_cast<float>(player->transform.position[2])};
     std::string error;
     if (!m_bethesdaSession.registerActorController(playerId, config, error)) {
-        VOX_LOGE("physics") << "could not register scenario player controller: " << error;
+        VOX_LOGE("physics") << "could not register player controller: " << error;
         return false;
     }
     m_bethesdaPlayerControllerRegistered = true;
     m_bethesdaControllerOwnsCamera = m_walkMode;
+    (void)recoverBethesdaPlayerControllerFromIntersectingFloor();
     if (m_bethesdaControllerOwnsCamera) pullBethesdaPlayerControllerState();
     return true;
 }
 
-void NewVegasApp::pullBethesdaPlayerControllerState() {
+bool BethesdaApp::recoverBethesdaPlayerControllerFromIntersectingFloor() {
+    if (!m_walkMode || !m_bethesdaPlayerControllerRegistered ||
+        !m_bethesdaSessionConfigured) return false;
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const auto physical = m_bethesdaSession.physics().characterState(playerId);
+    if (!physical.has_value()) return false;
+    float recoveredFeetY = 0.0f;
+    const float headY = physical->position.y + kEyeHeightUnits;
+    if (!m_collision.recoverFeetAboveIntersectingFloor(
+            physical->position.x, physical->position.z, physical->position.y, headY,
+            bethesda::PhysicsCharacterConfig{}.stepHeight, recoveredFeetY)) return false;
+
+    bethesda::PhysicsCharacterSnapshot recovered;
+    recovered.object = playerId;
+    recovered.position = physical->position;
+    recovered.position.y = recoveredFeetY + 0.1f;
+    recovered.rotation = physical->rotation;
+    recovered.groundNormal = {0.0f, 1.0f, 0.0f};
+    recovered.grounded = true;
+    recovered.supportingObject = physical->supportingObject;
+    std::string error;
+    if (!m_bethesdaSession.physics().restoreCharacter(recovered, error)) {
+        VOX_LOGW("physics") << "could not recover intersecting player capsule: " << error;
+        return false;
+    }
+    VOX_LOGW("physics") << "recovered player capsule from intersecting floor: feet y="
+                         << physical->position.y << " -> " << recovered.position.y;
+    m_bethesdaControllerOwnsCamera = true;
+    pullBethesdaPlayerControllerState();
+    syncBethesdaPlayerState(true);
+    return true;
+}
+
+void BethesdaApp::pullBethesdaPlayerControllerState() {
     if (!m_bethesdaPlayerControllerRegistered) return;
-    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-    if (scenario == nullptr) return;
     const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
     const auto physical = m_bethesdaSession.physics().characterState(playerId);
     if (!physical.has_value()) return;
@@ -8650,10 +8809,8 @@ void NewVegasApp::pullBethesdaPlayerControllerState() {
     m_cameraZ = physical->position.z;
 }
 
-void NewVegasApp::relocateBethesdaPlayerControllerToCamera() {
+void BethesdaApp::relocateBethesdaPlayerControllerToCamera() {
     if (!m_bethesdaPlayerControllerRegistered) return;
-    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-    if (scenario == nullptr) return;
     const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
     const auto physical = m_bethesdaSession.physics().characterState(playerId);
     if (!physical.has_value()) return;
@@ -8671,7 +8828,7 @@ void NewVegasApp::relocateBethesdaPlayerControllerToCamera() {
     syncBethesdaPlayerState(true);
 }
 
-void NewVegasApp::unregisterBethesdaActorControllers() {
+void BethesdaApp::unregisterBethesdaActorControllers() {
     if (!m_bethesdaSessionConfigured) return;
     for (SkinnedActor& actor : m_actors) {
         actor.runtimeRequestedVelocity = {};
@@ -8690,7 +8847,7 @@ void NewVegasApp::unregisterBethesdaActorControllers() {
     }
 }
 
-void NewVegasApp::pullBethesdaActorControllerStates() {
+void BethesdaApp::pullBethesdaActorControllerStates() {
     if (!m_bethesdaSessionConfigured) return;
     for (SkinnedActor& actor : m_actors) {
         if (actor.referenceFormId == 0u) continue;
@@ -8712,7 +8869,7 @@ void NewVegasApp::pullBethesdaActorControllerStates() {
     }
 }
 
-void NewVegasApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
+void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
     if (!m_bethesdaSessionConfigured) return;
     pullBethesdaActorControllerStates();
     for (SkinnedActor& actor : m_actors) {
@@ -8750,7 +8907,7 @@ void NewVegasApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
     syncBethesdaActors(false, false);
 }
 
-void NewVegasApp::submitBethesdaActorControllerIntents() {
+void BethesdaApp::submitBethesdaActorControllerIntents() {
     if (!m_bethesdaSessionConfigured) return;
     for (SkinnedActor& actor : m_actors) {
         if (actor.referenceFormId == 0u) continue;
@@ -8808,7 +8965,7 @@ void NewVegasApp::submitBethesdaActorControllerIntents() {
     }
 }
 
-void NewVegasApp::syncBethesdaPlayerState(bool applyNow) {
+void BethesdaApp::syncBethesdaPlayerState(bool applyNow) {
     if (!m_bethesdaSessionConfigured) return;
     const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
     const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
@@ -8844,7 +9001,7 @@ void NewVegasApp::syncBethesdaPlayerState(bool applyNow) {
     if (applyNow) (void)m_bethesdaSession.world().applyQueuedCommands();
 }
 
-void NewVegasApp::syncBethesdaActors(bool addMissing, bool applyNow) {
+void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
     if (!m_bethesdaSessionConfigured || m_streamLoadOrder.empty()) return;
     m_bethesdaSession.clearLoadedLocations();
     std::vector<std::uint32_t> loadedLocationFormIds =
@@ -9070,7 +9227,7 @@ void NewVegasApp::syncBethesdaActors(bool addMissing, bool applyNow) {
     }
 }
 
-void NewVegasApp::restoreBethesdaActorsFromSession() {
+void BethesdaApp::restoreBethesdaActorsFromSession() {
     if (!m_bethesdaSessionConfigured || m_streamLoadOrder.empty()) return;
     for (SkinnedActor& actor : m_actors) {
         bethesda::RecordKey reference;
@@ -9096,7 +9253,7 @@ void NewVegasApp::restoreBethesdaActorsFromSession() {
     pullBethesdaActorControllerStates();
 }
 
-bool NewVegasApp::saveGameplayState() {
+bool BethesdaApp::saveGameplayState() {
     if (!m_bethesdaSessionConfigured || m_gameplaySavePath.empty()) return false;
     syncBethesdaPlayerState(true);
     std::string error;
@@ -9109,7 +9266,7 @@ bool NewVegasApp::saveGameplayState() {
     return true;
 }
 
-bool NewVegasApp::loadGameplayState() {
+bool BethesdaApp::loadGameplayState() {
     const std::filesystem::path path = m_gameplayLoadPath.empty()
         ? m_gameplaySavePath : m_gameplayLoadPath;
     if (!m_bethesdaSessionConfigured || path.empty()) return false;
@@ -9184,7 +9341,7 @@ bool NewVegasApp::loadGameplayState() {
     return true;
 }
 
-void NewVegasApp::drawPipBoyHud() {
+void BethesdaApp::drawPipBoyHud() {
     const float scale = contentScale();
     int screenWidth = 0;
     int screenHeight = 0;
@@ -9473,7 +9630,7 @@ void NewVegasApp::drawPipBoyHud() {
     m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
 }
 
-void NewVegasApp::buildWeatherChoices() {
+void BethesdaApp::buildWeatherChoices() {
     if (!m_weatherChoices.empty()) {
         return;
     }
@@ -9503,7 +9660,7 @@ void NewVegasApp::buildWeatherChoices() {
     VOX_LOGI("newvegas") << "weather picker: " << m_weatherChoices.size() << " choices";
 }
 
-void NewVegasApp::openWeatherPicker() {
+void BethesdaApp::openWeatherPicker() {
     m_weatherPickerOpen = true;
     buildWeatherChoices();
     // Open ON the active weather rather than at the top. The list is sorted by
@@ -9521,7 +9678,7 @@ void NewVegasApp::openWeatherPicker() {
     m_weatherFocus.setFocus(std::min(activeIndex, 4));
 }
 
-bool NewVegasApp::drawWeatherPicker(const ui::UiRect& panelArea, float scale) {
+bool BethesdaApp::drawWeatherPicker(const ui::UiRect& panelArea, float scale) {
     buildWeatherChoices();
     if (m_weatherChoices.empty()) {
         m_weatherPickerOpen = false;
@@ -9655,7 +9812,7 @@ bool NewVegasApp::drawWeatherPicker(const ui::UiRect& panelArea, float scale) {
     return true;
 }
 
-bool NewVegasApp::drawCompatibilityPanel(const ui::UiRect& panelArea, float scale) {
+bool BethesdaApp::drawCompatibilityPanel(const ui::UiRect& panelArea, float scale) {
     if (!m_contentProfile.has_value()) {
         m_compatibilityPanelOpen = false;
         return false;
@@ -9710,7 +9867,7 @@ bool NewVegasApp::drawCompatibilityPanel(const ui::UiRect& panelArea, float scal
     return true;
 }
 
-void NewVegasApp::drawPauseMenu() {
+void BethesdaApp::drawPauseMenu() {
     if (!m_menuOpen) {
         // Keep the ring empty so a stale focus index cannot survive a close and
         // reopen and act on the wrong entry.
@@ -9897,7 +10054,7 @@ void NewVegasApp::drawPauseMenu() {
     }
 }
 
-void NewVegasApp::drawDialoguePanel(
+void BethesdaApp::drawDialoguePanel(
     const dialogue::DialogueNode& node, int screenWidth, int screenHeight, float scale
 ) {
     const bool compactTes3 = m_streamIsMorrowind;
@@ -10161,7 +10318,7 @@ void NewVegasApp::drawDialoguePanel(
         dialogueMuted);
 }
 
-void NewVegasApp::drawHud() {
+void BethesdaApp::drawHud() {
     // ODAI_FNV_NOHUD=1 draws the world and nothing else. A screenshot meant to
     // show the RENDERER has its own subject, and the Pip-Boy chrome, the key
     // hints and the debug readouts all sit on top of it.
@@ -10215,7 +10372,7 @@ void NewVegasApp::drawHud() {
     }
 }
 
-void NewVegasApp::drawTes3Journal() {
+void BethesdaApp::drawTes3Journal() {
     if (!m_tes3JournalOpen || m_tes3JournalPanel == nullptr) return;
     if (m_bethesdaSession.tes3().journal().chronology().size() !=
         m_tes3JournalSyncedVisits) {
@@ -10244,7 +10401,7 @@ void NewVegasApp::drawTes3Journal() {
         ui::UiColor{0.20f, 0.14f, 0.09f, 0.92f});
 }
 
-void NewVegasApp::drawGiftMenu() {
+void BethesdaApp::drawGiftMenu() {
     if (!m_bethesdaSessionConfigured ||
         m_bethesdaSession.giftMenuRequests().empty()) {
         return;
@@ -10327,7 +10484,7 @@ void NewVegasApp::drawGiftMenu() {
         ui::UiVec2{panel.minX + padding, panel.maxY - padding}, kPipGreenDim);
 }
 
-void NewVegasApp::updateDebugStats() {
+void BethesdaApp::updateDebugStats() {
     // Gated on the panel actually being up: this formats a couple of dozen
     // strings and it would otherwise do that every frame for nobody.
     if (!m_renderer.isDebugUiVisible()) {
@@ -10385,13 +10542,18 @@ void NewVegasApp::updateDebugStats() {
         m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
     world.rows.push_back({"Weather", weather != nullptr ? weather->editorId : "<none>"});
     world.rows.push_back({"Actors", number(m_actors.size())});
+    if (m_bethesdaSessionConfigured) {
+        world.rows.push_back({"Runtime objects", number(m_bethesdaSession.world().size())});
+        world.rows.push_back({"Runtime actors",
+            number(m_bethesdaSession.world().orderedActorIds().size())});
+    }
     world.rows.push_back({"Regions discovered", number(m_discoveredRegions.size())});
     groups.push_back(std::move(world));
 
     m_renderer.setDebugStatGroups(std::move(groups));
 }
 
-bool NewVegasApp::captureWarmupComplete() {
+bool BethesdaApp::captureWarmupComplete() {
     if (m_framesRendered <= m_captureWarmupFrames) {
         return false;
     }
@@ -10415,7 +10577,7 @@ bool NewVegasApp::captureWarmupComplete() {
     return m_captureUploadsReady;
 }
 
-bool NewVegasApp::beginCaptureAudio() {
+bool BethesdaApp::beginCaptureAudio() {
     if (!m_captureAudioRequested || m_captureAudio.isOpen()) {
         return true;
     }
@@ -10455,7 +10617,7 @@ bool NewVegasApp::beginCaptureAudio() {
     return true;
 }
 
-bool NewVegasApp::writeCaptureAudioFrame() {
+bool BethesdaApp::writeCaptureAudioFrame() {
     if (!m_captureAudioRequested) {
         return true;
     }
@@ -10481,7 +10643,7 @@ bool NewVegasApp::writeCaptureAudioFrame() {
     return true;
 }
 
-bool NewVegasApp::finishCaptureVideo() {
+bool BethesdaApp::finishCaptureVideo() {
     const bool videoOk = m_captureVideo.close();
     if (!m_captureAudioRequested) {
         return videoOk;
@@ -10502,7 +10664,7 @@ bool NewVegasApp::finishCaptureVideo() {
     return true;
 }
 
-void NewVegasApp::onRender(float /*deltaSeconds*/) {
+void BethesdaApp::onRender(float /*deltaSeconds*/) {
     // Before beginFrameDraw: the backend consumes the pending pose while
     // recording this frame, so setting it afterwards would always be a frame
     // late -- invisible on a still bind pose, and a lag on an animated one.

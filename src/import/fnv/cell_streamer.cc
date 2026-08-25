@@ -200,7 +200,9 @@ std::string toLowerAscii(std::string value) {
 // 54: TES3 CREA and explicit-model NPC_ placements enter the imported scene.
 // 55: nested TES3 editor-marker models (including TR's NPC marker) are no
 //     longer serialized as visible world geometry.
-constexpr int kCellBuildVersion = 55;
+// 56: TES3 DODT/DNAM load doors retain their named-cell/exterior transition
+//     targets in streamed scenes.
+constexpr int kCellBuildVersion = 56;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

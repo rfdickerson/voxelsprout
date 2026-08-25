@@ -117,6 +117,9 @@ struct FalloutRaceParts {
     // An actor with no VTCK of its own takes whichever its sex selects.
     std::uint32_t maleVoiceTypeFormId = 0;
     std::uint32_t femaleVoiceTypeFormId = 0;
+    // TES5 WNAM: the race's default skin ARMO. Its ARMA records provide the
+    // naked hands/feet/body for slots not covered by the actor's outfit.
+    std::uint32_t defaultSkinFormId = 0;
     // TES5 RACE stores the male/female skeleton directly in ANAM after the
     // corresponding MNAM/FNAM marker. Earlier generations leave these empty.
     std::string maleSkeletonPath;

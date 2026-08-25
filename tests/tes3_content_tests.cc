@@ -185,6 +185,15 @@ void addActorAndItem(std::vector<std::uint8_t>& file) {
     std::memcpy(inventory.data(), &count, sizeof(count));
     std::memcpy(inventory.data() + 4u, "tr_test_item", 12u);
     addSubrecord(actor, "NPCO", std::move(inventory));
+    std::vector<std::uint8_t> aiData(12u, 0u);
+    const std::uint32_t travelService = 0x00001000u;
+    std::memcpy(aiData.data() + 8u, &travelService, sizeof(travelService));
+    addSubrecord(actor, "AIDT", std::move(aiData));
+    std::vector<std::uint8_t> destination(24u, 0u);
+    const float destinationX = 4096.0f;
+    std::memcpy(destination.data(), &destinationX, sizeof(destinationX));
+    addSubrecord(actor, "DODT", std::move(destination));
+    addSubrecord(actor, "DNAM", "Test Destination");
     addRecord(file, "NPC_", actor);
 }
 
@@ -210,6 +219,19 @@ void addCell(std::vector<std::uint8_t>& file, std::uint32_t frmr, bool deleted) 
     addRecord(file, "CELL", body);
 }
 
+void addNamedExteriorCell(std::vector<std::uint8_t>& file, std::uint32_t frmr) {
+    std::vector<std::uint8_t> body;
+    addSubrecord(body, "NAME", "Test Town");
+    std::vector<std::uint8_t> cellData(12u, 0u);
+    addSubrecord(body, "DATA", cellData);
+    std::vector<std::uint8_t> referenceId;
+    append(referenceId, frmr);
+    addSubrecord(body, "FRMR", referenceId);
+    addSubrecord(body, "NAME", "tr_test_actor");
+    addSubrecord(body, "DATA", std::vector<std::uint8_t>(24u, 0u));
+    addRecord(file, "CELL", body);
+}
+
 void writePlugin(const fs::path& path, const std::vector<std::uint8_t>& bytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(bytes.data()),
@@ -232,6 +254,7 @@ void testContentStore() {
     addStatic(base);
     addActorAndItem(base);
     addCell(base, 0x00000042u, false);
+    addNamedExteriorCell(base, 0x00000043u);
     writePlugin(root / "Morrowind.esm", base);
 
     std::vector<std::uint8_t> patch;
@@ -281,17 +304,24 @@ void testContentStore() {
               actor->faction == makeTes3RecordKey("FACT", "temple") &&
               actor->script == makeTes3RecordKey("SCPT", "TR_TestScript"),
           "TES3 actor identity, stats, faction, rank, and local script are typed");
+    check(actor != nullptr && actor->serviceFlags == 0x00001000u &&
+              actor->travelDestinations.size() == 1u &&
+              actor->travelDestinations[0].cell == "Test Destination" &&
+              actor->travelDestinations[0].position[0] == 4096.0f,
+          "TES3 AIDT services and DODT/DNAM travel destinations are typed");
     check(actor != nullptr && actor->inventory.size() == 1u &&
               actor->inventory[0].first == makeTes3RecordKey("MISC", "tr_test_item") &&
               actor->inventory[0].second == 2,
           "TES3 NPCO inventory resolves string IDs to the winning typed record");
+    check(content.references().size() == 1u,
+          "a later plugin can delete a master-owned FRMR reference");
     if (!content.references().empty()) {
-        for (const auto& [id, reference] : content.references()) {
-            std::cerr << "remaining reference " << id.toString() << " from "
-                      << reference.sourcePlugin << '\n';
-        }
+        const Tes3ReferenceDefinition& townActor = content.references().begin()->second;
+        check(townActor.cell == makeTes3RecordKey("CELL", "Test Town") &&
+                  !townActor.interior &&
+                  townActor.base == makeTes3RecordKey("NPC_", "tr_test_actor"),
+              "named exterior CELL references retain exterior identity and typed actor bases");
     }
-    check(content.references().empty(), "a later plugin can delete a master-owned FRMR reference");
 
     const std::string cp1252("Pilgrimage \x97 complete", 21u);
     check(decodeTes3Text(cp1252, "win1252").find("\xe2\x80\x94") != std::string::npos,

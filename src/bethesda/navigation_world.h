@@ -15,6 +15,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -46,11 +48,35 @@ struct ActorNavigationStep {
     }
 };
 
+// TES3 has no authored NAVM records.  These values describe the agent used to
+// derive a conservative layered navigation mesh from the same collision soup
+// that is registered with Jolt.  The default raster is deliberately a little
+// wider than a Morrowind actor: a cell is retained only when the complete
+// capsule footprint is clear of wall triangles.
+struct GeneratedNavigationConfig {
+    float cellSize = 64.0f;
+    float agentRadius = 22.0f;
+    float agentHeight = 128.0f;
+    float stepHeight = 18.0f;
+    float maxSlopeDegrees = 50.0f;
+};
+
 class ActorNavigationWorld {
 public:
     void addCell(
         const importer::CellCoord& cell,
         const std::vector<importer::fnv::FalloutNavMeshRecord>& records);
+
+    // Builds navigation from ImportedScene collision for formats without
+    // authored navmeshes, notably Morrowind and Tamriel Rebuilt.  Multiple
+    // floor samples may occupy the same XZ raster coordinate, so bridges,
+    // balconies and rooms above rooms do not collapse into one heightfield.
+    // Passing an empty authored NAVM set and then this method is the normal
+    // TES3 streaming path.
+    void addGeneratedCell(
+        const importer::CellCoord& cell,
+        const importer::ImportedScene& scene,
+        const GeneratedNavigationConfig& config = {});
     void removeCell(const importer::CellCoord& cell);
     void clear();
 
@@ -91,6 +117,13 @@ public:
 
     [[nodiscard]] std::size_t meshCount() const;
     [[nodiscard]] std::size_t triangleCount() const;
+    [[nodiscard]] std::size_t generatedNodeCount() const;
+    // True for either authored NAVM data or TES3 collision-derived nodes.
+    // Actor planning must not infer availability from meshCount(): generated
+    // Morrowind/Tamriel Rebuilt cells intentionally have no authored meshes.
+    [[nodiscard]] bool hasNavigation() const {
+        return !m_cells.empty() || !m_generatedCells.empty();
+    }
 
 private:
     struct Triangle {
@@ -114,13 +147,57 @@ private:
         float score = 0.0f;
     };
 
+    struct GeneratedNode {
+        std::int64_t gridX = 0;
+        std::int64_t gridZ = 0;
+        odai::math::Vector3 position{};
+        float normalY = 1.0f;
+    };
+    struct GeneratedCell {
+        struct Obstacle {
+            odai::math::Vector3 vertex[3]{};
+            float minY = 0.0f;
+            float maxY = 0.0f;
+        };
+        GeneratedNavigationConfig config{};
+        std::vector<GeneratedNode> nodes;
+        std::vector<Obstacle> obstacles;
+        std::map<std::pair<std::int64_t, std::int64_t>,
+            std::vector<std::uint32_t>> obstacleBuckets;
+    };
+    struct GeneratedLocation {
+        const GeneratedCell* cell = nullptr;
+        importer::CellCoord cellCoord{};
+        std::size_t node = 0u;
+        odai::math::Vector3 point{};
+        float score = 0.0f;
+    };
+
     [[nodiscard]] bool findNearest(
         const odai::math::Vector3& point,
         float maxHorizontalDistance,
         float maxVerticalDistance,
         Location& outLocation) const;
 
+    [[nodiscard]] bool findNearestGenerated(
+        const odai::math::Vector3& point,
+        float maxHorizontalDistance,
+        float maxVerticalDistance,
+        GeneratedLocation& outLocation) const;
+    [[nodiscard]] bool buildGeneratedPath(
+        const odai::math::Vector3& start,
+        const odai::math::Vector3& goal,
+        std::vector<ActorNavigationStep>& outWaypoints) const;
+    [[nodiscard]] bool buildGeneratedWanderPath(
+        const odai::math::Vector3& start,
+        const odai::math::Vector3& origin,
+        float radius,
+        std::uint32_t randomValue,
+        std::vector<ActorNavigationStep>& outWaypoints) const;
+
     std::unordered_map<importer::CellCoord, std::vector<Mesh>, importer::CellCoordHash> m_cells;
+    std::unordered_map<importer::CellCoord, GeneratedCell, importer::CellCoordHash>
+        m_generatedCells;
     std::vector<importer::ImportedSceneDoor> m_residentDoors;
 };
 

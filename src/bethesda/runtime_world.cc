@@ -56,6 +56,7 @@ bool BethesdaWorld::addInitialObject(RuntimeObject object, std::string& outError
         m_nextRuntimeId = std::max(m_nextRuntimeId, object.id.spawned + 1u);
     }
     m_objects.emplace(object.id, std::move(object));
+    invalidateOrderedIds();
     outError.clear();
     return true;
 }
@@ -105,6 +106,7 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 result.renderDeltas.push_back(RuntimeRenderDelta{
                     command.target, RuntimeRenderVisibility, {}, false});
                 m_objects.erase(command.target);
+                invalidateOrderedIds();
                 ++result.applied;
                 break;
             case WorldCommandType::SetTransform:
@@ -415,15 +417,43 @@ const RuntimeObject* BethesdaWorld::find(const ObjectId& id) const {
     return found == m_objects.end() ? nullptr : &found->second;
 }
 
+void BethesdaWorld::invalidateOrderedIds() {
+    m_orderedIdsDirty = true;
+}
+
+void BethesdaWorld::refreshOrderedIds() const {
+    if (!m_orderedIdsDirty) return;
+    m_orderedObjectIds.clear();
+    m_orderedActorIds.clear();
+    m_orderedObjectIds.reserve(m_objects.size());
+    for (const auto& [id, object] : m_objects) {
+        m_orderedObjectIds.push_back(id);
+        if (object.kind == RuntimeObjectKind::Actor) {
+            m_orderedActorIds.push_back(id);
+        }
+    }
+    std::sort(m_orderedObjectIds.begin(), m_orderedObjectIds.end());
+    std::sort(m_orderedActorIds.begin(), m_orderedActorIds.end());
+    m_orderedIdsDirty = false;
+}
+
+std::span<const ObjectId> BethesdaWorld::orderedObjectIds() const {
+    refreshOrderedIds();
+    return m_orderedObjectIds;
+}
+
+std::span<const ObjectId> BethesdaWorld::orderedActorIds() const {
+    refreshOrderedIds();
+    return m_orderedActorIds;
+}
+
 std::vector<RuntimeObject> BethesdaWorld::orderedObjects() const {
     std::vector<RuntimeObject> objects;
     objects.reserve(m_objects.size());
-    for (const auto& [id, object] : m_objects) {
-        (void)id;
-        objects.push_back(object);
+    for (const ObjectId& id : orderedObjectIds()) {
+        const auto found = m_objects.find(id);
+        if (found != m_objects.end()) objects.push_back(found->second);
     }
-    std::sort(objects.begin(), objects.end(),
-        [](const RuntimeObject& left, const RuntimeObject& right) { return left.id < right.id; });
     return objects;
 }
 
@@ -588,6 +618,9 @@ void BethesdaWorld::restore(
 void BethesdaWorld::clear() {
     m_objects.clear();
     m_commands.clear();
+    m_orderedObjectIds.clear();
+    m_orderedActorIds.clear();
+    m_orderedIdsDirty = true;
     m_nextRuntimeId = 1u;
     m_nextCommandSequence = 1u;
 }

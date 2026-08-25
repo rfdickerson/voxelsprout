@@ -14,7 +14,7 @@
 // still gives a posed static robot, no voice still gives readable dialogue.
 
 #include "audio/audio.h"
-#include "games/newvegas/newvegas_actors.h"
+#include "games/newvegas/bethesda_actors.h"
 #include "import/fnv/asset_source.h"
 
 #include <cstdint>
@@ -27,7 +27,7 @@ namespace odai::games::newvegas {
 // Victor is an ordinary SkinnedActor with a conversation attached. These names
 // are kept because this file is about HIM specifically -- where he stands, what
 // he says, what he sounds like -- while everything about being a posable actor
-// now lives in newvegas_actors.h and is shared with the rest of the town.
+// now lives in bethesda_actors.h and is shared with the rest of the town.
 using VictorDialogueContext = ActorDialogueContext;
 using VictorVoiceIndex = ActorVoiceIndex;
 using VictorState = SkinnedActor;
@@ -39,7 +39,7 @@ using VictorState = SkinnedActor;
 // Nothing here touches the renderer. The caller uploads
 // `state.textures` (Renderer::uploadSkinnedActorTextures), rewrites each
 // vertex's textureIndex to the bindless slot it gets back, and then uploads the
-// template -- see remapActorTextureSlots in newvegas_actors.h.
+// template -- see remapActorTextureSlots in bethesda_actors.h.
 //
 // `assets` is the caller's already-open archive index -- pass the streamer's.
 // Opening a second one here cost ~50 ms of redundant indexing, and worse, a
@@ -55,10 +55,10 @@ bool loadVictor(
     const float* positionOverride = nullptr);
 
 // Uploading, posing and the "press E to talk" reach test are not Victor-specific
-// and live in newvegas_actors.h: remapActorTextureSlots, updateActorPoses,
+// and live in bethesda_actors.h: remapActorTextureSlots, updateActorPoses,
 // actorIsInReach / findActorInReach.
 
-// Playing a line is not Victor-specific and lives in newvegas_actors.h:
+// Playing a line is not Victor-specific and lives in bethesda_actors.h:
 // loadActorVoices indexes each voice type once, speakActorLine plays from it.
 
 }  // namespace odai::games::newvegas

@@ -904,6 +904,15 @@ void parseMorrowindCellRecord(
             current.rotationRadians[2] = readF32(sub.data + 20);
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             current.scale = readF32(sub.data);
+        } else if (sub.type == "DODT" && sub.size >= 24u) {
+            current.hasTeleport = true;
+            for (std::size_t axis = 0u; axis < 3u; ++axis) {
+                current.teleportPosition[axis] = readF32(sub.data + (axis * 4u));
+                current.teleportRotationRadians[axis] =
+                    readF32(sub.data + 12u + (axis * 4u));
+            }
+        } else if (sub.type == "DNAM") {
+            current.teleportTargetCellEditorId = subrecordString(sub);
         } else if (sub.type == "DELE") {
             current.isDeleted = true;
         }

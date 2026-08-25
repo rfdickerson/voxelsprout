@@ -2211,6 +2211,7 @@ int probeBuildCell(
     builder.addCellStatics(cell);
     odai::importer::ImportedScene scene;
     builder.finish(scene);
+    appendResolvedDoors(cell, index, scene);
     const double buildMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
 
@@ -2232,7 +2233,16 @@ int probeBuildCell(
               << " packedIndices=" << scene.packedIndices.size()
               << " packedDraws=" << scene.packedDraws.size()
               << " rigidAnimations=" << scene.rigidAnimations.size()
+              << " doors=" << scene.doors.size()
               << " terrainParts=" << stats.terrainPartsEmitted << "\n";
+    if (std::getenv("ODAI_PROBE_LIST_DOORS") != nullptr) {
+        for (const auto& door : scene.doors) {
+            std::cout << "  door ref=0x" << std::hex << door.sourceReferenceFormId
+                      << std::dec << " pos=(" << door.position[0] << ", "
+                      << door.position[1] << ", " << door.position[2]
+                      << ") target=\"" << door.targetCellEditorId << "\"\n";
+        }
+    }
     for (const auto& animation : scene.rigidAnimations) {
         float start[16] = {};
         float quarter[16] = {};
@@ -4471,6 +4481,15 @@ int probeScene(const std::filesystem::path& scenePath) {
                   << ", verts " << scene.meshes.front().vertices.size() << ", parts "
                   << scene.meshes.front().parts.size() << "\n";
     }
+    if (std::getenv("ODAI_PROBE_LIST_INSTANCES") != nullptr) {
+        for (const auto& instance : scene.instances) {
+            std::cout << "  instance ref=\"" << instance.sourceReferenceIdentity
+                      << "\" model=\"" << instance.modelPath << "\" pos=("
+                      << instance.transform[3] << ", " << instance.transform[7]
+                      << ", " << instance.transform[11] << ") visible="
+                      << (instance.initiallyVisible ? "yes" : "no") << "\n";
+        }
+    }
 
     // Per-texture alpha-test census over the packed vertices. loadImportedScene
     // just re-ran the content inference, so a texture the current classifier
@@ -5797,6 +5816,7 @@ void printUsage() {
               << "  odai_bethesda_probe --tes3-dialogue-trace <profile> <actor-or-topic> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-quest-trace <profile> <journal-id> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-quest-suite <profile> [--quest <journal-id>] [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-virtual-player <profile> [--strict] [--report <json>] [--data <Data>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --archives\n"
               << "  odai_bethesda_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --nif <virtualPath>\n"
@@ -6583,6 +6603,7 @@ bool openProfileLoadOrder(
 
 struct Tes3ProbeContext {
     odai::importer::fnv::ResolvedContentProfile profile;
+    odai::importer::fnv::FalloutLoadOrder order;
     std::shared_ptr<odai::bethesda::Tes3ContentStore> content;
     odai::bethesda::Tes3Runtime runtime;
 };
@@ -6599,10 +6620,9 @@ bool loadTes3ProbeContext(
         error = "TES3 probe requires a Morrowind content profile";
         return false;
     }
-    FalloutLoadOrder order;
-    if (!openProfileLoadOrder(out.profile, order, error)) return false;
+    if (!openProfileLoadOrder(out.profile, out.order, error)) return false;
     out.content = std::make_shared<Tes3ContentStore>();
-    if (!out.content->load(order, out.profile.encoding, error)) return false;
+    if (!out.content->load(out.order, out.profile.encoding, error)) return false;
     return out.runtime.configure(out.content,
         ObjectId::persistent(makeTes3RecordKey("NPC_", "player")), error);
 }
@@ -6856,6 +6876,366 @@ int tes3QuestSuiteCommand(
     return selectionFound ? 0 : 1;
 }
 
+struct Tes3VirtualDoor {
+    std::size_t sourceCell = 0u;
+    std::size_t targetCell = 0u;
+    odai::importer::ImportedSceneDoor door;
+};
+
+std::string tes3VirtualCellName(
+    const odai::importer::fnv::FalloutCellIndexEntry& cell) {
+    if (!cell.editorId.empty()) return cell.editorId;
+    if (cell.hasGridCoords) {
+        return "#" + std::to_string(cell.gridX) + "," + std::to_string(cell.gridZ);
+    }
+    return "cell:" + std::to_string(cell.cellFormId);
+}
+
+nlohmann::json tes3VirtualPosition(const float position[3]) {
+    return nlohmann::json::array({position[0], position[1], position[2]});
+}
+
+int tes3VirtualPlayerCommand(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    using namespace odai::importer;
+    using namespace odai::importer::fnv;
+
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    const bool strict = std::any_of(argv + optionStart, argv + argc,
+        [](const char* value) { return std::strcmp(value, "--strict") == 0; });
+    std::optional<std::filesystem::path> reportPath;
+    for (int i = optionStart; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--report") == 0) reportPath = argv[i + 1];
+    }
+
+    FalloutCellIndex index;
+    if (!buildFalloutCellIndex(context.order, index, error)) {
+        std::cout << nlohmann::json({{"ok", false},
+            {"error", "TES3 cell index failed: " + error}}).dump(2) << '\n';
+        return 1;
+    }
+
+    std::unordered_map<std::uint32_t, std::size_t> cellByFormId;
+    std::unordered_map<std::string, std::size_t> cellByName;
+    std::map<std::pair<std::int32_t, std::int32_t>, std::size_t> cellByGrid;
+    for (std::size_t i = 0u; i < index.cells.size(); ++i) {
+        const FalloutCellIndexEntry& cell = index.cells[i];
+        cellByFormId[cell.cellFormId] = i;
+        if (!cell.editorId.empty()) {
+            cellByName.emplace(normalizeTes3Symbol(cell.editorId), i);
+        }
+        if (!cell.isInterior && cell.hasGridCoords) {
+            cellByGrid.emplace(std::make_pair(cell.gridX, cell.gridZ), i);
+        }
+    }
+    const auto cellForNameOrPosition = [&](std::string_view name, const float position[3])
+        -> std::optional<std::size_t> {
+        if (!name.empty()) {
+            const auto named = cellByName.find(normalizeTes3Symbol(name));
+            if (named != cellByName.end()) return named->second;
+            if (name.front() == '#') {
+                const std::size_t comma = name.find(',');
+                if (comma != std::string_view::npos) {
+                    try {
+                        const std::int32_t x = std::stoi(std::string(name.substr(1u, comma - 1u)));
+                        const std::int32_t y = std::stoi(std::string(name.substr(comma + 1u)));
+                        const auto grid = cellByGrid.find({x, y});
+                        if (grid != cellByGrid.end()) return grid->second;
+                    } catch (const std::exception&) {
+                    }
+                }
+            }
+        }
+        if (index.cellWorldSize > 0.0f) {
+            const std::int32_t x = static_cast<std::int32_t>(
+                std::floor(position[0] / index.cellWorldSize));
+            const std::int32_t y = static_cast<std::int32_t>(
+                std::floor(position[1] / index.cellWorldSize));
+            const auto grid = cellByGrid.find({x, y});
+            if (grid != cellByGrid.end()) return grid->second;
+        }
+        return std::nullopt;
+    };
+
+    std::vector<Tes3VirtualDoor> doors;
+    nlohmann::json gaps = nlohmann::json::array();
+    std::size_t extractionFailures = 0u;
+    for (std::size_t cellIndex = 0u; cellIndex < index.cells.size(); ++cellIndex) {
+        FalloutCellRecord cell;
+        std::string cellError;
+        if (!extractFalloutCellMerged(
+                index, context.order, index.cells[cellIndex], cell, cellError)) {
+            ++extractionFailures;
+            gaps.push_back({{"kind", "cell_extraction"},
+                {"cell", tes3VirtualCellName(index.cells[cellIndex])},
+                {"detail", cellError}});
+            continue;
+        }
+        ImportedScene scene;
+        appendResolvedDoors(cell, index, scene);
+        for (ImportedSceneDoor& door : scene.doors) {
+            const auto target = cellByFormId.find(door.targetCellFormId);
+            if (target == cellByFormId.end()) {
+                gaps.push_back({{"kind", "unresolved_door_destination"},
+                    {"source_cell", tes3VirtualCellName(index.cells[cellIndex])},
+                    {"reference", door.sourceReferenceFormId},
+                    {"target_cell_form_id", door.targetCellFormId}});
+                continue;
+            }
+            doors.push_back(Tes3VirtualDoor{cellIndex, target->second, std::move(door)});
+        }
+    }
+
+    nlohmann::json actions = nlohmann::json::array();
+    nlohmann::json guilds = nlohmann::json::array();
+    std::size_t guildsEntered = 0u;
+    std::size_t guildsExited = 0u;
+    std::vector<std::vector<std::size_t>> outgoingDoors(index.cells.size());
+    for (std::size_t doorIndex = 0u; doorIndex < doors.size(); ++doorIndex) {
+        outgoingDoors[doors[doorIndex].sourceCell].push_back(doorIndex);
+    }
+    const auto pathFromExterior = [&](std::size_t targetCell) {
+        std::vector<std::int64_t> previousDoor(index.cells.size(), -1);
+        std::vector<bool> visited(index.cells.size(), false);
+        std::vector<std::size_t> queue;
+        for (std::size_t cellIndex = 0u; cellIndex < index.cells.size(); ++cellIndex) {
+            if (!index.cells[cellIndex].isInterior) {
+                visited[cellIndex] = true;
+                queue.push_back(cellIndex);
+            }
+        }
+        for (std::size_t cursor = 0u; cursor < queue.size() && !visited[targetCell]; ++cursor) {
+            const std::size_t current = queue[cursor];
+            for (const std::size_t doorIndex : outgoingDoors[current]) {
+                const Tes3VirtualDoor& door = doors[doorIndex];
+                if (door.door.locked || visited[door.targetCell]) continue;
+                visited[door.targetCell] = true;
+                previousDoor[door.targetCell] = static_cast<std::int64_t>(doorIndex);
+                queue.push_back(door.targetCell);
+            }
+        }
+        std::vector<std::size_t> path;
+        for (std::size_t current = targetCell;
+             visited[targetCell] && previousDoor[current] >= 0;) {
+            const std::size_t doorIndex = static_cast<std::size_t>(previousDoor[current]);
+            path.push_back(doorIndex);
+            current = doors[doorIndex].sourceCell;
+        }
+        std::reverse(path.begin(), path.end());
+        return std::make_pair(visited[targetCell], path);
+    };
+    const auto pathToExterior = [&](std::size_t sourceCell) {
+        std::vector<std::int64_t> previousDoor(index.cells.size(), -1);
+        std::vector<bool> visited(index.cells.size(), false);
+        std::vector<std::size_t> queue = {sourceCell};
+        visited[sourceCell] = true;
+        std::optional<std::size_t> target;
+        for (std::size_t cursor = 0u; cursor < queue.size() && !target.has_value(); ++cursor) {
+            const std::size_t current = queue[cursor];
+            if (current != sourceCell && !index.cells[current].isInterior) {
+                target = current;
+                break;
+            }
+            for (const std::size_t doorIndex : outgoingDoors[current]) {
+                const Tes3VirtualDoor& door = doors[doorIndex];
+                if (door.door.locked || visited[door.targetCell]) continue;
+                visited[door.targetCell] = true;
+                previousDoor[door.targetCell] = static_cast<std::int64_t>(doorIndex);
+                queue.push_back(door.targetCell);
+            }
+        }
+        std::vector<std::size_t> path;
+        if (target.has_value()) {
+            for (std::size_t current = *target; previousDoor[current] >= 0;) {
+                const std::size_t doorIndex = static_cast<std::size_t>(previousDoor[current]);
+                path.push_back(doorIndex);
+                current = doors[doorIndex].sourceCell;
+            }
+            std::reverse(path.begin(), path.end());
+        }
+        return std::make_pair(target.has_value(), path);
+    };
+    for (std::size_t guildCell = 0u; guildCell < index.cells.size(); ++guildCell) {
+        const FalloutCellIndexEntry& cell = index.cells[guildCell];
+        const std::string normalized = normalizeTes3Symbol(cell.editorId);
+        const std::size_t fightersGuild = normalized.find("fighters guild");
+        const std::size_t guildOfFighters = normalized.find("guild of fighters");
+        const std::size_t guildPhrase = fightersGuild != std::string::npos
+            ? fightersGuild : guildOfFighters;
+        const std::size_t phraseLength = fightersGuild != std::string::npos
+            ? std::string_view("fighters guild").size()
+            : std::string_view("guild of fighters").size();
+        if (!cell.isInterior || guildPhrase == std::string::npos) continue;
+        // A basement or barracks belonging to a named guild is part of that
+        // city's route, not a second Fighters Guild to count independently.
+        if (normalized.find(':', guildPhrase + phraseLength) != std::string::npos) continue;
+
+        std::vector<const Tes3VirtualDoor*> entrances;
+        std::vector<const Tes3VirtualDoor*> exits;
+        for (const Tes3VirtualDoor& door : doors) {
+            if (door.targetCell == guildCell) entrances.push_back(&door);
+            if (door.sourceCell == guildCell && !index.cells[door.targetCell].isInterior) {
+                exits.push_back(&door);
+            }
+        }
+        const auto [entered, entryPath] = pathFromExterior(guildCell);
+        const auto [exited, exitPath] = pathToExterior(guildCell);
+        if (entered) {
+            ++guildsEntered;
+            for (std::size_t step = 0u; step < entryPath.size(); ++step) {
+                const Tes3VirtualDoor& routeDoor = doors[entryPath[step]];
+                actions.push_back({{"sequence", actions.size()}, {"action", "activate_door"},
+                    {"result", step + 1u == entryPath.size()
+                        ? "entered_fighters_guild" : "continued_to_fighters_guild"},
+                    {"from", tes3VirtualCellName(index.cells[routeDoor.sourceCell])},
+                    {"to", tes3VirtualCellName(index.cells[routeDoor.targetCell])},
+                    {"reference", routeDoor.door.sourceReferenceFormId},
+                    {"at", tes3VirtualPosition(routeDoor.door.position)},
+                    {"arrival", tes3VirtualPosition(routeDoor.door.arrivalPosition)}});
+            }
+        } else {
+            gaps.push_back({{"kind", "unreachable_guild_entrance"},
+                {"cell", cell.editorId},
+                {"detail", "no unlocked authored door path from an exterior cell"}});
+        }
+        if (exited) {
+            ++guildsExited;
+            for (std::size_t step = 0u; step < exitPath.size(); ++step) {
+                const Tes3VirtualDoor& routeDoor = doors[exitPath[step]];
+                actions.push_back({{"sequence", actions.size()}, {"action", "activate_door"},
+                    {"result", step + 1u == exitPath.size()
+                        ? "exited_fighters_guild" : "continued_from_fighters_guild"},
+                    {"from", tes3VirtualCellName(index.cells[routeDoor.sourceCell])},
+                    {"to", tes3VirtualCellName(index.cells[routeDoor.targetCell])},
+                    {"reference", routeDoor.door.sourceReferenceFormId},
+                    {"at", tes3VirtualPosition(routeDoor.door.position)},
+                    {"arrival", tes3VirtualPosition(routeDoor.door.arrivalPosition)}});
+            }
+        } else {
+            gaps.push_back({{"kind", "unreachable_guild_exit"},
+                {"cell", cell.editorId},
+                {"detail", "no unlocked authored door path to an exterior cell"}});
+        }
+        std::string city = cell.editorId;
+        const std::size_t separator = city.find_first_of(",:");
+        if (separator != std::string::npos) city.resize(separator);
+        guilds.push_back({{"city", city}, {"cell", cell.editorId},
+            {"entrances", entrances.size()}, {"exterior_exits", exits.size()},
+            {"entry_path_doors", entryPath.size()}, {"exit_path_doors", exitPath.size()},
+            {"entered", entered}, {"exited", exited}});
+    }
+
+    nlohmann::json transport = nlohmann::json::array();
+    std::size_t striderRoutes = 0u;
+    std::size_t teleportRoutes = 0u;
+    std::size_t resolvedTransportRoutes = 0u;
+    std::size_t unresolvedRequiredRoutes = 0u;
+    for (const auto& [object, reference] : context.content->references()) {
+        (void)object;
+        if (!reference.enabled || reference.deleted) continue;
+        const auto actorIt = context.content->actors().find(reference.base);
+        if (actorIt == context.content->actors().end() ||
+            actorIt->second.travelDestinations.empty()) continue;
+        const Tes3ActorDefinition& actor = actorIt->second;
+        const auto sourceCell = cellForNameOrPosition(reference.cell.textId, reference.position);
+        const std::string actorClass = normalizeTes3Symbol(actor.actorClass);
+        const std::string sourceName = sourceCell.has_value()
+            ? normalizeTes3Symbol(tes3VirtualCellName(index.cells[*sourceCell])) : std::string{};
+        std::string kind = "other_transport";
+        if (actorClass.find("guild guide") != std::string::npos ||
+            sourceName.find("guild of mages") != std::string::npos ||
+            sourceName.find("mages guild") != std::string::npos) {
+            kind = "guild_guide_teleport";
+        } else if (actorClass.find("caravaner") != std::string::npos ||
+                   normalizeTes3Symbol(actor.id).find("caravaner") != std::string::npos) {
+            kind = "silt_strider";
+        }
+        if (kind == "other_transport") continue;
+
+        for (std::size_t destinationIndex = 0u;
+             destinationIndex < actor.travelDestinations.size(); ++destinationIndex) {
+            const Tes3ActorDefinition::TravelDestination& destination =
+                actor.travelDestinations[destinationIndex];
+            const auto targetCell = cellForNameOrPosition(destination.cell, destination.position);
+            const bool resolved = sourceCell.has_value() && targetCell.has_value();
+            if (kind == "silt_strider") ++striderRoutes;
+            else ++teleportRoutes;
+            if (resolved) {
+                ++resolvedTransportRoutes;
+                actions.push_back({{"sequence", actions.size()},
+                    {"action", kind == "silt_strider" ? "ride_silt_strider" : "use_guild_guide"},
+                    {"actor", actor.id},
+                    {"from", tes3VirtualCellName(index.cells[*sourceCell])},
+                    {"to", tes3VirtualCellName(index.cells[*targetCell])},
+                    {"arrival", tes3VirtualPosition(destination.position)}});
+            } else {
+                ++unresolvedRequiredRoutes;
+                gaps.push_back({{"kind", "unresolved_transport_route"},
+                    {"transport", kind}, {"actor", actor.id},
+                    {"source", reference.cell.textId},
+                    {"destination", destination.cell},
+                    {"detail", sourceCell.has_value()
+                        ? "destination cell could not be resolved"
+                        : "transport actor source cell could not be resolved"}});
+            }
+            transport.push_back({{"kind", kind}, {"actor", actor.id},
+                {"actor_name", actor.name}, {"source_reference", reference.id.toString()},
+                {"source", sourceCell.has_value()
+                    ? tes3VirtualCellName(index.cells[*sourceCell]) : reference.cell.textId},
+                {"destination", targetCell.has_value()
+                    ? tes3VirtualCellName(index.cells[*targetCell]) : destination.cell},
+                {"destination_index", destinationIndex}, {"resolved", resolved}});
+        }
+    }
+
+    if (guilds.empty()) gaps.push_back({{"kind", "no_fighters_guilds"},
+        {"detail", "load order exposed no Fighters Guild interiors"}});
+    if (striderRoutes == 0u) gaps.push_back({{"kind", "no_silt_strider_network"},
+        {"detail", "no placed caravaner with authored destinations was discovered"}});
+    if (teleportRoutes == 0u) gaps.push_back({{"kind", "no_guild_guide_network"},
+        {"detail", "no placed guild guide with authored destinations was discovered"}});
+
+    const bool coveragePass = extractionFailures == 0u &&
+        guildsEntered == guilds.size() && guildsExited == guilds.size() &&
+        striderRoutes > 0u && teleportRoutes > 0u && unresolvedRequiredRoutes == 0u;
+    nlohmann::json output = {{"version", 1}, {"ok", coveragePass}, {"strict", strict},
+        {"profile", context.profile.name}, {"fingerprint", context.profile.fingerprint},
+        {"virtual_player", {{"deterministic", true},
+            {"uses_authored_doors_and_travel_destinations", true},
+            {"actions_attempted", actions.size()}, {"actions", std::move(actions)}}},
+        {"coverage", {{"cells", index.cells.size()}, {"doors", doors.size()},
+            {"cell_extraction_failures", extractionFailures},
+            {"fighters_guilds", guilds.size()}, {"fighters_guilds_entered", guildsEntered},
+            {"fighters_guilds_exited", guildsExited}, {"silt_strider_routes", striderRoutes},
+            {"guild_guide_routes", teleportRoutes},
+            {"resolved_transport_routes", resolvedTransportRoutes},
+            {"unresolved_required_routes", unresolvedRequiredRoutes}}},
+        {"fighters_guilds", std::move(guilds)}, {"transport_routes", std::move(transport)},
+        {"gaps", std::move(gaps)}};
+
+    if (reportPath.has_value()) {
+        std::ofstream report(*reportPath, std::ios::trunc);
+        if (!report) {
+            std::cout << nlohmann::json({{"ok", false},
+                {"error", "could not write report " + reportPath->string()}}).dump(2) << '\n';
+            return 1;
+        }
+        report << output.dump(2) << '\n';
+        std::cout << nlohmann::json({{"ok", coveragePass},
+            {"report", reportPath->string()}, {"coverage", output["coverage"]},
+            {"gap_count", output["gaps"].size()}}).dump(2) << '\n';
+    } else {
+        std::cout << output.dump(2) << '\n';
+    }
+    return (!strict || coveragePass) ? 0 : 1;
+}
+
 int profileCheckCommand(
     const std::filesystem::path& source, int argc, char** argv, int optionStart) {
     using namespace odai::importer::fnv;
@@ -7076,6 +7456,9 @@ int main(int argc, char** argv) {
             if (std::strcmp(argv[i], "--quest") == 0) quest = argv[i + 1];
         }
         return tes3QuestSuiteCommand(argv[2], std::move(quest), argc, argv, 3);
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--tes3-virtual-player") == 0) {
+        return tes3VirtualPlayerCommand(argv[2], argc, argv, 3);
     }
     if (argc < 3) {
         printUsage();

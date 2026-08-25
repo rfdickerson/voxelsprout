@@ -1,5 +1,5 @@
-#include "games/newvegas/newvegas_actors.h"
-#include "games/newvegas/newvegas_navigation.h"
+#include "games/newvegas/bethesda_actors.h"
+#include "bethesda/navigation_world.h"
 
 #include "core/lcg.h"
 #include "core/log.h"
@@ -165,9 +165,22 @@ bool makeProceduralSkyrimIdle(
     const odai::math::Vector3 bind =
         skeleton.bones[static_cast<std::size_t>(com)].localTranslation;
     track.translationKeys = {
-        {0.0f, bind}, {1.2f, bind + odai::math::Vector3{0.0f, 0.7f, 0.0f}}, {2.4f, bind}};
+        {0.0f, bind}, {1.2f, bind + odai::math::Vector3{0.0f, 1.25f, 0.0f}}, {2.4f, bind}};
     outClip.tracks.push_back(std::move(track));
-    return true;
+    // A COM-only sub-unit bob was technically animated but visually static,
+    // especially on the smaller child meshes. These bind-relative breathing
+    // and balance tracks use bones shared by the adult and child Skyrim rigs.
+    addProceduralRotationTrack(outClip, skeleton, "NPC Spine1 [Spn1]",
+        {{0.0f, -0.8f}, {1.2f, 1.2f}, {2.4f, -0.8f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC Spine2 [Spn2]",
+        {{0.0f, 0.6f}, {1.2f, -1.0f}, {2.4f, 0.6f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC Head [Head]",
+        {{0.0f, -0.7f}, {1.2f, 0.9f}, {2.4f, -0.7f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC L UpperArm [LUar]",
+        {{0.0f, -1.5f}, {1.2f, 1.8f}, {2.4f, -1.5f}});
+    addProceduralRotationTrack(outClip, skeleton, "NPC R UpperArm [RUar]",
+        {{0.0f, 1.5f}, {1.2f, -1.8f}, {2.4f, 1.5f}});
+    return outClip.tracks.size() >= 4u;
 }
 
 bool makeProceduralSkyrimWalk(
@@ -824,6 +837,81 @@ bool loadActorWalkClip(
 ) {
     outSpeedUnitsPerSecond = 0.0f;
     const std::string directory = directoryOf(skeletonPath);
+
+    // TES3 stores one animation bank in base_anim.nif. The text keys are the
+    // clip directory; use the repeating portion of WalkForward rather than the
+    // intro/outro so the cycle is seamless. This is deliberately resolved
+    // before the external-KF convention below, because no mtforward.kf exists
+    // for the retail Morrowind humanoid rig.
+    std::string normalizedSkeleton = toLowerAscii(skeletonPath);
+    std::replace(normalizedSkeleton.begin(), normalizedSkeleton.end(), '/', '\\');
+    if (normalizedSkeleton == "base_anim.nif" ||
+        normalizedSkeleton.ends_with("\\base_anim.nif")) {
+        std::vector<std::uint8_t> skeletonBytes;
+        if (assets.resolveMesh(skeletonPath, skeletonBytes, outWhy)) {
+            importer::fnv::NifModel skeletonModel;
+            if (importer::fnv::parseNifStaticMesh(
+                    skeletonBytes, skeletonModel, outWhy) &&
+                !skeletonModel.embeddedAnimations.empty()) {
+                float walkStart = -1.0f;
+                float walkStop = -1.0f;
+                for (const importer::fnv::NifTextKey& key : skeletonModel.textKeys) {
+                    if (walkStart < 0.0f &&
+                        textKeyContainsLabel(key.text, "walkforward: loop start")) {
+                        walkStart = key.time;
+                        continue;
+                    }
+                    if (walkStart >= 0.0f && key.time > walkStart &&
+                        textKeyContainsLabel(key.text, "walkforward: loop stop")) {
+                        walkStop = key.time;
+                        break;
+                    }
+                }
+                if (!(walkStart >= 0.0f && walkStop > walkStart)) {
+                    // A modded bank may omit loop markers while retaining the
+                    // outer interval. It is still preferable to no locomotion.
+                    walkStart = -1.0f;
+                    walkStop = -1.0f;
+                    for (const importer::fnv::NifTextKey& key : skeletonModel.textKeys) {
+                        if (walkStart < 0.0f &&
+                            textKeyContainsLabel(key.text, "walkforward: start")) {
+                            walkStart = key.time;
+                            continue;
+                        }
+                        if (walkStart >= 0.0f && key.time > walkStart &&
+                            textKeyContainsLabel(key.text, "walkforward: stop")) {
+                            walkStop = key.time;
+                            break;
+                        }
+                    }
+                }
+                if (walkStart >= 0.0f && walkStop > walkStart) {
+                    importer::fnv::KfAnimation walk;
+                    walk.name = "Morrowind WalkForward";
+                    walk.startTime = 0.0f;
+                    walk.stopTime = walkStop - walkStart;
+                    walk.cycleType = 0u;
+                    for (const importer::fnv::KfAnimation& controller :
+                         skeletonModel.embeddedAnimations) {
+                        for (const importer::fnv::KfBoneTrack& sourceTrack :
+                             controller.tracks) {
+                            importer::fnv::KfBoneTrack track = sourceTrack;
+                            sliceTes3Track(track, walkStart, walkStop);
+                            walk.tracks.push_back(std::move(track));
+                        }
+                    }
+                    importer::fnv::FalloutAnimationStats stats;
+                    if (!importer::fnv::buildFalloutAnimationClip(
+                            walk, skeleton, outClip, stats)) {
+                        outWhy = "TES3 WalkForward interval bound no tracks";
+                    }
+                } else {
+                    outWhy = "base_anim.nif has no complete WalkForward interval";
+                }
+            }
+        }
+    }
+
     // "mt" is Bethesda's movement type prefix and "forward" the direction, so
     // mtforward.kf is the ordinary walk for anything that walks. Humans keep
     // theirs one level down under locomotion\<sex>\; creatures keep a single
@@ -836,7 +924,16 @@ bool loadActorWalkClip(
     candidates.push_back(directory + "locomotion\\mtforward.kf");
     candidates.push_back(directory + "mtforward.kf");
 
-    for (const std::string& clipPath : candidates) {
+    std::string clipPath = "base_anim.nif:WalkForward";
+    for (std::size_t candidateIndex = 0u;
+         candidateIndex <= candidates.size(); ++candidateIndex) {
+        if (candidateIndex > 0u) {
+            clipPath = candidates[candidateIndex - 1u];
+        }
+        if (candidateIndex == 0u && outClip.tracks.empty()) {
+            continue;
+        }
+        if (candidateIndex > 0u) {
         std::vector<std::uint8_t> bytes;
         if (!assets.resolveMesh(clipPath, bytes, outWhy)) {
             continue;
@@ -849,6 +946,7 @@ bool loadActorWalkClip(
         if (!importer::fnv::buildFalloutAnimationClip(animation, skeleton, outClip, stats)) {
             outWhy = "no track bound";
             continue;
+        }
         }
         if (outClip.tracks.size() < 8u || outClip.duration <= 0.0f) {
             outWhy = "only " + std::to_string(outClip.tracks.size()) + " tracks bound";
@@ -931,16 +1029,16 @@ bool loadActorWalkClip(
 
 // Facing for a yaw, and the yaw for a facing.
 //
-// EMPIRICAL, and worth stating because two call sites in this codebase already
-// disagreed about it: Victor turns to the player with atan2(dz, dx) and the
-// diagnostic parade turns to the camera with atan2(fx, fz), which cannot both
-// be right. The pair below is the one that makes an actor walk in the direction
-// it is facing, checked against a capture of the town on the move.
+// Bethesda actors are authored facing +Y in their Z-up asset space. The
+// character importer's basis change (x, y, z) -> (x, z, -y) therefore makes
+// the rendered skeleton's unrotated forward axis engine -Z, not +X. Rotating
+// local -Z by Matrix4::rotationY(yaw) yields (-sin(yaw), -cos(yaw)). Keeping
+// navigation on any other local axis makes every actor walk sideways.
 odai::math::Vector3 actorFacing(float yawRadians) {
-    return odai::math::Vector3{std::cos(yawRadians), 0.0f, std::sin(yawRadians)};
+    return odai::math::Vector3{-std::sin(yawRadians), 0.0f, -std::cos(yawRadians)};
 }
 
-float actorYawForDirection(float dx, float dz) { return std::atan2(dz, dx); }
+float actorYawForDirection(float dx, float dz) { return std::atan2(-dx, -dz); }
 
 // Shortest signed angle from `from` to `to`, in radians.
 float angleDelta(float from, float to) {
@@ -1067,9 +1165,24 @@ bool loadGoodspringsActors(
                                      << "\" in the loaded plugins";
                 continue;
             }
+            // Reuse a real resident reference when the cell already places
+            // this actor. Apart from producing a visible duplicate, injecting
+            // a base-only copy here loses the placed reference identity used
+            // by face data, dialogue and runtime state. Explicit spawning still
+            // relocates that authored actor in front of the player.
             importer::fnv::FalloutActorPlacement placement{};
-            placement.refFormId = 0u;  // synthetic; nothing else addresses it
-            placement.baseFormId = match->formId;
+            const auto resident = std::find_if(
+                placements.begin(), placements.end(), [&](const auto& candidate) {
+                    return candidate.baseFormId == match->formId;
+                });
+            const bool reusedAuthoredReference = resident != placements.end();
+            if (reusedAuthoredReference) {
+                placement = *resident;
+                placements.erase(resident);
+            } else {
+                placement.refFormId = 0u;  // no authored placement is resident
+                placement.baseFormId = match->formId;
+            }
             placement.position[0] = bethesdaCentre[0] + 160.0f + (static_cast<float>(placed) * 140.0f);
             placement.position[1] = bethesdaCentre[1] + 160.0f;
             // Ground height is resolved per actor every frame, so this only has
@@ -1083,6 +1196,7 @@ bool loadGoodspringsActors(
             VOX_LOGI("newvegas") << "spawn actor: " << match->editorId
                                  << (match->fullName.empty() ? "" : (" \"" + match->fullName + "\""))
                                  << " base 0x" << std::hex << match->formId << std::dec
+                                 << (reusedAuthoredReference ? " (authored reference relocated)" : "")
                                  << (match->isFemale ? " female" : "");
             ++placed;
         }
@@ -1533,19 +1647,26 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
     // moving, so SOMETHING always changes.
     static const bool freezeAtBindPose = std::getenv("ODAI_FNV_NOANIM") != nullptr ||
         std::getenv("ODAI_FNV_VICTOR_NOANIM") != nullptr;
+    constexpr float kPoseTransitionSeconds = 0.20f;
 
     for (SkinnedActor& actor : actors) {
         if (actor.character.skeleton.bones.empty()) {
             continue;
         }
-        // Restart the clock when the clip changes, so a conversation opens on
-        // the first frame of the gesture cycle rather than wherever the idle had
-        // got to -- entering talk 4 seconds into a 5-second clip reads as an
-        // actor finishing a gesture it never started.
         const bool wantsTalkClip = actor.talking && !actor.talkClip.tracks.empty();
-        if (wantsTalkClip != actor.posedTalking) {
+        const bool wantsWalkClip =
+            !wantsTalkClip && actor.walking && !actor.walkClip.tracks.empty();
+        // Restart the destination clip and retain the exact pose currently on
+        // screen. Blending from that snapshot also handles a rapid stop/start
+        // during an unfinished transition without snapping back to either
+        // clip's raw pose.
+        if (wantsTalkClip != actor.posedTalking ||
+            wantsWalkClip != actor.posedWalking) {
             actor.posedTalking = wantsTalkClip;
+            actor.posedWalking = wantsWalkClip;
             actor.animationSeconds = 0.0f;
+            actor.poseTransitionElapsedSeconds = 0.0f;
+            actor.poseTransitionSource = actor.localPoseScratch;
         }
         actor.animationSeconds += deltaSeconds;
 
@@ -1553,8 +1674,6 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
             continue;
         }
 
-        const bool wantsWalkClip =
-            !wantsTalkClip && actor.walking && !actor.walkClip.tracks.empty();
         const anim::AnimationClip& clip = wantsTalkClip ? actor.talkClip
             : (wantsWalkClip ? actor.walkClip : actor.idleClip);
         if (freezeAtBindPose || clip.tracks.empty() || clip.duration <= 0.0f) {
@@ -1565,6 +1684,31 @@ void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
             actor.sampler.sample(
                 actor.character.skeleton, clip, actor.animationSeconds, actor.poseScratch);
         }
+
+        const bool canBlend =
+            actor.poseTransitionSource.size() == actor.poseScratch.size() &&
+            !actor.poseTransitionSource.empty() &&
+            actor.poseTransitionElapsedSeconds < kPoseTransitionSeconds;
+        if (canBlend) {
+            actor.poseTransitionElapsedSeconds += std::max(deltaSeconds, 0.0f);
+            const float linear = std::clamp(
+                actor.poseTransitionElapsedSeconds / kPoseTransitionSeconds, 0.0f, 1.0f);
+            const float blend = linear * linear * (3.0f - (2.0f * linear));
+            actor.localPoseScratch.resize(actor.poseScratch.size());
+            for (std::size_t bone = 0u; bone < actor.poseScratch.size(); ++bone) {
+                for (std::size_t component = 0u; component < 16u; ++component) {
+                    actor.localPoseScratch[bone].m[component] =
+                        actor.poseTransitionSource[bone].m[component] +
+                        ((actor.poseScratch[bone].m[component] -
+                             actor.poseTransitionSource[bone].m[component]) * blend);
+                }
+            }
+            if (linear >= 1.0f) actor.poseTransitionSource.clear();
+        } else {
+            actor.localPoseScratch = actor.poseScratch;
+            actor.poseTransitionSource.clear();
+        }
+        actor.poseScratch = actor.localPoseScratch;
 
         // World placement rides on the bone matrices, pre-multiplied: the
         // skinning pass consumes bone matrices and nothing else, so there is no
@@ -1612,6 +1756,12 @@ void updateActorWandering(
     // is a ground query per actor per frame.
     constexpr float kMaxStepUnits = 400.0f;
 
+    // Residency changes outside this update. Evaluate once for the whole
+    // actor batch and include TES3's collision-derived navigation, which has
+    // generated nodes but deliberately no authored NAVM meshes.
+    const bool navigationAvailable =
+        navigation != nullptr && navigation->hasNavigation();
+
     for (std::size_t i = 0; i < actors.size(); ++i) {
         SkinnedActor& actor = actors[i];
         actor.runtimeRequestedVelocity = {};
@@ -1632,10 +1782,7 @@ void updateActorWandering(
             continue;
         }
 
-        const bool authoredNavigationAvailable =
-            navigation != nullptr && navigation->meshCount() != 0u;
-
-        // Project onto the authored walkable surface before ordinary collision.
+        // Project onto the walkable surface before ordinary collision.
         // Collision knows that a rock is a surface; NAVM knows it is not a path.
         // The wider first projection moves an authored rock-top placement to
         // the nearby street. Subsequent projections are a small height settle
@@ -1643,7 +1790,7 @@ void updateActorWandering(
         const odai::math::Vector3 positionBeforeSettle{
             actor.position[0], actor.position[1], actor.position[2]};
         bool settledByNavigation = false;
-        if (authoredNavigationAvailable && !actor.projectedToNavigation) {
+        if (navigationAvailable && !actor.projectedToNavigation) {
             odai::math::Vector3 point;
             if (navigation->projectPoint(
                     actor.position[0], actor.position[1], actor.position[2],
@@ -1668,7 +1815,7 @@ void updateActorWandering(
                 actor.wanderPath.clear();
                 actor.wanderPathIndex = 0u;
             }
-        } else if (authoredNavigationAvailable && actor.projectedToNavigation) {
+        } else if (navigationAvailable && actor.projectedToNavigation) {
             // The route itself is the constraint. Avoid a global closest-point
             // search over every resident triangle for every actor every frame.
             settledByNavigation = true;
@@ -1714,7 +1861,7 @@ void updateActorWandering(
         }
 
         if (!actor.wanders || actor.talking ||
-            (authoredNavigationAvailable && !actor.projectedToNavigation)) {
+            (navigationAvailable && !actor.projectedToNavigation)) {
             actor.walking = false;
             continue;
         }
@@ -1746,7 +1893,7 @@ void updateActorWandering(
         const float toTargetZ = actor.wanderTarget[2] - actor.position[2];
         const float distance = std::sqrt((toTargetX * toTargetX) + (toTargetZ * toTargetZ));
         if (distance < kArriveDistance) {
-            if (authoredNavigationAvailable && actor.wanderPathIndex > 0u &&
+            if (navigationAvailable && actor.wanderPathIndex > 0u &&
                 actor.wanderPathIndex <= actor.wanderPath.size()) {
                 ActorNavigationStep& reached =
                     actor.wanderPath[actor.wanderPathIndex - 1u];
@@ -1775,14 +1922,17 @@ void updateActorWandering(
                     continue;
                 }
             }
-            if (authoredNavigationAvailable &&
+            if (navigationAvailable &&
                 actor.wanderPathIndex < actor.wanderPath.size()) {
                 const ActorNavigationStep& waypoint =
                     actor.wanderPath[actor.wanderPathIndex++];
                 actor.wanderTarget[0] = waypoint.position.x;
                 actor.wanderTarget[1] = waypoint.position.y;
                 actor.wanderTarget[2] = waypoint.position.z;
-                actor.walking = false;
+                // This is one continuous stride across a route waypoint, not
+                // an arrival. Selecting idle for this bookkeeping frame makes
+                // the skeleton visibly hitch at every shared navmesh edge.
+                actor.walking = true;
                 continue;
             }
 
@@ -1798,7 +1948,7 @@ void updateActorWandering(
             // people rather than as patrol routes -- a town where everyone is
             // permanently in motion looks as wrong as one where nobody is.
             core::Lcg32 rng(actor.wanderRng);
-            if (authoredNavigationAvailable) {
+            if (navigationAvailable) {
                 const odai::math::Vector3 start{
                     actor.position[0], actor.position[1], actor.position[2]};
                 const odai::math::Vector3 origin{
@@ -1842,9 +1992,17 @@ void updateActorWandering(
         const odai::math::Vector3 facing = actorFacing(actor.yawRadians);
         const float step =
             std::min(actor.walkSpeedUnitsPerSecond * deltaSeconds, kMaxStepUnits);
-        // Only commit to the stride once roughly aimed, so a sharp turn happens
-        // on the spot instead of as a wide arc through a building.
-        const float alignment = std::abs(delta) < 0.7f ? 1.0f : 0.15f;
+        // Ramp naturally from turning in place to a full stride. The old
+        // binary 15%/100% choice produced a sevenfold velocity jump on the
+        // first sufficiently aligned frame, visible as a positional jerk even
+        // when the walk pose itself was smooth.
+        const float facingDot = distance > 1e-3f
+            ? std::clamp(((facing.x * toTargetX) + (facing.z * toTargetZ)) / distance,
+                  -1.0f, 1.0f)
+            : 1.0f;
+        const float alignmentLinear = std::clamp((facingDot - 0.35f) / 0.60f, 0.0f, 1.0f);
+        const float alignment = alignmentLinear * alignmentLinear *
+            (3.0f - (2.0f * alignmentLinear));
         const float fromX = actor.position[0];
         const float fromZ = actor.position[2];
         const float stride = step * alignment;
@@ -1856,7 +2014,7 @@ void updateActorWandering(
         } else {
             actor.position[0] = fromX + (facing.x * stride);
             actor.position[2] = fromZ + (facing.z * stride);
-            if (authoredNavigationAvailable && distance > 1e-3f) {
+            if (navigationAvailable && distance > 1e-3f) {
                 const float routeFraction = std::min(stride / distance, 1.0f);
                 actor.position[1] +=
                     (actor.wanderTarget[1] - actor.position[1]) * routeFraction;
@@ -1890,7 +2048,7 @@ void updateActorWandering(
             actor.wanderTarget[0] = actor.position[0];
             actor.wanderTarget[2] = actor.position[2];  // counts as arrived: repick next tick
         }
-        actor.walking = true;
+        actor.walking = alignment > 0.02f;
     }
 }
 

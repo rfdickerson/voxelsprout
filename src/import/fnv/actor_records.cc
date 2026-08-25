@@ -111,6 +111,10 @@ FalloutRaceParts parseRaceParts(const EsmRecordView& record) {
             race.femaleVoiceTypeFormId = readU32(sub, 4);
             continue;
         }
+        if (sub.type == "WNAM" && sub.size >= 4u) {
+            race.defaultSkinFormId = readU32(sub);
+            continue;
+        }
         if (done) {
             continue;
         }
@@ -306,6 +310,7 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     bool hatTaken = false;
     // Additive pieces -- a hat sits ON a head rather than replacing it.
     std::vector<std::string> accessories;
+    std::uint32_t skyrimCoveredSlots = 0u;
 
     // Levelled lists expand in place, so a settler's "OutfitSettlerFemale"
     // becomes the outfits it can hand out and the loop below sees armour.
@@ -370,6 +375,7 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
                     ? addon->second.femaleModel
                     : addon->second.maleModel;
                 appendUnique(resolved.bodyPartPaths, addonModel);
+                skyrimCoveredSlots |= addon->second.bipedFlags;
             }
             resolved.wornArmorFormIds.push_back(itemFormId);
             continue;
@@ -402,6 +408,34 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
         }
         if (worn) {
             resolved.wornArmorFormIds.push_back(itemFormId);
+        }
+    }
+
+    // Skyrim clothing contains only the skin it explicitly covers. The race's
+    // WNAM skin ARMO supplies exposed hands, feet and (for sparse outfits) body
+    // pieces. Add only ARMA records whose slots remain uncovered so a robe does
+    // not receive a second naked torso underneath it.
+    if (!skyrimSkeleton.empty() && race->second.defaultSkinFormId != 0u) {
+        const auto skin = armors.find(race->second.defaultSkinFormId);
+        if (skin != armors.end()) {
+            for (const std::uint32_t addonId : skin->second.armatureFormIds) {
+                const auto addon = armorAddons.find(addonId);
+                if (addon == armorAddons.end()) continue;
+                if (!addon->second.raceFormIds.empty() &&
+                    std::find(addon->second.raceFormIds.begin(),
+                        addon->second.raceFormIds.end(), traits.raceFormId) ==
+                        addon->second.raceFormIds.end()) {
+                    continue;
+                }
+                if (addon->second.bipedFlags != 0u &&
+                    (addon->second.bipedFlags & ~skyrimCoveredSlots) == 0u) {
+                    continue;
+                }
+                const std::string& model = female && !addon->second.femaleModel.empty()
+                    ? addon->second.femaleModel
+                    : addon->second.maleModel;
+                appendUnique(resolved.bodyPartPaths, model);
+            }
         }
     }
 

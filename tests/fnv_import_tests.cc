@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include <zlib.h>
@@ -4087,6 +4088,15 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
     // TES3 local index 1 addresses the first master, Morrowind.esm.
     appendReference(trExterior, 0x01000010u, "", 0.0f, 0.0f, 0.0f, true);
     appendReference(trExterior, 0x00000020u, "crate", 42000.0f, -226000.0f, 200.0f, false);
+    std::vector<std::uint8_t> tes3DoorDestination;
+    appendPod(tes3DoorDestination, 40.0f);
+    appendPod(tes3DoorDestination, 50.0f);
+    appendPod(tes3DoorDestination, 60.0f);
+    appendPod(tes3DoorDestination, 0.0f);
+    appendPod(tes3DoorDestination, 0.0f);
+    appendPod(tes3DoorDestination, 1.25f);
+    appendBytes(trExterior, subrecord("DODT", tes3DoorDestination));
+    appendBytes(trExterior, subrecord("DNAM", zstring("Almas Thirr, Canalworks")));
     std::vector<std::uint8_t> trInterior =
         cellHeader("almas thirr, canalworks", true, 0, 0);
     appendReference(trInterior, 0x00000021u, "crate", 40.0f, 50.0f, 60.0f, false);
@@ -4163,6 +4173,24 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
                ("the merged TES3 exterior extracts: " + error).c_str());
     expectTrue(merged.references.size() == 2u,
                "DELE removes the base placement while later TR references remain");
+    const auto mergedDoor = std::find_if(
+        merged.references.begin(), merged.references.end(),
+        [](const FalloutPlacedReference& reference) {
+            return reference.formId == 0x04000020u;
+        });
+    expectTrue(mergedDoor != merged.references.end() && mergedDoor->hasTeleport &&
+                   mergedDoor->teleportTargetCellEditorId == "Almas Thirr, Canalworks" &&
+                   mergedDoor->teleportPosition[2] == 60.0f,
+               "TES3 DODT/DNAM load-door destination survives merged extraction");
+    odai::importer::ImportedScene tes3DoorScene;
+    appendResolvedDoors(merged, index, tes3DoorScene);
+    expectTrue(tes3DoorScene.doors.size() == 1u &&
+                   tes3DoorScene.doors.front().targetKind ==
+                       odai::importer::ImportedSceneDoorTargetKind::Interior &&
+                   tes3DoorScene.doors.front().targetCellEditorId ==
+                       "almas thirr, canalworks" &&
+                   tes3DoorScene.doors.front().arrivalPosition[1] == 60.0f,
+               "TES3 named-cell load doors resolve to runtime transitions");
     expectTrue(std::any_of(merged.references.begin(), merged.references.end(),
                    [](const FalloutPlacedReference& reference) {
                        return reference.formId == 0x04000020u &&
@@ -5481,10 +5509,13 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
 
     constexpr std::uint32_t kRace = 0x100u;
     constexpr std::uint32_t kOutfit = 0x200u;
+    constexpr std::uint32_t kSkin = 0x201u;
     constexpr std::uint32_t kChoiceList = 0x300u;
     constexpr std::uint32_t kSetList = 0x301u;
     constexpr std::uint32_t kNpc = 0x600u;
     constexpr std::uint32_t kPlacement = 0x700u;
+    constexpr std::uint32_t kSkinHandsAddon = 0x510u;
+    constexpr std::uint32_t kSkinCoveredTorsoAddon = 0x511u;
     const std::uint32_t armorIds[] = {0x400u, 0x401u, 0x402u, 0x403u};
     const std::uint32_t addonIds[] = {0x500u, 0x501u, 0x502u, 0x503u};
     const char* models[] = {
@@ -5516,6 +5547,7 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
 
     std::vector<std::uint8_t> raceSubs;
     append(raceSubs, buildSubrecord("EDID", stringPayload("GuardRace")));
+    append(raceSubs, buildSubrecord("WNAM", u32Payload(kSkin)));
     append(raceSubs, buildSubrecord("MNAM", {}));
     append(raceSubs, buildSubrecord(
         "ANAM", stringPayload("Actors\\Character\\Character Assets\\skeleton.nif")));
@@ -5523,6 +5555,22 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
     append(raceSubs, buildSubrecord(
         "ANAM", stringPayload("Actors\\Character\\Character Assets Female\\skeleton_female.nif")));
     appendGroup("RACE", buildRecord("RACE", kRace, 0u, raceSubs));
+
+    std::vector<std::uint8_t> skinSubs;
+    append(skinSubs, buildSubrecord("EDID", stringPayload("SkinNakedTest")));
+    append(skinSubs, buildSubrecord("MODL", u32Payload(kSkinHandsAddon)));
+    append(skinSubs, buildSubrecord("MODL", u32Payload(kSkinCoveredTorsoAddon)));
+    appendGroup("ARMO", buildRecord("ARMO", kSkin, 0u, skinSubs));
+    for (const auto& [addonId, slot, model] : {
+             std::tuple{kSkinHandsAddon, 1u << 5, "Actors\\Character\\MaleHands_1.nif"},
+             std::tuple{kSkinCoveredTorsoAddon, 1u << 2, "Actors\\Character\\MaleBody_1.nif"}}) {
+        std::vector<std::uint8_t> addonSubs;
+        append(addonSubs, buildSubrecord("EDID", stringPayload("SkinAddonTest")));
+        append(addonSubs, buildSubrecord("BODT", u32Payload(slot)));
+        append(addonSubs, buildSubrecord("RNAM", u32Payload(kRace)));
+        append(addonSubs, buildSubrecord("MOD2", stringPayload(model)));
+        appendGroup("ARMA", buildRecord("ARMA", addonId, 0u, addonSubs));
+    }
 
     for (std::size_t i = 0; i < 4u; ++i) {
         std::vector<std::uint8_t> armorSubs;
@@ -5533,6 +5581,7 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
 
         std::vector<std::uint8_t> addonSubs;
         append(addonSubs, buildSubrecord("EDID", stringPayload("GuardArmorAddon")));
+        append(addonSubs, buildSubrecord("BODT", u32Payload(1u << i)));
         append(addonSubs, buildSubrecord("RNAM", u32Payload(kRace)));
         append(addonSubs, buildSubrecord("MOD2", stringPayload(models[i])));
         appendGroup("ARMA", buildRecord("ARMA", addonIds[i], 0u, addonSubs));
@@ -5593,9 +5642,10 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
         resolved.skeletonPath == "Actors\\Character\\Character Assets\\skeleton.nif",
         "Skyrim uses the RACE ANAM skeleton rather than an NPC/Fallout fallback");
     std::vector<std::string> expectedParts(std::begin(models), std::end(models));
+    expectedParts.push_back("Actors\\Character\\MaleHands_1.nif");
     expectedParts.push_back(faceGeometry);
     expectTrue(resolved.bodyPartPaths == expectedParts,
-               "Skyrim expands the outfit and appends the NPC's generated FaceGen mesh");
+               "Skyrim expands the outfit, fills uncovered default-skin slots, and appends FaceGen");
     expectTrue(
         resolved.wornArmorFormIds.size() == 4u,
         "the outer leveled list chooses one set while the inner use-all list wears every piece");

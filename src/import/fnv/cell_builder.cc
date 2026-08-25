@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -28,13 +29,45 @@ void appendResolvedDoors(
         }
         return std::string{};
     };
+    const auto lowerAscii = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return value;
+    };
     for (const FalloutPlacedReference& ref : record.references) {
         if (!ref.hasTeleport || ref.isDeleted || (ref.recordFlags & 0x00000800u) != 0u) continue;
-        const auto target = index.cellIndexByReferenceFormId.find(ref.teleportTargetRefFormId);
-        if (target == index.cellIndexByReferenceFormId.end() || target->second >= index.cells.size()) {
-            continue;
+        std::size_t targetCellIndex = index.cells.size();
+        if (ref.teleportTargetRefFormId != 0u) {
+            const auto target = index.cellIndexByReferenceFormId.find(ref.teleportTargetRefFormId);
+            if (target != index.cellIndexByReferenceFormId.end()) {
+                targetCellIndex = target->second;
+            }
+        } else if (!ref.teleportTargetCellEditorId.empty()) {
+            const std::string wanted = lowerAscii(ref.teleportTargetCellEditorId);
+            for (std::size_t i = 0u; i < index.cells.size(); ++i) {
+                if (index.cells[i].isInterior &&
+                    lowerAscii(index.cells[i].editorId) == wanted) {
+                    targetCellIndex = i;
+                    break;
+                }
+            }
+        } else if (index.cellWorldSize > 0.0f) {
+            const std::int32_t gridX = static_cast<std::int32_t>(
+                std::floor(ref.teleportPosition[0] / index.cellWorldSize));
+            const std::int32_t gridZ = static_cast<std::int32_t>(
+                std::floor(ref.teleportPosition[1] / index.cellWorldSize));
+            for (std::size_t i = 0u; i < index.cells.size(); ++i) {
+                const FalloutCellIndexEntry& candidate = index.cells[i];
+                if (!candidate.isInterior && candidate.hasGridCoords &&
+                    candidate.gridX == gridX && candidate.gridZ == gridZ) {
+                    targetCellIndex = i;
+                    break;
+                }
+            }
         }
-        const FalloutCellIndexEntry& targetCell = index.cells[target->second];
+        if (targetCellIndex >= index.cells.size()) continue;
+        const FalloutCellIndexEntry& targetCell = index.cells[targetCellIndex];
         if (targetCell.isInterior && targetCell.editorId.empty()) continue;
         ImportedSceneDoor door{};
         door.sourceReferenceFormId = ref.formId;

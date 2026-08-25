@@ -78,6 +78,33 @@ int main() {
         });
     assert(clockResult.steps == 3u && calls == 3u && clock.tick() == 3u);
 
+    // Deterministic simulation iteration is a cached identity index, not an
+    // owning copy/sort of every RuntimeObject. Decorative/non-actor residency
+    // must not enter the actor loop, and spawn/destroy must invalidate it.
+    {
+        BethesdaWorld indexed;
+        std::string indexedError;
+        RuntimeObject decoration;
+        decoration.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x100u));
+        decoration.base = makeRecordKey("Skyrim.esm", 0x101u);
+        decoration.kind = RuntimeObjectKind::Item;
+        assert(indexed.addInitialObject(decoration, indexedError));
+        RuntimeObject indexedActor;
+        indexedActor.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x20u));
+        indexedActor.base = makeRecordKey("Skyrim.esm", 0x21u);
+        indexedActor.kind = RuntimeObjectKind::Actor;
+        assert(indexed.addInitialObject(indexedActor, indexedError));
+        assert(indexed.orderedObjectIds().size() == 2u);
+        assert(indexed.orderedActorIds().size() == 1u &&
+               indexed.orderedActorIds().front() == indexedActor.id);
+        WorldCommand destroy;
+        destroy.type = WorldCommandType::Destroy;
+        destroy.target = indexedActor.id;
+        (void)indexed.queue(std::move(destroy));
+        assert(indexed.applyQueuedCommands().applied == 1u);
+        assert(indexed.orderedActorIds().empty());
+    }
+
     BethesdaSession session;
     std::string error;
     assert(session.configure({

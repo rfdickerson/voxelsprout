@@ -152,6 +152,18 @@ Tes3ActorDefinition parseActorDefinition(
             if (!item.empty() && count != 0) {
                 result.inventory.emplace_back(makeTes3RecordKey("REFR", item), count);
             }
+        } else if (sub.type == "AIDT" && sub.data.size() >= 12u) {
+            result.serviceFlags = readU32(sub.data.data() + 8u);
+        } else if (sub.type == "DODT" && sub.data.size() >= 24u) {
+            Tes3ActorDefinition::TravelDestination destination;
+            for (std::size_t axis = 0u; axis < 3u; ++axis) {
+                destination.position[axis] = readF32(sub.data.data() + (axis * 4u));
+                destination.rotationRadians[axis] =
+                    readF32(sub.data.data() + 12u + (axis * 4u));
+            }
+            result.travelDestinations.push_back(std::move(destination));
+        } else if (sub.type == "DNAM" && !result.travelDestinations.empty()) {
+            result.travelDestinations.back().cell = decodedDataString(sub, encoding);
         }
     }
     return result;
@@ -238,6 +250,16 @@ std::string cellId(const EsmRecordView& record, std::string_view encoding) {
     if (interior || !name.empty()) return name;
     if (!hasData) return {};
     return "#" + std::to_string(x) + "," + std::to_string(y);
+}
+
+bool cellIsInterior(const EsmRecordView& record) {
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "FRMR") break;
+        if (sub.type == "DATA" && sub.size >= 4u) {
+            return (readU32(sub.data) & 0x1u) != 0u;
+        }
+    }
+    return false;
 }
 
 std::string recordId(const EsmRecordView& record, std::string_view encoding) {
@@ -400,7 +422,7 @@ RecordKey referenceOwnerKey(
 
 void parseCellReferences(
     const EsmRecordView& record, const RecordKey& cell, const FalloutLoadOrder& order,
-    std::size_t pluginIndex, std::string_view encoding, const std::string& plugin,
+    bool interior, std::size_t pluginIndex, std::string_view encoding, const std::string& plugin,
     std::map<ObjectId, Tes3ReferenceDefinition>& references, Tes3ContentStats& stats) {
     std::optional<Tes3ReferenceDefinition> current;
     const auto flush = [&]() {
@@ -421,6 +443,7 @@ void parseCellReferences(
             current.emplace();
             current->id = ObjectId::persistent(referenceOwnerKey(order, pluginIndex, readU32(sub.data)));
             current->cell = cell;
+            current->interior = interior;
             current->sourcePlugin = plugin;
             current->subrecords.push_back(copySubrecord(sub));
             continue;
@@ -601,7 +624,7 @@ bool Tes3ContentStore::load(
                 m_globals.insert_or_assign(key, parseGlobal(record, m_encoding, entry.header.fileName));
                 ++m_stats.globals;
             } else if (record.type == "CELL") {
-                parseCellReferences(record, key, order, pluginIndex, m_encoding,
+                parseCellReferences(record, key, order, cellIsInterior(record), pluginIndex, m_encoding,
                     entry.header.fileName, m_references, m_stats);
             }
         };

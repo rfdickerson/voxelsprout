@@ -112,6 +112,11 @@ struct Tes3GlobalDefinition {
 };
 
 struct Tes3ActorDefinition {
+    struct TravelDestination {
+        std::string cell;
+        float position[3] = {};
+        float rotationRadians[3] = {};
+    };
     RecordKey record;
     std::string id;
     std::string name;
@@ -128,6 +133,8 @@ struct Tes3ActorDefinition {
     std::map<std::string, float> skills;
     bool creature = false;
     bool autoCalculate = false;
+    std::uint32_t serviceFlags = 0u;
+    std::vector<TravelDestination> travelDestinations;
     std::vector<std::pair<RecordKey, std::int32_t>> inventory;
     std::string sourcePlugin;
 };
@@ -171,6 +178,9 @@ struct Tes3NamedRecord {
 struct Tes3ReferenceDefinition {
     ObjectId id;
     RecordKey cell;
+    // Named TES3 exterior cells (Balmora, Ald'ruhn, etc.) do not use the
+    // synthetic "#x,y" identity, so the CELL flag must remain explicit.
+    bool interior = false;
     RecordKey base;
     std::string baseId;
     bool enabled = true;

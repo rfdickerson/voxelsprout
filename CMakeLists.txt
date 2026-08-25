@@ -336,10 +336,10 @@ if(ODAI_BUILD_RUNTIME)
     odai_warnings(odai_traversal)
 
     add_executable(odai
-        src/games/newvegas/newvegas_main.cc src/games/newvegas/newvegas_app.cc
-        src/games/newvegas/newvegas_collision.cc src/games/newvegas/newvegas_navigation.cc
+        src/games/newvegas/newvegas_main.cc src/games/newvegas/bethesda_app.cc
+        src/games/newvegas/bethesda_collision.cc src/bethesda/navigation_world.cc
         src/games/newvegas/newvegas_ogg.cc src/games/newvegas/newvegas_victor.cc
-        src/games/newvegas/newvegas_actors.cc src/import/fnv/cell_streamer.cc
+        src/games/newvegas/bethesda_actors.cc src/import/fnv/cell_streamer.cc
         src/engine/game_app.cc)
     target_include_directories(odai PRIVATE src ${Stb_INCLUDE_DIR})
     target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
@@ -442,15 +442,24 @@ if(BUILD_TESTING)
     odai_plain_test(odai_tes3_runtime_tests tests/tes3_runtime_tests.cc)
     target_link_libraries(odai_tes3_runtime_tests PRIVATE odai_bethesda_runtime)
 
-    odai_plain_test(odai_navigation_tests tests/newvegas_navigation_tests.cc)
+    odai_plain_test(odai_navigation_tests tests/navigation_world_tests.cc)
     target_sources(odai_navigation_tests PRIVATE
-        src/games/newvegas/newvegas_navigation.cc)
+        src/bethesda/navigation_world.cc)
     target_link_libraries(odai_navigation_tests PRIVATE odai_bethesda_import)
 
-    odai_plain_test(odai_actor_movement_tests tests/newvegas_actor_movement_tests.cc)
+    odai_plain_test(odai_tes3_navigation_simulation_tests
+        tests/tes3_navigation_simulation_tests.cc)
+    target_sources(odai_tes3_navigation_simulation_tests PRIVATE
+        src/bethesda/navigation_world.cc
+        src/bethesda/navigation_simulation.cc
+        src/games/newvegas/bethesda_collision.cc)
+    target_link_libraries(odai_tes3_navigation_simulation_tests PRIVATE
+        odai_bethesda_runtime)
+
+    odai_plain_test(odai_actor_movement_tests tests/bethesda_actor_movement_tests.cc)
     target_sources(odai_actor_movement_tests PRIVATE
-        src/games/newvegas/newvegas_actors.cc
-        src/games/newvegas/newvegas_navigation.cc
+        src/games/newvegas/bethesda_actors.cc
+        src/bethesda/navigation_world.cc
         src/games/newvegas/newvegas_ogg.cc)
     target_include_directories(odai_actor_movement_tests PRIVATE ${Stb_INCLUDE_DIR})
     target_link_libraries(odai_actor_movement_tests PRIVATE

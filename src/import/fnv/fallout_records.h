@@ -367,6 +367,10 @@ struct FalloutPlacedReference {
     // is what FalloutSceneData::cellIndexByReferenceFormId exists for.
     bool hasTeleport = false;
     std::uint32_t teleportTargetRefFormId = 0;
+    // TES3 DODT/DNAM names the destination CELL directly instead of pointing
+    // at a paired door reference. Empty DNAM means an exterior destination,
+    // selected from the DODT world position.
+    std::string teleportTargetCellEditorId;
     float teleportPosition[3] = {};
     float teleportRotationRadians[3] = {};
     // XLOC. Exploration mode exposes the authored lock but may deliberately

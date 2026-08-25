@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -247,6 +248,12 @@ public:
 
     [[nodiscard]] RuntimeObject* find(const ObjectId& id);
     [[nodiscard]] const RuntimeObject* find(const ObjectId& id) const;
+    // Stable deterministic identities, cached until residency changes. Runtime
+    // simulation should iterate these and resolve only the objects it needs;
+    // orderedObjects() intentionally remains the owning snapshot used by saves
+    // and hashing, where copying is required rather than a 60 Hz accident.
+    [[nodiscard]] std::span<const ObjectId> orderedObjectIds() const;
+    [[nodiscard]] std::span<const ObjectId> orderedActorIds() const;
     [[nodiscard]] std::vector<RuntimeObject> orderedObjects() const;
     [[nodiscard]] std::uint64_t deterministicHash() const;
     [[nodiscard]] std::size_t size() const { return m_objects.size(); }
@@ -261,8 +268,14 @@ public:
     void clear();
 
 private:
+    void invalidateOrderedIds();
+    void refreshOrderedIds() const;
+
     std::unordered_map<ObjectId, RuntimeObject, ObjectIdHash> m_objects;
     std::vector<WorldCommand> m_commands;
+    mutable std::vector<ObjectId> m_orderedObjectIds;
+    mutable std::vector<ObjectId> m_orderedActorIds;
+    mutable bool m_orderedIdsDirty = true;
     std::uint64_t m_nextRuntimeId = 1u;
     std::uint64_t m_nextCommandSequence = 1u;
 };

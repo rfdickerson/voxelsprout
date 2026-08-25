@@ -1,4 +1,4 @@
-#include "games/newvegas/newvegas_collision.h"
+#include "games/newvegas/bethesda_collision.h"
 
 #include <algorithm>
 #include <cmath>
@@ -328,6 +328,25 @@ bool CollisionWorld::groundHeight(
         return false;
     }
     outHeight = height;
+    return true;
+}
+
+bool CollisionWorld::recoverFeetAboveIntersectingFloor(
+    float worldX,
+    float worldZ,
+    float feetY,
+    float headY,
+    float stepHeight,
+    float& outFeetY
+) const {
+    if (!(headY > feetY) || stepHeight < 0.0f) return false;
+    float surfaceY = 0.0f;
+    // groundHeight accepts a feet reference and searches through
+    // reference+stepHeight. Shift that reference so this recovery query's
+    // explicit ceiling is the top of the capsule.
+    if (!groundHeight(worldX, worldZ, headY - stepHeight, surfaceY)) return false;
+    if (surfaceY <= feetY + stepHeight || surfaceY >= headY) return false;
+    outFeetY = surfaceY;
     return true;
 }
 

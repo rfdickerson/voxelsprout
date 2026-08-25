@@ -107,6 +107,10 @@ public:
         std::span<const std::uint32_t> triangleIndices, std::string& outError);
     bool removeStreamedStaticCollision(std::uint64_t residencyToken);
     void clearStreamedStaticCollision();
+    // Streamed cells are added one at a time, but rebuilding Jolt's broad
+    // phase after every body turns an 81-cell preload into 81 global rebuilds.
+    // The residency owner calls this once after a batch/ring settles.
+    void optimizeBroadPhase();
     bool addCharacter(ObjectId object, const PhysicsCharacterConfig& config, std::string& outError);
     bool removeCharacter(ObjectId object);
     bool setCharacterInput(ObjectId object, const PhysicsCharacterInput& input);
