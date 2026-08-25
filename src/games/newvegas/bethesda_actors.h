@@ -19,6 +19,7 @@
 #include "import/fnv/character_builder.h"
 #include "import/imported_scene.h"
 #include "bethesda/navigation_world.h"
+#include "bethesda/runtime_ids.h"
 #include "math/math.h"
 
 #include <cstdint>
@@ -119,6 +120,9 @@ struct SkinnedActor {
     // The placed ACHR/ACRE reference after load-order remapping. This is the
     // persistent gameplay identity; baseFormId identifies what the actor is.
     std::uint32_t referenceFormId = 0;
+    // Unified runtime identity. TES3 placements are FRMR ObjectIds and have no
+    // numeric form ID; later games lazily derive this from referenceFormId.
+    odai::bethesda::ObjectId runtimeObjectId;
     std::vector<std::uint32_t> referenceTypeFormIds;
     // Deterministically materialized CNTO inventory. LVLI tokens are expanded
     // during actor construction so runtime never exposes a list record as if

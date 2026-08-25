@@ -114,6 +114,11 @@ public:
     bool addCharacter(ObjectId object, const PhysicsCharacterConfig& config, std::string& outError);
     bool removeCharacter(ObjectId object);
     bool setCharacterInput(ObjectId object, const PhysicsCharacterInput& input);
+    // Adds an instantaneous velocity change without replacing locomotion
+    // intent. This is the fixed-tick entry point for knockback, explosions and
+    // shoves; gravity continues the resulting fall after support is lost.
+    bool addCharacterImpulse(
+        ObjectId object, const odai::math::Vector3& velocityChange);
     [[nodiscard]] bool hasCharacter(ObjectId object) const;
     // Steps every registered character in stable ObjectId order and then the
     // Jolt world. Results are the only transforms animation/gameplay may apply.

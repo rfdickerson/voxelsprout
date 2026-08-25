@@ -260,6 +260,11 @@ bool BethesdaSession::setActorControllerInput(
     return m_physics.setCharacterInput(object, input);
 }
 
+bool BethesdaSession::addActorImpulse(
+    ObjectId object, const odai::math::Vector3& velocityChange) {
+    return m_physics.addCharacterImpulse(object, velocityChange);
+}
+
 bool BethesdaSession::setActorAnimationInput(
     ObjectId object, odai::anim::AnimationInputState input) {
     const auto found = m_actorAnimations.find(object);
@@ -334,6 +339,15 @@ MeleeAttackResult BethesdaSession::performMeleeAttack(
         hit.actorValue = ActorValue::Health;
         hit.actorValueDelta = -damage;
         (void)m_world.queue(std::move(hit));
+        // A strike changes physical momentum as well as actor values. Because
+        // this lands on CharacterVirtual's external velocity channel, it can
+        // carry the target beyond a ledge and gravity owns the rest of the
+        // fall instead of navigation snapping them back onto the mesh.
+        const odai::math::Vector3 strikeDirection = odai::math::normalize(forward);
+        const float horizontalKick = std::clamp(160.0f + damage * 8.0f, 200.0f, 520.0f);
+        (void)m_physics.addCharacterImpulse(candidate.object,
+            {strikeDirection.x * horizontalKick, 150.0f,
+             strikeDirection.z * horizontalKick});
         if (result.killed) {
             for (const auto& [questName, questState] : m_quests) {
                 (void)questName;

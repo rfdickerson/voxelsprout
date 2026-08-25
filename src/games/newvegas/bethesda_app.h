@@ -231,6 +231,8 @@ protected:
     void pullBethesdaActorControllerStates();
     void stepBethesdaActorControllers(float fixedDeltaSeconds);
     void submitBethesdaActorControllerIntents();
+    [[nodiscard]] std::optional<bethesda::ObjectId> runtimeObjectIdForActor(
+        const SkinnedActor& actor) const;
     void syncBethesdaPlayerState(bool applyNow);
     void syncBethesdaActors(bool addMissing, bool applyNow);
     void restoreBethesdaActorsFromSession();

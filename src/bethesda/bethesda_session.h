@@ -189,6 +189,7 @@ public:
     bool unregisterActorController(ObjectId object);
     bool unregisterActorAnimation(ObjectId object);
     bool setActorControllerInput(ObjectId object, const PhysicsCharacterInput& input);
+    bool addActorImpulse(ObjectId object, const odai::math::Vector3& velocityChange);
     bool setActorAnimationInput(ObjectId object, odai::anim::AnimationInputState input);
     bool queueActorAnimationEvent(ObjectId object, odai::anim::AnimationEvent event);
     // Must be called from BeforeSimulationTick (or another fixed-tick system).

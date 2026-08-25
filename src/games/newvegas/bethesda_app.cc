@@ -7038,26 +7038,20 @@ void BethesdaApp::onTick(float deltaSeconds) {
                     stepBethesdaActorControllers(
                         static_cast<float>(fixedStepSeconds));
                     if (m_meleeAttackPending) {
-                        const bethesda::ScenarioDefinition* scenario =
-                            bethesda::findScenario(m_scenarioId);
-                        if (scenario != nullptr) {
-                            const float yaw = m_yawDegrees * (kPi / 180.0f);
-                            const float pitch = m_pitchDegrees * (kPi / 180.0f);
-                            const float horizontal = std::cos(pitch);
-                            const bethesda::MeleeAttackResult attack =
-                                m_bethesdaSession.performMeleeAttack(
-                                    bethesda::ObjectId::persistent(
-                                        bethesda::makeRecordKey(
-                                            scenario->basePlugin, 0x14u)),
-                                    {std::cos(yaw) * horizontal, std::sin(pitch),
-                                        std::sin(yaw) * horizontal});
-                            if (attack.accepted) {
-                                m_toasts.push(
-                                    attack.hit ? (attack.killed ? "Enemy defeated" : "Hit")
-                                               : "Attack missed",
-                                    attack.hit ? attack.target.toString() : std::string{},
-                                    "melee-attack");
-                            }
+                        const float yaw = m_yawDegrees * (kPi / 180.0f);
+                        const float pitch = m_pitchDegrees * (kPi / 180.0f);
+                        const float horizontal = std::cos(pitch);
+                        const bethesda::MeleeAttackResult attack =
+                            m_bethesdaSession.performMeleeAttack(
+                                m_bethesdaSession.playerObject(),
+                                {std::cos(yaw) * horizontal, std::sin(pitch),
+                                    std::sin(yaw) * horizontal});
+                        if (attack.accepted) {
+                            m_toasts.push(
+                                attack.hit ? (attack.killed ? "Enemy defeated" : "Hit")
+                                           : "Attack missed",
+                                attack.hit ? attack.target.toString() : std::string{},
+                                "melee-attack");
                         }
                         m_meleeAttackPending = false;
                     }
@@ -8373,6 +8367,7 @@ bool BethesdaApp::initBethesdaSession() {
             SkinnedActor actor;
             actor.name = definition->second.id;
             actor.fullName = definition->second.name;
+            actor.runtimeObjectId = referenceId;
             actor.position[0] = engineX;
             actor.position[1] = engineY;
             actor.position[2] = engineZ;
@@ -8381,6 +8376,40 @@ bool BethesdaApp::initBethesdaSession() {
             actor.humanoid = !definition->second.creature;
             actor.placed = true;
             actor.renderVisible = true;
+            if (m_bethesdaSession.world().find(referenceId) == nullptr) {
+                bethesda::RuntimeObject object;
+                object.id = referenceId;
+                object.base = definition->second.record;
+                object.kind = bethesda::RuntimeObjectKind::Actor;
+                object.transform.position = {engineX, engineY, engineZ};
+                object.transform.rotationRadians[1] = actor.yawRadians;
+                object.enabled = true;
+                object.persistent = true;
+                object.interior = reference.interior;
+                object.actorValues.emplace();
+                object.actorValues->health = definition->second.health;
+                object.actorValues->magicka = definition->second.magicka;
+                object.actorValues->stamina = definition->second.fatigue;
+                object.actorValues->maxHealth = definition->second.health;
+                object.actorValues->maxMagicka = definition->second.magicka;
+                object.actorValues->maxStamina = definition->second.fatigue;
+                for (const auto& [item, count] : definition->second.inventory) {
+                    object.inventory.push_back({item, count, false});
+                }
+                const float enginePosition[3] = {engineX, engineY, engineZ};
+                bethesda::RuntimeSpaceState space;
+                if (runtimeSpaceForPosition(enginePosition, space)) {
+                    object.originSpace = space;
+                    object.currentSpace = std::move(space);
+                }
+                std::string runtimeError;
+                if (!m_bethesdaSession.world().addInitialObject(
+                        std::move(object), runtimeError)) {
+                    VOX_LOGW("tes3") << "could not register placed actor "
+                                      << actor.name << ": " << runtimeError;
+                    actor.runtimeObjectId = {};
+                }
+            }
             m_actors.push_back(std::move(actor));
         }
         std::sort(m_actors.begin(), m_actors.end(), [&](const SkinnedActor& left,
@@ -8828,16 +8857,26 @@ void BethesdaApp::relocateBethesdaPlayerControllerToCamera() {
     syncBethesdaPlayerState(true);
 }
 
+std::optional<bethesda::ObjectId> BethesdaApp::runtimeObjectIdForActor(
+    const SkinnedActor& actor) const {
+    if (actor.runtimeObjectId.valid()) return actor.runtimeObjectId;
+    if (actor.referenceFormId == 0u) return std::nullopt;
+    bethesda::RecordKey reference;
+    std::string error;
+    if (!bethesda::stableRecordKey(
+            m_streamLoadOrder, actor.referenceFormId, reference, error)) {
+        return std::nullopt;
+    }
+    return bethesda::ObjectId::persistent(std::move(reference));
+}
+
 void BethesdaApp::unregisterBethesdaActorControllers() {
     if (!m_bethesdaSessionConfigured) return;
     for (SkinnedActor& actor : m_actors) {
         actor.runtimeRequestedVelocity = {};
-        if (actor.referenceFormId == 0u) continue;
-        bethesda::RecordKey reference;
-        std::string error;
-        if (!bethesda::stableRecordKey(
-                m_streamLoadOrder, actor.referenceFormId, reference, error)) continue;
-        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        const std::optional<bethesda::ObjectId> resolved = runtimeObjectIdForActor(actor);
+        if (!resolved.has_value()) continue;
+        const bethesda::ObjectId& id = *resolved;
         if (m_bethesdaSession.physics().hasCharacter(id)) {
             (void)m_bethesdaSession.unregisterActorController(id);
         }
@@ -8850,12 +8889,9 @@ void BethesdaApp::unregisterBethesdaActorControllers() {
 void BethesdaApp::pullBethesdaActorControllerStates() {
     if (!m_bethesdaSessionConfigured) return;
     for (SkinnedActor& actor : m_actors) {
-        if (actor.referenceFormId == 0u) continue;
-        bethesda::RecordKey reference;
-        std::string error;
-        if (!bethesda::stableRecordKey(
-                m_streamLoadOrder, actor.referenceFormId, reference, error)) continue;
-        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        const std::optional<bethesda::ObjectId> resolved = runtimeObjectIdForActor(actor);
+        if (!resolved.has_value()) continue;
+        const bethesda::ObjectId& id = *resolved;
         const auto physical = m_bethesdaSession.physics().characterState(id);
         if (!physical.has_value()) {
             actor.runtimeControllerOwned = false;
@@ -8873,13 +8909,9 @@ void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
     if (!m_bethesdaSessionConfigured) return;
     pullBethesdaActorControllerStates();
     for (SkinnedActor& actor : m_actors) {
-        if (actor.referenceFormId == 0u) continue;
-        bethesda::RecordKey reference;
-        std::string error;
-        if (!bethesda::stableRecordKey(
-                m_streamLoadOrder, actor.referenceFormId, reference, error)) continue;
-        const bethesda::RuntimeObject* runtime = m_bethesdaSession.world().find(
-            bethesda::ObjectId::persistent(std::move(reference)));
+        const std::optional<bethesda::ObjectId> id = runtimeObjectIdForActor(actor);
+        if (!id.has_value()) continue;
+        const bethesda::RuntimeObject* runtime = m_bethesdaSession.world().find(*id);
         actor.runtimeDead = runtime != nullptr && runtime->actorValues.has_value() &&
             runtime->actorValues->dead;
         if (actor.runtimeDead) {
@@ -8909,16 +8941,44 @@ void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
 
 void BethesdaApp::submitBethesdaActorControllerIntents() {
     if (!m_bethesdaSessionConfigured) return;
+    // Jolt's CharacterVsCharacterCollisionSimple deliberately checks every
+    // registered virtual character against every other one. Keep that exact
+    // collision set local to the player while distant city residents continue
+    // on the navmesh. Separate enter/exit radii prevent controller churn at
+    // the boundary and keep hundreds of visible actors practical.
+    constexpr float kPhysicsEnterRadius = 2400.0f;
+    constexpr float kPhysicsExitRadius = 2800.0f;
+    odai::math::Vector3 playerPosition{
+        m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+    if (const auto player = m_bethesdaSession.physics().characterState(
+            m_bethesdaSession.playerObject())) {
+        playerPosition = player->position;
+    }
     for (SkinnedActor& actor : m_actors) {
-        if (actor.referenceFormId == 0u) continue;
-        bethesda::RecordKey reference;
-        std::string identityError;
-        if (!bethesda::stableRecordKey(
-                m_streamLoadOrder, actor.referenceFormId, reference, identityError)) continue;
-        const bethesda::ObjectId id = bethesda::ObjectId::persistent(std::move(reference));
+        const std::optional<bethesda::ObjectId> resolved = runtimeObjectIdForActor(actor);
+        if (!resolved.has_value()) continue;
+        const bethesda::ObjectId& id = *resolved;
         if (m_bethesdaSession.world().find(id) == nullptr) continue;
 
-        if (!m_bethesdaSession.physics().hasCharacter(id)) {
+        const float dx = actor.position[0] - playerPosition.x;
+        const float dz = actor.position[2] - playerPosition.z;
+        const float distanceSquared = (dx * dx) + (dz * dz);
+        const bool hasController = m_bethesdaSession.physics().hasCharacter(id);
+        const float activeRadius = hasController
+            ? kPhysicsExitRadius : kPhysicsEnterRadius;
+        if (distanceSquared > activeRadius * activeRadius) {
+            if (hasController) {
+                // This is proximity residency, not save-state residency. The
+                // runtime object's synchronized transform is authoritative;
+                // re-entry builds a fresh controller at the navmesh position.
+                (void)m_bethesdaSession.physics().removeCharacter(id);
+            }
+            actor.runtimeControllerOwned = false;
+            actor.runtimeControllerBlocked = false;
+            continue;
+        }
+
+        if (!hasController) {
             const float height = std::clamp(
                 actor.standingHeightUnits > 1.0f ? actor.standingHeightUnits : 128.0f,
                 48.0f, 256.0f);
@@ -9230,14 +9290,9 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
 void BethesdaApp::restoreBethesdaActorsFromSession() {
     if (!m_bethesdaSessionConfigured || m_streamLoadOrder.empty()) return;
     for (SkinnedActor& actor : m_actors) {
-        bethesda::RecordKey reference;
-        std::string error;
-        if (actor.referenceFormId == 0u ||
-            !bethesda::stableRecordKey(m_streamLoadOrder, actor.referenceFormId, reference, error)) {
-            continue;
-        }
-        const bethesda::RuntimeObject* object = m_bethesdaSession.world().find(
-            bethesda::ObjectId::persistent(std::move(reference)));
+        const std::optional<bethesda::ObjectId> id = runtimeObjectIdForActor(actor);
+        if (!id.has_value()) continue;
+        const bethesda::RuntimeObject* object = m_bethesdaSession.world().find(*id);
         if (object == nullptr) continue;
         actor.position[0] = static_cast<float>(object->transform.position[0]);
         actor.position[1] = static_cast<float>(object->transform.position[1]);

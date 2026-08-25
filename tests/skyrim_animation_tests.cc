@@ -149,6 +149,63 @@ void testJoltCharacterGroundingAndSnapshot() {
     assert(world.characterState(actor)->position.y < 40.0f);
 }
 
+void testJoltCharactersBlockEachOther() {
+    using namespace odai::bethesda;
+    BethesdaPhysicsWorld world;
+    std::string error;
+    assert(world.initialize(error));
+    const std::vector<odai::math::Vector3> vertices{
+        {-500.0f, 0.0f, -500.0f}, {500.0f, 0.0f, -500.0f},
+        {500.0f, 0.0f, 500.0f}, {-500.0f, 0.0f, 500.0f}};
+    const std::vector<std::uint32_t> indices{0u, 1u, 2u, 0u, 2u, 3u};
+    assert(world.addStreamedStaticCollision(18u, vertices, indices, error));
+
+    const ObjectId player = ObjectId::runtime(70u);
+    const ObjectId actor = ObjectId::runtime(71u);
+    PhysicsCharacterConfig config;
+    config.position = {0.0f, 0.0f, 0.0f};
+    assert(world.addCharacter(player, config, error));
+    config.position = {100.0f, 0.0f, 0.0f};
+    assert(world.addCharacter(actor, config, error));
+    for (int tick = 0; tick < 30; ++tick) world.step(1.0f / 60.0f);
+
+    PhysicsCharacterInput input;
+    input.desiredVelocity = {200.0f, 0.0f, 0.0f};
+    assert(world.setCharacterInput(player, input));
+    for (int tick = 0; tick < 60; ++tick) world.step(1.0f / 60.0f);
+    const auto playerState = world.characterState(player);
+    const auto actorState = world.characterState(actor);
+    assert(playerState.has_value() && actorState.has_value());
+    assert(playerState->position.x < actorState->position.x);
+    assert((actorState->position.x - playerState->position.x) > 40.0f);
+}
+
+void testJoltImpulseCanCarryCharacterOffLedge() {
+    using namespace odai::bethesda;
+    BethesdaPhysicsWorld world;
+    std::string error;
+    assert(world.initialize(error));
+    const std::vector<odai::math::Vector3> ledge{
+        {-200.0f, 0.0f, -200.0f}, {80.0f, 0.0f, -200.0f},
+        {80.0f, 0.0f, 200.0f}, {-200.0f, 0.0f, 200.0f}};
+    const std::vector<std::uint32_t> indices{0u, 1u, 2u, 0u, 2u, 3u};
+    assert(world.addStreamedStaticCollision(19u, ledge, indices, error));
+    const ObjectId actor = ObjectId::runtime(72u);
+    PhysicsCharacterConfig config;
+    config.position = {0.0f, 0.0f, 0.0f};
+    assert(world.addCharacter(actor, config, error));
+    for (int tick = 0; tick < 30; ++tick) world.step(1.0f / 60.0f);
+    assert(world.characterState(actor)->grounded);
+
+    assert(world.addCharacterImpulse(actor, {500.0f, 150.0f, 0.0f}));
+    for (int tick = 0; tick < 120; ++tick) world.step(1.0f / 60.0f);
+    const auto state = world.characterState(actor);
+    assert(state.has_value());
+    assert(state->position.x > 80.0f);
+    assert(state->position.y < -20.0f);
+    assert(state->falling);
+}
+
 void testJoltOverlappingRetailCollisionWarningIsRecoverable() {
     using namespace odai::bethesda;
     BethesdaPhysicsWorld world;
@@ -236,6 +293,8 @@ int main() {
     testHkxInspection();
     testRigBindingAndGraphSnapshot();
     testJoltCharacterGroundingAndSnapshot();
+    testJoltCharactersBlockEachOther();
+    testJoltImpulseCanCarryCharacterOffLedge();
     testJoltOverlappingRetailCollisionWarningIsRecoverable();
     testSessionFixedTickAndSaveContinuation();
     std::cout << "Skyrim animation/Jolt tests passed\n";

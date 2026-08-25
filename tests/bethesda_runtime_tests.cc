@@ -368,6 +368,9 @@ int main() {
                spent->combatState.has_value() &&
                spent->combatState->nextMeleeAttackTick == 24u &&
                spent->combatState->lastTarget == target.id);
+        const auto knockedBack = combat.physics().characterState(target.id);
+        assert(knockedBack.has_value() &&
+               (knockedBack->position.x > 100.0f || knockedBack->position.y > 0.0f));
         MeleeAttackResult cooldown;
         (void)combat.advance(1.0 / 60.0,
             [&](std::uint64_t, double) {

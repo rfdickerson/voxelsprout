@@ -101,6 +101,7 @@ public:
         JPH::Ref<JPH::CharacterVirtual> character;
         PhysicsCharacterInput input;
         PhysicsCharacterStep last;
+        JPH::Vec3 externalVelocity = JPH::Vec3::sZero();
         float stepHeightMetres = 0.25f;
         float centreOffsetMetres = 0.0f;
     };
@@ -335,6 +336,18 @@ bool BethesdaPhysicsWorld::setCharacterInput(ObjectId object, const PhysicsChara
     return true;
 }
 
+bool BethesdaPhysicsWorld::addCharacterImpulse(
+    ObjectId object, const odai::math::Vector3& velocityChange) {
+    const auto found = m_impl->characters.find(object);
+    if (found == m_impl->characters.end() ||
+        !std::isfinite(velocityChange.x) || !std::isfinite(velocityChange.y) ||
+        !std::isfinite(velocityChange.z)) {
+        return false;
+    }
+    found->second.externalVelocity += toJoltVector(velocityChange);
+    return true;
+}
+
 bool BethesdaPhysicsWorld::hasCharacter(ObjectId object) const {
     return m_impl->characters.contains(object);
 }
@@ -349,8 +362,23 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
         JPH::Vec3 desired = toJoltVector(entry.input.desiredVelocity);
         if (entry.input.animationDriven) desired = toJoltVector(entry.input.rootMotion) / delta;
         const JPH::Vec3 oldVelocity = entry.character->GetLinearVelocity();
-        if (!entry.character->IsSupported()) desired.SetY(oldVelocity.GetY() + gravity.GetY() * delta);
-        else desired += entry.character->GetGroundVelocity();
+        const bool wasSupported = entry.character->IsSupported();
+        if (wasSupported) {
+            // A positive controller Y is a jump request. Move it into the
+            // external channel once so holding jump cannot reapply it in air.
+            if (desired.GetY() > 0.0f) {
+                entry.externalVelocity.SetY(
+                    std::max(entry.externalVelocity.GetY(), desired.GetY()));
+            } else if (entry.externalVelocity.GetY() < 0.0f) {
+                entry.externalVelocity.SetY(0.0f);
+            }
+            desired.SetY(0.0f);
+            desired += entry.character->GetGroundVelocity();
+        } else {
+            desired.SetY(0.0f);
+            entry.externalVelocity.SetY(oldVelocity.GetY() + gravity.GetY() * delta);
+        }
+        desired += entry.externalVelocity;
         const JPH::RVec3 before = entry.character->GetPosition();
         entry.character->SetLinearVelocity(desired);
         JPH::CharacterVirtual::ExtendedUpdateSettings settings;
@@ -375,6 +403,15 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
         const float desiredHorizontal = std::sqrt(desired.GetX() * desired.GetX() + desired.GetZ() * desired.GetZ());
         const float actualHorizontal = std::sqrt(actual.GetX() * actual.GetX() + actual.GetZ() * actual.GetZ());
         entry.last.blocked = desiredHorizontal > 0.1f && actualHorizontal < desiredHorizontal * 0.5f;
+        // Knockback retains momentum in the air but settles quickly on the
+        // ground. Locomotion remains a separate input and is never damped.
+        const float horizontalDamping =
+            std::exp(-(entry.last.grounded ? 3.5f : 0.25f) * delta);
+        entry.externalVelocity.SetX(entry.externalVelocity.GetX() * horizontalDamping);
+        entry.externalVelocity.SetZ(entry.externalVelocity.GetZ() * horizontalDamping);
+        entry.externalVelocity.SetY(entry.last.grounded
+                ? std::max(0.0f, entry.externalVelocity.GetY())
+                : entry.character->GetLinearVelocity().GetY());
         const auto support = m_impl->objectsByUserData.find(entry.character->GetGroundUserData());
         entry.last.supportingObject = support == m_impl->objectsByUserData.end() ?
             std::optional<ObjectId>{} : std::optional<ObjectId>{support->second};
