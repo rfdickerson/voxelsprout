@@ -268,6 +268,10 @@ struct WeatherSkyParams {
     float horizon[3] = {0.0f, 0.0f, 0.0f};    // the skyline itself
     float fogColor[3] = {0.0f, 0.0f, 0.0f};
     float fogFarDistance = 0.0f;              // world units; 0 leaves fog alone
+    // Screen-space precipitation strength derived from the active WTHR
+    // classification. Rain uses 0..1; snow remains zero until it has its own
+    // authored particle path rather than masquerading as rain.
+    float precipitationIntensity = 0.0f;
 
     // Per-layer tint (linear, from PNAM) and coverage, updated per frame
     // because both track time of day. A layer with opacity 0 costs nothing:

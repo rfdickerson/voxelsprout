@@ -10,4 +10,9 @@ namespace odai::games::newvegas {
 
 bool decodeOggToWav(const std::filesystem::path& oggPath, const std::filesystem::path& wavPath);
 
+// Skyrim stores its retail score in Microsoft's xWMA container. The runtime
+// already requires ffmpeg for encoded captures, so use that same decoder to
+// make a cached PCM copy miniaudio can stream.
+bool decodeXwmToWav(const std::filesystem::path& xwmPath, const std::filesystem::path& wavPath);
+
 }  // namespace odai::games::newvegas

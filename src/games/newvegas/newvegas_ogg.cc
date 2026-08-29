@@ -16,9 +16,12 @@
 #include "games/newvegas/newvegas_ogg.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 // stb_vorbis defines these itself; silence the warnings its C sources produce
@@ -38,6 +41,19 @@
 namespace odai::games::newvegas {
 
 namespace {
+
+std::string shellQuote(const std::filesystem::path& path) {
+    std::string quoted = "'";
+    for (const char c : path.string()) {
+        if (c == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted.push_back(c);
+        }
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
 
 void appendU32(std::vector<std::uint8_t>& out, std::uint32_t value) {
     for (int shift = 0; shift < 32; shift += 8) {
@@ -97,6 +113,23 @@ bool decodeOggToWav(
     const bool ok = static_cast<bool>(out);
     std::free(samples);
     return ok;
+}
+
+bool decodeXwmToWav(
+    const std::filesystem::path& xwmPath, const std::filesystem::path& wavPath) {
+    if (xwmPath.empty() || wavPath.empty()) {
+        return false;
+    }
+    std::ostringstream command;
+    command << "ffmpeg -y -hide_banner -loglevel error -i "
+            << shellQuote(xwmPath)
+            << " -vn -acodec pcm_s16le " << shellQuote(wavPath);
+    if (std::system(command.str().c_str()) != 0) {
+        return false;
+    }
+    std::error_code error;
+    return std::filesystem::exists(wavPath, error) && !error &&
+        std::filesystem::file_size(wavPath, error) > 44u && !error;
 }
 
 }  // namespace odai::games::newvegas

@@ -1504,7 +1504,11 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         mvpUniform.weatherHorizon[channel] = m_weatherSky.horizon[channel];
         mvpUniform.weatherFog[channel] = m_weatherSky.fogColor[channel];
     }
-    mvpUniform.weatherSkyLower[3] = 0.0f;
+    // Spare channel: WTHR-driven rain strength. Keeping this in the existing
+    // camera block avoids another descriptor, image, or synchronization edge
+    // for a purely procedural full-screen effect.
+    mvpUniform.weatherSkyLower[3] =
+        std::clamp(m_weatherSky.precipitationIntensity, 0.0f, 1.0f);
     // Spare channel: the weather's sun-glare scale. 1 when no weather is
     // published, which is the look every other game has.
     mvpUniform.weatherHorizon[3] =

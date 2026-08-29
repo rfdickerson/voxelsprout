@@ -3897,7 +3897,13 @@ std::filesystem::path cacheWeatherSound(
     }
     const std::filesystem::path raw = cacheDirectory / leaf;
     std::filesystem::path playable = raw;
-    const bool needsConversion = raw.extension() == ".ogg";
+    std::string extension = raw.extension().string();
+    for (char& c : extension) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const bool needsOggConversion = extension == ".ogg";
+    const bool needsXwmConversion = extension == ".xwm";
+    const bool needsConversion = needsOggConversion || needsXwmConversion;
     if (needsConversion) {
         playable.replace_extension(".wav");
     }
@@ -3918,8 +3924,13 @@ std::filesystem::path cacheWeatherSound(
             reinterpret_cast<const char*>(bytes.data()),
             static_cast<std::streamsize>(bytes.size()));
     }
-    if (needsConversion && !decodeOggToWav(raw, playable)) {
-        return {};
+    if (needsConversion) {
+        const bool converted = needsXwmConversion
+            ? decodeXwmToWav(raw, playable)
+            : decodeOggToWav(raw, playable);
+        if (!converted) {
+            return {};
+        }
     }
     return playable;
 }
@@ -3938,6 +3949,20 @@ void BethesdaApp::initWeatherAudio() {
     const std::filesystem::path audioCache = m_streamCacheDirectory.empty()
         ? std::filesystem::path{}
         : std::filesystem::path(m_streamCacheDirectory) / "audio";
+
+    // A runtime weather change must retire the previous global beds before
+    // starting the next ones. Positional and regional ambience is managed
+    // independently by updateSkyrimAmbience().
+    if (m_rainAmbient.valid()) {
+        m_audio.stopAmbient(m_rainAmbient, 1.0f);
+    }
+    if (m_windAmbient.valid()) {
+        m_audio.stopAmbient(m_windAmbient, 1.0f);
+    }
+    m_rainAmbient = {};
+    m_windAmbient = {};
+    m_rainLoop = {};
+    m_windLoop = {};
 
     // Resolves the first candidate that exists, through the ordinary asset
     // precedence, and caches it as a playable .wav.
@@ -3982,12 +4007,17 @@ void BethesdaApp::initWeatherAudio() {
         const bool heavy = lowered.find("heavy") != std::string::npos ||
             lowered.find("storm") != std::string::npos;
         m_rainLoop = heavy
-            ? loadFirst({"sound\\fx\\weather\\amb_weather_rain_heavy_lp.wav",
+            ? loadFirst({"sound\\fx\\amb\\weather\\rain\\amb_weather_rain_heavy_lp.wav",
+                         "sound\\fx\\amb\\weather\\rain\\amb_weather_rain_medium_lp.wav",
+                         "sound\\fx\\weather\\amb_weather_rain_heavy_lp.wav",
                          "sound\\fx\\weather\\amb_rainstorm_lp.wav",
                          "sound\\fx\\weather\\amb_weather_rain_medium_lp.wav",
                          "sound\\fx\\weather\\nvdlc02_rain-amb.wav"},
                         "rain")
-            : loadFirst({"sound\\fx\\weather\\amb_weather_rain_medium_lp.wav",
+            : loadFirst({"sound\\fx\\amb\\weather\\rain\\amb_weather_rain_medium_lp.wav",
+                         "sound\\fx\\amb\\weather\\rain\\amb_weather_rain_light_lp.wav",
+                         "sound\\fx\\amb\\weather\\rain\\amb_weather_rain_drizzle_lp.wav",
+                         "sound\\fx\\weather\\amb_weather_rain_medium_lp.wav",
                          "sound\\fx\\weather\\amb_weather_rain_light_lp.wav",
                          "sound\\fx\\weather\\amb_rain_lp.wav",
                          "sound\\fx\\weather\\nvdlc02_rain-amb.wav"},
@@ -4013,12 +4043,31 @@ void BethesdaApp::initWeatherAudio() {
         }
     }
 
-    // Skyrim's showcase audio comes from authored regional and placed sound
-    // descriptors.  Do not fall through to Fallout: New Vegas' loose radio
-    // directory: the showcase intentionally has no score or radio, and probing
-    // that directory on every Skyrim capture only produces a misleading
-    // missing-radio warning.
+    // Skyrim ambience comes from authored regional and placed descriptors.
+    // Its score is xWMA in the Sounds BSA; extract and transcode one stable
+    // daytime exploration track into the cache that miniaudio can stream.
     if (m_streamIsSkyrim) {
+        if (!m_musicTrack.valid()) {
+            const char* requested = std::getenv("ODAI_SKYRIM_MUSIC");
+            const std::string virtualPath = requested != nullptr && requested[0] != '\0'
+                ? requested
+                : "music\\explore\\mus_explore_day_01.xwm";
+            std::vector<std::uint8_t> bytes;
+            std::string assetError;
+            if (assets.resolveAsset(virtualPath, bytes, assetError) && !bytes.empty()) {
+                const std::filesystem::path playable =
+                    cacheWeatherSound(virtualPath, bytes, audioCache);
+                if (!playable.empty()) {
+                    m_musicTrack = m_audio.loadMusic(playable);
+                }
+            }
+            if (m_musicTrack.valid()) {
+                m_audio.playMusic(m_musicTrack, 4.0f, true);
+                VOX_LOGI("newvegas") << "Skyrim music: " << virtualPath;
+            } else {
+                VOX_LOGW("newvegas") << "Skyrim music unavailable: " << virtualPath;
+            }
+        }
         return;
     }
 
@@ -4518,6 +4567,13 @@ void BethesdaApp::applyWeather() {
     // separately and there is no third value to interpolate toward.
     const bool daytime = hour >= dawn && hour < dusk;
     params.fogFarDistance = daytime ? weather->fogDayFar : weather->fogNightFar;
+    if ((weather->classification & 0x04u) != 0u) {
+        const std::string weatherName = toLowerAscii(weather->editorId);
+        const bool heavy = weatherName.find("heavy") != std::string::npos ||
+            weatherName.find("storm") != std::string::npos ||
+            weatherName.find("overcast") != std::string::npos;
+        params.precipitationIntensity = heavy ? 1.0f : 0.68f;
+    }
 
     // Sunlight and Ambient light the GROUND. These two channels were read out
     // of every record and then dropped, so a storm rendered as a dark sky over

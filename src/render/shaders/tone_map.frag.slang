@@ -627,6 +627,37 @@ float3 applyVolumetricHeightFog(
     return (litColor * transmittance) + inscatter;
 }
 
+float rainHash(float2 p)
+{
+    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+}
+
+float rainLayer(float2 uv, float timeSeconds, float scale, float speed, float threshold)
+{
+    // Slant in screen space and advect vertically. Each cell owns one narrow,
+    // finite streak; the second layer below changes scale and speed so the rain
+    // has depth without another texture or particle buffer.
+    float2 p = float2(uv.x * scale, uv.y * scale * 0.56);
+    p.x += p.y * 0.17;
+    p.y += timeSeconds * speed;
+    const float2 cell = floor(p);
+    const float2 local = frac(p);
+    const float seed = rainHash(cell);
+    const float centre = frac(seed * 19.19);
+    const float across = smoothstep(0.032, 0.0, abs(local.x - centre));
+    const float along = frac(local.y + seed * 7.31);
+    const float lengthMask =
+        smoothstep(0.02, 0.16, along) * (1.0 - smoothstep(0.62, 0.94, along));
+    return across * lengthMask * step(threshold, rainHash(cell + float2(43.2, 17.7)));
+}
+
+float proceduralRain(float2 uv, float timeSeconds)
+{
+    const float nearRain = rainLayer(uv, timeSeconds, 118.0, 23.0, 0.72);
+    const float farRain = rainLayer(uv + float2(0.13, 0.07), timeSeconds, 176.0, 31.0, 0.82);
+    return saturate(nearRain + farRain * 0.62);
+}
+
 struct FragmentInput
 {
     float2 inUv : TEXCOORD0;
@@ -736,6 +767,17 @@ float4 main(FragmentInput input) : SV_Target0
             sunVisibility
         );
         hdrColor = lerp(hdrColor, foggedColor, sampleFogGeometryCoverage(input.inUv));
+    }
+
+    const float precipitation = saturate(camera.weatherSkyLower.w);
+    if (precipitation > 0.0)
+    {
+        const float rain = proceduralRain(input.inUv, camera.skyConfig1.z) * precipitation;
+        // Rain catches the overcast sky rather than emitting white. Apply in
+        // scene-linear HDR before exposure/tonemapping so it shares the same
+        // daylight balance as the rest of the frame.
+        hdrColor = hdrColor * (1.0 - rain * 0.055) +
+            float3(0.32, 0.39, 0.46) * (rain * 0.34);
     }
 
     const float3 cameraForward = normalize(mul(invViewRotation, float3(0.0, 0.0, -1.0)));
