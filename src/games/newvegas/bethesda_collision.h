@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "import/cell_residency_planner.h"
@@ -53,6 +54,10 @@ public:
     // Builds this cell's terrain lattice and collision triangles from its scene,
     // replacing anything already held for the same cell.
     void addCell(const importer::CellCoord& cell, const importer::ImportedScene& scene);
+    void addCell(
+        const importer::CellCoord& cell,
+        const importer::ImportedScene& scene,
+        const std::unordered_set<std::uint32_t>& disabledSourceReferences);
     void removeCell(const importer::CellCoord& cell);
     void clear();
 

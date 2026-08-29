@@ -71,6 +71,11 @@ public:
     // ~4 seconds at 60 Hz -- long enough for a p99 to mean something, short
     // enough that the overlay reacts to a change while you are watching it.
     static constexpr std::size_t kHistorySamples = 240;
+    // Do not label startup streaming and pipeline warm-up as the live frame
+    // rate. At 60 Hz this is two seconds; at the showcase's 100 Hz target it
+    // is only 1.2 seconds. The overlay explicitly says "warming up" until the
+    // window is representative.
+    static constexpr std::size_t kDisplayWarmupSamples = 120;
     using Channel = core::TimingChannel<kHistorySamples>;
 
     void beginFrame() { m_current.fill(0.0f); }
@@ -89,10 +94,17 @@ public:
     [[nodiscard]] const Channel& channel(GameZone zone) const { return m_channels[zoneIndex(zone)]; }
     [[nodiscard]] std::uint64_t frameIndex() const noexcept { return m_frameIndex; }
 
-    // Smoothed rate derived from the frame channel, so it does not jitter the
-    // way a raw 1/dt readout does.
+    [[nodiscard]] bool fpsReady() const {
+        return m_channels[zoneIndex(GameZone::Frame)].sampleCount() >=
+            kDisplayWarmupSamples;
+    }
+
+    // Typical presented rate. Use the rolling median instead of an EWMA seeded
+    // by frame zero: cell uploads and pipeline compilation are real hitches and
+    // remain visible in p99/max, but they must not leave the headline claiming
+    // 16 FPS while steady presentation is already running at 100 FPS.
     [[nodiscard]] float fps() const {
-        const float ms = m_channels[zoneIndex(GameZone::Frame)].ewmaMs();
+        const float ms = m_channels[zoneIndex(GameZone::Frame)].p50Ms();
         return ms > 0.0001f ? (1000.0f / ms) : 0.0f;
     }
 

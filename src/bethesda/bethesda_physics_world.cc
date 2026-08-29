@@ -15,16 +15,22 @@
 #include <Jolt/Core/JobSystemSingleThreaded.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.h>
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
 #include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 #include "core/log.h"
@@ -34,6 +40,7 @@ namespace {
 
 constexpr JPH::ObjectLayer kStaticLayer = 0u;
 constexpr JPH::ObjectLayer kCharacterLayer = 1u;
+constexpr JPH::ObjectLayer kDynamicLayer = 2u;
 
 // Jolt deliberately installs a breakpoint-producing dummy trace callback in
 // debug builds. MeshShape uses Trace for recoverable author-data warnings (for
@@ -105,15 +112,23 @@ public:
         float stepHeightMetres = 0.25f;
         float centreOffsetMetres = 0.0f;
     };
+    struct DynamicEntry {
+        JPH::BodyID body;
+        PhysicsDynamicBodyConfig config;
+    };
 
     Impl()
-        : broadPhaseLayers(2u, 2u), objectPairFilter(2u), jobs(JPH::cMaxPhysicsJobs) {
+        : broadPhaseLayers(3u, 2u), objectPairFilter(3u), jobs(JPH::cMaxPhysicsJobs) {
         broadPhaseLayers.MapObjectToBroadPhaseLayer(kStaticLayer, JPH::BroadPhaseLayer(0u));
         broadPhaseLayers.MapObjectToBroadPhaseLayer(kCharacterLayer, JPH::BroadPhaseLayer(1u));
+        broadPhaseLayers.MapObjectToBroadPhaseLayer(kDynamicLayer, JPH::BroadPhaseLayer(1u));
         objectPairFilter.EnableCollision(kStaticLayer, kCharacterLayer);
         objectPairFilter.EnableCollision(kCharacterLayer, kCharacterLayer);
+        objectPairFilter.EnableCollision(kStaticLayer, kDynamicLayer);
+        objectPairFilter.EnableCollision(kCharacterLayer, kDynamicLayer);
+        objectPairFilter.EnableCollision(kDynamicLayer, kDynamicLayer);
         broadPhaseFilter = std::make_unique<JPH::ObjectVsBroadPhaseLayerFilterTable>(
-            broadPhaseLayers, 2u, objectPairFilter, 2u);
+            broadPhaseLayers, 2u, objectPairFilter, 3u);
     }
 
     JPH::BroadPhaseLayerInterfaceTable broadPhaseLayers;
@@ -124,6 +139,8 @@ public:
     JPH::JobSystemSingleThreaded jobs;
     JPH::CharacterVsCharacterCollisionSimple characterCollision;
     std::map<ObjectId, CharacterEntry> characters;
+    std::map<ObjectId, DynamicEntry> dynamicBodies;
+    std::map<ObjectId, JPH::Ref<JPH::Constraint>> constraints;
     std::unordered_map<std::uint64_t, ObjectId> objectsByUserData;
     std::vector<JPH::BodyID> staticBodies;
     std::map<std::uint64_t, JPH::BodyID> streamedStaticBodies;
@@ -158,6 +175,17 @@ void BethesdaPhysicsWorld::clear() {
     }
     m_impl->characters.clear();
     JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    for (const auto& [object, constraint] : m_impl->constraints) {
+        (void)object;
+        m_impl->physics.RemoveConstraint(constraint);
+    }
+    m_impl->constraints.clear();
+    for (const auto& [object, entry] : m_impl->dynamicBodies) {
+        (void)object;
+        bodies.RemoveBody(entry.body);
+        bodies.DestroyBody(entry.body);
+    }
+    m_impl->dynamicBodies.clear();
     for (JPH::BodyID id : m_impl->staticBodies) {
         bodies.RemoveBody(id);
         bodies.DestroyBody(id);
@@ -352,6 +380,220 @@ bool BethesdaPhysicsWorld::hasCharacter(ObjectId object) const {
     return m_impl->characters.contains(object);
 }
 
+bool BethesdaPhysicsWorld::addDynamicBody(
+    ObjectId object, const PhysicsDynamicBodyConfig& config,
+    std::string& outError) {
+    if (!initialize(outError)) return false;
+    const auto finite = [](const odai::math::Vector3& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    if (!object.valid() || m_impl->dynamicBodies.contains(object) ||
+        !finite(config.position) || !finite(config.boundsHalfExtents) ||
+        config.boundsHalfExtents.x <= 0.0f || config.boundsHalfExtents.y <= 0.0f ||
+        config.boundsHalfExtents.z <= 0.0f || !std::isfinite(config.massKilograms) ||
+        config.massKilograms <= 0.0f) {
+        outError = "invalid or duplicate dynamic body";
+        return false;
+    }
+    const JPH::Vec3 half = toJoltVector(config.boundsHalfExtents);
+    JPH::BoxShapeSettings shapeSettings(JPH::Vec3(
+        std::max(0.01f, half.GetX()), std::max(0.01f, half.GetY()),
+        std::max(0.01f, half.GetZ())));
+    const auto shape = shapeSettings.Create();
+    if (shape.HasError()) {
+        outError = "Jolt dynamic box construction failed: " + shape.GetError();
+        return false;
+    }
+    JPH::BodyCreationSettings settings(shape.Get(), toJoltPosition(config.position),
+        toJoltRotation(config.rotation), JPH::EMotionType::Dynamic, kDynamicLayer);
+    settings.mUserData = userDataFor(object);
+    settings.mFriction = std::clamp(config.friction, 0.0f, 1.0f);
+    settings.mRestitution = std::clamp(config.restitution, 0.0f, 1.0f);
+    settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+    settings.mMassPropertiesOverride.mMass = config.massKilograms;
+    const JPH::BodyID body = m_impl->physics.GetBodyInterface().CreateAndAddBody(
+        settings, JPH::EActivation::Activate);
+    if (body.IsInvalid()) {
+        outError = "Jolt rejected dynamic body";
+        return false;
+    }
+    m_impl->dynamicBodies.emplace(object, Impl::DynamicEntry{body, config});
+    m_impl->objectsByUserData[userDataFor(object)] = object;
+    outError.clear();
+    return true;
+}
+
+bool BethesdaPhysicsWorld::removeDynamicBody(ObjectId object) {
+    const auto found = m_impl->dynamicBodies.find(object);
+    if (found == m_impl->dynamicBodies.end()) return false;
+    (void)removeConstraint(object);
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    bodies.RemoveBody(found->second.body);
+    bodies.DestroyBody(found->second.body);
+    m_impl->objectsByUserData.erase(userDataFor(object));
+    m_impl->dynamicBodies.erase(found);
+    return true;
+}
+
+bool BethesdaPhysicsWorld::hasDynamicBody(ObjectId object) const {
+    return m_impl->dynamicBodies.contains(object);
+}
+
+bool BethesdaPhysicsWorld::addWorldHingeConstraint(
+    ObjectId object, const PhysicsHingeConfig& config, std::string& outError) {
+    const auto found = m_impl->dynamicBodies.find(object);
+    const auto finite = [](const odai::math::Vector3& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    const odai::math::Vector3 cross = odai::math::cross(
+        config.hingeAxis, config.normalAxis);
+    if (found == m_impl->dynamicBodies.end() || m_impl->constraints.contains(object) ||
+        !finite(config.worldAnchor) || !finite(config.hingeAxis) ||
+        !finite(config.normalAxis) || odai::math::length(config.hingeAxis) < 1.0e-5f ||
+        odai::math::length(config.normalAxis) < 1.0e-5f ||
+        odai::math::length(cross) < 1.0e-5f ||
+        !std::isfinite(config.minimumAngleRadians) ||
+        !std::isfinite(config.maximumAngleRadians) ||
+        config.minimumAngleRadians > 0.0f || config.maximumAngleRadians < 0.0f ||
+        config.minimumAngleRadians > config.maximumAngleRadians ||
+        !std::isfinite(config.frictionTorqueNewtonMetres) ||
+        config.frictionTorqueNewtonMetres < 0.0f) {
+        outError = "invalid or duplicate world hinge constraint";
+        return false;
+    }
+    JPH::BodyLockWrite lock(
+        m_impl->physics.GetBodyLockInterface(), found->second.body);
+    if (!lock.Succeeded()) {
+        outError = "could not lock dynamic body for hinge constraint";
+        return false;
+    }
+    const odai::math::Vector3 hinge = odai::math::normalize(config.hingeAxis);
+    const odai::math::Vector3 normal = odai::math::normalize(config.normalAxis);
+    JPH::HingeConstraintSettings settings;
+    settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+    settings.mPoint1 = settings.mPoint2 = toJoltPosition(config.worldAnchor);
+    settings.mHingeAxis1 = settings.mHingeAxis2 =
+        JPH::Vec3(hinge.x, hinge.y, hinge.z);
+    settings.mNormalAxis1 = settings.mNormalAxis2 =
+        JPH::Vec3(normal.x, normal.y, normal.z);
+    settings.mLimitsMin = std::clamp(
+        config.minimumAngleRadians, -JPH::JPH_PI, 0.0f);
+    settings.mLimitsMax = std::clamp(
+        config.maximumAngleRadians, 0.0f, JPH::JPH_PI);
+    settings.mMaxFrictionTorque = config.frictionTorqueNewtonMetres;
+    JPH::Ref<JPH::Constraint> constraint =
+        settings.Create(JPH::Body::sFixedToWorld, lock.GetBody());
+    if (constraint == nullptr) {
+        outError = "Jolt rejected world hinge constraint";
+        return false;
+    }
+    m_impl->physics.AddConstraint(constraint);
+    m_impl->constraints.emplace(object, std::move(constraint));
+    outError.clear();
+    return true;
+}
+
+bool BethesdaPhysicsWorld::removeConstraint(ObjectId object) {
+    const auto found = m_impl->constraints.find(object);
+    if (found == m_impl->constraints.end()) return false;
+    m_impl->physics.RemoveConstraint(found->second);
+    m_impl->constraints.erase(found);
+    return true;
+}
+
+bool BethesdaPhysicsWorld::hasConstraint(ObjectId object) const {
+    return m_impl->constraints.contains(object);
+}
+
+bool BethesdaPhysicsWorld::addDynamicBodyImpulse(
+    ObjectId object, const odai::math::Vector3& impulseKilogramUnitsPerSecond) {
+    const auto found = m_impl->dynamicBodies.find(object);
+    if (found == m_impl->dynamicBodies.end() ||
+        !std::isfinite(impulseKilogramUnitsPerSecond.x) ||
+        !std::isfinite(impulseKilogramUnitsPerSecond.y) ||
+        !std::isfinite(impulseKilogramUnitsPerSecond.z)) return false;
+    m_impl->physics.GetBodyInterface().AddImpulse(
+        found->second.body, toJoltVector(impulseKilogramUnitsPerSecond));
+    return true;
+}
+
+bool BethesdaPhysicsWorld::setDynamicBodyTransform(
+    ObjectId object, const odai::math::Vector3& position,
+    const odai::math::Quaternion& rotation, bool activate) {
+    const auto found = m_impl->dynamicBodies.find(object);
+    if (found == m_impl->dynamicBodies.end() || !std::isfinite(position.x) ||
+        !std::isfinite(position.y) || !std::isfinite(position.z)) return false;
+    m_impl->physics.GetBodyInterface().SetPositionAndRotation(found->second.body,
+        toJoltPosition(position), toJoltRotation(rotation),
+        activate ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
+    return true;
+}
+
+bool BethesdaPhysicsWorld::applyBuoyancy(
+    ObjectId object, float waterHeightBethesdaUnits,
+    float fluidDensityKilogramsPerCubicMetre, float fixedDeltaSeconds) {
+    const auto found = m_impl->dynamicBodies.find(object);
+    if (found == m_impl->dynamicBodies.end() || !found->second.config.buoyant ||
+        !std::isfinite(waterHeightBethesdaUnits) ||
+        !std::isfinite(fluidDensityKilogramsPerCubicMetre) ||
+        fluidDensityKilogramsPerCubicMetre <= 0.0f ||
+        !std::isfinite(fixedDeltaSeconds) || fixedDeltaSeconds <= 0.0f) return false;
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    const odai::math::Vector3 centre = fromJoltPosition(bodies.GetPosition(found->second.body));
+    const float bottom = centre.y - found->second.config.boundsHalfExtents.y;
+    const float height = found->second.config.boundsHalfExtents.y * 2.0f;
+    const float submerged = std::clamp(
+        (waterHeightBethesdaUnits - bottom) / std::max(1.0f, height), 0.0f, 1.0f);
+    if (submerged <= 0.0f) return true;
+    const odai::math::Vector3 half = found->second.config.boundsHalfExtents *
+        kBethesdaUnitsToJoltMetres;
+    const float volume = 8.0f * half.x * half.y * half.z;
+    const float force = fluidDensityKilogramsPerCubicMetre * volume * 9.81f * submerged;
+    bodies.AddForce(found->second.body, JPH::Vec3(0.0f, force, 0.0f));
+    return true;
+}
+
+std::vector<PhysicsDynamicBodySnapshot> BethesdaPhysicsWorld::dynamicBodySnapshots() const {
+    std::vector<PhysicsDynamicBodySnapshot> snapshots;
+    snapshots.reserve(m_impl->dynamicBodies.size());
+    const JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    for (const auto& [object, entry] : m_impl->dynamicBodies) {
+        snapshots.push_back(PhysicsDynamicBodySnapshot{object,
+            fromJoltPosition(bodies.GetPosition(entry.body)),
+            fromJoltRotation(bodies.GetRotation(entry.body)),
+            fromJoltVector(bodies.GetLinearVelocity(entry.body)),
+            fromJoltVector(bodies.GetAngularVelocity(entry.body)),
+            bodies.IsActive(entry.body)});
+    }
+    return snapshots;
+}
+
+bool BethesdaPhysicsWorld::restoreDynamicBody(
+    const PhysicsDynamicBodySnapshot& snapshot, std::string& outError) {
+    const auto found = m_impl->dynamicBodies.find(snapshot.object);
+    if (found == m_impl->dynamicBodies.end()) {
+        outError = "saved Jolt dynamic body is not registered: " +
+            snapshot.object.toString();
+        return false;
+    }
+    const auto finite = [](const odai::math::Vector3& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    if (!finite(snapshot.position) || !finite(snapshot.linearVelocity) ||
+        !finite(snapshot.angularVelocity)) {
+        outError = "invalid saved Jolt dynamic body transform";
+        return false;
+    }
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    bodies.SetPositionAndRotation(found->second.body, toJoltPosition(snapshot.position),
+        toJoltRotation(snapshot.rotation), snapshot.active
+            ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
+    bodies.SetLinearAndAngularVelocity(found->second.body,
+        toJoltVector(snapshot.linearVelocity), toJoltVector(snapshot.angularVelocity));
+    outError.clear();
+    return true;
+}
+
 std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::step(float fixedDeltaSeconds) {
     std::vector<std::pair<ObjectId, PhysicsCharacterStep>> results;
     if (!m_impl->initialized) return results;
@@ -542,6 +784,89 @@ std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castDown(
         if (object != m_impl->objectsByUserData.end()) result.object = object->second;
     }
     return result;
+}
+
+std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castSphere(
+    const odai::math::Vector3& from,
+    const odai::math::Vector3& to,
+    float radiusBethesdaUnits,
+    std::optional<ObjectId> ignoredObject) const {
+    const odai::math::Vector3 delta = to - from;
+    const float length = odai::math::length(delta);
+    if (!m_impl->initialized || !std::isfinite(from.x) || !std::isfinite(from.y) ||
+        !std::isfinite(from.z) || !std::isfinite(to.x) || !std::isfinite(to.y) ||
+        !std::isfinite(to.z) || !std::isfinite(radiusBethesdaUnits) ||
+        radiusBethesdaUnits <= 0.0f || length <= 1.0e-5f) {
+        return std::nullopt;
+    }
+
+    class CameraLayerFilter final : public JPH::ObjectLayerFilter {
+    public:
+        bool ShouldCollide(JPH::ObjectLayer layer) const override {
+            return layer == kStaticLayer || layer == kDynamicLayer;
+        }
+    } cameraLayerFilter;
+    class IgnoredObjectFilter final : public JPH::BodyFilter {
+    public:
+        explicit IgnoredObjectFilter(std::optional<ObjectId> object)
+            : ignoredUserData(object.has_value()
+                    ? std::optional<std::uint64_t>{userDataFor(*object)}
+                    : std::nullopt) {}
+        bool ShouldCollideLocked(const JPH::Body& body) const override {
+            return !ignoredUserData.has_value() ||
+                body.GetUserData() != *ignoredUserData;
+        }
+    private:
+        std::optional<std::uint64_t> ignoredUserData;
+    } bodyFilter(ignoredObject);
+
+    JPH::SphereShape sphere(radiusBethesdaUnits * kBethesdaUnitsToJoltMetres);
+    const JPH::RVec3 start = toJoltPosition(from);
+    const JPH::Vec3 direction = toJoltPosition(to) - start;
+    const JPH::RShapeCast cast(
+        &sphere, JPH::Vec3::sReplicate(1.0f),
+        JPH::RMat44::sTranslation(start), direction);
+    JPH::ShapeCastSettings settings;
+    settings.mReturnDeepestPoint = true;
+    JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
+    m_impl->physics.GetNarrowPhaseQuery().CastShape(
+        cast, settings, start, collector,
+        m_impl->physics.GetDefaultBroadPhaseLayerFilter(kCharacterLayer),
+        cameraLayerFilter, bodyFilter);
+    if (!collector.HadHit()) return std::nullopt;
+
+    const JPH::ShapeCastResult& hit = collector.mHit;
+    PhysicsCastHit result;
+    result.position = fromJoltPosition(cast.GetPointOnRay(hit.mFraction));
+    result.distance = length * std::clamp(hit.mFraction, 0.0f, 1.0f);
+    const JPH::Vec3 normal = -hit.mPenetrationAxis.NormalizedOr(JPH::Vec3::sAxisZ());
+    result.normal = {normal.GetX(), normal.GetY(), normal.GetZ()};
+    JPH::BodyLockRead lock(m_impl->physics.GetBodyLockInterface(), hit.mBodyID2);
+    if (lock.Succeeded()) {
+        const auto object = m_impl->objectsByUserData.find(lock.GetBody().GetUserData());
+        if (object != m_impl->objectsByUserData.end()) result.object = object->second;
+    }
+    return result;
+}
+
+bool BethesdaPhysicsWorld::hasLineOfSight(
+    const odai::math::Vector3& from, const odai::math::Vector3& to) const {
+    if (!std::isfinite(from.x) || !std::isfinite(from.y) ||
+        !std::isfinite(from.z) || !std::isfinite(to.x) || !std::isfinite(to.y) ||
+        !std::isfinite(to.z)) return false;
+    if (!m_impl->initialized) return true;
+    class OccluderLayerFilter final : public JPH::ObjectLayerFilter {
+    public:
+        bool ShouldCollide(JPH::ObjectLayer layer) const override {
+            return layer == kStaticLayer || layer == kDynamicLayer;
+        }
+    } occluderFilter;
+    const JPH::RRayCast ray(toJoltPosition(from),
+        toJoltPosition(to) - toJoltPosition(from));
+    JPH::RayCastResult hit;
+    return !m_impl->physics.GetNarrowPhaseQuery().CastRay(
+        ray, hit, m_impl->physics.GetDefaultBroadPhaseLayerFilter(kCharacterLayer),
+        occluderFilter);
 }
 
 std::vector<PhysicsMeleeCandidate> BethesdaPhysicsWorld::meleeCandidates(

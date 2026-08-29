@@ -2,6 +2,7 @@
 
 #include "bethesda/fixed_step_clock.h"
 #include "bethesda/bethesda_physics_world.h"
+#include "bethesda/living_world.h"
 #include "bethesda/papyrus_vm.h"
 #include "bethesda/runtime_world.h"
 #include "bethesda/runtime_render_delta.h"
@@ -87,6 +88,8 @@ struct BethesdaSessionConfig {
     std::string scenarioId;
     std::uint32_t randomSeed = 1u;
     ObjectId playerObject;
+    bool livingWorldEnabled = true;
+    double gameTimeScale = 20.0;
 };
 
 struct BethesdaSessionStep {
@@ -96,6 +99,7 @@ struct BethesdaSessionStep {
     bool residencyChanged = false;
     RuntimeRenderDeltaBatch renderDeltas;
     std::vector<std::string> diagnostics;
+    LivingWorldStep livingWorld;
 };
 
 struct AnimationActorSnapshot {
@@ -186,6 +190,8 @@ public:
         const PhysicsCharacterConfig& physicsConfig, std::string& outError);
     bool registerActorController(
         ObjectId object, const PhysicsCharacterConfig& physicsConfig, std::string& outError);
+    bool registerDynamicBody(
+        ObjectId object, PhysicsDynamicBodyConfig config, std::string& outError);
     bool unregisterActorController(ObjectId object);
     bool unregisterActorAnimation(ObjectId object);
     bool setActorControllerInput(ObjectId object, const PhysicsCharacterInput& input);
@@ -246,8 +252,21 @@ public:
         dialogueBranches() const { return m_dialogueBranches; }
     [[nodiscard]] const odai::anim::AnimationStepOutput* actorAnimationOutput(
         ObjectId object, bool firstPerson = false) const;
+    [[nodiscard]] odai::anim::AnimationStepOutput interpolatedActorAnimationOutput(
+        ObjectId object, float alpha, bool firstPerson = false) const;
     [[nodiscard]] BethesdaPhysicsWorld& physics() { return m_physics; }
     [[nodiscard]] const BethesdaPhysicsWorld& physics() const { return m_physics; }
+    [[nodiscard]] LivingWorldSimulation& livingWorld() { return m_livingWorld; }
+    [[nodiscard]] const LivingWorldSimulation& livingWorld() const { return m_livingWorld; }
+    bool installGameplayCells(
+        std::vector<GameplayCellPayload> cells, std::string& outError);
+    bool upsertGameplayCell(GameplayCellPayload cell, std::string& outError);
+    void setGameplayResidentSpaces(std::vector<RuntimeSpaceState> spaces) {
+        m_livingWorld.setResidentSpaces(std::move(spaces));
+    }
+    [[nodiscard]] std::uint64_t postLivingWorldStimulus(LivingWorldStimulus stimulus) {
+        return m_livingWorld.postStimulus(std::move(stimulus));
+    }
     [[nodiscard]] std::vector<AnimationActorSnapshot> animationSnapshots() const;
     bool restoreAnimationSnapshots(
         std::span<const AnimationActorSnapshot> snapshots, std::string& outError);
@@ -378,6 +397,8 @@ private:
         odai::anim::AnimationInputState input;
         odai::anim::AnimationStepOutput thirdPersonOutput;
         odai::anim::AnimationStepOutput firstPersonOutput;
+        odai::anim::AnimationStepOutput previousThirdPersonOutput;
+        odai::anim::AnimationStepOutput previousFirstPersonOutput;
     };
     void registerSkyrimNatives();
     [[nodiscard]] Tes3NativeResult executeTes3WorldNative(const Tes3NativeCall& call);
@@ -393,6 +414,7 @@ private:
     FixedStepClock m_clock;
     BethesdaWorld m_world;
     BethesdaPhysicsWorld m_physics;
+    LivingWorldSimulation m_livingWorld;
     PapyrusVm m_papyrus;
     Tes3Runtime m_tes3;
     ObjectId m_playerObject;

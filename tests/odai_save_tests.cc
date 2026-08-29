@@ -101,13 +101,13 @@ void registerSaveFixture(BethesdaSession& session) {
 }
 
 std::shared_ptr<const odai::anim::AnimationView> saveAnimationView() {
-    static const odai::anim::Skeleton skeleton = [] {
+    static const auto skeleton = [] {
         odai::anim::Skeleton value;
         value.bones.push_back({"NPC Root [Root]", -1});
-        return value;
+        return std::make_shared<odai::anim::Skeleton>(std::move(value));
     }();
     auto view = std::make_shared<odai::anim::AnimationView>();
-    view->skeleton = &skeleton;
+    view->skeleton = skeleton;
     odai::anim::AnimationClip idle;
     idle.name = "idle";
     idle.duration = 1.0f;

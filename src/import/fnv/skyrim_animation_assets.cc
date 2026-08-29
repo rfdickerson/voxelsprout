@@ -50,10 +50,26 @@ bool inspectSkyrimAnimationBundle(
         }
         odai::anim::HkxGeneratorIdentity identity = providerGenerator(asset);
         if (identity == odai::anim::HkxGeneratorIdentity::Unknown) identity = summary.generator;
-        identities.insert(identity);
+        // A root that contains only references/string data may carry no class
+        // proving which generator wrote it. Unknown is absence of evidence,
+        // not a second generator identity; counting it made three files from
+        // the same retail BSA report as a mixed generated-root installation.
+        if (identity != odai::anim::HkxGeneratorIdentity::Unknown) {
+            identities.insert(identity);
+        }
         generatorProviders.insert(asset.providerId);
         out.unsupportedClasses.insert(out.unsupportedClasses.end(),
             summary.unsupportedBehaviorClasses.begin(), summary.unsupportedBehaviorClasses.end());
+        if (summary.containsBehaviorGraph) {
+            odai::anim::HkxDecodedBehaviorGraph graph;
+            std::string decodeError;
+            if (!odai::anim::decodeHkxBehaviorGraph(asset.bytes, graph, decodeError)) {
+                out.diagnostics.push_back(std::string("undecodable behavior graph: ") +
+                    path + " (" + decodeError + ")");
+            } else {
+                out.behaviorGraphs.push_back(std::move(graph));
+            }
+        }
         out.roots.push_back(std::move(asset));
     }
     std::sort(out.unsupportedClasses.begin(), out.unsupportedClasses.end());
@@ -61,16 +77,22 @@ bool inspectSkyrimAnimationBundle(
         std::unique(out.unsupportedClasses.begin(), out.unsupportedClasses.end()),
         out.unsupportedClasses.end());
     out.coherent = out.roots.size() == roots.size() && generatorProviders.size() == 1u &&
-        identities.size() == 1u;
+        identities.size() <= 1u;
     if (!out.roots.empty()) out.generatorProvider = out.roots.front().providerName;
     if (identities.size() == 1u) out.generator = *identities.begin();
+    if (out.coherent && out.generator == odai::anim::HkxGeneratorIdentity::Unknown) {
+        out.generator = odai::anim::HkxGeneratorIdentity::Vanilla;
+    }
     if (!out.coherent && out.roots.size() == roots.size()) {
         out.diagnostics.push_back("generated root HKX files resolve from inconsistent providers/generators");
     }
-    out.strictCompatible = out.coherent && out.unsupportedClasses.empty();
+    out.strictCompatible = out.coherent && out.unsupportedClasses.empty() &&
+        !out.behaviorGraphs.empty();
     if (strict && !out.strictCompatible) {
         outError = !out.coherent ? "incoherent Skyrim generated animation bundle" :
-            "unsupported gameplay behavior classes in Skyrim animation bundle";
+            !out.unsupportedClasses.empty() ?
+                "unsupported gameplay behavior classes in Skyrim animation bundle" :
+                "Skyrim master behavior graph could not be decoded";
         return false;
     }
     return true;

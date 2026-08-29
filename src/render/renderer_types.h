@@ -357,6 +357,22 @@ struct WeatherCloudTextures {
     WeatherCloudLayer layers[kWeatherCloudLayerCount];
 };
 
+// Authored sky geometry for weather layers. Skyrim's clouds.nif provides one
+// mesh surface per WTHR layer; its UVs select the correct strips from the
+// cloud atlases. Keeping this separate from ImportedScene avoids treating the
+// camera-centred firmament as lit, collidable world geometry.
+struct WeatherCloudMeshVertex {
+    float position[3] = {};
+    float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float uv[2] = {};
+    std::uint32_t layer = 0u;
+};
+
+struct WeatherCloudMesh {
+    std::vector<WeatherCloudMeshVertex> vertices;
+    std::vector<std::uint32_t> indices;
+};
+
 // Lighting authored on an imported interior CELL. Colours are scene-linear;
 // importers must decode the record's sRGB bytes before submitting them.
 //

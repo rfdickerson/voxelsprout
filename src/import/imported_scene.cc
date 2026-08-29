@@ -1177,6 +1177,17 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             dstVertex.uv[1] = srcVertex.uv[1];
             dstVertex.textureIndex = textureIndex;
             dstVertex.flags = flags;
+            // Static Bethesda materials use layer slot 0 as a runtime normal
+            // map sidecar. Terrain owns these slots only when its layer flag is
+            // set, so the two meanings cannot overlap. The field already lives
+            // in the packed, serialized vertex; no scene format change is
+            // needed and older scenes retain the invalid sentinel.
+            if ((flags & kImportedSceneMaterialFlagTerrainLayers) == 0u) {
+                const auto normalIt = scene.normalTextureByDiffuseIndex.find(textureIndex);
+                if (normalIt != scene.normalTextureByDiffuseIndex.end()) {
+                    dstVertex.layerTextureIndex[0] = normalIt->second;
+                }
+            }
             const std::uint32_t packedVertexIndex = static_cast<std::uint32_t>(scene.packedVertices.size());
             scene.packedVertices.push_back(dstVertex);
             expandBounds(dstVertex);

@@ -30,11 +30,19 @@ struct BoneTrack {
     std::vector<Vector3Key> scaleKeys;
 };
 
+struct AnimationAnnotation {
+    float time = 0.0f;
+    std::string name;
+};
+
 struct AnimationClip {
     std::string name;
     float duration = 0.0f;
     bool loop = true;
     std::vector<BoneTrack> tracks;
+    // Authored timeline markers (footsteps, sounds, effects). BehaviorGraph
+    // consumes crossings at the fixed simulation tick, never render time.
+    std::vector<AnimationAnnotation> annotations;
 };
 
 }  // namespace odai::anim

@@ -86,6 +86,36 @@ struct PhysicsMeleeCandidate {
                            const PhysicsMeleeCandidate&) = default;
 };
 
+struct PhysicsDynamicBodyConfig {
+    odai::math::Vector3 position{};
+    odai::math::Quaternion rotation{};
+    odai::math::Vector3 boundsHalfExtents{16.0f, 16.0f, 16.0f};
+    float massKilograms = 1.0f;
+    float friction = 0.5f;
+    float restitution = 0.1f;
+    bool buoyant = false;
+};
+
+struct PhysicsDynamicBodySnapshot {
+    ObjectId object;
+    odai::math::Vector3 position{};
+    odai::math::Quaternion rotation{};
+    odai::math::Vector3 linearVelocity{};
+    odai::math::Vector3 angularVelocity{};
+    bool active = false;
+    friend bool operator==(const PhysicsDynamicBodySnapshot&,
+                           const PhysicsDynamicBodySnapshot&) = default;
+};
+
+struct PhysicsHingeConfig {
+    odai::math::Vector3 worldAnchor{};
+    odai::math::Vector3 hingeAxis{0.0f, 1.0f, 0.0f};
+    odai::math::Vector3 normalAxis{1.0f, 0.0f, 0.0f};
+    float minimumAngleRadians = -3.14159265f;
+    float maximumAngleRadians = 3.14159265f;
+    float frictionTorqueNewtonMetres = 0.0f;
+};
+
 class BethesdaPhysicsWorld {
 public:
     BethesdaPhysicsWorld();
@@ -120,6 +150,29 @@ public:
     bool addCharacterImpulse(
         ObjectId object, const odai::math::Vector3& velocityChange);
     [[nodiscard]] bool hasCharacter(ObjectId object) const;
+    bool addDynamicBody(
+        ObjectId object, const PhysicsDynamicBodyConfig& config,
+        std::string& outError);
+    bool removeDynamicBody(ObjectId object);
+    [[nodiscard]] bool hasDynamicBody(ObjectId object) const;
+    bool addWorldHingeConstraint(
+        ObjectId object, const PhysicsHingeConfig& config, std::string& outError);
+    bool removeConstraint(ObjectId object);
+    [[nodiscard]] bool hasConstraint(ObjectId object) const;
+    bool addDynamicBodyImpulse(
+        ObjectId object, const odai::math::Vector3& impulseKilogramUnitsPerSecond);
+    bool setDynamicBodyTransform(
+        ObjectId object, const odai::math::Vector3& position,
+        const odai::math::Quaternion& rotation, bool activate = true);
+    // Applies a deterministic centre-of-buoyancy force to marked bodies. This
+    // is intentionally a gameplay primitive; water rendering remains in the
+    // renderer and never advances physics.
+    bool applyBuoyancy(
+        ObjectId object, float waterHeightBethesdaUnits,
+        float fluidDensityKilogramsPerCubicMetre, float fixedDeltaSeconds);
+    [[nodiscard]] std::vector<PhysicsDynamicBodySnapshot> dynamicBodySnapshots() const;
+    bool restoreDynamicBody(
+        const PhysicsDynamicBodySnapshot& snapshot, std::string& outError);
     // Steps every registered character in stable ObjectId order and then the
     // Jolt world. Results are the only transforms animation/gameplay may apply.
     std::vector<std::pair<ObjectId, PhysicsCharacterStep>> step(float fixedDeltaSeconds);
@@ -129,6 +182,19 @@ public:
     bool restore(std::span<const PhysicsCharacterSnapshot> snapshots, std::string& outError);
     [[nodiscard]] std::optional<PhysicsCastHit> castDown(
         const odai::math::Vector3& origin, float distanceBethesdaUnits) const;
+    // Sweeps a sphere through the authored/dynamic rigid-body world. This is
+    // the camera-boom primitive: CharacterVirtual is not a rigid body, but an
+    // optional stable object id is still accepted so future player proxy
+    // bodies and owned dynamic proxies can be excluded without changing the
+    // camera interface.
+    [[nodiscard]] std::optional<PhysicsCastHit> castSphere(
+        const odai::math::Vector3& from,
+        const odai::math::Vector3& to,
+        float radiusBethesdaUnits,
+        std::optional<ObjectId> ignoredObject = std::nullopt) const;
+    [[nodiscard]] bool hasLineOfSight(
+        const odai::math::Vector3& from,
+        const odai::math::Vector3& to) const;
     // CharacterVirtual instances do not appear as rigid bodies in an ordinary
     // Jolt ray cast. Enumerate them in stable ObjectId order, apply a facing
     // cone, reject targets occluded by authored static collision, then return

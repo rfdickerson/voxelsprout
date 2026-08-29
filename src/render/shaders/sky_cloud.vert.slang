@@ -3,8 +3,8 @@ import camera_uniform;
 struct VertexInput
 {
     [[vk::location(0)]] float3 inPosition : TEXCOORD0;
-    [[vk::location(1)]] float3 inNormal : TEXCOORD1;
-    [[vk::location(2)]] float3 inColor : TEXCOORD2;
+    [[vk::location(1)]] float2 inNormal : TEXCOORD1;
+    [[vk::location(2)]] float4 inColor : TEXCOORD2;
     [[vk::location(3)]] float2 inUv : TEXCOORD3;
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
     [[vk::location(5)]] uint inFlags : TEXCOORD5;
@@ -14,7 +14,7 @@ struct VertexOutput
 {
     float4 position : SV_Position;
     float3 outLocalDirection : TEXCOORD0;
-    float3 outColor : TEXCOORD1;
+    float4 outColor : TEXCOORD1;
     float2 outUv : TEXCOORD2;
     nointerpolation uint outTextureIndex : TEXCOORD3;
 };
@@ -24,7 +24,11 @@ VertexOutput main(VertexInput input)
     VertexOutput output;
 
     const float time = camera.skyConfig1.z;
-    const float rotation = time * 0.0045;
+    // clouds.nif is authored as sparse overlapping surfaces, not a complete
+    // dome. Offset its deterministic rotation so the clear-weather upper deck
+    // crosses the forward view instead of leaving only its atlas-fringes at
+    // the extreme sides of the reference composition.
+    const float rotation = (time * 0.0045) + 1.5707963;
     const float s = sin(rotation);
     const float c = cos(rotation);
 

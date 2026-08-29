@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -140,6 +141,9 @@ struct SkinnedActor {
     // handed to walkSpeedUnitsPerSecond instead -- see loadActorWalkClip. Empty
     // for anything with no locomotion clip beside its skeleton.
     odai::anim::AnimationClip walkClip;
+    // Extra authored third-person states used by the opt-in Skyrim avatar.
+    // Ordinary town actors continue to sample only idle/walk.
+    std::vector<odai::anim::AnimationClip> authoredLocomotionClips;
     float walkSpeedUnitsPerSecond = 0.0f;
     odai::anim::AnimationSampler sampler;
     // GPU-ready local pose before actor world placement. Clip changes blend
@@ -291,10 +295,21 @@ bool loadActorIdleClip(
     odai::anim::AnimationClip& outClip,
     std::string& outWhy);
 
+bool loadActorIdleClip(
+    const odai::importer::fnv::FalloutAssetSource& assets,
+    const std::string& skeletonPath,
+    const odai::anim::Skeleton& skeleton,
+    bool female,
+    std::size_t variant,
+    odai::anim::AnimationClip& outClip,
+    std::string& outWhy);
+
 // Loads ordinary forward locomotion and removes its horizontal root motion so
 // navigation remains the sole transform authority. TES3 humanoids keep this
-// interval inside base_anim.nif; later games use external KF files (or the
-// existing procedural HKX fallback).
+// interval inside base_anim*.nif (including beast-race variants); later games
+// use external KF files; Skyrim SE's x64 spline-compressed HKX is decoded into
+// the same clip representation, with procedural motion only as a recoverable
+// non-showcase fallback for missing/mod-incompatible assets.
 bool loadActorWalkClip(
     const odai::importer::fnv::FalloutAssetSource& assets,
     const std::string& skeletonPath,
@@ -360,6 +375,28 @@ bool loadGoodspringsActors(
     const std::unordered_map<std::uint32_t, std::string>* catalogVoiceFolderPlugin = nullptr,
     const ActorPlacementRuntimeResolver& placementRuntimeResolver = {});
 
+// Imports a small number of Whiterun guards from a separate Skyrim Data
+// directory without importing Skyrim world records into the active game.
+// Returned actors use synthetic, stable TES3 reference identities; the caller
+// owns final navmesh projection and runtime-world registration in Balmora.
+bool loadSkyrimGuardShowcase(
+    const std::filesystem::path& skyrimDataDirectory,
+    const float engineCentre[3],
+    std::uint32_t firstInstanceSlot,
+    std::size_t guardCount,
+    std::vector<SkinnedActor>& outGuards,
+    std::string& outDetail);
+
+// Builds Skyrim's male Player base as a read-only visual avatar. The returned
+// actor has no runtime identity and is never inserted in the NPC population;
+// Morrowind's player object remains the sole gameplay authority.
+bool loadSkyrimPlayerAvatar(
+    const std::filesystem::path& skyrimDataDirectory,
+    std::string_view outfitEditorId,
+    std::uint32_t instanceSlot,
+    SkinnedActor& outAvatar,
+    std::string& outDetail);
+
 // Attaches a conversation to every actor that has one, in ONE walk over the
 // plugin. Actors that already carry a tree are left alone, and actors the
 // plugin gives no lines are simply left unable to talk.
@@ -418,7 +455,7 @@ void speakActorLine(
 
 // Advances every actor's clip and writes this frame's bone matrices, world
 // placement folded in. Hand each actor's poseScratch to setSkinnedActorPose.
-void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds);
+void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds);
 
 // Walks the ones that can walk: chooses a connected authored-navmesh route near
 // where they were placed, turns toward each shared-edge waypoint, and moves at

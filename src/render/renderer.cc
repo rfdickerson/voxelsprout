@@ -23,6 +23,11 @@ void Renderer::clearImportedSceneMeshes() {
     m_backend->clearImportedSceneMeshes();
 }
 
+bool Renderer::reserveImportedSceneGeometry(
+    std::uint64_t vertexCapacity, std::uint64_t indexCapacity) {
+    return m_backend->reserveImportedSceneGeometry(vertexCapacity, indexCapacity);
+}
+
 std::size_t Renderer::addImportedSceneChunk(const odai::importer::ImportedScene& scene) {
     const std::size_t chunkIndex = m_backend->addImportedSceneChunk(scene);
     return chunkIndex == RendererBackend::kInvalidImportedChunkIndex
@@ -119,6 +124,10 @@ void Renderer::setColorGrading(const ColorGradingSettings& settings) {
 
 void Renderer::setAutoExposureEnabled(bool enabled) {
     m_backend->setAutoExposureEnabled(enabled);
+}
+
+void Renderer::setAutoExposureKeyValue(float keyValue) {
+    m_backend->setAutoExposureKeyValue(keyValue);
 }
 
 bool Renderer::isAutoExposureEnabled() const {
@@ -293,6 +302,10 @@ void Renderer::setWeatherSky(const WeatherSkyParams& params) {
 
 void Renderer::setWeatherClouds(const WeatherCloudTextures& clouds) {
     m_backend->setWeatherClouds(clouds);
+}
+
+void Renderer::setWeatherCloudMesh(const WeatherCloudMesh& mesh) {
+    m_backend->setWeatherCloudMesh(mesh);
 }
 
 void Renderer::setTonemapSettings(const TonemapSettings& settings) {

@@ -605,6 +605,11 @@ struct ImportedSceneParticleEmitter {
 struct ImportedScene {
     std::string sourceTag;
     std::vector<ImportedSceneTexture> textures;
+    // Import-time material sidecar. The packer consumes this into
+    // ImportedScenePackedVertex::layerTextureIndex[0] for non-terrain draws;
+    // it is deliberately not serialized, so the existing scene/chunk format
+    // and raw mesh-part layout remain unchanged.
+    std::unordered_map<std::uint32_t, std::uint32_t> normalTextureByDiffuseIndex;
     std::vector<ImportedSceneMesh> meshes;
     std::vector<ImportedSceneInstance> instances;
     std::vector<ImportedSceneLandscapeCell> landscapeCells;

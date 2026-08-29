@@ -1,4 +1,6 @@
 #include "games/newvegas/bethesda_actors.h"
+
+#include "import/fnv/skyrim_animation_assets.h"
 #include "bethesda/navigation_world.h"
 
 #include "core/lcg.h"
@@ -11,6 +13,7 @@
 #include "import/fnv/nif_scene.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -208,6 +211,17 @@ bool makeProceduralSkyrimWalk(
     addProceduralRotationTrack(outClip, skeleton, "NPC R UpperArm [RUar]",
         {{0.0f, -13.0f}, {0.43f, 13.0f}, {0.86f, -13.0f}});
     return outClip.tracks.size() >= 4u;
+}
+
+bool loadSkyrimHkxSkeleton(
+    const importer::fnv::FalloutAssetSource& assets, bool female,
+    anim::HkxDecodedSkeleton& outSkeleton, std::string& outError) {
+    const char* path = female
+        ? "meshes\\actors\\character\\character assets female\\skeleton_female.hkx"
+        : "meshes\\actors\\character\\character assets\\skeleton.hkx";
+    std::vector<std::uint8_t> bytes;
+    return assets.resolveAsset(path, bytes, outError) &&
+        anim::decodeHkxAnimationSkeleton(bytes, outSkeleton, outError);
 }
 
 
@@ -704,20 +718,28 @@ bool loadActorIdleClip(
     const importer::fnv::FalloutAssetSource& assets,
     const std::string& skeletonPath,
     const anim::Skeleton& skeleton,
+    bool female,
     std::size_t variant,
     anim::AnimationClip& outClip,
     std::string& outWhy
 ) {
-    // TES3 keeps the humanoid animation bank inside base_anim.nif rather than
-    // in external KF files. Every bone's NiKeyframeController spans the whole
-    // bank, while NiTextKeyExtraData is the authoritative clip directory.
+    // TES3 keeps the humanoid animation bank inside base_anim*.nif rather than
+    // in external KF files. The suffix variants are beast-race rigs with extra
+    // bones, not a different storage convention. Every bone's
+    // NiKeyframeController spans the whole bank, while NiTextKeyExtraData is
+    // the authoritative clip directory.
     // Merge the tracks, select the exact authored Idle interval, and rebase its
     // keys to zero. Sampling an assumed interval leaves the actor in the first
     // bank pose and is especially visible as horizontal upper arms.
     std::string normalizedSkeleton = toLowerAscii(skeletonPath);
     std::replace(normalizedSkeleton.begin(), normalizedSkeleton.end(), '/', '\\');
-    if (normalizedSkeleton == "base_anim.nif" ||
-        normalizedSkeleton.ends_with("\\base_anim.nif")) {
+    const std::size_t skeletonName = normalizedSkeleton.find_last_of('\\');
+    const std::string_view skeletonFile = skeletonName == std::string::npos
+        ? std::string_view(normalizedSkeleton)
+        : std::string_view(normalizedSkeleton).substr(skeletonName + 1u);
+    const bool tes3AnimationBank = skeletonFile.starts_with("base_anim") &&
+        skeletonFile.ends_with(".nif");
+    if (tes3AnimationBank) {
         std::vector<std::uint8_t> skeletonBytes;
         if (assets.resolveMesh(skeletonPath, skeletonBytes, outWhy)) {
             importer::fnv::NifModel skeletonModel;
@@ -739,7 +761,7 @@ bool loadActorIdleClip(
                     }
                 }
                 if (!(idleStart >= 0.0f && idleStop > idleStart)) {
-                    outWhy = "base_anim.nif has no complete Idle text-key interval";
+                    outWhy = skeletonPath + " has no complete Idle text-key interval";
                     return false;
                 }
                 importer::fnv::KfAnimation idle;
@@ -783,7 +805,10 @@ bool loadActorIdleClip(
     const std::string directory = directoryOf(skeletonPath);
     // "mtidle" first: it is the creature convention, it is right when it
     // resolves, and no human skeleton has one.
-    std::vector<std::string> candidates{directory + "mtidle.kf"};
+    std::vector<std::string> candidates{
+        directory + "mtidle.kf",
+        // Oblivion uses the plain action name beside the humanoid skeleton.
+        directory + "idle.kf"};
     for (std::size_t i = 0; i < kStandingIdleCount; ++i) {
         candidates.push_back(directory + kStandingIdles[(variant + i) % kStandingIdleCount]);
     }
@@ -815,15 +840,50 @@ bool loadActorIdleClip(
         outClip.loop = true;
         return true;
     }
-    // Skyrim's external actor animations are HKX, not KF. A complete Havok
-    // animation reader is far beyond what a walking town needs, so humanoids
-    // get a small bind-relative procedural idle while every Fallout path above
-    // remains data-driven.
+    // Skyrim SE's authored animation is a reflected x64 Havok packfile. Decode
+    // the immutable retail clip directly into the same AnimationClip used by
+    // KF/NIF animation; the NIF skeleton remains the skinning authority.
+    {
+        const std::string sex = female ? "female" : "male";
+        const std::string hkxPath =
+            "meshes\\actors\\character\\animations\\" + sex + "\\mt_idle.hkx";
+        std::vector<std::uint8_t> hkxBytes;
+        std::string hkxError;
+        anim::HkxDecodedSkeleton hkxSkeleton;
+        if (assets.resolveAsset(hkxPath, hkxBytes, hkxError) &&
+            loadSkyrimHkxSkeleton(assets, female, hkxSkeleton, hkxError)) {
+            anim::HkxDecodedClipMetadata metadata;
+            if (anim::decodeHkxAnimationClip(hkxBytes, skeleton,
+                    "Skyrim " + sex + " idle", outClip, metadata, hkxError,
+                    &hkxSkeleton) &&
+                metadata.boundTracks >= 8u) {
+                outWhy = hkxPath + ": " + std::to_string(metadata.boundTracks) +
+                    " retail HKX tracks";
+                return true;
+            }
+            outWhy = hkxPath + ": " + hkxError;
+            outClip = anim::AnimationClip{};
+        }
+    }
+    // A malformed or mod-incompatible clip remains recoverable for ordinary
+    // launches. The explicit cross-game showcase reports this fallback.
     if (makeProceduralSkyrimIdle(skeleton, outClip)) {
         outWhy = "procedural Skyrim humanoid idle";
         return true;
     }
     return false;
+}
+
+bool loadActorIdleClip(
+    const importer::fnv::FalloutAssetSource& assets,
+    const std::string& skeletonPath,
+    const anim::Skeleton& skeleton,
+    std::size_t variant,
+    anim::AnimationClip& outClip,
+    std::string& outWhy
+) {
+    return loadActorIdleClip(
+        assets, skeletonPath, skeleton, false, variant, outClip, outWhy);
 }
 
 bool loadActorWalkClip(
@@ -838,15 +898,20 @@ bool loadActorWalkClip(
     outSpeedUnitsPerSecond = 0.0f;
     const std::string directory = directoryOf(skeletonPath);
 
-    // TES3 stores one animation bank in base_anim.nif. The text keys are the
+    // TES3 stores one animation bank in base_anim*.nif. The text keys are the
     // clip directory; use the repeating portion of WalkForward rather than the
     // intro/outro so the cycle is seamless. This is deliberately resolved
     // before the external-KF convention below, because no mtforward.kf exists
     // for the retail Morrowind humanoid rig.
     std::string normalizedSkeleton = toLowerAscii(skeletonPath);
     std::replace(normalizedSkeleton.begin(), normalizedSkeleton.end(), '/', '\\');
-    if (normalizedSkeleton == "base_anim.nif" ||
-        normalizedSkeleton.ends_with("\\base_anim.nif")) {
+    const std::size_t skeletonName = normalizedSkeleton.find_last_of('\\');
+    const std::string_view skeletonFile = skeletonName == std::string::npos
+        ? std::string_view(normalizedSkeleton)
+        : std::string_view(normalizedSkeleton).substr(skeletonName + 1u);
+    const bool tes3AnimationBank = skeletonFile.starts_with("base_anim") &&
+        skeletonFile.ends_with(".nif");
+    if (tes3AnimationBank) {
         std::vector<std::uint8_t> skeletonBytes;
         if (assets.resolveMesh(skeletonPath, skeletonBytes, outWhy)) {
             importer::fnv::NifModel skeletonModel;
@@ -906,7 +971,7 @@ bool loadActorWalkClip(
                         outWhy = "TES3 WalkForward interval bound no tracks";
                     }
                 } else {
-                    outWhy = "base_anim.nif has no complete WalkForward interval";
+                    outWhy = skeletonPath + " has no complete WalkForward interval";
                 }
             }
         }
@@ -923,8 +988,13 @@ bool loadActorWalkClip(
     candidates.push_back(directory + "locomotion\\male\\mtforward.kf");
     candidates.push_back(directory + "locomotion\\mtforward.kf");
     candidates.push_back(directory + "mtforward.kf");
+    // TES4 predates the movement-type prefix used by Fallout. Its humanoid
+    // archive calls the same authored cycle walkforward.kf; creatures often
+    // use the shorter forward.kf spelling.
+    candidates.push_back(directory + "walkforward.kf");
+    candidates.push_back(directory + "forward.kf");
 
-    std::string clipPath = "base_anim.nif:WalkForward";
+    std::string clipPath = skeletonPath + ":WalkForward";
     for (std::size_t candidateIndex = 0u;
          candidateIndex <= candidates.size(); ++candidateIndex) {
         if (candidateIndex > 0u) {
@@ -1015,10 +1085,50 @@ bool loadActorWalkClip(
         outClip.loop = true;
         return true;
     }
-    // Skyrim ships mt_walkforward.hkx rather than a KF. Preserve the existing
-    // GPU skinning and locomotion path with a bind-relative humanoid cycle;
-    // 100 units/s is the same measured fallback used for an in-place creature
-    // clip above and reads as a normal city patrol pace at Bethesda scale.
+    // Skyrim ships mt_walkforward.hkx rather than a KF. Decode it after the
+    // legacy KF conventions have been exhausted, then feed it through the same
+    // root-motion measurement/flattening used by Gamebryo locomotion above.
+    {
+        const std::string sex = female ? "female" : "male";
+        const std::string hkxPath =
+            "meshes\\actors\\character\\animations\\" + sex + "\\mt_walkforward.hkx";
+        std::vector<std::uint8_t> hkxBytes;
+        std::string hkxError;
+        anim::HkxDecodedSkeleton hkxSkeleton;
+        if (assets.resolveAsset(hkxPath, hkxBytes, hkxError) &&
+            loadSkyrimHkxSkeleton(assets, female, hkxSkeleton, hkxError)) {
+            anim::HkxDecodedClipMetadata metadata;
+            if (anim::decodeHkxAnimationClip(hkxBytes, skeleton,
+                    "Skyrim " + sex + " walk forward", outClip, metadata, hkxError,
+                    &hkxSkeleton) &&
+                metadata.boundTracks >= 8u && outClip.duration > 0.0f) {
+                int rootBone = skeleton.findBone("NPC Root [Root]");
+                if (rootBone < 0) rootBone = skeleton.findBone("NPC COM [COM ]");
+                for (anim::BoneTrack& track : outClip.tracks) {
+                    if (track.boneIndex != rootBone || track.translationKeys.size() < 2u) continue;
+                    const odai::math::Vector3 first = track.translationKeys.front().value;
+                    const odai::math::Vector3 last = track.translationKeys.back().value;
+                    const float dx = last.x - first.x;
+                    const float dz = last.z - first.z;
+                    outSpeedUnitsPerSecond = std::sqrt(dx * dx + dz * dz) / outClip.duration;
+                    for (anim::Vector3Key& key : track.translationKeys) {
+                        key.value.x = first.x;
+                        key.value.z = first.z;
+                    }
+                    break;
+                }
+                if (outSpeedUnitsPerSecond <= 1.0f) outSpeedUnitsPerSecond = 100.0f;
+                outClip.loop = true;
+                outWhy = hkxPath + ": " + std::to_string(metadata.boundTracks) +
+                    " retail HKX tracks";
+                return true;
+            }
+            outWhy = hkxPath + ": " + hkxError;
+            outClip = anim::AnimationClip{};
+        }
+    }
+    // 100 units/s is the measured fallback used for an in-place creature clip
+    // above and reads as a normal city patrol pace at Bethesda scale.
     if (makeProceduralSkyrimWalk(skeleton, outClip)) {
         outSpeedUnitsPerSecond = 100.0f;
         outWhy = "procedural Skyrim humanoid walk (HKX fallback)";
@@ -1286,10 +1396,11 @@ bool loadGoodspringsActors(
             built.skeletonPath = skeletonPath;
             if (built.ok) {
                 std::string clipWhy;
-                built.hasClip = loadActorIdleClip(
-                    assets, built.skeletonPath, built.character.skeleton, builtByBase.size(),
-                    built.idleClip, clipWhy);
                 const bool female = resolved.base != nullptr && resolved.base->isFemale;
+                built.hasClip = loadActorIdleClip(
+                    assets, built.skeletonPath, built.character.skeleton, female,
+                    builtByBase.size(),
+                    built.idleClip, clipWhy);
                 built.hasWalk = loadActorWalkClip(
                     assets, built.skeletonPath, built.character.skeleton, female,
                     built.walkClip, built.walkSpeed, clipWhy);
@@ -1404,7 +1515,14 @@ bool loadGoodspringsActors(
                 << (base != nullptr && !base->fullName.empty() ? (" \"" + base->fullName + "\"")
                                                                : std::string())
                 << (base != nullptr && base->isFemale ? " female" : "")
-                << " voice=" << (built.voice.voiceFolder.empty() ? "<none>" : built.voice.voiceFolder);
+                << " voice=" << (built.voice.voiceFolder.empty() ? "<none>" : built.voice.voiceFolder)
+                << " height=" << built.standingHeightUnits
+                << " headHeight=" << built.headHeightUnits;
+            const importer::fnv::ResolvedActorBase resolved =
+                scan.resolve(built.baseFormId);
+            for (const std::string& part : resolved.bodyPartPaths) {
+                VOX_LOGI("newvegas") << "      part: " << part;
+            }
         }
     }
 
@@ -1416,6 +1534,305 @@ bool loadGoodspringsActors(
         std::to_string(outStats.skippedBuildFailed) + " unbuildable, " +
         std::to_string(outStats.skippedNoSlots) + " over slot budget, " +
         std::to_string(outStats.skippedExcluded) + " handled elsewhere";
+    return true;
+}
+
+bool loadSkyrimGuardShowcase(
+    const std::filesystem::path& skyrimDataDirectory,
+    const float engineCentre[3],
+    std::uint32_t firstInstanceSlot,
+    std::size_t guardCount,
+    std::vector<SkinnedActor>& outGuards,
+    std::string& outDetail) {
+    outGuards.clear();
+    outDetail.clear();
+    if (guardCount == 0u) return true;
+
+    const std::filesystem::path skyrimPlugin =
+        skyrimDataDirectory / "Skyrim.esm";
+    if (!std::filesystem::is_regular_file(skyrimPlugin)) {
+        outDetail = "Skyrim.esm is unavailable under " +
+            skyrimDataDirectory.string();
+        return false;
+    }
+
+    importer::fnv::FalloutAssetSource skyrimAssets;
+    if (!skyrimAssets.open(skyrimDataDirectory)) {
+        outDetail = "could not index Skyrim actor assets under " +
+            skyrimDataDirectory.string();
+        return false;
+    }
+    importer::fnv::FalloutActorScan catalog;
+    std::string error;
+    if (!importer::fnv::findActorsNear(
+            skyrimPlugin, 0.0f, 0.0f, 1.0f, catalog, error)) {
+        outDetail = "could not scan Skyrim guard records: " + error;
+        return false;
+    }
+
+    constexpr const char* kPreferredGuards[] = {
+        "guardwhiterunsonsjail", "guardwhiterunimperialjail"};
+    std::uint32_t guardBaseFormId = 0u;
+    for (const char* preferred : kPreferredGuards) {
+        const auto found = std::find_if(catalog.bases.begin(), catalog.bases.end(),
+            [&](const auto& entry) {
+                return toLowerAscii(entry.second.editorId) == preferred;
+            });
+        if (found != catalog.bases.end() &&
+            catalog.resolve(found->first).bodyPartPaths.size() >= 4u) {
+            guardBaseFormId = found->first;
+            break;
+        }
+    }
+    if (guardBaseFormId == 0u) {
+        const auto fallback = std::find_if(catalog.bases.begin(), catalog.bases.end(),
+            [&](const auto& entry) {
+                const std::string editorId = toLowerAscii(entry.second.editorId);
+                return editorId.starts_with("guardwhiterun") &&
+                    catalog.resolve(entry.first).bodyPartPaths.size() >= 4u;
+            });
+        if (fallback != catalog.bases.end()) guardBaseFormId = fallback->first;
+    }
+    if (guardBaseFormId == 0u) {
+        outDetail = "Skyrim.esm contains no buildable Whiterun guard base";
+        return false;
+    }
+
+    // Synthetic authored-space placements feed the ordinary actor builder so
+    // guard armor, skinning, clips and texture packing share exactly the same
+    // path as native residents. The caller replaces these approximate points
+    // with Balmora navmesh projections after construction.
+    catalog.placements.clear();
+    const float bethesdaCentre[3] = {
+        engineCentre[0], -engineCentre[2], engineCentre[1]};
+    for (std::size_t index = 0u; index < guardCount; ++index) {
+        importer::fnv::FalloutActorPlacement placement;
+        placement.baseFormId = guardBaseFormId;
+        placement.position[0] = bethesdaCentre[0] +
+            180.0f + static_cast<float>(index / 2u) * 140.0f;
+        placement.position[1] = bethesdaCentre[1] +
+            (index % 2u == 0u ? -110.0f : 110.0f);
+        placement.position[2] = bethesdaCentre[2];
+        catalog.placements.push_back(placement);
+    }
+
+    ActorPopulationStats stats;
+    if (!loadGoodspringsActors(
+            skyrimPlugin, nullptr, skyrimAssets, bethesdaCentre, 1000.0f,
+            firstInstanceSlot, guardCount, {}, {}, outGuards, stats, &catalog)) {
+        outDetail = stats.detail;
+        return false;
+    }
+    for (std::size_t index = 0u; index < outGuards.size(); ++index) {
+        SkinnedActor& guard = outGuards[index];
+        guard.fullName = "Skyrim Guard";
+        guard.referenceFormId = 0u;
+        guard.runtimeObjectId = bethesda::ObjectId::persistent(
+            bethesda::makeTes3ReferenceKey(
+                "odai-skyrim-guard-showcase", static_cast<std::uint32_t>(index + 1u)));
+        guard.wanderRng = 0x68bc21ebu ^
+            (static_cast<std::uint32_t>(index + 1u) * 2654435761u);
+        guard.wanderPauseSeconds = static_cast<float>(index) * 0.55f;
+    }
+    outDetail = std::to_string(outGuards.size()) +
+        " Whiterun guard(s): " + stats.detail;
+    return !outGuards.empty();
+}
+
+bool loadSkyrimPlayerAvatar(
+    const std::filesystem::path& skyrimDataDirectory,
+    std::string_view outfitEditorId,
+    std::uint32_t instanceSlot,
+    SkinnedActor& outAvatar,
+    std::string& outDetail) {
+    outAvatar = SkinnedActor{};
+    outDetail.clear();
+    const std::filesystem::path plugin = skyrimDataDirectory / "Skyrim.esm";
+    if (!std::filesystem::is_regular_file(plugin)) {
+        outDetail = "Skyrim.esm is unavailable under " + skyrimDataDirectory.string();
+        return false;
+    }
+    importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(skyrimDataDirectory)) {
+        outDetail = "could not index Skyrim avatar assets under " +
+            skyrimDataDirectory.string();
+        return false;
+    }
+    std::string error;
+    importer::fnv::SkyrimAnimationAssetReport animationBundle;
+    if (!importer::fnv::inspectSkyrimAnimationBundle(
+            assets, animationBundle, true, error)) {
+        outDetail = "Skyrim locomotion bundle is not usable: " + error;
+        for (const std::string& diagnostic : animationBundle.diagnostics) {
+            outDetail += "; " + diagnostic;
+        }
+        return false;
+    }
+    importer::fnv::FalloutActorScan catalog;
+    error.clear();
+    if (!importer::fnv::findActorsNear(plugin, 0.0f, 0.0f, 1.0f, catalog, error)) {
+        outDetail = "could not scan Skyrim avatar records: " + error;
+        return false;
+    }
+    const auto player = std::find_if(catalog.bases.begin(), catalog.bases.end(),
+        [](const auto& entry) {
+            return toLowerAscii(entry.second.editorId) == "player";
+        });
+    if (player == catalog.bases.end()) {
+        outDetail = "Skyrim.esm has no NPC_ record with EditorID Player";
+        return false;
+    }
+    const std::string wantedOutfit = toLowerAscii(std::string(outfitEditorId));
+    const auto outfit = std::find_if(
+        catalog.outfitEditorIds.begin(), catalog.outfitEditorIds.end(),
+        [&](const auto& entry) { return toLowerAscii(entry.second) == wantedOutfit; });
+    if (outfit == catalog.outfitEditorIds.end()) {
+        outDetail = "Skyrim outfit '" + std::string(outfitEditorId) +
+            "' was not found in Skyrim.esm";
+        return false;
+    }
+    // NPC heads are pre-generated under FaceGeom, but form 0x7 is the
+    // customizable Player and intentionally has no baked mesh in the retail
+    // archives. Assemble one deterministic stock male Nord face from the
+    // chargen source meshes instead. Every piece is required: silently
+    // skipping one is how the previous avatar rendered without a head at all.
+    static constexpr std::array<std::string_view, 6> kStockMaleNordFaceParts{
+        "actors\\character\\character assets\\malehead.nif",
+        "actors\\character\\character assets\\eyesmale.nif",
+        "actors\\character\\character assets\\mouth\\mouthhuman.nif",
+        "actors\\character\\character assets\\faceparts\\malebrows.nif",
+        "actors\\character\\character assets\\hair\\male\\hairline01.nif",
+        "actors\\character\\character assets\\hair\\male\\hair01.nif",
+    };
+    bool generatedFaceAvailable = false;
+    for (const std::string& facePath : player->second.faceGeometryPaths) {
+        std::vector<std::uint8_t> faceBytes;
+        std::string faceError;
+        if (assets.resolveMesh(facePath, faceBytes, faceError)) {
+            generatedFaceAvailable = true;
+            break;
+        }
+    }
+    std::vector<std::string> requiredStockFaceParts;
+    if (!generatedFaceAvailable) {
+        player->second.faceGeometryPaths.clear();
+        requiredStockFaceParts.reserve(kStockMaleNordFaceParts.size());
+        for (const std::string_view facePathView : kStockMaleNordFaceParts) {
+            const std::string facePath(facePathView);
+            std::vector<std::uint8_t> faceBytes;
+            std::string faceError;
+            importer::fnv::NifSkinnedModel faceModel;
+            if (!assets.resolveMesh(facePath, faceBytes, faceError)) {
+                outDetail = "required stock male Nord face mesh is unavailable: " +
+                    facePath + " (" + faceError + ")";
+                return false;
+            }
+            if (!importer::fnv::parseNifSkinnedMesh(
+                    faceBytes, faceModel, faceError) || faceModel.shapes.empty()) {
+                outDetail = "required stock male Nord face mesh is not decodable: " +
+                    facePath + " (" + faceError + ")";
+                return false;
+            }
+            player->second.faceGeometryPaths.emplace_back(facePath);
+            requiredStockFaceParts.emplace_back(facePath);
+        }
+    }
+    // The mutable copy is an avatar compilation catalog only. It cannot leak
+    // into BethesdaSession or alter Morrowind's inventory/quests/scripts.
+    player->second.isFemale = false;
+    player->second.defaultOutfitFormId = outfit->first;
+    catalog.placements.clear();
+    importer::fnv::FalloutActorPlacement placement;
+    placement.baseFormId = player->first;
+    catalog.placements.push_back(placement);
+
+    std::vector<SkinnedActor> avatars;
+    ActorPopulationStats stats;
+    const float origin[3] = {};
+    if (!loadGoodspringsActors(
+            plugin, nullptr, assets, origin, 1.0f, instanceSlot, 1u, {}, {},
+            avatars, stats, &catalog) || avatars.size() != 1u) {
+        outDetail = "Skyrim player avatar build failed: " + stats.detail;
+        return false;
+    }
+    outAvatar = std::move(avatars.front());
+    for (const std::string& requiredPath : requiredStockFaceParts) {
+        const std::string loweredRequired = toLowerAscii(requiredPath);
+        const bool contributed = std::any_of(
+            outAvatar.character.parts.begin(), outAvatar.character.parts.end(),
+            [&](const importer::fnv::FalloutCharacterPart& part) {
+                return toLowerAscii(part.sourcePath) == loweredRequired;
+            });
+        if (!contributed) {
+            outDetail = "required stock male Nord face mesh did not bind to the avatar: " +
+                requiredPath;
+            outAvatar = SkinnedActor{};
+            return false;
+        }
+    }
+    outAvatar.name = "SkyrimPlayerAvatar";
+    outAvatar.fullName = "Player";
+    outAvatar.referenceFormId = 0u;
+    outAvatar.runtimeObjectId = {};
+    outAvatar.wanders = false;
+    outAvatar.walking = false;
+    outAvatar.instanceSlot = instanceSlot;
+    if (const auto items = catalog.outfits.find(outfit->first);
+        items != catalog.outfits.end()) {
+        outAvatar.inventoryFormIds = items->second;
+    }
+    if (outAvatar.idleClip.name.starts_with("procedural") ||
+        outAvatar.walkClip.name.starts_with("procedural")) {
+        outDetail = "Skyrim player avatar requires decodable retail male idle and walk HKX clips";
+        outAvatar = SkinnedActor{};
+        return false;
+    }
+    static constexpr std::array additionalClips{
+        std::pair{"meshes\\actors\\character\\animations\\male\\mt_runforward.hkx",
+                  "Skyrim male run forward"},
+        std::pair{"meshes\\actors\\character\\animations\\male\\mt_sprintforward.hkx",
+                  "Skyrim male sprint forward"},
+        std::pair{"meshes\\actors\\character\\animations\\mt_jump.hkx",
+                  "Skyrim jump"},
+        std::pair{"meshes\\actors\\character\\animations\\mt_jumpfall.hkx",
+                  "Skyrim fall"},
+        std::pair{"meshes\\actors\\character\\animations\\mt_jumpland.hkx",
+                  "Skyrim landing"},
+        std::pair{"meshes\\actors\\character\\animations\\male\\npc_turnleft90.hkx",
+                  "Skyrim turn left"},
+        std::pair{"meshes\\actors\\character\\animations\\male\\npc_turnright90.hkx",
+                  "Skyrim turn right"}};
+    anim::HkxDecodedSkeleton hkxSkeleton;
+    if (!loadSkyrimHkxSkeleton(assets, false, hkxSkeleton, error)) {
+        outDetail = "required Skyrim avatar skeleton HKX could not decode: " + error;
+        outAvatar = SkinnedActor{};
+        return false;
+    }
+    for (const auto& [path, name] : additionalClips) {
+        std::vector<std::uint8_t> bytes;
+        if (!assets.resolveAsset(path, bytes, error)) {
+            outDetail = "required Skyrim avatar HKX is unavailable: " +
+                std::string(path) + " (" + error + ")";
+            outAvatar = SkinnedActor{};
+            return false;
+        }
+        anim::AnimationClip clip;
+        anim::HkxDecodedClipMetadata metadata;
+        if (!anim::decodeHkxAnimationClip(
+                bytes, outAvatar.character.skeleton, name, clip, metadata, error,
+                &hkxSkeleton) ||
+            metadata.boundTracks < 8u) {
+            outDetail = "required Skyrim avatar HKX could not decode: " +
+                std::string(path) + " (" + error + ")";
+            outAvatar = SkinnedActor{};
+            return false;
+        }
+        outAvatar.authoredLocomotionClips.push_back(std::move(clip));
+    }
+    outDetail = "male Nord Player with complete stock head wearing " +
+        std::string(outfitEditorId) +
+        " (" + std::to_string(outAvatar.character.parts.size()) +
+        " body pieces); 9 retail HKX locomotion clips decoded";
     return true;
 }
 
@@ -1638,7 +2055,7 @@ void speakActorLine(
     }
 }
 
-void updateActorPoses(std::vector<SkinnedActor>& actors, float deltaSeconds) {
+void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds) {
     // ODAI_FNV_NOANIM=1 freezes every actor at bind pose while leaving the rest
     // of the path running -- same upload, same per-frame pose submission, same
     // draws. It is the control for "is this actually animating": a screenshot

@@ -41,6 +41,17 @@ public:
     bool readU8(std::uint8_t& out) { return readRaw(&out, 1); }
     bool readFloat(float& out) { return readRaw(&out, 4); }
 
+    bool readSizedString32(std::string& out) {
+        std::uint32_t length = 0u;
+        if (!readU32(length) || length > remaining()) {
+            return false;
+        }
+        out.assign(reinterpret_cast<const char*>(m_data + m_offset), length);
+        m_offset += length;
+        while (!out.empty() && out.back() == '\0') out.pop_back();
+        return true;
+    }
+
     bool readVector3(Vector3& out) {
         return readFloat(out.x) && readFloat(out.y) && readFloat(out.z);
     }
@@ -614,24 +625,54 @@ static bool parseAnimationAtBlock(
         }
         return &summary.strings[static_cast<std::size_t>(index)];
     };
+    const auto paletteString = [&](std::int32_t paletteBlock,
+                                   std::int32_t offset) -> std::string {
+        if (paletteBlock < 0 || offset < 0 ||
+            static_cast<std::size_t>(paletteBlock) >= summary.blockTypeNames.size() ||
+            summary.blockTypeNames[static_cast<std::size_t>(paletteBlock)] !=
+                "NiStringPalette") {
+            return {};
+        }
+        const std::size_t block = static_cast<std::size_t>(paletteBlock);
+        if (summary.blockSizes[block] < 4u) return {};
+        std::uint32_t bufferSize = 0u;
+        std::memcpy(&bufferSize, bytes.data() + summary.blockStarts[block], 4u);
+        const std::size_t available = summary.blockSizes[block] - 4u;
+        if (bufferSize > available || static_cast<std::uint32_t>(offset) >= bufferSize) {
+            return {};
+        }
+        const char* begin = reinterpret_cast<const char*>(
+            bytes.data() + summary.blockStarts[block] + 4u +
+            static_cast<std::size_t>(offset));
+        const std::size_t remaining = bufferSize - static_cast<std::size_t>(offset);
+        const void* terminator = std::memchr(begin, '\0', remaining);
+        const std::size_t length = terminator != nullptr
+            ? static_cast<const char*>(terminator) - begin : remaining;
+        return std::string(begin, length);
+    };
 
     BlockCursor cursor(
         bytes.data() + summary.blockStarts[sequenceBlock], summary.blockSizes[sequenceBlock]);
 
-    std::int32_t nameIndex = 0;
+    std::int32_t nameIndex = -1;
     std::uint32_t controlledBlockCount = 0;
     std::uint32_t arrayGrowBy = 0;
-    if (!cursor.readI32(nameIndex) || !cursor.readU32(controlledBlockCount) ||
-        !cursor.readU32(arrayGrowBy)) {
+    if ((summary.inlineNames
+             ? !cursor.readSizedString32(outAnimation.name)
+             : !cursor.readI32(nameIndex)) ||
+        !cursor.readU32(controlledBlockCount) || !cursor.readU32(arrayGrowBy)) {
         outError = "NiControllerSequence truncated at header";
         return false;
     }
-    if (const std::string* name = stringAt(nameIndex)) {
+    if (!summary.inlineNames) if (const std::string* name = stringAt(nameIndex)) {
         outAnimation.name = *name;
     }
-    // 29 bytes each; a count that cannot fit is the first sign the layout
-    // assumption is wrong for this file's version.
-    if (static_cast<std::size_t>(controlledBlockCount) * 29u > cursor.remaining()) {
+    // Oblivion's inline-name generation stores a palette ref plus five byte
+    // offsets (33 bytes); Fallout and later store five string-table indices
+    // directly (29 bytes).
+    const std::size_t controlledBlockStride = summary.inlineNames ? 33u : 29u;
+    if (static_cast<std::size_t>(controlledBlockCount) * controlledBlockStride >
+        cursor.remaining()) {
         outError = "NiControllerSequence controlled-block count does not fit the block";
         return false;
     }
@@ -646,30 +687,42 @@ static bool parseAnimationAtBlock(
         std::int32_t interpolator = 0;
         std::int32_t controller = 0;
         std::uint8_t priority = 0;
-        std::int32_t nodeName = 0;
+        std::int32_t nodeName = -1;
         std::int32_t propertyType = 0;
         std::int32_t controllerType = 0;
         std::int32_t controllerId = 0;
         std::int32_t interpolatorId = 0;
         if (!cursor.readI32(interpolator) || !cursor.readI32(controller) ||
-            !cursor.readU8(priority) || !cursor.readI32(nodeName) ||
-            !cursor.readI32(propertyType) || !cursor.readI32(controllerType) ||
-            !cursor.readI32(controllerId) || !cursor.readI32(interpolatorId)) {
+            !cursor.readU8(priority)) {
             outError = "NiControllerSequence truncated in controlled blocks";
+            return false;
+        }
+        std::int32_t paletteBlock = -1;
+        if (summary.inlineNames && !cursor.readI32(paletteBlock)) {
+            outError = "NiControllerSequence truncated at string palette";
+            return false;
+        }
+        if (!cursor.readI32(nodeName) || !cursor.readI32(propertyType) ||
+            !cursor.readI32(controllerType) || !cursor.readI32(controllerId) ||
+            !cursor.readI32(interpolatorId)) {
+            outError = "NiControllerSequence truncated in controlled names";
             return false;
         }
         // The layout check that matters. Every one of these is either a valid
         // index or the -1 "absent" marker; a stride error makes them wander out
         // of range within the first few entries.
         if (interpolator >= static_cast<std::int32_t>(summary.blockTypeNames.size()) ||
-            nodeName >= static_cast<std::int32_t>(summary.strings.size()) ||
-            interpolator < -1 || nodeName < -1) {
+            (!summary.inlineNames &&
+             nodeName >= static_cast<std::int32_t>(summary.strings.size())) ||
+            interpolator < -1 || (!summary.inlineNames && nodeName < -1)) {
             outError = "NiControllerSequence controlled block out of range (layout mismatch)";
             return false;
         }
         ControlledBlock entry;
         entry.interpolator = interpolator;
-        if (const std::string* resolved = stringAt(nodeName)) {
+        if (summary.inlineNames) {
+            entry.nodeName = paletteString(paletteBlock, nodeName);
+        } else if (const std::string* resolved = stringAt(nodeName)) {
             entry.nodeName = *resolved;
         }
         controlledBlocks.push_back(std::move(entry));

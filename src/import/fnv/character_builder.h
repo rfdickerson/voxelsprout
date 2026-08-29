@@ -70,10 +70,12 @@ struct FalloutCharacter {
     // so its value cannot matter.
     std::vector<odai::math::Matrix4> inverseBindMatrices;
 
-    // Bones named by a skinned shape that the skeleton does not contain. Every
-    // vertex weighted to one is silently rebound to the root, so a nonzero
-    // count here means the character is deformed, not merely incomplete.
+    // Bones named by a skinned shape that the skeleton does not contain. A
+    // triangle touching one of those influences is omitted: allowing only its
+    // resolved vertices through would connect actor-local geometry to the
+    // world origin and produce a strip across the scene.
     std::uint32_t unresolvedBoneCount = 0;
+    std::uint32_t droppedUnresolvedBoneTriangleCount = 0;
     // Shapes whose inverse bind for a shared bone disagreed with one already
     // recorded by an earlier shape. Zero for retail body parts that share a
     // skeleton; nonzero means the parts were authored against different rigs

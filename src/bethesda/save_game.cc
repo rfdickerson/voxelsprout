@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -18,7 +19,7 @@
 namespace odai::bethesda {
 namespace {
 
-constexpr std::uint32_t kOdaiSaveVersion = 8u;
+constexpr std::uint32_t kOdaiSaveVersion = 10u;
 
 using Json = nlohmann::json;
 
@@ -149,6 +150,10 @@ Json graphSnapshotJson(const odai::anim::BehaviorGraphSnapshot& snapshot) {
         events.push_back({{"name", event.name}, {"payload", event.payload}});
     }
     return {{"state", snapshot.state}, {"state_time", snapshot.stateTime},
+        {"previous_state", snapshot.previousState},
+        {"previous_state_time", snapshot.previousStateTime},
+        {"transition_elapsed", snapshot.transitionElapsed},
+        {"transition_duration", snapshot.transitionDuration},
         {"fixed_tick", snapshot.fixedTick}, {"was_grounded", snapshot.wasGrounded},
         {"queued_events", std::move(events)}};
 }
@@ -158,13 +163,20 @@ bool graphSnapshotFromJson(
     try {
         out.state = json.at("state").get<std::string>();
         out.stateTime = json.at("state_time").get<float>();
+        out.previousState = json.value("previous_state", std::string{});
+        out.previousStateTime = json.value("previous_state_time", 0.0f);
+        out.transitionElapsed = json.value("transition_elapsed", 0.0f);
+        out.transitionDuration = json.value("transition_duration", 0.0f);
         out.fixedTick = json.at("fixed_tick").get<std::uint64_t>();
         out.wasGrounded = json.at("was_grounded").get<bool>();
         for (const Json& event : json.at("queued_events")) {
             out.queuedEvents.push_back({event.at("name").get<std::string>(),
                 event.at("payload").get<std::string>()});
         }
-        if (out.state.empty() || out.stateTime < 0.0f || !std::isfinite(out.stateTime)) {
+        if (out.state.empty() || out.stateTime < 0.0f || !std::isfinite(out.stateTime) ||
+            out.previousStateTime < 0.0f || !std::isfinite(out.previousStateTime) ||
+            out.transitionElapsed < 0.0f || !std::isfinite(out.transitionElapsed) ||
+            out.transitionDuration < 0.0f || !std::isfinite(out.transitionDuration)) {
             throw std::runtime_error("invalid state/time");
         }
     } catch (const std::exception& exception) {
@@ -361,6 +373,44 @@ Json objectJson(const RuntimeObject& object) {
     } else {
         json["activator_state"] = Json(nullptr);
     }
+    if (object.livingState.has_value()) {
+        const RuntimeLivingState& living = *object.livingState;
+        json["living_state"] = {{"activity", static_cast<std::uint8_t>(living.activity)},
+            {"source", static_cast<std::uint8_t>(living.source)},
+            {"tier", static_cast<std::uint8_t>(living.tier)},
+            {"schedule_revision", living.scheduleRevision},
+            {"absolute_game_minute", living.absoluteGameMinute},
+            {"next_transition_game_minute", living.nextTransitionGameMinute},
+            {"phase_index", living.phaseIndex}, {"confidence", living.confidence},
+            {"reason", living.reason}, {"travelling", living.travelling},
+            {"last_stimulus_sequence", living.lastStimulusSequence},
+            {"crimes_committed", living.crimesCommitted},
+            {"crimes_witnessed", living.crimesWitnessed}, {"bounty", living.bounty},
+            {"last_crime", static_cast<std::uint8_t>(living.lastCrime)}};
+        json["living_state"]["anchor"] = living.anchor.valid()
+            ? objectIdJson(living.anchor) : Json(nullptr);
+    } else {
+        json["living_state"] = Json(nullptr);
+    }
+    if (object.physicalState.has_value()) {
+        const RuntimePhysicalState& physical = *object.physicalState;
+        json["physical_state"] = {{"authored_transform", transformJson(physical.authoredTransform)},
+            {"rotation_quaternion", physical.rotationQuaternion},
+            {"linear_velocity", physical.linearVelocity},
+            {"angular_velocity", physical.angularVelocity},
+            {"last_touched_game_minute", physical.lastTouchedGameMinute},
+            {"unloaded_since_game_minute", physical.unloadedSinceGameMinute},
+            {"dynamic", physical.dynamic}, {"breakable", physical.breakable},
+            {"constrained", physical.constrained},
+            {"protected", physical.protectedFromDestruction},
+            {"resettable", physical.resettable}, {"broken", physical.broken},
+            {"player_grabbed", physical.playerGrabbed},
+            {"intentionally_placed", physical.intentionallyPlaced},
+            {"owned", physical.owned}, {"quest_linked", physical.questLinked},
+            {"meaningful", physical.meaningful}};
+    } else {
+        json["physical_state"] = Json(nullptr);
+    }
     json["relationships"] = Json::array();
     for (const RelationshipRank& relationship : object.relationships) {
         json["relationships"].push_back(
@@ -553,6 +603,88 @@ bool objectFromJson(const Json& json, RuntimeObject& out, std::string& error) {
                 return false;
             }
             out.activatorState = std::move(activator);
+        }
+        if (json.contains("living_state") && !json.at("living_state").is_null()) {
+            const Json& saved = json.at("living_state");
+            const auto activity = saved.at("activity").get<std::uint8_t>();
+            const auto source = saved.at("source").get<std::uint8_t>();
+            const auto tier = saved.at("tier").get<std::uint8_t>();
+            const auto crime = saved.at("last_crime").get<std::uint8_t>();
+            if (activity > static_cast<std::uint8_t>(RuntimeActivityKind::Quest) ||
+                source > static_cast<std::uint8_t>(RuntimeBehaviorSource::Death) ||
+                tier > static_cast<std::uint8_t>(RuntimeSimulationTier::Full) ||
+                crime > static_cast<std::uint8_t>(RuntimeCrimeKind::Murder)) {
+                error = "invalid saved living-world enum";
+                return false;
+            }
+            RuntimeLivingState living;
+            living.activity = static_cast<RuntimeActivityKind>(activity);
+            living.source = static_cast<RuntimeBehaviorSource>(source);
+            living.tier = static_cast<RuntimeSimulationTier>(tier);
+            if (!saved.at("anchor").is_null() &&
+                !objectIdFromJson(saved.at("anchor"), living.anchor, error)) return false;
+            living.scheduleRevision = saved.at("schedule_revision").get<std::uint64_t>();
+            living.absoluteGameMinute = saved.at("absolute_game_minute").get<std::uint64_t>();
+            living.nextTransitionGameMinute =
+                saved.at("next_transition_game_minute").get<std::uint64_t>();
+            living.phaseIndex = saved.at("phase_index").get<std::uint32_t>();
+            living.confidence = saved.at("confidence").get<float>();
+            living.reason = saved.at("reason").get<std::string>();
+            living.travelling = saved.at("travelling").get<bool>();
+            living.lastStimulusSequence =
+                saved.at("last_stimulus_sequence").get<std::uint64_t>();
+            living.crimesCommitted = saved.at("crimes_committed").get<std::uint64_t>();
+            living.crimesWitnessed = saved.at("crimes_witnessed").get<std::uint64_t>();
+            living.bounty = saved.at("bounty").get<std::int64_t>();
+            living.lastCrime = static_cast<RuntimeCrimeKind>(crime);
+            if (!std::isfinite(living.confidence) || living.confidence < 0.0f ||
+                living.confidence > 1.0f || living.bounty < 0) {
+                error = "invalid saved living-world state";
+                return false;
+            }
+            out.livingState = std::move(living);
+        }
+        if (json.contains("physical_state") && !json.at("physical_state").is_null()) {
+            const Json& saved = json.at("physical_state");
+            RuntimePhysicalState physical;
+            if (!transformFromJson(saved.at("authored_transform"),
+                physical.authoredTransform, error)) return false;
+            physical.rotationQuaternion = saved.at("rotation_quaternion")
+                .get<std::array<float, 4>>();
+            physical.linearVelocity = saved.at("linear_velocity").get<std::array<float, 3>>();
+            physical.angularVelocity = saved.at("angular_velocity").get<std::array<float, 3>>();
+            physical.lastTouchedGameMinute =
+                saved.at("last_touched_game_minute").get<std::uint64_t>();
+            physical.unloadedSinceGameMinute =
+                saved.at("unloaded_since_game_minute").get<std::uint64_t>();
+            physical.dynamic = saved.at("dynamic").get<bool>();
+            physical.breakable = saved.at("breakable").get<bool>();
+            physical.constrained = saved.at("constrained").get<bool>();
+            physical.protectedFromDestruction = saved.at("protected").get<bool>();
+            physical.resettable = saved.at("resettable").get<bool>();
+            physical.broken = saved.at("broken").get<bool>();
+            physical.playerGrabbed = saved.at("player_grabbed").get<bool>();
+            physical.intentionallyPlaced = saved.at("intentionally_placed").get<bool>();
+            physical.owned = saved.at("owned").get<bool>();
+            physical.questLinked = saved.at("quest_linked").get<bool>();
+            physical.meaningful = saved.at("meaningful").get<bool>();
+            const auto finite3 = [](const std::array<float, 3>& values) {
+                return std::all_of(values.begin(), values.end(),
+                    [](float value) { return std::isfinite(value); });
+            };
+            const bool finiteRotation = std::all_of(
+                physical.rotationQuaternion.begin(), physical.rotationQuaternion.end(),
+                [](float value) { return std::isfinite(value); });
+            const float rotationLengthSquared = std::inner_product(
+                physical.rotationQuaternion.begin(), physical.rotationQuaternion.end(),
+                physical.rotationQuaternion.begin(), 0.0f);
+            if (!finite3(physical.linearVelocity) || !finite3(physical.angularVelocity) ||
+                !finiteRotation || rotationLengthSquared < 1.0e-8f ||
+                (physical.broken && !physical.breakable)) {
+                error = "invalid saved physical persistence state";
+                return false;
+            }
+            out.physicalState = std::move(physical);
         }
         if (json.contains("actor_values")) {
             ActorValues values;
@@ -1191,6 +1323,10 @@ Json sessionPayload(const BethesdaSession& session) {
         {"tick", session.clock().tick()},
         {"accumulator_seconds", session.clock().accumulatorSeconds()},
         {"random_state", session.randomState()},
+        {"living_world", {
+            {"absolute_game_minute", session.livingWorld().absoluteGameMinute()},
+            {"fractional_game_minute", session.livingWorld().fractionalGameMinute()},
+            {"next_stimulus_sequence", session.livingWorld().nextStimulusSequence()}}},
         {"world", {{"next_runtime_id", session.world().nextRuntimeId()},
                    {"next_command_sequence", session.world().nextCommandSequence()},
                    {"objects", std::move(objects)}}},
@@ -1229,6 +1365,10 @@ void collectRecordKeys(const RuntimeObject& object, std::set<RecordKey>& keys) {
     if (object.navigationRequest.has_value() &&
         object.navigationRequest->destination.kind == ObjectIdKind::PersistentReference) {
         keys.insert(object.navigationRequest->destination.reference);
+    }
+    if (object.livingState.has_value() &&
+        object.livingState->anchor.kind == ObjectIdKind::PersistentReference) {
+        keys.insert(object.livingState->anchor.reference);
     }
     for (const RelationshipRank& relationship : object.relationships) {
         if (relationship.other.kind == ObjectIdKind::PersistentReference) {
@@ -1383,6 +1523,9 @@ bool loadOdaiGame(
     std::uint32_t randomState = 1u;
     std::uint64_t nextRuntimeId = 1u;
     std::uint64_t nextCommandSequence = 1u;
+    std::uint64_t livingGameMinute = 8u * 60u;
+    double livingFractionalMinute = 0.0;
+    std::uint64_t nextStimulusSequence = 1u;
     std::string savedFingerprint;
     try {
         const auto savedGame = static_cast<importer::fnv::BethesdaGame>(
@@ -1399,6 +1542,19 @@ bool loadOdaiGame(
         tick = payload.at("tick").get<std::uint64_t>();
         accumulator = payload.at("accumulator_seconds").get<double>();
         randomState = payload.at("random_state").get<std::uint32_t>();
+        if (saveVersion >= 9u) {
+            livingGameMinute = payload.at("living_world")
+                .at("absolute_game_minute").get<std::uint64_t>();
+            livingFractionalMinute = payload.at("living_world")
+                .at("fractional_game_minute").get<double>();
+            nextStimulusSequence = payload.at("living_world")
+                .at("next_stimulus_sequence").get<std::uint64_t>();
+            if (!std::isfinite(livingFractionalMinute) || livingFractionalMinute < 0.0 ||
+                livingFractionalMinute >= 1.0 || nextStimulusSequence == 0u) {
+                outError = "invalid saved living-world clock";
+                return false;
+            }
+        }
         nextRuntimeId = payload.at("world").at("next_runtime_id").get<std::uint64_t>();
         nextCommandSequence = payload.at("world").at("next_command_sequence").get<std::uint64_t>();
         for (const Json& savedObject : payload.at("world").at("objects")) {
@@ -2011,6 +2167,14 @@ bool loadOdaiGame(
         outReport.diagnostics.push_back(
             "pre-version-8 save initialized actor factions, gift menus, and game-time timer metadata");
     }
+    if (saveVersion < 9u) {
+        outReport.diagnostics.push_back(
+            "pre-version-9 save initialized living-world schedules, crime, and physical deltas");
+    }
+    if (saveVersion < 10u) {
+        outReport.diagnostics.push_back(
+            "pre-version-10 save initialized animation transitions as inactive");
+    }
     if (!tes3State.present && session.config().game == importer::fnv::BethesdaGame::Morrowind) {
         outReport.diagnostics.push_back(
             "save has no TES3 extension; journal, MWScript, topics, and dialogue initialized empty");
@@ -2045,6 +2209,8 @@ bool loadOdaiGame(
     }
     session.clock().reset(tick, accumulator);
     session.setRandomState(randomState);
+    session.livingWorld().restoreClock(livingGameMinute, livingFractionalMinute);
+    session.livingWorld().setNextStimulusSequence(nextStimulusSequence);
     outError.clear();
     return true;
 }

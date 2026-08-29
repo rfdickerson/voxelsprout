@@ -50,6 +50,12 @@ public:
     // addImportedSceneChunk returns kInvalidImportedChunkIndex on failure.
     // Indices stay valid across evictions.
     static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
+    // Preallocate streamed geometry before a known initial residency set is
+    // uploaded. This avoids repeatedly recreating and copying the arenas while
+    // the first cells arrive. Intended for startup prewarm; later streaming
+    // still grows automatically when required.
+    bool reserveImportedSceneGeometry(
+        std::uint64_t vertexCapacity, std::uint64_t indexCapacity);
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunk(std::size_t chunkIndex);
     // Capture-only readiness fence. Waits on the upload timeline values already
@@ -109,6 +115,7 @@ public:
     // that baseline comes out uniformly too dark or too bright. Worth enabling
     // for any scene with a wide dynamic range or a day/night cycle.
     void setAutoExposureEnabled(bool enabled);
+    void setAutoExposureKeyValue(float keyValue);
     // Sets every colour-grading term to its neutral value. See the backend's
     // definition for why this is a reset rather than a bypass.
     void setNeutralColorGrading();
@@ -214,6 +221,8 @@ public:
     // Cloud layer textures for the active weather. Upload-heavy, so call it
     // when the weather changes rather than per frame.
     void setWeatherClouds(const WeatherCloudTextures& clouds);
+    // Camera-centred authored geometry used by Skyrim's WTHR cloud layers.
+    void setWeatherCloudMesh(const WeatherCloudMesh& mesh);
     // Tone curve for the post pass. Default is ACES, so this is inert
     // unless a game selects otherwise.
     void setTonemapSettings(const TonemapSettings& settings);

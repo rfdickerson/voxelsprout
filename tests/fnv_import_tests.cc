@@ -1659,6 +1659,182 @@ void testSkyrimRegionAndSoundRecords() {
     fs::remove(path);
 }
 
+void testWorldspaceEntranceUsesPairedDoorArrival() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr std::uint32_t kParentWorld = 0x1000u;
+    constexpr std::uint32_t kChildWorld = 0x1100u;
+    constexpr std::uint32_t kParentCell = 0x2000u;
+    constexpr std::uint32_t kChildCell = 0x2100u;
+    constexpr std::uint32_t kOuterDoor = 0x3000u;
+    constexpr std::uint32_t kInnerDoor = 0x3100u;
+    constexpr std::uint32_t kDisabledOuterDoor = 0x3200u;
+    constexpr std::uint32_t kDisabledInnerDoor = 0x3300u;
+    constexpr std::uint32_t kDoorBase = 0x4000u;
+
+    const auto doorRecord = [=](std::uint32_t formId, std::uint32_t target,
+                               const std::array<float, 6>& arrival,
+                               std::uint32_t recordFlags = 0u) {
+        std::vector<std::uint8_t> body;
+        std::vector<std::uint8_t> name;
+        appendPod(name, kDoorBase);
+        const auto nameSubrecord = buildSubrecord("NAME", name);
+        body.insert(body.end(), nameSubrecord.begin(), nameSubrecord.end());
+        std::vector<std::uint8_t> data;
+        for (const float value : {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}) {
+            appendPod(data, value);
+        }
+        const auto dataSubrecord = buildSubrecord("DATA", data);
+        body.insert(body.end(), dataSubrecord.begin(), dataSubrecord.end());
+        std::vector<std::uint8_t> xtel;
+        appendPod(xtel, target);
+        for (const float value : arrival) appendPod(xtel, value);
+        const auto xtelSubrecord = buildSubrecord("XTEL", xtel);
+        body.insert(body.end(), xtelSubrecord.begin(), xtelSubrecord.end());
+        return buildRecord("REFR", formId, recordFlags, body);
+    };
+    const auto worldWithDoor = [&](std::uint32_t worldFormId, const char* editorId,
+                                   std::uint32_t cellFormId, std::int32_t gridX,
+                                   std::int32_t gridZ,
+                                   const std::vector<std::uint8_t>& doors) {
+        const auto worldRecord = buildRecord(
+            "WRLD", worldFormId, 0u,
+            buildSubrecord("EDID", stringPayload(editorId)));
+
+        std::vector<std::uint8_t> cellBody;
+        const auto data = buildSubrecord("DATA", std::vector<std::uint8_t>{0u});
+        cellBody.insert(cellBody.end(), data.begin(), data.end());
+        std::vector<std::uint8_t> xclc;
+        appendPod(xclc, gridX);
+        appendPod(xclc, gridZ);
+        appendPod(xclc, 0u);
+        const auto xclcSubrecord = buildSubrecord("XCLC", xclc);
+        cellBody.insert(cellBody.end(), xclcSubrecord.begin(), xclcSubrecord.end());
+        const auto cellRecord = buildRecord("CELL", cellFormId, 0u, cellBody);
+
+        char cellLabel[4];
+        std::memcpy(cellLabel, &cellFormId, sizeof(cellLabel));
+        const auto temporaryChildren = buildGroup(cellLabel, 9u, doors);
+        const auto cellChildren = buildGroup(cellLabel, 6u, temporaryChildren);
+        std::vector<std::uint8_t> subBlockContent = cellRecord;
+        subBlockContent.insert(
+            subBlockContent.end(), cellChildren.begin(), cellChildren.end());
+        const auto subBlock = buildGroup("\0\0\0\0", 5u, subBlockContent);
+        const auto block = buildGroup("\0\0\0\0", 4u, subBlock);
+
+        char worldLabel[4];
+        std::memcpy(worldLabel, &worldFormId, sizeof(worldLabel));
+        const auto children = buildGroup(worldLabel, 1u, block);
+        std::vector<std::uint8_t> result = worldRecord;
+        result.insert(result.end(), children.begin(), children.end());
+        return result;
+    };
+
+    const std::array<float, 6> insideArrival{
+        100.0f, 200.0f, 300.0f, 0.0f, 0.0f, 0.5f};
+    const std::array<float, 6> outsideArrival{
+        -100.0f, -200.0f, 30.0f, 0.0f, 0.0f, -0.25f};
+    const std::array<float, 6> disabledArrival{
+        900.0f, 800.0f, 700.0f, 0.0f, 0.0f, 1.5f};
+    std::vector<std::uint8_t> parentDoors = doorRecord(
+        kDisabledOuterDoor, kDisabledInnerDoor, disabledArrival, 0x00000800u);
+    const std::vector<std::uint8_t> enabledOuter = doorRecord(
+        kOuterDoor, kInnerDoor, insideArrival);
+    parentDoors.insert(parentDoors.end(), enabledOuter.begin(), enabledOuter.end());
+    std::vector<std::uint8_t> childDoors = doorRecord(
+        kDisabledInnerDoor, kDisabledOuterDoor, outsideArrival, 0x00000800u);
+    const std::vector<std::uint8_t> enabledInner = doorRecord(
+        kInnerDoor, kOuterDoor, outsideArrival);
+    childDoors.insert(childDoors.end(), enabledInner.begin(), enabledInner.end());
+    const auto parent = worldWithDoor(
+        kParentWorld, "Tamriel", kParentCell, 1, 2, parentDoors);
+    const auto child = worldWithDoor(
+        kChildWorld, "RiftenWorld", kChildCell, 42, -24, childDoors);
+
+    std::vector<std::uint8_t> file = buildTes4Record({}, EsmPluginFormat::kFallout3);
+    std::vector<std::uint8_t> worlds = parent;
+    worlds.insert(worlds.end(), child.begin(), child.end());
+    const auto worldGroup = buildGroup("WRLD", 0u, worlds);
+    file.insert(file.end(), worldGroup.begin(), worldGroup.end());
+
+    const fs::path dataDirectory =
+        fs::temp_directory_path() / "odai_worldspace_entrance_test";
+    std::error_code cleanupError;
+    fs::remove_all(dataDirectory, cleanupError);
+    fs::create_directories(dataDirectory, cleanupError);
+    const fs::path plugin = dataDirectory / "Synthetic.esm";
+    {
+        std::ofstream out(plugin, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(file.data()),
+                  static_cast<std::streamsize>(file.size()));
+    }
+
+    FalloutCellIndex index;
+    FalloutWorldTables tables;
+    std::string error;
+    expectTrue(
+        buildFalloutCellIndex(plugin, index, error),
+        "synthetic worldspace cell index builds");
+    expectTrue(
+        buildFalloutWorldTables(plugin, tables, error),
+        "synthetic worldspace tables build");
+    FalloutWorldspaceEntrance entrance;
+    expectTrue(
+        findFalloutWorldspaceEntrance(
+            index, tables, plugin, "Tamriel", "RiftenWorld", entrance, error),
+        "paired exterior doors resolve the authored RiftenWorld arrival");
+    expectNear(entrance.arrivalPosition[0], 100.0f, 1.0e-4f,
+               "paired door keeps authored arrival X");
+    expectNear(entrance.arrivalPosition[1], 200.0f, 1.0e-4f,
+               "paired door keeps authored arrival Y");
+    expectNear(entrance.arrivalPosition[2], 300.0f, 1.0e-4f,
+               "paired door keeps authored arrival height");
+    expectNear(entrance.arrivalRotationRadians[2], 0.5f, 1.0e-4f,
+               "paired door keeps authored arrival yaw");
+    expectTrue(
+        entrance.parentDoorFormId == kOuterDoor &&
+            entrance.childDoorFormId == kInnerDoor,
+        "paired door resolver reports both authored references");
+    fs::remove_all(dataDirectory, cleanupError);
+}
+
+void testWorldspaceLodAncestryIsOrderedAndCycleSafe() {
+    using namespace odai::importer::fnv;
+
+    FalloutWorldTables tables;
+    tables.worldspaceDefaultsByFormId.emplace(
+        1u, FalloutWorldspaceRecord{1u, "Tamriel"});
+    FalloutWorldspaceRecord whiterun{2u, "WhiterunWorld"};
+    whiterun.parentWorldspaceFormId = 1u;
+    tables.worldspaceDefaultsByFormId.emplace(2u, whiterun);
+    FalloutWorldspaceRecord district{3u, "WhiterunDistrict"};
+    district.parentWorldspaceFormId = 2u;
+    tables.worldspaceDefaultsByFormId.emplace(3u, district);
+
+    expectTrue(
+        worldspaceEditorIdAncestry(tables, 3u) ==
+            std::vector<std::string>{"WhiterunDistrict", "WhiterunWorld", "Tamriel"},
+        "LOD ancestry searches the selected child before its nearest parents");
+    expectTrue(worldspaceEditorIdAncestry(tables, 99u).empty(),
+               "a missing worldspace has no LOD owner candidates");
+
+    tables.worldspaceDefaultsByFormId.at(1u).parentWorldspaceFormId = 3u;
+    expectTrue(worldspaceEditorIdAncestry(tables, 3u).size() == 3u,
+               "a cyclic WNAM chain terminates after each unique worldspace");
+
+    const auto candidates = worldspaceEditorIdAncestry(tables, 3u);
+    const auto firstOwner = [&](const std::vector<std::string>& available) {
+        const auto found = std::find_first_of(
+            candidates.begin(), candidates.end(), available.begin(), available.end());
+        return found == candidates.end() ? std::string{} : *found;
+    };
+    expectTrue(firstOwner({"Tamriel"}) == "Tamriel",
+               "terrain LOD may resolve from the top-level parent");
+    expectTrue(firstOwner({"WhiterunWorld", "Tamriel"}) == "WhiterunWorld",
+               "a different LOD set may resolve from the nearest child owner");
+}
+
 void appendSizedString8(std::vector<std::uint8_t>& buffer, const std::string& text) {
     appendPod(buffer, static_cast<std::uint8_t>(text.size()));
     buffer.insert(buffer.end(), text.begin(), text.end());
@@ -4615,8 +4791,13 @@ void testSkinnedInfluenceWeightsAreNormalized() {
     strayShape.boneNames[0] = "no_such_bone";
     stray.shapes.push_back(strayShape);
     const std::uint32_t before = character.unresolvedBoneCount;
+    const std::size_t indicesBefore = character.indices.size();
     expectTrue(appendFalloutCharacterMesh(stray, character, error), "the stray shape still binds");
     expectTrue(character.unresolvedBoneCount == before + 1u, "the missing bone is counted");
+    expectTrue(
+        character.indices.size() == indicesBefore &&
+            character.droppedUnresolvedBoneTriangleCount == 1u,
+        "a triangle with an unresolved positive-weight bone cannot stretch to world origin");
 }
 
 }  // namespace
@@ -5499,6 +5680,111 @@ void testActorRaceAndWardrobeAssembly() {
     fs::remove(esmPath);
 }
 
+void testOblivionActorBodyAndHelmetAssembly() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer::fnv;
+
+    constexpr auto kFormat = EsmPluginFormat::kOblivion;
+    constexpr std::uint32_t kRace = 0x100u;
+    constexpr std::uint32_t kCuirass = 0x200u;
+    constexpr std::uint32_t kHelmet = 0x201u;
+    constexpr std::uint32_t kClothes = 0x202u;
+    constexpr std::uint32_t kNpc = 0x300u;
+    constexpr std::uint32_t kPlacement = 0x400u;
+    const auto append = [](std::vector<std::uint8_t>& out,
+                           const std::vector<std::uint8_t>& bytes) {
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    };
+    const auto u32Payload = [](std::uint32_t value) {
+        std::vector<std::uint8_t> out;
+        appendPod(out, value);
+        return out;
+    };
+    const auto appendGroup = [&](std::vector<std::uint8_t>& file, const char* type,
+                                 std::uint32_t formId,
+                                 const std::vector<std::uint8_t>& subrecords) {
+        append(file, buildGroup(
+            type, 0, buildRecord(type, formId, 0u, subrecords, kFormat), kFormat));
+    };
+
+    std::vector<std::uint8_t> file = buildTes4Record({}, kFormat);
+    std::vector<std::uint8_t> race;
+    append(race, buildSubrecord("EDID", stringPayload("ImperialTest")));
+    append(race, buildSubrecord("NAM0", {}));
+    append(race, buildSubrecord("MNAM", {}));
+    append(race, buildSubrecord("INDX", u32Payload(0u)));
+    append(race, buildSubrecord("MODL", stringPayload("heads\\head.nif")));
+    append(race, buildSubrecord("INDX", u32Payload(6u)));
+    append(race, buildSubrecord("MODL", stringPayload("heads\\eyes.nif")));
+    append(race, buildSubrecord("NAM1", {}));
+    append(race, buildSubrecord("MNAM", {}));
+    for (const auto& [slot, model] : {
+             std::pair{0u, "body\\upper.nif"}, std::pair{1u, "body\\lower.nif"},
+             std::pair{2u, "body\\hands.nif"}, std::pair{3u, "body\\feet.nif"}}) {
+        append(race, buildSubrecord("INDX", u32Payload(slot)));
+        append(race, buildSubrecord("MODL", stringPayload(model)));
+    }
+    append(race, buildSubrecord("HNAM", {}));
+    appendGroup(file, "RACE", kRace, race);
+
+    const auto armorRecord = [&](const char* editorId, std::uint32_t slots,
+                                 const char* model) {
+        std::vector<std::uint8_t> subs;
+        append(subs, buildSubrecord("EDID", stringPayload(editorId)));
+        append(subs, buildSubrecord("BMDT", u32Payload(slots)));
+        append(subs, buildSubrecord("MODL", stringPayload(model)));
+        return subs;
+    };
+    appendGroup(file, "ARMO", kCuirass,
+        armorRecord("WatchCuirass", 0x08u | 0x10u | 0x20u,
+                    "armor\\watch.nif"));
+    appendGroup(file, "ARMO", kHelmet,
+        armorRecord("WatchHelmet", 0x01u | 0x02u, "armor\\helmet.nif"));
+    appendGroup(file, "CLOT", kClothes,
+        armorRecord("GuardShirt", 0x04u, "clothes\\shirt.nif"));
+
+    std::vector<std::uint8_t> npc;
+    append(npc, buildSubrecord("EDID", stringPayload("AnvilGuardTest")));
+    append(npc, buildSubrecord("RNAM", u32Payload(kRace)));
+    for (const std::uint32_t item : {kClothes, kCuirass, kHelmet}) {
+        std::vector<std::uint8_t> cnto = u32Payload(item);
+        appendPod(cnto, static_cast<std::uint32_t>(1u));
+        append(npc, buildSubrecord("CNTO", cnto));
+    }
+    appendGroup(file, "NPC_", kNpc, npc);
+
+    std::vector<std::uint8_t> placement;
+    append(placement, buildSubrecord("NAME", u32Payload(kNpc)));
+    std::vector<std::uint8_t> transform;
+    for (const float value : {10.0f, 20.0f, 30.0f, 0.0f, 0.0f, 0.0f}) {
+        appendPod(transform, value);
+    }
+    append(placement, buildSubrecord("DATA", transform));
+    appendGroup(file, "ACHR", kPlacement, placement);
+
+    const fs::path esmPath = fs::temp_directory_path() / "odai_oblivion_actor_test.esm";
+    {
+        std::ofstream out(esmPath, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(file.data()),
+                  static_cast<std::streamsize>(file.size()));
+    }
+    FalloutActorScan scan;
+    std::string error;
+    expectTrue(findActorsNear(esmPath, 10.0f, 20.0f, 100.0f, scan, error),
+               ("Oblivion actor scan succeeds: " + error).c_str());
+    const ResolvedActorBase resolved = scan.resolve(kNpc);
+    const std::vector<std::string> expected{
+        "clothes\\shirt.nif", "armor\\watch.nif",
+        "heads\\head.nif", "heads\\eyes.nif",
+        "armor\\helmet.nif"};
+    expectTrue(resolved.skeletonPath == "body\\skeleton.nif",
+               "Oblivion derives the skeleton beside the race upper body");
+    expectTrue(resolved.bodyPartPaths == expected,
+               "Oblivion compiles CLOT, treats lower body, hands, and feet as TES4 slots, "
+               "and keeps the FaceGen head beneath a helmet");
+    fs::remove(esmPath);
+}
+
 // Skyrim moved the human skeleton onto RACE and the visible outfit through
 // NPC_ DOFT -> OTFT -> LVLI(set) -> ARMO -> ARMA. It also marks the inner set
 // "use all" while its outer list chooses one set. This is the complete path a
@@ -5646,6 +5932,19 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
     expectedParts.push_back(faceGeometry);
     expectTrue(resolved.bodyPartPaths == expectedParts,
                "Skyrim expands the outfit, fills uncovered default-skin slots, and appends FaceGen");
+    expectTrue(
+        scan.bases.at(kNpc).faceGeometryPaths ==
+            std::vector<std::string>{faceGeometry},
+        "an ordinary Skyrim NPC keeps its single generated FaceGeom path");
+    scan.bases.at(kNpc).faceGeometryPaths = {
+        "face\\head.nif", "face\\eyes.nif", "face\\mouth.nif"};
+    std::vector<std::string> expectedMultiPart(std::begin(models), std::end(models));
+    expectedMultiPart.push_back("Actors\\Character\\MaleHands_1.nif");
+    expectedMultiPart.insert(expectedMultiPart.end(), {
+        "face\\head.nif", "face\\eyes.nif", "face\\mouth.nif"});
+    expectTrue(
+        scan.resolve(kNpc).bodyPartPaths == expectedMultiPart,
+        "Skyrim preserves ordered multi-part face geometry for the stock Player head");
     expectTrue(
         resolved.wornArmorFormIds.size() == 4u,
         "the outer leveled list chooses one set while the inner use-all list wears every piece");
@@ -6185,6 +6484,37 @@ void testVertexFadeTrianglePartitioning() {
                "fully faded geometry remains wholly in the blended tail");
 }
 
+void testBethesdaPlacementRotationConventions() {
+    using namespace odai::importer;
+    using namespace odai::importer::fnv;
+
+    FalloutPlacedReference reference;
+    reference.position[0] = 10.0f;
+    reference.position[1] = 20.0f;
+    reference.position[2] = 30.0f;
+    reference.rotationRadians[2] = 1.57079632679f;
+
+    ImportedSceneInstance tes3;
+    writeBethesdaPlacementTransform(tes3, reference, true);
+    expectNear(tes3.transform[3], 10.0f, 1e-5f,
+               "TES3 placement keeps engine X translation");
+    expectNear(tes3.transform[7], 30.0f, 1e-5f,
+               "TES3 placement maps Bethesda Z to engine height");
+    expectNear(tes3.transform[11], -20.0f, 1e-5f,
+               "TES3 placement maps Bethesda Y to negative engine Z");
+    expectNear(tes3.transform[1], 1.0f, 1e-5f,
+               "TES3 placement negates its authored positive Z rotation");
+    expectNear(tes3.transform[8], 1.0f, 1e-5f,
+               "TES3 placement points the rotated model toward positive engine Z");
+
+    ImportedSceneInstance laterGeneration;
+    writeBethesdaPlacementTransform(laterGeneration, reference, false);
+    expectNear(laterGeneration.transform[1], -1.0f, 1e-5f,
+               "TES4/TES5 placement retains its authored positive angle");
+    expectNear(laterGeneration.transform[8], -1.0f, 1e-5f,
+               "later-generation placement convention remains unchanged");
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -6198,9 +6528,12 @@ int main() {
     testEsmReaderToleratesCorruptChecksum();
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
+    testWorldspaceEntranceUsesPairedDoorArrival();
+    testWorldspaceLodAncestryIsOrderedAndCycleSafe();
     testSkyrimRegionAndSoundRecords();
     testLandLayerOpacityReconstruction();
     testVertexFadeTrianglePartitioning();
+    testBethesdaPlacementRotationConventions();
     testNifParserExtractsTransformedGeometry();
     testSkyrimTerrainPackedPositionsAreFullPrecision();
     testSkyrimLightingShaderVertexAlpha();
@@ -6224,6 +6557,7 @@ int main() {
     testKfAnimationStrideAndBasisChange();
     testKfBSplineDecoding();
     testActorRaceAndWardrobeAssembly();
+    testOblivionActorBodyAndHelmetAssembly();
     testSkyrimActorSkeletonAndOutfitAssembly();
     testDialogueAttributionByActorAndVoiceType();
     testTemplateSkeletonThroughNestedLeveledLists();

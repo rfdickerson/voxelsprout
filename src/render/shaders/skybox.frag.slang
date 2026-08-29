@@ -81,6 +81,10 @@ float3 applyWeatherClouds(float3 sky, float3 dir, float time)
             continue;
         }
         const float4 band = camera.weatherCloudBand[layer];
+        if (band.w > 0.5)
+        {
+            continue; // Skyrim's authored clouds.nif owns these layers.
+        }
         const int mapping = int(band.z + 0.5);
 
         // The elevation window this layer occupies, feathered at both ends so a

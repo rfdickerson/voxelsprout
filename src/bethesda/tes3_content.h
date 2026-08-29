@@ -181,6 +181,13 @@ struct Tes3ReferenceDefinition {
     // Named TES3 exterior cells (Balmora, Ald'ruhn, etc.) do not use the
     // synthetic "#x,y" identity, so the CELL flag must remain explicit.
     bool interior = false;
+    // Exterior CELL records may have a human-readable NAME while their DATA
+    // subrecord still owns the authoritative streaming-grid coordinates.
+    // Retain both identities so gameplay sidecars can follow renderer cell
+    // residency without changing the stable named CELL RecordKey.
+    bool hasCellGrid = false;
+    std::int32_t cellGridX = 0;
+    std::int32_t cellGridZ = 0;
     RecordKey base;
     std::string baseId;
     bool enabled = true;

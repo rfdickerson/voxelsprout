@@ -240,6 +240,55 @@ void testIntersectingBridgeDeckRecovery() {
         0.0f, 0.0f, 80.0f, 200.0f, 18.0f, recoveredFeetY));
 }
 
+void testInitiallyHiddenCollisionIsExcludedFromGrounding() {
+    ImportedScene scene;
+    addFloor(scene, -128.0f, 128.0f, -128.0f, 128.0f, 0.0f);
+    const std::size_t hiddenBegin = scene.collisionTriangles.size();
+    addFloor(scene, -128.0f, 128.0f, -128.0f, 128.0f, 80.0f);
+    constexpr std::uint32_t kHiddenReference = 0x42u;
+    for (std::size_t index = hiddenBegin; index < scene.collisionTriangles.size(); ++index) {
+        scene.collisionTriangles[index].sourceReferenceFormId = kHiddenReference;
+    }
+
+    odai::games::newvegas::CollisionWorld unfiltered;
+    unfiltered.addCell({0, 0}, scene);
+    float ground = -1.0f;
+    assert(unfiltered.groundHeight(0.0f, 0.0f, 80.0f, ground));
+    assert(std::fabs(ground - 80.0f) < 1.0e-4f);
+
+    odai::games::newvegas::CollisionWorld filtered;
+    filtered.addCell({0, 0}, scene, {kHiddenReference});
+    assert(filtered.groundHeight(0.0f, 0.0f, 80.0f, ground));
+    assert(std::fabs(ground) < 1.0e-4f);
+}
+
+void testProjectedSpawnIsPushedClearOfWall() {
+    ImportedScene scene;
+    addFloor(scene, -256.0f, 256.0f, -256.0f, 256.0f, 0.0f);
+    addWall(scene, 0.0f, -192.0f, 192.0f, 0.0f, 180.0f);
+    odai::games::newvegas::CollisionWorld collision;
+    collision.addCell({0, 0}, scene);
+
+    PhysicsCharacterConfig capsule;
+    float feetX = 5.0f;  // deliberately inside the capsule radius of the wall
+    float feetZ = 0.0f;
+    float feetY = 125.0f;  // nav projection can sit well above rendered collision
+    float ground = -1.0f;
+    assert(collision.groundHeight(feetX, feetZ, feetY, ground));
+    feetY = ground + 0.1f;
+    collision.resolveHorizontalFor(
+        feetX, feetZ, feetY, feetY + capsule.boundsHalfExtents.y * 2.0f,
+        std::max(capsule.boundsHalfExtents.x, capsule.boundsHalfExtents.z),
+        capsule.stepHeight);
+    assert(feetX >= 21.9f);
+    assert(std::fabs(feetZ) < 1.0e-4f);
+
+    ground = -1.0f;
+    assert(collision.groundHeight(
+        feetX, feetZ, capsule.stepHeight, ground));
+    assert(std::fabs(ground) < 1.0e-4f);
+}
+
 void runOptionalRetailSceneProbe(const char* environmentName, const char* label) {
     const char* path = std::getenv(environmentName);
     if (path == nullptr || *path == '\0') return;
@@ -450,6 +499,8 @@ int main() {
     testJoltPlayerCompletesTes3QuestRoute();
     testJoltPlayerAndNavmeshRejectSolidWall();
     testIntersectingBridgeDeckRecovery();
+    testInitiallyHiddenCollisionIsExcludedFromGrounding();
+    testProjectedSpawnIsPushedClearOfWall();
     // Game data remains optional and is never redistributed. Point either
     // variable at a locally cooked exterior/interior .bin to smoke-test the
     // exact Morrowind or Tamriel Rebuilt collision authored on this machine.

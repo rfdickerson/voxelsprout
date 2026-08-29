@@ -16,6 +16,7 @@ struct SkyrimAnimationAssetReport {
     odai::anim::HkxGeneratorIdentity generator = odai::anim::HkxGeneratorIdentity::Unknown;
     std::string generatorProvider;
     std::vector<FalloutAssetSource::ResolvedAsset> roots;
+    std::vector<odai::anim::HkxDecodedBehaviorGraph> behaviorGraphs;
     std::vector<std::string> missingAssets;
     std::vector<std::string> unsupportedClasses;
     std::vector<std::string> diagnostics;

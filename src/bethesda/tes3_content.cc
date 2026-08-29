@@ -262,6 +262,20 @@ bool cellIsInterior(const EsmRecordView& record) {
     return false;
 }
 
+bool cellGrid(
+    const EsmRecordView& record, std::int32_t& outX, std::int32_t& outZ) {
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "FRMR") break;
+        if (sub.type == "DATA" && sub.size >= 12u) {
+            if ((readU32(sub.data) & 0x1u) != 0u) return false;
+            outX = readI32(sub.data + 4u);
+            outZ = readI32(sub.data + 8u);
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string recordId(const EsmRecordView& record, std::string_view encoding) {
     if (record.type == "SCPT") return scriptId(record, encoding);
     if (record.type == "CELL") return cellId(record, encoding);
@@ -424,6 +438,9 @@ void parseCellReferences(
     const EsmRecordView& record, const RecordKey& cell, const FalloutLoadOrder& order,
     bool interior, std::size_t pluginIndex, std::string_view encoding, const std::string& plugin,
     std::map<ObjectId, Tes3ReferenceDefinition>& references, Tes3ContentStats& stats) {
+    std::int32_t cellGridX = 0;
+    std::int32_t cellGridZ = 0;
+    const bool hasCellGrid = cellGrid(record, cellGridX, cellGridZ);
     std::optional<Tes3ReferenceDefinition> current;
     const auto flush = [&]() {
         if (!current.has_value() || !current->id.valid()) return;
@@ -444,6 +461,9 @@ void parseCellReferences(
             current->id = ObjectId::persistent(referenceOwnerKey(order, pluginIndex, readU32(sub.data)));
             current->cell = cell;
             current->interior = interior;
+            current->hasCellGrid = hasCellGrid;
+            current->cellGridX = cellGridX;
+            current->cellGridZ = cellGridZ;
             current->sourcePlugin = plugin;
             current->subrecords.push_back(copySubrecord(sub));
             continue;

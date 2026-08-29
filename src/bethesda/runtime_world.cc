@@ -296,6 +296,70 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 object->combatState = std::move(command.combatState);
                 ++result.applied;
                 break;
+            case WorldCommandType::SetLivingState:
+                if (object->kind != RuntimeObjectKind::Actor) {
+                    result.diagnostics.push_back(
+                        "living state requires a resident actor: " +
+                        command.target.toString());
+                    break;
+                }
+                object->livingState = std::move(command.livingState);
+                ++result.applied;
+                break;
+            case WorldCommandType::ReplanSchedule:
+                if (object->kind != RuntimeObjectKind::Actor) {
+                    result.diagnostics.push_back(
+                        "schedule replan requires a resident actor: " +
+                        command.target.toString());
+                    break;
+                }
+                if (!object->livingState.has_value()) object->livingState.emplace();
+                ++object->livingState->scheduleRevision;
+                object->livingState->nextTransitionGameMinute = 0u;
+                object->livingState->anchor = {};
+                object->livingState->travelling = false;
+                ++object->packageRevision;
+                ++result.applied;
+                break;
+            case WorldCommandType::SetPhysicalState:
+                object->physicalState = std::move(command.physicalState);
+                ++result.applied;
+                break;
+            case WorldCommandType::BreakObject:
+                if (!object->physicalState.has_value() ||
+                    !object->physicalState->breakable) {
+                    result.diagnostics.push_back(
+                        "breakage requires a breakable physical object: " +
+                        command.target.toString());
+                    break;
+                }
+                // Protected/quest-linked objects enter a recoverable broken
+                // presentation state; this command never destroys identity.
+                object->physicalState->broken = true;
+                object->physicalState->meaningful = true;
+                ++result.applied;
+                break;
+            case WorldCommandType::ReportCrime:
+                if (object->kind != RuntimeObjectKind::Actor ||
+                    command.crimeKind == RuntimeCrimeKind::None ||
+                    command.stimulusSequence == 0u) {
+                    result.diagnostics.push_back(
+                        "crime report requires an actor, kind, and stable sequence: " +
+                        command.target.toString());
+                    break;
+                }
+                if (!object->livingState.has_value()) object->livingState.emplace();
+                // Multiple witnesses may report one stimulus. Sequence makes
+                // the persistent consequence idempotent.
+                if (command.stimulusSequence > object->livingState->lastStimulusSequence) {
+                    object->livingState->lastStimulusSequence = command.stimulusSequence;
+                    object->livingState->lastCrime = command.crimeKind;
+                    ++object->livingState->crimesCommitted;
+                    object->livingState->bounty = std::max<std::int64_t>(
+                        0, object->livingState->bounty + command.crimeValue);
+                }
+                ++result.applied;
+                break;
             case WorldCommandType::SetActivatorState:
                 if (object->kind != RuntimeObjectKind::Door &&
                     object->kind != RuntimeObjectKind::Activator) {
@@ -577,6 +641,63 @@ std::uint64_t BethesdaWorld::deterministicHash() const {
             for (const std::int32_t state : activator.puzzleSolution) {
                 hashBytes(hash, &state, sizeof(state));
             }
+        }
+        const bool hasLivingState = object.livingState.has_value();
+        hashBytes(hash, &hasLivingState, sizeof(hasLivingState));
+        if (object.livingState.has_value()) {
+            const RuntimeLivingState& living = *object.livingState;
+            hashBytes(hash, &living.activity, sizeof(living.activity));
+            hashBytes(hash, &living.source, sizeof(living.source));
+            hashBytes(hash, &living.tier, sizeof(living.tier));
+            hashString(hash, living.anchor.toString());
+            hashBytes(hash, &living.scheduleRevision, sizeof(living.scheduleRevision));
+            hashBytes(hash, &living.absoluteGameMinute, sizeof(living.absoluteGameMinute));
+            hashBytes(hash, &living.nextTransitionGameMinute,
+                sizeof(living.nextTransitionGameMinute));
+            hashBytes(hash, &living.phaseIndex, sizeof(living.phaseIndex));
+            hashBytes(hash, &living.confidence, sizeof(living.confidence));
+            hashString(hash, living.reason);
+            hashBytes(hash, &living.travelling, sizeof(living.travelling));
+            hashBytes(hash, &living.lastStimulusSequence,
+                sizeof(living.lastStimulusSequence));
+            hashBytes(hash, &living.crimesCommitted, sizeof(living.crimesCommitted));
+            hashBytes(hash, &living.crimesWitnessed, sizeof(living.crimesWitnessed));
+            hashBytes(hash, &living.bounty, sizeof(living.bounty));
+            hashBytes(hash, &living.lastCrime, sizeof(living.lastCrime));
+        }
+        const bool hasPhysicalState = object.physicalState.has_value();
+        hashBytes(hash, &hasPhysicalState, sizeof(hasPhysicalState));
+        if (object.physicalState.has_value()) {
+            const RuntimePhysicalState& physical = *object.physicalState;
+            for (const double value : physical.authoredTransform.position) {
+                hashBytes(hash, &value, sizeof(value));
+            }
+            for (const float value : physical.authoredTransform.rotationRadians) {
+                hashBytes(hash, &value, sizeof(value));
+            }
+            hashBytes(hash, &physical.authoredTransform.scale,
+                sizeof(physical.authoredTransform.scale));
+            hashBytes(hash, physical.rotationQuaternion.data(),
+                sizeof(physical.rotationQuaternion));
+            hashBytes(hash, physical.linearVelocity.data(), sizeof(physical.linearVelocity));
+            hashBytes(hash, physical.angularVelocity.data(), sizeof(physical.angularVelocity));
+            hashBytes(hash, &physical.lastTouchedGameMinute,
+                sizeof(physical.lastTouchedGameMinute));
+            hashBytes(hash, &physical.unloadedSinceGameMinute,
+                sizeof(physical.unloadedSinceGameMinute));
+            hashBytes(hash, &physical.dynamic, sizeof(physical.dynamic));
+            hashBytes(hash, &physical.breakable, sizeof(physical.breakable));
+            hashBytes(hash, &physical.constrained, sizeof(physical.constrained));
+            hashBytes(hash, &physical.protectedFromDestruction,
+                sizeof(physical.protectedFromDestruction));
+            hashBytes(hash, &physical.resettable, sizeof(physical.resettable));
+            hashBytes(hash, &physical.broken, sizeof(physical.broken));
+            hashBytes(hash, &physical.playerGrabbed, sizeof(physical.playerGrabbed));
+            hashBytes(hash, &physical.intentionallyPlaced,
+                sizeof(physical.intentionallyPlaced));
+            hashBytes(hash, &physical.owned, sizeof(physical.owned));
+            hashBytes(hash, &physical.questLinked, sizeof(physical.questLinked));
+            hashBytes(hash, &physical.meaningful, sizeof(physical.meaningful));
         }
         std::sort(object.inventory.begin(), object.inventory.end(),
             [](const InventoryEntry& left, const InventoryEntry& right) { return left.item < right.item; });

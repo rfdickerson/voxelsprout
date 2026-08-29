@@ -1,4 +1,5 @@
 #include "bethesda/tes3_content.h"
+#include "bethesda/gameplay_catalog.h"
 
 #include <cstdint>
 #include <cstring>
@@ -223,6 +224,10 @@ void addNamedExteriorCell(std::vector<std::uint8_t>& file, std::uint32_t frmr) {
     std::vector<std::uint8_t> body;
     addSubrecord(body, "NAME", "Test Town");
     std::vector<std::uint8_t> cellData(12u, 0u);
+    const std::int32_t gridX = 2;
+    const std::int32_t gridZ = -3;
+    std::memcpy(cellData.data() + 4u, &gridX, sizeof(gridX));
+    std::memcpy(cellData.data() + 8u, &gridZ, sizeof(gridZ));
     addSubrecord(body, "DATA", cellData);
     std::vector<std::uint8_t> referenceId;
     append(referenceId, frmr);
@@ -319,9 +324,38 @@ void testContentStore() {
         const Tes3ReferenceDefinition& townActor = content.references().begin()->second;
         check(townActor.cell == makeTes3RecordKey("CELL", "Test Town") &&
                   !townActor.interior &&
+                  townActor.hasCellGrid && townActor.cellGridX == 2 &&
+                  townActor.cellGridZ == -3 &&
                   townActor.base == makeTes3RecordKey("NPC_", "tr_test_actor"),
-              "named exterior CELL references retain exterior identity and typed actor bases");
+              "named exterior CELL references retain identity, grid, and typed actor bases");
     }
+    GameplayCellPayload gameplay;
+    check(compileTes3GameplayCell(content,
+              makeTes3RecordKey("CELL", "Test Town"), order.fingerprint(),
+              gameplay, error), error);
+    check(gameplay.actors.size() == 1u &&
+              hasRole(gameplay.actors[0].roles, ActorRole::Merchant) &&
+              hasRole(gameplay.actors[0].roles, ActorRole::GuildMember) &&
+              hasRole(gameplay.actors[0].roles, ActorRole::Priest) &&
+              hasRole(gameplay.actors[0].roles, ActorRole::Traveller),
+          "TES3 services, faction, class, and travel records compile to common actor roles");
+    check(gameplay.actors.size() == 1u && gameplay.actors[0].questConstrained &&
+              !gameplay.actors[0].authoredPackages.empty() &&
+              gameplay.actors[0].authoredPackages[0].source ==
+                  BehaviorPackageSource::QuestOrScript,
+          "scripted TES3 actors retain authored-first package precedence");
+    check(gameplay.anchors.size() == 2u &&
+              gameplay.anchors[0].kind == ActivityAnchorKind::Idle &&
+              gameplay.anchors[1].kind == ActivityAnchorKind::TravelService,
+          "TES3 actor origin and travel service compile as stable anchors");
+    GameplayCellPayload streamedGameplay;
+    check(compileTes3GameplayExteriorCell(content, 2, -3,
+              order.fingerprint(), streamedGameplay, error), error);
+    check(streamedGameplay.space.kind == RuntimeSpaceKind::Exterior &&
+              streamedGameplay.space.gridX == 2 &&
+              streamedGameplay.space.gridZ == -3 &&
+              streamedGameplay.space.cell == makeTes3RecordKey("CELL", "Test Town"),
+          "streaming grid resolves a named TES3 exterior gameplay sidecar");
 
     const std::string cp1252("Pilgrimage \x97 complete", 21u);
     check(decodeTes3Text(cp1252, "win1252").find("\xe2\x80\x94") != std::string::npos,

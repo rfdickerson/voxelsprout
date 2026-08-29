@@ -148,7 +148,10 @@ public:
     void addPlugin(std::string plugin) { m_extraPlugins.push_back(std::move(plugin)); }
     // Force a specific weather by editor ID (e.g. "WEAVarNV01"). Empty picks
     // one from the worldspace's climate.
-    void setWeather(std::string editorId) { m_requestedWeatherEditorId = std::move(editorId); }
+    void setWeather(std::string editorId) {
+        m_requestedWeatherEditorId = std::move(editorId);
+        m_weatherExplicit = true;
+    }
     void setUpscalerSettings(const render::UpscalerSettings& settings) { m_upscalerSettings = settings; }
     [[nodiscard]] render::UpscalerSettings upscalerSettings() const { return m_upscalerSettings; }
     // GameApp consumes this before renderer init, which is the only point at
@@ -176,6 +179,63 @@ public:
     }
     void setTraversalStatePath(std::string path) { m_traversalStatePath = std::move(path); }
     void setResumeEnabled(bool enabled) { m_resumeEnabled = enabled; }
+    void setBalmoraSkyrimPlayerShowcase(
+        std::string skyrimDataDirectory,
+        std::string outfitEditorId = "ArmorIronBandedNoHelmetOutfit") {
+        m_balmoraSkyrimPlayerShowcase = true;
+        m_skyrimAvatarDataDirectory = std::move(skyrimDataDirectory);
+        m_skyrimPlayerOutfitEditorId = std::move(outfitEditorId);
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
+    void setWhiterunThirdPersonShowcase(
+        std::string skyrimDataDirectory,
+        std::string outfitEditorId = "ArmorIronBandedNoHelmetOutfit") {
+        m_whiterunThirdPersonShowcase = true;
+        if (!skyrimDataDirectory.empty()) {
+            m_streamDirectory = skyrimDataDirectory;
+            m_skyrimAvatarDataDirectory = std::move(skyrimDataDirectory);
+        }
+        m_skyrimPlayerOutfitEditorId = std::move(outfitEditorId);
+        setScenario("skyrim-whiterun-showcase");
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
+    void setWhiterunReferenceShowcase(std::string skyrimDataDirectory) {
+        m_whiterunReferenceShowcase = true;
+        if (!skyrimDataDirectory.empty()) {
+            m_streamDirectory = std::move(skyrimDataDirectory);
+        }
+        setScenario("skyrim-whiterun-showcase");
+        if (m_requestedWeatherEditorId.empty()) {
+            m_requestedWeatherEditorId = "SkyrimClear";
+        }
+        if (!m_timeOfDayExplicit) {
+            m_timeOfDayHours = 12.0f;
+        }
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
+    void setWhiterunMarketReferenceShowcase(std::string skyrimDataDirectory) {
+        m_whiterunMarketReferenceShowcase = true;
+        setWhiterunReferenceShowcase(std::move(skyrimDataDirectory));
+        if (!m_weatherExplicit) {
+            m_requestedWeatherEditorId = "SkyrimOvercastRain";
+        }
+    }
+    void setRiftenThirdPersonShowcase(
+        std::string skyrimDataDirectory,
+        std::string outfitEditorId = "ArmorIronBandedNoHelmetOutfit") {
+        m_riftenThirdPersonShowcase = true;
+        if (!skyrimDataDirectory.empty()) {
+            m_streamDirectory = skyrimDataDirectory;
+            m_skyrimAvatarDataDirectory = std::move(skyrimDataDirectory);
+        }
+        m_skyrimPlayerOutfitEditorId = std::move(outfitEditorId);
+        setScenario("skyrim-riften-showcase");
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
     void setScenario(std::string id);
     void setGameplaySavePath(std::string path) { m_gameplaySavePath = std::move(path); }
     void setGameplayLoadPath(std::string path) { m_gameplayLoadPath = std::move(path); }
@@ -220,13 +280,30 @@ protected:
     bool initStreaming();
     bool resolveConfiguredContentProfile();
     bool initBethesdaSession();
+    bool addSkyrimGuardsToBalmora(std::uint32_t firstInstanceSlot);
     bool loadScenarioQuestDefinitions(const bethesda::ScenarioDefinition& scenario);
     bool saveGameplayState();
     bool loadGameplayState();
     bool registerBethesdaPlayerController();
+    bool settleSkyrimCityShowcasePlayer();
     bool recoverBethesdaPlayerControllerFromIntersectingFloor();
     void pullBethesdaPlayerControllerState();
     void relocateBethesdaPlayerControllerToCamera();
+    [[nodiscard]] odai::math::Vector3 bethesdaPlayerFeetPosition() const;
+    [[nodiscard]] odai::math::Vector3 bethesdaPlayerEyePosition() const;
+    [[nodiscard]] bool thirdPersonPlayerShowcase() const {
+        return m_balmoraSkyrimPlayerShowcase || m_whiterunThirdPersonShowcase ||
+            m_riftenThirdPersonShowcase;
+    }
+    [[nodiscard]] bool skyrimCityThirdPersonShowcase() const {
+        return m_whiterunThirdPersonShowcase || m_riftenThirdPersonShowcase;
+    }
+    [[nodiscard]] bool skyrimCityShowcase() const {
+        return skyrimCityThirdPersonShowcase() || m_whiterunReferenceShowcase;
+    }
+    void reconstructPlayerCamera(float deltaSeconds, bool snapInward = false);
+    bool initSkyrimPlayerAvatar();
+    void updateSkyrimPlayerAvatar(float deltaSeconds);
     void unregisterBethesdaActorControllers();
     void pullBethesdaActorControllerStates();
     void stepBethesdaActorControllers(float fixedDeltaSeconds);
@@ -251,6 +328,8 @@ protected:
     void removeBethesdaCollisionCell(const importer::CellCoord& cell);
     void registerBethesdaCollisionCell(const importer::CellCoord& cell);
     void registerCachedBethesdaCollision();
+    void upsertMorrowindGameplayCell(const importer::CellCoord& cell);
+    void refreshBethesdaGameplayResidency();
     // Loads the skeleton and body parts, binds them, and uploads the result to
     // skinned instance slot 0. Also frames the camera on the bind-pose bounds,
     // because the character's own extent is the only sensible thing to point at
@@ -292,10 +371,12 @@ private:
     std::int32_t m_skyrimTerrainLodTileX = 0;
     std::int32_t m_skyrimTerrainLodTileZ = 0;
     bool m_skyrimTerrainLodTileValid = false;
+    std::string m_skyrimTerrainLodWorldspace;
     std::size_t m_skyrimObjectLodChunk = static_cast<std::size_t>(-1);
     std::int32_t m_skyrimObjectLodTileX = 0;
     std::int32_t m_skyrimObjectLodTileZ = 0;
     bool m_skyrimObjectLodTileValid = false;
+    std::string m_skyrimObjectLodWorldspace;
     // Fills m_weatherChoices, once. Prefers the weathers this worldspace's
     // climate actually runs -- with Nevada Skies loaded that IS the mod's
     // weather set, and it is a far more useful list than every WTHR in the load
@@ -369,11 +450,16 @@ private:
     // bypassing ODAI_FNV_ACTORS_PARADE.
     void arrangeActorParadeIfRequested();
     void reloadActorsForCurrentSpace();
+    // Walled Skyrim cities are explicit showcases: finish the initial cell,
+    // collision, actor and GPU residency before GameApp enters the visible
+    // frame loop. Normal streaming remains incremental after startup.
+    bool prewarmSkyrimCityShowcase();
     // Realize CPU-built actor meshes on the GPU over multiple frames. A whole
     // town can contain dozens of unique bodies and textures; uploading all of
     // them in one onTick starves GLFW event polling and makes close/input look
     // frozen even though the process is still doing useful work.
     void queueActorUploads();
+    void realizePendingActorUploads(std::size_t maxActorUploads);
     void updateDoorTransition(float deltaSeconds);
     void rebuildStreamDoors();
     // Bilinear ground height at a world XZ. false outside the cooked terrain or
@@ -469,6 +555,7 @@ private:
     std::unordered_map<std::uint32_t, std::string> m_skyrimActorVoiceFolderPlugin;
     bool m_skyrimActorCatalogReady = false;
     bool m_streamIsMorrowind = false;
+    bool m_streamIsOblivion = false;
     bool m_streamIsSkyrim = false;
     // Conversation depth of field, eased 0..1 alongside the dolly. A long lens
     // does not only magnify, it throws the background out — the two arriving
@@ -580,6 +667,8 @@ private:
     // The rest of the town starts above Victor. Slot 0 stays with --character's
     // isolation harness.
     static constexpr std::uint32_t kFirstCrowdSkinnedInstance = 2u;
+    static constexpr std::uint32_t kPlayerAvatarSkinnedInstance =
+        render::kMaxSkinnedInstances - 1u;
     // How far around the player to populate, in Bethesda units (~70/metre), so
     // ~170 m. Wide enough to cover Goodsprings from the spawn, tight enough
     // that the slot budget is spent on actors the player can actually see.
@@ -590,6 +679,30 @@ private:
     // each existed twice by the time the town arrived. Held for the process
     // lifetime because a skinned template is uploaded from spans into these.
     std::vector<SkinnedActor> m_actors;
+    // Deliberately outside m_actors: it cannot wander, reserve anchors, enter
+    // dialogue, be activated, or inherit NPC residency. It is only a visual
+    // view of the Morrowind-authoritative player controller.
+    std::optional<SkinnedActor> m_skyrimPlayerAvatar;
+    std::string m_skyrimAvatarDataDirectory;
+    std::string m_skyrimPlayerOutfitEditorId = "ArmorIronBandedNoHelmetOutfit";
+    std::uint64_t m_skyrimPlayerEquippedSignature = 0u;
+    bool m_skyrimPlayerAvatarUploadPending = false;
+    bool m_balmoraSkyrimPlayerShowcase = false;
+    bool m_whiterunThirdPersonShowcase = false;
+    bool m_riftenThirdPersonShowcase = false;
+    bool m_whiterunReferenceShowcase = false;
+    bool m_whiterunMarketReferenceShowcase = false;
+    bool m_weatherExplicit = false;
+    bool m_skyrimCitySpawnSettlementPending = false;
+    importer::CellCoord m_skyrimCitySpawnCell{};
+    odai::math::Vector3 m_skyrimCityAuthoredSpawnFeet{};
+    bool m_thirdPersonView = true;
+    bool m_viewToggleLatch = false;
+    float m_playerYawRadians = 0.0f;
+    float m_playerPreviousYawRadians = 0.0f;
+    float m_cameraBoomRequested = 260.0f;
+    float m_cameraBoomActual = 260.0f;
+    float m_sessionInterpolationAlpha = 0.0f;
     bool m_actorsUploadPending = false;
     std::size_t m_nextActorUploadIndex = 0u;
     std::size_t m_actorUploadSuccessCount = 0u;
@@ -837,6 +950,8 @@ private:
     };
     std::unordered_map<importer::CellCoord, BethesdaCollisionMesh,
         importer::CellCoordHash> m_bethesdaCollisionByCell;
+    std::unordered_set<importer::CellCoord, importer::CellCoordHash>
+        m_bethesdaGameplayResidentCells;
     std::unordered_set<std::uint32_t> m_disabledBethesdaCollisionReferences;
     bool m_bethesdaCollisionBroadPhaseDirty = false;
     // Previous frame's camera position, differenced to get the velocity the

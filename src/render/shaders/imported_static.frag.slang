@@ -176,6 +176,43 @@ struct FragmentInput
     float4 inLayerWeights : TEXCOORD7;
 };
 
+// Bethesda static NIFs provide tangent-space normals in BSShaderTextureSet
+// slot 1, but the imported vertex stream intentionally carries no tangent.
+// Reconstruct the cotangent frame from position/UV derivatives in the fragment
+// instead. This is stable across instancing and rigid animation, and lets the
+// normal-map slot ride in the existing non-terrain layer field without
+// widening the cooked or GPU vertex formats.
+float3 applyAuthoredStaticNormalMap(FragmentInput input, float3 geometricNormal)
+{
+    if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u ||
+        input.inLayerTextures[0] == kInvalidImportedTextureIndex)
+    {
+        return geometricNormal;
+    }
+
+    const float3 dpdx = ddx(input.inWorldPosition);
+    const float3 dpdy = ddy(input.inWorldPosition);
+    const float2 duvdx = ddx(input.inUv);
+    const float2 duvdy = ddy(input.inUv);
+    const float determinant = (duvdx.x * duvdy.y) - (duvdx.y * duvdy.x);
+    if (abs(determinant) < 1.0e-8)
+    {
+        return geometricNormal;
+    }
+
+    float3 tangent = normalize((dpdx * duvdy.y - dpdy * duvdx.y) / determinant);
+    tangent = normalize(tangent - geometricNormal * dot(geometricNormal, tangent));
+    const float handedness = determinant < 0.0 ? -1.0 : 1.0;
+    const float3 bitangent = normalize(cross(geometricNormal, tangent)) * handedness;
+    const float2 encoded =
+        bindlessTextures[input.inLayerTextures[0]].Sample(input.inUv).xy * 2.0 - 1.0;
+    const float3 tangentNormal =
+        float3(encoded, sqrt(saturate(1.0 - dot(encoded, encoded))));
+    return normalize((tangent * tangentNormal.x) +
+                     (bitangent * tangentNormal.y) +
+                     (geometricNormal * tangentNormal.z));
+}
+
 // A two-sided surface's BACK face has the front face's normal, and nothing
 // downstream fixes it.
 //
@@ -1305,7 +1342,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     {
         return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
-    const float3 normal = resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
+    float3 normal = resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
+    normal = applyAuthoredStaticNormalMap(input, normal);
     // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)
     // read as exposed rock or lighter cliff stone; flat faces are unaffected.
     // The welded terrain's smooth normals make this correct at elevation transitions.

@@ -32,6 +32,8 @@ struct ScenarioDefinition {
 };
 
 [[nodiscard]] const ScenarioDefinition& skyrimBleakFallsScenario();
+[[nodiscard]] const ScenarioDefinition& skyrimWhiterunShowcaseScenario();
+[[nodiscard]] const ScenarioDefinition& skyrimRiftenShowcaseScenario();
 [[nodiscard]] const ScenarioDefinition* findScenario(const std::string& id);
 
 }  // namespace odai::bethesda

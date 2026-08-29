@@ -105,6 +105,93 @@ struct RuntimeCombatState {
     friend bool operator==(const RuntimeCombatState&, const RuntimeCombatState&) = default;
 };
 
+// One normalized activity vocabulary for TES3 AI records, TES4/Fallout/TES5
+// packages, and generated schedules.  Presentation consumes this state but
+// never owns or advances it.
+enum class RuntimeActivityKind : std::uint8_t {
+    Idle,
+    Sleep,
+    Eat,
+    Work,
+    Shop,
+    Socialize,
+    Patrol,
+    Travel,
+    Worship,
+    Train,
+    Investigate,
+    Flee,
+    Combat,
+    Dialogue,
+    Quest,
+};
+
+enum class RuntimeBehaviorSource : std::uint8_t {
+    SafeIdle,
+    GeneratedSchedule,
+    AuthoredPackage,
+    CrimeOrEmergency,
+    Dialogue,
+    QuestOrScript,
+    Combat,
+    Death,
+};
+
+enum class RuntimeSimulationTier : std::uint8_t {
+    Abstract,
+    Full,
+};
+
+enum class RuntimeCrimeKind : std::uint8_t {
+    None,
+    Theft,
+    Assault,
+    Vandalism,
+    Trespass,
+    Murder,
+};
+
+struct RuntimeLivingState {
+    RuntimeActivityKind activity = RuntimeActivityKind::Idle;
+    RuntimeBehaviorSource source = RuntimeBehaviorSource::SafeIdle;
+    RuntimeSimulationTier tier = RuntimeSimulationTier::Abstract;
+    ObjectId anchor;
+    std::uint64_t scheduleRevision = 0u;
+    std::uint64_t absoluteGameMinute = 0u;
+    std::uint64_t nextTransitionGameMinute = 0u;
+    std::uint32_t phaseIndex = 0u;
+    float confidence = 0.0f;
+    std::string reason;
+    bool travelling = false;
+    std::uint64_t lastStimulusSequence = 0u;
+    std::uint64_t crimesCommitted = 0u;
+    std::uint64_t crimesWitnessed = 0u;
+    std::int64_t bounty = 0;
+    RuntimeCrimeKind lastCrime = RuntimeCrimeKind::None;
+    friend bool operator==(const RuntimeLivingState&, const RuntimeLivingState&) = default;
+};
+
+struct RuntimePhysicalState {
+    RuntimeTransform authoredTransform;
+    std::array<float, 4> rotationQuaternion{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> linearVelocity{};
+    std::array<float, 3> angularVelocity{};
+    std::uint64_t lastTouchedGameMinute = 0u;
+    std::uint64_t unloadedSinceGameMinute = 0u;
+    bool dynamic = false;
+    bool breakable = false;
+    bool constrained = false;
+    bool protectedFromDestruction = false;
+    bool resettable = false;
+    bool broken = false;
+    bool playerGrabbed = false;
+    bool intentionallyPlaced = false;
+    bool owned = false;
+    bool questLinked = false;
+    bool meaningful = false;
+    friend bool operator==(const RuntimePhysicalState&, const RuntimePhysicalState&) = default;
+};
+
 struct RuntimeActivatorState {
     std::vector<std::int32_t> puzzleStates;
     std::vector<std::int32_t> puzzleSolution;
@@ -154,6 +241,8 @@ struct RuntimeObject {
     std::optional<RuntimeNavigationRequest> navigationRequest;
     std::optional<RuntimeAiState> aiState;
     std::optional<RuntimeCombatState> combatState;
+    std::optional<RuntimeLivingState> livingState;
+    std::optional<RuntimePhysicalState> physicalState;
     std::optional<RuntimeActivatorState> activatorState;
     std::optional<ActorValues> actorValues;
     std::vector<InventoryEntry> inventory;
@@ -188,6 +277,11 @@ enum class WorldCommandType : std::uint8_t {
     SetCurrentSpace,
     SetAiState,
     SetCombatState,
+    SetLivingState,
+    ReplanSchedule,
+    SetPhysicalState,
+    BreakObject,
+    ReportCrime,
     SetActivatorState,
     RequestMoveTo,
     SetNavigationStatus,
@@ -226,6 +320,11 @@ struct WorldCommand {
     RecordKey outfit;
     RuntimeAiState aiState;
     RuntimeCombatState combatState;
+    RuntimeLivingState livingState;
+    RuntimePhysicalState physicalState;
+    RuntimeCrimeKind crimeKind = RuntimeCrimeKind::None;
+    std::int64_t crimeValue = 0;
+    std::uint64_t stimulusSequence = 0u;
     RuntimeActivatorState activatorState;
     RecordKey item;
     std::int32_t itemCount = 0;

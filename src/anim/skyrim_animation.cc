@@ -42,6 +42,32 @@ odai::math::Vector3 sampleRootTranslation(const AnimationClip& clip, int root, f
     return keys.back().value;
 }
 
+void appendCrossedAnnotations(const AnimationClip& clip, float before, float after,
+                              std::vector<AnimationEvent>& out) {
+    if (clip.annotations.empty() || !(after > before) || clip.duration <= 0.0f) return;
+    if (!clip.loop) {
+        for (const AnimationAnnotation& annotation : clip.annotations) {
+            if (annotation.time > before && annotation.time <= after) {
+                out.push_back({annotation.name, {}});
+            }
+        }
+        return;
+    }
+    const std::int64_t firstCycle = static_cast<std::int64_t>(
+        std::floor(before / clip.duration));
+    const std::int64_t lastCycle = static_cast<std::int64_t>(
+        std::floor(after / clip.duration));
+    for (std::int64_t cycle = firstCycle; cycle <= lastCycle; ++cycle) {
+        const float base = static_cast<float>(cycle) * clip.duration;
+        for (const AnimationAnnotation& annotation : clip.annotations) {
+            const float eventTime = base + annotation.time;
+            if (eventTime > before && eventTime <= after) {
+                out.push_back({annotation.name, {}});
+            }
+        }
+    }
+}
+
 }  // namespace
 
 float RigBindingResult::coverage() const {
@@ -90,7 +116,11 @@ bool BehaviorGraphInstance::bind(const AnimationView& view, std::string& outErro
         return false;
     }
     m_view = &view;
-    m_sampler.bindSkeleton(*view.skeleton);
+    if (view.inverseBindMatrices.empty()) {
+        m_sampler.bindSkeleton(*view.skeleton);
+    } else {
+        m_sampler.bindSkeleton(*view.skeleton, view.inverseBindMatrices);
+    }
     m_state = BehaviorGraphSnapshot{};
     m_bindWorld.resize(view.skeleton->bones.size());
     for (std::size_t index = 0; index < view.skeleton->bones.size(); ++index) {
@@ -113,9 +143,11 @@ const AnimationClip* BehaviorGraphInstance::clipForState(const std::string& stat
 
 std::string BehaviorGraphInstance::chooseState(const AnimationInputState& input) const {
     if (input.landed) return "landing";
+    if (!input.grounded && input.verticalVelocity > 1.0f) return "jump";
     if (!input.grounded || input.falling) return "fall";
     if (input.equipping) return input.weaponDrawn ? "unequip" : "equip";
     if (input.attacking) return "attack";
+    if (input.sprinting && input.movementSpeed > 1.0f) return "sprint";
     if (input.weaponDrawn && input.movementSpeed > 1.0f) return "combat_locomotion";
     if (input.weaponDrawn) return "combat_idle";
     if (input.movementSpeed > 1.0f) return "locomotion";
@@ -135,6 +167,13 @@ AnimationStepOutput BehaviorGraphInstance::step(
     const std::string nextState = chooseState(input);
     if (nextState != m_state.state) {
         output.events.push_back({"state_exit", m_state.state});
+        m_state.previousState = m_state.state;
+        m_state.previousStateTime = m_state.stateTime;
+        m_state.transitionElapsed = 0.0f;
+        // Vanilla locomotion graphs use short blend transitions. A decoded
+        // graph may override this through the snapshot/view in a later bind;
+        // keeping it in fixed-tick state makes the current path deterministic.
+        m_state.transitionDuration = 0.16f;
         m_state.state = nextState;
         m_state.stateTime = 0.0f;
         output.events.push_back({"state_enter", m_state.state});
@@ -151,10 +190,33 @@ AnimationStepOutput BehaviorGraphInstance::step(
     if (clip == nullptr) clip = clipForState("idle");
     if (clip != nullptr) {
         const odai::math::Vector3 before = sampleRootTranslation(*clip, 0, m_state.stateTime);
-        m_state.stateTime += delta;
+        const bool locomotionState = m_state.state == "locomotion" ||
+            m_state.state == "sprint" || m_state.state == "combat_locomotion";
+        const float playbackRate = locomotionState
+            ? std::clamp(input.locomotionPlaybackRate, 0.1f, 4.0f) : 1.0f;
+        m_state.stateTime += delta * playbackRate;
+        appendCrossedAnnotations(*clip, m_state.stateTime - delta * playbackRate,
+            m_state.stateTime, output.events);
         const odai::math::Vector3 after = sampleRootTranslation(*clip, 0, m_state.stateTime);
         if (input.animationDriven) output.desiredRootMotion = after - before;
         m_sampler.sample(*m_view->skeleton, *clip, m_state.stateTime, output.pose);
+        if (!m_state.previousState.empty() && m_state.transitionDuration > 0.0f &&
+            m_state.transitionElapsed < m_state.transitionDuration) {
+            const AnimationClip* previous = clipForState(m_state.previousState);
+            if (previous != nullptr) {
+                const float linear = std::clamp(
+                    m_state.transitionElapsed / m_state.transitionDuration, 0.0f, 1.0f);
+                const float blend = linear * linear * (3.0f - 2.0f * linear);
+                m_sampler.sampleBlended(*m_view->skeleton, *previous,
+                    m_state.previousStateTime + m_state.transitionElapsed,
+                    *clip, m_state.stateTime, blend, output.pose);
+            }
+            m_state.transitionElapsed += delta;
+            if (m_state.transitionElapsed >= m_state.transitionDuration) {
+                m_state.previousState.clear();
+                m_state.previousStateTime = 0.0f;
+            }
+        }
     } else {
         output.pose.assign(m_view->skeleton->bones.size(), odai::math::Matrix4::identity());
         output.proceduralFallback = true;
@@ -230,8 +292,11 @@ BehaviorGraphSnapshot BehaviorGraphInstance::snapshot() const { return m_state; 
 
 bool BehaviorGraphInstance::restore(const BehaviorGraphSnapshot& snapshot, std::string& outError) {
     outError.clear();
-    if (snapshot.stateTime < 0.0f || !std::isfinite(snapshot.stateTime)) {
-        outError = "invalid behavior graph state time";
+    if (snapshot.stateTime < 0.0f || !std::isfinite(snapshot.stateTime) ||
+        snapshot.previousStateTime < 0.0f || !std::isfinite(snapshot.previousStateTime) ||
+        snapshot.transitionElapsed < 0.0f || !std::isfinite(snapshot.transitionElapsed) ||
+        snapshot.transitionDuration < 0.0f || !std::isfinite(snapshot.transitionDuration)) {
+        outError = "invalid behavior graph transition time";
         return false;
     }
     m_state = snapshot;

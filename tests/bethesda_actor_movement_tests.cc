@@ -1,9 +1,12 @@
 #include "games/newvegas/bethesda_actors.h"
 #include "bethesda/bethesda_session.h"
+#include "anim/hkx_packfile.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -289,6 +292,85 @@ int main() {
     assert(doorActors[0].runtimeControllerNeedsRelocation);
 
     assert(replayHash({1.0 / 30.0}) == replayHash({1.0 / 60.0, 1.0 / 60.0}));
+
+    // Optional installed-data fixture: no retail bytes enter the repository,
+    // but a developer with Skyrim installed proves the Player/Nord/OTFT and
+    // ARMO -> ARMA assembly path against the actual virtual Data source.
+    if (const char* skyrimData = std::getenv("ODAI_SKYRIM_DATA")) {
+        SkinnedActor avatar;
+        std::string detail;
+        assert(loadSkyrimPlayerAvatar(
+            std::filesystem::path(skyrimData),
+            "ArmorIronBandedNoHelmetOutfit", 47u, avatar, detail));
+        std::cerr << "retail avatar: " << detail << ", equipped="
+                  << avatar.inventoryFormIds.size() << "\n";
+        assert(avatar.name == "SkyrimPlayerAvatar");
+        assert(avatar.instanceSlot == 47u);
+        assert(!avatar.runtimeObjectId.valid() && avatar.referenceFormId == 0u);
+        assert(avatar.inventoryFormIds.size() >= 3u);
+        assert(avatar.character.parts.size() >= 3u);
+        for (const std::string_view requiredFace : {
+                 "actors\\character\\character assets\\malehead.nif",
+                 "actors\\character\\character assets\\eyesmale.nif",
+                 "actors\\character\\character assets\\mouth\\mouthhuman.nif",
+                 "actors\\character\\character assets\\faceparts\\malebrows.nif",
+                 "actors\\character\\character assets\\hair\\male\\hairline01.nif",
+                 "actors\\character\\character assets\\hair\\male\\hair01.nif"}) {
+            assert(std::any_of(
+                avatar.character.parts.begin(), avatar.character.parts.end(),
+                [&](const odai::importer::fnv::FalloutCharacterPart& part) {
+                    return part.sourcePath == requiredFace;
+                }));
+        }
+        assert(!avatar.idleClip.tracks.empty() && !avatar.walkClip.tracks.empty());
+        assert(!avatar.idleClip.name.starts_with("procedural"));
+        assert(!avatar.walkClip.name.starts_with("procedural"));
+        assert(avatar.authoredLocomotionClips.size() == 7u);
+        odai::importer::fnv::FalloutAssetSource retailAssets;
+        assert(retailAssets.open(skyrimData));
+        std::vector<std::uint8_t> retailHkx;
+        std::string decodeError;
+        std::vector<std::uint8_t> retailMasterGraph;
+        assert(retailAssets.resolveAsset(
+            "meshes\\actors\\character\\behaviors\\0_master.hkx",
+            retailMasterGraph, decodeError));
+        odai::anim::HkxDecodedBehaviorGraph behaviorGraph;
+        assert(odai::anim::decodeHkxBehaviorGraph(
+            retailMasterGraph, behaviorGraph, decodeError));
+        assert(behaviorGraph.name == "0_Master.hkb");
+        assert(behaviorGraph.nodes.size() > 1000u);
+        assert(behaviorGraph.clipGeneratorCount > 250u);
+        assert(behaviorGraph.behaviorReferenceCount > 10u);
+        assert(behaviorGraph.stateMachineCount > 100u);
+        assert(behaviorGraph.transitionEffectCount > 30u);
+        assert(retailAssets.resolveAsset(
+            "meshes\\actors\\character\\animations\\male\\mt_walkforward.hkx",
+            retailHkx, decodeError));
+        odai::anim::AnimationClip decoded;
+        odai::anim::HkxDecodedClipMetadata metadata;
+        std::vector<std::uint8_t> retailSkeletonHkx;
+        assert(retailAssets.resolveAsset(
+            "meshes\\actors\\character\\character assets\\skeleton.hkx",
+            retailSkeletonHkx, decodeError));
+        odai::anim::HkxDecodedSkeleton sourceSkeleton;
+        assert(odai::anim::decodeHkxAnimationSkeleton(
+            retailSkeletonHkx, sourceSkeleton, decodeError));
+        assert(sourceSkeleton.boneNames.size() == 99u);
+        assert(std::count(sourceSkeleton.translationLocked.begin(),
+            sourceSkeleton.translationLocked.end(), true) == 94);
+        if (!odai::anim::decodeHkxAnimationClip(retailHkx, avatar.character.skeleton,
+                "retail walk", decoded, metadata, decodeError, &sourceSkeleton)) {
+            std::cerr << "retail HKX decode failed: " << decodeError << "\n";
+        }
+        assert(!decoded.tracks.empty());
+        assert(metadata.frameCount > 2u && metadata.transformTrackCount == 99u);
+        assert(metadata.boundTracks >= 90u && metadata.missingTracks <= 9u);
+        for (const odai::anim::BoneTrack& track : decoded.tracks) {
+            assert(track.translationKeys.size() == metadata.frameCount);
+            assert(track.rotationKeys.size() == metadata.frameCount);
+            assert(track.scaleKeys.size() == metadata.frameCount);
+        }
+    }
 
     std::cout << "bethesda actor movement tests passed\n";
     return 0;

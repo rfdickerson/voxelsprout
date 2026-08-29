@@ -62,6 +62,10 @@ bool GameApp::init(const char* title) {
     // below that resolution; UI is composited afterward at the framebuffer extent.
     int winW = 1600, winH = 900;
     bool explicitWindowSize = false;
+    const bool nativeLogicalPresentation = [] {
+        const char* value = std::getenv("ODAI_NATIVE_LOGICAL_PRESENT");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
     if (const char* sizeEnv = std::getenv("ODAI_WINDOW_SIZE")) {
         int envW = 0, envH = 0;
         if (std::sscanf(sizeEnv, "%dx%d", &envW, &envH) == 2 && envW > 0 && envH > 0) {
@@ -79,7 +83,7 @@ bool GameApp::init(const char* title) {
     // swapchain, quadrupling every full-resolution pass and producing a 4K
     // capture despite the caller asking for 1080p. Leave platform-native HiDPI
     // behavior alone for the default interactive window.
-    if (explicitWindowSize) {
+    if (explicitWindowSize || nativeLogicalPresentation) {
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
     }
 #endif
@@ -538,10 +542,20 @@ void GameApp::drawPerfOverlay() {
     const render::UiRenderStats uiStats = m_renderer.uiRenderStats();
 
     char headText[96];
-    std::snprintf(headText, sizeof(headText), "%.0f fps   %.2f ms   frame %llu",
-                  static_cast<double>(m_frameProfiler.fps()),
-                  static_cast<double>(m_frameProfiler.channel(GameZone::Frame).ewmaMs()),
-                  static_cast<unsigned long long>(m_frameProfiler.frameIndex()));
+    if (m_frameProfiler.fpsReady()) {
+        const float typicalMs =
+            m_frameProfiler.channel(GameZone::Frame).p50Ms();
+        std::snprintf(headText, sizeof(headText),
+                      "%.0f fps   %.2f ms p50   frame %llu",
+                      static_cast<double>(m_frameProfiler.fps()),
+                      static_cast<double>(typicalMs),
+                      static_cast<unsigned long long>(m_frameProfiler.frameIndex()));
+    } else {
+        std::snprintf(headText, sizeof(headText),
+                      "warming up   %llu / %zu frames",
+                      static_cast<unsigned long long>(m_frameProfiler.frameIndex()),
+                      GameFrameProfiler::kDisplayWarmupSamples);
+    }
     char otherText[96];
     std::snprintf(otherText, sizeof(otherText), "other         %s",
                   formatMs(m_frameProfiler.unattributedMs()).c_str());

@@ -32,6 +32,14 @@ void closestPointOnSegment(
 
 void CollisionWorld::addCell(
     const importer::CellCoord& cell, const importer::ImportedScene& scene) {
+    static const std::unordered_set<std::uint32_t> kNoDisabledReferences;
+    addCell(cell, scene, kNoDisabledReferences);
+}
+
+void CollisionWorld::addCell(
+    const importer::CellCoord& cell,
+    const importer::ImportedScene& scene,
+    const std::unordered_set<std::uint32_t>& disabledSourceReferences) {
     CellCollision collision;
 
     // Terrain, read from the scene's own terrain mesh rather than the LAND
@@ -151,6 +159,10 @@ void CollisionWorld::addCell(
     if (!scene.collisionTriangles.empty()) {
         for (const importer::ImportedSceneCollisionTriangle& triangle :
              scene.collisionTriangles) {
+            if (triangle.sourceReferenceFormId != 0u &&
+                disabledSourceReferences.contains(triangle.sourceReferenceFormId)) {
+                continue;
+            }
             addTriangle(triangle.vertices);
         }
         m_cells[cell] = std::move(collision);

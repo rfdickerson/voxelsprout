@@ -1534,7 +1534,11 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         mvpUniform.weatherCloudBand[layer][1] = m_weatherCloudLayers[layer].bandHigh;
         mvpUniform.weatherCloudBand[layer][2] =
             static_cast<float>(m_weatherCloudLayers[layer].mapping);
-        mvpUniform.weatherCloudBand[layer][3] = 0.0f;
+        // An authored cloud mesh consumes the same active WTHR textures. The
+        // fullscreen sky pass sees this flag and does not draw a second,
+        // projection-guessed copy underneath it.
+        mvpUniform.weatherCloudBand[layer][3] =
+            (m_skyCloudIndexCount > 0u) ? 1.0f : 0.0f;
     }
 
     mvpUniform.tonemapConfig[0] =

@@ -109,6 +109,11 @@ struct CellStreamerStats {
     // Draws carrying kImportedSceneMaterialFlagAlphaBlend, i.e. those replayed
     // through the blended pipeline instead of the opaque one.
     std::uint64_t blendedPartsLoaded = 0;
+    std::uint64_t alphaTestedPartsLoaded = 0;
+    std::uint64_t bannerInstancesLoaded = 0;
+    std::uint64_t fireEmittersLoaded = 0;
+    std::uint64_t localLightsLoaded = 0;
+    std::uint64_t geometryInstancesLoaded = 0;
 };
 
 class CellStreamer {
@@ -252,6 +257,15 @@ public:
         m_onCellEvicted = std::move(onEvicted);
     }
 
+    // A presentation may adjust transient scene visibility after cache load
+    // and before upload. The callback never participates in cache writes, so
+    // it cannot change the cooked/streamed scene format or contaminate another
+    // showcase that shares the same retail-data cache.
+    using ScenePresentationOverride = std::function<void(ImportedScene&)>;
+    void setScenePresentationOverride(ScenePresentationOverride callback) {
+        m_scenePresentationOverride = std::move(callback);
+    }
+
     // Sound-marker references are record residency rather than scene data.
     // Publish them beside the geometry callbacks without baking them into the
     // ImportedScene cache format.
@@ -363,6 +377,14 @@ public:
     bool spawnAtInteriorDoorEngineSpace(
         const std::string& interiorEditorId, float outPosition[3]) const;
 
+    // Resolve the paired load doors between two exterior worldspaces and
+    // return the authored arrival point just inside the child worldspace.
+    // This is used for walled-city starts such as Tamriel -> WhiterunWorld.
+    bool spawnAtWorldspaceEntranceEngineSpace(
+        const std::string& parentWorldspaceEditorId,
+        const std::string& childWorldspaceEditorId,
+        float outPosition[3], float& outYawDegrees) const;
+
     // Fallout is Z-up, the engine is Y-up, and the conversion is
     // (x, y, z) -> (x, z, -y). Both directions live here because the streamer is
     // the boundary between the two: the planner ranks cells in Fallout space,
@@ -401,6 +423,7 @@ public:
     [[nodiscard]] std::uint32_t currentWorldspaceFormId() const {
         return m_currentWorldspaceFormId;
     }
+    [[nodiscard]] std::vector<std::string> currentWorldspaceEditorIdAncestry() const;
 
     [[nodiscard]] CellStreamerStats stats() const;
     [[nodiscard]] std::size_t availableCellCount() const { return m_availableCells.size(); }
@@ -484,6 +507,7 @@ private:
     std::unordered_map<CellCoord, std::size_t, CellCoordHash> m_residentChunks;
     std::shared_ptr<Pending> m_pending;
     CellResidentCallback m_onCellResident;
+    ScenePresentationOverride m_scenePresentationOverride;
     CellEvictedCallback m_onCellEvicted;
     AmbientEmittersResidentCallback m_onAmbientEmittersResident;
     CellEvictedCallback m_onAmbientEmittersEvicted;

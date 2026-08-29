@@ -2302,8 +2302,16 @@ bool consumeKeyframeData(ByteCursor& cursor, bool xyzHasAxisOrder) {
 bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
                           std::uint32_t version) {
     // --- Havok. Skipped entirely; only the byte counts matter. ---
-    if (typeName == "bhkCollisionObject" || typeName == "bhkBlendCollisionObject") {
-        return consumeSkip(cursor, 10u);
+    if (typeName == "bhkCollisionObject") {
+        // NiCollisionObject target ref, Havok's 16-bit flags, and body ref.
+        return consumeSkip(cursor, 4u + 2u + 4u);
+    }
+    if (typeName == "bhkBlendCollisionObject") {
+        // bhkCollisionObject plus the two blend gains (hierarchy and
+        // velocity). Treating the flags as a dword and omitting the second
+        // gains consumed only ten bytes, leaving every Oblivion actor skeleton
+        // eight bytes out of phase at the following NiNode.
+        return consumeSkip(cursor, 4u + 2u + 4u + 4u + 4u);
     }
     if (typeName == "bhkRigidBody" || typeName == "bhkRigidBodyT") {
         // bhkRigidBodyT stores the same bytes; the T only changes whether the
@@ -2391,6 +2399,28 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
     if (typeName == "bhkStiffSpringConstraint") {
         // Same prefix; two float4 pivots and the rest length.
         return consumeSkip(cursor, 16u) && consumeSkip(cursor, (2u * 16u) + 4u);
+    }
+    if (typeName == "bhkMalleableConstraint") {
+        // A malleable constraint wraps another constraint descriptor. It has
+        // its own inherited bhkConstraintCInfo, then the wrapped type and a
+        // second CInfo, followed by the selected descriptor and Oblivion's
+        // tau/damping pair. Actor skeleton ragdolls use this block heavily.
+        std::uint32_t wrappedType = 0u;
+        if (!consumeSkip(cursor, 16u) || !cursor.read(wrappedType) ||
+            !consumeSkip(cursor, 16u)) {
+            return false;
+        }
+        std::size_t descriptorBytes = 0u;
+        switch (wrappedType) {
+            case 0u: descriptorBytes = 2u * 16u; break;              // ball/socket
+            case 1u: descriptorBytes = 5u * 16u; break;              // hinge
+            case 2u: descriptorBytes = (7u * 16u) + 12u; break;      // limited hinge
+            case 6u: descriptorBytes = (8u * 16u) + 12u; break;      // prismatic
+            case 7u: descriptorBytes = (6u * 16u) + 24u; break;      // ragdoll
+            case 8u: descriptorBytes = (2u * 16u) + 4u; break;       // stiff spring
+            default: return false;
+        }
+        return consumeSkip(cursor, descriptorBytes + 8u);
     }
 
     // --- Skinning and animation. Not read for geometry here (Oblivion skinned
@@ -2602,6 +2632,17 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
     if (typeName == "NiStringPalette") {
         // The whole buffer as one u32-sized string, then its length again.
         return consumeCountedArray(cursor, 1u) && consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiBSplineCompTransformInterpolator") {
+        // start/stop + data/basis refs, NiQuatTransform, three u32 handles,
+        // then offset/half-range pairs for translation, rotation and scale.
+        return consumeSkip(cursor, 16u + 32u + 12u + 24u);
+    }
+    if (typeName == "NiBSplineData") {
+        return consumeCountedArray(cursor, 4u) && consumeCountedArray(cursor, 2u);
+    }
+    if (typeName == "NiBSplineBasisData") {
+        return consumeSkip(cursor, 4u);
     }
     if (typeName == "NiVisController") {
         return consumeSkip(cursor, 26u + 4u);  // controller prefix + interpolator
@@ -3532,6 +3573,8 @@ bool parseNifBlockSummary(
     }
     outSummary.blockStarts = std::move(blockStart);
     outSummary.strings = header.strings;
+    outSummary.version = header.version;
+    outSummary.inlineNames = header.inlineNames;
     return true;
 }
 
@@ -4653,6 +4696,9 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     const TextureSetBlock& set = textureSets[static_cast<std::size_t>(textureSetRef)];
                     if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
                         shape.diffuseTexturePath = set.textures.front();
+                        if (set.textures.size() > 1u && !set.textures[1].empty()) {
+                            shape.normalTexturePath = set.textures[1];
+                        }
                     }
                     return;
                 }
@@ -5381,8 +5427,13 @@ bool parseNifSkinnedMesh(
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
             GeometryBlock block;
             const bool isStrips = (typeName == "NiTriStripsData");
-            if (readGeometryData(blockCursor, header.blockSize[i], isStrips, header.inlineBlockTypes,
-                             header.version, block) &&
+            // Sequential Oblivion files have no block-size table. Their exact
+            // bounds were reconstructed above, so using header.blockSize[i]
+            // here passed zero to the geometry reader and made its otherwise
+            // valid size check reject every skinned shape as unskinned.
+            const std::size_t measuredBlockSize = blockEnd[i] - blockStart[i];
+            if (readGeometryData(blockCursor, measuredBlockSize, isStrips,
+                             header.inlineBlockTypes, header.version, block) &&
                 block.valid) {
                 outModel.outOfRangeTriangleCount += block.outOfRangeTriangles;
                 outModel.degenerateTriangleCount += block.degenerateTriangles;
@@ -5506,7 +5557,19 @@ bool parseNifSkinnedMesh(
         // rotating heads and sleeves away from their pivots. The character
         // builder evaluates the actual authored skin product into one shared
         // bind pose instead.
-        shape.requiresCanonicalBindBake = header.version == kMorrowindNifVersion;
+        // NetImmerse/Morrowind and sequential Oblivion body parts do not
+        // sharing a named bone carry byte-equivalent inverse binds. A character
+        // has one GPU palette, so bake each part's authored bind product into
+        // canonical skeleton space before merging it. TES4's overall skin
+        // transform must first be canceled from its geometry; otherwise the
+        // bake applies it twice and collapses FaceGen pieces to the origin.
+        shape.requiresCanonicalBindBake =
+            header.version == kMorrowindNifVersion ||
+            header.version == kOblivionNifVersion ||
+            header.version == kOblivionNifVersion5;
+        shape.canonicalBindCancelsSkinTransform =
+            header.version == kOblivionNifVersion ||
+            header.version == kOblivionNifVersion5;
         shape.uvs = src.uvs;
         shape.triangleIndices = src.triangleIndices;
         shape.usesDynamicPositions = isBsDynamicTriShape[blockIndex];

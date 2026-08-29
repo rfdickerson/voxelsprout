@@ -63,7 +63,10 @@ struct FalloutActorBase {
     // TES5 stores each NPC's generated head as a separate mesh named by the
     // NPC record's LOCAL form ID. It is not referenced by a subrecord, so the
     // path must be captured before load-order remapping changes the form ID.
-    std::string faceGeometryPath;
+    // The ordinary case has one entry. The customizable Player has no baked
+    // FaceGeom asset, so the explicit showcase replaces it with the ordered
+    // retail head/eyes/mouth/brows/hair pieces used for its stock appearance.
+    std::vector<std::string> faceGeometryPaths;
     std::vector<std::string> bodyPartPaths;  // NIFZ, relative to the skeleton's directory
     std::uint32_t templateFormId = 0;        // TPLT
     std::uint32_t raceFormId = 0;            // RNAM
@@ -113,6 +116,12 @@ inline constexpr std::size_t kRaceRightHandSlot = 2;
 struct FalloutRaceParts {
     std::uint32_t formId = 0;
     std::string editorId;
+    // TES4 uses its four NAM1 body indices as upper body, lower body, hands,
+    // and feet. Fallout reuses the same positional record shape for upper
+    // body, left hand, right hand, and a non-mesh FaceGen texture. Keep the
+    // generation with the compiled race so resolution never has to guess from
+    // filenames or from which slots happen to be populated.
+    bool usesOblivionBodyLayout = false;
     // VTCK, which on a RACE is a PAIR: male voice type then female, 8 bytes.
     // An actor with no VTCK of its own takes whichever its sex selects.
     std::uint32_t maleVoiceTypeFormId = 0;
@@ -139,6 +148,12 @@ inline constexpr std::uint32_t kBipedSlotUpperBody = 0x00000004u;
 inline constexpr std::uint32_t kBipedSlotLeftHand = 0x00000008u;
 inline constexpr std::uint32_t kBipedSlotRightHand = 0x00000010u;
 inline constexpr std::uint32_t kBipedSlotHat = 0x00000400u;
+
+// Oblivion predates Fallout's split left/right-hand biped objects. Its BMDT
+// word uses the next three bits for lower body, hands, and feet respectively.
+inline constexpr std::uint32_t kOblivionBipedSlotLowerBody = 0x00000008u;
+inline constexpr std::uint32_t kOblivionBipedSlotHands = 0x00000010u;
+inline constexpr std::uint32_t kOblivionBipedSlotFeet = 0x00000020u;
 
 struct FalloutArmorPiece {
     std::uint32_t formId = 0;
@@ -218,6 +233,10 @@ struct FalloutActorScan {
     std::unordered_map<std::uint32_t, FalloutArmorPiece> armors;
     // OTFT formID -> its INAM item list.
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> outfits;
+    // OTFT formID -> EditorID. The read-only avatar catalog uses this to
+    // select an authored Skyrim outfit without publishing Skyrim records into
+    // the active game's mutable runtime world.
+    std::unordered_map<std::uint32_t, std::string> outfitEditorIds;
     std::unordered_map<std::uint32_t, SkyrimArmorAddon> armorAddons;
     // VTYP formID -> its EditorID, which is the voice folder's name verbatim
     // ("MaleAdult11", "RobotVictor"). Collected wholesale for the same reason

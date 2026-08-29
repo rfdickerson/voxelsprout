@@ -106,12 +106,27 @@ void testUnattributedExcludesNestedZones() {
 void testFpsDerivesFromTheFrameChannel() {
     GameFrameProfiler prof;
     expectTrue(prof.fps() == 0.0f, "fps is 0 before any frame is committed");
+    expectTrue(!prof.fpsReady(), "headline fps waits for a representative window");
 
-    // A steady 10 ms frame is 100 fps; the first sample seeds the EWMA so this
-    // is exact after one frame rather than ramping.
+    // A steady 10 ms frame is 100 fps.
     prof.beginFrame();
     prof.endFrame(10.0f);
-    expectTrue(std::fabs(prof.fps() - 100.0f) < 1e-3f, "fps derives from the frame EWMA");
+    expectTrue(std::fabs(prof.fps() - 100.0f) < 1e-3f, "fps derives from frame p50");
+
+    // A startup upload hitch must remain in max/p99 without poisoning the
+    // typical headline rate after smooth presentation begins.
+    GameFrameProfiler startup;
+    startup.beginFrame();
+    startup.endFrame(250.0f);
+    for (std::size_t i = 1; i < GameFrameProfiler::kDisplayWarmupSamples; ++i) {
+        startup.beginFrame();
+        startup.endFrame(10.0f);
+    }
+    expectTrue(startup.fpsReady(), "headline fps becomes ready after warm-up");
+    expectTrue(std::fabs(startup.fps() - 100.0f) < 1e-3f,
+               "startup hitch does not masquerade as sustained fps");
+    expectTrue(startup.channel(GameZone::Frame).maxMs() == 250.0f,
+               "startup hitch remains visible in the diagnostic window");
 
     // A zero-length frame must not divide by zero.
     GameFrameProfiler zero;

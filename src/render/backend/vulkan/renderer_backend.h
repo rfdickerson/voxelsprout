@@ -318,6 +318,9 @@ public:
     // levels do not happen to match that fixed exposure renders uniformly too
     // dark or too bright with no way for the app to say otherwise.
     void setAutoExposureEnabled(bool enabled) { m_skyDebugSettings.autoExposureEnabled = enabled; }
+    void setAutoExposureKeyValue(float keyValue) {
+        m_skyDebugSettings.autoExposureKeyValue = std::clamp(keyValue, 0.01f, 1.0f);
+    }
     // Whole-frame debug visualization. See DebugView in renderer_types.h for
     // what each mode shows and why they are one enum rather than a set of
     // toggles. Published to the shaders through CameraUniform::tonemapConfig2.y.
@@ -409,6 +412,8 @@ public:
     //
     // Returns kInvalidImportedChunkIndex on failure.
     static constexpr std::size_t kInvalidImportedChunkIndex = static_cast<std::size_t>(-1);
+    bool reserveImportedSceneGeometry(
+        std::uint64_t vertexCapacity, std::uint64_t indexCapacity);
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunkAt(std::size_t chunkIndex);
     bool waitForImportedSceneUploads();
@@ -517,6 +522,7 @@ public:
     // called when the weather changes; the per-frame tints ride on
     // WeatherSkyParams instead.
     void setWeatherClouds(const WeatherCloudTextures& clouds);
+    void setWeatherCloudMesh(const WeatherCloudMesh& mesh);
     void setTonemapSettings(const TonemapSettings& settings) { m_tonemapSettings = settings; }
     [[nodiscard]] TonemapSettings tonemapSettings() const { return m_tonemapSettings; }
     void setImportedPbrDefaults(const ImportedPbrDefaults& defaults) {

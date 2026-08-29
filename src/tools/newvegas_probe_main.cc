@@ -577,6 +577,7 @@ int dumpKfAnimation(const std::filesystem::path& dataPath, const std::string& vi
     std::cout << "parsed \"" << animation.name << "\": " << animation.duration() << "s, "
               << (animation.loops() ? "looping" : "one-shot") << ", " << animation.tracks.size()
               << " tracks (" << animation.stats.transformInterpolators << " transform, "
+              << animation.stats.bSplineInterpolators << " B-spline, "
               << animation.stats.unsupportedInterpolators << " unsupported, of "
               << animation.stats.controlledBlocks << " controlled blocks)\n";
     if (!animation.stats.unsupportedNodes.empty()) {
@@ -586,9 +587,13 @@ int dumpKfAnimation(const std::filesystem::path& dataPath, const std::string& vi
         }
         std::cout << "\n";
     }
+    const std::size_t trackDisplayLimit =
+        std::getenv("ODAI_BETHESDA_PROBE_ALL_KF_TRACKS") != nullptr
+        ? std::numeric_limits<std::size_t>::max()
+        : 8u;
     std::size_t shownTracks = 0;
     for (const auto& track : animation.tracks) {
-        if (shownTracks++ >= 8u) {
+        if (shownTracks++ >= trackDisplayLimit) {
             break;
         }
         std::cout << "  " << track.nodeName << ": " << track.rotationKeys.size() << " rot, "
@@ -4272,19 +4277,54 @@ void mapToEngine(bool mirrorMap, const double p[3], double out[3]) {
 int probeRotations(const std::filesystem::path& dataPath, const std::string& plugin, const std::string& cellId) {
     odai::importer::fnv::FalloutSceneData scene;
     std::string error;
-    odai::importer::fnv::FalloutExtractFilter filter;
-    filter.wantCellContents = [&](const odai::importer::fnv::FalloutCellRecord& cell) {
-        return cell.editorId == cellId;
-    };
-    if (!odai::importer::fnv::extractFalloutScene(dataPath / plugin, filter, scene, error)) {
-        std::cout << "extract failed: " << error << "\n";
+    odai::importer::fnv::FalloutWorldTables tes3Tables;
+    odai::importer::fnv::FalloutCellRecord tes3Cell;
+    const odai::importer::fnv::FalloutCellRecord* target = nullptr;
+    odai::importer::fnv::EsmReader formatReader;
+    if (!formatReader.open(dataPath / plugin)) {
+        std::cout << "open failed: " << formatReader.lastError() << "\n";
         return 1;
     }
-    const odai::importer::fnv::FalloutCellRecord* target = nullptr;
-    for (const auto& cell : scene.cells) {
-        if (cell.editorId == cellId) {
-            target = &cell;
-            break;
+    if (formatReader.pluginFormat() == odai::importer::fnv::EsmPluginFormat::kMorrowind) {
+        const std::size_t comma = cellId.find(',');
+        if (comma == std::string::npos) {
+            std::cout << "TES3 exterior rotation probes use a grid coordinate such as -3,-2\n";
+            return 1;
+        }
+        const std::int32_t gridX = std::stoi(cellId.substr(0u, comma));
+        const std::int32_t gridZ = std::stoi(cellId.substr(comma + 1u));
+        odai::importer::fnv::FalloutCellIndex index;
+        if (!odai::importer::fnv::buildFalloutCellIndex(dataPath / plugin, index, error) ||
+            !odai::importer::fnv::buildFalloutWorldTables(dataPath / plugin, tes3Tables, error)) {
+            std::cout << "TES3 index failed: " << error << "\n";
+            return 1;
+        }
+        const auto entry = std::find_if(index.cells.begin(), index.cells.end(),
+            [&](const odai::importer::fnv::FalloutCellIndexEntry& cell) {
+                return !cell.isInterior && cell.hasGridCoords &&
+                    cell.gridX == gridX && cell.gridZ == gridZ &&
+                    cell.childrenGroupSize != 0u;
+            });
+        if (entry == index.cells.end() ||
+            !odai::importer::fnv::extractFalloutCellAt(formatReader, *entry, tes3Cell, error)) {
+            std::cout << "TES3 cell extract failed: " << error << "\n";
+            return 1;
+        }
+        target = &tes3Cell;
+    } else {
+        odai::importer::fnv::FalloutExtractFilter filter;
+        filter.wantCellContents = [&](const odai::importer::fnv::FalloutCellRecord& cell) {
+            return cell.editorId == cellId;
+        };
+        if (!odai::importer::fnv::extractFalloutScene(dataPath / plugin, filter, scene, error)) {
+            std::cout << "extract failed: " << error << "\n";
+            return 1;
+        }
+        for (const auto& cell : scene.cells) {
+            if (cell.editorId == cellId) {
+                target = &cell;
+                break;
+            }
         }
     }
     if (target == nullptr) {
@@ -4298,46 +4338,46 @@ int probeRotations(const std::filesystem::path& dataPath, const std::string& plu
     }
 
     // Local-space AABB per base static, from its NIF.
-    MeshIndex meshes = buildMeshIndex(dataPath);
+    odai::importer::fnv::FalloutAssetSource assets;
+    if (!assets.open(dataPath)) {
+        std::cout << "asset source failed: " << dataPath << "\n";
+        return 1;
+    }
     std::map<std::uint32_t, Aabb> localBounds;
     std::vector<std::uint8_t> bytes;
+    const auto resolvedBaseFormId = [&](const odai::importer::fnv::FalloutPlacedReference& ref) {
+        if (ref.baseFormId != 0u) return ref.baseFormId;
+        const auto found = tes3Tables.baseFormIdsByEditorId.find(toLowerAscii(ref.baseEditorId));
+        return found == tes3Tables.baseFormIdsByEditorId.end() ? 0u : found->second;
+    };
     for (const auto& ref : target->references) {
-        if (localBounds.count(ref.baseFormId) != 0u) {
+        const std::uint32_t baseFormId = resolvedBaseFormId(ref);
+        if (localBounds.count(baseFormId) != 0u) {
             continue;
         }
-        const auto statIt = staticsByFormId.find(ref.baseFormId);
-        if (statIt == staticsByFormId.end()) {
+        std::string sourceModelPath;
+        if (const auto tes3 = tes3Tables.staticModelPaths.find(baseFormId);
+            tes3 != tes3Tables.staticModelPaths.end()) {
+            sourceModelPath = tes3->second;
+        } else if (const auto stat = staticsByFormId.find(baseFormId);
+                   stat != staticsByFormId.end()) {
+            sourceModelPath = stat->second->modelPath;
+        } else {
             continue;
         }
-        std::string modelPath = "meshes\\" + statIt->second->modelPath;
-        for (char& c : modelPath) {
-            if (c == '/') {
-                c = '\\';
+        std::string nifError;
+        if (!assets.resolveMesh(sourceModelPath, bytes, nifError)) continue;
+        odai::importer::fnv::NifModel model;
+        if (!odai::importer::fnv::parseNifStaticMesh(bytes, model, nifError)) continue;
+        Aabb box;
+        for (const auto& shape : model.shapes) {
+            for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
+                const double p[3] = {shape.positions[v * 3u], shape.positions[(v * 3u) + 1],
+                                     shape.positions[(v * 3u) + 2]};
+                box.add(p);
             }
         }
-        for (std::size_t a = 0; a < meshes.archives.size(); ++a) {
-            const auto* entry = meshes.archives[a].find(modelPath);
-            if (entry == nullptr || !meshes.archives[a].extract(*entry, bytes)) {
-                continue;
-            }
-            odai::importer::fnv::NifModel model;
-            std::string nifError;
-            if (!odai::importer::fnv::parseNifStaticMesh(bytes, model, nifError)) {
-                break;
-            }
-            Aabb box;
-            for (const auto& shape : model.shapes) {
-                for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
-                    const double p[3] = {shape.positions[v * 3u], shape.positions[(v * 3u) + 1],
-                                         shape.positions[(v * 3u) + 2]};
-                    box.add(p);
-                }
-            }
-            if (box.valid()) {
-                localBounds[ref.baseFormId] = box;
-            }
-            break;
-        }
+        if (box.valid()) localBounds[baseFormId] = box;
     }
     std::cout << "Cell " << cellId << ": " << target->references.size() << " reference(s), " << localBounds.size()
               << " base mesh(es) resolved.\n";
@@ -4365,7 +4405,7 @@ int probeRotations(const std::filesystem::path& dataPath, const std::string& plu
     for (const Convention& convention : candidates) {
         std::vector<Aabb> worldBoxes;
         for (const auto& ref : target->references) {
-            const auto boundsIt = localBounds.find(ref.baseFormId);
+            const auto boundsIt = localBounds.find(resolvedBaseFormId(ref));
             if (boundsIt == localBounds.end()) {
                 continue;
             }
@@ -4487,7 +4527,14 @@ int probeScene(const std::filesystem::path& scenePath) {
                       << "\" model=\"" << instance.modelPath << "\" pos=("
                       << instance.transform[3] << ", " << instance.transform[7]
                       << ", " << instance.transform[11] << ") visible="
-                      << (instance.initiallyVisible ? "yes" : "no") << "\n";
+                      << (instance.initiallyVisible ? "yes" : "no")
+                      << " basis=[(" << instance.transform[0] << ","
+                      << instance.transform[1] << "," << instance.transform[2]
+                      << "),(" << instance.transform[4] << ","
+                      << instance.transform[5] << "," << instance.transform[6]
+                      << "),(" << instance.transform[8] << ","
+                      << instance.transform[9] << "," << instance.transform[10]
+                      << ")]\n";
         }
     }
 
@@ -5855,7 +5902,7 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --modelrefs <Plugin.esm> <modelSubstring> [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --cells <Plugin.esm> [filter]\n"
               << "  odai_bethesda_probe <DataFilesPath> --navm <Plugin.esm> [dumpCount]\n"
-              << "  odai_bethesda_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --rotations <Plugin.esm> <CellEditorID|TES3-x,z>\n"
               << "  odai_bethesda_probe <anyDir> --scene <cooked.bin>\n";
 }
 
@@ -5892,6 +5939,14 @@ int animationCheck(const std::filesystem::path& dataPath, bool strict) {
             {"provider_id", asset.providerId}, {"provider", asset.providerName},
             {"fingerprint", asset.contentFingerprint}, {"archive", asset.archiveName}});
     }
+    nlohmann::json behaviorGraphs = nlohmann::json::array();
+    for (const odai::anim::HkxDecodedBehaviorGraph& graph : report.behaviorGraphs) {
+        behaviorGraphs.push_back({{"name", graph.name}, {"nodes", graph.nodes.size()},
+            {"clip_generators", graph.clipGeneratorCount},
+            {"behavior_references", graph.behaviorReferenceCount},
+            {"state_machines", graph.stateMachineCount},
+            {"transition_effects", graph.transitionEffectCount}});
+    }
     odai::bethesda::BethesdaPhysicsWorld physics;
     std::string joltError;
     bool joltCharacter = physics.initialize(joltError);
@@ -5905,6 +5960,7 @@ int animationCheck(const std::filesystem::path& dataPath, bool strict) {
         {"strict_ready", report.strictCompatible},
         {"generator", odai::anim::hkxGeneratorName(report.generator)},
         {"generator_provider", report.generatorProvider}, {"roots", std::move(roots)},
+        {"behavior_graphs", std::move(behaviorGraphs)},
         {"missing_assets", report.missingAssets},
         {"unsupported_classes", report.unsupportedClasses},
         {"jolt_character_constructed", joltCharacter}, {"jolt_error", joltError},

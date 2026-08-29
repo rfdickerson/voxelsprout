@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <unordered_set>
 
 #include "core/frame_profiler.h"
 #include "import/dds.h"
@@ -281,10 +282,11 @@ Mat3 makeEngineInstanceRotation(const Mat3& beth) {
     return out;
 }
 
-// REFR rotation order: Bethesda applies X, then Y, then Z (R = Rz*Ry*Rx),
-// with the angles used as stored (not negated).
+// REFR rotation order: Bethesda applies X, then Y, then Z (R = Rz*Ry*Rx).
+// TES4/TES5 use the angles as stored; TES3 uses the opposite sign, selected by
+// writeBethesdaPlacementTransform after the common order is composed here.
 //
-// The angle sign is settled: `odai_bethesda_probe --rotations FalloutNV.esm
+// The later-generation angle sign is settled: `odai_bethesda_probe --rotations FalloutNV.esm
 // GSDocMitchellHouse` scores every candidate convention by how much the cell's
 // modular pieces interpenetrate once placed, and positive angles beat negated
 // ones by 1.6x (5.9e7 vs 9.6e7). The order is not separated by that test —
@@ -834,6 +836,25 @@ void appendTerrainCell(
 
 }  // namespace
 
+void writeBethesdaPlacementTransform(
+    ImportedSceneInstance& instance,
+    const FalloutPlacedReference& reference,
+    bool morrowind) {
+    const Vec3 worldPos = bethesdaToEngine(
+        reference.position[0], reference.position[1], reference.position[2]);
+    // TES3's DATA angles rotate placed objects in the opposite direction from
+    // TES4/TES5's REFR angles. Balmora's modular canal kit makes this measurable:
+    // positive angles make the pieces overlap by 2.24e9 cubic units, while
+    // negating them reduces that to 1.29e9 and closes the authored kit joins.
+    const float angleSign = morrowind ? -1.0f : 1.0f;
+    const Mat3 bethRotation = eulerToMatrixBethesdaOrder(
+        angleSign * reference.rotationRadians[0],
+        angleSign * reference.rotationRadians[1],
+        angleSign * reference.rotationRadians[2]);
+    writeTransform(
+        instance, worldPos, makeEngineInstanceRotation(bethRotation), reference.scale);
+}
+
 bool isEffectOnlyModelPath(std::string_view modelPath) {
     std::string lowered(modelPath);
     for (char& c : lowered) {
@@ -1109,7 +1130,96 @@ FalloutExtractFilter worldTableFilter() {
     return filter;
 }
 
+using CellExtractor = std::function<bool(
+    const FalloutCellIndexEntry&, FalloutCellRecord&, std::string&)>;
+
+bool findWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    const CellExtractor& extract,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError) {
+    outEntrance = FalloutWorldspaceEntrance{};
+    const auto parent = tables.worldspaceFormIdsByEditorId.find(
+        toLowerAsciiCopy(parentWorldspaceEditorId));
+    const auto child = tables.worldspaceFormIdsByEditorId.find(
+        toLowerAsciiCopy(childWorldspaceEditorId));
+    if (parent == tables.worldspaceFormIdsByEditorId.end() ||
+        child == tables.worldspaceFormIdsByEditorId.end()) {
+        outError = "missing worldspace pair " + parentWorldspaceEditorId +
+            " -> " + childWorldspaceEditorId;
+        return false;
+    }
+
+    for (const FalloutCellIndexEntry& childCell : index.cells) {
+        if (childCell.isInterior || childCell.worldspaceFormId != child->second) continue;
+        FalloutCellRecord childRecord;
+        std::string extractError;
+        if (!extract(childCell, childRecord, extractError)) continue;
+        for (const FalloutPlacedReference& childDoor : childRecord.references) {
+            if (!childDoor.hasTeleport || childDoor.isDeleted ||
+                (childDoor.recordFlags & 0x00000800u) != 0u) continue;
+            const auto parentOwner = index.cellIndexByReferenceFormId.find(
+                childDoor.teleportTargetRefFormId);
+            if (parentOwner == index.cellIndexByReferenceFormId.end() ||
+                parentOwner->second >= index.cells.size()) continue;
+            const FalloutCellIndexEntry& parentCell = index.cells[parentOwner->second];
+            if (parentCell.isInterior ||
+                parentCell.worldspaceFormId != parent->second) continue;
+
+            FalloutCellRecord parentRecord;
+            if (!extract(parentCell, parentRecord, extractError)) continue;
+            const auto parentDoor = std::find_if(
+                parentRecord.references.begin(), parentRecord.references.end(),
+                [&](const FalloutPlacedReference& reference) {
+                    return reference.formId == childDoor.teleportTargetRefFormId &&
+                        reference.hasTeleport && !reference.isDeleted &&
+                        (reference.recordFlags & 0x00000800u) == 0u &&
+                        reference.teleportTargetRefFormId == childDoor.formId;
+                });
+            if (parentDoor == parentRecord.references.end()) continue;
+
+            std::copy(std::begin(parentDoor->teleportPosition),
+                      std::end(parentDoor->teleportPosition),
+                      std::begin(outEntrance.arrivalPosition));
+            std::copy(std::begin(parentDoor->teleportRotationRadians),
+                      std::end(parentDoor->teleportRotationRadians),
+                      std::begin(outEntrance.arrivalRotationRadians));
+            outEntrance.parentDoorFormId = parentDoor->formId;
+            outEntrance.childDoorFormId = childDoor.formId;
+            return true;
+        }
+    }
+    outError = "no enabled paired door from " + parentWorldspaceEditorId +
+        " to " + childWorldspaceEditorId;
+    return false;
+}
+
 }  // namespace
+
+std::vector<std::string> worldspaceEditorIdAncestry(
+    const FalloutWorldTables& tables, std::uint32_t worldspaceFormId) {
+    constexpr int kMaxParentHops = 8;
+    std::vector<std::string> result;
+    std::unordered_set<std::uint32_t> visited;
+    std::uint32_t current = worldspaceFormId;
+    for (int hop = 0; hop < kMaxParentHops && current != 0u; ++hop) {
+        if (!visited.insert(current).second) {
+            break;
+        }
+        const FalloutWorldspaceRecord* worldspace = tables.findWorldspace(current);
+        if (worldspace == nullptr) {
+            break;
+        }
+        if (!worldspace->editorId.empty()) {
+            result.push_back(worldspace->editorId);
+        }
+        current = worldspace->parentWorldspaceFormId;
+    }
+    return result;
+}
 
 bool buildFalloutWorldTables(
     const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError) {
@@ -1287,6 +1397,47 @@ bool buildFalloutWorldTables(
     }
     resolveWorldspaceInheritance(outTables);
     return true;
+}
+
+bool findFalloutWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const std::filesystem::path& esmPath,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError) {
+    EsmReader reader;
+    if (!reader.open(esmPath)) {
+        outError = "could not open " + esmPath.string();
+        return false;
+    }
+    const CellExtractor extract = [&](const FalloutCellIndexEntry& entry,
+                                      FalloutCellRecord& record,
+                                      std::string& error) {
+        return extractFalloutCellAt(reader, entry, record, error);
+    };
+    return findWorldspaceEntrance(
+        index, tables, parentWorldspaceEditorId, childWorldspaceEditorId,
+        extract, outEntrance, outError);
+}
+
+bool findFalloutWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const FalloutLoadOrder& order,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError) {
+    const CellExtractor extract = [&](const FalloutCellIndexEntry& entry,
+                                      FalloutCellRecord& record,
+                                      std::string& error) {
+        return extractFalloutCellMerged(index, order, entry, record, error);
+    };
+    return findWorldspaceEntrance(
+        index, tables, parentWorldspaceEditorId, childWorldspaceEditorId,
+        extract, outEntrance, outError);
 }
 
 CellSceneBuilder::CellSceneBuilder(
@@ -2154,6 +2305,13 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             ? opaqueIndexCount
                             : partIndexCount;
                         part.textureIndex = resolveTextureIndex(shape.diffuseTexturePath);
+                        const std::uint32_t normalTextureIndex =
+                            resolveTextureIndex(shape.normalTexturePath, /*linearData=*/true);
+                        if (part.textureIndex != kNoTextureIndex &&
+                            normalTextureIndex != kNoTextureIndex) {
+                            m_scene.normalTextureByDiffuseIndex.emplace(
+                                part.textureIndex, normalTextureIndex);
+                        }
                         if (part.textureIndex == kNoTextureIndex &&
                             modelDominantTexture != kNoTextureIndex) {
                             part.textureIndex = modelDominantTexture;
@@ -2341,11 +2499,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             if (const std::string* modelPath = staticModelPathFor(ref.baseFormId)) {
                 instance.modelPath = *modelPath;
             }
-            const Vec3 worldPos = bethesdaToEngine(ref.position[0], ref.position[1], ref.position[2]);
-            const Mat3 bethRotation = eulerToMatrixBethesdaOrder(
-                ref.rotationRadians[0], ref.rotationRadians[1], ref.rotationRadians[2]);
-            const Mat3 engineRotation = makeEngineInstanceRotation(bethRotation);
-            writeTransform(instance, worldPos, engineRotation, ref.scale);
+            writeBethesdaPlacementTransform(instance, ref, m_tables.morrowind);
             if (const auto collisionIt = m_collisionByStaticFormId.find(ref.baseFormId);
                 collisionIt != m_collisionByStaticFormId.end()) {
                 for (const NifCollisionTriangle& local : collisionIt->second) {

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -110,7 +111,13 @@ std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) 
 // texture upload acquires from the same reference-counted table and has to
 // normalize identically, which only one definition can guarantee.
 
-VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
+VkFormat vkFormatForImportedTexture(const odai::importer::ImportedSceneTexture& texture) {
+    const odai::importer::TextureFormat format = texture.format;
+    std::string normalizedPath = texture.sourcePath;
+    std::transform(normalizedPath.begin(), normalizedPath.end(), normalizedPath.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool tangentSpaceData =
+        normalizedPath.ends_with("_n.dds") || normalizedPath.ends_with("_msn.dds");
     switch (format) {
         // Color albedo (BC1/BC3/BC7) holds sRGB-encoded bytes, so use the _SRGB views:
         // the sampler decodes sRGB -> linear, matching the linear lighting + tonemap
@@ -119,11 +126,14 @@ VkFormat vkFormatForImportedTexture(odai::importer::TextureFormat format) {
         // channel — e.g. the water normal map) and must stay UNORM/linear.
         case odai::importer::TextureFormat::BC1: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC1Linear: return VK_FORMAT_BC1_RGB_UNORM_BLOCK;
-        case odai::importer::TextureFormat::BC2: return VK_FORMAT_BC2_SRGB_BLOCK;
-        case odai::importer::TextureFormat::BC3: return VK_FORMAT_BC3_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC2:
+            return tangentSpaceData ? VK_FORMAT_BC2_UNORM_BLOCK : VK_FORMAT_BC2_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC3:
+            return tangentSpaceData ? VK_FORMAT_BC3_UNORM_BLOCK : VK_FORMAT_BC3_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC5: return VK_FORMAT_BC5_UNORM_BLOCK;
-        case odai::importer::TextureFormat::BC7: return VK_FORMAT_BC7_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC7:
+            return tangentSpaceData ? VK_FORMAT_BC7_UNORM_BLOCK : VK_FORMAT_BC7_SRGB_BLOCK;
         case odai::importer::TextureFormat::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
         default:                                      return VK_FORMAT_R8G8B8A8_UNORM;
     }
@@ -1059,6 +1069,17 @@ bool RendererBackend::ensureImportedArenaCapacity(
     return true;
 }
 
+bool RendererBackend::reserveImportedSceneGeometry(
+    std::uint64_t vertexCapacity, std::uint64_t indexCapacity) {
+    if (!m_importedSceneChunks.empty() || m_importedVertexArena.used() != 0u ||
+        m_importedIndexArena.used() != 0u) {
+        VOX_LOGW("render")
+            << "imported geometry reserve ignored after scene uploads began";
+        return false;
+    }
+    return ensureImportedArenaCapacity(vertexCapacity, indexCapacity);
+}
+
 void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     if (chunkIndex >= m_importedSceneChunks.size()) {
         return;
@@ -1347,16 +1368,22 @@ bool RendererBackend::ensureImportedTextureSampler() {
         const char* env = std::getenv("ODAI_UPSCALE_MIPBIAS");
         return (env != nullptr) ? static_cast<float>(std::atof(env)) : 1.0f;
     }();
-    samplerCreateInfo.mipLodBias = (renderScaleForMip < 0.999f)
-        ? ((s_mipBiasOverride <= 0.5f) ? s_mipBiasOverride : -0.5f)
-        : 0.0f;
+    const bool mipBiasExplicit = s_mipBiasOverride <= 0.5f;
+    samplerCreateInfo.mipLodBias = mipBiasExplicit
+        ? std::clamp(s_mipBiasOverride, -2.0f, 0.5f)
+        : ((renderScaleForMip < 0.999f) ? -0.5f : 0.0f);
     VOX_LOGI("render") << "imported texture sampler: mip bias " << samplerCreateInfo.mipLodBias
                        << " (render " << m_renderExtent.width << "x" << m_renderExtent.height
                        << ", swapchain " << m_swapchainExtent.width << "x"
                        << m_swapchainExtent.height << ")";
+    float requestedAnisotropy = 8.0f;
+    if (const char* anisotropyEnv = std::getenv("ODAI_TEXTURE_ANISOTROPY")) {
+        requestedAnisotropy = std::clamp(
+            static_cast<float>(std::atof(anisotropyEnv)), 1.0f, 16.0f);
+    }
     samplerCreateInfo.anisotropyEnable = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     samplerCreateInfo.maxAnisotropy = m_supportsSamplerAnisotropy
-        ? std::min(m_maxSamplerAnisotropy, 8.0f)
+        ? std::min(m_maxSamplerAnisotropy, requestedAnisotropy)
         : 1.0f;
     samplerCreateInfo.compareEnable = VK_FALSE;
     samplerCreateInfo.minLod = 0.0f;
@@ -1386,6 +1413,76 @@ static_assert(
     kInvalidImportedTextureSlot == ~0u,
     "m_weatherCloudSlots in renderer_backend.h initializes to ~0u because that header "
     "cannot see this constant; if it changes, that initializer must change with it");
+
+void RendererBackend::setWeatherCloudMesh(const WeatherCloudMesh& mesh) {
+    if (m_skyCloudIndexBufferHandle != kInvalidBufferHandle ||
+        m_skyCloudVertexBufferHandle != kInvalidBufferHandle) {
+        // Weather changes are infrequent; make replacement explicit and safe
+        // instead of destroying buffers an in-flight frame can still read.
+        vkDeviceWaitIdle(m_device);
+    }
+    if (m_skyCloudIndexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_skyCloudIndexBufferHandle);
+        m_skyCloudIndexBufferHandle = kInvalidBufferHandle;
+    }
+    if (m_skyCloudVertexBufferHandle != kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(m_skyCloudVertexBufferHandle);
+        m_skyCloudVertexBufferHandle = kInvalidBufferHandle;
+    }
+    m_skyCloudIndexCount = 0u;
+    if (mesh.vertices.empty() || mesh.indices.empty()) {
+        return;
+    }
+
+    std::vector<ImportedMeshVertex> vertices(mesh.vertices.size());
+    constexpr float kSkyNormal[3] = {0.0f, 1.0f, 0.0f};
+    for (std::size_t index = 0; index < mesh.vertices.size(); ++index) {
+        const WeatherCloudMeshVertex& source = mesh.vertices[index];
+        ImportedMeshVertex& target = vertices[index];
+        std::copy_n(source.position, 3u, target.position);
+        target.packedNormal = odai::importer::packImportedVertexNormal(kSkyNormal);
+        target.packedColor = odai::importer::packImportedVertexColor(source.color, source.color[3]);
+        target.uv[0] = source.uv[0];
+        target.uv[1] = source.uv[1];
+        // A logical weather slot, remapped to its bindless texture slot in the
+        // sky fragment shader after setWeatherClouds uploads the active DDS.
+        target.textureIndex = source.layer;
+    }
+
+    const auto createHostBuffer = [this](
+                                      const void* data,
+                                      VkDeviceSize bytes,
+                                      VkBufferUsageFlags usage) -> BufferHandle {
+        BufferCreateDesc desc{};
+        desc.size = bytes;
+        desc.usage = usage;
+        desc.memoryProperties =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        desc.initialData = data;
+        return m_bufferAllocator.createBuffer(desc);
+    };
+
+    const BufferHandle vertexHandle = createHostBuffer(
+        vertices.data(), static_cast<VkDeviceSize>(vertices.size() * sizeof(ImportedMeshVertex)),
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    if (vertexHandle == kInvalidBufferHandle) {
+        VOX_LOGE("render") << "weather cloud mesh vertex upload failed";
+        return;
+    }
+    const BufferHandle indexHandle = createHostBuffer(
+        mesh.indices.data(), static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t)),
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    if (indexHandle == kInvalidBufferHandle) {
+        m_bufferAllocator.destroyBuffer(vertexHandle);
+        VOX_LOGE("render") << "weather cloud mesh index upload failed";
+        return;
+    }
+    m_skyCloudVertexBufferHandle = vertexHandle;
+    m_skyCloudIndexBufferHandle = indexHandle;
+    m_skyCloudIndexCount = static_cast<std::uint32_t>(mesh.indices.size());
+    VOX_LOGI("render") << "weather cloud mesh uploaded: " << mesh.vertices.size()
+                       << " vertices, " << (mesh.indices.size() / 3u) << " triangles";
+}
 
 void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     // Release first, then acquire: the refcount makes re-acquiring a texture the
@@ -1587,7 +1684,7 @@ std::uint32_t RendererBackend::acquireImportedTexture(
     }
     stagingBuffers.push_back(stagingHandle);
 
-    const VkFormat textureFormat = vkFormatForImportedTexture(srcTexture.format);
+    const VkFormat textureFormat = vkFormatForImportedTexture(srcTexture);
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;

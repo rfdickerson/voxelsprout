@@ -202,7 +202,10 @@ std::string toLowerAscii(std::string value) {
 //     longer serialized as visible world geometry.
 // 56: TES3 DODT/DNAM load doors retain their named-cell/exterior transition
 //     targets in streamed scenes.
-constexpr int kCellBuildVersion = 56;
+// 57: TES3 placed-reference Euler angles use their generation's negative sign.
+//     Cached positive-angle cells leave modular kits such as Balmora's canal
+//     walls and bridges rotated into one another after the importer fix.
+constexpr int kCellBuildVersion = 58;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -230,6 +233,33 @@ std::uint64_t countBlendedDraws(const ImportedScene& scene) {
         }
     }
     return blended;
+}
+
+struct ScenePresentationCounts {
+    std::uint64_t alphaTestedParts = 0;
+    std::uint64_t bannerInstances = 0;
+    std::uint64_t fireEmitters = 0;
+    std::uint64_t localLights = 0;
+    std::uint64_t geometryInstances = 0;
+};
+
+ScenePresentationCounts scenePresentationCounts(const ImportedScene& scene) {
+    ScenePresentationCounts counts;
+    counts.fireEmitters = scene.particleEmitters.size();
+    counts.localLights = scene.lights.size();
+    counts.geometryInstances = scene.instances.size();
+    for (const ImportedSceneMesh& mesh : scene.meshes) {
+        for (const ImportedSceneMeshPart& part : mesh.parts) {
+            counts.alphaTestedParts += part.alphaTest ? 1u : 0u;
+        }
+    }
+    for (const ImportedSceneInstance& instance : scene.instances) {
+        const std::string path = toLowerAscii(instance.modelPath);
+        if (path.find("banner") != std::string::npos) {
+            ++counts.bannerInstances;
+        }
+    }
+    return counts;
 }
 
 std::vector<FalloutSoundEmitterRecord> extractSoundEmitters(
@@ -317,6 +347,7 @@ struct CellStreamer::Pending {
         std::uint64_t droppedTerrainLayers = 0;
         std::uint64_t waterPatches = 0;
         std::uint64_t blendedParts = 0;
+        ScenePresentationCounts presentation;
     };
 
     std::mutex mutex;
@@ -497,6 +528,10 @@ bool CellStreamer::hasWorldspace(const std::string& worldspaceEditorId) const {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return m_worldTables.worldspaceFormIdsByEditorId.contains(lowered);
+}
+
+std::vector<std::string> CellStreamer::currentWorldspaceEditorIdAncestry() const {
+    return worldspaceEditorIdAncestry(m_worldTables, m_currentWorldspaceFormId);
 }
 
 bool CellStreamer::hasChildWorldspaceCellInRange(
@@ -826,6 +861,7 @@ void CellStreamer::update(
                         result.cacheLoadMs = cacheTimer.elapsedMs();
                         result.buildMs = buildTimer.elapsedMs();
                         result.blendedParts = countBlendedDraws(result.scene);
+                        result.presentation = scenePresentationCounts(result.scene);
                         // Counted from the loaded scene, like blendedParts
                         // above: this stat is the log line's whole evidence
                         // that water exists, and counting it only on the build
@@ -869,6 +905,7 @@ void CellStreamer::update(
                     result.droppedTerrainLayers = builder.stats().droppedTerrainLayers;
                     result.waterPatches = builder.stats().waterPatchesEmitted;
                     result.blendedParts = countBlendedDraws(result.scene);
+                    result.presentation = scenePresentationCounts(result.scene);
 
                     if (!cachePath.empty()) {
                         // Write to a temporary and rename, so a crash or a second
@@ -975,6 +1012,10 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         if (result.cacheWriteFailed) {
             ++m_stats.cacheWriteFailures;
         }
+        if (m_scenePresentationOverride) {
+            m_scenePresentationOverride(result.scene);
+            result.presentation = scenePresentationCounts(result.scene);
+        }
         if (result.scene.packedIndices.empty()) {
             ++m_stats.emptyScenes;
             if (m_onCellResident) {
@@ -1017,6 +1058,11 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         m_stats.droppedTerrainLayers += result.droppedTerrainLayers;
         m_stats.waterPatchesLoaded += result.waterPatches;
         m_stats.blendedPartsLoaded += result.blendedParts;
+        m_stats.alphaTestedPartsLoaded += result.presentation.alphaTestedParts;
+        m_stats.bannerInstancesLoaded += result.presentation.bannerInstances;
+        m_stats.fireEmittersLoaded += result.presentation.fireEmitters;
+        m_stats.localLightsLoaded += result.presentation.localLights;
+        m_stats.geometryInstancesLoaded += result.presentation.geometryInstances;
         if (m_onCellResident) {
             // Before result.scene is destroyed at the end of this loop.
             m_onCellResident(result.cell, result.scene, result.navMeshes);
@@ -1288,6 +1334,40 @@ bool CellStreamer::spawnAtInteriorDoorEngineSpace(
     }
     VOX_LOGW("streamer") << "spawn: " << interiorEditorId << " has no teleport door";
     return false;
+}
+
+bool CellStreamer::spawnAtWorldspaceEntranceEngineSpace(
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    float outPosition[3], float& outYawDegrees) const {
+    FalloutWorldspaceEntrance entrance;
+    std::string error;
+    const bool found = m_useLoadOrder
+        ? findFalloutWorldspaceEntrance(
+              m_cellIndex, m_worldTables, m_loadOrder,
+              parentWorldspaceEditorId, childWorldspaceEditorId,
+              entrance, error)
+        : findFalloutWorldspaceEntrance(
+              m_cellIndex, m_worldTables, m_esmPath,
+              parentWorldspaceEditorId, childWorldspaceEditorId,
+              entrance, error);
+    if (!found) {
+        VOX_LOGW("streamer") << "spawn: " << error;
+        return false;
+    }
+
+    constexpr float kEyeHeightUnits = 120.0f;
+    const float arrival[3] = {
+        entrance.arrivalPosition[0], entrance.arrivalPosition[1],
+        entrance.arrivalPosition[2] + kEyeHeightUnits};
+    falloutToEngine(arrival, outPosition);
+    constexpr float kRadiansToDegrees = 57.29577951308232f;
+    outYawDegrees = -entrance.arrivalRotationRadians[2] * kRadiansToDegrees;
+    VOX_LOGI("streamer") << "spawn: " << parentWorldspaceEditorId << " -> "
+                          << childWorldspaceEditorId << " through paired refs 0x"
+                          << std::hex << entrance.parentDoorFormId << "/0x"
+                          << entrance.childDoorFormId << std::dec;
+    return true;
 }
 
 void CellStreamer::engineToFallout(const float enginePosition[3], float outFallout[3]) {

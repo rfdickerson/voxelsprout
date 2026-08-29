@@ -1302,8 +1302,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_skyCloudPipeline != VK_NULL_HANDLE &&
         m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
         m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
-        m_skyCloudIndexCount > 0 &&
-        m_morrowindSkyTextureImageView != VK_NULL_HANDLE) {
+        m_skyCloudIndexCount > 0) {
         const VkBuffer skyCloudVertexBuffer = m_bufferAllocator.getBuffer(m_skyCloudVertexBufferHandle);
         const VkBuffer skyCloudIndexBuffer = m_bufferAllocator.getBuffer(m_skyCloudIndexBufferHandle);
         if (skyCloudVertexBuffer != VK_NULL_HANDLE && skyCloudIndexBuffer != VK_NULL_HANDLE) {

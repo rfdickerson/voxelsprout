@@ -38,9 +38,49 @@ const ScenarioDefinition& skyrimBleakFallsScenario() {
     return scenario;
 }
 
+const ScenarioDefinition& skyrimWhiterunShowcaseScenario() {
+    // Enter Whiterun after Dragon Rising's prerequisite chain, while leaving
+    // the next main-quest beat uncompleted. The city itself, its actors and
+    // their packages still come entirely from the resolved retail load order.
+    static const ScenarioDefinition scenario{
+        "skyrim-whiterun-showcase",
+        importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        "Skyrim.esm",
+        "WhiterunWorld",
+        {},
+        {},
+        {{"MQ101", 900, true},
+         {"MQ102", 160, true},
+         {"MQ103", 190, true},
+         {"MQ104", 160, true},
+         {"MQ105", 10, false}},
+    };
+    return scenario;
+}
+
+const ScenarioDefinition& skyrimRiftenShowcaseScenario() {
+    // Presentation-only third-person start inside the authored walled city.
+    // The paired Tamriel gate supplies the arrival pose at runtime; the city
+    // and its residents remain entirely retail content.
+    static const ScenarioDefinition scenario{
+        "skyrim-riften-showcase",
+        importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        "Skyrim.esm",
+        "RiftenWorld",
+        {},
+        {},
+        {},
+    };
+    return scenario;
+}
+
 const ScenarioDefinition* findScenario(const std::string& id) {
     const ScenarioDefinition& bleakFalls = skyrimBleakFallsScenario();
-    return id == bleakFalls.id ? &bleakFalls : nullptr;
+    if (id == bleakFalls.id) return &bleakFalls;
+    const ScenarioDefinition& whiterun = skyrimWhiterunShowcaseScenario();
+    if (id == whiterun.id) return &whiterun;
+    const ScenarioDefinition& riften = skyrimRiftenShowcaseScenario();
+    return id == riften.id ? &riften : nullptr;
 }
 
 }  // namespace odai::bethesda

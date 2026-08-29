@@ -271,7 +271,8 @@ add_library(odai_bethesda_runtime STATIC
     src/bethesda/runtime_ids.cc src/bethesda/record_resolver.cc src/bethesda/tes3_content.cc
     src/bethesda/tes3_script.cc src/bethesda/tes3_runtime.cc
     src/bethesda/fixed_step_clock.cc
-    src/bethesda/runtime_world.cc src/bethesda/vmad_reader.cc src/bethesda/skyrim_quest.cc
+    src/bethesda/runtime_world.cc src/bethesda/gameplay_catalog.cc
+    src/bethesda/living_world.cc src/bethesda/vmad_reader.cc src/bethesda/skyrim_quest.cc
     src/bethesda/skyrim_dialogue.cc
     src/bethesda/skyrim_runtime_records.cc
     src/bethesda/skyrim_scenario_content.cc
@@ -470,6 +471,9 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_save_tests tests/odai_save_tests.cc)
     target_link_libraries(odai_save_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_living_world_tests tests/living_world_tests.cc)
+    target_link_libraries(odai_living_world_tests PRIVATE odai_bethesda_runtime)
 
     odai_plain_test(odai_ui_tests tests/ui_tests.cc)
     target_compile_definitions(odai_ui_tests PRIVATE ODAI_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")

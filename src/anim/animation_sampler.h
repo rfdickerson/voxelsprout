@@ -38,6 +38,15 @@ public:
     void sample(const Skeleton& skeleton, const AnimationClip& clip, float timeSeconds,
                 std::vector<odai::math::Matrix4>& outMatrices) const;
 
+    // Samples both clips into local translation/rotation/scale, blends those
+    // channels, and only then composes hierarchy/skin matrices. Matrix-wise
+    // interpolation shears rotating limbs and is not a valid transition pose.
+    void sampleBlended(const Skeleton& skeleton,
+                       const AnimationClip& fromClip, float fromTimeSeconds,
+                       const AnimationClip& toClip, float toTimeSeconds,
+                       float alpha,
+                       std::vector<odai::math::Matrix4>& outMatrices) const;
+
 private:
     std::vector<odai::math::Matrix4> inverseBindMatrices_;
 };

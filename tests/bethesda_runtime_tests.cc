@@ -2,14 +2,17 @@
 #include "bethesda/condition.h"
 #include "bethesda/runtime_ids.h"
 #include "bethesda/runtime_world.h"
+#include "bethesda/scenario.h"
 #include "bethesda/skyrim_quest.h"
 #include "bethesda/skyrim_dialogue.h"
 #include "bethesda/skyrim_runtime_records.h"
 #include "bethesda/vmad_reader.h"
+#include "bethesda/whiterun_presentation.h"
 
 #include <bit>
 #include <cassert>
 #include <cstdint>
+#include <cmath>
 #include <iostream>
 #include <vector>
 
@@ -46,6 +49,70 @@ std::vector<std::uint8_t> ctda(
 }  // namespace
 
 int main() {
+    {
+        const float gate[3] = {100.0f, 200.0f, 300.0f};
+        const WhiterunReferenceCamera camera =
+            whiterunReferenceCamera(gate, -90.0f);
+        assert(std::abs(camera.horizontalFovDegrees - 75.0f) < 0.001f);
+        assert(camera.position[0] > gate[0] + 2300.0f);
+        assert(camera.position[2] > gate[2]);
+        assert(camera.pitchDegrees > 0.0f);
+        const float yaw = camera.yawDegrees * 3.14159265358979323846f / 180.0f;
+        const float toGateX = gate[0] - camera.position[0];
+        const float toGateZ = gate[2] - camera.position[2];
+        assert(toGateX * std::cos(yaw) + toGateZ * std::sin(yaw) > 0.0f);
+        // The look target is intentionally left of the gate centre, placing
+        // the gatehouse/banner in the right half of a 16:9 reference frame.
+        assert(toGateX * -std::sin(yaw) + toGateZ * std::cos(yaw) > 0.0f);
+
+        const float movedGate[3] = {-400.0f, 225.0f, 900.0f};
+        const WhiterunReferenceCamera moved =
+            whiterunReferenceCamera(movedGate, -90.0f);
+        assert(std::abs((moved.position[0] - camera.position[0]) + 500.0f) < 0.001f);
+        assert(std::abs((moved.position[1] - camera.position[1]) - 25.0f) < 0.001f);
+        assert(std::abs((moved.position[2] - camera.position[2]) - 600.0f) < 0.001f);
+
+        const WhiterunReferenceCamera market =
+            whiterunMarketReferenceCamera(gate, -90.0f);
+        assert(std::abs(market.horizontalFovDegrees - 75.0f) < 0.001f);
+        assert(market.position[2] > gate[2]);
+        assert(market.position[0] > gate[0] + 400.0f);
+        assert(market.pitchDegrees > 0.0f && market.pitchDegrees < 10.0f);
+        const float marketYaw =
+            market.yawDegrees * 3.14159265358979323846f / 180.0f;
+        assert(std::cos(marketYaw) > 0.9f);
+        assert(std::abs(std::sin(marketYaw)) < 0.1f);
+    }
+
+    const ScenarioDefinition* whiterunScenario =
+        findScenario("skyrim-whiterun-showcase");
+    assert(whiterunScenario != nullptr);
+    assert(whiterunScenario->basePlugin == "Skyrim.esm");
+    assert(whiterunScenario->worldspace == "WhiterunWorld");
+    assert(whiterunScenario->startMarker.empty());
+    assert(whiterunScenario->questRecords.empty());
+    assert(whiterunScenario->prerequisiteQuests.size() == 5u);
+    BethesdaSession whiterunSession;
+    std::string whiterunError;
+    assert(whiterunSession.configure({
+        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        "whiterun-fixture", whiterunScenario->id, 17u}, whiterunError));
+    const QuestRuntimeState* dragonRising = whiterunSession.findQuest("MQ104");
+    const QuestRuntimeState* wayOfTheVoice = whiterunSession.findQuest("MQ105");
+    assert(dragonRising != nullptr && dragonRising->stage == 160 &&
+           dragonRising->completed);
+    assert(wayOfTheVoice != nullptr && wayOfTheVoice->stage == 10 &&
+           wayOfTheVoice->running && !wayOfTheVoice->completed);
+
+    const ScenarioDefinition* riftenScenario =
+        findScenario("skyrim-riften-showcase");
+    assert(riftenScenario != nullptr);
+    assert(riftenScenario->basePlugin == "Skyrim.esm");
+    assert(riftenScenario->worldspace == "RiftenWorld");
+    assert(riftenScenario->startMarker.empty());
+    assert(riftenScenario->questRecords.empty());
+    assert(riftenScenario->prerequisiteQuests.empty());
+
     const RecordKey key = makeRecordKey("Data/Skyrim.ESM", 0x1234u);
     assert(key.plugin == "skyrim.esm");
     RecordKey parsed;

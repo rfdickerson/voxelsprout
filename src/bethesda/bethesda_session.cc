@@ -84,6 +84,10 @@ void hashBehaviorGraph(
     std::uint64_t& hash, const odai::anim::BehaviorGraphSnapshot& graph) {
     hashString(hash, graph.state);
     hashScalar(hash, graph.stateTime);
+    hashString(hash, graph.previousState);
+    hashScalar(hash, graph.previousStateTime);
+    hashScalar(hash, graph.transitionElapsed);
+    hashScalar(hash, graph.transitionDuration);
     hashScalar(hash, graph.fixedTick);
     hashScalar(hash, graph.wasGrounded);
     for (const odai::anim::AnimationEvent& event : graph.queuedEvents) {
@@ -117,6 +121,9 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
     m_clock.reset();
     m_world.clear();
     m_physics.clear();
+    m_livingWorld.reset(LivingWorldConfig{
+        m_config.livingWorldEnabled, m_config.gameTimeScale, 8u * 60u,
+        72u * 60u, 64u});
     m_actorAnimations.clear();
     m_pendingAnimationSnapshots.clear();
     m_pendingPhysicsSnapshots.clear();
@@ -141,8 +148,12 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
     m_resolvedFormResolver = {};
     m_nextStoryEventSequence = 1u;
     m_nextGiftMenuSequence = 1u;
+    // Character controllers, dynamic residency and camera casts are shared
+    // runtime facilities, not Skyrim script facilities. Initializing Jolt only
+    // for TES5 left the TES3 player registration path operating on an inert
+    // world and made cross-game presentation impossible.
+    if (!m_physics.initialize(outError)) return false;
     if (m_config.game == importer::fnv::BethesdaGame::SkyrimSpecialEdition) {
-        if (!m_physics.initialize(outError)) return false;
         registerSkyrimNatives();
     }
     m_configured = true;
@@ -150,6 +161,82 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
         const ScenarioDefinition* scenario = findScenario(m_config.scenarioId);
         if (scenario == nullptr || !applyScenario(*scenario, outError)) {
             m_configured = false;
+            return false;
+        }
+    }
+    outError.clear();
+    return true;
+}
+
+bool BethesdaSession::installGameplayCells(
+    std::vector<GameplayCellPayload> cells, std::string& outError) {
+    if (!m_configured) {
+        outError = "Bethesda session is not configured";
+        return false;
+    }
+    for (const GameplayCellPayload& cell : cells) {
+        if (cell.version != kGameplayCellPayloadVersion) {
+            outError = "unsupported gameplay cell payload version";
+            return false;
+        }
+        if (cell.contentFingerprint != m_config.contentFingerprint) {
+            outError = "gameplay cell payload fingerprint differs from session content";
+            return false;
+        }
+    }
+    m_livingWorld.installCells(std::move(cells));
+    outError.clear();
+    return true;
+}
+
+bool BethesdaSession::upsertGameplayCell(
+    GameplayCellPayload cell, std::string& outError) {
+    if (!m_configured) {
+        outError = "Bethesda session is not configured";
+        return false;
+    }
+    if (cell.version != kGameplayCellPayloadVersion) {
+        outError = "unsupported gameplay cell payload version";
+        return false;
+    }
+    if (cell.contentFingerprint != m_config.contentFingerprint) {
+        outError = "gameplay cell payload fingerprint differs from session content";
+        return false;
+    }
+    m_livingWorld.upsertCell(std::move(cell));
+    outError.clear();
+    return true;
+}
+
+bool BethesdaSession::registerDynamicBody(
+    ObjectId objectId, PhysicsDynamicBodyConfig config, std::string& outError) {
+    const RuntimeObject* object = m_world.find(objectId);
+    if (object == nullptr) {
+        outError = "dynamic body requires a resident runtime object";
+        return false;
+    }
+    config.position = {static_cast<float>(object->transform.position[0]),
+        static_cast<float>(object->transform.position[1]),
+        static_cast<float>(object->transform.position[2])};
+    if (!m_physics.addDynamicBody(objectId, config, outError)) return false;
+    if (object->physicalState.has_value()) {
+        PhysicsDynamicBodySnapshot restored;
+        restored.object = objectId;
+        restored.position = config.position;
+        restored.rotation = {object->physicalState->rotationQuaternion[0],
+            object->physicalState->rotationQuaternion[1],
+            object->physicalState->rotationQuaternion[2],
+            object->physicalState->rotationQuaternion[3]};
+        restored.linearVelocity = {object->physicalState->linearVelocity[0],
+            object->physicalState->linearVelocity[1],
+            object->physicalState->linearVelocity[2]};
+        restored.angularVelocity = {object->physicalState->angularVelocity[0],
+            object->physicalState->angularVelocity[1],
+            object->physicalState->angularVelocity[2]};
+        restored.active = odai::math::length(restored.linearVelocity) > 1.0e-4f ||
+            odai::math::length(restored.angularVelocity) > 1.0e-4f;
+        if (!m_physics.restoreDynamicBody(restored, outError)) {
+            (void)m_physics.removeDynamicBody(objectId);
             return false;
         }
     }
@@ -1010,6 +1097,21 @@ const odai::anim::AnimationStepOutput* BethesdaSession::actorAnimationOutput(
     if (found == m_actorAnimations.end()) return nullptr;
     if (firstPerson && found->second.firstPersonView != nullptr) return &found->second.firstPersonOutput;
     return &found->second.thirdPersonOutput;
+}
+
+odai::anim::AnimationStepOutput BethesdaSession::interpolatedActorAnimationOutput(
+    ObjectId object, float alpha, bool firstPerson) const {
+    const auto found = m_actorAnimations.find(object);
+    if (found == m_actorAnimations.end()) return {};
+    const odai::anim::AnimationStepOutput& current =
+        firstPerson && found->second.firstPersonView != nullptr
+            ? found->second.firstPersonOutput : found->second.thirdPersonOutput;
+    const odai::anim::AnimationStepOutput& previous =
+        firstPerson && found->second.firstPersonView != nullptr
+            ? found->second.previousFirstPersonOutput
+            : found->second.previousThirdPersonOutput;
+    if (previous.pose.empty()) return current;
+    return odai::anim::BehaviorGraphInstance::interpolate(previous, current, alpha);
 }
 
 std::vector<AnimationActorSnapshot> BethesdaSession::animationSnapshots() const {
@@ -3815,6 +3917,24 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
 void BethesdaSession::simulateTick(
     std::uint64_t tick, double stepSeconds, BethesdaSessionStep& result) {
     const float fixedDelta = static_cast<float>(stepSeconds);
+    LivingWorldStep living = m_livingWorld.advance(stepSeconds, m_world,
+        [&](const std::array<double, 3>& from, const std::array<double, 3>& to) {
+            return m_physics.hasLineOfSight(
+                {static_cast<float>(from[0]), static_cast<float>(from[1]),
+                 static_cast<float>(from[2])},
+                {static_cast<float>(to[0]), static_cast<float>(to[1]),
+                 static_cast<float>(to[2])});
+        });
+    result.livingWorld.actorsEvaluated += living.actorsEvaluated;
+    result.livingWorld.activityChanges += living.activityChanges;
+    result.livingWorld.offscreenReconciliations += living.offscreenReconciliations;
+    result.livingWorld.physicalResets += living.physicalResets;
+    result.livingWorld.witnesses.insert(result.livingWorld.witnesses.end(),
+        std::make_move_iterator(living.witnesses.begin()),
+        std::make_move_iterator(living.witnesses.end()));
+    result.diagnostics.insert(result.diagnostics.end(),
+        std::make_move_iterator(living.diagnostics.begin()),
+        std::make_move_iterator(living.diagnostics.end()));
     // Combat packages and Actor.StartCombat converge here. Rendering never
     // selects targets: fixed-tick AI aims from one Jolt character to the other
     // and uses the same cone/occlusion/cooldown path as player input.
@@ -3862,8 +3982,10 @@ void BethesdaSession::simulateTick(
             runtime.input.movementSpeed = odai::math::length(odai::math::Vector3{
                 physical->velocity.x, 0.0f, physical->velocity.z});
         }
+        runtime.previousThirdPersonOutput = runtime.thirdPersonOutput;
         runtime.thirdPersonOutput = runtime.thirdPerson.step(runtime.input, fixedDelta);
         if (runtime.firstPersonView != nullptr) {
+            runtime.previousFirstPersonOutput = runtime.firstPersonOutput;
             runtime.firstPersonOutput = runtime.firstPerson.step(runtime.input, fixedDelta);
         }
         PhysicsCharacterInput input;
@@ -3892,6 +4014,30 @@ void BethesdaSession::simulateTick(
         command.target = object;
         command.transform.position = {physical.position.x, physical.position.y, physical.position.z};
         (void)m_world.queue(std::move(command));
+    }
+    for (const PhysicsDynamicBodySnapshot& dynamic : m_physics.dynamicBodySnapshots()) {
+        const RuntimeObject* resident = m_world.find(dynamic.object);
+        if (resident == nullptr) continue;
+        WorldCommand transform;
+        transform.type = WorldCommandType::SetPosition;
+        transform.target = dynamic.object;
+        transform.transform.position = {
+            dynamic.position.x, dynamic.position.y, dynamic.position.z};
+        (void)m_world.queue(std::move(transform));
+        if (resident->physicalState.has_value()) {
+            RuntimePhysicalState state = *resident->physicalState;
+            state.rotationQuaternion = {dynamic.rotation.x, dynamic.rotation.y,
+                dynamic.rotation.z, dynamic.rotation.w};
+            state.linearVelocity = {dynamic.linearVelocity.x,
+                dynamic.linearVelocity.y, dynamic.linearVelocity.z};
+            state.angularVelocity = {dynamic.angularVelocity.x,
+                dynamic.angularVelocity.y, dynamic.angularVelocity.z};
+            WorldCommand physical;
+            physical.type = WorldCommandType::SetPhysicalState;
+            physical.target = dynamic.object;
+            physical.physicalState = std::move(state);
+            (void)m_world.queue(std::move(physical));
+        }
     }
     if (m_tes3.content() != nullptr) {
         Tes3VmStepResult tes3Vm = m_tes3.step(tick, 4096u);

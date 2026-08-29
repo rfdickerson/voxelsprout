@@ -428,7 +428,9 @@ bool appendFalloutCharacterMesh(
         // the right shape, in the wrong place. Every creature part in the game
         // has an identity skinTransform, which is why the actors built before
         // the townsfolk never showed it.
-        const Matrix4 geometryToCharacter = shape.requiresCanonicalBindBake
+        const Matrix4 geometryToCharacter =
+            shape.requiresCanonicalBindBake &&
+                !shape.canonicalBindCancelsSkinTransform
             ? Matrix4::identity()
             : inverse(changeMatrixBasis(shape.skinTransform));
         const bool moveGeometry = matricesDiffer(geometryToCharacter, Matrix4::identity());
@@ -443,9 +445,10 @@ bool appendFalloutCharacterMesh(
         part.twoSided = shape.twoSided;
         part.unlit = shape.unlit;
         part.firstIndex = static_cast<std::uint32_t>(character.indices.size());
-        part.indexCount = static_cast<std::uint32_t>(shape.triangleIndices.size());
+        part.indexCount = 0u;
 
         character.vertices.reserve(character.vertices.size() + vertexCount);
+        std::vector<bool> vertexHasUnresolvedInfluence(vertexCount, false);
         for (std::size_t v = 0; v < vertexCount; ++v) {
             odai::render::ImportedSkinnedMeshVertex vertex;
             Vector3 position = changePointBasis(
@@ -532,9 +535,12 @@ bool appendFalloutCharacterMesh(
                     ? skeletonBoneIndex[localBone]
                     : -1;
                 if (weight <= 0.0f || resolved < 0) {
-                    // Weight zero, so the index is never read by the shader.
-                    // Bone 0 rather than the unresolved index keeps it in range
-                    // regardless.
+                    if (weight > 0.0f) {
+                        vertexHasUnresolvedInfluence[v] = true;
+                    }
+                    // This slot is never read by the shader. Bone 0 rather
+                    // than the unresolved index keeps it in range; triangles
+                    // touching a positive unresolved slot are culled below.
                     vertex.boneIndices[k] = 0u;
                     vertex.boneWeights[k] = 0.0f;
                     continue;
@@ -546,10 +552,27 @@ bool appendFalloutCharacterMesh(
         }
 
         character.indices.reserve(character.indices.size() + shape.triangleIndices.size());
-        for (const std::uint32_t index : shape.triangleIndices) {
-            character.indices.push_back(baseVertex + index);
+        for (std::size_t triangle = 0u;
+             triangle + 2u < shape.triangleIndices.size(); triangle += 3u) {
+            const std::uint32_t a = shape.triangleIndices[triangle];
+            const std::uint32_t b = shape.triangleIndices[triangle + 1u];
+            const std::uint32_t c = shape.triangleIndices[triangle + 2u];
+            if (a >= vertexCount || b >= vertexCount || c >= vertexCount ||
+                vertexHasUnresolvedInfluence[a] ||
+                vertexHasUnresolvedInfluence[b] ||
+                vertexHasUnresolvedInfluence[c]) {
+                ++character.droppedUnresolvedBoneTriangleCount;
+                continue;
+            }
+            character.indices.push_back(baseVertex + a);
+            character.indices.push_back(baseVertex + b);
+            character.indices.push_back(baseVertex + c);
         }
-        character.parts.push_back(std::move(part));
+        part.indexCount = static_cast<std::uint32_t>(character.indices.size()) -
+            part.firstIndex;
+        if (part.indexCount != 0u) {
+            character.parts.push_back(std::move(part));
+        }
     }
 
     return true;

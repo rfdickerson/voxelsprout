@@ -1232,6 +1232,55 @@ void testRigidAnimationPackingSamplingAndRoundTrip() {
     fs::remove(path);
 }
 
+void testStaticNormalMapSidecarPackingAndRoundTrip() {
+    namespace fs = std::filesystem;
+    using namespace odai::importer;
+
+    ImportedScene scene{};
+    scene.sourceTag = "synthetic_static_normal_map";
+    scene.textures.resize(2u);
+    scene.textures[0].sourcePath = "textures\\architecture\\gate.dds";
+    scene.textures[1].sourcePath = "textures\\architecture\\gate_n.dds";
+    scene.normalTextureByDiffuseIndex.emplace(0u, 1u);
+
+    ImportedSceneMesh mesh{};
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}};
+    mesh.indices = {0u, 1u, 2u};
+    ImportedSceneMeshPart part{};
+    part.indexCount = 3u;
+    part.textureIndex = 0u;
+    mesh.parts.push_back(part);
+    scene.meshes.push_back(std::move(mesh));
+
+    ImportedSceneInstance instance{};
+    instance.meshIndex = 0u;
+    instance.transform[0] = 1.0f;
+    instance.transform[5] = 1.0f;
+    instance.transform[10] = 1.0f;
+    instance.transform[15] = 1.0f;
+    scene.instances.push_back(instance);
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(!scene.packedVertices.empty() &&
+                   scene.packedVertices.front().layerTextureIndex[0] == 1u,
+               "static authored normal map occupies the existing non-terrain layer slot");
+    expectTrue((scene.packedVertices.front().flags &
+                kImportedSceneMaterialFlagTerrainLayers) == 0u,
+               "static normal-map sidecar does not masquerade as terrain layering");
+
+    const fs::path path = fs::temp_directory_path() / "odai_static_normal_map_roundtrip.bin";
+    expectTrue(saveImportedScene(scene, path), "normal-map sidecar scene saves");
+    ImportedScene loaded{};
+    expectTrue(loadImportedSceneRuntime(path, loaded), "normal-map sidecar scene loads");
+    expectTrue(!loaded.packedVertices.empty() &&
+                   loaded.packedVertices.front().layerTextureIndex[0] == 1u,
+               "normal-map slot survives through the unchanged packed-vertex layout");
+    fs::remove(path);
+}
+
 int main() {
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
@@ -1247,6 +1296,7 @@ int main() {
     testAlphaThresholdRoundTrip();
     testImportedVertexPacking();
     testRigidAnimationPackingSamplingAndRoundTrip();
+    testStaticNormalMapSidecarPackingAndRoundTrip();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

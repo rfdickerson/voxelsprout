@@ -10,6 +10,9 @@
 #include <limits>
 
 int main(int argc, char** argv) {
+    const bool renderResolutionExplicit =
+        std::getenv("ODAI_RENDER_SIZE") != nullptr ||
+        std::getenv("ODAI_RENDER_SCALE") != nullptr;
     // MSAA off by default for this game: TAA (taa.comp.slang) does the
     // anti-aliasing work now, MSAA 4x measured ~1.5 ms of main-pass GPU time
     // on the target iGPU, and MSAA cannot fix the two artifacts that actually
@@ -42,6 +45,15 @@ int main(int argc, char** argv) {
     bool loadOrderSpecified = false;
     bool listProfiles = false;
     bool profilePicker = false;
+    bool balmoraSkyrimPlayerShowcase = false;
+    bool whiterunThirdPersonShowcase = false;
+    bool whiterunReferenceShowcase = false;
+    bool whiterunMarketReferenceShowcase = false;
+    bool riftenThirdPersonShowcase = false;
+    bool conflictingShowcaseOption = false;
+    std::string skyrimDataDirectory;
+    std::string skyrimPlayerOutfit = "ArmorIronBandedNoHelmetOutfit";
+    bool skyrimPlayerOutfitSpecified = false;
     // TAA ON, AT NATIVE RESOLUTION, BY DEFAULT.
     //
     // setTaaEnabled(true) was doing nothing: recordTaaPass returns early with no
@@ -75,11 +87,13 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
             app.setScenePath(argv[++i]);
+            conflictingShowcaseOption = true;
         } else if (std::strcmp(argv[i], "--stream") == 0 && i + 1 < argc) {
             // Stream straight from the game's own Data directory -- no cooking.
             app.setStreamDataPath(argv[++i]);
         } else if (std::strcmp(argv[i], "--plugin") == 0 && i + 1 < argc) {
             app.setStreamPlugin(argv[++i]);
+            conflictingShowcaseOption = true;
         } else if (std::strcmp(argv[i], "--load-order") == 0 && i + 1 < argc) {
             app.setLoadOrderPath(argv[++i]);
             loadOrderSpecified = true;
@@ -104,16 +118,44 @@ int main(int argc, char** argv) {
             app.setResumeEnabled(false);
         } else if (std::strcmp(argv[i], "--scenario") == 0 && i + 1 < argc) {
             app.setScenario(argv[++i]);
+            conflictingShowcaseOption = true;
         } else if (std::strcmp(argv[i], "--save-game") == 0 && i + 1 < argc) {
             app.setGameplaySavePath(argv[++i]);
         } else if (std::strcmp(argv[i], "--load-game") == 0 && i + 1 < argc) {
             app.setGameplayLoadPath(argv[++i]);
         } else if (std::strcmp(argv[i], "--worldspace") == 0 && i + 1 < argc) {
             app.setStreamWorldspace(argv[++i]);
+            conflictingShowcaseOption = true;
         } else if (std::strcmp(argv[i], "--plugin-add") == 0 && i + 1 < argc) {
             // An extra plugin loaded after --plugin; masters resolve on their
             // own, so "--plugin-add NevadaSkies.esp" is enough.
             app.addPlugin(argv[++i]);
+            conflictingShowcaseOption = true;
+        } else if (std::strcmp(argv[i], "--showcase") == 0 && i + 1 < argc) {
+            const std::string showcase = argv[++i];
+            if (showcase != "balmora-skyrim-player" &&
+                showcase != "whiterun-third-person" &&
+                showcase != "whiterun-reference" &&
+                showcase != "whiterun-market-reference" &&
+                showcase != "riften-third-person") {
+                std::cout << "unknown --showcase: " << showcase
+                          << " (balmora-skyrim-player|whiterun-third-person|"
+                             "whiterun-reference|whiterun-market-reference|"
+                             "riften-third-person)\n";
+                return 1;
+            }
+            balmoraSkyrimPlayerShowcase = showcase == "balmora-skyrim-player";
+            whiterunThirdPersonShowcase = showcase == "whiterun-third-person";
+            whiterunReferenceShowcase = showcase == "whiterun-reference" ||
+                showcase == "whiterun-market-reference";
+            whiterunMarketReferenceShowcase =
+                showcase == "whiterun-market-reference";
+            riftenThirdPersonShowcase = showcase == "riften-third-person";
+        } else if (std::strcmp(argv[i], "--skyrim-data") == 0 && i + 1 < argc) {
+            skyrimDataDirectory = argv[++i];
+        } else if (std::strcmp(argv[i], "--skyrim-player-outfit") == 0 && i + 1 < argc) {
+            skyrimPlayerOutfit = argv[++i];
+            skyrimPlayerOutfitSpecified = true;
         } else if (std::strcmp(argv[i], "--upscaler") == 0 && i + 1 < argc) {
             // off | temporal | xess. Unavailable backends report
             // why and fall back rather than failing to launch.
@@ -165,9 +207,11 @@ int main(int argc, char** argv) {
             // Start INSIDE this interior rather than on its doorstep, which is
             // where New Vegas itself begins: --interior GSDocMitchellHouse.
             app.startInsideInterior(argv[++i]);
+            conflictingShowcaseOption = true;
         } else if (std::strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
             // Interior cell whose doorstep to start on, e.g. GSDocMitchellHouse.
             app.setStreamSpawnInterior(argv[++i]);
+            conflictingShowcaseOption = true;
         } else if (std::strcmp(argv[i], "--tes3-start-quest") == 0 && i + 2 < argc) {
             const std::string questId = argv[++i];
             char* end = nullptr;
@@ -283,6 +327,22 @@ int main(int argc, char** argv) {
                       << "  Stand one GPU-skinned character in bind pose, no world.\n"
                       << "  Defaults to characters\\_male\\skeleton.nif + upperbody.nif.\n"
                       << "odai --stream <Data> --mod <dir> [--mod <dir>...]\n"
+                      << "odai --showcase balmora-skyrim-player [--stream <Morrowind/Data Files>]\n"
+                      << "  [--skyrim-data <Skyrim/Data>] [--skyrim-player-outfit <OTFT EditorID>]\n"
+                      << "  Start at Balmora's south canal with a collision-aware third-person\n"
+                      << "  Skyrim avatar. V toggles first/third person; mouse orbits and wheel zooms.\n"
+                      << "odai --showcase whiterun-third-person [--skyrim-data <Skyrim/Data>]\n"
+                      << "  Enter Whiterun through its authored main gate with streamed city assets,\n"
+                      << "  resident actors, retail locomotion, and the collision-aware third-person camera.\n"
+                      << "odai --showcase whiterun-reference [--skyrim-data <Skyrim/Data>]\n"
+                      << "  Render a deterministic, HUD-free midday view of Whiterun's authored\n"
+                      << "  main-gate plaza, with the parent Tamriel landscape prewarmed.\n"
+                      << "odai --showcase whiterun-market-reference [--skyrim-data <Skyrim/Data>]\n"
+                      << "  Render a deterministic, HUD-free view from the main-gate bridge\n"
+                      << "  looking inward along Whiterun's authored market street.\n"
+                      << "odai --showcase riften-third-person [--skyrim-data <Skyrim/Data>]\n"
+                      << "  Enter Riften through its authored main gate with the same playable\n"
+                      << "  third-person avatar and a prewarmed city residency ring.\n"
                       << "  Override game assets from directories laid out like Data\n"
                       << "  (textures\\..., meshes\\...); later --mod wins. Also\n"
                       << "  $ODAI_FNV_MODS, ':'-separated.\n"
@@ -322,6 +382,107 @@ int main(int argc, char** argv) {
     }
     if (profileSpecified && loadOrderSpecified) {
         std::cout << "--profile and --load-order are both authoritative; choose one\n";
+        return 1;
+    }
+    if (balmoraSkyrimPlayerShowcase || whiterunThirdPersonShowcase ||
+        whiterunReferenceShowcase ||
+        riftenThirdPersonShowcase) {
+        if (conflictingShowcaseOption || profileSpecified || loadOrderSpecified) {
+            std::cout << "the selected --showcase conflicts with scene, scenario, "
+                         "interior, spawn, plugin, worldspace, profile, and load-order options\n";
+            return 1;
+        }
+        if (balmoraSkyrimPlayerShowcase) {
+            app.setBalmoraSkyrimPlayerShowcase(
+                std::move(skyrimDataDirectory), std::move(skyrimPlayerOutfit));
+        } else {
+            // Whiterun's dense city draw list and dozens of skinned residents
+            // need a console-style performance budget. These are defaults,
+            // not locks: an explicitly supplied environment setting wins.
+            if (!renderResolutionExplicit) {
+                // The fixed reference view is a still-image quality target and
+                // has enough headroom on the reference LNL GPU to shade at the
+                // presentation extent. Keep playable city showcases at their
+                // measured 0.8 scale. Explicit environment overrides remain
+                // authoritative for both paths.
+                setenv("ODAI_RENDER_SCALE", whiterunReferenceShowcase ? "1.0" : "0.8", 1);
+            }
+            // GLFW's default HiDPI behavior made the maximized 1440x844 window
+            // present at 2880x1688. The full-resolution post/UI pass alone cost
+            // ~3.6 ms on the reference iGPU. Keep the same maximized logical
+            // window but present one pixel per logical pixel; an explicit user
+            // value of 0 retains native HiDPI presentation.
+            setenv("ODAI_NATIVE_LOGICAL_PRESENT", "1", 0);
+            setenv("ODAI_FNV_AO", whiterunReferenceShowcase ? "xegtao" : "off", 0);
+            setenv("ODAI_SHADOW_DISTANCE", whiterunReferenceShowcase ? "5000" : "6000", 0);
+            setenv("ODAI_PRESENT_MODE", "mailbox", 0);
+            if (whiterunReferenceShowcase) {
+                if (skyrimPlayerOutfitSpecified) {
+                    std::cout << "--skyrim-player-outfit is not used by whiterun-reference\n";
+                    return 1;
+                }
+                // The general runtime's 512px ceiling is a memory-first
+                // gameplay default. It visibly destroys Whiterun's stone and
+                // timber detail in a fixed showcase, so retain retail mips up
+                // to 2K here. An explicit user ceiling still wins.
+                setenv("ODAI_FNV_TEX_SIZE", "2048", 0);
+                // The reference camera views the gate at a shallow enough
+                // angle that trilinear filtering otherwise selects a visibly
+                // soft mip even though the retail diffuse is already 2K.
+                // TAA stabilizes this restrained negative bias, and 16x
+                // anisotropy keeps the cobbles and door planks detailed along
+                // their receding axes. Both remain explicit overrides.
+                setenv("ODAI_UPSCALE_MIPBIAS", "-0.35", 0);
+                setenv("ODAI_TEXTURE_ANISOTROPY", "16", 0);
+
+                // A directly overhead noon sun produces almost no readable
+                // cast-shadow direction in this composition. Early afternoon
+                // retains clear daylight while separating the gate, bridge,
+                // smithy and braziers. Concentrate the cascades on the resident
+                // plaza and strengthen XeGTAO's contact scale; CLI/environment
+                // choices still win over every one of these defaults.
+                setenv("ODAI_FNV_HOUR", "14", 0);
+                setenv("ODAI_SHADOW_LAMBDA", "0.98", 0);
+                setenv("ODAI_FNV_AO_RADIUS",
+                    whiterunMarketReferenceShowcase ? "300" : "240", 0);
+                setenv("ODAI_FNV_AO_INTENSITY",
+                    whiterunMarketReferenceShowcase ? "2.35" : "1.95", 0);
+                setenv("ODAI_FNV_AO_FINE",
+                    whiterunMarketReferenceShowcase ? "0.38" : "0.30", 0);
+                setenv("ODAI_XEGTAO_BLUR",
+                    whiterunMarketReferenceShowcase ? "4" : "6", 0);
+                if (whiterunMarketReferenceShowcase) {
+                    // The rainy market composition is dominated by pale
+                    // plaster and roof shingles. Key it slightly below the
+                    // shared exterior middle-grey target so highlight texture
+                    // survives without changing other Skyrim showcases.
+                    setenv("ODAI_FNV_EXPOSURE_KEY", "0.08", 0);
+                    // A nearly uniform distance fog leaves the market readable
+                    // while collecting visibly across the remote mountain
+                    // silhouette. Explicit atmosphere overrides remain
+                    // authoritative because these defaults never overwrite.
+                    setenv("ODAI_FOG_DENSITY", "0.00022", 0);
+                    setenv("ODAI_FOG_FALLOFF", "0.00002", 0);
+                    setenv("ODAI_FOG_SCATTER", "0.28", 0);
+                }
+                setenv("ODAI_FNV_NOHUD", "1", 0);
+                if (whiterunMarketReferenceShowcase) {
+                    app.setWhiterunMarketReferenceShowcase(
+                        std::move(skyrimDataDirectory));
+                } else {
+                    app.setWhiterunReferenceShowcase(std::move(skyrimDataDirectory));
+                }
+            } else if (whiterunThirdPersonShowcase) {
+                app.setWhiterunThirdPersonShowcase(
+                    std::move(skyrimDataDirectory), std::move(skyrimPlayerOutfit));
+            } else {
+                app.setRiftenThirdPersonShowcase(
+                    std::move(skyrimDataDirectory), std::move(skyrimPlayerOutfit));
+            }
+        }
+    } else if (!skyrimDataDirectory.empty() || skyrimPlayerOutfitSpecified) {
+        std::cout << "--skyrim-data and --skyrim-player-outfit require "
+                     "a Skyrim-player third-person showcase\n";
         return 1;
     }
     if (listProfiles || (profilePicker && !profileSpecified)) {

@@ -5,6 +5,7 @@
 #include "bethesda/scenario.h"
 #include "bethesda/skyrim_scenario_content.h"
 #include "bethesda/vmad_reader.h"
+#include "bethesda/whiterun_presentation.h"
 
 #include "import/fnv/land_lod.h"
 
@@ -127,7 +128,15 @@ bool tes3ActorGeometry(
         return true;
     }
 
-    outSkeleton = "base_anim.nif";
+    // TES3 NPCs normally name base_anim.nif, but beast races can select a
+    // compatible animation-bank variant with extra bones. Hul, for example,
+    // names base_animKnA.nif; forcing her onto base_anim.nif leaves the
+    // Argonian-only skin weights unresolved. Those vertices then miss the
+    // actor-world transform in the GPU skinning pass and pull their triangles
+    // into kilometre-long strips toward the world origin.
+    const std::string authoredSkeleton =
+        tes3SubrecordText(*actorRecord, "MODL", content.encoding());
+    outSkeleton = authoredSkeleton.empty() ? "base_anim.nif" : authoredSkeleton;
     const auto appendBodyModel = [&](std::string_view bodyId,
                                      std::string_view rigidAttachmentBone) {
         if (bodyId.empty()) return;
@@ -481,7 +490,11 @@ audio::AudioConfig BethesdaApp::audioConfig() const {
         config.offlineMix = true;
         config.offlineSampleRate = 48000u;
         config.offlineChannels = 2u;
-        config.musicVolume = 0.0f;
+        // Fallout capture keeps licensed radio muted. The Whiterun market is
+        // explicitly a Skyrim audiovisual showcase, so its retail exploration
+        // score belongs in the deterministic offline mix with the rain and
+        // authored city ambience.
+        config.musicVolume = m_whiterunMarketReferenceShowcase ? 0.55f : 0.0f;
     }
     return config;
 }
@@ -748,12 +761,15 @@ int BethesdaApp::findUsableDoor() const {
     const float yawRadians = m_yawDegrees * (kPi / 180.0f);
     const float forwardX = std::cos(yawRadians);
     const float forwardZ = std::sin(yawRadians);
+    const odai::math::Vector3 query = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
     int best = -1;
     float bestDistanceSquared = kMaxDoorDistance * kMaxDoorDistance;
     for (std::size_t i = 0; i < m_doors.size(); ++i) {
-        const float dx = m_doors[i].position[0] - m_cameraX;
-        const float dz = m_doors[i].position[2] - m_cameraZ;
-        const float dy = m_doors[i].position[1] - m_cameraY;
+        const float dx = m_doors[i].position[0] - query.x;
+        const float dz = m_doors[i].position[2] - query.z;
+        const float dy = m_doors[i].position[1] - query.y;
         const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
         if (distanceSquared > bestDistanceSquared) {
             continue;
@@ -769,7 +785,10 @@ int BethesdaApp::findUsableDoor() const {
 }
 
 int BethesdaApp::findLootableActorInReach() const {
-    const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    const odai::math::Vector3 query = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
+    const float cameraPosition[3] = {query.x, query.y, query.z};
     const float yaw = m_yawDegrees * (kPi / 180.0f);
     int best = -1;
     float bestDistanceSquared = std::numeric_limits<float>::max();
@@ -779,9 +798,9 @@ int BethesdaApp::findLootableActorInReach() const {
             !actorIsInReach(actor, cameraPosition, yaw)) {
             continue;
         }
-        const float dx = actor.position[0] - m_cameraX;
-        const float dy = actor.position[1] - m_cameraY;
-        const float dz = actor.position[2] - m_cameraZ;
+        const float dx = actor.position[0] - query.x;
+        const float dy = actor.position[1] - query.y;
+        const float dz = actor.position[2] - query.z;
         const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
         if (distanceSquared < bestDistanceSquared) {
             best = static_cast<int>(index);
@@ -1727,11 +1746,13 @@ bool BethesdaApp::completeDoorTransition(
             m_distantLodChunk = render::Renderer::kInvalidImportedChunkIndex;
         }
         m_skyrimTerrainLodTileValid = false;
+        m_skyrimTerrainLodWorldspace.clear();
         if (m_skyrimObjectLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
             m_renderer.removeImportedSceneChunk(m_skyrimObjectLodChunk);
             m_skyrimObjectLodChunk = render::Renderer::kInvalidImportedChunkIndex;
             m_skyrimObjectLodTileValid = false;
         }
+        m_skyrimObjectLodWorldspace.clear();
         for (const SkinnedActor& actor : m_actors) {
             m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
         }
@@ -1747,7 +1768,7 @@ bool BethesdaApp::completeDoorTransition(
             static_cast<std::int32_t>(std::floor(door.arrivalPosition[2] / 4096.0f))};
         m_collision.addCell(collisionCell, scene);
         m_actorNavigation.addCell(collisionCell, interior.navMeshes);
-        if (interior.navMeshes.empty() && m_streamIsMorrowind) {
+        if (interior.navMeshes.empty() && (m_streamIsMorrowind || m_streamIsOblivion)) {
             m_actorNavigation.addGeneratedCell(collisionCell, scene);
         }
         m_actorNavigation.setResidentDoors({});
@@ -1816,11 +1837,13 @@ bool BethesdaApp::completeDoorTransition(
             m_distantLodChunk = render::Renderer::kInvalidImportedChunkIndex;
         }
         m_skyrimTerrainLodTileValid = false;
+        m_skyrimTerrainLodWorldspace.clear();
         if (m_skyrimObjectLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
             m_renderer.removeImportedSceneChunk(m_skyrimObjectLodChunk);
             m_skyrimObjectLodChunk = render::Renderer::kInvalidImportedChunkIndex;
         }
         m_skyrimObjectLodTileValid = false;
+        m_skyrimObjectLodWorldspace.clear();
         if (!m_streamer->selectWorldspace(
                 door.targetWorldspaceEditorId, m_renderer, outError)) {
             return false;
@@ -2450,7 +2473,9 @@ void BethesdaApp::reloadActorsForCurrentSpace() {
         m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
         m_streamer->assets(), bethesdaCentre, kActorLoadRadius,
         kFirstCrowdSkinnedInstance,
-        render::kMaxSkinnedInstances - kFirstCrowdSkinnedInstance,
+        (thirdPersonPlayerShowcase()
+             ? kPlayerAvatarSkinnedInstance
+             : render::kMaxSkinnedInstances) - kFirstCrowdSkinnedInstance,
         {}, {}, m_actors, actorStats,
         &m_skyrimActorCatalog, &m_skyrimActorVoiceFolderPlugin,
         runtimePlacementResolver);
@@ -2500,6 +2525,194 @@ void BethesdaApp::queueActorUploads() {
             return !actor.character.vertices.empty() && !actor.draws.empty() &&
                 actor.instanceSlot != 0u;
         });
+}
+
+void BethesdaApp::realizePendingActorUploads(std::size_t maxActorUploads) {
+    // Textures first, because their bindless slots are baked into the template
+    // vertices. The backend now seeds skinned output buffers with the rest pose,
+    // so this is safe during startup before the first skinning dispatch.
+    if (m_skyrimPlayerAvatarUploadPending && m_skyrimPlayerAvatar.has_value()) {
+        SkinnedActor& avatar = *m_skyrimPlayerAvatar;
+        const std::vector<std::uint32_t> slots =
+            m_renderer.uploadSkinnedActorTextures(avatar.instanceSlot, avatar.textures);
+        remapActorTextureSlots(avatar, slots);
+        render::ImportedSkinnedMeshTemplate meshTemplate{};
+        meshTemplate.vertices = avatar.character.vertices;
+        meshTemplate.indices = avatar.character.indices;
+        meshTemplate.draws = avatar.draws;
+        meshTemplate.boneCount =
+            static_cast<std::uint32_t>(avatar.character.skeleton.bones.size());
+        avatar.uploaded = m_renderer.uploadSkinnedMeshTemplate(
+            avatar.instanceSlot, meshTemplate);
+        m_skyrimPlayerAvatarUploadPending = false;
+        if (!avatar.uploaded) {
+            VOX_LOGE("showcase") << "Skyrim player GPU template upload failed";
+        }
+    }
+
+    if (!m_actorsUploadPending || maxActorUploads == 0u) {
+        return;
+    }
+    std::size_t submittedActors = 0u;
+    while (m_nextActorUploadIndex < m_actors.size() &&
+           submittedActors < maxActorUploads) {
+        SkinnedActor& actor = m_actors[m_nextActorUploadIndex++];
+        // TES3 keeps activation proxies even when an optional creature or
+        // modded body mesh cannot be assembled. Those proxies must not upload
+        // an empty template into renderer slot zero.
+        if (actor.character.vertices.empty() || actor.draws.empty() ||
+            actor.instanceSlot == 0u) {
+            continue;
+        }
+        ++submittedActors;
+        const std::vector<std::uint32_t> slots =
+            m_renderer.uploadSkinnedActorTextures(actor.instanceSlot, actor.textures);
+        remapActorTextureSlots(actor, slots);
+        for (const std::uint32_t slot : slots) {
+            m_actorUploadedTextureCount += (slot != 0xffffffffu) ? 1u : 0u;
+        }
+        m_actorTotalTextureCount += slots.size();
+
+        render::ImportedSkinnedMeshTemplate meshTemplate{};
+        meshTemplate.vertices = actor.character.vertices;
+        meshTemplate.indices = actor.character.indices;
+        meshTemplate.draws = actor.draws;
+        meshTemplate.boneCount =
+            static_cast<std::uint32_t>(actor.character.skeleton.bones.size());
+        actor.uploaded = m_renderer.uploadSkinnedMeshTemplate(
+            actor.instanceSlot, meshTemplate);
+        m_actorUploadSuccessCount += actor.uploaded ? 1u : 0u;
+    }
+    if (m_nextActorUploadIndex >= m_actors.size()) {
+        m_actorsUploadPending = false;
+        VOX_LOGI("newvegas")
+            << "actors uploaded: " << m_actorUploadSuccessCount << "/"
+            << m_actors.size() << ", " << m_actorUploadedTextureCount << "/"
+            << m_actorTotalTextureCount << " textures bound";
+    }
+}
+
+bool BethesdaApp::prewarmSkyrimCityShowcase() {
+    if (!m_streamer || m_interiorStarted) {
+        VOX_LOGE("showcase") << "Skyrim city startup prewarm requires exterior streaming";
+        return false;
+    }
+
+    const core::Stopwatch timer;
+    const importer::CellResidencyConfig normalConfig = m_streamer->config();
+    importer::CellResidencyConfig startupConfig = normalConfig;
+    // During prewarm there is no visible frame to protect. Start the complete
+    // local ring together and apply it as one batch; after this function the
+    // normal one-chunk-per-frame streaming budget is restored.
+    startupConfig.maxLoadsInFlight = 16u;
+    startupConfig.maxChunkAppliesPerFrame = 16u;
+    m_streamer->setConfig(startupConfig);
+
+    const odai::math::Vector3 residencyPosition = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
+    const float enginePosition[3] = {
+        residencyPosition.x, residencyPosition.y, residencyPosition.z};
+    float falloutPosition[3] = {};
+    importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
+    const float stationaryVelocity[3] = {};
+
+    constexpr std::size_t kMaximumPrewarmPasses = 8u;
+    bool ready = false;
+    for (std::size_t pass = 0; pass < kMaximumPrewarmPasses; ++pass) {
+        updateStreaming(0.0f);
+        m_streamer->waitIdle();
+        updateStreaming(0.0f);
+        const auto stats = m_streamer->stats();
+        if (m_streamer->isStreamingIdle() &&
+            stats.residency.loadingCount == 0u) {
+            ready = true;
+            break;
+        }
+        // Keep the residency origin stable even if a callback reconstructed
+        // the third-person camera while the ring was being installed.
+        m_streamer->update(m_renderer, falloutPosition, stationaryVelocity);
+    }
+    m_streamer->setConfig(normalConfig);
+
+    if (!ready) {
+        VOX_LOGE("showcase")
+            << "Skyrim city startup prewarm did not settle its initial residency ring";
+        return false;
+    }
+    if (m_skyrimCitySpawnSettlementPending && !settleSkyrimCityShowcasePlayer()) {
+        VOX_LOGE("showcase")
+            << "Skyrim city startup prewarm could not settle the player on navigation";
+        return false;
+    }
+
+    realizePendingActorUploads(std::numeric_limits<std::size_t>::max());
+    if (!m_renderer.waitForImportedSceneUploads()) {
+        VOX_LOGE("showcase") << "Skyrim city startup GPU uploads did not complete";
+        return false;
+    }
+    if (m_whiterunReferenceShowcase) {
+        const importer::fnv::CellStreamerStats stats = m_streamer->stats();
+        VOX_LOGI("showcase")
+            << "Whiterun reference inventory: instances="
+            << stats.geometryInstancesLoaded << " banners="
+            << stats.bannerInstancesLoaded << " alpha-tested-parts="
+            << stats.alphaTestedPartsLoaded << " fire-emitters="
+            << stats.fireEmittersLoaded << " local-lights="
+            << stats.localLightsLoaded << " terrain-lod="
+            << (m_skyrimTerrainLodWorldspace.empty()
+                    ? "<missing>" : m_skyrimTerrainLodWorldspace)
+            << " object-lod="
+            << (m_skyrimObjectLodWorldspace.empty()
+                    ? "<missing>" : m_skyrimObjectLodWorldspace);
+        if (stats.geometryInstancesLoaded == 0u) {
+            VOX_LOGE("showcase")
+                << "Whiterun reference has no gate-plaza geometry instances";
+            return false;
+        }
+        if (m_skyrimTerrainLodWorldspace.empty() ||
+            m_skyrimObjectLodWorldspace.empty()) {
+            VOX_LOGE("showcase")
+                << "Whiterun reference is missing inherited Tamriel terrain/object LOD";
+            return false;
+        }
+        if (stats.bannerInstancesLoaded == 0u) {
+            VOX_LOGW("showcase")
+                << "Whiterun reference inventory found no banner geometry";
+        }
+        if (stats.fireEmittersLoaded < 2u) {
+            VOX_LOGW("showcase")
+                << "Whiterun reference inventory found fewer than two fire emitters";
+        }
+        if (stats.localLightsLoaded < 2u) {
+            VOX_LOGW("showcase")
+                << "Whiterun reference inventory found fewer than two local lights";
+        }
+        if (stats.alphaTestedPartsLoaded == 0u) {
+            VOX_LOGW("showcase")
+                << "Whiterun reference inventory found no alpha-tested foliage/overlays";
+        }
+    }
+    if (thirdPersonPlayerShowcase() &&
+        (!m_skyrimPlayerAvatar.has_value() || !m_skyrimPlayerAvatar->uploaded)) {
+        VOX_LOGE("showcase") << "Skyrim city startup player avatar is not GPU-resident";
+        return false;
+    }
+    // A gate-cell callback may have settled the capsule while another result
+    // from the same prewarm batch was still waiting to be installed. Sweep the
+    // boom once more against the complete resident collision set so the first
+    // visible frame cannot inherit a camera position inside that final wall.
+    if (thirdPersonPlayerShowcase()) {
+        reconstructPlayerCamera(1.0f / 60.0f, true);
+    }
+
+    // The visible frame loop starts from rest; no synthetic velocity sample
+    // should point residency ahead because prewarm touched the tracking origin.
+    m_hasPreviousCameraPosition = false;
+    VOX_LOGI("showcase") << "cold-start prewarm complete in " << timer.elapsedMs()
+                         << " ms: " << m_streamer->stats().residentChunks
+                         << " cells, " << m_actors.size() << " actors";
+    return true;
 }
 
 void BethesdaApp::updateDoorTransition(float deltaSeconds) {
@@ -2582,12 +2795,150 @@ std::string findSkyrimDataDirectory() {
     return {};
 }
 
+std::string findMorrowindDataDirectory() {
+    std::vector<std::filesystem::path> candidates;
+    if (const char* home = std::getenv("HOME")) {
+        const std::filesystem::path homePath(home);
+        candidates.push_back(homePath /
+            ".steam/steam/steamapps/common/Morrowind/Data Files");
+        candidates.push_back(homePath /
+            ".local/share/Steam/steamapps/common/Morrowind/Data Files");
+    }
+    candidates.emplace_back(
+        "/mnt/c/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files");
+    candidates.emplace_back(
+        "C:/Program Files (x86)/Steam/steamapps/common/Morrowind/Data Files");
+    for (const std::filesystem::path& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate / "Morrowind.esm", error) &&
+            !error) return candidate.string();
+    }
+    return {};
+}
+
 }  // namespace
 
 bool BethesdaApp::onInit() {
+    if (m_balmoraSkyrimPlayerShowcase) {
+        if (m_streamDirectory.empty()) m_streamDirectory = findMorrowindDataDirectory();
+        if (m_skyrimAvatarDataDirectory.empty()) {
+            if (const char* configured = std::getenv("ODAI_SKYRIM_DATA")) {
+                m_skyrimAvatarDataDirectory = configured;
+            } else {
+                m_skyrimAvatarDataDirectory = findSkyrimDataDirectory();
+            }
+        }
+        if (m_streamDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_streamDirectory) / "Morrowind.esm")) {
+            VOX_LOGE("showcase")
+                << "balmora-skyrim-player requires Morrowind.esm/Vvardenfell; "
+                   "pass --stream \"<Morrowind/Data Files>\"";
+            return false;
+        }
+        if (m_skyrimAvatarDataDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_skyrimAvatarDataDirectory) / "Skyrim.esm")) {
+            VOX_LOGE("showcase")
+                << "balmora-skyrim-player requires Skyrim.esm; pass --skyrim-data "
+                   "\"<Skyrim Special Edition/Data>\" or set ODAI_SKYRIM_DATA";
+            return false;
+        }
+        m_streamPlugin = "Morrowind.esm";
+        m_streamWorldspace = "Vvardenfell";
+        m_streamWorldspaceExplicit = true;
+        m_streamSpawnInterior.clear();
+        m_startInsideInterior.clear();
+        m_resumeEnabled = false;
+        m_walkMode = true;
+        m_thirdPersonView = true;
+    }
+    if (m_whiterunThirdPersonShowcase) {
+        if (m_streamDirectory.empty()) {
+            if (const char* configured = std::getenv("ODAI_SKYRIM_DATA")) {
+                m_streamDirectory = configured;
+            } else {
+                m_streamDirectory = findSkyrimDataDirectory();
+            }
+        }
+        if (m_skyrimAvatarDataDirectory.empty()) {
+            m_skyrimAvatarDataDirectory = m_streamDirectory;
+        }
+        if (m_streamDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_streamDirectory) / "Skyrim.esm")) {
+            VOX_LOGE("showcase")
+                << "whiterun-third-person requires Skyrim.esm; pass --skyrim-data "
+                   "\"<Skyrim Special Edition/Data>\" or set ODAI_SKYRIM_DATA";
+            return false;
+        }
+        m_streamPlugin = "Skyrim.esm";
+        m_streamWorldspace = "WhiterunWorld";
+        m_streamWorldspaceExplicit = true;
+        m_streamSpawnInterior.clear();
+        m_startInsideInterior.clear();
+        m_resumeEnabled = false;
+        m_walkMode = true;
+        m_thirdPersonView = true;
+    }
+    if (m_whiterunReferenceShowcase) {
+        if (m_streamDirectory.empty()) {
+            if (const char* configured = std::getenv("ODAI_SKYRIM_DATA")) {
+                m_streamDirectory = configured;
+            } else {
+                m_streamDirectory = findSkyrimDataDirectory();
+            }
+        }
+        if (m_streamDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_streamDirectory) / "Skyrim.esm")) {
+            VOX_LOGE("showcase")
+                << "whiterun-reference requires Skyrim.esm; pass --skyrim-data "
+                   "\"<Skyrim Special Edition/Data>\" or set ODAI_SKYRIM_DATA";
+            return false;
+        }
+        m_streamPlugin = "Skyrim.esm";
+        m_streamWorldspace = "WhiterunWorld";
+        m_streamWorldspaceExplicit = true;
+        m_streamSpawnInterior.clear();
+        m_startInsideInterior.clear();
+        m_resumeEnabled = false;
+        m_walkMode = false;
+        m_thirdPersonView = false;
+        m_mouseCaptured = false;
+    }
+    if (m_riftenThirdPersonShowcase) {
+        if (m_streamDirectory.empty()) {
+            if (const char* configured = std::getenv("ODAI_SKYRIM_DATA")) {
+                m_streamDirectory = configured;
+            } else {
+                m_streamDirectory = findSkyrimDataDirectory();
+            }
+        }
+        if (m_skyrimAvatarDataDirectory.empty()) {
+            m_skyrimAvatarDataDirectory = m_streamDirectory;
+        }
+        if (m_streamDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_streamDirectory) / "Skyrim.esm")) {
+            VOX_LOGE("showcase")
+                << "riften-third-person requires Skyrim.esm; pass --skyrim-data "
+                   "\"<Skyrim Special Edition/Data>\" or set ODAI_SKYRIM_DATA";
+            return false;
+        }
+        m_streamPlugin = "Skyrim.esm";
+        m_streamWorldspace = "RiftenWorld";
+        m_streamWorldspaceExplicit = true;
+        m_streamSpawnInterior.clear();
+        m_startInsideInterior.clear();
+        m_resumeEnabled = false;
+        m_walkMode = true;
+        m_thirdPersonView = true;
+    }
     if (!m_scenarioId.empty() && bethesda::findScenario(m_scenarioId) == nullptr) {
         VOX_LOGE("scenario") << "unknown scenario '" << m_scenarioId
-                              << "' (available: skyrim-bleak-falls)";
+                              << "' (available: skyrim-bleak-falls, "
+                                 "skyrim-whiterun-showcase, skyrim-riften-showcase)";
         return false;
     }
     // Without this the font atlas is empty, so every addText() emits zero
@@ -3098,6 +3449,10 @@ bool BethesdaApp::onInit() {
     }
 
     m_renderer.setAutoExposureEnabled(true);
+    if (const char* exposureKey = std::getenv("ODAI_FNV_EXPOSURE_KEY")) {
+        m_renderer.setAutoExposureKeyValue(
+            static_cast<float>(std::atof(exposureKey)));
+    }
 
     // Diagnostic A/B: ODAI_FNV_NOTEX forces every imported surface to shade from
     // its vertex colour instead of its texture. Comparing a capture with and
@@ -3130,6 +3485,9 @@ bool BethesdaApp::onInit() {
         return false;
     }
     if ((!m_scenarioId.empty() || m_streamIsMorrowind) && !initBethesdaSession()) {
+        return false;
+    }
+    if (skyrimCityShowcase() && !prewarmSkyrimCityShowcase()) {
         return false;
     }
     // Skyrim's exterior art was authored around a restrained, contrasty
@@ -3782,6 +4140,96 @@ void applySkyrimCloudBand(importer::fnv::FalloutCloudBand band,
     }
 }
 
+bool buildSkyrimWeatherCloudMesh(
+    const importer::fnv::FalloutAssetSource& assets,
+    const importer::fnv::FalloutWeatherRecord& weather,
+    const int layerSources[render::kWeatherCloudLayerCount],
+    render::WeatherCloudMesh& outMesh,
+    std::string& outError) {
+    outMesh = render::WeatherCloudMesh{};
+    std::vector<std::uint8_t> bytes;
+    if (!assets.resolveMesh("Sky\\Clouds.nif", bytes, outError)) {
+        outError = "authored Skyrim weather dome is missing: " + outError;
+        return false;
+    }
+    importer::fnv::NifModel model;
+    if (!importer::fnv::parseNifStaticMesh(bytes, model, outError)) {
+        outError = "authored Skyrim weather dome could not be parsed: " + outError;
+        return false;
+    }
+    // clouds.nif contains one surface per WTHR texture layer, stored in reverse
+    // layer order (28..0). This is the geometry that owns the atlas UVs; a
+    // fullscreen projection cannot reconstruct them from the DDS alone.
+    constexpr std::size_t kSkyrimWeatherLayerCount = 29u;
+    if (model.shapes.size() != kSkyrimWeatherLayerCount) {
+        outError = "authored Skyrim weather dome expected 29 surfaces, found " +
+            std::to_string(model.shapes.size());
+        return false;
+    }
+
+    constexpr float kSkyRadiusScale = 1000.0f;
+    for (std::uint32_t slot = 0u; slot < render::kWeatherCloudLayerCount; ++slot) {
+        const int source = layerSources[slot];
+        if (source < 0 || static_cast<std::size_t>(source) >= weather.cloudLayers.size()) {
+            continue;
+        }
+        const int authoredLayer = weather.cloudLayers[static_cast<std::size_t>(source)].index;
+        if (authoredLayer < 0 || authoredLayer >= static_cast<int>(kSkyrimWeatherLayerCount)) {
+            outError = "Skyrim weather cloud layer index is outside clouds.nif: " +
+                std::to_string(authoredLayer);
+            return false;
+        }
+        const importer::fnv::NifShape& shape =
+            model.shapes[(kSkyrimWeatherLayerCount - 1u) -
+                         static_cast<std::size_t>(authoredLayer)];
+        float maximumVertexAlpha = 1.0f;
+        if (!shape.colors.empty()) {
+            maximumVertexAlpha = 0.0f;
+            for (std::size_t color = 3u; color < shape.colors.size(); color += 4u) {
+                maximumVertexAlpha = std::max(maximumVertexAlpha, shape.colors[color]);
+            }
+        }
+        VOX_LOGI("newvegas") << "Skyrim cloud slot " << slot
+                              << " WTHR layer " << authoredLayer
+                              << " -> clouds.nif surface \"" << shape.name
+                              << "\" (" << (shape.positions.size() / 3u)
+                              << " vertices, max alpha " << maximumVertexAlpha << ")";
+        const std::uint32_t baseVertex = static_cast<std::uint32_t>(outMesh.vertices.size());
+        const std::size_t vertexCount = shape.positions.size() / 3u;
+        outMesh.vertices.reserve(outMesh.vertices.size() + vertexCount);
+        for (std::size_t vertexIndex = 0u; vertexIndex < vertexCount; ++vertexIndex) {
+            render::WeatherCloudMeshVertex vertex;
+            // NIF model space is Z-up; the renderer is Y-up. The shader adds
+            // the current camera position, so these remain camera-centred and
+            // cannot drift through the city as ordinary world geometry.
+            vertex.position[0] = shape.positions[vertexIndex * 3u] * kSkyRadiusScale;
+            vertex.position[1] = shape.positions[(vertexIndex * 3u) + 2u] * kSkyRadiusScale;
+            vertex.position[2] = -shape.positions[(vertexIndex * 3u) + 1u] * kSkyRadiusScale;
+            if ((vertexIndex * 2u) + 1u < shape.uvs.size()) {
+                vertex.uv[0] = shape.uvs[vertexIndex * 2u];
+                vertex.uv[1] = shape.uvs[(vertexIndex * 2u) + 1u];
+            }
+            if ((vertexIndex * 4u) + 3u < shape.colors.size()) {
+                std::copy_n(&shape.colors[vertexIndex * 4u], 4u, vertex.color);
+            }
+            vertex.layer = slot;
+            outMesh.vertices.push_back(vertex);
+        }
+        for (const std::uint32_t index : shape.triangleIndices) {
+            if (index >= vertexCount) {
+                outError = "authored Skyrim weather dome has an out-of-range index";
+                return false;
+            }
+            outMesh.indices.push_back(baseVertex + index);
+        }
+    }
+    if (outMesh.indices.empty()) {
+        outError = "authored Skyrim weather dome selected no active surfaces";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 // Everything that has to happen when the active weather changes: cloud layers
@@ -3865,6 +4313,19 @@ void BethesdaApp::selectWeather(std::uint32_t weatherFormId) {
         VOX_LOGI("newvegas") << "cloud layers: " << loadedLayers << " of "
                              << active->cloudLayers.size() << " authored in use ("
                              << (tiling ? "tiling sheets" : "dome fisheye") << ")";
+        if (tiling) {
+            render::WeatherCloudMesh cloudMesh;
+            std::string cloudMeshError;
+            if (buildSkyrimWeatherCloudMesh(
+                    assets, *active, m_cloudLayerSource, cloudMesh, cloudMeshError)) {
+                m_renderer.setWeatherCloudMesh(cloudMesh);
+            } else {
+                m_renderer.setWeatherCloudMesh(render::WeatherCloudMesh{});
+                VOX_LOGE("newvegas") << cloudMeshError;
+            }
+        } else {
+            m_renderer.setWeatherCloudMesh(render::WeatherCloudMesh{});
+        }
         m_renderer.setWeatherClouds(clouds);
     }
 
@@ -5277,6 +5738,20 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     m_lastCursorX = cursorX;
     m_lastCursorY = cursorY;
 
+    if (thirdPersonPlayerShowcase()) {
+        const bool viewDown = keyDown(m_window, GLFW_KEY_V);
+        if (canControlPlayer && viewDown && !m_viewToggleLatch) {
+            m_thirdPersonView = !m_thirdPersonView;
+            reconstructPlayerCamera(deltaSeconds, true);
+        }
+        m_viewToggleLatch = viewDown;
+        if (canControlPlayer && m_thirdPersonView && m_uiInput.scrollDelta != 0.0f) {
+            m_cameraBoomRequested = std::clamp(
+                m_cameraBoomRequested - m_uiInput.scrollDelta * 24.0f,
+                90.0f, 520.0f);
+        }
+    }
+
     // Turn to the speaker's face and hold there.
     //
     // Aiming at his ORIGIN would point the camera at his wheel: he stands ~187
@@ -5493,12 +5968,18 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     }
 
     float speed = kWalkUnitsPerSecond;
-    if (keyDown(m_window, GLFW_KEY_LEFT_SHIFT)) {
+    const bool sprinting = keyDown(m_window, GLFW_KEY_LEFT_SHIFT);
+    if (sprinting) {
         speed *= kSprintMultiplier;
     }
     if (m_bethesdaPlayerControllerRegistered && m_walkMode) {
         if (!m_bethesdaControllerOwnsCamera) {
-            relocateBethesdaPlayerControllerToCamera();
+            if (thirdPersonPlayerShowcase()) {
+                m_bethesdaControllerOwnsCamera = true;
+                reconstructPlayerCamera(deltaSeconds, true);
+            } else {
+                relocateBethesdaPlayerControllerToCamera();
+            }
         }
         bethesda::PhysicsCharacterInput input;
         input.desiredVelocity = {moveX * speed, 0.0f, moveZ * speed};
@@ -5508,8 +5989,55 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
             physical.has_value() && physical->grounded) {
             input.desiredVelocity.y = kJumpUnitsPerSecond;
         }
+        if (thirdPersonPlayerShowcase() && lengthSquared > 1.0e-6f) {
+            const float wanted = actorYawForDirection(moveX, moveZ);
+            float turn = std::fmod(wanted - m_playerYawRadians + 3.0f * kPi,
+                2.0f * kPi) - kPi;
+            constexpr float kMaximumTurnRate = 8.0f;
+            turn = std::clamp(turn, -kMaximumTurnRate * deltaSeconds,
+                kMaximumTurnRate * deltaSeconds);
+            m_playerPreviousYawRadians = m_playerYawRadians;
+            m_playerYawRadians += turn;
+        }
+        if (thirdPersonPlayerShowcase()) {
+            anim::AnimationInputState animationInput;
+            animationInput.requestedVelocity = input.desiredVelocity;
+            animationInput.movementSpeed = std::sqrt(
+                input.desiredVelocity.x * input.desiredVelocity.x +
+                input.desiredVelocity.z * input.desiredVelocity.z);
+            const odai::math::Vector3 facing = actorFacing(m_playerYawRadians);
+            const odai::math::Vector3 right{-facing.z, 0.0f, facing.x};
+            animationInput.localVelocity = {
+                odai::math::dot(input.desiredVelocity, right),
+                input.desiredVelocity.y,
+                odai::math::dot(input.desiredVelocity, facing)};
+            animationInput.turnRateRadiansPerSecond = deltaSeconds > 0.0f
+                ? (m_playerYawRadians - m_playerPreviousYawRadians) / deltaSeconds
+                : 0.0f;
+            animationInput.sprinting = sprinting &&
+                animationInput.movementSpeed > 1.0f;
+            if (physical.has_value()) {
+                animationInput.groundVelocity = physical->groundVelocity;
+                animationInput.groundNormal = physical->groundNormal;
+                animationInput.verticalVelocity = physical->velocity.y;
+                animationInput.grounded = physical->grounded;
+                animationInput.falling = physical->falling;
+                animationInput.landed = physical->landed;
+                animationInput.blocked = physical->blocked;
+            }
+            if (m_skyrimPlayerAvatar.has_value() &&
+                m_skyrimPlayerAvatar->walkSpeedUnitsPerSecond > 1.0f) {
+                animationInput.locomotionPlaybackRate = std::clamp(
+                    animationInput.movementSpeed /
+                        m_skyrimPlayerAvatar->walkSpeedUnitsPerSecond,
+                    0.25f, 4.0f);
+            }
+            (void)m_bethesdaSession.setActorAnimationInput(
+                playerId, std::move(animationInput));
+        }
         (void)m_bethesdaSession.setActorControllerInput(playerId, input);
         m_bethesdaControllerOwnsCamera = true;
+        if (thirdPersonPlayerShowcase()) reconstructPlayerCamera(deltaSeconds);
         return;
     }
     if (m_bethesdaPlayerControllerRegistered) {
@@ -5633,6 +6161,7 @@ bool BethesdaApp::resolveConfiguredContentProfile() {
     }
     m_loadOrderFingerprint = resolved.fingerprint;
     m_streamIsMorrowind = resolved.game == importer::fnv::BethesdaGame::Morrowind;
+    m_streamIsOblivion = resolved.game == importer::fnv::BethesdaGame::Oblivion;
     m_streamIsSkyrim =
         resolved.game == importer::fnv::BethesdaGame::SkyrimSpecialEdition;
 
@@ -5720,6 +6249,8 @@ bool BethesdaApp::initStreaming() {
                 header, headerError)) {
             m_streamIsMorrowind = m_streamIsMorrowind ||
                 header.format == importer::fnv::EsmPluginFormat::kMorrowind;
+            m_streamIsOblivion = m_streamIsOblivion ||
+                header.format == importer::fnv::EsmPluginFormat::kOblivion;
             // Skyrim is the only supported generation whose base master uses
             // localized string tables. That is a format property, unlike a
             // filename check, so a renamed or total-conversion master keeps
@@ -5847,6 +6378,9 @@ bool BethesdaApp::initStreaming() {
             m_streamIsMorrowind = !streamOrder.entries().empty() &&
                 streamOrder.entries().front().header.format ==
                     importer::fnv::EsmPluginFormat::kMorrowind;
+            m_streamIsOblivion = !streamOrder.entries().empty() &&
+                streamOrder.entries().front().header.format ==
+                    importer::fnv::EsmPluginFormat::kOblivion;
             m_streamIsSkyrim = !streamOrder.entries().empty() &&
                 streamOrder.entries().front().header.isLocalized;
             m_loadOrderFingerprint = m_contentProfile.has_value()
@@ -5947,22 +6481,117 @@ bool BethesdaApp::initStreaming() {
     m_collision.clear();
     m_actorNavigation.clear();
     m_bethesdaCollisionByCell.clear();
+    m_bethesdaGameplayResidentCells.clear();
+    if (m_whiterunReferenceShowcase) {
+        m_streamer->setScenePresentationOverride(
+            [](importer::ImportedScene& scene) {
+                std::unordered_set<std::uint32_t> hiddenDoorReferences;
+                std::unordered_set<std::uint32_t> mainGateShellMeshes;
+                for (importer::ImportedSceneInstance& instance : scene.instances) {
+                    const std::string modelPath = toLowerAscii(instance.modelPath);
+                    if (modelPath.find("wrwallmaingate01.nif") != std::string::npos) {
+                        mainGateShellMeshes.insert(instance.meshIndex);
+                    }
+                    if (modelPath.find("wrdoormaingate01.nif") ==
+                            std::string::npos) {
+                        continue;
+                    }
+                    instance.initiallyVisible = false;
+                    if (instance.sourceReferenceFormId != 0u) {
+                        hiddenDoorReferences.insert(instance.sourceReferenceFormId);
+                    }
+                }
+                if (hiddenDoorReferences.empty() && mainGateShellMeshes.empty()) {
+                    return;
+                }
+                std::size_t hiddenDoorMeshes = 0u;
+                for (importer::ImportedSceneMesh& mesh : scene.meshes) {
+                    const bool usesMainGateDoorTexture = std::any_of(
+                        mesh.parts.begin(), mesh.parts.end(),
+                        [&](const importer::ImportedSceneMeshPart& part) {
+                            if (part.textureIndex >= scene.textures.size()) {
+                                return false;
+                            }
+                            const std::string path =
+                                toLowerAscii(scene.textures[part.textureIndex].sourcePath);
+                            return path.find("wrdoormaingate01.dds") != std::string::npos ||
+                                path.ends_with("\\wrdoor01.dds");
+                        });
+                    if (!usesMainGateDoorTexture) {
+                        continue;
+                    }
+                    mesh.vertices.clear();
+                    mesh.indices.clear();
+                    mesh.parts.clear();
+                    ++hiddenDoorMeshes;
+                }
+                std::size_t hiddenEmbeddedDoorParts = 0u;
+                for (const std::uint32_t meshIndex : mainGateShellMeshes) {
+                    if (meshIndex >= scene.meshes.size()) {
+                        continue;
+                    }
+                    importer::ImportedSceneMesh& mesh = scene.meshes[meshIndex];
+                    hiddenEmbeddedDoorParts += std::erase_if(
+                        mesh.parts,
+                        [&](const importer::ImportedSceneMeshPart& part) {
+                            return part.textureIndex < scene.textures.size() &&
+                                toLowerAscii(scene.textures[part.textureIndex].sourcePath)
+                                    .ends_with("\\wrwoodplanks01.dds");
+                        });
+                }
+                std::erase_if(
+                    scene.collisionTriangles,
+                    [&](const importer::ImportedSceneCollisionTriangle& triangle) {
+                        return hiddenDoorReferences.contains(triangle.sourceReferenceFormId);
+                    });
+                importer::buildImportedScenePackedRenderData(scene);
+                importer::buildImportedScenePageRanges(scene);
+                VOX_LOGI("showcase")
+                    << "Whiterun reference opened " << hiddenDoorReferences.size()
+                    << " authored main-gate door reference(s) across "
+                    << hiddenDoorMeshes << " retail mesh(es), plus "
+                    << hiddenEmbeddedDoorParts
+                    << " embedded closed-door part(s), before presentation";
+            });
+    }
     m_streamer->setCellCallbacks(
         [this](
             const importer::CellCoord& cell,
             const importer::ImportedScene& scene,
             const std::vector<importer::fnv::FalloutNavMeshRecord>& navMeshes) {
-            m_collision.addCell(cell, scene);
-            m_actorNavigation.addCell(cell, navMeshes);
-            if (navMeshes.empty() && m_streamIsMorrowind) {
-                m_actorNavigation.addGeneratedCell(cell, scene);
+            if (m_streamIsMorrowind) {
+                m_bethesdaGameplayResidentCells.insert(cell);
             }
+            // Cache first so initially hidden references are known to both
+            // collision implementations. Otherwise the lightweight capsule
+            // resolver can stand on an invisible door/FX hull that Jolt has
+            // correctly omitted from the same streamed cell.
             if (!m_scenarioId.empty() || m_streamIsMorrowind) {
                 cacheBethesdaCollisionCell(cell, scene);
+            }
+            m_collision.addCell(cell, scene, m_disabledBethesdaCollisionReferences);
+            m_actorNavigation.addCell(cell, navMeshes);
+            if (navMeshes.empty() && (m_streamIsMorrowind || m_streamIsOblivion)) {
+                m_actorNavigation.addGeneratedCell(cell, scene);
             }
             m_streamDoorsByCell[cell] = scene.doors;
             rebuildStreamDoors();
             if (m_streamIsSkyrim) m_skyrimActorResidencyDirty = true;
+            if (m_whiterunReferenceShowcase) {
+                for (const importer::ImportedSceneInstance& instance : scene.instances) {
+                    const std::string path = toLowerAscii(instance.modelPath);
+                    if (path.find("wrwallmaingate") == std::string::npos &&
+                        path.find("wrbrazier") == std::string::npos &&
+                        path.find("banner") == std::string::npos) {
+                        continue;
+                    }
+                    VOX_LOGI("showcase")
+                        << "Whiterun reference anchor " << instance.modelPath
+                        << " at (" << instance.transform[3] << ", "
+                        << instance.transform[7] << ", " << instance.transform[11]
+                        << ") in cell " << cell.x << "," << cell.z;
+                }
+            }
             if (std::getenv("ODAI_FNV_LOG_NAVIGATION") != nullptr) {
                 VOX_LOGI("newvegas") << "navigation cell " << cell.x << "," << cell.z
                                      << ": " << navMeshes.size() << " meshes, resident total "
@@ -5973,6 +6602,7 @@ bool BethesdaApp::initStreaming() {
             }
         },
         [this](const importer::CellCoord& cell) {
+            m_bethesdaGameplayResidentCells.erase(cell);
             m_collision.removeCell(cell);
             m_actorNavigation.removeCell(cell);
             removeBethesdaCollisionCell(cell);
@@ -6008,12 +6638,35 @@ bool BethesdaApp::initStreaming() {
     if (m_streamIsMorrowind) {
         config.loadRadius = 2;
         config.unloadRadius = 4;
+    } else if (skyrimCityShowcase()) {
+        // Skyrim's walled cities store much of their always-visible kit in
+        // persistent cell 0,0 even though the main-gate arrival is several
+        // grid cells away. Keep that cell explicitly resident and stream only
+        // the local 3x3 ring instead of a 9x9 radius-four square.
+        config.loadRadius = 1;
+        config.unloadRadius = 3;
+        config.maxLoadsInFlight = 2u;
+        m_streamer->setPinnedCells({importer::CellCoord{0, 0}});
     }
     if (const char* radiusEnv = std::getenv("ODAI_FNV_LOAD_RADIUS")) {
         config.loadRadius = std::max(0, std::atoi(radiusEnv));
         config.unloadRadius = config.loadRadius + 2;
     }
     m_streamer->setConfig(config);
+    if (skyrimCityShowcase()) {
+        // The initial 3x3 ring plus a city's persistent cell fits this modest
+        // reserve in the retail masters. Allocate it once so the cold load
+        // does not repeatedly recreate and copy device-local arenas as worker
+        // results land. A changed load order may exceed it and still uses
+        // normal growth.
+        constexpr std::uint64_t kInitialVertexReserve = 1'000'000u;
+        constexpr std::uint64_t kInitialIndexReserve = 2'500'000u;
+        if (!m_renderer.reserveImportedSceneGeometry(
+                kInitialVertexReserve, kInitialIndexReserve)) {
+            VOX_LOGW("showcase")
+                << "initial geometry reservation failed; falling back to streamed growth";
+        }
+    }
 
     // A fixed-step video capture advances the tour in simulation time, not in
     // wall time. That can cross the entire route while the worker threads are
@@ -6128,7 +6781,7 @@ bool BethesdaApp::initStreaming() {
             cacheBethesdaCollisionCell(interiorCell, interiorScene);
         }
         m_actorNavigation.addCell(interiorCell, interior.navMeshes);
-        if (interior.navMeshes.empty() && m_streamIsMorrowind) {
+        if (interior.navMeshes.empty() && (m_streamIsMorrowind || m_streamIsOblivion)) {
             m_actorNavigation.addGeneratedCell(interiorCell, interiorScene);
         }
         m_actorNavigation.setResidentDoors({});
@@ -6216,7 +6869,67 @@ bool BethesdaApp::initStreaming() {
     // Fall back to the middle of the worldspace if the cell is missing, so a
     // different plugin or a trimmed install still starts somewhere sensible.
     bool spawnedAtScenarioMarker = false;
-    if (!m_interiorStarted && !m_scenarioStartMarker.empty()) {
+    bool spawnedAtShowcase = false;
+    if (!m_interiorStarted && m_balmoraSkyrimPlayerShowcase) {
+        constexpr odai::math::Vector3 kSouthCanalApproach{
+            -19920.0f, 300.0f, 12960.0f};
+        odai::math::Vector3 projected = kSouthCanalApproach;
+        if (!m_actorNavigation.projectPoint(
+                projected.x, projected.y, projected.z, 384.0f, 640.0f,
+                projected)) {
+            float ground = projected.y;
+            if (m_collision.groundHeight(
+                    projected.x, projected.z, projected.y, ground)) {
+                projected.y = ground;
+            } else {
+                VOX_LOGE("showcase")
+                    << "Balmora south-canal anchor is not navigation/ground reachable";
+                return false;
+            }
+        }
+        spawn[0] = projected.x;
+        spawn[1] = projected.y + kEyeHeightUnits;
+        spawn[2] = projected.z;
+        spawnedAtShowcase = true;
+        m_yawDegrees = -90.0f;
+        m_pitchDegrees = -8.0f;
+        VOX_LOGI("showcase") << "Balmora player anchor projected to ("
+                              << projected.x << ", " << projected.y << ", "
+                              << projected.z << ")";
+    } else if (!m_interiorStarted && skyrimCityShowcase()) {
+        const bool whiterun = m_whiterunThirdPersonShowcase ||
+            m_whiterunReferenceShowcase;
+        const char* childWorldspace = whiterun ? "WhiterunWorld" : "RiftenWorld";
+        const char* cityName = whiterun ? "Whiterun" : "Riften";
+        float gateYawDegrees = 0.0f;
+        if (!m_streamer->spawnAtWorldspaceEntranceEngineSpace(
+                "Tamriel", childWorldspace, spawn, gateYawDegrees)) {
+            VOX_LOGE("showcase")
+                << cityName
+                << " main-gate arrival could not be resolved from retail XTEL pairs";
+            return false;
+        }
+        spawnedAtShowcase = true;
+        if (m_whiterunReferenceShowcase) {
+            const bethesda::WhiterunReferenceCamera camera =
+                m_whiterunMarketReferenceShowcase
+                    ? bethesda::whiterunMarketReferenceCamera(spawn, gateYawDegrees)
+                    : bethesda::whiterunReferenceCamera(spawn, gateYawDegrees);
+            std::copy_n(camera.position, 3u, spawn);
+            m_yawDegrees = camera.yawDegrees;
+            m_pitchDegrees = camera.pitchDegrees;
+            VOX_LOGI("showcase")
+                << (m_whiterunMarketReferenceShowcase
+                        ? "Whiterun market reference camera from authored gate yaw "
+                        : "Whiterun reference camera from authored gate yaw ")
+                << gateYawDegrees << ": x=" << spawn[0] << " y=" << spawn[1]
+                << " z=" << spawn[2] << " yaw=" << m_yawDegrees
+                << " pitch=" << m_pitchDegrees;
+        } else {
+            m_yawDegrees = gateYawDegrees;
+            m_pitchDegrees = -8.0f;
+        }
+    } else if (!m_interiorStarted && !m_scenarioStartMarker.empty()) {
         const std::string wantedMarker = toLowerAscii(m_scenarioStartMarker);
         const auto marker = std::find_if(
             m_streamer->mapMarkers().begin(), m_streamer->mapMarkers().end(),
@@ -6242,7 +6955,7 @@ bool BethesdaApp::initStreaming() {
         !m_interiorStarted && !m_streamSpawnInterior.empty() &&
         m_streamer->spawnAtInteriorDoorEngineSpace(m_streamSpawnInterior, spawn);
     const bool haveSpawn =
-        !m_interiorStarted && (spawnedAtScenarioMarker || spawnedAtDoorstep ||
+        !m_interiorStarted && (spawnedAtShowcase || spawnedAtScenarioMarker || spawnedAtDoorstep ||
                                m_streamer->suggestedSpawnEngineSpace(spawn));
     if (haveSpawn) {
         bool spawnedAtExplicitPosition = false;
@@ -6252,7 +6965,9 @@ bool BethesdaApp::initStreaming() {
         // A doorstep spawn is at eye height on the ground, so look at the
         // horizon; the worldspace-centre fallback is well above the terrain and
         // wants to look down at it.
-        m_pitchDegrees = (spawnedAtScenarioMarker || spawnedAtDoorstep) ? 0.0f : -20.0f;
+        if (!spawnedAtShowcase) {
+            m_pitchDegrees = (spawnedAtScenarioMarker || spawnedAtDoorstep) ? 0.0f : -20.0f;
+        }
         // Same diagnostic override the cooked-scene path has: being able to
         // look straight down separates "above the ground" from "inside it".
         if (const char* pitchEnv = std::getenv("ODAI_FNV_PITCH")) {
@@ -6280,13 +6995,27 @@ bool BethesdaApp::initStreaming() {
                 spawnedAtExplicitPosition = true;
             }
         }
+        if (skyrimCityThirdPersonShowcase()) {
+            const float engineSpawn[3] = {m_cameraX, m_cameraY, m_cameraZ};
+            float bethesdaSpawn[3] = {};
+            importer::fnv::CellStreamer::engineToFallout(
+                engineSpawn, bethesdaSpawn);
+            const float cellSize = m_streamer->cellWorldSize();
+            m_skyrimCitySpawnCell = {
+                static_cast<std::int32_t>(std::floor(bethesdaSpawn[0] / cellSize)),
+                static_cast<std::int32_t>(std::floor(bethesdaSpawn[1] / cellSize))};
+            m_skyrimCityAuthoredSpawnFeet = {
+                m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+            m_skyrimCitySpawnSettlementPending = true;
+        }
         VOX_LOGI("newvegas") << "spawn (engine space): x=" << m_cameraX
                              << " y=" << m_cameraY << " (height) z=" << m_cameraZ;
         // Walk on arrival at a doorstep: collision now supplies terrain height
         // from the streamed cells, so there is ground to stand on. The
         // worldspace-centre fallback still starts in fly mode, because it aims
         // the camera from well above the terrain.
-        m_walkMode = spawnedAtScenarioMarker || spawnedAtDoorstep || spawnedAtExplicitPosition;
+        m_walkMode = spawnedAtShowcase || spawnedAtScenarioMarker || spawnedAtDoorstep ||
+            spawnedAtExplicitPosition;
         // Stand Victor beside wherever the player starts, rather than at his
         // ACRE reference ~7400 units away. Talking to him is the thing being
         // built; a hike across Goodsprings before every test is friction with
@@ -6588,20 +7317,51 @@ void BethesdaApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
         (fixedCaptureLod ? m_captureSkyrimLodMaxTileZ : tileZ) +
         (kTileRadius * kTileCells);
     importer::ImportedScene scene;
-    scene.sourceTag = "skyrim_terrain_lod";
     importer::fnv::LandLodTierStats stats;
     std::string error;
     const auto start = std::chrono::steady_clock::now();
     const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
-    const bool built = importer::fnv::appendLandLodTier(
-        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
-            return assets.resolveMesh(path, bytes, error);
-        },
-        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
-            return assets.resolveTexture(path, bytes, error);
-        },
-        m_streamWorldspace, importer::fnv::LandLodSet::SkyrimTerrain, kTileCells,
-        firstX, firstZ, lastX, lastZ, 96.0f, scene, stats, error);
+    std::vector<std::string> lodWorldspaces =
+        m_streamer->currentWorldspaceEditorIdAncestry();
+    if (!m_skyrimTerrainLodWorldspace.empty()) {
+        const auto cached = std::find(
+            lodWorldspaces.begin(), lodWorldspaces.end(), m_skyrimTerrainLodWorldspace);
+        if (cached != lodWorldspaces.end()) {
+            std::rotate(lodWorldspaces.begin(), cached, cached + 1);
+        }
+    }
+    bool built = false;
+    std::string attempts;
+    for (const std::string& worldspace : lodWorldspaces) {
+        importer::ImportedScene candidate;
+        importer::fnv::LandLodTierStats candidateStats;
+        std::string candidateError;
+        if (importer::fnv::appendLandLodTier(
+                [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+                    return assets.resolveMesh(path, bytes, candidateError);
+                },
+                [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+                    return assets.resolveTexture(path, bytes, candidateError);
+                },
+                worldspace, importer::fnv::LandLodSet::SkyrimTerrain, kTileCells,
+                firstX, firstZ, lastX, lastZ, 96.0f, candidate, candidateStats,
+                candidateError)) {
+            scene = std::move(candidate);
+            scene.sourceTag = "skyrim_terrain_lod:" + worldspace;
+            stats = candidateStats;
+            built = true;
+            if (m_skyrimTerrainLodWorldspace != worldspace) {
+                VOX_LOGI("newvegas") << "Skyrim terrain LOD for "
+                                     << m_streamWorldspace << " resolved from "
+                                     << worldspace;
+                m_skyrimTerrainLodWorldspace = worldspace;
+            }
+            break;
+        }
+        if (!attempts.empty()) attempts += "; ";
+        attempts += worldspace + ": " + candidateError;
+    }
+    if (!built) error = attempts;
 
     std::size_t replacement = render::Renderer::kInvalidImportedChunkIndex;
     if (built) {
@@ -6714,6 +7474,13 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     if (!m_streamIsSkyrim || m_streamer == nullptr) {
         return;
     }
+    // The fixed Whiterun presentation has no visible loading phase. Build its
+    // parent proxy once the child ring is final, so the handoff below can trim
+    // against the complete detailed residency set instead of rebuilding the
+    // 7x7 BTO window once per arriving cell.
+    if (m_whiterunReferenceShowcase && !m_streamer->isStreamingIdle()) {
+        return;
+    }
 
     constexpr std::int32_t kTileCells = importer::fnv::kLandLodBlockCells;
     // A 3x3 BTO window only reaches roughly 20-31k units from the camera,
@@ -6745,7 +7512,6 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     // atlas decodes, this gives the renderer one replaceable chunk when the
     // camera crosses a four-cell boundary.
     importer::ImportedScene scene;
-    scene.sourceTag = "skyrim_object_lod";
     importer::fnv::LandLodTierStats stats;
     std::string error;
     const auto start = std::chrono::steady_clock::now();
@@ -6762,15 +7528,47 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     const std::int32_t lastZ =
         (fixedCaptureLod ? m_captureSkyrimLodMaxTileZ : tileZ) +
         (kTileRadius * kTileCells);
-    const bool built = importer::fnv::appendLandLodTier(
-        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
-            return assets.resolveMesh(path, bytes, error);
-        },
-        [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
-            return assets.resolveTexture(path, bytes, error);
-        },
-        m_streamWorldspace, importer::fnv::LandLodSet::SkyrimObjects, kTileCells,
-        firstX, firstZ, lastX, lastZ, 0.0f, scene, stats, error);
+    std::vector<std::string> lodWorldspaces =
+        m_streamer->currentWorldspaceEditorIdAncestry();
+    if (!m_skyrimObjectLodWorldspace.empty()) {
+        const auto cached = std::find(
+            lodWorldspaces.begin(), lodWorldspaces.end(), m_skyrimObjectLodWorldspace);
+        if (cached != lodWorldspaces.end()) {
+            std::rotate(lodWorldspaces.begin(), cached, cached + 1);
+        }
+    }
+    bool built = false;
+    std::string attempts;
+    for (const std::string& worldspace : lodWorldspaces) {
+        importer::ImportedScene candidate;
+        importer::fnv::LandLodTierStats candidateStats;
+        std::string candidateError;
+        if (importer::fnv::appendLandLodTier(
+                [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+                    return assets.resolveMesh(path, bytes, candidateError);
+                },
+                [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+                    return assets.resolveTexture(path, bytes, candidateError);
+                },
+                worldspace, importer::fnv::LandLodSet::SkyrimObjects, kTileCells,
+                firstX, firstZ, lastX, lastZ, 0.0f, candidate, candidateStats,
+                candidateError)) {
+            scene = std::move(candidate);
+            scene.sourceTag = "skyrim_object_lod:" + worldspace;
+            stats = candidateStats;
+            built = true;
+            if (m_skyrimObjectLodWorldspace != worldspace) {
+                VOX_LOGI("newvegas") << "Skyrim object LOD for "
+                                     << m_streamWorldspace << " resolved from "
+                                     << worldspace;
+                m_skyrimObjectLodWorldspace = worldspace;
+            }
+            break;
+        }
+        if (!attempts.empty()) attempts += "; ";
+        attempts += worldspace + ": " + candidateError;
+    }
+    if (!built) error = attempts;
 
     std::size_t replacement = render::Renderer::kInvalidImportedChunkIndex;
     if (built) {
@@ -6800,18 +7598,33 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                     const float minZ = static_cast<float>(tz) * cellSize;
                     const float maxZ = static_cast<float>(tz + kTileCells) * cellSize;
                     if (fixedCaptureLod) {
-                        bool detailedTileResident = true;
-                        for (std::int32_t cz = tz; cz < tz + kTileCells && detailedTileResident;
-                             ++cz) {
-                            for (std::int32_t cx = tx; cx < tx + kTileCells; ++cx) {
-                                if (!m_capturePinnedCells.contains(importer::CellCoord{cx, cz})) {
-                                    detailedTileResident = false;
-                                    break;
+                        // Whiterun is a child worldspace whose visible 3x3
+                        // detail ring occupies only part of Tamriel's 4x4 BTO
+                        // tile. Requiring all sixteen parent cells to be pinned
+                        // therefore retained the LargeRef city proxy directly
+                        // over the resident gate—the blurry "door" in the
+                        // reference view. The fixed camera has already proved
+                        // its complete visible ring resident, so its containing
+                        // parent tile yields as one authored LOD unit.
+                        if (m_whiterunReferenceShowcase) {
+                            if (tx != tileX || tz != tileZ) {
+                                continue;
+                            }
+                        } else {
+                            bool detailedTileResident = true;
+                            for (std::int32_t cz = tz;
+                                 cz < tz + kTileCells && detailedTileResident; ++cz) {
+                                for (std::int32_t cx = tx; cx < tx + kTileCells; ++cx) {
+                                    if (!m_capturePinnedCells.contains(
+                                            importer::CellCoord{cx, cz})) {
+                                        detailedTileResident = false;
+                                        break;
+                                    }
                                 }
                             }
-                        }
-                        if (!detailedTileResident) {
-                            continue;
+                            if (!detailedTileResident) {
+                                continue;
+                            }
                         }
                     } else {
                         const float dx = distanceToInterval(bethesdaPosition[0], minX, maxX);
@@ -6820,29 +7633,88 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                             continue;
                         }
                     }
-                    // A walled Skyrim city is a child worldspace whose full
-                    // geometry is absent from Tamriel. Its parent-world BTO
-                    // proxy is not only LargeRef: generated ordinary Obj
-                    // groups contain smaller roofs and houses too. Removing
-                    // those groups at the normal near-tile handoff produced a
-                    // complete wall around a visibly incomplete Whiterun.
-                    // Keep the whole BTO tile wherever a direct child
-                    // worldspace occupies its grid; ordinary Tamriel tiles
-                    // still hand off to their detailed streamed statics.
-                    if (m_streamer->hasChildWorldspaceCellInRange(
-                            tx, tz, tx + kTileCells - 1, tz + kTileCells - 1)) {
-                        continue;
-                    }
                     const std::string meshNamePrefix =
                         "lod" + std::to_string(kTileCells) + "_" + std::to_string(tx) + "_" +
                         std::to_string(tz);
+                    const bool childCityTile = m_whiterunReferenceShowcase ||
+                        m_streamer->hasChildWorldspaceCellInRange(
+                            tx, tz, tx + kTileCells - 1, tz + kTileCells - 1);
                     for (std::size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex) {
-                        const std::string& meshName = scene.meshes[meshIndex].name;
+                        importer::ImportedSceneMesh& mesh = scene.meshes[meshIndex];
+                        const std::string& meshName = mesh.name;
                         const bool belongsToTile =
                             meshName == meshNamePrefix ||
                             meshName.starts_with(meshNamePrefix + "_");
+                        if (!belongsToTile) {
+                            continue;
+                        }
+                        if (childCityTile) {
+                            // The fixed reference prewarms every detailed cell
+                            // that can contribute to its view. Its containing
+                            // parent tile can therefore yield completely; this
+                            // also avoids retaining a coarse gate leaf whose
+                            // triangles straddle a detailed-cell boundary.
+                            if (m_whiterunReferenceShowcase) {
+                                nearMeshIndices.push_back(meshIndex);
+                                continue;
+                            }
+                            // A parent BTO may merge the whole walled city into
+                            // one mesh, so dropping the mesh creates holes when
+                            // only part of the child is resident. Clip at the
+                            // triangle centroid instead: detailed child cells
+                            // replace their exact footprint while the proxy
+                            // remains everywhere else.
+                            std::vector<std::uint32_t> keptIndices;
+                            std::vector<importer::ImportedSceneMeshPart> keptParts;
+                            keptIndices.reserve(mesh.indices.size());
+                            keptParts.reserve(mesh.parts.size());
+                            for (const importer::ImportedSceneMeshPart& sourcePart : mesh.parts) {
+                                importer::ImportedSceneMeshPart part = sourcePart;
+                                part.firstIndex = static_cast<std::uint32_t>(keptIndices.size());
+                                const std::size_t begin = sourcePart.firstIndex;
+                                const std::size_t end = std::min(
+                                    begin + static_cast<std::size_t>(sourcePart.indexCount),
+                                    mesh.indices.size());
+                                for (std::size_t i = begin; i + 2u < end; i += 3u) {
+                                    const std::uint32_t ia = mesh.indices[i];
+                                    const std::uint32_t ib = mesh.indices[i + 1u];
+                                    const std::uint32_t ic = mesh.indices[i + 2u];
+                                    if (ia >= mesh.vertices.size() || ib >= mesh.vertices.size() ||
+                                        ic >= mesh.vertices.size()) {
+                                        continue;
+                                    }
+                                    const float centreX =
+                                        (mesh.vertices[ia].position[0] +
+                                         mesh.vertices[ib].position[0] +
+                                         mesh.vertices[ic].position[0]) / 3.0f;
+                                    const float centreEngineZ =
+                                        (mesh.vertices[ia].position[2] +
+                                         mesh.vertices[ib].position[2] +
+                                         mesh.vertices[ic].position[2]) / 3.0f;
+                                    const std::int32_t cellX = static_cast<std::int32_t>(
+                                        std::floor(centreX / cellSize));
+                                    const std::int32_t cellZ = static_cast<std::int32_t>(
+                                        std::floor(-centreEngineZ / cellSize));
+                                    if (m_streamer->isExteriorCellResident(
+                                            m_streamer->currentWorldspaceFormId(), cellX, cellZ)) {
+                                        continue;
+                                    }
+                                    keptIndices.push_back(ia);
+                                    keptIndices.push_back(ib);
+                                    keptIndices.push_back(ic);
+                                }
+                                part.indexCount = static_cast<std::uint32_t>(keptIndices.size()) -
+                                    part.firstIndex;
+                                if (part.indexCount != 0u) {
+                                    keptParts.push_back(part);
+                                }
+                            }
+                            mesh.indices = std::move(keptIndices);
+                            mesh.parts = std::move(keptParts);
+                            continue;
+                        }
                         const bool largeReference = meshName.ends_with("_largeref");
-                        if (belongsToTile && !largeReference) {
+                        if (!largeReference) {
                             nearMeshIndices.push_back(meshIndex);
                         }
                     }
@@ -6862,6 +7734,12 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                            nearMeshIndices.end();
                 }),
             scene.instances.end());
+        if (m_whiterunReferenceShowcase) {
+            VOX_LOGI("showcase")
+                << "Whiterun reference object-LOD handoff removed "
+                << nearMeshIndices.size()
+                << " parent BTO mesh(es) from the detailed gate tile";
+        }
         importer::buildImportedScenePackedRenderData(scene);
         importer::buildImportedScenePageRanges(scene);
         replacement = m_renderer.addImportedSceneChunk(scene);
@@ -6997,25 +7875,31 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
         return;
     }
 
-    // Velocity by differencing the camera rather than reading the movement
+    const odai::math::Vector3 residencyPosition = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
+    // Velocity by differencing the gameplay-residency origin rather than
+    // reading the movement code's own. In third person this is the player,
+    // never the displaced camera boom.
     // code's own: that one is zeroed by collision and jumping, which would make
     // the planner think a walking player had stopped.
     float velocity[3] = {0.0f, 0.0f, 0.0f};
     if (m_hasPreviousCameraPosition && deltaSeconds > 0.0f) {
-        velocity[0] = (m_cameraX - m_previousCameraX) / deltaSeconds;
-        velocity[1] = (m_cameraY - m_previousCameraY) / deltaSeconds;
-        velocity[2] = (m_cameraZ - m_previousCameraZ) / deltaSeconds;
+        velocity[0] = (residencyPosition.x - m_previousCameraX) / deltaSeconds;
+        velocity[1] = (residencyPosition.y - m_previousCameraY) / deltaSeconds;
+        velocity[2] = (residencyPosition.z - m_previousCameraZ) / deltaSeconds;
     }
-    m_previousCameraX = m_cameraX;
-    m_previousCameraY = m_cameraY;
-    m_previousCameraZ = m_cameraZ;
+    m_previousCameraX = residencyPosition.x;
+    m_previousCameraY = residencyPosition.y;
+    m_previousCameraZ = residencyPosition.z;
     m_hasPreviousCameraPosition = true;
 
     // The planner ranks cells in FALLOUT space; the camera moves in engine
     // space. Converting is not optional -- feeding engine coordinates straight
     // in makes the grid's second axis the player's altitude, so streaming
     // follows how high they are rather than where they are.
-    const float enginePosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    const float enginePosition[3] = {
+        residencyPosition.x, residencyPosition.y, residencyPosition.z};
     float falloutPosition[3] = {0.0f, 0.0f, 0.0f};
     float falloutVelocity[3] = {0.0f, 0.0f, 0.0f};
     importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
@@ -7112,11 +7996,18 @@ void BethesdaApp::onTick(float deltaSeconds) {
                         m_meleeAttackPending = false;
                     }
                 });
+        m_sessionInterpolationAlpha =
+            static_cast<float>(sessionStep.clock.interpolationAlpha);
+        if (m_skyrimCitySpawnSettlementPending) {
+            (void)settleSkyrimCityShowcasePlayer();
+        }
         if (m_bethesdaControllerOwnsCamera) pullBethesdaPlayerControllerState();
         pullBethesdaActorControllerStates();
-        if (sessionStep.residencyChanged && m_streamIsSkyrim) {
-            m_skyrimActorResidencyDirty = true;
-        }
+        // Runtime simulation-level changes do not alter the streamer's placed
+        // actor set. Marking the catalog dirty here caused a full retail actor
+        // rescan/rebuild after its own synchronization, creating a self-fed
+        // multi-second hitch loop. Stream cell callbacks above are the sole
+        // presentation-residency authority.
         (void)m_renderer.applyRuntimeRenderDeltas(sessionStep.renderDeltas);
         for (const std::string& diagnostic : sessionStep.diagnostics) {
             VOX_LOGW("runtime") << diagnostic;
@@ -7174,58 +8065,12 @@ void BethesdaApp::onTick(float deltaSeconds) {
         updateRegionDiscovery();
     }
 
-    // Uploaded from the frame loop, not onInit: an init-time GPU upload lands
-    // as zeros (see chunk_upload.cc's add-time note) and draws nothing at all.
-    //
-    // Textures first, because their bindless slots have to be written into the
-    // vertices before the template carrying those vertices goes to the GPU --
-    // a skinned template is uploaded verbatim, with none of the index remapping
-    // a scene chunk gets.
-    // ONE upload path for every actor, Victor included. He had his own copy of
-    // this block until the town arrived, and the two had already drifted apart
-    // (his remapped texture slots through a helper, the crowd's inline).
-    if (m_actorsUploadPending) {
-        // One GPU realization per frame is deliberate. Each actor can own
-        // several decoded textures and three device-local mesh buffers. Doing
-        // a 40-person cell in one tick prevented the loop from returning to
-        // glfwPollEvents, so movement and even the window close button appeared
-        // dead until the entire crowd had uploaded.
-        bool submittedActor = false;
-        while (m_nextActorUploadIndex < m_actors.size() && !submittedActor) {
-            SkinnedActor& actor = m_actors[m_nextActorUploadIndex++];
-            // TES3 keeps activation proxies even when an optional creature or
-            // modded body mesh cannot be assembled. Those proxies must not
-            // upload an empty template into renderer slot zero.
-            if (actor.character.vertices.empty() || actor.draws.empty() ||
-                actor.instanceSlot == 0u) {
-                continue;
-            }
-            submittedActor = true;
-            const std::vector<std::uint32_t> slots =
-                m_renderer.uploadSkinnedActorTextures(actor.instanceSlot, actor.textures);
-            remapActorTextureSlots(actor, slots);
-            for (const std::uint32_t slot : slots) {
-                m_actorUploadedTextureCount += (slot != 0xffffffffu) ? 1u : 0u;
-            }
-            m_actorTotalTextureCount += slots.size();
+    // Normal traversal realizes one actor per visible frame so a newly entered
+    // 40-person cell cannot starve event polling. The Whiterun cold-start path
+    // calls the same helper with an unlimited budget before the frame loop.
+    realizePendingActorUploads(1u);
 
-            render::ImportedSkinnedMeshTemplate meshTemplate{};
-            meshTemplate.vertices = actor.character.vertices;
-            meshTemplate.indices = actor.character.indices;
-            meshTemplate.draws = actor.draws;
-            meshTemplate.boneCount =
-                static_cast<std::uint32_t>(actor.character.skeleton.bones.size());
-            actor.uploaded = m_renderer.uploadSkinnedMeshTemplate(actor.instanceSlot, meshTemplate);
-            m_actorUploadSuccessCount += actor.uploaded ? 1u : 0u;
-        }
-        if (m_nextActorUploadIndex >= m_actors.size()) {
-            m_actorsUploadPending = false;
-            VOX_LOGI("newvegas")
-                << "actors uploaded: " << m_actorUploadSuccessCount << "/"
-                << m_actors.size() << ", " << m_actorUploadedTextureCount << "/"
-                << m_actorTotalTextureCount << " textures bound";
-        }
-    }
+    updateSkyrimPlayerAvatar(deltaSeconds);
 
     // Pose every actor every frame, whether or not it is being talked to -- the
     // idle clip is what makes an actor read as someone standing there rather
@@ -7453,12 +8298,14 @@ void BethesdaApp::onTick(float deltaSeconds) {
 
     updateDoorTransition(deltaSeconds);
     if (!m_tes3JournalOpen && m_doorTransitionPhase == DoorTransitionPhase::None) {
-        updateCamera(deltaSeconds);
+        if (!m_whiterunReferenceShowcase) {
+            updateCamera(deltaSeconds);
+        }
         updateStreaming(deltaSeconds);
     }
     updateSkyrimAmbience(deltaSeconds);
     m_stateSaveSeconds += deltaSeconds;
-    if (m_stateSaveSeconds >= 5.0f) {
+    if (!m_whiterunReferenceShowcase && m_stateSaveSeconds >= 5.0f) {
         m_stateSaveSeconds = 0.0f;
         saveTraversalState(false);
     }
@@ -7494,7 +8341,11 @@ void BethesdaApp::onTick(float deltaSeconds) {
     // happens to run first. An actor wins over a door at equal reach: Victor
     // stands a step from Doc Mitchell's porch, and a player pressing E while
     // facing him means to talk, not to go inside.
-    const float cameraPosition[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    const odai::math::Vector3 activationOrigin = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
+    const float cameraPosition[3] = {
+        activationOrigin.x, activationOrigin.y, activationOrigin.z};
     m_activationLootActor = (m_talkingActor >= 0 || m_tes3JournalOpen)
         ? -1 : findLootableActorInReach();
     m_activationActor = -1;
@@ -7899,7 +8750,11 @@ void BethesdaApp::updateRegionDiscovery() {
     if (!m_streamer) {
         return;
     }
-    const float position[3] = {m_cameraX, m_cameraY, m_cameraZ};
+    const odai::math::Vector3 discoveryOrigin = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
+    const float position[3] = {
+        discoveryOrigin.x, discoveryOrigin.y, discoveryOrigin.z};
     // ODAI_FNV_LOG_REGION=1 traces the cell and region under the camera every
     // poll. "No banner fired" and "the walk never left the region" look the
     // same from the outside, and a traversal test has to tell them apart.
@@ -7943,8 +8798,8 @@ void BethesdaApp::updateRegionDiscovery() {
             continue;
         }
         const float markerEngine[3] = {marker.position[0], marker.position[2], -marker.position[1]};
-        const float dx = markerEngine[0] - m_cameraX;
-        const float dz = markerEngine[2] - m_cameraZ;
+        const float dx = markerEngine[0] - discoveryOrigin.x;
+        const float dz = markerEngine[2] - discoveryOrigin.z;
         if ((dx * dx) + (dz * dz) > kMarkerDiscoveryRadiusSquared) {
             continue;
         }
@@ -7965,11 +8820,15 @@ void BethesdaApp::saveTraversalState(bool force) {
         m_doorTransitionPhase != DoorTransitionPhase::None) {
         return;
     }
+    const odai::math::Vector3 savedEye = thirdPersonPlayerShowcase()
+        ? bethesdaPlayerEyePosition()
+        : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
     if (!force) {
         float ground = 0.0f;
         if (!m_collision.groundHeight(
-                m_cameraX, m_cameraZ, m_cameraY - m_collision.tuning().eyeHeight, ground) ||
-            std::abs((m_cameraY - m_collision.tuning().eyeHeight) - ground) > 24.0f) {
+                savedEye.x, savedEye.z,
+                savedEye.y - m_collision.tuning().eyeHeight, ground) ||
+            std::abs((savedEye.y - m_collision.tuning().eyeHeight) - ground) > 24.0f) {
             return;
         }
     }
@@ -7977,9 +8836,9 @@ void BethesdaApp::saveTraversalState(bool force) {
     state.interior = m_interiorStarted;
     state.worldspaceEditorId = m_streamer->currentWorldspaceEditorId();
     state.interiorEditorId = m_currentInteriorEditorId;
-    state.position[0] = m_cameraX;
-    state.position[1] = m_cameraY;
-    state.position[2] = m_cameraZ;
+    state.position[0] = savedEye.x;
+    state.position[1] = savedEye.y;
+    state.position[2] = savedEye.z;
     state.yawDegrees = m_yawDegrees;
     state.pitchDegrees = m_pitchDegrees;
     state.timeOfDayHours = m_timeOfDayHours;
@@ -7996,10 +8855,27 @@ void BethesdaApp::saveTraversalState(bool force) {
 }
 
 void BethesdaApp::onShutdown() {
-    if (m_bethesdaSessionConfigured && !m_gameplaySavePath.empty()) {
+    if (std::getenv("ODAI_FNV_ACTORS_LIST") != nullptr) {
+        for (const SkinnedActor& actor : m_actors) {
+            const float dx = actor.position[0] - actor.wanderOrigin[0];
+            const float dy = actor.position[1] - actor.wanderOrigin[1];
+            const float dz = actor.position[2] - actor.wanderOrigin[2];
+            VOX_LOGI("newvegas")
+                << "  actor final " << actor.name << " at ("
+                << actor.position[0] << ", " << actor.position[1] << ", "
+                << actor.position[2] << ") moved="
+                << std::sqrt((dx * dx) + (dy * dy) + (dz * dz))
+                << " walking=" << (actor.walking ? "yes" : "no")
+                << " nav=" << (actor.projectedToNavigation ? "projected" : "fallback");
+        }
+    }
+    if (!m_whiterunReferenceShowcase &&
+        m_bethesdaSessionConfigured && !m_gameplaySavePath.empty()) {
         (void)saveGameplayState();
     }
-    saveTraversalState(true);
+    if (!m_whiterunReferenceShowcase) {
+        saveTraversalState(true);
+    }
     clearSkyrimAmbience();
     if (m_streamer) {
         m_streamer->waitIdle();
@@ -8058,6 +8934,20 @@ void BethesdaApp::cacheBethesdaCollisionCell(
         object.enabled = instance.initiallyVisible && definition->second.enabled;
         object.transform.position = {
             instance.transform[3], instance.transform[7], instance.transform[11]};
+        object.originSpace.cell = definition->second.cell;
+        object.originSpace.kind = definition->second.interior
+            ? bethesda::RuntimeSpaceKind::Interior
+            : bethesda::RuntimeSpaceKind::Exterior;
+        if (!definition->second.interior) {
+            object.originSpace.worldspace =
+                bethesda::makeTes3RecordKey("WRLD", "vardenfell");
+            if (definition->second.hasCellGrid) {
+                object.originSpace.gridX = definition->second.cellGridX;
+                object.originSpace.gridZ = definition->second.cellGridZ;
+            }
+        }
+        object.currentSpace = object.originSpace;
+        object.interior = definition->second.interior;
         const float scaleX = std::sqrt(
             (instance.transform[0] * instance.transform[0]) +
             (instance.transform[4] * instance.transform[4]) +
@@ -8119,6 +9009,11 @@ void BethesdaApp::cacheBethesdaCollisionCell(
             }
         }
     }
+    if (m_streamIsMorrowind &&
+        m_bethesdaGameplayResidentCells.contains(cell)) {
+        upsertMorrowindGameplayCell(cell);
+        refreshBethesdaGameplayResidency();
+    }
     const auto appendTriangle = [&](const float* vertices, std::uint32_t sourceReferenceFormId) {
         if (mesh.vertices.size() >
             static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - 3u) return;
@@ -8162,6 +9057,7 @@ void BethesdaApp::removeBethesdaCollisionCell(const importer::CellCoord& cell) {
     if (m_bethesdaSessionConfigured) {
         (void)m_bethesdaSession.physics().removeStreamedStaticCollision(
             physicsResidencyToken(cell));
+        refreshBethesdaGameplayResidency();
     }
 }
 
@@ -8214,7 +9110,15 @@ void BethesdaApp::registerBethesdaCollisionCell(const importer::CellCoord& cell)
         // reaches residency. If this cell introduced a floor through the
         // capsule, repair it immediately; waiting for CharacterVirtual::Update
         // leaves contradictory contacts that reject every movement direction.
-        (void)recoverBethesdaPlayerControllerFromIntersectingFloor();
+        // City showcases have a stronger authored-arrival settlement below;
+        // applying this generic visual-triangle recovery afterwards can lift
+        // them off the Jolt floor selected by that settlement.
+        if (!skyrimCityThirdPersonShowcase()) {
+            (void)recoverBethesdaPlayerControllerFromIntersectingFloor();
+        }
+        if (m_skyrimCitySpawnSettlementPending && cell == m_skyrimCitySpawnCell) {
+            (void)settleSkyrimCityShowcasePlayer();
+        }
     }
 }
 
@@ -8231,7 +9135,103 @@ void BethesdaApp::registerCachedBethesdaCollision() {
     });
     for (const importer::CellCoord& cell : cells) {
         registerBethesdaCollisionCell(cell);
+        if (m_streamIsMorrowind &&
+            m_bethesdaGameplayResidentCells.contains(cell)) {
+            upsertMorrowindGameplayCell(cell);
+        }
     }
+    refreshBethesdaGameplayResidency();
+}
+
+void BethesdaApp::upsertMorrowindGameplayCell(
+    const importer::CellCoord& cell) {
+    if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
+        m_bethesdaSession.tes3().content() == nullptr) return;
+
+    std::string fingerprint = m_loadOrderFingerprint;
+    if (fingerprint.empty() && m_contentProfile.has_value()) {
+        fingerprint = m_contentProfile->fingerprint;
+    }
+    if (fingerprint.empty()) {
+        fingerprint = "unfingerprinted:" + toLowerAscii(m_streamPlugin);
+    }
+
+    bethesda::GameplayCellPayload payload;
+    std::string error;
+    std::filesystem::path sidecar;
+    bool loaded = false;
+    if (m_streamCacheEnabled && !m_streamCacheDirectory.empty()) {
+        sidecar = std::filesystem::path(m_streamCacheDirectory) / "gameplay" /
+            ("tes3_" + std::to_string(cell.x) + "_" +
+             std::to_string(cell.z) + ".json");
+        loaded = bethesda::loadGameplayCellPayload(
+            sidecar, fingerprint, payload, error);
+    }
+    if (!loaded) {
+        if (!bethesda::compileTes3GameplayExteriorCell(
+                *m_bethesdaSession.tes3().content(), cell.x, cell.z,
+                fingerprint, payload, error)) {
+            VOX_LOGW("tes3") << "gameplay sidecar skipped for " << cell.x << ","
+                               << cell.z << ": " << error;
+            return;
+        }
+        if (!sidecar.empty()) {
+            std::string cacheError;
+            if (!bethesda::saveGameplayCellPayloadAtomic(
+                    sidecar, payload, cacheError)) {
+                VOX_LOGW("tes3") << "could not cache gameplay sidecar "
+                                   << sidecar.string() << ": " << cacheError;
+            }
+        }
+    }
+    // Some valid anchors (beds, benches, counters, signs) are rendering-only
+    // STAT references and are intentionally excluded from the heavyweight
+    // activation catalog. Materialize only the sidecar-selected anchors as
+    // lightweight runtime targets so navigation and offscreen reconciliation
+    // address the real placed reference instead of inventing city markers.
+    for (const bethesda::ActivityAnchor& anchor : payload.anchors) {
+        if (m_bethesdaSession.world().find(anchor.object) != nullptr) continue;
+        const auto definition = m_bethesdaSession.tes3().content()->references().find(
+            anchor.object);
+        if (definition == m_bethesdaSession.tes3().content()->references().end()) continue;
+        bethesda::RuntimeObject target;
+        target.id = anchor.object;
+        target.base = definition->second.base;
+        target.kind = bethesda::RuntimeObjectKind::Activator;
+        target.transform.position = anchor.position;
+        target.transform.scale = definition->second.scale.value_or(1.0f);
+        target.originSpace = anchor.space;
+        target.currentSpace = anchor.space;
+        target.enabled = definition->second.enabled && !definition->second.deleted;
+        target.persistent = true;
+        target.ghost = true;
+        target.interior = anchor.space.kind == bethesda::RuntimeSpaceKind::Interior;
+        std::string targetError;
+        if (!m_bethesdaSession.world().addInitialObject(
+                std::move(target), targetError)) {
+            VOX_LOGW("tes3") << "could not materialize gameplay anchor "
+                               << anchor.object.toString() << ": " << targetError;
+        }
+    }
+    if (!m_bethesdaSession.upsertGameplayCell(std::move(payload), error)) {
+        VOX_LOGW("tes3") << "could not install gameplay sidecar for "
+                           << cell.x << "," << cell.z << ": " << error;
+    }
+}
+
+void BethesdaApp::refreshBethesdaGameplayResidency() {
+    if (!m_bethesdaSessionConfigured) return;
+    std::vector<bethesda::RuntimeSpaceState> spaces;
+    spaces.reserve(m_bethesdaGameplayResidentCells.size());
+    for (const bethesda::GameplayCellPayload& payload :
+         m_bethesdaSession.livingWorld().cells()) {
+        if (payload.space.kind != bethesda::RuntimeSpaceKind::Exterior) continue;
+        const importer::CellCoord cell{payload.space.gridX, payload.space.gridZ};
+        if (m_bethesdaGameplayResidentCells.contains(cell)) {
+            spaces.push_back(payload.space);
+        }
+    }
+    m_bethesdaSession.setGameplayResidentSpaces(std::move(spaces));
 }
 
 bool BethesdaApp::loadScenarioQuestDefinitions(const bethesda::ScenarioDefinition& scenario) {
@@ -8323,6 +9323,15 @@ bool BethesdaApp::initBethesdaSession() {
             return false;
         }
         m_bethesdaSessionConfigured = true;
+        if (m_balmoraSkyrimPlayerShowcase && m_gameplaySavePath.empty()) {
+            if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
+                m_gameplaySavePath = std::filesystem::path(xdg) /
+                    "odai/saves/balmora-skyrim-player.odai.json";
+            } else if (const char* home = std::getenv("HOME")) {
+                m_gameplaySavePath = std::filesystem::path(home) /
+                    ".local/share/odai/saves/balmora-skyrim-player.odai.json";
+            }
+        }
         const bethesda::Tes3ScriptCheckReport& report =
             m_bethesdaSession.tes3().scriptCheckReport();
         VOX_LOGI("tes3") << "runtime active: " << content->dialogues().size()
@@ -8495,7 +9504,9 @@ bool BethesdaApp::initBethesdaSession() {
                     return false;
                 }
             }
-            if (nextSlot >= render::kMaxSkinnedInstances) break;
+            const std::uint32_t actorSlotLimit = thirdPersonPlayerShowcase()
+                ? kPlayerAvatarSkinnedInstance : render::kMaxSkinnedInstances;
+            if (nextSlot >= actorSlotLimit) break;
             const bethesda::Tes3ActorDefinition* definition =
                 content->findActor("NPC_", actor.name);
             if (definition == nullptr) definition = content->findActor("CREA", actor.name);
@@ -8745,6 +9756,8 @@ bool BethesdaApp::initBethesdaSession() {
                               << actor.character.vertices.size() << " parts="
                               << actor.character.parts.size();
         }
+        if (!m_balmoraSkyrimPlayerShowcase &&
+            !addSkyrimGuardsToBalmora(nextSlot)) return false;
         arrangeActorParadeIfRequested();
         queueActorUploads();
         VOX_LOGI("tes3") << "bound " << m_actors.size()
@@ -8758,6 +9771,9 @@ bool BethesdaApp::initBethesdaSession() {
                                   : std::sqrt(nearestActorDistanceSquared));
         registerCachedBethesdaCollision();
         if (!registerBethesdaPlayerController()) return false;
+        if (thirdPersonPlayerShowcase() && !initSkyrimPlayerAvatar()) return false;
+        if (thirdPersonPlayerShowcase() && !m_gameplayLoadPath.empty() &&
+            !loadGameplayState()) return false;
         return true;
     }
     const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
@@ -8820,9 +9836,136 @@ bool BethesdaApp::initBethesdaSession() {
         return false;
     }
     if (!registerBethesdaPlayerController()) return false;
-    VOX_LOGI("scenario") << scenario->id
-                         << " active; MQ101 post-Helgen bootstrap plus authored MQ102:10; "
-                            "F5 saves, F9 loads";
+    if (thirdPersonPlayerShowcase() && !initSkyrimPlayerAvatar()) return false;
+    VOX_LOGI("scenario") << scenario->id << " active; F5 saves, F9 loads";
+    return true;
+}
+
+bool BethesdaApp::addSkyrimGuardsToBalmora(std::uint32_t firstInstanceSlot) {
+    if (!m_streamIsMorrowind || m_interiorStarted) return true;
+    // Keep the deliberately cross-game population scoped to Balmora rather
+    // than silently adding Skyrim guards to every Vvardenfell/TR exterior.
+    constexpr float kBalmoraCentreX = -20000.0f;
+    constexpr float kBalmoraCentreZ = 14000.0f;
+    constexpr float kBalmoraShowcaseRadius = 7000.0f;
+    const float balmoraDx = m_cameraX - kBalmoraCentreX;
+    const float balmoraDz = m_cameraZ - kBalmoraCentreZ;
+    if ((balmoraDx * balmoraDx) + (balmoraDz * balmoraDz) >
+        kBalmoraShowcaseRadius * kBalmoraShowcaseRadius) {
+        return true;
+    }
+
+    std::vector<std::filesystem::path> candidates;
+    if (const char* configured = std::getenv("ODAI_SKYRIM_DATA")) {
+        candidates.emplace_back(configured);
+    }
+    if (const char* home = std::getenv("HOME")) {
+        const std::filesystem::path homePath(home);
+        candidates.push_back(homePath /
+            ".local/share/Steam/steamapps/common/Skyrim Special Edition/Data");
+        candidates.push_back(homePath /
+            ".steam/steam/steamapps/common/Skyrim Special Edition/Data");
+    }
+    const auto available = std::find_if(candidates.begin(), candidates.end(),
+        [](const std::filesystem::path& candidate) {
+            return std::filesystem::is_regular_file(candidate / "Skyrim.esm");
+        });
+    if (available == candidates.end()) {
+        VOX_LOGW("tes3")
+            << "Balmora Skyrim guards skipped: set ODAI_SKYRIM_DATA to a Skyrim SE Data directory";
+        return true;
+    }
+
+    // These are the authored approaches to Balmora's two low canal bridges,
+    // derived from the bridge/canal kit references in exterior cell (-3,-2).
+    // Fixed city anchors keep a camera launched inside a wall or over the water
+    // from dragging the whole showcase there. Each point sits just beyond a
+    // bridge end; navmesh projection below performs the final height settle.
+    constexpr std::array<std::array<float, 3>, 4> kGuardAnchors{{
+        {{-19920.0f, 300.0f, 12960.0f}},
+        {{-18672.0f, 300.0f, 12960.0f}},
+        {{-19920.0f, 300.0f, 14896.0f}},
+        {{-18672.0f, 300.0f, 14896.0f}},
+    }};
+    constexpr std::size_t kGuardCount = kGuardAnchors.size();
+    const float centre[3] = {
+        kBalmoraCentreX, kGuardAnchors.front()[1], kBalmoraCentreZ};
+    std::vector<SkinnedActor> guards;
+    std::string detail;
+    if (!loadSkyrimGuardShowcase(
+            *available, centre, firstInstanceSlot, kGuardCount, guards, detail)) {
+        VOX_LOGW("tes3") << "Balmora Skyrim guards skipped: " << detail;
+        return true;
+    }
+
+    std::size_t added = 0u;
+    for (std::size_t guardIndex = 0u; guardIndex < guards.size(); ++guardIndex) {
+        SkinnedActor& guard = guards[guardIndex];
+        const auto& anchor = kGuardAnchors[guardIndex % kGuardAnchors.size()];
+        std::copy(anchor.begin(), anchor.end(), guard.position);
+        // Face inward across the bridge until the navmesh planner supplies the
+        // first walking target. actorYawForDirection uses asset-forward -Z.
+        guard.yawRadians = actorYawForDirection(
+            guardIndex % 2u == 0u ? 1.0f : -1.0f, 0.0f);
+        odai::math::Vector3 projected;
+        if (m_actorNavigation.projectPoint(
+                guard.position[0], guard.position[1], guard.position[2],
+                320.0f, 500.0f, projected)) {
+            guard.position[0] = projected.x;
+            guard.position[1] = projected.y;
+            guard.position[2] = projected.z;
+            guard.projectedToNavigation = true;
+        } else {
+            float ground = guard.position[1];
+            if (m_collision.groundHeight(
+                    guard.position[0], guard.position[2], guard.position[1], ground)) {
+                guard.position[1] = ground;
+            }
+        }
+        std::copy_n(guard.position, 3u, guard.wanderOrigin);
+        std::copy_n(guard.position, 3u, guard.wanderTarget);
+
+        bethesda::RuntimeObject* existing =
+            m_bethesdaSession.world().find(guard.runtimeObjectId);
+        if (existing == nullptr) {
+            bethesda::RuntimeObject object;
+            object.id = guard.runtimeObjectId;
+            object.base = bethesda::makeRecordKey(
+                "Skyrim.esm", guard.baseFormId & 0x00ffffffu);
+            object.kind = bethesda::RuntimeObjectKind::Actor;
+            object.transform.position = {
+                guard.position[0], guard.position[1], guard.position[2]};
+            object.transform.rotationRadians[1] = guard.yawRadians;
+            object.enabled = true;
+            object.persistent = true;
+            object.actorValues.emplace();
+            object.aiState = runtimeAiStateFor(guard, m_streamLoadOrder);
+            const float enginePosition[3] = {
+                guard.position[0], guard.position[1], guard.position[2]};
+            bethesda::RuntimeSpaceState space;
+            if (runtimeSpaceForPosition(enginePosition, space)) {
+                object.originSpace = space;
+                object.currentSpace = std::move(space);
+            }
+            std::string error;
+            if (!m_bethesdaSession.world().addInitialObject(
+                    std::move(object), error)) {
+                VOX_LOGW("tes3") << "could not register " << guard.displayName()
+                                  << " in Balmora: " << error;
+                continue;
+            }
+        } else {
+            guard.position[0] = static_cast<float>(existing->transform.position[0]);
+            guard.position[1] = static_cast<float>(existing->transform.position[1]);
+            guard.position[2] = static_cast<float>(existing->transform.position[2]);
+            std::copy_n(guard.position, 3u, guard.wanderOrigin);
+            std::copy_n(guard.position, 3u, guard.wanderTarget);
+        }
+        m_actors.push_back(std::move(guard));
+        ++added;
+    }
+    VOX_LOGI("tes3") << "Balmora cross-game guard showcase: " << added
+                      << " registered; " << detail;
     return true;
 }
 
@@ -8846,8 +9989,168 @@ bool BethesdaApp::registerBethesdaPlayerController() {
     }
     m_bethesdaPlayerControllerRegistered = true;
     m_bethesdaControllerOwnsCamera = m_walkMode;
-    (void)recoverBethesdaPlayerControllerFromIntersectingFloor();
+    if (m_skyrimCitySpawnSettlementPending) {
+        (void)settleSkyrimCityShowcasePlayer();
+    }
+    if (!skyrimCityThirdPersonShowcase()) {
+        (void)recoverBethesdaPlayerControllerFromIntersectingFloor();
+    }
     if (m_bethesdaControllerOwnsCamera) pullBethesdaPlayerControllerState();
+    return true;
+}
+
+bool BethesdaApp::settleSkyrimCityShowcasePlayer() {
+    if (!m_skyrimCitySpawnSettlementPending ||
+        !m_bethesdaPlayerControllerRegistered || !m_bethesdaSessionConfigured) {
+        return !m_skyrimCitySpawnSettlementPending;
+    }
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const auto physical = m_bethesdaSession.physics().characterState(playerId);
+    if (!physical.has_value()) return false;
+
+    odai::math::Vector3 feet = m_skyrimCityAuthoredSpawnFeet;
+    const bool gateCollisionResident =
+        m_bethesdaCollisionByCell.contains(m_skyrimCitySpawnCell);
+    // The gate cell can arrive before the rest of the startup ring. Wait for
+    // the complete collision/navigation batch so a projection cannot choose a
+    // point whose adjacent wall has not been registered yet.
+    if (!gateCollisionResident || !m_streamer || !m_streamer->isStreamingIdle()) {
+        return false;
+    }
+    const bethesda::PhysicsCharacterConfig capsule;
+    const float capsuleRadius = std::max(
+        capsule.boundsHalfExtents.x, capsule.boundsHalfExtents.z);
+    // Imported Havok vertices and NAVM/visual collision are quantized through
+    // different retail encodings. Leave a two-unit numerical margin around the
+    // controller's authored step while still rejecting the gate threshold's
+    // much larger overlapping-floor discrepancies.
+    constexpr float kGroundAgreementSlack = 2.0f;
+    constexpr float kMinimumWalkableGroundNormalY = 0.64f;
+    const auto tryCandidate = [&](const odai::math::Vector3& requested,
+                                  float navigationRadius,
+                                  odai::math::Vector3& outFeet) {
+        odai::math::Vector3 candidate;
+        if (!m_actorNavigation.projectPoint(
+                requested.x, requested.y, requested.z,
+                navigationRadius, 512.0f, candidate)) return false;
+
+        const auto groundCandidate = [&](odai::math::Vector3& point) {
+            // NAVM supplies a legal horizontal location, not an exact rendered
+            // floor height. Require the imported visual collision and Jolt's
+            // supporting static body to agree within one authored step; this
+            // prevents choosing a gate ledge whose physics floor is underneath
+            // the visible street.
+            float visualGround = point.y;
+            if (!m_collision.groundHeight(
+                    point.x, point.z, point.y, visualGround)) return false;
+            const float castOriginY = visualGround + capsule.stepHeight +
+                kGroundAgreementSlack + 4.0f;
+            const auto physicsGround = m_bethesdaSession.physics().castDown(
+                {point.x, castOriginY, point.z}, 1024.0f);
+            if (!physicsGround.has_value() ||
+                std::fabs(physicsGround->normal.y) < kMinimumWalkableGroundNormalY ||
+                std::fabs(physicsGround->position.y - visualGround) >
+                    capsule.stepHeight + kGroundAgreementSlack) {
+                return false;
+            }
+            point.y = physicsGround->position.y + 0.1f;
+            return true;
+        };
+        if (!groundCandidate(candidate)) return false;
+
+        const float beforeX = candidate.x;
+        const float beforeZ = candidate.z;
+        m_collision.resolveHorizontalFor(
+            candidate.x, candidate.z, candidate.y,
+            candidate.y + capsule.boundsHalfExtents.y * 2.0f,
+            capsuleRadius, capsule.stepHeight);
+        if ((candidate.x != beforeX || candidate.z != beforeZ) &&
+            !groundCandidate(candidate)) return false;
+
+        // Settlement is also the first-frame camera contract. Reject a floor
+        // beside a gate wall when the same collision-aware boom sweep used by
+        // the visible loop cannot retain most of the showcase framing.
+        constexpr float kPivotHeight = 105.0f;
+        constexpr float kCameraRadius = 12.0f;
+        const float yaw = m_yawDegrees * (kPi / 180.0f);
+        const float pitch = m_pitchDegrees * (kPi / 180.0f);
+        const float horizontal = std::cos(pitch);
+        const odai::math::Vector3 forward{
+            std::cos(yaw) * horizontal, std::sin(pitch),
+            std::sin(yaw) * horizontal};
+        const odai::math::Vector3 pivot = candidate +
+            odai::math::Vector3{0.0f, kPivotHeight, 0.0f};
+        const odai::math::Vector3 requestedCamera =
+            pivot - forward * m_cameraBoomRequested;
+        if (const auto hit = m_bethesdaSession.physics().castSphere(
+                pivot, requestedCamera, kCameraRadius, playerId)) {
+            constexpr float kMinimumBoomFraction = 0.8f;
+            if (hit->distance - 2.0f <
+                m_cameraBoomRequested * kMinimumBoomFraction) return false;
+        }
+        outFeet = candidate;
+        if (candidate.x != beforeX || candidate.z != beforeZ) {
+            VOX_LOGI("showcase")
+                << "pushed authored city spawn clear of wall by ("
+                << (candidate.x - beforeX) << ", "
+                << (candidate.z - beforeZ) << ")";
+        }
+        return true;
+    };
+
+    bool grounded = tryCandidate(feet, 256.0f, feet);
+    if (!grounded) {
+        // A paired door can place the authored point on the gate threshold,
+        // where decorative ledges overlap the playable street. Search only the
+        // immediate entrance apron, prioritizing the XTEL facing direction,
+        // and keep the first nav/visual/Jolt-consistent capsule pose.
+        static constexpr std::array<float, 8> kDirectionOffsets{
+            0.0f, 45.0f, -45.0f, 90.0f, -90.0f, 135.0f, -135.0f, 180.0f};
+        // The first 256 units are the door/arch collision band. A point can
+        // have a valid floor there while the full capsule is still wedged
+        // against the gate jamb, so begin on the open inner apron.
+        for (float distance = 320.0f; distance <= 1024.0f && !grounded;
+             distance += 64.0f) {
+            for (const float offsetDegrees : kDirectionOffsets) {
+                const float angle = (m_yawDegrees + offsetDegrees) * (kPi / 180.0f);
+                odai::math::Vector3 requested = m_skyrimCityAuthoredSpawnFeet;
+                requested.x += std::cos(angle) * distance;
+                requested.z += std::sin(angle) * distance;
+                if (tryCandidate(requested, 48.0f, feet)) {
+                    grounded = true;
+                    VOX_LOGI("showcase")
+                        << "moved city arrival " << distance
+                        << " units onto a playable gate-apron surface";
+                    break;
+                }
+            }
+        }
+    }
+
+    // Until the asynchronous gate cell arrives, reset the controller to the
+    // resolved gate-apron feet pose every frame. It can no longer accumulate
+    // several seconds of gravity in an empty Jolt world and end up below the
+    // city.
+    bethesda::PhysicsCharacterSnapshot settled;
+    settled.object = playerId;
+    settled.position = feet;
+    settled.rotation = physical->rotation;
+    settled.velocity = {};
+    settled.groundNormal = {0.0f, 1.0f, 0.0f};
+    settled.grounded = grounded;
+    std::string error;
+    if (!m_bethesdaSession.physics().restoreCharacter(settled, error)) {
+        VOX_LOGW("showcase") << "could not hold Skyrim city gate spawn: " << error;
+        return false;
+    }
+    if (!grounded) return false;
+
+    m_skyrimCitySpawnSettlementPending = false;
+    m_skyrimCityAuthoredSpawnFeet = feet;
+    VOX_LOGI("showcase") << "Skyrim city player settled on gate navigation at feet ("
+                          << feet.x << ", " << feet.y << ", " << feet.z << ")";
+    syncBethesdaPlayerState(true);
+    reconstructPlayerCamera(1.0f / 60.0f, true);
     return true;
 }
 
@@ -8889,9 +10192,174 @@ void BethesdaApp::pullBethesdaPlayerControllerState() {
     const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
     const auto physical = m_bethesdaSession.physics().characterState(playerId);
     if (!physical.has_value()) return;
-    m_cameraX = physical->position.x;
-    m_cameraY = physical->position.y + kEyeHeightUnits;
-    m_cameraZ = physical->position.z;
+    if (thirdPersonPlayerShowcase()) {
+        reconstructPlayerCamera(1.0f / 60.0f);
+    } else {
+        m_cameraX = physical->position.x;
+        m_cameraY = physical->position.y + kEyeHeightUnits;
+        m_cameraZ = physical->position.z;
+    }
+}
+
+odai::math::Vector3 BethesdaApp::bethesdaPlayerFeetPosition() const {
+    if (m_bethesdaPlayerControllerRegistered && m_bethesdaSessionConfigured) {
+        const auto physical = m_bethesdaSession.physics().characterState(
+            m_bethesdaSession.playerObject());
+        if (physical.has_value()) return physical->position;
+    }
+    return {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+}
+
+odai::math::Vector3 BethesdaApp::bethesdaPlayerEyePosition() const {
+    return bethesdaPlayerFeetPosition() + odai::math::Vector3{0.0f, kEyeHeightUnits, 0.0f};
+}
+
+void BethesdaApp::reconstructPlayerCamera(float deltaSeconds, bool snapInward) {
+    if (!thirdPersonPlayerShowcase() || !m_bethesdaPlayerControllerRegistered) return;
+    const odai::math::Vector3 feet = bethesdaPlayerFeetPosition();
+    if (!m_thirdPersonView) {
+        const odai::math::Vector3 eye = feet +
+            odai::math::Vector3{0.0f, kEyeHeightUnits, 0.0f};
+        m_cameraX = eye.x;
+        m_cameraY = eye.y;
+        m_cameraZ = eye.z;
+        return;
+    }
+    constexpr float kPivotHeight = 105.0f;
+    constexpr float kCameraRadius = 12.0f;
+    const odai::math::Vector3 pivot = feet +
+        odai::math::Vector3{0.0f, kPivotHeight, 0.0f};
+    const float yaw = m_yawDegrees * (kPi / 180.0f);
+    const float pitch = m_pitchDegrees * (kPi / 180.0f);
+    const float horizontal = std::cos(pitch);
+    const odai::math::Vector3 forward{
+        std::cos(yaw) * horizontal, std::sin(pitch),
+        std::sin(yaw) * horizontal};
+    const odai::math::Vector3 requested = pivot - forward * m_cameraBoomRequested;
+    float unobstructedDistance = m_cameraBoomRequested;
+    if (const auto hit = m_bethesdaSession.physics().castSphere(
+            pivot, requested, kCameraRadius, m_bethesdaSession.playerObject())) {
+        unobstructedDistance = std::clamp(hit->distance - 2.0f, 0.0f,
+            m_cameraBoomRequested);
+    }
+    if (snapInward || unobstructedDistance < m_cameraBoomActual) {
+        m_cameraBoomActual = unobstructedDistance;
+    } else {
+        constexpr float kRecoveryTauSeconds = 0.20f;
+        const float blend = 1.0f - std::exp(
+            -std::max(deltaSeconds, 0.0f) / kRecoveryTauSeconds);
+        m_cameraBoomActual += (unobstructedDistance - m_cameraBoomActual) * blend;
+    }
+    const odai::math::Vector3 camera = pivot - forward * m_cameraBoomActual;
+    m_cameraX = camera.x;
+    m_cameraY = camera.y;
+    m_cameraZ = camera.z;
+}
+
+bool BethesdaApp::initSkyrimPlayerAvatar() {
+    SkinnedActor avatar;
+    std::string detail;
+    if (!loadSkyrimPlayerAvatar(
+            std::filesystem::path(m_skyrimAvatarDataDirectory),
+            m_skyrimPlayerOutfitEditorId, kPlayerAvatarSkinnedInstance,
+            avatar, detail)) {
+        VOX_LOGE("showcase") << detail;
+        return false;
+    }
+    const odai::math::Vector3 feet = bethesdaPlayerFeetPosition();
+    avatar.position[0] = feet.x;
+    avatar.position[1] = feet.y;
+    avatar.position[2] = feet.z;
+    avatar.yawRadians = m_playerYawRadians;
+    avatar.renderVisible = m_thirdPersonView;
+    m_skyrimPlayerEquippedSignature = 1469598103934665603ull;
+    for (const std::uint32_t item : avatar.inventoryFormIds) {
+        m_skyrimPlayerEquippedSignature ^= item;
+        m_skyrimPlayerEquippedSignature *= 1099511628211ull;
+    }
+    auto animationView = std::make_shared<anim::AnimationView>();
+    animationView->skeleton =
+        std::make_shared<const anim::Skeleton>(avatar.character.skeleton);
+    animationView->inverseBindMatrices = avatar.character.inverseBindMatrices;
+    animationView->clips = {avatar.idleClip, avatar.walkClip};
+    animationView->clips.insert(animationView->clips.end(),
+        avatar.authoredLocomotionClips.begin(),
+        avatar.authoredLocomotionClips.end());
+    animationView->stateClips = {
+        {"idle", avatar.idleClip.name},
+        {"locomotion", avatar.walkClip.name},
+        {"sprint", "Skyrim male sprint forward"},
+        {"jump", "Skyrim jump"},
+        {"fall", "Skyrim fall"},
+        {"landing", "Skyrim landing"}};
+    animationView->providerId = "skyrim-avatar:" +
+        m_skyrimPlayerOutfitEditorId;
+    animationView->supportedBehaviorGraph =
+        !avatar.idleClip.name.starts_with("procedural") &&
+        !avatar.walkClip.name.starts_with("procedural");
+    bethesda::PhysicsCharacterConfig alreadyRegistered;
+    alreadyRegistered.position = feet;
+    std::string animationError;
+    if (!m_bethesdaSession.registerActorAnimation(
+            m_bethesdaSession.playerObject(), std::move(animationView), nullptr,
+            alreadyRegistered, animationError)) {
+        VOX_LOGE("showcase")
+            << "could not register fixed-tick Skyrim player graph: "
+            << animationError;
+        return false;
+    }
+    m_skyrimPlayerAvatar = std::move(avatar);
+    m_skyrimPlayerAvatarUploadPending = true;
+    m_cameraBoomActual = m_cameraBoomRequested;
+    reconstructPlayerCamera(1.0f / 60.0f, true);
+    VOX_LOGI("showcase") << "Skyrim player avatar ready: " << detail;
+    return true;
+}
+
+void BethesdaApp::updateSkyrimPlayerAvatar(float deltaSeconds) {
+    if (!m_skyrimPlayerAvatar.has_value()) return;
+    SkinnedActor& avatar = *m_skyrimPlayerAvatar;
+    const odai::math::Vector3 feet = bethesdaPlayerFeetPosition();
+    avatar.position[0] = feet.x;
+    avatar.position[1] = feet.y;
+    avatar.position[2] = feet.z;
+    avatar.yawRadians = m_playerYawRadians;
+    avatar.renderVisible = m_thirdPersonView;
+    if (const auto physical = m_bethesdaSession.physics().characterState(
+            m_bethesdaSession.playerObject())) {
+        const float horizontalSpeed = std::sqrt(
+            physical->velocity.x * physical->velocity.x +
+            physical->velocity.z * physical->velocity.z);
+        avatar.walking = horizontalSpeed > 1.0f;
+    }
+    const bool freezeAtBindPose = std::getenv("ODAI_FNV_NOANIM") != nullptr ||
+        std::getenv("ODAI_FNV_VICTOR_NOANIM") != nullptr;
+    const anim::AnimationStepOutput graphPose = freezeAtBindPose
+        ? anim::AnimationStepOutput{}
+        : m_bethesdaSession.interpolatedActorAnimationOutput(
+              m_bethesdaSession.playerObject(), m_sessionInterpolationAlpha);
+    if (freezeAtBindPose) {
+        const odai::math::Matrix4 world =
+            odai::math::Matrix4::translation(feet) *
+            odai::math::Matrix4::rotationY(avatar.yawRadians);
+        avatar.poseScratch.assign(avatar.character.skeleton.bones.size(), world);
+    } else if (!graphPose.pose.empty()) {
+        avatar.poseScratch = graphPose.pose;
+        const odai::math::Matrix4 world =
+            odai::math::Matrix4::translation(feet) *
+            odai::math::Matrix4::rotationY(avatar.yawRadians);
+        for (odai::math::Matrix4& bone : avatar.poseScratch) bone = world * bone;
+    } else {
+        updateActorPoses(std::span<SkinnedActor>(&avatar, 1u), deltaSeconds);
+    }
+    if (avatar.uploaded) {
+        m_renderer.setSkinnedActorVisible(avatar.instanceSlot, avatar.renderVisible);
+        if (avatar.renderVisible) {
+            render::ImportedSkinnedActorFrameData pose{};
+            pose.boneMatrices = avatar.poseScratch;
+            m_renderer.setSkinnedActorPose(avatar.instanceSlot, pose);
+        }
+    }
 }
 
 void BethesdaApp::relocateBethesdaPlayerControllerToCamera() {
@@ -8911,6 +10379,13 @@ void BethesdaApp::relocateBethesdaPlayerControllerToCamera() {
     }
     m_bethesdaControllerOwnsCamera = true;
     syncBethesdaPlayerState(true);
+    if (thirdPersonPlayerShowcase()) {
+        const float viewYaw = m_yawDegrees * (kPi / 180.0f);
+        m_playerPreviousYawRadians = m_playerYawRadians;
+        m_playerYawRadians = actorYawForDirection(
+            std::cos(viewYaw), std::sin(viewYaw));
+        reconstructPlayerCamera(1.0f / 60.0f, true);
+    }
 }
 
 std::optional<bethesda::ObjectId> BethesdaApp::runtimeObjectIdForActor(
@@ -9102,8 +10577,11 @@ void BethesdaApp::syncBethesdaPlayerState(bool applyNow) {
         feetPosition[1] = m_cameraY - kEyeHeightUnits;
         feetPosition[2] = m_cameraZ;
     }
-    command.transform.rotationRadians = {
-        m_pitchDegrees * (kPi / 180.0f), m_yawDegrees * (kPi / 180.0f), 0.0f};
+    command.transform.rotationRadians = thirdPersonPlayerShowcase()
+        ? std::array<float, 3>{0.0f, m_playerYawRadians, 0.0f}
+        : std::array<float, 3>{
+            m_pitchDegrees * (kPi / 180.0f),
+            m_yawDegrees * (kPi / 180.0f), 0.0f};
     (void)m_bethesdaSession.world().queue(std::move(command));
     bethesda::RuntimeSpaceState space;
     if (runtimeSpaceForPosition(feetPosition, space) &&
@@ -9395,17 +10873,20 @@ bool BethesdaApp::loadGameplayState() {
         VOX_LOGE("save") << error;
         return false;
     }
-    const bethesda::ScenarioDefinition* scenario = bethesda::findScenario(m_scenarioId);
-    if (scenario != nullptr) {
-        const bethesda::ObjectId playerId = bethesda::ObjectId::persistent(
-            bethesda::makeRecordKey(scenario->basePlugin, 0x14u));
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    if (playerId.valid()) {
         const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
         if (player != nullptr) {
             m_cameraX = static_cast<float>(player->transform.position[0]);
             m_cameraY = static_cast<float>(player->transform.position[1]);
             m_cameraZ = static_cast<float>(player->transform.position[2]);
-            m_pitchDegrees = player->transform.rotationRadians[0] * (180.0f / kPi);
-            m_yawDegrees = player->transform.rotationRadians[1] * (180.0f / kPi);
+            if (thirdPersonPlayerShowcase()) {
+                m_playerPreviousYawRadians = m_playerYawRadians;
+                m_playerYawRadians = player->transform.rotationRadians[1];
+            } else {
+                m_pitchDegrees = player->transform.rotationRadians[0] * (180.0f / kPi);
+                m_yawDegrees = player->transform.rotationRadians[1] * (180.0f / kPi);
+            }
         }
         const std::vector<bethesda::PhysicsCharacterSnapshot> physicalActors =
             m_bethesdaSession.physicsSnapshots();
@@ -10820,8 +12301,14 @@ void BethesdaApp::onRender(float /*deltaSeconds*/) {
         //
         // Same ceiling as the video path, so a worldspace that never settles
         // still produces a file instead of hanging.
+        const bool streamReady = m_streamer == nullptr || m_streamer->isStreamingIdle();
+        const bool lodReady = !m_streamIsSkyrim || m_streamer == nullptr ||
+            (m_skyrimTerrainLodTileValid && m_skyrimObjectLodTileValid);
+        if (streamReady && lodReady && !m_captureUploadsReady) {
+            m_captureUploadsReady = m_renderer.waitForImportedSceneUploads();
+        }
         const bool settled = m_framesRendered >= m_captureWarmupFrameCeiling ||
-            m_streamer == nullptr || m_streamer->isStreamingIdle();
+            (streamReady && lodReady && m_captureUploadsReady);
         if (m_framesRendered >= m_screenshotWarmupFrames && settled) {
             if (!m_renderer.captureFrameToFile(m_screenshotPath)) {
                 VOX_LOGE("newvegas") << "screenshot capture failed";

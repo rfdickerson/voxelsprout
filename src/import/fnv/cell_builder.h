@@ -40,6 +40,14 @@ void appendPartitionedNifShapeIndices(
     std::uint32_t& outOpaqueIndexCount,
     std::uint32_t& outFadedIndexCount);
 
+// Writes a placed-reference transform while preserving the rotation convention
+// of its source generation. TES3 stores its Euler angles with the opposite sign
+// to the later TES4/TES5 records even though both use the same axis order.
+void writeBethesdaPlacementTransform(
+    ImportedSceneInstance& instance,
+    const FalloutPlacedReference& reference,
+    bool morrowind);
+
 // Plugin-wide lookups the per-cell build needs, gathered once. A cell's REFR
 // names a STAT by formID and a LAND quadrant names an LTEX by formID; neither
 // record carries the path, so these have to come from a pass over the plugin
@@ -107,6 +115,11 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, FalloutLightRecord> lightsByFormId;
 };
 
+// Current worldspace first, followed by its WNAM ancestors. The walk is
+// bounded and cycle-safe because malformed plugin chains must not hang startup.
+[[nodiscard]] std::vector<std::string> worldspaceEditorIdAncestry(
+    const FalloutWorldTables& tables, std::uint32_t worldspaceFormId);
+
 // One pass over the plugin that materializes no cell contents: it rejects every
 // worldspace group and every cell's children, so LAND records are never
 // decompressed. This is what makes it affordable at startup.
@@ -121,6 +134,36 @@ bool buildFalloutWorldTables(
 // degraded scene, losing the base game's is no scene.
 bool buildFalloutWorldTables(
     const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError);
+
+// The authored arrival stored on the parent-world door of a paired exterior
+// teleport. Positions and rotations remain in Bethesda plugin space so this
+// importer-side result is independent of the runtime renderer's coordinates.
+struct FalloutWorldspaceEntrance {
+    float arrivalPosition[3] = {};
+    float arrivalRotationRadians[3] = {};
+    std::uint32_t parentDoorFormId = 0u;
+    std::uint32_t childDoorFormId = 0u;
+};
+
+// Finds an enabled, mutually paired load-door connection from a parent
+// exterior worldspace into a child exterior worldspace. These overloads mirror
+// the cell-index extraction paths used by the runtime and by synthetic tests.
+bool findFalloutWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const std::filesystem::path& esmPath,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError);
+bool findFalloutWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const FalloutLoadOrder& order,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError);
 
 // True for meshes that only make sense alpha-blended or additive: dust, glow
 // billboards, light beams, sand. The imported static path draws opaque, so

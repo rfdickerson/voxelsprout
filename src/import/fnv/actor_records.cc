@@ -91,9 +91,12 @@ std::vector<std::string> fullPartPaths(
 // FNAM reappear to introduce FaceGen data (FGGS/FGGA/FGTS), where an INDX means
 // something else entirely. HNAM (hair list) is the first subrecord past the
 // parts, so it is where the state machine stops.
-FalloutRaceParts parseRaceParts(const EsmRecordView& record) {
+FalloutRaceParts parseRaceParts(
+    const EsmRecordView& record, EsmPluginFormat pluginFormat
+) {
     FalloutRaceParts race;
     race.formId = record.formId;
+    race.usesOblivionBodyLayout = pluginFormat == EsmPluginFormat::kOblivion;
 
     enum class Section : std::uint8_t { None, Head, Body };
     Section section = Section::None;
@@ -303,9 +306,19 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     std::string upperBody = bodyModels[kRaceUpperBodySlot];
     std::string leftHand = bodyModels[kRaceLeftHandSlot];
     std::string rightHand = bodyModels[kRaceRightHandSlot];
+    // The arrays are positional in both generations but the positions do not
+    // mean the same thing. In TES4 these are lower body, one two-handed mesh,
+    // and feet. Preserve Fallout's left/right interpretation everywhere else.
+    const bool oblivionBodyLayout = race->second.usesOblivionBodyLayout;
+    std::string lowerBody = oblivionBodyLayout ? bodyModels[1] : std::string();
+    std::string hands = oblivionBodyLayout ? bodyModels[2] : std::string();
+    std::string feet = oblivionBodyLayout ? bodyModels[3] : std::string();
     bool upperBodyTaken = false;
     bool leftHandTaken = false;
     bool rightHandTaken = false;
+    bool lowerBodyTaken = false;
+    bool handsTaken = false;
+    bool feetTaken = false;
     bool headTaken = false;
     bool hatTaken = false;
     // Additive pieces -- a hat sits ON a head rather than replacing it.
@@ -397,11 +410,26 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
             worn = true;
         };
         claim(kBipedSlotUpperBody, upperBodyTaken, upperBody);
-        claim(kBipedSlotLeftHand, leftHandTaken, leftHand);
-        claim(kBipedSlotRightHand, rightHandTaken, rightHand);
-        claim(kBipedSlotHead, headTaken, head);
+        if (oblivionBodyLayout) {
+            claim(kOblivionBipedSlotLowerBody, lowerBodyTaken, lowerBody);
+            claim(kOblivionBipedSlotHands, handsTaken, hands);
+            claim(kOblivionBipedSlotFeet, feetTaken, feet);
+        } else {
+            claim(kBipedSlotLeftHand, leftHandTaken, leftHand);
+            claim(kBipedSlotRightHand, rightHandTaken, rightHand);
+            claim(kBipedSlotHead, headTaken, head);
+        }
+        // A TES4 helmet hides hair but is drawn around the race's FaceGen head;
+        // it does not contain a replacement face. Treating the head bit as a
+        // replacement made every helmeted Anvil guard headless.
+        if (oblivionBodyLayout &&
+            (slots & (kBipedSlotHead | kBipedSlotHair)) != 0u && !hatTaken) {
+            accessories.push_back(model);
+            hatTaken = true;
+            worn = true;
+        }
         if ((slots & (kBipedSlotHat | kBipedSlotHair)) != 0u && (slots & kBipedSlotHead) == 0u &&
-            !hatTaken) {
+            !hatTaken && !oblivionBodyLayout) {
             accessories.push_back(model);
             hatTaken = true;
             worn = true;
@@ -440,9 +468,20 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     }
 
     appendUnique(resolved.bodyPartPaths, upperBody);
-    appendUnique(resolved.bodyPartPaths, leftHand);
-    appendUnique(resolved.bodyPartPaths, rightHand);
-    appendUnique(resolved.bodyPartPaths, head);
+    if (oblivionBodyLayout) {
+        appendUnique(resolved.bodyPartPaths, lowerBody);
+        appendUnique(resolved.bodyPartPaths, hands);
+        appendUnique(resolved.bodyPartPaths, feet);
+        // TES4's head section is an additive set: face, ears, mouth, teeth,
+        // tongue, and eyes. The first entry alone produces a blank mask.
+        for (std::size_t slot = 0u; slot < kRaceHeadPartCount; ++slot) {
+            appendUnique(resolved.bodyPartPaths, headModels[slot]);
+        }
+    } else {
+        appendUnique(resolved.bodyPartPaths, leftHand);
+        appendUnique(resolved.bodyPartPaths, rightHand);
+        appendUnique(resolved.bodyPartPaths, head);
+    }
     for (const std::string& accessory : accessories) {
         appendUnique(resolved.bodyPartPaths, accessory);
     }
@@ -451,7 +490,9 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     // rather than putting a reference on NPC_. Append it only on the TES5
     // assembly branch: Fallout's race head model above remains authoritative.
     if (!skyrimSkeleton.empty()) {
-        appendUnique(resolved.bodyPartPaths, traits.faceGeometryPath);
+        for (const std::string& faceGeometryPath : traits.faceGeometryPaths) {
+            appendUnique(resolved.bodyPartPaths, faceGeometryPath);
+        }
     }
     return resolved;
 }
@@ -645,6 +686,7 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
             entry = remap(entry);
         }
     });
+    remapKeyed(scan.outfitEditorIds, [](std::string&) {});
     remapKeyed(scan.armorAddons, [&](SkyrimArmorAddon& addon) {
         addon.formId = remap(addon.formId);
         for (std::uint32_t& race : addon.raceFormIds) {
@@ -711,6 +753,9 @@ bool findActorsNearAcrossOrder(
         }
         for (auto& [formId, outfit] : scan.outfits) {
             outScan.outfits[formId] = std::move(outfit);
+        }
+        for (auto& [formId, editorId] : scan.outfitEditorIds) {
+            outScan.outfitEditorIds[formId] = std::move(editorId);
         }
         for (auto& [formId, addon] : scan.armorAddons) {
             outScan.armorAddons[formId] = std::move(addon);
@@ -782,7 +827,8 @@ bool findActorsNear(
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
             return header.type == "CREA" || header.type == "NPC_" || header.type == "LVLC" ||
                 header.type == "LVLN" || header.type == "LVLI" || header.type == "RACE" ||
-                header.type == "ARMO" || header.type == "ARMA" || header.type == "OTFT" ||
+                header.type == "ARMO" || header.type == "CLOT" ||
+                header.type == "ARMA" || header.type == "OTFT" ||
                 header.type == "VTYP";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
@@ -795,10 +841,16 @@ bool findActorsNear(
                 return;
             }
             if (record.type == "RACE") {
-                outScan.races[record.formId] = parseRaceParts(record);
+                outScan.races[record.formId] =
+                    parseRaceParts(record, reader.pluginFormat());
                 return;
             }
-            if (record.type == "ARMO") {
+            // TES4 CLOT has the same wearable BMDT + male/female biped-model
+            // shape as ARMO. Compile both into the common wardrobe table: an
+            // Oblivion citizen generally gets their entire visible body from
+            // clothing, so omitting CLOT leaves an otherwise valid actor as a
+            // walking FaceGen head.
+            if (record.type == "ARMO" || record.type == "CLOT") {
                 FalloutArmorPiece armor;
                 armor.formId = record.formId;
                 for (const EsmSubrecordView& sub : record.subrecords) {
@@ -852,10 +904,21 @@ bool findActorsNear(
             }
             if (record.type == "OTFT") {
                 std::vector<std::uint32_t> items;
+                std::string editorId;
                 for (const EsmSubrecordView& sub : record.subrecords) {
-                    if (sub.type == "INAM" && sub.size >= 4u) {
-                        items.push_back(readU32(sub));
+                    if (sub.type == "EDID") {
+                        editorId = subrecordText(sub);
+                    } else if (sub.type == "INAM" && sub.size >= 4u) {
+                        // Skyrim writes the outfit as one packed form-id array,
+                        // not necessarily one INAM subrecord per entry.
+                        for (std::size_t offset = 0u;
+                             offset + 4u <= sub.size; offset += 4u) {
+                            items.push_back(readU32(sub, offset));
+                        }
                     }
+                }
+                if (!editorId.empty()) {
+                    outScan.outfitEditorIds[record.formId] = std::move(editorId);
                 }
                 if (!items.empty()) {
                     outScan.outfits[record.formId] = std::move(items);
@@ -920,9 +983,9 @@ bool findActorsNear(
                 std::ostringstream localForm;
                 localForm << std::hex << std::nouppercase << std::setfill('0')
                           << std::setw(8) << record.formId;
-                base.faceGeometryPath =
+                base.faceGeometryPaths.push_back(
                     "actors\\character\\facegendata\\facegeom\\" +
-                    pluginPath.filename().string() + "\\" + localForm.str() + ".nif";
+                    pluginPath.filename().string() + "\\" + localForm.str() + ".nif");
             }
             outScan.bases[record.formId] = std::move(base);
         };

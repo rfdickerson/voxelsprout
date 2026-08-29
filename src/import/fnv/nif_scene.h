@@ -76,6 +76,11 @@ struct NifShape {
     // and backslash-separated. Empty when the shape has no resolvable
     // BSShaderTextureSet.
     std::string diffuseTexturePath;
+    // Tangent-space normal map from BSShaderTextureSet slot 1. This remains
+    // transient NIF-import data: the cell packer stores its resolved texture
+    // index in the packed vertex's otherwise-unused first layer slot for
+    // non-terrain geometry, preserving the cooked-scene binary layout.
+    std::string normalTexturePath;
     // NiAlphaProperty declared alpha testing (flag 0x200) for this shape.
     bool alphaTest = false;
     // NiAlphaProperty's threshold byte, the value alphaTest compares against.
@@ -336,6 +341,12 @@ struct NifSkinnedShape {
     // pose before the common GPU palette can animate them.
     bool requiresCanonicalBindBake = false;
 
+    // Sequential TES4 parts still author vertices in the shape's geometry
+    // space. Their overall NiSkinData transform is already included in the
+    // inverse-bind product, so cancel it before evaluating that product for a
+    // canonical bake. TES3's retained-node convention is different.
+    bool canonicalBindCancelsSkinTransform = false;
+
     // Per vertex, kNifMaxBoneInfluences entries each. Index is into boneNames,
     // NOT into a skeleton. Weights sum to 1 for any vertex with any influence;
     // an unused slot is weight 0 and index 0.
@@ -381,6 +392,8 @@ struct NifBlockSummary {
     std::vector<std::uint32_t> blockSizes;    // per block, bytes
     std::vector<std::string> strings;         // header string table
     std::vector<std::size_t> blockStarts;     // byte offset of each block
+    std::uint32_t version = 0u;
+    bool inlineNames = false;
 };
 
 bool parseNifBlockSummary(
