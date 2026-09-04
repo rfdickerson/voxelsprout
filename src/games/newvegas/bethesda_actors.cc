@@ -840,6 +840,40 @@ bool loadActorIdleClip(
         outClip.loop = true;
         return true;
     }
+    // Skyrim dragons keep their authored perch pose in an HKX beside the
+    // creature animation bank rather than in the humanoid male/female bank.
+    // Resolve it from the declared creature skeleton so a showcase dragon is
+    // a genuinely posed retail actor, not a rigid NIF bind pose.  The source
+    // HKX skeleton supplies annotation-track names while the NIF skeleton
+    // remains the skinning and inverse-bind authority.
+    if (normalizedSkeleton.find("actors\\dragon\\") != std::string::npos) {
+        constexpr const char* kDragonPose =
+            "meshes\\actors\\dragon\\animations\\special_perchidle.hkx";
+        constexpr const char* kDragonHkxSkeleton =
+            "meshes\\actors\\dragon\\character assets\\skeleton.hkx";
+        std::vector<std::uint8_t> poseBytes;
+        std::vector<std::uint8_t> skeletonBytes;
+        std::string hkxError;
+        anim::HkxDecodedSkeleton hkxSkeleton;
+        if (assets.resolveAsset(kDragonPose, poseBytes, hkxError) &&
+            assets.resolveAsset(kDragonHkxSkeleton, skeletonBytes, hkxError) &&
+            anim::decodeHkxAnimationSkeleton(
+                skeletonBytes, hkxSkeleton, hkxError)) {
+            anim::HkxDecodedClipMetadata metadata;
+            if (anim::decodeHkxAnimationClip(
+                    poseBytes, skeleton, "Skyrim dragon perch", outClip,
+                    metadata, hkxError, &hkxSkeleton) &&
+                metadata.boundTracks >= 8u) {
+                outClip.loop = true;
+                outWhy = std::string(kDragonPose) + ": " +
+                    std::to_string(metadata.boundTracks) +
+                    " retail HKX tracks";
+                return true;
+            }
+            outClip = anim::AnimationClip{};
+        }
+        outWhy = std::string(kDragonPose) + ": " + hkxError;
+    }
     // Skyrim SE's authored animation is a reflected x64 Havok packfile. Decode
     // the immutable retail clip directly into the same AnimationClip used by
     // KF/NIF animation; the NIF skeleton remains the skinning authority.
@@ -2133,7 +2167,9 @@ void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds) {
         const odai::math::Matrix4 actorWorld =
             odai::math::Matrix4::translation(odai::math::Vector3{
                 actor.position[0], actor.position[1], actor.position[2]}) *
-            odai::math::Matrix4::rotationY(actor.yawRadians);
+            odai::math::Matrix4::rotationY(actor.yawRadians) *
+            odai::math::Matrix4::scale(odai::math::Vector3{
+                actor.visualScale, actor.visualScale, actor.visualScale});
         for (odai::math::Matrix4& matrix : actor.poseScratch) {
             matrix = actorWorld * matrix;
         }

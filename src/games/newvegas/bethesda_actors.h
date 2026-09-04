@@ -194,6 +194,10 @@ struct SkinnedActor {
     // origin is at the FEET -- aiming at the origin points the camera at the
     // ground.
     float standingHeightUnits = 0.0f;
+    // Presentation-only uniform scale applied with the actor's world
+    // transform. Ordinary actors remain at their authored 1.0 scale; fixed
+    // showcase subjects may use it to preserve a readable distant silhouette.
+    float visualScale = 1.0f;
     // NPC_ records have an upright humanoid body even when their legacy rig
     // has no vertices dominantly weighted to a bone literally named "Head".
     // That distinction matters to the dialogue fallback: 65% is sensible for

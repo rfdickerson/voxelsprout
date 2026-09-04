@@ -6,8 +6,10 @@
 #include "bethesda/skyrim_scenario_content.h"
 #include "bethesda/vmad_reader.h"
 #include "bethesda/whiterun_presentation.h"
+#include "bethesda/oblivion_presentation.h"
 
 #include "import/fnv/land_lod.h"
+#include "import/fnv/skyrim_tree_lod.h"
 
 #include "render/upscale/upscale_policy.h"
 
@@ -1753,6 +1755,12 @@ bool BethesdaApp::completeDoorTransition(
             m_skyrimObjectLodTileValid = false;
         }
         m_skyrimObjectLodWorldspace.clear();
+        if (m_skyrimTreeLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_skyrimTreeLodChunk);
+            m_skyrimTreeLodChunk = render::Renderer::kInvalidImportedChunkIndex;
+        }
+        m_skyrimTreeLodCellValid = false;
+        m_skyrimTreeLodWorldspace.clear();
         for (const SkinnedActor& actor : m_actors) {
             m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
         }
@@ -1844,6 +1852,12 @@ bool BethesdaApp::completeDoorTransition(
         }
         m_skyrimObjectLodTileValid = false;
         m_skyrimObjectLodWorldspace.clear();
+        if (m_skyrimTreeLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+            m_renderer.removeImportedSceneChunk(m_skyrimTreeLodChunk);
+            m_skyrimTreeLodChunk = render::Renderer::kInvalidImportedChunkIndex;
+        }
+        m_skyrimTreeLodCellValid = false;
+        m_skyrimTreeLodWorldspace.clear();
         if (!m_streamer->selectWorldspace(
                 door.targetWorldspaceEditorId, m_renderer, outError)) {
             return false;
@@ -2594,7 +2608,7 @@ void BethesdaApp::realizePendingActorUploads(std::size_t maxActorUploads) {
 
 bool BethesdaApp::prewarmSkyrimCityShowcase() {
     if (!m_streamer || m_interiorStarted) {
-        VOX_LOGE("showcase") << "Skyrim city startup prewarm requires exterior streaming";
+        VOX_LOGE("showcase") << "city showcase startup prewarm requires exterior streaming";
         return false;
     }
 
@@ -2617,7 +2631,8 @@ bool BethesdaApp::prewarmSkyrimCityShowcase() {
     importer::fnv::CellStreamer::engineToFallout(enginePosition, falloutPosition);
     const float stationaryVelocity[3] = {};
 
-    constexpr std::size_t kMaximumPrewarmPasses = 8u;
+    const std::size_t kMaximumPrewarmPasses = oblivionReferenceShowcase()
+        ? 48u : (m_skyrimForestReferenceShowcase ? 24u : 8u);
     bool ready = false;
     for (std::size_t pass = 0; pass < kMaximumPrewarmPasses; ++pass) {
         updateStreaming(0.0f);
@@ -2637,7 +2652,7 @@ bool BethesdaApp::prewarmSkyrimCityShowcase() {
 
     if (!ready) {
         VOX_LOGE("showcase")
-            << "Skyrim city startup prewarm did not settle its initial residency ring";
+            << "city showcase startup prewarm did not settle its initial residency ring";
         return false;
     }
     if (m_skyrimCitySpawnSettlementPending && !settleSkyrimCityShowcasePlayer()) {
@@ -2645,10 +2660,94 @@ bool BethesdaApp::prewarmSkyrimCityShowcase() {
             << "Skyrim city startup prewarm could not settle the player on navigation";
         return false;
     }
+    if (m_oblivionGreatForestShowcase || m_skyrimForestReferenceShowcase) {
+        // The marker supplies a stable horizontal frame, but the approach
+        // crosses rolling terrain. Resolve eye height only after the complete
+        // ring has installed collision; a fixed marker-relative Y can put the
+        // camera below a nearby ridge even though the composition is valid.
+        float groundHeight = m_cameraY;
+        if (!m_collision.groundHeight(
+                m_cameraX, m_cameraZ, m_cameraY + 8192.0f, groundHeight)) {
+            VOX_LOGE("showcase")
+                << "forest camera could not resolve authored ground height";
+            return false;
+        }
+        m_cameraY = groundHeight +
+            (m_skyrimForestReferenceShowcase ? 460.0f : 180.0f);
+        VOX_LOGI("showcase") << "forest camera grounded at eye height " << m_cameraY;
+    }
+
+    if (m_skyrimForestReferenceShowcase) {
+        const auto dragon = std::find_if(
+            m_actors.begin(), m_actors.end(), [](const SkinnedActor& actor) {
+                return toLowerAscii(actor.name) == "encdragon01fire";
+            });
+        if (dragon == m_actors.end()) {
+            VOX_LOGE("showcase")
+                << "Skyrim forest reference could not build the retail mountain dragon";
+            return false;
+        }
+
+        // The fixed view is marker-relative, so this ridge-local placement
+        // remains stable if the authored Riverwood marker moves in a later
+        // load order.  At 16:9 it lands in the upper-left third, against a
+        // bright snow shelf where the wings read as a clean silhouette.
+        const float dragonX = m_cameraX + 13580.0f;
+        const float dragonZ = m_cameraZ + 11408.0f;
+        float dragonGround = m_cameraY;
+        if (!m_collision.groundHeight(
+                dragonX, dragonZ, m_cameraY + 12288.0f, dragonGround)) {
+            VOX_LOGE("showcase")
+                << "Skyrim forest mountain dragon could not resolve ridge collision";
+            return false;
+        }
+        dragon->position[0] = dragonX;
+        // Lift the origin just clear of the collision skin so the talons rest
+        // on the rock instead of being z-fought into it.
+        dragon->position[1] = dragonGround + 18.0f;
+        dragon->position[2] = dragonZ;
+        const float faceCamera = std::atan2(
+            m_cameraZ - dragonZ, m_cameraX - dragonX);
+        dragon->yawRadians = faceCamera + 0.38f;
+        dragon->animationSeconds = 1.35f;
+        // Dragons vary substantially in Skyrim, and the subject is more than
+        // fourteen thousand units from the lens. A restrained hero scale
+        // keeps the wing and horn silhouette legible at 1080p while it still
+        // reads as resting on the mountain rather than looming over Riverwood.
+        dragon->visualScale = 1.55f;
+        dragon->wanders = false;
+        dragon->renderVisible = true;
+        VOX_LOGI("showcase")
+            << "Skyrim mountain dragon perched at (" << dragonX << ", "
+            << dragonGround << ", " << dragonZ << ") using "
+            << (dragon->idleClip.tracks.empty()
+                    ? "bind pose" : "authored perch pose");
+        if (dragon->idleClip.tracks.empty()) {
+            VOX_LOGE("showcase")
+                << "Skyrim forest mountain dragon has no decoded perch animation";
+            return false;
+        }
+    }
 
     realizePendingActorUploads(std::numeric_limits<std::size_t>::max());
+    if (m_oblivionAnvilHarborShowcase) {
+        importer::ImportedScene waterGuard;
+        std::string waterError;
+        if (!m_streamer->buildWaterGuardScene(
+                enginePosition, 6, waterGuard, waterError)) {
+            VOX_LOGE("showcase") << "Anvil water guard failed: " << waterError;
+            return false;
+        }
+        const std::size_t waterChunk = m_renderer.addImportedSceneChunk(waterGuard);
+        if (waterChunk == render::Renderer::kInvalidImportedChunkIndex) {
+            VOX_LOGE("showcase") << "Anvil water guard GPU upload failed";
+            return false;
+        }
+        VOX_LOGI("showcase") << "Anvil water guard ready: radius=6 patches="
+                              << waterGuard.waterPatches.size();
+    }
     if (!m_renderer.waitForImportedSceneUploads()) {
-        VOX_LOGE("showcase") << "Skyrim city startup GPU uploads did not complete";
+        VOX_LOGE("showcase") << "city showcase startup GPU uploads did not complete";
         return false;
     }
     if (m_whiterunReferenceShowcase) {
@@ -2664,16 +2763,20 @@ bool BethesdaApp::prewarmSkyrimCityShowcase() {
                     ? "<missing>" : m_skyrimTerrainLodWorldspace)
             << " object-lod="
             << (m_skyrimObjectLodWorldspace.empty()
-                    ? "<missing>" : m_skyrimObjectLodWorldspace);
+                    ? "<missing>" : m_skyrimObjectLodWorldspace)
+            << " tree-lod="
+            << (m_skyrimTreeLodWorldspace.empty()
+                    ? "<missing>" : m_skyrimTreeLodWorldspace);
         if (stats.geometryInstancesLoaded == 0u) {
             VOX_LOGE("showcase")
                 << "Whiterun reference has no gate-plaza geometry instances";
             return false;
         }
         if (m_skyrimTerrainLodWorldspace.empty() ||
-            m_skyrimObjectLodWorldspace.empty()) {
+            m_skyrimObjectLodWorldspace.empty() ||
+            m_skyrimTreeLodWorldspace.empty()) {
             VOX_LOGE("showcase")
-                << "Whiterun reference is missing inherited Tamriel terrain/object LOD";
+                << "Whiterun reference is missing inherited Tamriel terrain/object/tree LOD";
             return false;
         }
         if (stats.bannerInstancesLoaded == 0u) {
@@ -2691,6 +2794,76 @@ bool BethesdaApp::prewarmSkyrimCityShowcase() {
         if (stats.alphaTestedPartsLoaded == 0u) {
             VOX_LOGW("showcase")
                 << "Whiterun reference inventory found no alpha-tested foliage/overlays";
+        }
+    }
+    if (m_skyrimForestReferenceShowcase) {
+        const importer::fnv::CellStreamerStats stats = m_streamer->stats();
+        VOX_LOGI("showcase")
+            << "Skyrim forest inventory: cells=" << stats.residentChunks
+            << " instances=" << stats.geometryInstancesLoaded
+            << " alpha-tested-parts=" << stats.alphaTestedPartsLoaded
+            << " detailed-trees=" << m_skyrimTreeDetailedInstanceCount
+            << " tree-lod="
+            << (m_skyrimTreeLodWorldspace.empty()
+                    ? "<missing>" : m_skyrimTreeLodWorldspace);
+        if (m_skyrimTreeDetailedInstanceCount < 8u) {
+            VOX_LOGE("showcase")
+                << "Skyrim forest reference has too few full NIF tree instances";
+            return false;
+        }
+        if (m_skyrimTreeLodWorldspace.empty()) {
+            VOX_LOGE("showcase")
+                << "Skyrim forest reference is missing Tamriel BTT tree LOD";
+            return false;
+        }
+    }
+    if (oblivionReferenceShowcase()) {
+        const importer::fnv::CellStreamerStats stats = m_streamer->stats();
+        const char* location = m_oblivionAnvilHarborShowcase
+            ? "Anvil harbor"
+            : (m_oblivionGreatForestShowcase ? "Great Forest" : "market");
+        VOX_LOGI("showcase")
+            << "Oblivion " << location << " inventory: cells=" << stats.residentChunks
+            << " instances=" << stats.geometryInstancesLoaded
+            << " alpha-tested-parts=" << stats.alphaTestedPartsLoaded
+            << " trees=" << stats.vegetationInstancesLoaded
+            << " Flowing-Bowl-signs=" << stats.flowingBowlSignInstancesLoaded
+            << " ship-pieces=" << stats.shipInstancesLoaded
+            << " local-lights=" << stats.localLightsLoaded
+            << " actors=" << m_actors.size();
+        if (stats.geometryInstancesLoaded == 0u) {
+            VOX_LOGE("showcase")
+                << "Oblivion " << location << " reference has no resident architecture";
+            return false;
+        }
+        if (m_oblivionAnvilHarborShowcase && stats.vegetationInstancesLoaded == 0u) {
+            VOX_LOGE("showcase")
+                << "Anvil reference is missing TREE/SPT geometry or textures";
+            return false;
+        }
+        if (m_oblivionAnvilHarborShowcase &&
+            stats.flowingBowlSignInstancesLoaded == 0u) {
+            VOX_LOGE("showcase")
+                << "Anvil reference is missing the authored Flowing Bowl sign";
+            return false;
+        }
+        if (m_oblivionAnvilHarborShowcase && stats.shipInstancesLoaded == 0u) {
+            VOX_LOGE("showcase")
+                << "Anvil reference is missing authored harbor ship pieces";
+            return false;
+        }
+        if (m_oblivionGreatForestShowcase && stats.vegetationInstancesLoaded < 12u) {
+            VOX_LOGE("showcase")
+                << "Great Forest reference has too few resident TREE/SPT instances";
+            return false;
+        }
+        const std::size_t minimumActors = m_oblivionGreatForestShowcase
+            ? 0u : (m_oblivionAnvilHarborShowcase ? 3u : 1u);
+        if (m_actors.size() < minimumActors) {
+            VOX_LOGE("showcase")
+                << "Oblivion " << location
+                << " reference has too few enabled authored actors";
+            return false;
         }
     }
     if (thirdPersonPlayerShowcase() &&
@@ -2795,6 +2968,27 @@ std::string findSkyrimDataDirectory() {
     return {};
 }
 
+std::string findOblivionDataDirectory() {
+    std::vector<std::filesystem::path> candidates;
+    if (const char* home = std::getenv("HOME")) {
+        const std::filesystem::path homePath(home);
+        candidates.push_back(homePath / ".steam/steam/steamapps/common/Oblivion/Data");
+        candidates.push_back(homePath / ".local/share/Steam/steamapps/common/Oblivion/Data");
+        candidates.push_back(homePath / "GOG Games/Oblivion/Data");
+    }
+    candidates.emplace_back(
+        "/mnt/c/Program Files (x86)/Steam/steamapps/common/Oblivion/Data");
+    candidates.emplace_back("C:/Program Files (x86)/Steam/steamapps/common/Oblivion/Data");
+    candidates.emplace_back("C:/GOG Games/Oblivion/Data");
+    for (const std::filesystem::path& candidate : candidates) {
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate / "Oblivion.esm", error) && !error) {
+            return candidate.string();
+        }
+    }
+    return {};
+}
+
 std::string findMorrowindDataDirectory() {
     std::vector<std::filesystem::path> candidates;
     if (const char* home = std::getenv("HOME")) {
@@ -2819,6 +3013,61 @@ std::string findMorrowindDataDirectory() {
 }  // namespace
 
 bool BethesdaApp::onInit() {
+    if (oblivionReferenceShowcase()) {
+        if (m_streamDirectory.empty()) {
+            if (const char* configured = std::getenv("ODAI_OBLIVION_DATA")) {
+                m_streamDirectory = configured;
+            } else {
+                m_streamDirectory = findOblivionDataDirectory();
+            }
+        }
+        if (m_streamDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_streamDirectory) / "Oblivion.esm")) {
+            VOX_LOGE("showcase")
+                << "the selected Oblivion showcase requires Oblivion.esm; pass "
+                   "--oblivion-data \"<Oblivion/Data>\" or set ODAI_OBLIVION_DATA";
+            return false;
+        }
+        m_streamPlugin = "Oblivion.esm";
+        m_streamWorldspace =
+            (m_oblivionAnvilHarborShowcase || m_oblivionGreatForestShowcase)
+            ? "Tamriel"
+            : "ICMarketDistrict";
+        m_streamWorldspaceExplicit = true;
+        m_streamSpawnInterior.clear();
+        m_startInsideInterior.clear();
+        m_resumeEnabled = false;
+        m_walkMode = false;
+        m_thirdPersonView = false;
+        m_mouseCaptured = false;
+    }
+    if (m_skyrimForestReferenceShowcase) {
+        if (m_streamDirectory.empty()) {
+            if (const char* configured = std::getenv("ODAI_SKYRIM_DATA")) {
+                m_streamDirectory = configured;
+            } else {
+                m_streamDirectory = findSkyrimDataDirectory();
+            }
+        }
+        if (m_streamDirectory.empty() ||
+            !std::filesystem::is_regular_file(
+                std::filesystem::path(m_streamDirectory) / "Skyrim.esm")) {
+            VOX_LOGE("showcase")
+                << "skyrim-forest-reference requires Skyrim.esm; pass --skyrim-data "
+                   "\"<Skyrim Special Edition/Data>\" or set ODAI_SKYRIM_DATA";
+            return false;
+        }
+        m_streamPlugin = "Skyrim.esm";
+        m_streamWorldspace = "Tamriel";
+        m_streamWorldspaceExplicit = true;
+        m_streamSpawnInterior.clear();
+        m_startInsideInterior.clear();
+        m_resumeEnabled = false;
+        m_walkMode = false;
+        m_thirdPersonView = false;
+        m_mouseCaptured = false;
+    }
     if (m_balmoraSkyrimPlayerShowcase) {
         if (m_streamDirectory.empty()) m_streamDirectory = findMorrowindDataDirectory();
         if (m_skyrimAvatarDataDirectory.empty()) {
@@ -3487,7 +3736,9 @@ bool BethesdaApp::onInit() {
     if ((!m_scenarioId.empty() || m_streamIsMorrowind) && !initBethesdaSession()) {
         return false;
     }
-    if (skyrimCityShowcase() && !prewarmSkyrimCityShowcase()) {
+    if ((skyrimCityShowcase() || m_skyrimForestReferenceShowcase ||
+         oblivionReferenceShowcase()) &&
+        !prewarmSkyrimCityShowcase()) {
         return false;
     }
     // Skyrim's exterior art was authored around a restrained, contrasty
@@ -3498,15 +3749,53 @@ bool BethesdaApp::onInit() {
     // format. An explicit color-look request remains authoritative.
     if (m_streamIsSkyrim && std::getenv("ODAI_FNV_COLOR_LOOK") == nullptr) {
         render::ColorGradingSettings grade;
-        grade.whiteBalance[0] = 1.02f;
-        grade.whiteBalance[2] = 0.94f;
-        grade.contrast = 1.10f;
-        grade.midtoneContrast = 1.22f;
-        grade.saturation = 0.92f;
-        grade.vibrance = 0.02f;
-        grade.shadowDensity = 0.92f;
+        if (m_skyrimForestReferenceShowcase) {
+            // Warm grazing light and a cool, restrained shadow split separate
+            // the near pines, village, mountain and cloud bank without
+            // replacing SkyrimClear's authored palette. Preserve highlight
+            // range for the cloud rim rather than buying drama with clipping.
+            grade.whiteBalance[0] = 1.04f;
+            grade.whiteBalance[1] = 1.01f;
+            grade.whiteBalance[2] = 0.93f;
+            grade.contrast = 1.08f;
+            grade.midtoneContrast = 1.18f;
+            grade.saturation = 0.94f;
+            grade.vibrance = 0.025f;
+            grade.shadowDensity = 0.95f;
+            grade.shadowTint[2] = 0.025f;
+            grade.highlightTint[0] = 0.035f;
+            grade.highlightTint[1] = 0.012f;
+        } else {
+            grade.whiteBalance[0] = 1.02f;
+            grade.whiteBalance[2] = 0.94f;
+            grade.contrast = 1.10f;
+            grade.midtoneContrast = 1.22f;
+            grade.saturation = 0.92f;
+            grade.vibrance = 0.02f;
+            grade.shadowDensity = 0.92f;
+        }
         m_renderer.setColorGrading(grade);
-        VOX_LOGI("newvegas") << "color look: Skyrim restrained";
+        VOX_LOGI("newvegas") << "color look: Skyrim "
+                               << (m_skyrimForestReferenceShowcase
+                                       ? "cinematic forest" : "restrained");
+    }
+    if (oblivionReferenceShowcase() &&
+        std::getenv("ODAI_FNV_COLOR_LOOK") == nullptr) {
+        render::ColorGradingSettings grade;
+        // Let Oblivion's WTHR and retail textures carry the palette.  The
+        // earlier showcase grade added contrast and vibrance on top of the
+        // authored late-afternoon light, exaggerating orange roofs and blue
+        // shadow noise.  A restrained shoulder plus lifted shadows retains
+        // material depth without crushing the underside of the dock.
+        grade.whiteBalance[0] = 1.01f;
+        grade.whiteBalance[2] = 1.0f;
+        grade.contrast = 1.04f;
+        grade.midtoneContrast = 1.06f;
+        grade.saturation = 0.88f;
+        grade.vibrance = 0.01f;
+        grade.shadowDensity = 0.84f;
+        m_renderer.setColorGrading(grade);
+        VOX_LOGI("showcase") << "color look: Oblivion warm stone";
     }
     if (m_characterMode && !initCharacter(m_streamDirectory)) {
         return false;
@@ -6640,20 +6929,39 @@ bool BethesdaApp::initStreaming() {
         config.unloadRadius = 4;
     } else if (skyrimCityShowcase()) {
         // Skyrim's walled cities store much of their always-visible kit in
-        // persistent cell 0,0 even though the main-gate arrival is several
-        // grid cells away. Keep that cell explicitly resident and stream only
-        // the local 3x3 ring instead of a 9x9 radius-four square.
+        // their coordinate-less persistent exterior cell. Keep it explicitly
+        // resident and stream only the local 3x3 ring instead of a 9x9
+        // radius-four square.
         config.loadRadius = 1;
         config.unloadRadius = 3;
         config.maxLoadsInFlight = 2u;
-        m_streamer->setPinnedCells({importer::CellCoord{0, 0}});
+        m_streamer->setPinnedCells({importer::fnv::persistentExteriorCellCoord()});
+    } else if (m_skyrimForestReferenceShowcase) {
+        // Keep full NIF branch geometry through the middle distance. BTT
+        // impostors begin outside this 7x7 ring, where their individual card
+        // planes are small enough for the radial crown to read as continuous.
+        config.loadRadius = 3;
+        config.unloadRadius = 5;
+        config.maxLoadsInFlight = 2u;
+    } else if (oblivionReferenceShowcase()) {
+        // Settle the complete local neighbourhood before the first visible
+        // frame, so district architecture, ships, and actors cannot pop into a
+        // capture. Imperial City also needs its shared persistent-cell kit;
+        // Anvil's harbor is authored in ordinary Tamriel exterior cells.
+        config.loadRadius = 2;
+        config.unloadRadius = 4;
+        config.maxLoadsInFlight = 2u;
+        if (m_oblivionImperialMarketShowcase) {
+            m_streamer->setPinnedCells({importer::fnv::persistentExteriorCellCoord()});
+        }
     }
     if (const char* radiusEnv = std::getenv("ODAI_FNV_LOAD_RADIUS")) {
         config.loadRadius = std::max(0, std::atoi(radiusEnv));
         config.unloadRadius = config.loadRadius + 2;
     }
     m_streamer->setConfig(config);
-    if (skyrimCityShowcase()) {
+    if (skyrimCityShowcase() || m_skyrimForestReferenceShowcase ||
+        oblivionReferenceShowcase()) {
         // The initial 3x3 ring plus a city's persistent cell fits this modest
         // reserve in the retail masters. Allocate it once so the cold load
         // does not repeatedly recreate and copy device-local arenas as worker
@@ -6716,6 +7024,9 @@ bool BethesdaApp::initStreaming() {
         m_captureRoutePreloadActive = !corridor.empty();
         m_capturePinnedCells = std::move(pinnedCells);
         m_captureSkyrimLodBoundsValid = m_streamIsSkyrim && !corridor.empty();
+        m_captureSkyrimTerrainLodFrozen = false;
+        m_captureSkyrimObjectLodFrozen = false;
+        m_captureSkyrimTreeLodFrozen = false;
         if (m_captureSkyrimLodBoundsValid) {
             m_captureSkyrimLodMinTileX = minLodTileX;
             m_captureSkyrimLodMinTileZ = minLodTileZ;
@@ -6896,6 +7207,93 @@ bool BethesdaApp::initStreaming() {
         VOX_LOGI("showcase") << "Balmora player anchor projected to ("
                               << projected.x << ", " << projected.y << ", "
                               << projected.z << ")";
+    } else if (!m_interiorStarted && m_skyrimForestReferenceShowcase) {
+        const auto marker = std::find_if(
+            m_streamer->mapMarkers().begin(), m_streamer->mapMarkers().end(),
+            [](const importer::fnv::FalloutMapMarkerRecord& candidate) {
+                return !candidate.deleted && toLowerAscii(candidate.name) == "riverwood";
+            });
+        if (marker == m_streamer->mapMarkers().end()) {
+            VOX_LOGE("showcase")
+                << "Skyrim forest reference requires the authored Riverwood map marker";
+            return false;
+        }
+        const float markerEngine[3] = {
+            marker->position[0], marker->position[2], -marker->position[1]};
+        // Stand above the wooded north-west approach and look back toward the
+        // authored marker. Ground height is resolved after the complete 7x7
+        // ring arrives, so this temporary Y only seeds residency safely.
+        spawn[0] = markerEngine[0] - 4800.0f;
+        spawn[1] = markerEngine[1] + 1200.0f;
+        spawn[2] = markerEngine[2] - 5200.0f;
+        spawnedAtShowcase = true;
+        // Frame Riverwood through the greener north-west valley rather than
+        // the fire-scarred Helgen approach. The authored marker remains the
+        // target while the larger offset clears the settlement footprint.
+        m_yawDegrees = 47.28f;
+        m_pitchDegrees = -2.0f;
+        m_cameraFovDegrees = verticalFovDegreesFor(70.0f, 16.0f / 9.0f);
+        // Anchor the orographic bank beyond Riverwood, against the authored
+        // mountain rather than the camera. Its lower shelf sits above the
+        // valley while the feathered footprint keeps cloud out of the near
+        // tree canopy.
+        m_renderer.setMountainCloudVolume(
+            markerEngine[0] + 5200.0f,
+            markerEngine[2] + 5600.0f,
+            markerEngine[1] + 1100.0f,
+            markerEngine[1] + 2900.0f,
+            4200.0f,
+            9800.0f);
+        VOX_LOGI("showcase")
+            << "Skyrim forest anchor Riverwood ref 0x" << std::hex
+            << marker->referenceFormId << std::dec << " at ("
+            << markerEngine[0] << ", " << markerEngine[1] << ", "
+            << markerEngine[2] << ")";
+    } else if (!m_interiorStarted && oblivionReferenceShowcase()) {
+        bethesda::OblivionReferenceCamera camera;
+        if (m_oblivionGreatForestShowcase) {
+            const auto marker = std::find_if(
+                m_streamer->mapMarkers().begin(), m_streamer->mapMarkers().end(),
+                [](const importer::fnv::FalloutMapMarkerRecord& candidate) {
+                    // Map markers normally begin hidden until discovered; that
+                    // gameplay flag does not make their authored coordinates
+                    // unsuitable as a presentation anchor.
+                    return !candidate.deleted &&
+                        toLowerAscii(candidate.name) == "weynon priory";
+                });
+            if (marker == m_streamer->mapMarkers().end()) {
+                VOX_LOGE("showcase")
+                    << "Great Forest reference requires the authored Weynon Priory map marker";
+                return false;
+            }
+            const float markerEngine[3] = {
+                marker->position[0], marker->position[2], -marker->position[1]};
+            camera = bethesda::greatForestReferenceCamera(markerEngine);
+            VOX_LOGI("showcase")
+                << "Great Forest anchor Weynon Priory ref 0x" << std::hex
+                << marker->referenceFormId << std::dec << " at ("
+                << markerEngine[0] << ", " << markerEngine[1] << ", "
+                << markerEngine[2] << ")";
+        } else {
+            camera = m_oblivionAnvilHarborShowcase
+                ? bethesda::anvilHarborReferenceCamera()
+                : bethesda::imperialMarketReferenceCamera();
+        }
+        std::copy_n(camera.position, 3u, spawn);
+        spawnedAtShowcase = true;
+        m_yawDegrees = camera.yawDegrees;
+        m_pitchDegrees = camera.pitchDegrees;
+        m_cameraFovDegrees = verticalFovDegreesFor(
+            camera.horizontalFovDegrees, 16.0f / 9.0f);
+        VOX_LOGI("showcase")
+            << "Oblivion "
+            << (m_oblivionAnvilHarborShowcase
+                    ? "Anvil harbor"
+                    : (m_oblivionGreatForestShowcase
+                        ? "Great Forest" : "Imperial Market"))
+            << " reference camera: x=" << spawn[0]
+            << " y=" << spawn[1] << " z=" << spawn[2]
+            << " yaw=" << m_yawDegrees << " pitch=" << m_pitchDegrees;
     } else if (!m_interiorStarted && skyrimCityShowcase()) {
         const bool whiterun = m_whiterunThirdPersonShowcase ||
             m_whiterunReferenceShowcase;
@@ -7016,6 +7414,13 @@ bool BethesdaApp::initStreaming() {
         // the camera from well above the terrain.
         m_walkMode = spawnedAtShowcase || spawnedAtScenarioMarker || spawnedAtDoorstep ||
             spawnedAtExplicitPosition;
+        // A fixed presentation camera is not a player controller. Letting the
+        // ordinary walk-mode ground solver own it after prewarm drops the eye
+        // to the canal surface or under an overhanging arcade, depending on
+        // which collision triangle wins the first query.
+        if (fixedCityReferenceShowcase()) {
+            m_walkMode = false;
+        }
         // Stand Victor beside wherever the player starts, rather than at his
         // ACRE reference ~7400 units away. Talking to him is the thing being
         // built; a hike across Goodsprings before every test is friction with
@@ -7478,7 +7883,8 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     // parent proxy once the child ring is final, so the handoff below can trim
     // against the complete detailed residency set instead of rebuilding the
     // 7x7 BTO window once per arriving cell.
-    if (m_whiterunReferenceShowcase && !m_streamer->isStreamingIdle()) {
+    if ((m_whiterunReferenceShowcase || m_skyrimForestReferenceShowcase) &&
+        !m_streamer->isStreamingIdle()) {
         return;
     }
 
@@ -7768,6 +8174,124 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                          << ms << " ms";
 }
 
+void BethesdaApp::updateSkyrimTreeLod(const float bethesdaPosition[3]) {
+    const char* drawMode = std::getenv("ODAI_FNV_DRAW");
+    if ((drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) ||
+        !m_streamIsSkyrim || m_streamer == nullptr ||
+        !m_streamer->isStreamingIdle()) {
+        return;
+    }
+
+    constexpr std::int32_t kTileCells = importer::fnv::kLandLodBlockCells;
+    constexpr std::int32_t kTileRadius = 3;
+    const float cellSize = m_streamer->cellWorldSize();
+    if (cellSize <= 0.0f) return;
+    const auto cellX = static_cast<std::int32_t>(std::floor(bethesdaPosition[0] / cellSize));
+    const auto cellZ = static_cast<std::int32_t>(std::floor(bethesdaPosition[1] / cellSize));
+    const auto tileX = importer::fnv::landLodTileOrigin(cellX, kTileCells);
+    const auto tileZ = importer::fnv::landLodTileOrigin(cellZ, kTileCells);
+    const bool fixedCaptureLod =
+        m_captureRoutePreloadActive && m_captureSkyrimLodBoundsValid;
+    if ((fixedCaptureLod && m_captureSkyrimTreeLodFrozen) ||
+        (!fixedCaptureLod && m_skyrimTreeLodCellValid &&
+         cellX == m_skyrimTreeLodCellX && cellZ == m_skyrimTreeLodCellZ)) {
+        return;
+    }
+
+    const std::int32_t firstX =
+        (fixedCaptureLod ? m_captureSkyrimLodMinTileX : tileX) -
+        kTileRadius * kTileCells;
+    const std::int32_t firstZ =
+        (fixedCaptureLod ? m_captureSkyrimLodMinTileZ : tileZ) -
+        kTileRadius * kTileCells;
+    const std::int32_t lastX =
+        (fixedCaptureLod ? m_captureSkyrimLodMaxTileX : tileX) +
+        kTileRadius * kTileCells;
+    const std::int32_t lastZ =
+        (fixedCaptureLod ? m_captureSkyrimLodMaxTileZ : tileZ) +
+        kTileRadius * kTileCells;
+
+    const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
+    std::vector<std::string> lodWorldspaces =
+        m_streamer->currentWorldspaceEditorIdAncestry();
+    if (!m_skyrimTreeLodWorldspace.empty()) {
+        const auto cached = std::find(
+            lodWorldspaces.begin(), lodWorldspaces.end(), m_skyrimTreeLodWorldspace);
+        if (cached != lodWorldspaces.end()) {
+            std::rotate(lodWorldspaces.begin(), cached, cached + 1);
+        }
+    }
+    importer::ImportedScene scene;
+    importer::fnv::SkyrimTreeLodStats stats;
+    std::string attempts;
+    bool built = false;
+    const auto start = std::chrono::steady_clock::now();
+    for (const std::string& worldspace : lodWorldspaces) {
+        importer::ImportedScene candidate;
+        importer::fnv::SkyrimTreeLodStats candidateStats;
+        std::string candidateError;
+        const bool appended = importer::fnv::appendSkyrimTreeLod(
+            [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+                return assets.resolveMesh(path, bytes, candidateError);
+            },
+            [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+                return assets.resolveTexture(path, bytes, candidateError);
+            },
+            worldspace, firstX, firstZ, lastX, lastZ,
+            [&](std::int32_t x, std::int32_t z) {
+                if (fixedCaptureLod) {
+                    return m_capturePinnedCells.contains(importer::CellCoord{x, z});
+                }
+                return m_streamer->isExteriorCellResident(
+                    m_streamer->currentWorldspaceFormId(), x, z);
+            },
+            candidate, candidateStats, candidateError);
+        if (appended) {
+            scene = std::move(candidate);
+            scene.sourceTag = "skyrim_tree_lod:" + worldspace;
+            stats = candidateStats;
+            built = true;
+            if (m_skyrimTreeLodWorldspace != worldspace) {
+                VOX_LOGI("newvegas") << "Skyrim tree LOD for " << m_streamWorldspace
+                                     << " resolved from " << worldspace;
+                m_skyrimTreeLodWorldspace = worldspace;
+            }
+            break;
+        }
+        if (!attempts.empty()) attempts += "; ";
+        attempts += worldspace + ": " + candidateError;
+    }
+
+    std::size_t replacement = render::Renderer::kInvalidImportedChunkIndex;
+    if (built) {
+        importer::buildImportedScenePackedRenderData(scene);
+        importer::buildImportedScenePageRanges(scene);
+        replacement = m_renderer.addImportedSceneChunk(scene);
+    }
+    if (m_skyrimTreeLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
+        m_renderer.removeImportedSceneChunk(m_skyrimTreeLodChunk);
+    }
+    m_skyrimTreeLodChunk = replacement;
+    m_skyrimTreeDetailedInstanceCount = stats.instancesTrimmed;
+    m_skyrimTreeLodCellX = cellX;
+    m_skyrimTreeLodCellZ = cellZ;
+    m_skyrimTreeLodCellValid = true;
+    m_captureSkyrimTreeLodFrozen = fixedCaptureLod;
+    if (!built) {
+        VOX_LOGI("newvegas") << "no Skyrim tree LOD around tile " << tileX << ","
+                             << tileZ << ": " << attempts;
+        return;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    VOX_LOGI("newvegas") << (fixedCaptureLod ? "fixed capture Skyrim tree LOD" :
+                                                "Skyrim tree LOD around tile")
+                         << " " << tileX << "," << tileZ << ": "
+                         << stats.tilesParsed << " BTT tiles, " << stats.instances
+                         << " trees, " << stats.instancesTrimmed << " handed to detail, "
+                         << stats.triangles << " triangles, in " << ms << " ms";
+}
+
 // Headless check that collision is actually doing its job, because walking
 // around by hand is not a repeatable test and "it felt solid" is not a result.
 //
@@ -7915,6 +8439,7 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
     }
     updateSkyrimTerrainLod(falloutPosition);
     updateSkyrimObjectLod(falloutPosition);
+    updateSkyrimTreeLod(falloutPosition);
 
     // Actor placements and quest aliases are gameplay residency, not renderer
     // payload. Rebuild the nearby Skyrim population only after the asynchronous
@@ -12160,7 +12685,8 @@ bool BethesdaApp::captureWarmupComplete() {
         return false;
     }
     if (m_captureSkyrimLodBoundsValid &&
-        (!m_captureSkyrimTerrainLodFrozen || !m_captureSkyrimObjectLodFrozen)) {
+        (!m_captureSkyrimTerrainLodFrozen || !m_captureSkyrimObjectLodFrozen ||
+         !m_captureSkyrimTreeLodFrozen)) {
         return false;
     }
     if (!m_captureUploadsReady) {

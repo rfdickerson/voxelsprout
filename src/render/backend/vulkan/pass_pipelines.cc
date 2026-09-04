@@ -888,11 +888,22 @@ bool RendererBackend::createPipePipeline() {
                 terrainTessState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
                 terrainTessState.patchControlPoints = 3;
                 VkGraphicsPipelineCreateInfo terrainTessCreateInfo = importedPipelineCreateInfo;
+                // LAND and Skyrim's HD-LargeRef mountain proxies are open
+                // surface shells. Their packed parts are two-sided, but the
+                // shared tessellated prefix cannot select the ordinary
+                // per-draw two-sided pipeline. Culling here removed valid
+                // camera-visible cliff shelves even though their winding and
+                // authored normals agree. Keep this exception terrain-only;
+                // normal imported statics retain back-face culling.
+                VkPipelineRasterizationStateCreateInfo terrainTessRasterizer =
+                    importedRasterizer;
+                terrainTessRasterizer.cullMode = VK_CULL_MODE_NONE;
                 terrainTessCreateInfo.stageCount =
                     static_cast<uint32_t>(terrainTessStages.size());
                 terrainTessCreateInfo.pStages = terrainTessStages.data();
                 terrainTessCreateInfo.pInputAssemblyState = &terrainInputAssembly;
                 terrainTessCreateInfo.pTessellationState = &terrainTessState;
+                terrainTessCreateInfo.pRasterizationState = &terrainTessRasterizer;
                 VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
                 if (vkCreateGraphicsPipelines(
                         m_device, m_pipelineCache, 1, &terrainTessCreateInfo, nullptr,
@@ -1925,7 +1936,12 @@ bool RendererBackend::createAoPipelines() {
                 terrainCreateInfo.pInputAssemblyState = &terrainInputAssembly;
                 terrainCreateInfo.pTessellationState = &terrainTessState;
                 terrainCreateInfo.pVertexInputState = &importedVertexInputInfo;
-                terrainCreateInfo.pRasterizationState = &rasterizer;
+                // Match the main tessellated terrain pipeline exactly. AO
+                // consumes this normal/depth output, so disagreeing cull state
+                // would reintroduce the same missing shelf in diagnostics.
+                VkPipelineRasterizationStateCreateInfo terrainRasterizer = rasterizer;
+                terrainRasterizer.cullMode = VK_CULL_MODE_NONE;
+                terrainCreateInfo.pRasterizationState = &terrainRasterizer;
                 VkPipeline terrainPipeline = VK_NULL_HANDLE;
                 if (vkCreateGraphicsPipelines(
                         m_device, m_pipelineCache, 1, &terrainCreateInfo, nullptr,
@@ -2857,7 +2873,7 @@ bool RendererBackend::createGraphicsPipeline() {
     // Locations 1 and 2 (normal, colour) are gone: imported_static_shadow.vert
     // no longer declares them, because this pass writes depth and alpha-tests
     // and reads nothing else.
-    VkVertexInputAttributeDescription importedShadowAttributes[4]{};
+    VkVertexInputAttributeDescription importedShadowAttributes[5]{};
     importedShadowAttributes[0].location = 0;
     importedShadowAttributes[0].binding = 0;
     importedShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -2874,14 +2890,18 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowAttributes[3].binding = 0;
     importedShadowAttributes[3].format = VK_FORMAT_R32_UINT;
     importedShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, flags));
+    importedShadowAttributes[4].location = 7;
+    importedShadowAttributes[4].binding = 0;
+    importedShadowAttributes[4].format = VK_FORMAT_R32_UINT;
+    importedShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedMeshVertex, layerWeights));
 
-    // Identical attributes against the 28-byte stream. Same shaders, same
+    // Identical attributes against the compact stream. Same shaders, same
     // locations; only the stride and offsets differ.
     VkVertexInputBindingDescription importedShadowCompactBindings[1]{};
     importedShadowCompactBindings[0].binding = 0;
     importedShadowCompactBindings[0].stride = sizeof(ImportedShadowVertex);
     importedShadowCompactBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    VkVertexInputAttributeDescription importedShadowCompactAttributes[4]{};
+    VkVertexInputAttributeDescription importedShadowCompactAttributes[5]{};
     importedShadowCompactAttributes[0].location = 0;
     importedShadowCompactAttributes[0].binding = 0;
     importedShadowCompactAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -2898,18 +2918,22 @@ bool RendererBackend::createGraphicsPipeline() {
     importedShadowCompactAttributes[3].binding = 0;
     importedShadowCompactAttributes[3].format = VK_FORMAT_R32_UINT;
     importedShadowCompactAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, flags));
+    importedShadowCompactAttributes[4].location = 7;
+    importedShadowCompactAttributes[4].binding = 0;
+    importedShadowCompactAttributes[4].format = VK_FORMAT_R32_UINT;
+    importedShadowCompactAttributes[4].offset = static_cast<uint32_t>(offsetof(ImportedShadowVertex, layerWeights));
     VkPipelineVertexInputStateCreateInfo importedShadowCompactVertexInputInfo{};
     importedShadowCompactVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedShadowCompactVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedShadowCompactVertexInputInfo.pVertexBindingDescriptions = importedShadowCompactBindings;
-    importedShadowCompactVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    importedShadowCompactVertexInputInfo.vertexAttributeDescriptionCount = 5;
     importedShadowCompactVertexInputInfo.pVertexAttributeDescriptions = importedShadowCompactAttributes;
 
     VkPipelineVertexInputStateCreateInfo importedShadowVertexInputInfo{};
     importedShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedShadowVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedShadowVertexInputInfo.pVertexBindingDescriptions = importedShadowBindings;
-    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    importedShadowVertexInputInfo.vertexAttributeDescriptionCount = 5;
     importedShadowVertexInputInfo.pVertexAttributeDescriptions = importedShadowAttributes;
 
     VkGraphicsPipelineCreateInfo importedShadowPipelineCreateInfo = shadowPipelineCreateInfo;

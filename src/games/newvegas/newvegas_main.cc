@@ -50,8 +50,13 @@ int main(int argc, char** argv) {
     bool whiterunReferenceShowcase = false;
     bool whiterunMarketReferenceShowcase = false;
     bool riftenThirdPersonShowcase = false;
+    bool skyrimForestReferenceShowcase = false;
+    bool oblivionImperialMarketShowcase = false;
+    bool oblivionAnvilHarborShowcase = false;
+    bool oblivionGreatForestShowcase = false;
     bool conflictingShowcaseOption = false;
     std::string skyrimDataDirectory;
+    std::string oblivionDataDirectory;
     std::string skyrimPlayerOutfit = "ArmorIronBandedNoHelmetOutfit";
     bool skyrimPlayerOutfitSpecified = false;
     // TAA ON, AT NATIVE RESOLUTION, BY DEFAULT.
@@ -137,11 +142,17 @@ int main(int argc, char** argv) {
                 showcase != "whiterun-third-person" &&
                 showcase != "whiterun-reference" &&
                 showcase != "whiterun-market-reference" &&
-                showcase != "riften-third-person") {
+                showcase != "riften-third-person" &&
+                showcase != "skyrim-forest-reference" &&
+                showcase != "oblivion-imperial-market" &&
+                showcase != "oblivion-anvil-harbor" &&
+                showcase != "oblivion-great-forest") {
                 std::cout << "unknown --showcase: " << showcase
                           << " (balmora-skyrim-player|whiterun-third-person|"
                              "whiterun-reference|whiterun-market-reference|"
-                             "riften-third-person)\n";
+                             "riften-third-person|skyrim-forest-reference|"
+                             "oblivion-imperial-market|"
+                             "oblivion-anvil-harbor|oblivion-great-forest)\n";
                 return 1;
             }
             balmoraSkyrimPlayerShowcase = showcase == "balmora-skyrim-player";
@@ -151,8 +162,15 @@ int main(int argc, char** argv) {
             whiterunMarketReferenceShowcase =
                 showcase == "whiterun-market-reference";
             riftenThirdPersonShowcase = showcase == "riften-third-person";
+            skyrimForestReferenceShowcase = showcase == "skyrim-forest-reference";
+            oblivionImperialMarketShowcase =
+                showcase == "oblivion-imperial-market";
+            oblivionAnvilHarborShowcase = showcase == "oblivion-anvil-harbor";
+            oblivionGreatForestShowcase = showcase == "oblivion-great-forest";
         } else if (std::strcmp(argv[i], "--skyrim-data") == 0 && i + 1 < argc) {
             skyrimDataDirectory = argv[++i];
+        } else if (std::strcmp(argv[i], "--oblivion-data") == 0 && i + 1 < argc) {
+            oblivionDataDirectory = argv[++i];
         } else if (std::strcmp(argv[i], "--skyrim-player-outfit") == 0 && i + 1 < argc) {
             skyrimPlayerOutfit = argv[++i];
             skyrimPlayerOutfitSpecified = true;
@@ -343,6 +361,18 @@ int main(int argc, char** argv) {
                       << "odai --showcase riften-third-person [--skyrim-data <Skyrim/Data>]\n"
                       << "  Enter Riften through its authored main gate with the same playable\n"
                       << "  third-person avatar and a prewarmed city residency ring.\n"
+                      << "odai --showcase skyrim-forest-reference [--skyrim-data <Skyrim/Data>]\n"
+                      << "  Render a deterministic, HUD-free forest view near Riverwood with\n"
+                      << "  full NIF trees and Tamriel BTT tree LOD prewarmed.\n"
+                      << "odai --showcase oblivion-imperial-market [--oblivion-data <Oblivion/Data>]\n"
+                      << "  Render a deterministic, HUD-free Imperial City Market District view\n"
+                      << "  with authored weather, resident crowds, and persistent architecture.\n"
+                      << "odai --showcase oblivion-anvil-harbor [--oblivion-data <Oblivion/Data>]\n"
+                      << "  Render a deterministic, HUD-free view down Anvil's authored waterfront,\n"
+                      << "  with the Flowing Bowl, boardwalk, ships, and castle.\n"
+                      << "odai --showcase oblivion-great-forest [--oblivion-data <Oblivion/Data>]\n"
+                      << "  Render a deterministic, HUD-free woodland view along the authored\n"
+                      << "  Great Forest approach to Weynon Priory.\n"
                       << "  Override game assets from directories laid out like Data\n"
                       << "  (textures\\..., meshes\\...); later --mod wins. Also\n"
                       << "  $ODAI_FNV_MODS, ':'-separated.\n"
@@ -385,14 +415,62 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (balmoraSkyrimPlayerShowcase || whiterunThirdPersonShowcase ||
-        whiterunReferenceShowcase ||
-        riftenThirdPersonShowcase) {
+        whiterunReferenceShowcase || skyrimForestReferenceShowcase ||
+        riftenThirdPersonShowcase || oblivionImperialMarketShowcase ||
+        oblivionAnvilHarborShowcase || oblivionGreatForestShowcase) {
         if (conflictingShowcaseOption || profileSpecified || loadOrderSpecified) {
             std::cout << "the selected --showcase conflicts with scene, scenario, "
                          "interior, spawn, plugin, worldspace, profile, and load-order options\n";
             return 1;
         }
-        if (balmoraSkyrimPlayerShowcase) {
+        if (oblivionImperialMarketShowcase || oblivionAnvilHarborShowcase ||
+            oblivionGreatForestShowcase) {
+            if (!renderResolutionExplicit) {
+                setenv("ODAI_RENDER_SCALE", "1.0", 1);
+            }
+            setenv("ODAI_NATIVE_LOGICAL_PRESENT", "1", 0);
+            setenv("ODAI_FNV_AO", "xegtao", 0);
+            // The Anvil reference uses a broad grounding lobe and a restrained
+            // contact lobe in the single XeGTAO dispatch. Imperial Market keeps
+            // its tighter existing scale.
+            setenv("ODAI_FNV_AO_RADIUS",
+                oblivionAnvilHarborShowcase ? "240" :
+                (oblivionGreatForestShowcase ? "176" : "112"), 0);
+            setenv("ODAI_FNV_AO_INTENSITY",
+                oblivionAnvilHarborShowcase ? "1.10" :
+                (oblivionGreatForestShowcase ? "1.18" : "1.32"), 0);
+            setenv("ODAI_FNV_AO_FINE",
+                oblivionAnvilHarborShowcase ? "0.30" :
+                (oblivionGreatForestShowcase ? "0.38" : "0.34"), 0);
+            setenv("ODAI_XEGTAO_BLUR", "4", 0);
+            setenv("ODAI_SHADOW_DISTANCE",
+                oblivionAnvilHarborShowcase ? "6800" :
+                (oblivionGreatForestShowcase ? "9000" : "5200"), 0);
+            setenv("ODAI_SHADOW_LAMBDA",
+                oblivionGreatForestShowcase ? "0.91" :
+                (oblivionAnvilHarborShowcase ? "0.94" : "0.97"), 0);
+            setenv("ODAI_FNV_TEX_SIZE", "2048", 0);
+            setenv("ODAI_UPSCALE_MIPBIAS", "-0.25", 0);
+            setenv("ODAI_TEXTURE_ANISOTROPY", "16", 0);
+            setenv("ODAI_FNV_EXPOSURE_KEY",
+                oblivionAnvilHarborShowcase ? "0.060" :
+                (oblivionGreatForestShowcase ? "0.068" : "0.075"), 0);
+            setenv("ODAI_FNV_FOGFAR",
+                oblivionAnvilHarborShowcase ? "170000" :
+                (oblivionGreatForestShowcase ? "90000" : "120000"), 0);
+            setenv("ODAI_FNV_NOHUD", "1", 0);
+            setenv("ODAI_PRESENT_MODE", "mailbox", 0);
+            if (oblivionAnvilHarborShowcase) {
+                app.setOblivionAnvilHarborShowcase(
+                    std::move(oblivionDataDirectory));
+            } else if (oblivionGreatForestShowcase) {
+                app.setOblivionGreatForestShowcase(
+                    std::move(oblivionDataDirectory));
+            } else {
+                app.setOblivionImperialMarketShowcase(
+                    std::move(oblivionDataDirectory));
+            }
+        } else if (balmoraSkyrimPlayerShowcase) {
             app.setBalmoraSkyrimPlayerShowcase(
                 std::move(skyrimDataDirectory), std::move(skyrimPlayerOutfit));
         } else {
@@ -405,7 +483,9 @@ int main(int argc, char** argv) {
                 // presentation extent. Keep playable city showcases at their
                 // measured 0.8 scale. Explicit environment overrides remain
                 // authoritative for both paths.
-                setenv("ODAI_RENDER_SCALE", whiterunReferenceShowcase ? "1.0" : "0.8", 1);
+                setenv("ODAI_RENDER_SCALE",
+                       (whiterunReferenceShowcase || skyrimForestReferenceShowcase)
+                           ? "1.0" : "0.8", 1);
             }
             // GLFW's default HiDPI behavior made the maximized 1440x844 window
             // present at 2880x1688. The full-resolution post/UI pass alone cost
@@ -413,12 +493,16 @@ int main(int argc, char** argv) {
             // window but present one pixel per logical pixel; an explicit user
             // value of 0 retains native HiDPI presentation.
             setenv("ODAI_NATIVE_LOGICAL_PRESENT", "1", 0);
-            setenv("ODAI_FNV_AO", whiterunReferenceShowcase ? "xegtao" : "off", 0);
-            setenv("ODAI_SHADOW_DISTANCE", whiterunReferenceShowcase ? "5000" : "6000", 0);
+            setenv("ODAI_FNV_AO",
+                   (whiterunReferenceShowcase || skyrimForestReferenceShowcase)
+                       ? "xegtao" : "off", 0);
+            setenv("ODAI_SHADOW_DISTANCE",
+                   skyrimForestReferenceShowcase ? "10000" :
+                   (whiterunReferenceShowcase ? "5000" : "6000"), 0);
             setenv("ODAI_PRESENT_MODE", "mailbox", 0);
-            if (whiterunReferenceShowcase) {
+            if (whiterunReferenceShowcase || skyrimForestReferenceShowcase) {
                 if (skyrimPlayerOutfitSpecified) {
-                    std::cout << "--skyrim-player-outfit is not used by whiterun-reference\n";
+                    std::cout << "--skyrim-player-outfit is not used by fixed references\n";
                     return 1;
                 }
                 // The general runtime's 512px ceiling is a memory-first
@@ -441,16 +525,32 @@ int main(int argc, char** argv) {
                 // smithy and braziers. Concentrate the cascades on the resident
                 // plaza and strengthen XeGTAO's contact scale; CLI/environment
                 // choices still win over every one of these defaults.
-                setenv("ODAI_FNV_HOUR", "14", 0);
-                setenv("ODAI_SHADOW_LAMBDA", "0.98", 0);
+                setenv("ODAI_FNV_HOUR", skyrimForestReferenceShowcase ? "16.25" : "14", 0);
+                setenv("ODAI_SHADOW_LAMBDA",
+                       skyrimForestReferenceShowcase ? "0.93" : "0.98", 0);
                 setenv("ODAI_FNV_AO_RADIUS",
-                    whiterunMarketReferenceShowcase ? "300" : "240", 0);
+                    skyrimForestReferenceShowcase ? "176" :
+                    (whiterunMarketReferenceShowcase ? "300" : "240"), 0);
                 setenv("ODAI_FNV_AO_INTENSITY",
-                    whiterunMarketReferenceShowcase ? "2.35" : "1.95", 0);
+                    skyrimForestReferenceShowcase ? "1.35" :
+                    (whiterunMarketReferenceShowcase ? "2.35" : "1.95"), 0);
                 setenv("ODAI_FNV_AO_FINE",
                     whiterunMarketReferenceShowcase ? "0.38" : "0.30", 0);
                 setenv("ODAI_XEGTAO_BLUR",
                     whiterunMarketReferenceShowcase ? "4" : "6", 0);
+                if (skyrimForestReferenceShowcase) {
+                    // Low cloud banks hug Riverwood's mountain shoulders. The
+                    // paused showcase clock fixes their procedural phase.
+                    setenv("ODAI_MOUNTAIN_CLOUDS", "1", 0);
+                    // A retail fire dragon perches on the mountain above the
+                    // village.  Actor discovery still goes through the common
+                    // Skyrim catalog/build path; the showcase only supplies a
+                    // deterministic synthetic placement for a base that is
+                    // normally enabled by quest script.  An explicit spawn or
+                    // draw-distance override remains authoritative.
+                    setenv("ODAI_FNV_SPAWN_ACTOR", "EncDragon01Fire", 0);
+                    setenv("ODAI_FNV_ACTOR_DRAW_DISTANCE", "18000", 0);
+                }
                 if (whiterunMarketReferenceShowcase) {
                     // The rainy market composition is dominated by pale
                     // plaster and roof shingles. Key it slightly below the
@@ -466,7 +566,10 @@ int main(int argc, char** argv) {
                     setenv("ODAI_FOG_SCATTER", "0.28", 0);
                 }
                 setenv("ODAI_FNV_NOHUD", "1", 0);
-                if (whiterunMarketReferenceShowcase) {
+                if (skyrimForestReferenceShowcase) {
+                    app.setSkyrimForestReferenceShowcase(
+                        std::move(skyrimDataDirectory));
+                } else if (whiterunMarketReferenceShowcase) {
                     app.setWhiterunMarketReferenceShowcase(
                         std::move(skyrimDataDirectory));
                 } else {
@@ -480,9 +583,10 @@ int main(int argc, char** argv) {
                     std::move(skyrimDataDirectory), std::move(skyrimPlayerOutfit));
             }
         }
-    } else if (!skyrimDataDirectory.empty() || skyrimPlayerOutfitSpecified) {
-        std::cout << "--skyrim-data and --skyrim-player-outfit require "
-                     "a Skyrim-player third-person showcase\n";
+    } else if (!skyrimDataDirectory.empty() || skyrimPlayerOutfitSpecified ||
+               !oblivionDataDirectory.empty()) {
+        std::cout << "--skyrim-data and --skyrim-player-outfit require a Skyrim "
+                     "showcase; --oblivion-data requires an Oblivion showcase\n";
         return 1;
     }
     if (listProfiles || (profilePicker && !profileSpecified)) {

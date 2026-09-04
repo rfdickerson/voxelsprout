@@ -501,6 +501,104 @@ float heightFogDensityAt(float worldHeight, float fogBaseHeight, float heightFal
     return exp(clamp(-relativeHeight * heightFalloff, -7.0, 7.0));
 }
 
+float mountainCloudHash(float3 p)
+{
+    p = frac(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return frac((p.x + p.y) * p.z);
+}
+
+float mountainCloudNoise(float3 p)
+{
+    const float3 cell = floor(p);
+    float3 f = frac(p);
+    f = f * f * (3.0 - (2.0 * f));
+    const float n000 = mountainCloudHash(cell + float3(0.0, 0.0, 0.0));
+    const float n100 = mountainCloudHash(cell + float3(1.0, 0.0, 0.0));
+    const float n010 = mountainCloudHash(cell + float3(0.0, 1.0, 0.0));
+    const float n110 = mountainCloudHash(cell + float3(1.0, 1.0, 0.0));
+    const float n001 = mountainCloudHash(cell + float3(0.0, 0.0, 1.0));
+    const float n101 = mountainCloudHash(cell + float3(1.0, 0.0, 1.0));
+    const float n011 = mountainCloudHash(cell + float3(0.0, 1.0, 1.0));
+    const float n111 = mountainCloudHash(cell + float3(1.0, 1.0, 1.0));
+    const float n00 = lerp(n000, n100, f.x);
+    const float n10 = lerp(n010, n110, f.x);
+    const float n01 = lerp(n001, n101, f.x);
+    const float n11 = lerp(n011, n111, f.x);
+    return lerp(lerp(n00, n10, f.y), lerp(n01, n11, f.y), f.z);
+}
+
+float mountainCloudFbm(float3 p)
+{
+    return (mountainCloudNoise(p) * 0.5714) +
+        (mountainCloudNoise((p * 2.03) + 13.7) * 0.2857) +
+        (mountainCloudNoise((p * 4.11) + 31.9) * 0.1429);
+}
+
+float mountainCloudDensityAt(float3 worldPosition, float3 cameraWorld)
+{
+    if (camera.mountainCloudConfig0.x <= 0.5)
+    {
+        return 0.0;
+    }
+    const float baseHeight = camera.mountainCloudConfig0.z;
+    const float topHeight = max(camera.mountainCloudConfig0.w, baseHeight + 1.0);
+    const float heightT = saturate((worldPosition.y - baseHeight) / (topHeight - baseHeight));
+    const float heightEnvelope =
+        smoothstep(0.0, 0.18, heightT) * (1.0 - smoothstep(0.68, 1.0, heightT));
+    const float distanceToCamera = length(worldPosition - cameraWorld);
+    const float distanceEnvelope =
+        smoothstep(camera.mountainCloudConfig1.x,
+                   camera.mountainCloudConfig1.x + 1800.0, distanceToCamera) *
+        (1.0 - smoothstep(camera.mountainCloudConfig1.y - 2800.0,
+                          camera.mountainCloudConfig1.y, distanceToCamera));
+    const float horizontalDistance = length(
+        worldPosition.xz - camera.mountainCloudConfig2.xy);
+    const float footprintEnvelope = 1.0 - smoothstep(
+        camera.mountainCloudConfig2.z,
+        max(camera.mountainCloudConfig2.w,
+            camera.mountainCloudConfig2.z + 1.0),
+        horizontalDistance);
+    const float scale = max(camera.mountainCloudConfig1.z, 1e-6);
+    const float3 drift = float3(camera.skyConfig1.z * 0.006, 0.0,
+                                camera.skyConfig1.z * 0.0035);
+    const float3 noisePosition = (worldPosition + drift) * scale;
+    // Broad weather structure establishes coherent banks. Finer detail then
+    // erodes their edges instead of creating equally bright cotton-ball noise
+    // at every scale.
+    const float macro = mountainCloudNoise(
+        float3(noisePosition.x * 0.48, noisePosition.y * 0.30,
+               noisePosition.z * 0.48) + 7.3);
+    const float shape = mountainCloudFbm(noisePosition);
+    const float erosion = mountainCloudNoise((noisePosition * 5.7) + 47.1);
+    const float noise = (shape * 0.70) + (macro * 0.38) - (erosion * 0.08);
+    const float coverage = saturate(camera.mountainCloudConfig1.w);
+    const float cloud = smoothstep(coverage - 0.16, coverage + 0.14, noise);
+    return camera.mountainCloudConfig0.y * cloud * heightEnvelope *
+        distanceEnvelope * footprintEnvelope;
+}
+
+float mountainCloudSunTransmittance(
+    float3 worldPosition,
+    float3 cameraWorld,
+    float3 toSun,
+    int stepCount,
+    float stepLength)
+{
+    float opticalDepth = 0.0;
+    [loop]
+    for (int i = 0; i < stepCount; ++i)
+    {
+        const float t = (float(i) + 0.75) * stepLength;
+        opticalDepth += mountainCloudDensityAt(
+            worldPosition + (toSun * t), cameraWorld) * stepLength;
+    }
+    // Cloud droplets are largely wavelength-neutral at this scale. The
+    // scalar extinction keeps the shadow chromatically plausible while the
+    // atmospheric fog continues to use wavelength-dependent extinction.
+    return exp(-opticalDepth * 0.115);
+}
+
 float3 fogExtinctionCoefficient()
 {
     const float rayleighT = clamp(camera.skyConfig0.x * 0.25, 0.0, 1.0);
@@ -581,7 +679,8 @@ float3 applyVolumetricHeightFog(
 )
 {
     const float fogDensity = max(camera.skyConfig4.x, 0.0);
-    if (fogDensity <= 1e-6 || travelDistance <= 1e-4)
+    const bool cloudsEnabled = camera.mountainCloudConfig0.x > 0.5;
+    if ((fogDensity <= 1e-6 && !cloudsEnabled) || travelDistance <= 1e-4)
     {
         return litColor;
     }
@@ -593,8 +692,21 @@ float3 applyVolumetricHeightFog(
     const float3 extinction = fogExtinctionCoefficient();
     const float3 scatteringAlbedo = fogScatteringAlbedo();
 
+    // Approximate the cloud bank's broad shadow on terrain before integrating
+    // the view ray. It is deliberately soft and capped: the main material
+    // shader has already separated direct and ambient terms, so this post
+    // interaction must not pretend to be a hard, direct-only shadow.
+    if (cloudsEnabled)
+    {
+        const float cloudShadow = mountainCloudSunTransmittance(
+            worldPosition, cameraWorld, toSun, 6, 1050.0);
+        litColor *= lerp(1.0, max(cloudShadow, 0.68), 0.72);
+    }
+
     const float horizonGather = 1.0 + (pow(1.0 - saturate(abs(worldViewDir.y)), 2.0) * 0.32);
-    const int sampleCount = 6;
+    // Localized clouds need enough samples for their density variation, while
+    // ordinary weather fog retains the established six-sample cost and output.
+    const int sampleCount = cloudsEnabled ? 12 : 6;
     const float stepLength = travelDistance / float(sampleCount);
     float3 transmittance = float3(1.0, 1.0, 1.0);
     float3 inscatter = float3(0.0, 0.0, 0.0);
@@ -604,18 +716,41 @@ float3 applyVolumetricHeightFog(
     {
         const float t = (float(i) + 0.5) * stepLength;
         const float3 samplePosition = cameraWorld + (worldViewDir * t);
+        const float cloudDensity = mountainCloudDensityAt(
+            samplePosition, cameraWorld);
         const float localDensity =
-            fogDensity * heightFogDensityAt(samplePosition.y, fogBaseHeight, heightFalloff) * horizonGather;
+            (fogDensity * heightFogDensityAt(
+                samplePosition.y, fogBaseHeight, heightFalloff) * horizonGather) +
+            cloudDensity;
         const float opticalDepth = localDensity * stepLength;
         const float3 segmentTransmittance = exp(-(extinction * opticalDepth));
-        const float3 incidentRadiance = volumetricIncidentRadiance(
+        float cloudSunVisibility = sunVisibility;
+        if (cloudDensity > 1e-5)
+        {
+            cloudSunVisibility *= mountainCloudSunTransmittance(
+                samplePosition, cameraWorld, toSun, 4, 720.0);
+        }
+        float3 incidentRadiance = volumetricIncidentRadiance(
             worldViewDir,
             toSun,
             samplePosition.y,
             fogBaseHeight,
             sunScatterStrength,
-            sunVisibility
+            cloudSunVisibility
         );
+        if (cloudDensity > 1e-5)
+        {
+            // A restrained multiple-scattering approximation prevents the
+            // self-shadowed core from collapsing to black while retaining a
+            // cool skylit underside and a warm, directional sunward rim.
+            const float powder = 1.0 - exp(-cloudDensity * stepLength * 0.32);
+            const float3 skyBounce = lerp(
+                float3(0.20, 0.28, 0.42),
+                camera.weatherSkyUpper.xyz,
+                saturate(camera.weatherSkyUpper.w));
+            incidentRadiance *= lerp(0.52, 1.0, cloudSunVisibility);
+            incidentRadiance += skyBounce * (powder * 0.20);
+        }
         inscatter +=
             transmittance *
             (float3(1.0, 1.0, 1.0) - segmentTransmittance) *
@@ -728,7 +863,10 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 toSun = normalize(-camera.sunDirectionIntensity.xyz);
     const float3 sunView = mul((float3x3)camera.view, toSun);
     float2 sunUv = float2(-1.0, -1.0);
-    float sunVisibility = 0.0;
+    // An off-screen sun is not an occluded sun. Only replace the default with
+    // the screen-space visibility sample when its projected disk is actually
+    // covered by the visibility texture.
+    float sunVisibility = 1.0;
     if (sunView.z < -1e-4)
     {
         const float invDepth = 1.0 / max(-sunView.z, 1e-4);

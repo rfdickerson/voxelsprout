@@ -56,6 +56,8 @@ struct DomainOutput
     float4 layerWeights : TEXCOORD7;
 };
 
+static const uint kDistantLodTessellation = (1u << 10);
+
 // Same construction as imported_static.frag's terrainBlendNoise, kept separate
 // because the fragment shader's operates in UV space and this one in world
 // space -- sharing them would couple the bump field to texture tiling.
@@ -101,7 +103,9 @@ DomainOutput main(
         (projected0 * bary.x) + (projected1 * bary.y) + (projected2 * bary.z);
     // 0.5: enough to round a ridge, not enough to pull the surface visibly off
     // the collision heights the CPU walks on.
-    const float kPhongAlpha = 0.5;
+    const bool distantLod =
+        (patch[0].flags & kDistantLodTessellation) != 0u;
+    const float kPhongAlpha = distantLod ? 0.72 : 0.5;
     float3 worldPosition = lerp(flatPosition, phongPosition, kPhongAlpha);
 
     const float3 worldNormal = normalize((n0 * bary.x) + (n1 * bary.y) + (n2 * bary.z));
@@ -114,18 +118,36 @@ DomainOutput main(
     // edges shared with an untessellated neighbour stay watertight.
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float viewDistance = length(worldPosition - cameraWorld);
-    const float distanceFade = 1.0 - smoothstep(2000.0, 10000.0, viewDistance);
-    const float edgeFade = saturate(3.0 * min(bary.x, min(bary.y, bary.z)));
+    const float distanceFade = distantLod
+        ? (1.0 - smoothstep(9000.0, 48000.0, viewDistance))
+        : (1.0 - smoothstep(2000.0, 10000.0, viewDistance));
+    // Adjacent tessellated mountain triangles evaluate identical world-space
+    // noise and interpolated edge normals, so displacement can reach their
+    // shared edges without cracks. Ordinary LAND still fades at every edge
+    // because a neighbouring page may have fallen back to the flat pipeline.
+    const float edgeFade = distantLod
+        ? 1.0 : saturate(3.0 * min(bary.x, min(bary.y, bary.z)));
     if (distanceFade > 0.0 && edgeFade > 0.0)
     {
-        const float coarse = terrainDetailNoise(worldPosition.xz * (1.0 / 96.0));
-        const float fine = terrainDetailNoise(worldPosition.xz * (1.0 / 34.0));
+        const float3 normalWeight = abs(worldNormal);
+        const float weightSum = max(normalWeight.x + normalWeight.y + normalWeight.z, 1e-4);
+        const float3 axisWeight = normalWeight / weightSum;
+        const float coarse = distantLod
+            ? (terrainDetailNoise(worldPosition.yz * (1.0 / 420.0)) * axisWeight.x +
+               terrainDetailNoise(worldPosition.xz * (1.0 / 420.0)) * axisWeight.y +
+               terrainDetailNoise(worldPosition.xy * (1.0 / 420.0)) * axisWeight.z)
+            : terrainDetailNoise(worldPosition.xz * (1.0 / 96.0));
+        const float fine = distantLod
+            ? (terrainDetailNoise(worldPosition.yz * (1.0 / 145.0)) * axisWeight.x +
+               terrainDetailNoise(worldPosition.xz * (1.0 / 145.0)) * axisWeight.y +
+               terrainDetailNoise(worldPosition.xy * (1.0 / 145.0)) * axisWeight.z)
+            : terrainDetailNoise(worldPosition.xz * (1.0 / 34.0));
         const float bump = ((coarse - 0.5) * 0.7) + ((fine - 0.5) * 0.3);
         // bump spans roughly [-0.5, 0.5], so this is +/-9 units -- about
         // 13 cm at Bethesda's ~70 units per metre. Enough to break up a flat
         // plain up close, small enough that an actor standing on the CPU
         // collision heights never visibly floats or sinks.
-        const float kBumpAmplitude = 18.0;
+        const float kBumpAmplitude = distantLod ? 64.0 : 18.0;
         worldPosition += worldNormal * (bump * kBumpAmplitude * distanceFade * edgeFade);
     }
 

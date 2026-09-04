@@ -89,6 +89,14 @@ public struct CameraUniform
     public float4 importedPbrConfig;
     // x = dominant horizontal water plane in world Y, y = planar target valid.
     public float4 waterReflectionConfig;
+    // xy = horizontal direction, z = maximum displacement in world units,
+    // w = deterministic phase/time.
+    public float4 foliageWind;
+    // (enabled, density, base-height, top-height), then
+    // (near-distance, far-distance, world-noise scale, coverage).
+    public float4 mountainCloudConfig0;
+    public float4 mountainCloudConfig1;
+    public float4 mountainCloudConfig2;
 };
 
 [[vk::binding(0, 0)]]

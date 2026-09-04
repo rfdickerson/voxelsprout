@@ -169,7 +169,22 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         mainPush.falloffRange = kFalloffRange;
         mainPush.sampleDistributionPower = 2.0f;
         mainPush.thinOccluderCompensation = 0.0f;
-        mainPush.finalValuePower = 2.2f;
+        // Honor the same public intensity control as the SSAO/HBAO/GTAO
+        // estimators.  This used to be a fixed 2.2, so showcase tuning changed
+        // every AO mode except the one it actually selected (XeGTAO).
+        mainPush.finalValuePower =
+            std::clamp(m_shadowDebugSettings.ssaoIntensity, 0.25f, 4.0f);
+        mainPush.fineRadiusScale =
+            std::clamp(m_shadowDebugSettings.ssaoFineRadiusScale, 0.0f, 0.95f);
+        if (mainPush.fineRadiusScale > 0.0f) {
+            // A broad lobe grounds streets and walls; a restrained contact lobe
+            // keeps joints readable without painting crevices black. These are
+            // deliberately separate from finalValuePower: intensity changes
+            // the response curve, while these values decide spatial scale.
+            mainPush.coarseWeight = 0.55f;
+            mainPush.fineWeight = 0.45f;
+            mainPush.minimumVisibility = 0.42f;
+        }
         // Keep the R2 pattern pixel-stable by default. In this renderer the AO
         // term has no dedicated temporal history; asking the colour TAA pass to
         // absorb a binary horizon pattern left shallow receivers (most visibly

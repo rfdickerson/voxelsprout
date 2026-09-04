@@ -54,7 +54,10 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v31 gives every placed instance an explicit source-reference identity and
 // initial visibility. Initially-disabled quest objects remain in the cache and
 // can be materialized by runtime state instead of disappearing at cook time.
-constexpr std::uint32_t kImportedSceneVersion = 31u;
+// v32 assigns semantics to ImportedScenePackedDraw's reserved bytes for
+// vegetation LOD. The raw stride is unchanged, but old caches cannot promise
+// those bytes were initialized by every historical writer.
+constexpr std::uint32_t kImportedSceneVersion = 32u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
@@ -1123,6 +1126,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
         scene.boundsMax[2] = std::max(scene.boundsMax[2], vertex.position[2]);
     };
 
+    std::uint16_t nextVegetationGroup = 1u;
     auto appendMesh = [&](const ImportedSceneMesh& mesh,
                           const std::array<float, 16>& transform,
                           const PackedRenderColor& color) {
@@ -1130,6 +1134,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             return;
         }
         const std::uint32_t firstIndex = static_cast<std::uint32_t>(scene.packedIndices.size());
+        const bool vegetationMesh = std::any_of(
+            mesh.parts.begin(), mesh.parts.end(),
+            [](const ImportedSceneMeshPart& part) { return part.vegetationLod != 0u; });
+        const std::uint16_t vegetationGroup = vegetationMesh ? nextVegetationGroup++ : 0u;
         std::vector<std::uint32_t> packedAnimationIndices;
         packedAnimationIndices.reserve(mesh.rigidAnimations.size());
         for (const ImportedSceneRigidAnimation& source : mesh.rigidAnimations) {
@@ -1177,6 +1185,12 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             dstVertex.uv[1] = srcVertex.uv[1];
             dstVertex.textureIndex = textureIndex;
             dstVertex.flags = flags;
+            if (srcVertex.layerTextureIndex[3] == kImportedSceneFoliageWindMarker) {
+                const float windPayload[4] = {
+                    srcVertex.layerWeight[0], srcVertex.layerWeight[1], 0.0f, 0.0f};
+                dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(windPayload);
+                dstVertex.flags |= kImportedSceneMaterialFlagFoliageWind;
+            }
             // Static Bethesda materials use layer slot 0 as a runtime normal
             // map sidecar. Terrain owns these slots only when its layer flag is
             // set, so the two meanings cannot overlap. The field already lives
@@ -1208,7 +1222,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
         // actually differ stay apart.
         const auto emitDraw = [&](std::uint32_t drawFirstIndex,
                                   std::uint8_t alphaThreshold,
-                                  std::uint32_t rigidAnimationIndex) {
+                                  std::uint32_t rigidAnimationIndex,
+                                  std::uint8_t vegetationLod) {
             const std::uint32_t indexCount =
                 static_cast<std::uint32_t>(scene.packedIndices.size() - drawFirstIndex);
             if (indexCount == 0u) {
@@ -1219,6 +1234,12 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             draw.indexCount = indexCount;
             draw.alphaThreshold = alphaThreshold;
             draw.rigidAnimationIndex = rigidAnimationIndex;
+            if (vegetationLod != 0u) {
+                draw.reserved[0] = static_cast<std::uint8_t>(
+                    kImportedSceneVegetationDraw | (vegetationLod & 0x03u));
+                draw.reserved[1] = static_cast<std::uint8_t>(vegetationGroup & 0xffu);
+                draw.reserved[2] = static_cast<std::uint8_t>(vegetationGroup >> 8u);
+            }
             scene.packedDraws.push_back(draw);
         };
 
@@ -1239,7 +1260,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             }
             // No part, so no authored alpha mode; the neutral default applies
             // and this draw never alpha-tests anyway.
-            emitDraw(firstIndex, 128u, 0xffffffffu);
+            emitDraw(firstIndex, 128u, 0xffffffffu, 0u);
         } else {
             for (const ImportedSceneMeshPart& part : mesh.parts) {
                 if (part.indexCount == 0u || part.firstIndex >= mesh.indices.size()) {
@@ -1258,7 +1279,15 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     (part.alphaTest ? kImportedSceneMaterialFlagAlphaTest : 0u) |
                     (part.alphaBlend ? kImportedSceneMaterialFlagAlphaBlend : 0u) |
                     (part.twoSided ? kImportedSceneMaterialFlagTwoSided : 0u) |
-                    (part.unlit ? kImportedSceneMaterialFlagUnlit : 0u);
+                    (part.unlit ? kImportedSceneMaterialFlagUnlit : 0u) |
+                    ((part.vegetationReserved[0] &
+                      kImportedSceneMeshPartDistantLodTessellation) != 0u
+                         ? kImportedSceneMaterialFlagDistantLodTessellation
+                         : 0u) |
+                    ((part.vegetationReserved[0] &
+                      kImportedSceneMeshPartDistantLodSnow) != 0u
+                         ? kImportedSceneMaterialFlagDistantLodSnow
+                         : 0u);
                 for (std::size_t indexOffset = firstPartIndex; indexOffset < lastPartIndex; ++indexOffset) {
                     const std::uint32_t index = mesh.indices[indexOffset];
                     if (index >= mesh.vertices.size()) {
@@ -1274,7 +1303,9 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     part.rigidAnimationIndex < packedAnimationIndices.size()
                         ? packedAnimationIndices[part.rigidAnimationIndex]
                         : 0xffffffffu;
-                emitDraw(partDrawFirstIndex, part.alphaThreshold, animationIndex);
+                emitDraw(
+                    partDrawFirstIndex, part.alphaThreshold, animationIndex,
+                    part.vegetationLod);
             }
         }
     };

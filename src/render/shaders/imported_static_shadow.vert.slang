@@ -11,6 +11,7 @@ struct VertexInput
     [[vk::location(3)]] float2 inUv : TEXCOORD3;
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
     [[vk::location(5)]] uint inFlags : TEXCOORD5;
+    [[vk::location(7)]] uint inLayerWeights : TEXCOORD7;
 };
 
 struct VertexOutput
@@ -25,6 +26,17 @@ VertexOutput main(VertexInput input)
 {
     VertexOutput output;
     float3 worldPosition = input.inPosition;
+    static const uint kFoliageWindFlag = 1u << 9u;
+    if ((input.inFlags & kFoliageWindFlag) != 0u)
+    {
+        const float bendWeight = float(input.inLayerWeights & 0xffu) / 255.0;
+        const float phase = float((input.inLayerWeights >> 8u) & 0xffu) / 255.0;
+        const float wave = sin(
+            camera.foliageWind.w * 0.82 + phase * 6.2831853 +
+            dot(worldPosition.xz, float2(0.0031, 0.0023)));
+        worldPosition.xz += camera.foliageWind.xy *
+            (camera.foliageWind.z * bendWeight * wave);
+    }
     if (chunkPc.rigidAnimationParams.x > 0.5)
     {
         const float4 p = float4(worldPosition, 1.0);

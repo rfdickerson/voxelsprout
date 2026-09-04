@@ -161,7 +161,46 @@ void parseStatRecord(const EsmRecordView& record, FalloutSceneData& scene) {
             if (looksLikeModelPath(candidate)) {
                 entry.modelPath = candidate;
             }
+        } else if (record.type == "TREE" && sub.type == "ICON") {
+            entry.treeLeafTexturePath = subrecordString(sub);
+        } else if (record.type == "TREE" && sub.type == "SNAM" && sub.size >= 4u) {
+            entry.treeSeed = readU32(sub.data);
+        } else if (record.type == "TREE" && sub.type == "BNAM" && sub.size >= 8u) {
+            entry.treeBillboardWidth = readF32(sub.data);
+            entry.treeBillboardHeight = readF32(sub.data + 4u);
+        } else if (record.type == "TREE" && sub.type == "CNAM") {
+            const std::size_t count = std::min<std::size_t>(8u, sub.size / 4u);
+            for (std::size_t i = 0; i < count; ++i) {
+                entry.treeWind[i] = readF32(sub.data + (i * 4u));
+            }
         }
+    }
+    // Oblivion TREE records name SpeedTree assets relative to meshes\trees and
+    // textures\trees. Skyrim reused TREE for ordinary NIF models whose MODL
+    // is already rooted (for example Landscape\Trees\TreePineForest01.nif).
+    // Prefixing those paths made every Skyrim tree resolve as
+    // trees\landscape\..., silently removing the near forest.
+    std::string loweredTreeModel = entry.modelPath;
+    std::transform(
+        loweredTreeModel.begin(), loweredTreeModel.end(), loweredTreeModel.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (record.type == "TREE" && loweredTreeModel.ends_with(".spt")) {
+        const auto treeRootedPath = [](std::string path, std::string_view folder) {
+            while (!path.empty() && (path.front() == '\\' || path.front() == '/')) {
+                path.erase(path.begin());
+            }
+            std::string lowered = path;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+                return c == '/' ? '\\' : static_cast<char>(std::tolower(c));
+            });
+            if (lowered.rfind(folder, 0u) != 0u) {
+                path = std::string(folder) + path;
+            }
+            return path;
+        };
+        entry.modelPath = treeRootedPath(std::move(entry.modelPath), "trees\\");
+        entry.treeLeafTexturePath = treeRootedPath(
+            std::move(entry.treeLeafTexturePath), "trees\\");
     }
     scene.statics.push_back(std::move(entry));
 }

@@ -69,6 +69,12 @@ struct NifShape {
     // so nothing about the texture says the edges should fade. Without this a
     // road renders as a hard-edged slab laid on the terrain.
     std::vector<float> colors;
+    // Procedural SpeedTree-only bend payload, one value per vertex. Ordinary
+    // NIF shapes leave these empty.
+    std::vector<float> windWeights;
+    std::vector<float> windPhases;
+    // 0 = ordinary geometry, 1/2/3 = high/reduced/billboard vegetation LOD.
+    std::uint8_t vegetationLod = 0u;
     std::vector<std::uint32_t> triangleIndices;  // 3 per triangle, indexes into positions/normals
     std::uint32_t sourceTriangleCount = 0;
     std::uint32_t rejectedTriangleCount = 0;
@@ -119,6 +125,12 @@ struct NifShape {
         0, 0, 1, 0,
         0, 0, 0, 1};
 };
+
+// Repairs a shape whose triangle order decisively disagrees with its authored
+// vertex normals. The weighted 3:1 threshold deliberately leaves mixed-facing
+// and open two-sided meshes alone; callers must still preserve their authored
+// two-sided material state.
+bool repairNifShapeWindingFromNormals(NifShape& shape);
 
 // Model-space triangle emitted by a NIF's authored static Havok graph. Havok
 // stores its coordinates in metres; the parser converts them back to Bethesda
@@ -213,6 +225,9 @@ struct NifModel {
     // Shapes whose NiStencilProperty declared DRAW_CW (front face is the
     // clockwise winding, the reverse of this renderer's convention).
     std::uint32_t reversedWindingShapeCount = 0;
+    // Shapes whose triangle order was decisively opposite their authored
+    // vertex normals and was repaired for back-face culling.
+    std::uint32_t normalWindingRepairShapeCount = 0;
     // Triangles rejected at parse for naming a vertex the block does not have,
     // and for being degenerate (two indices equal).
     //

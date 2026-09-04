@@ -37,7 +37,9 @@ struct PatchConstants
 // triangle computes the identical factor for the shared edge, which is what
 // keeps the tessellation watertight. A per-patch factor would crack every
 // boundary between a near patch and a far one.
-float edgeTessFactor(float3 a, float3 b)
+static const uint kDistantLodTessellation = (1u << 10);
+
+float edgeTessFactor(float3 a, float3 b, bool distantLod)
 {
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float distance = length(((a + b) * 0.5) - cameraWorld);
@@ -46,20 +48,23 @@ float edgeTessFactor(float3 a, float3 b)
     // 6: triangle count grows with the SQUARE of the factor and this stage
     // runs twice per frame (merged prepass + main), and on the LNL iGPU the
     // step from 4 to 6 measured +2.5 ms for a difference the eye cannot find.
-    const float nearTess = 4.0;
+    const float nearTess = distantLod ? 5.0 : 4.0;
     const float farTess = 1.0;
+    const float fadeStart = distantLod ? 9000.0 : 1500.0;
+    const float fadeEnd = distantLod ? 48000.0 : 10000.0;
     return clamp(
-        lerp(nearTess, farTess, smoothstep(1500.0, 10000.0, distance)), farTess, nearTess);
+        lerp(nearTess, farTess, smoothstep(fadeStart, fadeEnd, distance)), farTess, nearTess);
 }
 
 PatchConstants patchConstants(InputPatch<ControlPoint, 3> patch)
 {
     PatchConstants constants;
+    const bool distantLod = (patch[0].flags & kDistantLodTessellation) != 0u;
     // Edge i is opposite control point i (D3D/Vulkan triangle convention):
     // edge 0 runs between CPs 1 and 2.
-    constants.edges[0] = edgeTessFactor(patch[1].worldPosition, patch[2].worldPosition);
-    constants.edges[1] = edgeTessFactor(patch[2].worldPosition, patch[0].worldPosition);
-    constants.edges[2] = edgeTessFactor(patch[0].worldPosition, patch[1].worldPosition);
+    constants.edges[0] = edgeTessFactor(patch[1].worldPosition, patch[2].worldPosition, distantLod);
+    constants.edges[1] = edgeTessFactor(patch[2].worldPosition, patch[0].worldPosition, distantLod);
+    constants.edges[2] = edgeTessFactor(patch[0].worldPosition, patch[1].worldPosition, distantLod);
     constants.inside = max(max(constants.edges[0], constants.edges[1]), constants.edges[2]);
     return constants;
 }

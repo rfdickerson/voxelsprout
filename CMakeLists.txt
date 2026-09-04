@@ -260,6 +260,7 @@ add_library(odai_bethesda_import STATIC
     src/import/fnv/esm_reader.cc src/import/fnv/fallout_records.cc
     src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/lz4_frame.cc
     src/import/fnv/nif_scene.cc src/import/fnv/plugin_load_order.cc
+    src/import/fnv/spt_scene.cc src/import/fnv/skyrim_tree_lod.cc
     src/import/fnv/skyrim_animation_assets.cc
     src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc)
 odai_source_includes(odai_bethesda_import)

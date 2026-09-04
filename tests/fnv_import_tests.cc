@@ -28,6 +28,8 @@
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/fallout_records.h"
 #include "import/fnv/nif_scene.h"
+#include "import/fnv/spt_scene.h"
+#include "import/fnv/skyrim_tree_lod.h"
 #include "import/fnv/weather_records.h"
 
 namespace {
@@ -6295,6 +6297,129 @@ void testMorrowindNifLodNodeSubtypeTail() {
         "Morrowind NiSwitchNode consumes its four-byte subtype tail");
 }
 
+void testOblivionPathInterpolatorSizing() {
+    using namespace odai::importer::fnv;
+
+    // Oblivion has neither a block-size table nor a global string table. A
+    // path interpolator therefore has to be consumed exactly or every block
+    // after it is lost. This is the layout used by the two retail butterfly
+    // meshes that exercise NiPathInterpolator in the Anvil showcase.
+    std::vector<std::uint8_t> controller(30u, 0u);
+    std::vector<std::uint8_t> path;
+    appendPod(path, static_cast<std::uint16_t>(0x0030u));  // flags
+    appendPod(path, static_cast<std::int32_t>(1));         // bank direction
+    appendPod(path, 0.75f);                               // maximum bank angle
+    appendPod(path, 0.125f);                              // smoothing
+    appendPod(path, static_cast<std::uint16_t>(2));       // follow axis
+    appendPod(path, static_cast<std::int32_t>(2));        // path-data ref
+    appendPod(path, static_cast<std::int32_t>(-1));       // percent-data ref
+    expectTrue(path.size() == 24u, "Oblivion path interpolator stays packed");
+
+    std::vector<std::uint8_t> floatData;
+    appendPod(floatData, static_cast<std::uint32_t>(0));  // no float keys
+
+    const auto makeFile = [](
+        const std::vector<std::string>& typeNames,
+        const std::vector<std::vector<std::uint8_t>>& blocks,
+        std::uint32_t version = 0x14000005u) {
+        std::vector<std::uint8_t> bytes;
+        const std::string headerLine = version == 0x14000004u
+            ? "Gamebryo File Format, Version 20.0.0.4"
+            : "Gamebryo File Format, Version 20.0.0.5";
+        bytes.insert(bytes.end(), headerLine.begin(), headerLine.end());
+        bytes.push_back('\n');
+        appendPod(bytes, version);
+        appendPod(bytes, static_cast<std::uint8_t>(1));   // little endian
+        appendPod(bytes, static_cast<std::uint32_t>(10)); // Oblivion user version
+        appendPod(bytes, static_cast<std::uint32_t>(blocks.size()));
+        appendPod(bytes, static_cast<std::uint32_t>(10)); // Oblivion BS version
+        appendSizedString8(bytes, "");
+        appendSizedString8(bytes, "");
+        appendSizedString8(bytes, "");
+        appendPod(bytes, static_cast<std::uint16_t>(typeNames.size()));
+        for (const std::string& typeName : typeNames) {
+            appendSizedString32(bytes, typeName);
+        }
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            appendPod(bytes, static_cast<std::uint16_t>(i));
+        }
+        appendPod(bytes, static_cast<std::uint32_t>(0));  // no block groups
+        for (const auto& block : blocks) {
+            bytes.insert(bytes.end(), block.begin(), block.end());
+        }
+        return bytes;
+    };
+
+    const std::vector<std::string> pathTypes{
+        "NiTransformController", "NiPathInterpolator", "NiFloatData"};
+    const std::vector<std::uint8_t> validFile =
+        makeFile(pathTypes, {controller, path, floatData});
+    NifBlockSummary summary;
+    std::string error;
+    expectTrue(
+        parseNifBlockSummary(validFile, summary, error),
+        ("Oblivion path interpolator keeps following blocks aligned: " + error).c_str());
+    expectTrue(
+        summary.blockSizes == std::vector<std::uint32_t>{30u, 24u, 4u} &&
+            summary.blockTypeNames.back() == "NiFloatData",
+        "Oblivion path interpolator consumes its exact 24-byte packed layout");
+
+    std::vector<std::uint8_t> truncatedPath = path;
+    truncatedPath.pop_back();
+    const std::vector<std::uint8_t> truncatedFile = makeFile(
+        {"NiTransformController", "NiPathInterpolator"}, {controller, truncatedPath});
+    error.clear();
+    expectTrue(
+        !parseNifBlockSummary(truncatedFile, summary, error) &&
+            error.find("NiPathInterpolator") != std::string::npos,
+        "truncated Oblivion path interpolator fails with its block type in the diagnostic");
+
+    // FireOpenMediumSmoke and FireOpenLargeSmoke are 20.0.0.4 and carry a
+    // collision-query phantom followed by the policy-only SP collision-object
+    // variant. The older phantom has an extra u32 in bhkWorldObject.
+    std::vector<std::uint8_t> phantom(104u, 0u);
+    std::vector<std::uint8_t> spCollision(6u, 0u);
+    const std::vector<std::uint8_t> phantomFile = makeFile(
+        {"bhkSimpleShapePhantom", "bhkSPCollisionObject", "NiFloatData"},
+        {phantom, spCollision, floatData}, 0x14000004u);
+    error.clear();
+    expectTrue(
+        parseNifBlockSummary(phantomFile, summary, error),
+        ("Oblivion simple-shape phantom keeps following blocks aligned: " + error).c_str());
+    expectTrue(
+        summary.blockSizes == std::vector<std::uint32_t>{104u, 6u, 4u} &&
+            summary.blockTypeNames.back() == "NiFloatData",
+        "Oblivion phantom and SP collision object consume their exact layouts");
+
+    // Keep the variable-length particle modifier prefix and the derived tails
+    // locked to their retail sizes. A one-byte drift here used to make the
+    // remainder of each fire/smoke NIF look like an unsupported block.
+    const auto particleModifier = [](std::size_t tailSize) {
+        std::vector<std::uint8_t> block;
+        appendSizedString32(block, "");
+        appendPod(block, static_cast<std::uint32_t>(0));  // execution order
+        appendPod(block, static_cast<std::int32_t>(-1));  // particle target
+        appendPod(block, static_cast<std::uint8_t>(1));   // active
+        block.resize(block.size() + tailSize, 0u);
+        return block;
+    };
+    const std::vector<std::uint8_t> cylinderEmitter = particleModifier(68u);
+    const std::vector<std::uint8_t> spawnModifier = particleModifier(26u);
+    const std::vector<std::uint8_t> rotationModifier = particleModifier(30u);
+    const std::vector<std::uint8_t> particleFile = makeFile(
+        {"NiPSysCylinderEmitter", "NiPSysSpawnModifier",
+         "NiPSysRotationModifier", "NiFloatData"},
+        {cylinderEmitter, spawnModifier, rotationModifier, floatData},
+        0x14000004u);
+    error.clear();
+    expectTrue(
+        parseNifBlockSummary(particleFile, summary, error),
+        ("Oblivion particle modifiers keep following blocks aligned: " + error).c_str());
+    expectTrue(
+        summary.blockSizes == std::vector<std::uint32_t>{81u, 39u, 43u, 4u},
+        "Oblivion particle emitters and modifiers consume their exact layouts");
+}
+
 void testMorrowindDirectKeyframeAndStencilSizing() {
     using namespace odai::importer::fnv;
 
@@ -6484,6 +6609,35 @@ void testVertexFadeTrianglePartitioning() {
                "fully faded geometry remains wholly in the blended tail");
 }
 
+void testNifShapeWindingRepairUsesAuthoredNormals() {
+    using namespace odai::importer::fnv;
+
+    NifShape inverted;
+    inverted.positions = {
+        0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f,
+        1.0f, 1.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+    };
+    inverted.normals = {
+        0.0f, 0.0f, 1.0f,
+        0.0f, 0.0f, 1.0f,
+        0.0f, 0.0f, 1.0f,
+        0.0f, 0.0f, 1.0f,
+    };
+    inverted.triangleIndices = {0u, 2u, 1u, 0u, 3u, 2u};
+    expectTrue(repairNifShapeWindingFromNormals(inverted),
+               "decisively inverted shape winding is repaired from authored normals");
+    expectTrue(inverted.triangleIndices ==
+                   std::vector<std::uint32_t>({0u, 1u, 2u, 0u, 2u, 3u}),
+               "winding repair swaps exactly two indices per triangle");
+
+    NifShape mixed = inverted;
+    mixed.triangleIndices = {0u, 1u, 2u, 0u, 3u, 2u};
+    expectTrue(!repairNifShapeWindingFromNormals(mixed),
+               "mixed-facing open geometry is not guessed into one orientation");
+}
+
 void testBethesdaPlacementRotationConventions() {
     using namespace odai::importer;
     using namespace odai::importer::fnv;
@@ -6515,6 +6669,116 @@ void testBethesdaPlacementRotationConventions() {
                "later-generation placement convention remains unchanged");
 }
 
+void testOblivionSptImportIsBoundedAndDeterministic() {
+    using namespace odai::importer::fnv;
+
+    std::vector<std::uint8_t> bytes;
+    appendPod(bytes, std::uint32_t{1000u});
+    appendPod(bytes, std::uint32_t{12u});
+    const std::string magic = "__IdvSpt_02_";
+    bytes.insert(bytes.end(), magic.begin(), magic.end());
+    appendNulTerminated(bytes, "BeginBranchGeometry");
+    appendNulTerminated(bytes, "BezierSpline");
+    appendNulTerminated(bytes, "textures\\trees\\anvilbark.dds");
+    appendNulTerminated(bytes, "EndBranchGeometry");
+    const float wind[8] = {0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.2f, 1.4f, 1.6f};
+    OblivionSptTree tree;
+    std::string error;
+    expectTrue(
+        parseOblivionSpt(
+            bytes, "trees\\TreeAnvil.spt", "trees\\TreeAnvilLeaves.dds",
+            0x12345678u, 240.0f, 420.0f, wind, tree, error),
+        "retail-style SPT header and bounded tagged strings parse");
+    expectTrue(tree.taggedSectionCount >= 2u && tree.splineTokenCount == 1u,
+               "SPT parser inventories tagged sections and splines");
+    expectTrue(tree.barkTexturePath.find("anvilbark.dds") != std::string::npos,
+               "SPT parser resolves its bark texture reference");
+
+    NifModel first;
+    NifModel second;
+    expectTrue(buildOblivionSptModel(tree, first, error),
+               "parsed SPT generates imported-scene geometry");
+    expectTrue(buildOblivionSptModel(tree, second, error),
+               "the same SPT seed generates a second model");
+    expectTrue(first.shapes.size() == 4u && second.shapes.size() == 4u,
+               "SPT geometry contains high, reduced, and billboard LOD parts");
+    expectTrue(first.shapes[0].positions == second.shapes[0].positions &&
+                   first.shapes[1].windPhases == second.shapes[1].windPhases,
+               "SPT generation and wind phase are deterministic for SNAM seed");
+    expectTrue(first.shapes[0].vegetationLod == 1u &&
+                   first.shapes[1].vegetationLod == 1u &&
+                   first.shapes[2].vegetationLod == 2u &&
+                   first.shapes[3].vegetationLod == 3u,
+               "SPT parts carry the three renderer LOD tags");
+    expectTrue(first.shapes[1].alphaTest && first.shapes[1].twoSided &&
+                   first.shapes[3].alphaTest && first.shapes[3].twoSided &&
+                   first.shapes[2].diffuseTexturePath == tree.billboardTexturePath,
+               "volumetric leaves and retail billboard LOD use two-sided alpha cutouts");
+    expectTrue(first.shapes[1].windWeights.size() ==
+                   first.shapes[1].positions.size() / 3u,
+               "retail billboard vertices carry wind weights");
+
+    bytes[8] = 'X';
+    expectTrue(!parseOblivionSpt(
+                   bytes, "trees\\broken.spt", "trees\\leaf.dds", 1u,
+                   100.0f, 200.0f, wind, tree, error) &&
+                   error.find("header") != std::string::npos,
+               "malformed SPT header produces an actionable diagnostic");
+}
+
+void testSkyrimTreeLodParsingIsBounded() {
+    using namespace odai::importer::fnv;
+
+    std::vector<std::uint8_t> list;
+    appendPod(list, std::uint32_t{1u});
+    appendPod(list, std::uint32_t{7u});
+    appendPod(list, 566.0f);
+    appendPod(list, 1521.0f);
+    appendPod(list, 0.10f);
+    appendPod(list, 0.20f);
+    appendPod(list, 0.30f);
+    appendPod(list, 0.60f);
+    appendPod(list, 0.0f);
+    std::vector<SkyrimTreeLodType> types;
+    std::string error;
+    expectTrue(parseSkyrimTreeLodList(list, types, error) && types.size() == 1u,
+               "Skyrim LST parses bounded tree dimensions and atlas UVs");
+    expectTrue(types[0].index == 7u && types[0].width == 566.0f &&
+                   types[0].uvMax[1] == 0.60f,
+               "Skyrim LST preserves the authored type index and atlas rectangle");
+
+    std::vector<std::uint8_t> tile;
+    appendPod(tile, std::uint32_t{1u});
+    appendPod(tile, std::uint32_t{7u});
+    appendPod(tile, std::uint32_t{1u});
+    appendPod(tile, 65536.0f);
+    appendPod(tile, -61440.0f);
+    appendPod(tile, 812.0f);
+    appendPod(tile, 1.25f);
+    appendPod(tile, 0.9f);
+    appendPod(tile, std::uint32_t{0x12345678u});
+    appendPod(tile, std::uint32_t{1u});
+    appendPod(tile, 0.0f);
+    std::vector<SkyrimTreeLodInstance> trees;
+    expectTrue(parseSkyrimTreeLodTile(tile, trees, error) && trees.size() == 1u,
+               "Skyrim BTT parses a retail-sized grouped tree instance");
+    expectTrue(trees[0].typeIndex == 7u && trees[0].referenceId == 0x12345678u &&
+                   trees[0].position[1] == -61440.0f,
+               "Skyrim BTT retains type, reference identity, and world transform");
+
+    tile.pop_back();
+    expectTrue(!parseSkyrimTreeLodTile(tile, trees, error) &&
+                   error.find("instance count") != std::string::npos,
+               "a truncated Skyrim BTT fails with an actionable bounded-count diagnostic");
+    list[16] = 0xffu;  // corrupt the first U coordinate into a non-finite value
+    list[17] = 0xffu;
+    list[18] = 0xffu;
+    list[19] = 0x7fu;
+    expectTrue(!parseSkyrimTreeLodList(list, types, error) &&
+                   error.find("atlas coordinates") != std::string::npos,
+               "non-finite Skyrim tree atlas data is rejected explicitly");
+}
+
 int main() {
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
@@ -6533,7 +6797,10 @@ int main() {
     testSkyrimRegionAndSoundRecords();
     testLandLayerOpacityReconstruction();
     testVertexFadeTrianglePartitioning();
+    testNifShapeWindingRepairUsesAuthoredNormals();
     testBethesdaPlacementRotationConventions();
+    testOblivionSptImportIsBoundedAndDeterministic();
+    testSkyrimTreeLodParsingIsBounded();
     testNifParserExtractsTransformedGeometry();
     testSkyrimTerrainPackedPositionsAreFullPrecision();
     testSkyrimLightingShaderVertexAlpha();
@@ -6568,6 +6835,7 @@ int main() {
     testAnimatedBannerSettlesUnderJoltGravity();
     testMorrowindSkeletonNamesAndSkinLayout();
     testMorrowindNifLodNodeSubtypeTail();
+    testOblivionPathInterpolatorSizing();
     testMorrowindDirectKeyframeAndStencilSizing();
 
     if (g_failures != 0) {

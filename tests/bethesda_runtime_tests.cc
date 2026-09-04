@@ -8,6 +8,7 @@
 #include "bethesda/skyrim_runtime_records.h"
 #include "bethesda/vmad_reader.h"
 #include "bethesda/whiterun_presentation.h"
+#include "bethesda/oblivion_presentation.h"
 
 #include <bit>
 #include <cassert>
@@ -49,6 +50,40 @@ std::vector<std::uint8_t> ctda(
 }  // namespace
 
 int main() {
+    {
+        constexpr OblivionReferenceCamera camera =
+            imperialMarketReferenceCamera();
+        assert(std::abs(camera.horizontalFovDegrees - 70.0f) < 0.001f);
+        assert(camera.position[0] >= 32768.0f && camera.position[0] < 36864.0f);
+        assert(camera.position[2] <= -65536.0f && camera.position[2] > -69632.0f);
+        assert(camera.position[1] > 3600.0f && camera.position[1] < 4200.0f);
+        assert(camera.pitchDegrees < 0.0f);
+        const float yaw = camera.yawDegrees * 3.14159265358979323846f / 180.0f;
+        assert(std::cos(yaw) < -0.4f && std::sin(yaw) < -0.85f);
+    }
+    {
+        constexpr OblivionReferenceCamera camera = anvilHarborReferenceCamera();
+        assert(std::abs(camera.horizontalFovDegrees - 72.0f) < 0.001f);
+        assert(static_cast<int>(std::floor(camera.position[0] / 4096.0f)) == -48);
+        // Streamer engine Z is the negative of the plugin's exterior-cell Y.
+        assert(static_cast<int>(std::floor(-camera.position[2] / 4096.0f)) == -8);
+        assert(camera.position[1] > 380.0f && camera.position[1] < 460.0f);
+        assert(camera.yawDegrees > 40.0f && camera.yawDegrees < 50.0f);
+        assert(camera.pitchDegrees < -6.0f && camera.pitchDegrees > -11.0f);
+    }
+    {
+        constexpr float marker[3] = {10000.0f, 800.0f, -20000.0f};
+        constexpr OblivionReferenceCamera camera =
+            greatForestReferenceCamera(marker);
+        assert(std::abs(camera.horizontalFovDegrees - 70.0f) < 0.001f);
+        assert(camera.position[0] == marker[0] - 2200.0f);
+        assert(camera.position[1] == marker[1] + 230.0f);
+        assert(camera.position[2] == marker[2] - 1700.0f);
+        const float yaw = camera.yawDegrees * 3.14159265358979323846f / 180.0f;
+        const float toMarkerX = marker[0] - camera.position[0];
+        const float toMarkerZ = marker[2] - camera.position[2];
+        assert(toMarkerX * std::cos(yaw) + toMarkerZ * std::sin(yaw) > 2700.0f);
+    }
     {
         const float gate[3] = {100.0f, 200.0f, 300.0f};
         const WhiterunReferenceCamera camera =

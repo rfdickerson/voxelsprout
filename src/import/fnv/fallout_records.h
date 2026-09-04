@@ -206,6 +206,13 @@ struct FalloutStaticRecord {
     std::string recordType;
     std::string editorId;
     std::string modelPath;  // relative to Data\Meshes, backslashes as stored in the plugin
+    // TES4 TREE metadata. SPT paths are rooted at Data rather than under
+    // Data\Meshes; these fields remain empty for every other record type.
+    std::string treeLeafTexturePath;
+    std::uint32_t treeSeed = 0u;
+    float treeBillboardWidth = 0.0f;
+    float treeBillboardHeight = 0.0f;
+    float treeWind[8] = {};
 };
 
 // A LIGH base record's light parameters.

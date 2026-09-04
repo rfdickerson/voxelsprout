@@ -223,6 +223,58 @@ public:
             m_requestedWeatherEditorId = "SkyrimOvercastRain";
         }
     }
+    void setOblivionImperialMarketShowcase(std::string oblivionDataDirectory) {
+        m_oblivionImperialMarketShowcase = true;
+        if (!oblivionDataDirectory.empty()) {
+            m_streamDirectory = std::move(oblivionDataDirectory);
+        }
+        if (!m_weatherExplicit) {
+            m_requestedWeatherEditorId = "Clear";
+        }
+        if (!m_timeOfDayExplicit) {
+            m_timeOfDayHours = 14.0f;
+        }
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
+    void setOblivionAnvilHarborShowcase(std::string oblivionDataDirectory) {
+        m_oblivionAnvilHarborShowcase = true;
+        if (!oblivionDataDirectory.empty()) {
+            m_streamDirectory = std::move(oblivionDataDirectory);
+        }
+        if (!m_weatherExplicit) {
+            m_requestedWeatherEditorId = "Clear";
+        }
+        if (!m_timeOfDayExplicit) {
+            m_timeOfDayHours = 17.0f;
+        }
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
+    void setOblivionGreatForestShowcase(std::string oblivionDataDirectory) {
+        m_oblivionGreatForestShowcase = true;
+        if (!oblivionDataDirectory.empty()) {
+            m_streamDirectory = std::move(oblivionDataDirectory);
+        }
+        if (!m_weatherExplicit) {
+            m_requestedWeatherEditorId = "Clear";
+        }
+        if (!m_timeOfDayExplicit) {
+            m_timeOfDayHours = 15.0f;
+        }
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
+    void setSkyrimForestReferenceShowcase(std::string skyrimDataDirectory) {
+        m_skyrimForestReferenceShowcase = true;
+        if (!skyrimDataDirectory.empty()) {
+            m_streamDirectory = std::move(skyrimDataDirectory);
+        }
+        if (!m_weatherExplicit) m_requestedWeatherEditorId = "SkyrimClear";
+        if (!m_timeOfDayExplicit) m_timeOfDayHours = 16.25f;
+        m_resumeEnabled = false;
+        m_explicitStart = true;
+    }
     void setRiftenThirdPersonShowcase(
         std::string skyrimDataDirectory,
         std::string outfitEditorId = "ArmorIronBandedNoHelmetOutfit") {
@@ -301,6 +353,14 @@ protected:
     [[nodiscard]] bool skyrimCityShowcase() const {
         return skyrimCityThirdPersonShowcase() || m_whiterunReferenceShowcase;
     }
+    [[nodiscard]] bool fixedCityReferenceShowcase() const {
+        return m_whiterunReferenceShowcase || m_skyrimForestReferenceShowcase ||
+            oblivionReferenceShowcase();
+    }
+    [[nodiscard]] bool oblivionReferenceShowcase() const {
+        return m_oblivionImperialMarketShowcase || m_oblivionAnvilHarborShowcase ||
+            m_oblivionGreatForestShowcase;
+    }
     void reconstructPlayerCamera(float deltaSeconds, bool snapInward = false);
     bool initSkyrimPlayerAvatar();
     void updateSkyrimPlayerAvatar(float deltaSeconds);
@@ -343,6 +403,9 @@ protected:
     // Keep a small window around the camera so child-worldspace cities (most
     // visibly Whiterun) retain their authored skyline from the parent world.
     void updateSkyrimObjectLod(const float bethesdaPosition[3]);
+    // Skyrim's near trees are NIFs; distant forest coverage is a separate BTT
+    // atlas set. Keep the latter outside detailed cell residency.
+    void updateSkyrimTreeLod(const float bethesdaPosition[3]);
     // Skyrim's matching .btr terrain tiles form the distant ground underneath
     // those object shells. Keep a ring outside detailed LAND residency.
     void updateSkyrimTerrainLod(const float bethesdaPosition[3]);
@@ -377,6 +440,12 @@ private:
     std::int32_t m_skyrimObjectLodTileZ = 0;
     bool m_skyrimObjectLodTileValid = false;
     std::string m_skyrimObjectLodWorldspace;
+    std::size_t m_skyrimTreeLodChunk = static_cast<std::size_t>(-1);
+    std::int32_t m_skyrimTreeLodCellX = 0;
+    std::int32_t m_skyrimTreeLodCellZ = 0;
+    bool m_skyrimTreeLodCellValid = false;
+    std::string m_skyrimTreeLodWorldspace;
+    std::size_t m_skyrimTreeDetailedInstanceCount = 0u;
     // Fills m_weatherChoices, once. Prefers the weathers this worldspace's
     // climate actually runs -- with Nevada Skies loaded that IS the mod's
     // weather set, and it is a far more useful list than every WTHR in the load
@@ -624,6 +693,7 @@ private:
     std::int32_t m_captureSkyrimLodMaxTileZ = 0;
     bool m_captureSkyrimTerrainLodFrozen = false;
     bool m_captureSkyrimObjectLodFrozen = false;
+    bool m_captureSkyrimTreeLodFrozen = false;
     bool m_captureUploadsReady = false;
     // Frames rendered but not kept: at least m_captureWarmupFrames AND, while
     // streaming, until the streamer goes idle. Both, because auto-exposure and
@@ -692,6 +762,10 @@ private:
     bool m_riftenThirdPersonShowcase = false;
     bool m_whiterunReferenceShowcase = false;
     bool m_whiterunMarketReferenceShowcase = false;
+    bool m_skyrimForestReferenceShowcase = false;
+    bool m_oblivionImperialMarketShowcase = false;
+    bool m_oblivionAnvilHarborShowcase = false;
+    bool m_oblivionGreatForestShowcase = false;
     bool m_weatherExplicit = false;
     bool m_skyrimCitySpawnSettlementPending = false;
     importer::CellCoord m_skyrimCitySpawnCell{};

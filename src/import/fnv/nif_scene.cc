@@ -946,27 +946,60 @@ bool readNiAlphaProperty(
 }
 
 bool readNiStencilProperty(
-    ByteCursor& cursor, bool inlineNames, StencilPropertyBlock& out) {
-    // Same NiObjectNET prefix as NiAlphaProperty above: name, extra data,
-    // controller, then the property's own 16-bit flags.
-    std::uint32_t nameRef = 0;
-    if (!cursor.read(nameRef)) {
+    ByteCursor& cursor, std::uint32_t version, bool inlineNames,
+    StencilPropertyBlock& out) {
+    const bool morrowind = version == kMorrowindNifVersion;
+    if (!readNiObjectNetPrefix(cursor, inlineNames, morrowind)) {
         return false;
     }
-    std::uint32_t numExtraData = 0;
-    if (!cursor.read(numExtraData) || numExtraData > 1024u) {
-        return false;
-    }
-    for (std::uint32_t i = 0; i < numExtraData; ++i) {
-        std::int32_t ref = 0;
-        if (!cursor.read(ref)) {
+
+    // Through Oblivion 20.0.0.5 this is NOT a packed StencilFlags word.
+    // Gamebryo stores enabled as a byte followed by seven uint32 fields, the
+    // last of which is FaceDrawMode. Reading the byte plus the low byte of the
+    // compare function as a modern uint16 flags word made every Oblivion
+    // DRAW_BOTH wall/floor single-sided. The meshes remained present, but their
+    // camera-facing side was culled into large rectangular holes.
+    if (version <= kOblivionNifVersion5) {
+        if (version <= 0x0A000102u) {
+            std::uint16_t legacyPropertyFlags = 0;
+            if (!cursor.read(legacyPropertyFlags)) {
+                return false;
+            }
+        }
+        std::uint8_t enabled = 0;
+        std::uint32_t stencilFunction = 0;
+        std::uint32_t stencilRef = 0;
+        std::uint32_t stencilMask = 0;
+        std::uint32_t failAction = 0;
+        std::uint32_t zFailAction = 0;
+        std::uint32_t passAction = 0;
+        std::uint32_t drawMode = 0;
+        if (!cursor.read(enabled) || !cursor.read(stencilFunction) ||
+            !cursor.read(stencilRef) || !cursor.read(stencilMask) ||
+            !cursor.read(failAction) || !cursor.read(zFailAction) ||
+            !cursor.read(passAction) || !cursor.read(drawMode)) {
             return false;
         }
+        (void)enabled;
+        (void)stencilFunction;
+        (void)stencilRef;
+        (void)stencilMask;
+        (void)failAction;
+        (void)zFailAction;
+        (void)passAction;
+        out.drawMode = static_cast<std::uint16_t>(drawMode & 0x3u);
+        // DRAW_CCW_OR_BOTH (0) deliberately delegates the choice to the
+        // application. Oblivion uses that legacy default on architectural
+        // wall/floor sheets which must remain visible from either side. The
+        // modern runtime has no per-title application default, so preserve the
+        // retail result by selecting BOTH for this old unpacked representation.
+        out.twoSided = out.drawMode == 0u || out.drawMode == 3u;
+        out.reversedWinding = out.drawMode == 2u;
+        out.valid = true;
+        return true;
     }
-    std::int32_t controllerRef = 0;
-    if (!cursor.read(controllerRef)) {
-        return false;
-    }
+
+    // From 20.1.0.3 onward the same fields are packed into StencilFlags.
     std::uint16_t flags = 0;
     if (!cursor.read(flags)) {
         return false;
@@ -1299,6 +1332,73 @@ void rejectUnusableTriangles(GeometryBlock& out) {
     // A trailing partial triangle is not a triangle; the loop above already
     // leaves it out, and keeping it would hand the renderer two thirds of one.
     out.triangleIndices = std::move(kept);
+}
+
+// Bethesda content occasionally carries triangle order that disagrees with its
+// authored vertex normals. The original renderers tolerated more of these
+// meshes, but an explicit back-face-culling pipeline does not: an entire wall
+// or floor can disappear from the intended side even though all vertices are
+// present. Requiring a 3:1 weighted majority avoids changing meshes with
+// hard-edge seams, mixed intentional facings, or noisy/invalid normals.
+bool repairWindingFromNormalsImpl(NifShape& shape) {
+    if (shape.positions.empty() || shape.normals.size() != shape.positions.size() ||
+        shape.triangleIndices.size() < 3u) {
+        return false;
+    }
+
+    double alignedWeight = 0.0;
+    double opposedWeight = 0.0;
+    std::size_t usableTriangles = 0;
+    const std::size_t vertexCount = shape.positions.size() / 3u;
+    for (std::size_t i = 0; i + 2u < shape.triangleIndices.size(); i += 3u) {
+        const std::uint32_t ia = shape.triangleIndices[i];
+        const std::uint32_t ib = shape.triangleIndices[i + 1u];
+        const std::uint32_t ic = shape.triangleIndices[i + 2u];
+        if (ia >= vertexCount || ib >= vertexCount || ic >= vertexCount) {
+            continue;
+        }
+
+        const auto component = [](const std::vector<float>& values,
+                                  std::uint32_t vertex, std::size_t axis) {
+            return static_cast<double>(values[(static_cast<std::size_t>(vertex) * 3u) + axis]);
+        };
+        const double abx = component(shape.positions, ib, 0u) - component(shape.positions, ia, 0u);
+        const double aby = component(shape.positions, ib, 1u) - component(shape.positions, ia, 1u);
+        const double abz = component(shape.positions, ib, 2u) - component(shape.positions, ia, 2u);
+        const double acx = component(shape.positions, ic, 0u) - component(shape.positions, ia, 0u);
+        const double acy = component(shape.positions, ic, 1u) - component(shape.positions, ia, 1u);
+        const double acz = component(shape.positions, ic, 2u) - component(shape.positions, ia, 2u);
+        const double faceX = (aby * acz) - (abz * acy);
+        const double faceY = (abz * acx) - (abx * acz);
+        const double faceZ = (abx * acy) - (aby * acx);
+        const double normalX = component(shape.normals, ia, 0u) +
+                               component(shape.normals, ib, 0u) +
+                               component(shape.normals, ic, 0u);
+        const double normalY = component(shape.normals, ia, 1u) +
+                               component(shape.normals, ib, 1u) +
+                               component(shape.normals, ic, 1u);
+        const double normalZ = component(shape.normals, ia, 2u) +
+                               component(shape.normals, ib, 2u) +
+                               component(shape.normals, ic, 2u);
+        const double alignment = (faceX * normalX) + (faceY * normalY) + (faceZ * normalZ);
+        if (std::abs(alignment) <= 1.0e-10) {
+            continue;
+        }
+        ++usableTriangles;
+        if (alignment > 0.0) {
+            alignedWeight += alignment;
+        } else {
+            opposedWeight -= alignment;
+        }
+    }
+
+    if (usableTriangles < 2u || opposedWeight <= alignedWeight * 3.0) {
+        return false;
+    }
+    for (std::size_t i = 0; i + 2u < shape.triangleIndices.size(); i += 3u) {
+        std::swap(shape.triangleIndices[i + 1u], shape.triangleIndices[i + 2u]);
+    }
+    return true;
 }
 
 // Unpacks one BSVertexData array -- the format BSTriShape and NiSkinPartition
@@ -2301,10 +2401,31 @@ bool consumeKeyframeData(ByteCursor& cursor, bool xyzHasAxisOrder) {
 // know how long that block is", which fails the file.
 bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
                           std::uint32_t version) {
+    const auto consumeParticleModifierPrefix = [&cursor]() {
+        // Inline modifier name, execution order, particle-system target and
+        // active byte.
+        return consumeSizedString(cursor) && consumeSkip(cursor, 4u + 4u + 1u);
+    };
+    const auto consumeParticleEmitterPrefix = [&]() {
+        // Modifier prefix; six directional/speed floats, initial RGBA, radius
+        // plus its variation, then lifespan plus its variation. The radius-
+        // variation float arrived after 10.2, so retail fireflies are shorter.
+        const std::size_t emitterBytes =
+            version <= kGamebryo10MaxVersion ? 52u : 56u;
+        return consumeParticleModifierPrefix() && consumeSkip(cursor, emitterBytes);
+    };
     // --- Havok. Skipped entirely; only the byte counts matter. ---
     if (typeName == "bhkCollisionObject") {
         // NiCollisionObject target ref, Havok's 16-bit flags, and body ref.
         return consumeSkip(cursor, 4u + 2u + 4u);
+    }
+    if (typeName == "bhkPCollisionObject" || typeName == "bhkSPCollisionObject") {
+        // Oblivion's phantom collision variants omit the ordinary object's
+        // back-pointer to its target node: only u16 flags and the phantom-body
+        // ref are serialized. FireOpen*Smoke provides the retail control case;
+        // reading these as bhkCollisionObject over-consumes the next inline
+        // NiNode name by four bytes.
+        return consumeSkip(cursor, 2u + 4u);
     }
     if (typeName == "bhkBlendCollisionObject") {
         // bhkCollisionObject plus the two blend gains (hierarchy and
@@ -2331,6 +2452,15 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
     if (typeName == "bhkConvexVerticesShape") {
         return consumeSkip(cursor, 4u + 4u + 12u + 12u) &&
                consumeCountedArray(cursor, 16u) && consumeCountedArray(cursor, 16u);
+    }
+    if (typeName == "bhkSimpleShapePhantom") {
+        // bhkWorldObject: shape ref, HavokFilter, and world-object info. The
+        // older 20.0.0.4 spelling carries one additional unknown u32 after the
+        // shape ref; Oblivion's 20.0.0.5 meshes do not. The concrete phantom
+        // then appends two unused u32s and a packed float4x4 transform.
+        const std::size_t worldObjectBytes =
+            4u + (version <= kOblivionNifVersion ? 4u : 0u) + 4u + 20u;
+        return consumeSkip(cursor, worldObjectBytes + 8u + 64u);
     }
     if (typeName == "bhkBoxShape") {
         return consumeSkip(cursor, 32u);
@@ -2574,6 +2704,51 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
     if (typeName == "NiPoint3Interpolator") {
         return consumeSkip(cursor, 12u + 4u);
     }
+    if (typeName == "NiPathInterpolator") {
+        // Oblivion's 20.0.0.5 layout: path flags, banking direction and
+        // parameters, follow axis, then the position-path and percentage-key
+        // data refs. The two u16 fields make this a packed 24-byte block; do
+        // not round either one up to four-byte alignment.
+        return consumeSkip(cursor, 2u + 4u + 4u + 4u + 2u + 4u + 4u);
+    }
+    if (typeName == "NiColorData") {
+        std::uint32_t interpolation = 0;
+        return consumeKeyGroup(cursor, 16u, false, interpolation);
+    }
+    if (typeName == "NiPSysAgeDeathModifier") {
+        return consumeParticleModifierPrefix() && consumeSkip(cursor, 1u + 4u);
+    }
+    if (typeName == "NiPSysBoundUpdateModifier") {
+        return consumeParticleModifierPrefix() && consumeSkip(cursor, 2u);
+    }
+    if (typeName == "NiPSysColorModifier") {
+        return consumeParticleModifierPrefix() && consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiPSysPositionModifier") {
+        return consumeParticleModifierPrefix();
+    }
+    if (typeName == "NiPSysGravityModifier") {
+        // Gravity object, axis, decay/strength/type/turbulence/scale. The
+        // world-aligned byte is a Fallout-era addition (BS version >= 17).
+        return consumeParticleModifierPrefix() && consumeSkip(cursor, 4u + 12u + 20u);
+    }
+    if (typeName == "NiPSysGrowFadeModifier") {
+        return consumeParticleModifierPrefix() && consumeSkip(cursor, 4u + 2u + 4u + 2u);
+    }
+    if (typeName == "NiPSysRotationModifier") {
+        return consumeParticleModifierPrefix() &&
+               consumeSkip(cursor, 4u + 4u + 4u + 4u + 1u + 1u + 12u);
+    }
+    if (typeName == "NiPSysSpawnModifier") {
+        return consumeParticleModifierPrefix() &&
+               consumeSkip(cursor, 2u + 4u + 2u + 2u + 4u + 4u + 4u + 4u);
+    }
+    if (typeName == "NiPSysCylinderEmitter") {
+        return consumeParticleEmitterPrefix() && consumeSkip(cursor, 4u + 4u + 4u);
+    }
+    if (typeName == "NiPSysBoxEmitter") {
+        return consumeParticleEmitterPrefix() && consumeSkip(cursor, 4u + 4u + 4u + 4u);
+    }
     if (typeName == "NiGeomMorpherController") {
         // NiInterpController prefix, u16 extra flags, data ref, u8 always
         // active, then (this generation) a counted interpolator-ref list and a
@@ -2659,6 +2834,10 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
         // visibility interpolator ref.
         return consumeSkip(cursor, 26u + 4u) && consumeSizedString(cursor) &&
                consumeSkip(cursor, 4u);
+    }
+    if (typeName == "NiFlipController") {
+        // NiFloatInterpController, texture slot and source-texture ref list.
+        return consumeSkip(cursor, 26u + 4u + 4u) && consumeCountedArray(cursor, 4u);
     }
     if (typeName == "NiDefaultAVObjectPalette") {
         // Scene ptr, then a u32-counted list of (sized string, object ref).
@@ -2780,6 +2959,26 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
         }
         return typeName != "NiBillboardNode" || consumeSkip(cursor, 2u);
     }
+    if (typeName == "NiDirectionalLight" || typeName == "NiAmbientLight" ||
+        typeName == "NiPointLight" || typeName == "NiSpotLight") {
+        // NiDynamicEffect = NiAVObject, switch-state byte and affected-node
+        // refs at Oblivion's 20.0.0.x generation. NiLight then stores dimmer
+        // plus ambient/diffuse/specular RGB. These embedded lights are not
+        // rendered from the static mesh, but their exact size is mandatory:
+        // rejecting the block discarded the complete retail statue NIF.
+        if (!consumeNiAvObject(cursor) || !consumeSkip(cursor, 1u) ||
+            !consumeCountedArray(cursor, 4u) || !consumeSkip(cursor, 40u)) {
+            return false;
+        }
+        if (typeName == "NiPointLight") {
+            return consumeSkip(cursor, 12u);  // three attenuation floats
+        }
+        if (typeName == "NiSpotLight") {
+            // Point-light attenuation plus outer angle, inner angle, exponent.
+            return consumeSkip(cursor, 24u);
+        }
+        return true;
+    }
     if (typeName == "NiTriShape" || typeName == "NiTriStrips") {
         if (!consumeNiAvObject(cursor) || !consumeSkip(cursor, 8u)) {  // data, skin
             return false;
@@ -2789,6 +2988,19 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
             return false;
         }
         return hasShader == 0u || (consumeSizedString(cursor) && consumeSkip(cursor, 4u));
+    }
+    if (typeName == "NiParticleSystem") {
+        // Oblivion's NiParticleSystem still inherits NiGeometry: AV object,
+        // data/skin refs, MaterialData, then world-space and modifier refs.
+        if (!consumeNiAvObject(cursor) || !consumeSkip(cursor, 8u)) {
+            return false;
+        }
+        std::uint8_t hasShader = 0;
+        if (!cursor.read(hasShader) ||
+            (hasShader != 0u && (!consumeSizedString(cursor) || !consumeSkip(cursor, 4u)))) {
+            return false;
+        }
+        return consumeSkip(cursor, 1u) && consumeCountedArray(cursor, 4u);
     }
     if (typeName == "NiTriShapeData") {
         std::uint16_t numVertices = 0;
@@ -2835,6 +3047,51 @@ bool consumeOblivionBlock(ByteCursor& cursor, std::string_view typeName,
             return false;
         }
         return hasPoints == 0u || consumeSkip(cursor, totalPoints * 2u);
+    }
+    if (typeName == "NiPSysData") {
+        std::uint16_t numVertices = 0;
+        if (!consumeNiGeometryData(cursor, numVertices, version)) {
+            return false;
+        }
+        const auto optionalVertexArray = [&cursor, numVertices](std::size_t stride) {
+            std::uint8_t present = 0;
+            return cursor.read(present) &&
+                (present == 0u ||
+                 consumeSkip(cursor, static_cast<std::size_t>(numVertices) * stride));
+        };
+        // Per-particle radii, active count, sizes and rotations. Rotation-angle
+        // and rotation-axis arrays arrive at 20.0.0.4; 10.2 fireflies proceed
+        // directly from quaternion rotations to NiParticleInfo.
+        if (!optionalVertexArray(4u) || !consumeSkip(cursor, 2u) ||
+            !optionalVertexArray(4u) || !optionalVertexArray(16u)) {
+            return false;
+        }
+        if (version >= kOblivionNifVersion &&
+            (!optionalVertexArray(4u) || !optionalVertexArray(12u))) {
+            return false;
+        }
+        // NiParticleInfo retained a 12-byte rotation axis through 10.4.0.1.
+        // Later Oblivion blocks are the compact 28-byte form.
+        const std::size_t particleInfoBytes =
+            version <= kPs2TexDescMaxVersion ? 40u : 28u;
+        if (!consumeSkip(
+                cursor, static_cast<std::size_t>(numVertices) * particleInfoBytes)) {
+            return false;
+        }
+        // Per-particle rotation speeds were introduced at 20.0.0.2. Retail
+        // Oblivion also contains 10.2.0.0 firefly systems, where the two added-
+        // particle shorts follow Particle Info immediately. Treating the low
+        // byte of Num Added Particles as a bool made us skip an entire bogus
+        // float array and desynchronize every remaining block.
+        if (version >= 0x14000002u) {
+            std::uint8_t hasRotationSpeeds = 0;
+            if (!cursor.read(hasRotationSpeeds) ||
+                (hasRotationSpeeds != 0u &&
+                 !consumeSkip(cursor, static_cast<std::size_t>(numVertices) * 4u))) {
+                return false;
+            }
+        }
+        return consumeSkip(cursor, 2u + 2u);
     }
 
     // --- Properties. ---
@@ -3518,6 +3775,14 @@ bool computeSequentialBlockBounds(
                               ? "(none)"
                               : header.blockTypeNames[header.blockTypeIndex[i - 1u]].c_str());
             outError = "Could not size NIF block type '" + typeName + "'" + where;
+            const std::size_t recentBegin = i > 7u ? i - 7u : 0u;
+            outError += "; recent bounds:";
+            for (std::size_t recent = recentBegin; recent < i; ++recent) {
+                outError += " " +
+                    header.blockTypeNames[header.blockTypeIndex[recent]] + "@" +
+                    std::to_string(blockStart[recent]) + "-" +
+                    std::to_string(blockEnd[recent]);
+            }
             return false;
         }
         blockEnd[i] = cursor.pos();
@@ -4268,7 +4533,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
         } else if (typeName == "NiStencilProperty") {
             StencilPropertyBlock stencil;
-            if (readNiStencilProperty(blockCursor, header.inlineNames, stencil)) {
+            if (readNiStencilProperty(
+                    blockCursor, header.version, header.inlineNames, stencil)) {
                 stencilProperties[i] = stencil;
             }
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
@@ -4618,6 +4884,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             // in the header comment relies on.
             std::string noLightingFallback;
             bool shapeReversedWinding = false;
+            bool shapeHasStencilProperty = false;
             bool vertexAlphaResolved = false;
             bool vertexAlphaEnabled = true;  // classic NIFs keep their existing semantics
             const auto applyProperty = [&](std::int32_t propertyRef) {
@@ -4675,6 +4942,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     return;
                 }
                 if (stencilProperties[propertyIndex].valid) {
+                    shapeHasStencilProperty = true;
                     shape.twoSided = shape.twoSided || stencilProperties[propertyIndex].twoSided;
                     shapeReversedWinding =
                         shapeReversedWinding || stencilProperties[propertyIndex].reversedWinding;
@@ -4737,6 +5005,17 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
             if (shape.diffuseTexturePath.empty() && !noLightingFallback.empty()) {
                 shape.diffuseTexturePath = std::move(noLightingFallback);
+            }
+            // Oblivion's NiTriStrips application default is effectively
+            // DRAW_BOTH unless a NiStencilProperty explicitly selects a face.
+            // Large Imperial City wall and paving meshes rely on that default;
+            // forcing the modern renderer's CCW-only default cuts rectangular
+            // holes through their camera-facing sheets.
+            if ((header.version == kOblivionNifVersion ||
+                 header.version == kOblivionNifVersion5) &&
+                shape.sourceBlockType == "NiTriStrips" &&
+                !shapeHasStencilProperty) {
+                shape.twoSided = true;
             }
 
             shape.uvs = src.uvs;
@@ -4823,6 +5102,9 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 for (std::size_t i = 0; i + 2u < shape.triangleIndices.size(); i += 3u) {
                     std::swap(shape.triangleIndices[i + 1u], shape.triangleIndices[i + 2u]);
                 }
+            }
+            if (repairNifShapeWindingFromNormals(shape)) {
+                ++outModel.normalWindingRepairShapeCount;
             }
 
             outModel.shapes.push_back(std::move(shape));
@@ -5421,7 +5703,8 @@ bool parseNifSkinnedMesh(
             }
         } else if (typeName == "NiStencilProperty") {
             StencilPropertyBlock stencil;
-            if (readNiStencilProperty(blockCursor, header.inlineNames, stencil)) {
+            if (readNiStencilProperty(
+                    blockCursor, header.version, header.inlineNames, stencil)) {
                 stencilProperties[i] = stencil;
             }
         } else if (typeName == "NiTriShapeData" || typeName == "NiTriStripsData") {
@@ -5854,6 +6137,10 @@ bool settleBannerClothWithJolt(NifModel& model, float topZ, float topBand) {
 }
 
 }  // namespace
+
+bool repairNifShapeWindingFromNormals(NifShape& shape) {
+    return repairWindingFromNormalsImpl(shape);
+}
 
 bool applyNifBannerGravityRestPose(std::string_view modelPath, NifModel& model) {
     if (!model.hasEmbeddedTransformAnimation || model.shapes.empty()) {

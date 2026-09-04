@@ -48,6 +48,18 @@ VertexOutput main(VertexInput input)
     VertexOutput output;
     float3 worldPosition = input.inPosition;
     float3 worldNormal = decodeImportedVertexNormal(input.inNormalOct);
+    static const uint kFoliageWindFlag = 1u << 9u;
+    if ((input.inFlags & kFoliageWindFlag) != 0u)
+    {
+        const float bendWeight = float(input.inLayerWeights & 0xffu) / 255.0;
+        const float phase = float((input.inLayerWeights >> 8u) & 0xffu) / 255.0;
+        const float wave = sin(
+            camera.foliageWind.w * 0.82 + phase * 6.2831853 +
+            dot(worldPosition.xz, float2(0.0031, 0.0023)));
+        const float2 offset = camera.foliageWind.xy *
+            (camera.foliageWind.z * bendWeight * wave);
+        worldPosition.xz += offset;
+    }
     if (chunkPc.rigidAnimationParams.x > 0.5)
     {
         const float4 p = float4(worldPosition, 1.0);

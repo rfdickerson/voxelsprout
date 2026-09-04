@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,6 +58,16 @@ namespace render {
 class Renderer;
 }
 namespace importer::fnv {
+
+// TES4+ exterior persistent cells deliberately have no XCLC grid coordinates:
+// their references may span the entire worldspace. Give that authored cell a
+// reserved residency key instead of aliasing ordinary grid cell (0,0), which
+// is a real place in large worldspaces such as Tamriel.
+inline constexpr CellCoord persistentExteriorCellCoord() {
+    return CellCoord{
+        std::numeric_limits<std::int32_t>::min(),
+        std::numeric_limits<std::int32_t>::min()};
+}
 
 struct ReferenceCellOwnership {
     std::uint32_t cellFormId = 0u;
@@ -111,6 +122,9 @@ struct CellStreamerStats {
     std::uint64_t blendedPartsLoaded = 0;
     std::uint64_t alphaTestedPartsLoaded = 0;
     std::uint64_t bannerInstancesLoaded = 0;
+    std::uint64_t vegetationInstancesLoaded = 0;
+    std::uint64_t flowingBowlSignInstancesLoaded = 0;
+    std::uint64_t shipInstancesLoaded = 0;
     std::uint64_t fireEmittersLoaded = 0;
     std::uint64_t localLightsLoaded = 0;
     std::uint64_t geometryInstancesLoaded = 0;
@@ -300,6 +314,13 @@ public:
     // so speeding up capture silently shortened the warm-up and started recording
     // half-loaded towns.
     bool isStreamingIdle() const;
+
+    // Builds only water patches for the annulus outside normal detailed
+    // residency. It deliberately omits statics, actors, navigation, textures,
+    // and terrain meshes.
+    bool buildWaterGuardScene(
+        const float enginePosition[3], int outerRadius,
+        ImportedScene& outScene, std::string& outError) const;
 
     // Everything a room needs that is not its geometry: how it is lit, and
     // somewhere inside it to stand.

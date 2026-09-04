@@ -153,7 +153,34 @@ float3 applyWeatherClouds(float3 sky, float3 dir, float time)
             horizonFade = 1.0 - smoothStep(0.86, 1.0, radius);
         }
         horizonFade *= bandMask;
-        const float4 sampled = bindlessTextures[slot].Sample(uv);
+
+        float4 sampled;
+        if (mapping == 0)
+        {
+            // Oblivion/Fallout dome maps cover an entire hemisphere with one
+            // relatively small texture. Implicit derivatives select a coarse
+            // mip across the curved projection, which makes a 1080p sky look
+            // lower resolution than the source. Reconstruct from mip 0 and use
+            // a restrained cross-shaped unsharp filter. This preserves the
+            // authored cloud image and its alpha while recovering edge detail;
+            // the horizon fade above still suppresses projection aliasing at
+            // the compressed outer rim.
+            uint texW;
+            uint texH;
+            bindlessTextures[slot].GetDimensions(texW, texH);
+            const float2 texel = 1.0 / float2(max(texW, 1u), max(texH, 1u));
+            const float4 center = bindlessTextures[slot].SampleLevel(uv, 0.0);
+            const float4 neighbours =
+                (bindlessTextures[slot].SampleLevel(uv + float2(texel.x, 0.0), 0.0) +
+                 bindlessTextures[slot].SampleLevel(uv - float2(texel.x, 0.0), 0.0) +
+                 bindlessTextures[slot].SampleLevel(uv + float2(0.0, texel.y), 0.0) +
+                 bindlessTextures[slot].SampleLevel(uv - float2(0.0, texel.y), 0.0)) * 0.25;
+            sampled = saturate(center + ((center - neighbours) * 0.35));
+        }
+        else
+        {
+            sampled = bindlessTextures[slot].Sample(uv);
+        }
 
         // FNV cloud textures carry the cloud SHAPE in alpha; rgb is shading
         // detail, not the final colour. PNAM's per-layer tint is the colour.
@@ -214,17 +241,30 @@ float3 proceduralSky(float3 direction, float3 sunDirection)
     // having.
     const float weatherWeight = saturate01(camera.weatherSkyUpper.w);
     const float upAmount = saturate01(dir.y);
+    // TES4's stops are display-authored colours decoded to linear by the
+    // weather importer. Keep their luminance but recover the chroma that was
+    // being washed out when the authored and procedural gradients were blended
+    // twice near the horizon.
+    const float3 weatherUpper = lerp(
+        dot(camera.weatherSkyUpper.xyz, float3(0.2126, 0.7152, 0.0722)).xxx,
+        camera.weatherSkyUpper.xyz, 1.16);
+    const float3 weatherLower = lerp(
+        dot(camera.weatherSkyLower.xyz, float3(0.2126, 0.7152, 0.0722)).xxx,
+        camera.weatherSkyLower.xyz, 1.10);
+    const float3 weatherHorizon = lerp(
+        dot(camera.weatherHorizon.xyz, float3(0.2126, 0.7152, 0.0722)).xxx,
+        camera.weatherHorizon.xyz, 1.06);
     const float3 authoredLowBand =
-        lerp(camera.weatherHorizon.xyz, camera.weatherSkyLower.xyz,
+        lerp(weatherHorizon, weatherLower,
              smoothStep(0.0, 0.22, upAmount));
     const float3 authoredSky =
-        lerp(authoredLowBand, camera.weatherSkyUpper.xyz, smoothStep(0.12, 0.75, upAmount));
+        lerp(authoredLowBand, weatherUpper, smoothStep(0.12, 0.75, upAmount));
 
     // The horizon and zenith stops move too, because everything downstream --
     // the ground blend below, and any caller reading these -- would otherwise
     // mix an authored sky against a procedural horizon and band at the skyline.
-    horizonColor = lerp(horizonColor, camera.weatherHorizon.xyz, weatherWeight);
-    zenithColor = lerp(zenithColor, camera.weatherSkyUpper.xyz, weatherWeight);
+    horizonColor = lerp(horizonColor, weatherHorizon, weatherWeight);
+    zenithColor = lerp(zenithColor, weatherUpper, weatherWeight);
 
     // Falls through to the sun disk and phase terms below rather than returning:
     // an authored sky still needs a sun in it.

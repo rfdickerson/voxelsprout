@@ -323,6 +323,17 @@ struct alignas(16) CameraUniform {
     // x = horizontal water plane in world Y, y = pass valid, z/w unused.
     // Appended so all existing camera-uniform offsets remain stable.
     float waterReflectionConfig[4];
+    // SpeedTree wind; appended so no existing uniform offset moves.
+    float foliageWind[4];
+    // Localized mountain cloud volume. Config 0 is (enabled, density,
+    // base-height, top-height); config 1 is (near-distance, far-distance,
+    // world-noise scale, coverage). Appended to preserve every prior offset.
+    float mountainCloudConfig0[4];
+    float mountainCloudConfig1[4];
+    // World-space cloud-bank footprint. xy = horizontal centre, z = fully
+    // dense radius, w = feathered outer radius. A fixed anchor keeps the
+    // formation attached to its mountain instead of following the camera.
+    float mountainCloudConfig2[4];
 };
 
 struct alignas(16) ChunkPushConstants {

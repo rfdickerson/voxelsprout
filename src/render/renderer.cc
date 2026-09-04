@@ -300,6 +300,13 @@ void Renderer::setWeatherSky(const WeatherSkyParams& params) {
     m_backend->setWeatherSky(params);
 }
 
+void Renderer::setMountainCloudVolume(
+    float centerX, float centerZ, float baseHeight, float topHeight,
+    float fullRadius, float outerRadius) {
+    m_backend->setMountainCloudVolume(
+        centerX, centerZ, baseHeight, topHeight, fullRadius, outerRadius);
+}
+
 void Renderer::setWeatherClouds(const WeatherCloudTextures& clouds) {
     m_backend->setWeatherClouds(clouds);
 }

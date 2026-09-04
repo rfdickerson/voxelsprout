@@ -2329,6 +2329,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                 shadowVertex.uv[1] = dstVertex.uv[1];
                 shadowVertex.textureIndex = dstVertex.textureIndex;
                 shadowVertex.flags = dstVertex.flags;
+                shadowVertex.layerWeights = dstVertex.layerWeights;
                 shadowVertices[v] = shadowVertex;
             }
         };
@@ -2424,6 +2425,10 @@ bool RendererBackend::uploadImportedSceneInternal(
                                 std::uint8_t alphaThreshold,
                                 std::uint32_t rigidAnimationIndex,
                                 const float (&drawCenter)[3],
+                                float vegetationHeight,
+                                std::uint16_t vegetationGroup,
+                                std::uint8_t vegetationLod,
+                                bool distantLodTessellation,
                                 std::uint32_t pageRangeIndex
                             ) {
         if (indexCount == 0) {
@@ -2439,6 +2444,9 @@ bool RendererBackend::uploadImportedSceneInternal(
                 previous.twoSided == twoSidedDraw &&
                 previous.alphaThreshold == alphaThreshold &&
                 previous.rigidAnimationIndex == rigidAnimationIndex &&
+                previous.vegetationGroup == vegetationGroup &&
+                previous.vegetationLod == vegetationLod &&
+                previous.distantLodTessellation == distantLodTessellation &&
                 lastMergedPageRangeIndex == pageRangeIndex &&
                 previous.firstIndex + previous.indexCount == firstIndex) {
                 // Weight the merged centre by index count so a large shape does
@@ -2467,6 +2475,10 @@ bool RendererBackend::uploadImportedSceneInternal(
         draw.center[0] = drawCenter[0];
         draw.center[1] = drawCenter[1];
         draw.center[2] = drawCenter[2];
+        draw.vegetationHeight = vegetationHeight;
+        draw.vegetationGroup = vegetationGroup;
+        draw.vegetationLod = vegetationLod;
+        draw.distantLodTessellation = distantLodTessellation;
         const std::uint32_t rendererDrawIndex = static_cast<std::uint32_t>(draws.size());
         draws.push_back(draw);
         if (terrainDraw) {
@@ -2481,6 +2493,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             if (terrainDraw) {
                 ++pageRange.terrainDrawCount;
             }
+            pageRange.distantLodTessellation |= distantLodTessellation;
         }
         lastMergedDrawWasTerrain = terrainDraw;
         lastMergedPageRangeIndex = pageRangeIndex;
@@ -2510,15 +2523,27 @@ bool RendererBackend::uploadImportedSceneInternal(
         return (uploadScene.packedVertices[vertexIndex].flags &
                 odai::importer::kImportedSceneMaterialFlagTwoSided) != 0u;
     };
+    auto packedDrawNeedsDistantLodTessellation = [&]() {
+        return [&](const odai::importer::ImportedScenePackedDraw& srcDraw) {
+            if (srcDraw.firstIndex >= uploadScene.packedIndices.size()) {
+                return false;
+            }
+            const std::uint32_t vertexIndex = uploadScene.packedIndices[srcDraw.firstIndex];
+            return vertexIndex < uploadScene.packedVertices.size() &&
+                (uploadScene.packedVertices[vertexIndex].flags &
+                 odai::importer::kImportedSceneMaterialFlagDistantLodTessellation) != 0u;
+        };
+    }();
     // AABB centre over the draw's own vertices. Only computed for blended draws
     // -- it exists purely to sort them, and walking every opaque draw's indices
     // to fill in a field nothing reads would be a full extra pass over the
     // scene's geometry for nothing.
     auto packedDrawCenter = [&](const odai::importer::ImportedScenePackedDraw& srcDraw,
-                                float (&outCenter)[3]) {
+                                float (&outCenter)[3], float& outHeight) {
         outCenter[0] = 0.0f;
         outCenter[1] = 0.0f;
         outCenter[2] = 0.0f;
+        outHeight = 0.0f;
         float boundsMin[3] = {
             std::numeric_limits<float>::max(),
             std::numeric_limits<float>::max(),
@@ -2549,6 +2574,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         for (int axis = 0; axis < 3; ++axis) {
             outCenter[axis] = (boundsMin[axis] + boundsMax[axis]) * 0.5f;
         }
+        outHeight = boundsMax[1] - boundsMin[1];
     };
     for (std::uint32_t drawIndex = 0; drawIndex < uploadScene.packedDraws.size(); ++drawIndex) {
         const odai::importer::ImportedScenePackedDraw& srcDraw = uploadScene.packedDraws[drawIndex];
@@ -2556,9 +2582,20 @@ bool RendererBackend::uploadImportedSceneInternal(
             continue;
         }
         const bool blendedDraw = packedDrawIsBlended(srcDraw);
+        const bool vegetationDraw =
+            (srcDraw.reserved[0] & odai::importer::kImportedSceneVegetationDraw) != 0u;
+        const std::uint8_t vegetationLod = vegetationDraw
+            ? static_cast<std::uint8_t>(srcDraw.reserved[0] & 0x03u) : 0u;
+        const std::uint16_t vegetationGroup = vegetationDraw
+            ? static_cast<std::uint16_t>(srcDraw.reserved[1]) |
+                (static_cast<std::uint16_t>(srcDraw.reserved[2]) << 8u)
+            : 0u;
+        const bool distantLodTessellation =
+            packedDrawNeedsDistantLodTessellation(srcDraw);
         float drawCenter[3] = {0.0f, 0.0f, 0.0f};
-        if (blendedDraw) {
-            packedDrawCenter(srcDraw, drawCenter);
+        float vegetationHeight = 0.0f;
+        if (blendedDraw || vegetationDraw || distantLodTessellation) {
+            packedDrawCenter(srcDraw, drawCenter, vegetationHeight);
         }
         appendMergedDraw(
             srcDraw.firstIndex,
@@ -2569,6 +2606,10 @@ bool RendererBackend::uploadImportedSceneInternal(
             srcDraw.alphaThreshold,
             srcDraw.rigidAnimationIndex,
             drawCenter,
+            vegetationHeight,
+            vegetationGroup,
+            vegetationLod,
+            distantLodTessellation,
             sourceDrawPageRangeIndices[drawIndex]);
     }
     for (const odai::importer::ImportedSceneWaterPatch& patch : uploadScene.waterPatches) {
@@ -2619,7 +2660,11 @@ bool RendererBackend::uploadImportedSceneInternal(
         waterIndices.push_back(baseVertex + 2u);
     }
 
-    if (vertices.empty() || indices.empty()) {
+    // Water-only residency chunks deliberately carry no imported static stream.
+    // They still own authored water patches and must reach chunk creation so
+    // rebuildImportedWaterBuffers() can append them to the shared water buffers.
+    // Treat only a scene with neither indexed geometry nor water as empty.
+    if ((vertices.empty() || indices.empty()) && waterVertices.empty()) {
         VOX_LOGW("render") << "imported scene upload skipped because it produced no renderable geometry";
         return true;
     }

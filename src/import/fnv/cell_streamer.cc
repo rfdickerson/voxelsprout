@@ -205,7 +205,16 @@ std::string toLowerAscii(std::string value) {
 // 57: TES3 placed-reference Euler angles use their generation's negative sign.
 //     Cached positive-angle cells leave modular kits such as Balmora's canal
 //     walls and bridges rotated into one another after the importer fix.
-constexpr int kCellBuildVersion = 58;
+// 59: Oblivion NiLight-derived blocks are sized, so statue/building NIFs that
+// previously failed wholesale must be rebuilt instead of reused from cache.
+// 60: pre-20.1 NiStencilProperty's unpacked FaceDrawMode is decoded, restoring
+//     two-sided Oblivion wall and floor faces previously removed by culling.
+// 66: Oblivion TREE records resolve SPT assets into procedural foliage and
+// carry wind/LOD metadata in formerly-reserved packed fields.
+// 75: Skyrim TREE records retain their already-rooted NIF paths instead of
+// being treated as Oblivion SPT files, and their vertices carry height-anchored
+// wind data. Cached cells built before this version are missing those trees.
+constexpr int kCellBuildVersion = 76;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -238,6 +247,9 @@ std::uint64_t countBlendedDraws(const ImportedScene& scene) {
 struct ScenePresentationCounts {
     std::uint64_t alphaTestedParts = 0;
     std::uint64_t bannerInstances = 0;
+    std::uint64_t vegetationInstances = 0;
+    std::uint64_t flowingBowlSignInstances = 0;
+    std::uint64_t shipInstances = 0;
     std::uint64_t fireEmitters = 0;
     std::uint64_t localLights = 0;
     std::uint64_t geometryInstances = 0;
@@ -257,6 +269,15 @@ ScenePresentationCounts scenePresentationCounts(const ImportedScene& scene) {
         const std::string path = toLowerAscii(instance.modelPath);
         if (path.find("banner") != std::string::npos) {
             ++counts.bannerInstances;
+        }
+        if (path.ends_with(".spt")) {
+            ++counts.vegetationInstances;
+        }
+        if (path.find("signtheflowingbow") != std::string::npos) {
+            ++counts.flowingBowlSignInstances;
+        }
+        if (path.find("ship") != std::string::npos) {
+            ++counts.shipInstances;
         }
     }
     return counts;
@@ -379,7 +400,8 @@ bool CellStreamer::open(
     // The streamer also owns runtime weather, regional, and placed ambience,
     // so its one shared archive index must admit authored WAV assets too.
     const std::uint32_t assetMask =
-        kBsaContentMeshes | kBsaContentTextures | kBsaContentSounds;
+        kBsaContentMeshes | kBsaContentTextures | kBsaContentSounds |
+        kBsaContentTrees;
     const bool assetsOpened = m_contentProfile.has_value()
         ? m_assets.open(*m_contentProfile, assetMask)
         : m_assets.open(dataFilesPath, assetMask);
@@ -458,12 +480,18 @@ bool CellStreamer::configureWorldspace(
     m_currentWorldspaceFormId = worldIt->second;
     for (std::size_t i = 0; i < m_cellIndex.cells.size(); ++i) {
         const FalloutCellIndexEntry& entry = m_cellIndex.cells[i];
-        if (entry.isInterior || !entry.hasGridCoords ||
-            entry.worldspaceFormId != m_currentWorldspaceFormId ||
+        if (entry.isInterior || entry.worldspaceFormId != m_currentWorldspaceFormId ||
             entry.childrenGroupSize == 0u) {
             continue;
         }
-        m_availableCells.emplace(CellCoord{entry.gridX, entry.gridZ}, i);
+        if (entry.hasGridCoords) {
+            m_availableCells.emplace(CellCoord{entry.gridX, entry.gridZ}, i);
+        } else {
+            // The persistent CELL owns cross-cell architecture and other
+            // always-loaded refs. Dropping it leaves clean rectangular holes
+            // at district borders even when the full local ring is resident.
+            m_availableCells.emplace(persistentExteriorCellCoord(), i);
+        }
     }
 
     m_resolvedCacheDirectory.clear();
@@ -1060,6 +1088,10 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         m_stats.blendedPartsLoaded += result.blendedParts;
         m_stats.alphaTestedPartsLoaded += result.presentation.alphaTestedParts;
         m_stats.bannerInstancesLoaded += result.presentation.bannerInstances;
+        m_stats.vegetationInstancesLoaded += result.presentation.vegetationInstances;
+        m_stats.flowingBowlSignInstancesLoaded +=
+            result.presentation.flowingBowlSignInstances;
+        m_stats.shipInstancesLoaded += result.presentation.shipInstances;
         m_stats.fireEmittersLoaded += result.presentation.fireEmitters;
         m_stats.localLightsLoaded += result.presentation.localLights;
         m_stats.geometryInstancesLoaded += result.presentation.geometryInstances;
@@ -1389,6 +1421,59 @@ bool CellStreamer::isStreamingIdle() const {
     }
     std::lock_guard<std::mutex> lock(m_pending->mutex);
     return m_pending->inFlight == 0u && m_pending->completed.empty();
+}
+
+bool CellStreamer::buildWaterGuardScene(
+    const float enginePosition[3], int outerRadius,
+    ImportedScene& outScene, std::string& outError) const {
+    outScene = ImportedScene{};
+    outScene.sourceTag = "water-guard:" + m_currentWorldspaceEditorId;
+    outError.clear();
+    if (m_jobs == nullptr || m_cellIndex.cellWorldSize <= 0.0f || outerRadius < 0) {
+        outError = "water guard requires an open exterior streamer and a non-negative radius";
+        return false;
+    }
+    float fallout[3] = {};
+    engineToFallout(enginePosition, fallout);
+    const CellCoord center{
+        static_cast<std::int32_t>(std::floor(fallout[0] / m_cellIndex.cellWorldSize)),
+        static_cast<std::int32_t>(std::floor(fallout[1] / m_cellIndex.cellWorldSize))};
+    const int innerRadius = std::max(0, m_planner.config().loadRadius);
+    const FalloutWorldspaceRecord* worldspace =
+        m_worldTables.findWorldspace(m_currentWorldspaceFormId);
+    std::size_t extractedCells = 0u;
+    for (int dz = -outerRadius; dz <= outerRadius; ++dz) {
+        for (int dx = -outerRadius; dx <= outerRadius; ++dx) {
+            if (std::max(std::abs(dx), std::abs(dz)) <= innerRadius) continue;
+            const CellCoord coordinate{center.x + dx, center.z + dz};
+            const auto available = m_availableCells.find(coordinate);
+            if (available == m_availableCells.end()) continue;
+            const FalloutCellIndexEntry& entry = m_cellIndex.cells[available->second];
+            FalloutCellRecord record;
+            std::string extractError;
+            const bool extracted = m_useLoadOrder
+                ? extractFalloutCellMerged(
+                      m_cellIndex, m_loadOrder, entry, record, extractError)
+                : [&]() {
+                      EsmReader reader;
+                      return reader.open(m_esmPath) &&
+                          extractFalloutCellAt(reader, entry, record, extractError);
+                  }();
+            if (!extracted) {
+                outError = "water guard cell " + std::to_string(coordinate.x) + "," +
+                    std::to_string(coordinate.z) + " failed: " + extractError;
+                return false;
+            }
+            ++extractedCells;
+            appendCellWaterPatch(outScene, record, worldspace);
+        }
+    }
+    if (outScene.waterPatches.empty()) {
+        outError = "water guard found no authored wet cells in " +
+            std::to_string(extractedCells) + " candidates";
+        return false;
+    }
+    return true;
 }
 
 bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {

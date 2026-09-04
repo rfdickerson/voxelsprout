@@ -70,6 +70,13 @@ struct PushConstants
     float finalValuePower;
     // Frame counter for the temporal half of the noise.
     uint temporalIndex;
+    // Optional second, contact-scale march. Zero disables it. The two
+    // visibility deficits are combined by weight and clamped so a tight joint
+    // cannot collapse to black while the broad lobe still grounds large walls.
+    float fineRadiusScale;
+    float coarseWeight;
+    float fineWeight;
+    float minimumVisibility;
 };
 
 [[vk::push_constant]]
@@ -285,7 +292,20 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float minS = pixelTooCloseThreshold / screenspaceRadius;
 
     float visibility = 0.0;
+    float fineVisibility = 0.0;
     float3 bentNormal = float3(0.0, 0.0, 0.0);
+
+    const bool useFine = pushConstants.fineRadiusScale > 0.0;
+    const float fineRadius = effectRadius * pushConstants.fineRadiusScale;
+    const float fineFalloffRange = max(pushConstants.falloffRange * fineRadius, 1e-6);
+    const float fineFalloffFrom = fineRadius * (1.0 - pushConstants.falloffRange);
+    const float fineFalloffMul = -1.0 / fineFalloffRange;
+    const float fineFalloffAdd = (fineFalloffFrom / fineFalloffRange) + 1.0;
+    const float fineScreenspaceRadius = screenspaceRadius * pushConstants.fineRadiusScale;
+    // Four samples per slice at most. Contact AO does not need the distant
+    // lobe's long march and sharing its slice directions keeps this one
+    // dispatch cheaper than two complete AO passes.
+    const int fineStepsPerSlice = min(stepsPerSlice, 4);
 
     for (int slice = 0; slice < sliceCount; ++slice)
     {
@@ -316,6 +336,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float lowHorizonCos1 = cos(n - kPiHalf);
         float horizonCos0 = lowHorizonCos0;
         float horizonCos1 = lowHorizonCos1;
+        float fineHorizonCos0 = lowHorizonCos0;
+        float fineHorizonCos1 = lowHorizonCos1;
 
         for (int step = 0; step < stepsPerSlice; ++step)
         {
@@ -368,6 +390,37 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
             horizonCos0 = max(horizonCos0, shc0);
             horizonCos1 = max(horizonCos1, shc1);
+
+            if (useFine && fineScreenspaceRadius >= 1.5 && step < fineStepsPerSlice)
+            {
+                const float fineMinS = pixelTooCloseThreshold / fineScreenspaceRadius;
+                float fineS = (float(step) + stepNoise) / float(fineStepsPerSlice);
+                fineS = pow(fineS, pushConstants.sampleDistributionPower);
+                fineS += fineMinS;
+                const float2 fineOmega =
+                    float2(cosPhi, -sinPhi) * (fineScreenspaceRadius / screenSize.x);
+                const float2 fineOffset = fineS * fineOmega;
+                const float fineOffsetLength = length(fineOffset * screenSize);
+                const int fineMipIndex = int(clamp(
+                    log2(max(fineOffsetLength, 1.0)) - kDepthMipSamplingOffset,
+                    0.0, kDepthMipLevels - 1.0));
+                const float2 fineUv0 = uv + fineOffset;
+                const float2 fineUv1 = uv - fineOffset;
+                const float fineDepth0 = depthPyramid[fineMipIndex].SampleLevel(saturate(fineUv0), 0.0);
+                const float fineDepth1 = depthPyramid[fineMipIndex].SampleLevel(saturate(fineUv1), 0.0);
+                const float3 fineDelta0 = viewPositionFromUv(fineUv0, fineDepth0) - centerPos;
+                const float3 fineDelta1 = viewPositionFromUv(fineUv1, fineDepth1) - centerPos;
+                const float fineDist0 = max(length(fineDelta0), 1e-5);
+                const float fineDist1 = max(length(fineDelta1), 1e-5);
+                const float fineWeight0 = saturate((fineDist0 * fineFalloffMul) + fineFalloffAdd);
+                const float fineWeight1 = saturate((fineDist1 * fineFalloffMul) + fineFalloffAdd);
+                const float fineShc0 = lerp(
+                    lowHorizonCos0, dot(fineDelta0 / fineDist0, viewVec), fineWeight0);
+                const float fineShc1 = lerp(
+                    lowHorizonCos1, dot(fineDelta1 / fineDist1, viewVec), fineWeight1);
+                fineHorizonCos0 = max(fineHorizonCos0, fineShc0);
+                fineHorizonCos1 = max(fineHorizonCos1, fineShc1);
+            }
         }
 
         const float h0 = -fastAcos(clamp(horizonCos1, -1.0, 1.0));
@@ -376,6 +429,17 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float iarc0 = (cosNorm + (2.0 * h0 * sinN) - cos((2.0 * h0) - n)) * 0.25;
         const float iarc1 = (cosNorm + (2.0 * h1 * sinN) - cos((2.0 * h1) - n)) * 0.25;
         visibility += projectedNormalVecLength * (iarc0 + iarc1);
+
+        if (useFine && fineScreenspaceRadius >= 1.5)
+        {
+            const float fineH0 = -fastAcos(clamp(fineHorizonCos1, -1.0, 1.0));
+            const float fineH1 = fastAcos(clamp(fineHorizonCos0, -1.0, 1.0));
+            const float fineArc0 =
+                (cosNorm + (2.0 * fineH0 * sinN) - cos((2.0 * fineH0) - n)) * 0.25;
+            const float fineArc1 =
+                (cosNorm + (2.0 * fineH1 * sinN) - cos((2.0 * fineH1) - n)) * 0.25;
+            fineVisibility += projectedNormalVecLength * (fineArc0 + fineArc1);
+        }
 
         // Bent normal for this slice: the centroid of the unoccluded arc, lifted
         // out of the slice frame and weighted the same way visibility is.
@@ -390,8 +454,20 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             projectedNormalVecLength;
     }
 
-    visibility = saturate(visibility / float(sliceCount));
-    visibility = pow(max(visibility, 1e-4), pushConstants.finalValuePower);
+    visibility = pow(
+        max(saturate(visibility / float(sliceCount)), 1e-4),
+        pushConstants.finalValuePower);
+    if (useFine && fineScreenspaceRadius >= 1.5)
+    {
+        fineVisibility = pow(
+            max(saturate(fineVisibility / float(sliceCount)), 1e-4),
+            pushConstants.finalValuePower);
+        const float totalWeight = max(pushConstants.coarseWeight + pushConstants.fineWeight, 1e-4);
+        const float deficit =
+            (pushConstants.coarseWeight * (1.0 - visibility) +
+             pushConstants.fineWeight * (1.0 - fineVisibility)) / totalWeight;
+        visibility = max(1.0 - deficit, pushConstants.minimumVisibility);
+    }
 
     bentNormal = normalize(bentNormal);
     // Degenerate slices (all of them clipped) leave a zero vector; fall back to

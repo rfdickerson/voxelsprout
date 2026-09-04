@@ -60,6 +60,8 @@ struct FalloutWorldTables {
     // Base formID -> its record type (STAT, MSTT, ACTI, ...), for attributing
     // geometry back to the kind of record that placed it.
     std::unordered_map<std::uint32_t, std::string> staticRecordTypes;
+    // TES4 TREE formID -> procedural SPT metadata.
+    std::unordered_map<std::uint32_t, FalloutStaticRecord> treesByFormId;
     // LTEX formID -> diffuse texture path, already resolved through TXST.
     std::unordered_map<std::uint32_t, std::string> landTexturePaths;
     // TES3 VTEX palette entries are scoped to the plugin that authored LAND.

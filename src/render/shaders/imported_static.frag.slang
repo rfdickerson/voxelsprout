@@ -64,6 +64,8 @@ static const uint kImportedMaterialFlagUnlit = 128u;
 // Context-dependent bit 8: terrain never sets PBR, so it can identify TES3's
 // normalized VTEX reconstruction without consuming serialized flag space.
 static const uint kImportedMaterialFlagTerrainNormalizedLayers = 256u;
+static const uint kImportedMaterialFlagDistantLodTessellation = (1u << 10u);
+static const uint kImportedMaterialFlagDistantLodSnow = (1u << 11u);
 static const uint kImportedMaterialRoughnessShift = 8u;
 static const uint kImportedMaterialMetallicShift = 16u;
 static const uint kImportedMaterialChannelMask = 0xffu;
@@ -506,6 +508,44 @@ float4 sampleImportedAlbedo(FragmentInput input)
         return float4(sampled.rgb * input.inColor.rgb, sampled.a);
     }
     return sampled;
+}
+
+float3 applyOrganicDistantMountainSnow(
+    float3 albedo, float3 worldPosition, float3 shadingNormal, uint flags)
+{
+    if ((flags & kImportedMaterialFlagDistantLodTessellation) == 0u)
+    {
+        return albedo;
+    }
+
+    // BTO splits mountains into a snowy and a bare-rock shape. That is useful
+    // authored coverage, but its boundary follows the deliberately coarse LOD
+    // triangles and UV islands. Use the shape as a BIAS, then resolve the
+    // actual edge from world-space slope and two broad noise octaves. Both
+    // shapes therefore agree at their seam and the transition no longer traces
+    // a straight triangle or texture line.
+    const bool authoredSnow = (flags & kImportedMaterialFlagDistantLodSnow) != 0u;
+    const float slopeDeposit = smoothstep(0.30, 0.82, shadingNormal.y);
+    const float coarse = terrainBlendNoise(worldPosition.xz * (1.0 / 1150.0));
+    const float fine = terrainBlendNoise(worldPosition.xz * (1.0 / 330.0));
+    const float breakup = ((coarse * 0.68) + (fine * 0.32)) - 0.5;
+    const float coverage =
+        (authoredSnow ? 0.28 : -0.08) +
+        ((slopeDeposit - 0.5) * 0.38) +
+        (breakup * 0.55);
+    const float snowMask = smoothstep(0.18, 0.62, coverage);
+
+    // Recover rock under the bright portion of MountainSlab02 before laying
+    // snow back down. Otherwise the baked pale stripe remains visible even
+    // where the organic mask says exposed rock. Preserve hue and fine texture;
+    // only compress implausibly bright texels toward a weathered-rock range.
+    const float luma = dot(albedo, float3(0.2126, 0.7152, 0.0722));
+    const float rockLuma = min(luma, 0.30 + (luma * 0.45));
+    const float3 exposedRock =
+        albedo * (rockLuma / max(luma, 0.025)) * float3(0.94, 0.98, 1.02);
+    const float3 snowColor = lerp(
+        albedo, float3(0.72, 0.78, 0.84), 0.38);
+    return lerp(exposedRock, snowColor, snowMask);
 }
 
 float3 sampleImportedVoxelGi(float3 worldPosition, float3 normal)
@@ -1360,6 +1400,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         input.inFlags, materialTint, materialEmissive, usePbr);
 
     float3 albedo = albedoFull.rgb * materialTint;
+    albedo = applyOrganicDistantMountainSnow(
+        albedo, input.inWorldPosition, normal, input.inFlags);
     // Stylized slope tint (docs/stylized_low_poly.md): steep faces blend toward
     // flat rock greys so untextured low-poly terrain reads as cliff rather than
     // as a coloured ramp.

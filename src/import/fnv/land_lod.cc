@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <numeric>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -86,11 +88,15 @@ bool appendLandLodTier(
     // single atlas across every tile, where it saves decoding it hundreds of
     // times.
     std::unordered_map<std::string, std::uint32_t> textureIndexByPath;
-    const auto textureIndexFor = [&](const std::string& texturePath) -> std::uint32_t {
+    const auto textureIndexFor = [&](const std::string& texturePath, bool linearData = false)
+        -> std::uint32_t {
         if (texturePath.empty()) {
             return kNoTextureIndex;
         }
-        const std::string key = toLowerCopy(texturePath);
+        std::string key = toLowerCopy(texturePath);
+        if (linearData) {
+            key += "|linear-data";
+        }
         const auto existing = textureIndexByPath.find(key);
         if (existing != textureIndexByPath.end()) {
             return existing->second;
@@ -103,6 +109,9 @@ bool appendLandLodTier(
             return kNoTextureIndex;
         }
         texture.sourcePath = texturePath;
+        if (linearData && texture.format == TextureFormat::BC1) {
+            texture.format = TextureFormat::BC1Linear;
+        }
         const auto index = static_cast<std::uint32_t>(out.textures.size());
         out.textures.push_back(std::move(texture));
         textureIndexByPath.emplace(key, index);
@@ -117,6 +126,21 @@ bool appendLandLodTier(
     const std::int32_t z0 = landLodTileOrigin(std::min(cellZ0, cellZ1), tierCells);
     const std::int32_t x1 = landLodTileOrigin(std::max(cellX0, cellX1), tierCells);
     const std::int32_t z1 = landLodTileOrigin(std::max(cellZ0, cellZ1), tierCells);
+
+    struct PendingMesh {
+        ImportedSceneMesh mesh;
+        std::int32_t tileX = 0;
+        std::int32_t tileZ = 0;
+    };
+    std::vector<PendingMesh> tessellatedMeshes;
+    std::vector<PendingMesh> ordinaryMeshes;
+    // The renderer's tessellated range is a leading draw prefix. All runtime
+    // and cooker callers build one LOD set into a fresh scene; retain safe
+    // append semantics for tooling by declining the optimization if a caller
+    // has already placed unrelated geometry ahead of us.
+    const bool canEstablishDistantTessellationPrefix =
+        out.meshes.empty() && out.instances.empty() &&
+        out.sourceLandscapeCellCount == 0u;
 
     for (std::int32_t tz = z0; tz <= z1; tz += tierCells) {
         for (std::int32_t tx = x0; tx <= x1; tx += tierCells) {
@@ -144,7 +168,10 @@ bool appendLandLodTier(
                 : tileName;
             ImportedSceneMesh largeRefMesh;
             largeRefMesh.name = tileName + "_largeref";
-            const auto appendShape = [&](ImportedSceneMesh& mesh, const NifShape& shape) {
+            ImportedSceneMesh mountainMesh;
+            mountainMesh.name = tileName + "_mountain";
+            const auto appendShape = [&](ImportedSceneMesh& mesh, const NifShape& shape,
+                                         bool distantMountain, bool distantMountainSnow) {
                 const auto baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
                 for (std::size_t v = 0; (v * 3u) < shape.positions.size(); ++v) {
                     ImportedSceneVertex vertex{};
@@ -168,6 +195,21 @@ bool appendLandLodTier(
                 ImportedSceneMeshPart part{};
                 part.firstIndex = static_cast<std::uint32_t>(mesh.indices.size());
                 part.textureIndex = textureIndexFor(shape.diffuseTexturePath);
+                const std::uint32_t normalTextureIndex =
+                    textureIndexFor(shape.normalTexturePath, /*linearData=*/true);
+                if (part.textureIndex != kNoTextureIndex &&
+                    normalTextureIndex != kNoTextureIndex) {
+                    out.normalTextureByDiffuseIndex.emplace(
+                        part.textureIndex, normalTextureIndex);
+                }
+                if (distantMountain && canEstablishDistantTessellationPrefix) {
+                    part.vegetationReserved[0] |=
+                        kImportedSceneMeshPartDistantLodTessellation;
+                    if (distantMountainSnow) {
+                        part.vegetationReserved[0] |=
+                            kImportedSceneMeshPartDistantLodSnow;
+                    }
+                }
                 // Skyrim's generated object atlas uses alpha as auxiliary
                 // material data. Trees have their own BTT/TreeLod atlas and
                 // are not present in these BTO shapes, so inferring cutouts
@@ -217,31 +259,65 @@ bool appendLandLodTier(
                     // The HD variants are mountains/rocks with their own
                     // vertex-alpha handoff, not a child-worldspace city shell.
                     loweredShapeName.find("hd-largeref") == std::string::npos;
-                appendShape(largeReference ? largeRefMesh : detailMesh, shape);
+                const bool distantMountain =
+                    set == LandLodSet::SkyrimObjects &&
+                    loweredShapeName.find("hd-largeref") != std::string::npos;
+                const bool distantMountainSnow =
+                    distantMountain && loweredShapeName.find("snow") != std::string::npos;
+                appendShape(
+                    distantMountain ? mountainMesh
+                                    : (largeReference ? largeRefMesh : detailMesh),
+                    shape, distantMountain, distantMountainSnow);
             }
 
             bool emittedTile = false;
-            const auto emitMesh = [&](ImportedSceneMesh& mesh) {
+            const auto queueMesh = [&](ImportedSceneMesh& mesh, bool tessellated) {
                 if (mesh.indices.empty()) {
                     return;
                 }
-                const auto meshIndex = static_cast<std::uint32_t>(out.meshes.size());
-                out.meshes.push_back(std::move(mesh));
-                ImportedSceneInstance instance{};
-                instance.meshIndex = meshIndex;
-                const bool localTerrain = set == LandLodSet::SkyrimTerrain;
-                writeLodInstanceTransform(
-                    instance, sinkUnits,
-                    localTerrain ? static_cast<float>(tx) * kExteriorCellSize : 0.0f,
-                    localTerrain ? static_cast<float>(tz) * kExteriorCellSize : 0.0f);
-                out.instances.push_back(std::move(instance));
+                (tessellated ? tessellatedMeshes : ordinaryMeshes).push_back(
+                    PendingMesh{std::move(mesh), tx, tz});
                 emittedTile = true;
             };
-            emitMesh(detailMesh);
-            emitMesh(largeRefMesh);
+            queueMesh(mountainMesh, true);
+            queueMesh(detailMesh, false);
+            queueMesh(largeRefMesh, false);
             outStats.tilesParsed += emittedTile ? 1u : 0u;
         }
     }
+
+    const auto emitPending = [&](std::vector<PendingMesh>& pending) {
+        for (PendingMesh& item : pending) {
+            const auto meshIndex = static_cast<std::uint32_t>(out.meshes.size());
+            out.meshes.push_back(std::move(item.mesh));
+            ImportedSceneInstance instance{};
+            instance.meshIndex = meshIndex;
+            const bool localTerrain = set == LandLodSet::SkyrimTerrain;
+            writeLodInstanceTransform(
+                instance, sinkUnits,
+                localTerrain ? static_cast<float>(item.tileX) * kExteriorCellSize : 0.0f,
+                localTerrain ? static_cast<float>(item.tileZ) * kExteriorCellSize : 0.0f);
+            out.instances.push_back(std::move(instance));
+        }
+    };
+    // Packed rendering emits instances in this order. Keeping the selected
+    // mountain proxies first preserves the renderer's contiguous
+    // [0, sourceLandscapeCellCount) tessellation invariant.
+    emitPending(tessellatedMeshes);
+    if (canEstablishDistantTessellationPrefix) {
+        out.sourceLandscapeCellCount = static_cast<std::uint32_t>(
+            std::accumulate(
+                out.meshes.begin(), out.meshes.end(), std::size_t{0},
+                [](std::size_t count, const ImportedSceneMesh& mesh) {
+                    return count + static_cast<std::size_t>(std::count_if(
+                        mesh.parts.begin(), mesh.parts.end(),
+                        [](const ImportedSceneMeshPart& part) {
+                            return (part.vegetationReserved[0] &
+                                    kImportedSceneMeshPartDistantLodTessellation) != 0u;
+                        }));
+                }));
+    }
+    emitPending(ordinaryMeshes);
 
     outStats.textures = out.textures.size();
     if (outStats.tilesParsed == 0u) {

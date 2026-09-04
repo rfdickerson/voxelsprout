@@ -74,6 +74,10 @@ inline constexpr std::uint32_t kImportedSceneNoTerrainLayer = 0xffffffffu;
 // it is never serialized as a texture index and does not widen either vertex
 // structure.
 inline constexpr std::uint32_t kImportedSceneTerrainNormalizedBlendMarker = 0xfffffffeu;
+// Transient non-terrain marker used by generated SpeedTree vertices. The
+// packer consumes it and stores bend weight/phase in layerWeights, which is
+// otherwise unused for these vertices.
+inline constexpr std::uint32_t kImportedSceneFoliageWindMarker = 0xfffffffdu;
 
 struct ImportedSceneMeshPart {
     std::uint32_t firstIndex = 0;
@@ -92,6 +96,10 @@ struct ImportedSceneMeshPart {
     // way the source formats store it. 128 is the neutral 0.5 that every
     // caller which does not author a threshold gets.
     std::uint8_t alphaThreshold = 128;
+    // Stored in padding that already existed before rigidAnimationIndex, so the
+    // raw ImportedSceneMeshPart stride remains unchanged.
+    std::uint8_t vegetationLod = 0u;
+    std::uint8_t vegetationReserved[2] = {0u, 0u};
     // Index into ImportedSceneMesh::rigidAnimations, or UINT32_MAX. One source
     // node may own several material parts; they all point at the same track.
     std::uint32_t rigidAnimationIndex = 0xffffffffu;
@@ -375,6 +383,7 @@ inline constexpr std::uint32_t packImportedVertexLayerPair(std::uint32_t low, st
 //   bit 8      normalized terrain layers when PBR is clear; otherwise the
 //              low bit of roughness
 //   bits 8-15  roughness, 8-bit quantized over [0,1], when PBR is set
+//   bit 10     distant generated rock shell eligible for LOD tessellation
 //   bits 16-23 metallic, 8-bit quantized over [0,1]
 //   bits 24-31 free
 //
@@ -426,6 +435,25 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagUnlit = 1u << 7;
 // Terrain vertices never set the PBR bit, so sharing bit 8 with the conditional
 // roughness payload preserves the serialized flags layout.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTerrainNormalizedLayers = 1u << 8;
+// Conditional with PBR clear: generated foliage carries bend payload in the
+// otherwise-unused non-terrain layerWeights word.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagFoliageWind = 1u << 9;
+// Skyrim BTO names its coarse mountain/rock proxy shapes `HD-LargeRef`.
+// Keeping this marker on their vertices lets the shared terrain hull/domain
+// shaders use a longer, gentler refinement ramp without sending every distant
+// LAND tile through tessellation. Conditional on PBR being clear, like the
+// other legacy-material flags in this low range.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagDistantLodTessellation = 1u << 10;
+// Authored snowy half of Skyrim's paired `objsnowHD-LargeRef` / `objHD-LargeRef`
+// mountain proxy. The fragment shader uses this as a coverage bias, then breaks
+// up the coarse BTO boundary in world space.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagDistantLodSnow = 1u << 11;
+
+// ImportedSceneMeshPart already carries two reserved vegetation-adjacent bytes
+// in its serialized layout. This semantic uses one bit without changing the
+// raw struct stride or any scene/chunk wire format.
+inline constexpr std::uint8_t kImportedSceneMeshPartDistantLodTessellation = 1u << 0;
+inline constexpr std::uint8_t kImportedSceneMeshPartDistantLodSnow = 1u << 1;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;
@@ -529,6 +557,8 @@ struct ImportedScenePackedDraw {
     // Index into ImportedScene::rigidAnimations, or UINT32_MAX.
     std::uint32_t rigidAnimationIndex = 0xffffffffu;
 };
+
+inline constexpr std::uint8_t kImportedSceneVegetationDraw = 0x80u;
 
 // Optional spatial grouping of packed draws for per-chunk frustum culling.
 // When non-empty, the renderer treats each entry as a cullable page covering the

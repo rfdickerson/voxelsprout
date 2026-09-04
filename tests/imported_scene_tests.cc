@@ -1281,6 +1281,47 @@ void testStaticNormalMapSidecarPackingAndRoundTrip() {
     fs::remove(path);
 }
 
+void testDistantLodTessellationMarkerPacking() {
+    using namespace odai::importer;
+
+    ImportedScene scene{};
+    scene.sourceTag = "skyrim_object_lod:Tamriel";
+    ImportedSceneMesh mesh{};
+    mesh.name = "lod4_4_-12_mountain";
+    mesh.vertices = {
+        ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+        ImportedSceneVertex{{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
+        ImportedSceneVertex{{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}};
+    mesh.indices = {0u, 1u, 2u};
+    ImportedSceneMeshPart part{};
+    part.indexCount = 3u;
+    part.vegetationReserved[0] =
+        kImportedSceneMeshPartDistantLodTessellation |
+        kImportedSceneMeshPartDistantLodSnow;
+    mesh.parts.push_back(part);
+    scene.meshes.push_back(std::move(mesh));
+
+    ImportedSceneInstance instance{};
+    instance.meshIndex = 0u;
+    instance.transform[0] = instance.transform[5] =
+        instance.transform[10] = instance.transform[15] = 1.0f;
+    scene.instances.push_back(instance);
+    scene.sourceLandscapeCellCount = 1u;
+
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(!scene.packedVertices.empty() &&
+                   (scene.packedVertices.front().flags &
+                    kImportedSceneMaterialFlagDistantLodTessellation) != 0u,
+               "distant mountain part marker reaches packed vertex flags");
+    expectTrue((scene.packedVertices.front().flags &
+                kImportedSceneMaterialFlagDistantLodSnow) != 0u,
+               "authored distant snow coverage reaches the fragment material flags");
+    buildImportedScenePageRanges(scene);
+    expectTrue(scene.pageRanges.size() == 1u &&
+                   scene.pageRanges.front().terrainDrawCount == 1u,
+               "distant mountain remains in the tessellated draw prefix after paging");
+}
+
 int main() {
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
@@ -1297,6 +1338,7 @@ int main() {
     testImportedVertexPacking();
     testRigidAnimationPackingSamplingAndRoundTrip();
     testStaticNormalMapSidecarPackingAndRoundTrip();
+    testDistantLodTessellationMarkerPacking();
 
     if (g_failures != 0) {
         std::cerr << "[imported scene test] " << g_failures << " failures\n";

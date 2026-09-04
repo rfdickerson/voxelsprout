@@ -518,6 +518,17 @@ public:
     void setSunAngles(float yawDegrees, float pitchDegrees);
     void setVisualTimeSeconds(float seconds) { m_visualTimeSeconds = seconds; }
     void setWeatherSky(const WeatherSkyParams& params) { m_weatherSky = params; }
+    void setMountainCloudVolume(
+        float centerX, float centerZ, float baseHeight, float topHeight,
+        float fullRadius, float outerRadius) {
+        m_mountainCloudCenterX = centerX;
+        m_mountainCloudCenterZ = centerZ;
+        m_mountainCloudBaseHeight = baseHeight;
+        m_mountainCloudTopHeight = std::max(topHeight, baseHeight + 1.0f);
+        m_mountainCloudFullRadius = std::max(fullRadius, 0.0f);
+        m_mountainCloudOuterRadius = std::max(outerRadius, m_mountainCloudFullRadius + 1.0f);
+        m_mountainCloudVolumeValid = true;
+    }
     // Uploads the cloud layer textures and holds their bindless slots. Only
     // called when the weather changes; the per-frame tints ride on
     // WeatherSkyParams instead.
@@ -1091,6 +1102,10 @@ private:
         float thinOccluderCompensation = 0.0f;
         float finalValuePower = 2.2f;
         std::uint32_t temporalIndex = 0u;
+        float fineRadiusScale = 0.0f;
+        float coarseWeight = 1.0f;
+        float fineWeight = 0.0f;
+        float minimumVisibility = 0.0f;
     };
 
     struct XeGtaoDenoisePushConstants {
@@ -1199,6 +1214,7 @@ private:
         float uv[2];
         std::uint32_t textureIndex = 0xffffffffu;
         std::uint32_t flags = 0u;
+        std::uint32_t layerWeights = 0u;
     };
 
     // 48 bytes, down from 72.
@@ -1302,6 +1318,12 @@ private:
         // back-to-front. Computed at upload for blended draws and left at the
         // origin for opaque ones, which never consult it.
         float center[3] = {0.0f, 0.0f, 0.0f};
+        float vegetationHeight = 0.0f;
+        std::uint16_t vegetationGroup = 0u;
+        std::uint8_t vegetationLod = 0u;
+        // Coarse Skyrim BTO mountain shell: route through the terrain
+        // tessellation pipeline even beyond the near-LAND refinement range.
+        bool distantLodTessellation = false;
         // kImportedSceneMaterialFlagTwoSided: drawn with back-face culling off.
         // Currently honoured only on the blended replay, which is where the
         // authored two-sidedness actually shows -- Fallout's window glass and
@@ -1318,6 +1340,7 @@ private:
         std::uint32_t firstDraw = 0;
         std::uint32_t drawCount = 0;
         std::uint32_t terrainDrawCount = 0;
+        bool distantLodTessellation = false;
         float boundsMin[3] = {};
         float boundsMax[3] = {};
     };
@@ -2624,6 +2647,13 @@ private:
     // Weight 0 by default, so the procedural sky is what every game gets until
     // something authored is pushed in.
     WeatherSkyParams m_weatherSky{};
+    float m_mountainCloudCenterX = 0.0f;
+    float m_mountainCloudCenterZ = 0.0f;
+    float m_mountainCloudBaseHeight = 0.0f;
+    float m_mountainCloudTopHeight = 1.0f;
+    float m_mountainCloudFullRadius = 1.0f;
+    float m_mountainCloudOuterRadius = 2.0f;
+    bool m_mountainCloudVolumeValid = false;
     TonemapSettings m_tonemapSettings{};
     ImportedPbrDefaults m_importedPbrDefaults{};
     // ~0u is kInvalidImportedTextureSlot, which this header cannot see --

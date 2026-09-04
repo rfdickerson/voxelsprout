@@ -218,6 +218,11 @@ public:
     // Authored sky from a Fallout WTHR record. Default-constructed params
     // (weight 0) restore the procedural sky.
     void setWeatherSky(const WeatherSkyParams& params);
+    // Pins a procedural mountain cloud bank to a world-space landmark. The
+    // environment switch still controls whether the effect is rendered.
+    void setMountainCloudVolume(
+        float centerX, float centerZ, float baseHeight, float topHeight,
+        float fullRadius, float outerRadius);
     // Cloud layer textures for the active weather. Upload-heavy, so call it
     // when the weather changes rather than per frame.
     void setWeatherClouds(const WeatherCloudTextures& clouds);

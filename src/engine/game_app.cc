@@ -90,13 +90,22 @@ bool GameApp::init(const char* title) {
     if (!explicitWindowSize) {
         glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
     }
-    // Never open larger than the monitor's logical (content-scaled) size.
-    if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
-        float xs = 1.0f, ys = 1.0f;
-        glfwGetMonitorContentScale(mon, &xs, &ys);
-        if (const GLFWvidmode* mode = glfwGetVideoMode(mon)) {
-            winW = std::min(winW, static_cast<int>(std::round(mode->width  / std::max(xs, 1.0f))));
-            winH = std::min(winH, static_cast<int>(std::round(mode->height / std::max(ys, 1.0f))));
+    // Keep interactive windows within the monitor's logical work area. An
+    // explicit capture/benchmark size is a pixel contract and may intentionally
+    // exceed that work area; GLFW can still create the larger swapchain even
+    // when part of the window lies off-screen.
+    if (!explicitWindowSize) {
+        if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
+            float xs = 1.0f, ys = 1.0f;
+            glfwGetMonitorContentScale(mon, &xs, &ys);
+            if (const GLFWvidmode* mode = glfwGetVideoMode(mon)) {
+                winW = std::min(
+                    winW, static_cast<int>(
+                              std::round(mode->width / std::max(xs, 1.0f))));
+                winH = std::min(
+                    winH, static_cast<int>(
+                              std::round(mode->height / std::max(ys, 1.0f))));
+            }
         }
     }
 

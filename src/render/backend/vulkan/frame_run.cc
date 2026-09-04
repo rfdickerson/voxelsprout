@@ -1393,6 +1393,34 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.skyConfig1[1] = effectiveSkySettings.sunHaloIntensity;
     mvpUniform.skyConfig1[2] = flowTimeSeconds;
     mvpUniform.skyConfig1[3] = 1.85f;
+    mvpUniform.foliageWind[0] = 0.78f;
+    mvpUniform.foliageWind[1] = 0.62f;
+    mvpUniform.foliageWind[2] = 8.0f;
+    mvpUniform.foliageWind[3] = flowTimeSeconds;
+    if (const char* enabled = std::getenv("ODAI_MOUNTAIN_CLOUDS");
+        enabled != nullptr && enabled[0] != '\0' && enabled[0] != '0') {
+        // A presentation can pin the bank to an authored landmark. Other
+        // callers retain the old camera-relative fallback rather than
+        // inheriting coordinates from a different worldspace.
+        mvpUniform.mountainCloudConfig0[0] = 1.0f;
+        mvpUniform.mountainCloudConfig0[1] = 0.0065f;
+        mvpUniform.mountainCloudConfig0[2] = m_mountainCloudVolumeValid
+            ? m_mountainCloudBaseHeight : eye.y + 900.0f;
+        mvpUniform.mountainCloudConfig0[3] = m_mountainCloudVolumeValid
+            ? m_mountainCloudTopHeight : eye.y + 2400.0f;
+        mvpUniform.mountainCloudConfig1[0] = 4500.0f;
+        mvpUniform.mountainCloudConfig1[1] = 16000.0f;
+        mvpUniform.mountainCloudConfig1[2] = 0.00090f;
+        mvpUniform.mountainCloudConfig1[3] = 0.66f;
+        mvpUniform.mountainCloudConfig2[0] = m_mountainCloudVolumeValid
+            ? m_mountainCloudCenterX : eye.x;
+        mvpUniform.mountainCloudConfig2[1] = m_mountainCloudVolumeValid
+            ? m_mountainCloudCenterZ : eye.z;
+        mvpUniform.mountainCloudConfig2[2] = m_mountainCloudVolumeValid
+            ? m_mountainCloudFullRadius : 9000.0f;
+        mvpUniform.mountainCloudConfig2[3] = m_mountainCloudVolumeValid
+            ? m_mountainCloudOuterRadius : 14000.0f;
+    }
     mvpUniform.skyConfig2[0] = effectiveSkySettings.sunDiskSize;
     mvpUniform.skyConfig2[1] = effectiveSkySettings.sunHazeFalloff;
     mvpUniform.skyConfig2[2] = effectiveSkySettings.plantQuadDirectionality;
@@ -2886,6 +2914,28 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             m_visibleImportedPageOrder.push_back(static_cast<std::uint32_t>(pageIndex));
         }
 
+        const auto vegetationLodVisible = [&](const ImportedMeshDraw& draw) {
+            if (draw.vegetationLod == 0u) return true;
+            const float dx = draw.center[0] - eye.x;
+            const float dy = draw.center[1] - eye.y;
+            const float dz = draw.center[2] - eye.z;
+            const float distance = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f);
+            const float projectedPixels = camera.orthographic
+                ? draw.vegetationHeight *
+                    (static_cast<float>(m_renderExtent.height) /
+                     std::max(camera.orthoHalfHeight * 2.0f, 1.0f))
+                : draw.vegetationHeight * std::abs(projection(1, 1)) *
+                    (0.5f * static_cast<float>(m_renderExtent.height)) / distance;
+            // The 15% dead band is encoded by separating the enter thresholds
+            // from their nominal 80/20 px targets. A fixed-camera capture is
+            // stable, while ordinary motion does not chatter on one pixel.
+            const float highEnter = 80.0f * 1.15f;
+            const float billboardEnter = 20.0f * 0.85f;
+            const std::uint8_t wanted = projectedPixels >= highEnter
+                ? 1u : (projectedPixels <= billboardEnter ? 3u : 2u);
+            return draw.vegetationLod == wanted;
+        };
+
         auto appendDrawRange = [&](std::uint32_t firstDraw, std::uint32_t drawCount) -> std::uint32_t {
             if (drawCount == 0u || firstDraw >= m_importedMeshDraws.size()) {
                 return 0u;
@@ -2893,11 +2943,14 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             const std::size_t availableDrawCount = m_importedMeshDraws.size() - firstDraw;
             const std::uint32_t clampedDrawCount =
                 std::min<std::uint32_t>(drawCount, static_cast<std::uint32_t>(availableDrawCount));
-            outDraws.insert(
-                outDraws.end(),
-                m_importedMeshDraws.begin() + static_cast<std::ptrdiff_t>(firstDraw),
-                m_importedMeshDraws.begin() + static_cast<std::ptrdiff_t>(firstDraw + clampedDrawCount));
-            return clampedDrawCount;
+            std::uint32_t appended = 0u;
+            for (std::uint32_t offset = 0u; offset < clampedDrawCount; ++offset) {
+                const ImportedMeshDraw& draw = m_importedMeshDraws[firstDraw + offset];
+                if (!vegetationLodVisible(draw)) continue;
+                outDraws.push_back(draw);
+                ++appended;
+            }
+            return appended;
         };
 
         // Terrain stays a prefix of the visible list -- callers read
@@ -2916,7 +2969,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         const auto pageWithinTessRange = [&](const ImportedScenePageDrawRange& pageRange) {
             // Conservative point-to-AABB distance against the tessellation
             // ramp's far end (imported_terrain.tesc stops at 10000).
-            constexpr float kTessRangeUnits = 10500.0f;
+            const float tessRangeUnits = pageRange.distantLodTessellation
+                ? 48000.0f : 10500.0f;
             float distanceSq = 0.0f;
             const float eyePosition[3] = {eye.x, eye.y, eye.z};
             for (int axis = 0; axis < 3; ++axis) {
@@ -2925,7 +2979,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                 const float delta = eyePosition[axis] - clamped;
                 distanceSq += delta * delta;
             }
-            return distanceSq < (kTessRangeUnits * kTessRangeUnits);
+            return distanceSq < (tessRangeUnits * tessRangeUnits);
         };
         for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
             const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];

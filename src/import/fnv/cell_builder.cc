@@ -16,6 +16,7 @@
 #include "core/frame_profiler.h"
 #include "import/dds.h"
 #include "import/fnv/nif_scene.h"
+#include "import/fnv/spt_scene.h"
 
 namespace odai::importer::fnv {
 
@@ -1001,6 +1002,11 @@ void mergeWorldTablesFromScene(
         if (!entry.recordType.empty()) {
             put(outTables.staticRecordTypes, formId, entry.recordType);
         }
+        if (entry.recordType == "TREE") {
+            FalloutStaticRecord tree = entry;
+            tree.formId = formId;
+            put(outTables.treesByFormId, formId, tree);
+        }
     }
     for (const FalloutLightRecord& entry : data.lights) {
         FalloutLightRecord light = entry;
@@ -1346,6 +1352,9 @@ bool buildFalloutWorldTables(
         if (!entry.recordType.empty()) {
             outTables.staticRecordTypes.emplace(entry.formId, entry.recordType);
         }
+        if (entry.recordType == "TREE") {
+            outTables.treesByFormId.emplace(entry.formId, entry);
+        }
         if (!entry.editorId.empty()) {
             outTables.baseFormIdsByEditorId.emplace(
                 toLowerAsciiCopy(entry.editorId), entry.formId);
@@ -1636,6 +1645,21 @@ bool appendCellWaterPatch(
     const bool hasImpliedHeight = worldspace != nullptr && worldspace->hasDefaultHeights;
     const float impliedHeight = hasImpliedHeight ? worldspace->defaultWaterHeight : 0.0f;
     const float waterHeight = cell.hasWater ? cell.waterHeight : impliedHeight;
+    // A child city cell with neither LAND nor XCLW is an architecture-covered
+    // plaza, not an open-ocean cell inherited from the parent worldspace.
+    // Imperial City's market otherwise receives a full 4096-unit sea-level
+    // quad through its paving, making the right side look like missing floor
+    // and leaving clutter apparently floating. Explicit XCLW remains
+    // authoritative outside this district-specific retail compatibility case,
+    // and root-world landless ocean cells keep the old path.
+    if (cell.land == nullptr && worldspace != nullptr &&
+        worldspace->parentWorldspaceFormId != 0u) {
+        const bool imperialMarketPlaza =
+            toLowerAsciiCopy(worldspace->editorId) == "icmarketdistrict";
+        if (!cell.hasWater || imperialMarketPlaza) {
+            return false;
+        }
+    }
     const float cellWorldSize = cell.land != nullptr
         ? cell.land->cellWorldSize()
         : kExteriorCellSize;
@@ -1986,6 +2010,14 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 const std::string& staticModelPath = *resolvedModelPath;
                 std::vector<std::uint8_t> nifBytes;
+                const auto treeIt = m_tables.treesByFormId.find(ref.baseFormId);
+                const std::string loweredStaticModelPath =
+                    toLowerAsciiCopy(staticModelPath);
+                const bool speedTree =
+                    treeIt != m_tables.treesByFormId.end() &&
+                    loweredStaticModelPath.ends_with(".spt");
+                const bool skyrimTreeNif =
+                    treeIt != m_tables.treesByFormId.end() && !speedTree;
                 if (isSkyOnlyModelPath(staticModelPath) ||
                     isUnsupportedAdditiveLodOverlay(staticModelPath)) {
                     ++m_stats.effectMeshesSkipped;
@@ -1993,8 +2025,13 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     continue;
                 }
                 std::string meshError;
-                if (!m_assets.resolveMesh(staticModelPath, nifBytes, meshError)) {
-                    std::cerr << "warning: could not resolve mesh " << staticModelPath << "\n";
+                const bool assetResolved = speedTree
+                    ? m_assets.resolveAsset(staticModelPath, nifBytes, meshError)
+                    : m_assets.resolveMesh(staticModelPath, nifBytes, meshError);
+                if (!assetResolved) {
+                    std::cerr << "warning: could not resolve "
+                              << (speedTree ? "SpeedTree " : "mesh ")
+                              << staticModelPath << ": " << meshError << "\n";
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnresolved);
                     continue;
                 }
@@ -2012,12 +2049,16 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 // marker_radiation.nif and markerxheading.nif. The root-level
                 // check keeps the rule tight -- editor markers live at the top of
                 // meshes\, so a model in a content directory whose name happens to
-                // start with those six letters is not caught.
+                // start with those six letters is not caught. Oblivion's
+                // Dungeons\Misc\Triggers meshes are likewise invisible editor/
+                // collision volumes, never authored scene geometry.
                 const bool isRootLevelModel = lastSlash == std::string::npos;
                 if ((isRootLevelModel && modelBaseName.rfind("marker", 0) == 0) ||
                     modelBaseName.find("editormarker") != std::string::npos ||
                     modelBaseName.find("editor_marker") != std::string::npos ||
-                    lowerModelPath.find("\\markers\\") != std::string::npos) {
+                    lowerModelPath.find("\\markers\\") != std::string::npos ||
+                    lowerModelPath.find("dungeons\\misc\\triggers\\") !=
+                        std::string::npos) {
                     ++m_stats.editorMarkerModelsSkipped;
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
                     continue;
@@ -2026,10 +2067,67 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 const core::Stopwatch nifTimer;
                 odai::importer::fnv::NifModel nifModel;
                 std::string nifError;
-                if (!odai::importer::fnv::parseNifStaticMesh(nifBytes, nifModel, nifError) || nifModel.shapes.empty()) {
-                    std::cerr << "warning: failed to parse NIF " << staticModelPath << ": " << nifError << "\n";
+                bool parsedModel = false;
+                if (speedTree) {
+                    OblivionSptTree tree;
+                    const FalloutStaticRecord& record = treeIt->second;
+                    parsedModel = parseOblivionSpt(
+                        nifBytes, staticModelPath, record.treeLeafTexturePath,
+                        record.treeSeed, record.treeBillboardWidth,
+                        record.treeBillboardHeight, record.treeWind, tree, nifError) &&
+                        buildOblivionSptModel(tree, nifModel, nifError);
+                } else {
+                    parsedModel = parseNifStaticMesh(nifBytes, nifModel, nifError);
+                }
+                if (!parsedModel || nifModel.shapes.empty()) {
+                    if (nifError.empty()) {
+                        nifError = nifModel.shapes.empty()
+                            ? "no renderable static mesh was emitted (particle/effect-only NIF or unsupported shape family)"
+                            : "NIF parser stopped without a diagnostic";
+                    }
+                    std::cerr << "warning: failed to parse "
+                              << (speedTree ? "SPT " : "NIF ")
+                              << staticModelPath << ": " << nifError << "\n";
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
+                }
+                if (skyrimTreeNif) {
+                    // Skyrim's close trees are real NIF geometry, not SPT
+                    // billboards. Give that geometry the same packed wind
+                    // attributes used by Oblivion's generated branches and
+                    // leaves. Height-based anchoring keeps roots fixed; alpha
+                    // foliage bends more than opaque trunk shapes. The main,
+                    // depth and shadow paths all consume this one vertex
+                    // position deformation.
+                    float minZ = std::numeric_limits<float>::max();
+                    float maxZ = std::numeric_limits<float>::lowest();
+                    for (const NifShape& shape : nifModel.shapes) {
+                        for (std::size_t v = 2u; v < shape.positions.size(); v += 3u) {
+                            minZ = std::min(minZ, shape.positions[v]);
+                            maxZ = std::max(maxZ, shape.positions[v]);
+                        }
+                    }
+                    const float height = std::max(1.0f, maxZ - minZ);
+                    for (std::size_t shapeIndex = 0u;
+                         shapeIndex < nifModel.shapes.size(); ++shapeIndex) {
+                        NifShape& shape = nifModel.shapes[shapeIndex];
+                        const std::size_t vertexCount = shape.positions.size() / 3u;
+                        shape.windWeights.resize(vertexCount);
+                        shape.windPhases.resize(vertexCount);
+                        const bool foliage = shape.alphaTest || shape.alphaBlend;
+                        for (std::size_t v = 0u; v < vertexCount; ++v) {
+                            const float h = std::clamp(
+                                (shape.positions[(v * 3u) + 2u] - minZ) / height,
+                                0.0f, 1.0f);
+                            const float smooth = h * h * (3.0f - (2.0f * h));
+                            shape.windWeights[v] = foliage ? smooth : 0.14f * smooth;
+                            const std::uint32_t phaseHash =
+                                ref.baseFormId * 1664525u +
+                                static_cast<std::uint32_t>(shapeIndex * 101u + v * 17u);
+                            shape.windPhases[v] =
+                                static_cast<float>(phaseHash & 0xffffu) / 65535.0f;
+                        }
+                    }
                 }
                 if (nifModel.skippedShapeCount != 0u ||
                     nifModel.nodeParseFailedCount != 0u) {
@@ -2267,6 +2365,11 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             vertex.uv[0] = shape.uvs[v * 2u];
                             vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
                         }
+                        if (v < shape.windWeights.size() && v < shape.windPhases.size()) {
+                            vertex.layerTextureIndex[3] = kImportedSceneFoliageWindMarker;
+                            vertex.layerWeight[0] = std::clamp(shape.windWeights[v], 0.0f, 1.0f);
+                            vertex.layerWeight[1] = shape.windPhases[v] - std::floor(shape.windPhases[v]);
+                        }
                         // Alpha only. The RGB of a Bethesda vertex colour is
                         // usually a baked ambient-occlusion tint that this
                         // renderer already gets from its own AO pass, and
@@ -2274,7 +2377,16 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         // corner -- so it is deliberately left out while the
                         // channel that has no other source is taken. See
                         // ImportedSceneVertex::colorAlpha.
-                        if ((v * 4u) + 3u < shape.colors.size()) {
+                        // Skyrim TreeAnim branch meshes store per-vertex tree
+                        // data in the color alpha channel. It is not opacity:
+                        // multiplying it into the branch texture's alpha cuts
+                        // away most needles (retail TreePineForest01 has over
+                        // 1,000 such vertices below one) and leaves a skeletal
+                        // trunk. The texture alpha remains authoritative for
+                        // the cutout, while ordinary NIF vertex fades retain
+                        // their existing semantics.
+                        if (!skyrimTreeNif &&
+                            (v * 4u) + 3u < shape.colors.size()) {
                             vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
                         }
                         mesh.vertices.push_back(vertex);
@@ -2343,6 +2455,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         // angle, which is all a stand-in has to be.
                         part.twoSided = shape.twoSided || isDistantLodModelPath(staticModelPath);
                         part.alphaThreshold = shape.alphaThreshold;
+                        part.vegetationLod = shape.vegetationLod;
                         if (const auto animationIt =
                                 rigidAnimationByNode.find(shape.animationNodeName);
                             animationIt != rigidAnimationByNode.end()) {
