@@ -246,6 +246,30 @@ void testWavHeaderAndOfflineDeterminism() {
                }),
                "offline render contains mixed audio rather than silence");
 
+    // Music must remain audible at Bethesda world coordinates, far from zero.
+    const auto musicEnergy = [&](const odai::math::Vector3& position) {
+        Audio audio;
+        AudioConfig config;
+        config.offlineMix = true;
+        audio.init(config);
+        ListenerTransform listener;
+        listener.position = position;
+        audio.setListenerTransform(listener);
+        const MusicHandle music = audio.loadMusic(path);
+        expectTrue(music.valid(), "offline mixer loads streamed music");
+        audio.playMusic(music, 0.0f, true);
+        std::vector<float> pcm(4800u * 2u);
+        expectTrue(audio.renderOfflineFrames(pcm, 4800u), "offline music renders");
+        double energy = 0.0;
+        for (const float sample : pcm) energy += sample * sample;
+        return energy;
+    };
+    const double originEnergy = musicEnergy({0.0f, 0.0f, 0.0f});
+    const double cityEnergy = musicEnergy({-64530.0f, -8260.0f, -105551.0f});
+    expectTrue(originEnergy > 1.0, "streamed score produces audible PCM");
+    expectTrue(std::fabs(cityEnergy - originEnergy) < originEnergy * 0.001,
+               "score loudness is independent of listener position");
+
     std::error_code removeError;
     std::filesystem::remove(path, removeError);
 }

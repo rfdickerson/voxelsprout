@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <cctype>
 #include <cstdlib>
@@ -4730,7 +4731,25 @@ std::filesystem::path cacheWeatherSound(
     if (lastSeparator != std::string::npos) {
         leaf = leaf.substr(lastSeparator + 1u);
     }
-    const std::filesystem::path raw = cacheDirectory / leaf;
+    // Asset names are commonly reused across Sound\\FX subdirectories. Cache
+    // by both the normalized virtual path and the source bytes so two authored
+    // descriptors never alias each other, and replacing a loose or mod asset
+    // cannot keep serving an older decoded WAV from a previous run.
+    std::uint64_t cacheKey = 1469598103934665603ull;
+    const auto hashByte = [&](std::uint8_t byte) {
+        cacheKey ^= byte;
+        cacheKey *= 1099511628211ull;
+    };
+    for (const char character : virtualPath) {
+        const unsigned char byte = static_cast<unsigned char>(character);
+        hashByte(byte == '/' ? static_cast<std::uint8_t>('\\')
+                            : static_cast<std::uint8_t>(std::tolower(byte)));
+    }
+    for (const std::uint8_t byte : bytes) {
+        hashByte(byte);
+    }
+    const std::filesystem::path raw =
+        cacheDirectory / (std::to_string(cacheKey) + "_" + leaf);
     std::filesystem::path playable = raw;
     std::string extension = raw.extension().string();
     for (char& c : extension) {

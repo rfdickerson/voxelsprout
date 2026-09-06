@@ -428,7 +428,13 @@ void MiniaudioBackend::playMusic(MusicHandle track, float fadeSeconds, bool loop
     if (!track.valid() || track.id > m_music.size()) return;
     if (m_musicCurrent) retire(std::move(m_musicCurrent), fadeSeconds);
     const SoundDef& def = m_music[track.id - 1];
-    m_musicCurrent = createSound(def.path, SoundCategory::Music, MA_SOUND_FLAG_STREAM, loop, fadeSeconds);
+    // The score is a stereo bed, independent of the listener's world position.
+    // Default spatialization otherwise attenuates it from the world origin.
+    // Offline priming can consume seconds faster than the stream worker can
+    // refill its pages. Decode synchronously for captures to avoid underruns.
+    const ma_uint32 sourceFlags = m_offline ? MA_SOUND_FLAG_DECODE : MA_SOUND_FLAG_STREAM;
+    m_musicCurrent = createSound(def.path, SoundCategory::Music,
+        sourceFlags | MA_SOUND_FLAG_NO_SPATIALIZATION, loop, fadeSeconds);
 }
 
 void MiniaudioBackend::stopMusic(float fadeSeconds) {
