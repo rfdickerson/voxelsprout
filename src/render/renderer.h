@@ -116,6 +116,7 @@ public:
     // for any scene with a wide dynamic range or a day/night cycle.
     void setAutoExposureEnabled(bool enabled);
     void setAutoExposureKeyValue(float keyValue);
+    void setAutoExposureRange(float minimum, float maximum);
     // Sets every colour-grading term to its neutral value. See the backend's
     // definition for why this is a reset rather than a bypass.
     void setNeutralColorGrading();
@@ -257,6 +258,7 @@ public:
                          float maxRadiusPixels, float nearBlurScale = 0.0f);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
     void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
+    void setImportedExteriorLighting(const ImportedExteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
         bool& outShowTerrain,

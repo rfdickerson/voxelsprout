@@ -1801,6 +1801,119 @@ void testWorldspaceEntranceUsesPairedDoorArrival() {
     fs::remove_all(dataDirectory, cleanupError);
 }
 
+void testInitialEnableParentState() {
+    using namespace odai::importer::fnv;
+    FalloutCellIndex index;
+    for (std::uint32_t id = 1u; id <= 6u; ++id) index.cellIndexByReferenceFormId[id] = 0u;
+    index.referenceEnableStates[1u] = {0u, false, true, false};
+    index.referenceEnableStates[2u] = {1u, false, false, false};
+    index.referenceEnableStates[3u] = {1u, true, false, false};
+    index.referenceEnableStates[4u] = {3u, false, false, false};
+    expectTrue(!initialReferenceEnabled(index, 2u), "disabled cross-cell marker hides siege debris");
+    expectTrue(initialReferenceEnabled(index, 3u), "opposite parent enables intact scenery");
+    expectTrue(initialReferenceEnabled(index, 4u), "enable chains follow the resolved parent");
+    expectTrue(initialReferenceEnabled(index, 6u), "ordinary references remain enabled");
+    index.referenceEnableStates[5u] = {5u, true, false, false};
+    expectTrue(!initialReferenceEnabled(index, 5u), "cyclic enable parents fail closed");
+}
+
+void testPersistentExteriorDummyGrid() {
+    using namespace odai::importer::fnv;
+    const auto path = std::filesystem::temp_directory_path() / "odai_persistent_grid_test.esm";
+    std::vector<std::uint8_t> body = buildSubrecord("DATA", {0u});
+    std::vector<std::uint8_t> grid(12u, 0u);
+    const auto xclc = buildSubrecord("XCLC", grid);
+    body.insert(body.end(), xclc.begin(), xclc.end());
+    auto bytes = buildRecord("TES4", 0u, 0u, {});
+    for (const auto& record : {
+             buildRecord("CELL", 1u, 0x400u, body),
+             buildRecord("CELL", 2u, 0u, body)}) {
+        bytes.insert(bytes.end(), record.begin(), record.end());
+    }
+    {
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+    FalloutSceneData scene;
+    FalloutCellIndex index;
+    std::string error;
+    expectTrue(extractFalloutScene(path, scene, error), "extract persistent dummy-grid fixture");
+    expectTrue(buildFalloutCellIndex(path, index, error), "index persistent dummy-grid fixture");
+    expectTrue(scene.cells.size() == 2u && !scene.cells[0].hasGridCoords &&
+                   scene.cells[1].hasGridCoords,
+               "persistent dummy XCLC is distinct from genuine exterior (0,0)");
+    expectTrue(index.cells.size() == 2u && !index.cells[0].hasGridCoords &&
+                   index.cells[1].hasGridCoords,
+               "streaming index preserves persistent-cell identity");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
+void testAuthoredWaterRecords() {
+    using namespace odai::importer::fnv;
+    namespace fs = std::filesystem;
+    std::vector<std::uint8_t> visual(228u, 0u);
+    const float farPlane = 80.0f;
+    std::memcpy(visual.data() + 36u, &farPlane, 4u);
+    visual[40] = 38; visual[41] = 53; visual[42] = 39;
+    std::vector<std::uint8_t> body;
+    for (const auto& sub : {buildSubrecord("EDID", stringPayload("SyntheticWater")),
+                           buildSubrecord("ANAM", {30u}),
+                           buildSubrecord("DNAM", visual),
+                           buildSubrecord("NAM2", stringPayload("textures\\water\\test.dds"))})
+        body.insert(body.end(), sub.begin(), sub.end());
+    auto bytes = buildTes4Record({}, EsmPluginFormat::kFallout3);
+    const auto group = buildGroup("WATR", 0, buildRecord("WATR", 18u, 0u, body));
+    bytes.insert(bytes.end(), group.begin(), group.end());
+    std::vector<std::uint8_t> waterIdBytes; appendPod(waterIdBytes, 18u);
+    auto worldBody = buildSubrecord("NAM2", waterIdBytes);
+    const auto flags = buildSubrecord("PNAM", {0x77u, 0u});
+    worldBody.insert(worldBody.end(), flags.begin(), flags.end());
+    const auto worldGroup = buildGroup("WRLD", 0, buildRecord("WRLD", 2u, 0u, worldBody));
+    bytes.insert(bytes.end(), worldGroup.begin(), worldGroup.end());
+    const auto cellGroup = buildGroup("CELL", 0, buildRecord("CELL", 3u, 0u,
+        buildSubrecord("XCWT", waterIdBytes)));
+    bytes.insert(bytes.end(), cellGroup.begin(), cellGroup.end());
+    const auto path = fs::temp_directory_path() / "odai_synthetic_water.esm";
+    { std::ofstream file(path, std::ios::binary); file.write(
+        reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); }
+    FalloutSceneData scene;
+    std::string error;
+    expectTrue(extractFalloutScene(path, scene, error), "WATR fixture extracts");
+    expectTrue(scene.worldspaces.size() == 1u && scene.worldspaces[0].waterFormId == 18u &&
+                   scene.worldspaces[0].parentFlags == 0x77u,
+               "WRLD parses NAM2 water and PNAM flags separately");
+    expectTrue(scene.cells.size() == 1u && scene.cells[0].waterFormId == 18u,
+               "CELL parses XCWT water override");
+    FalloutCellIndex index;
+    expectTrue(buildFalloutCellIndex(path, index, error) && index.cells.size() == 1u &&
+                   index.cells[0].waterFormId == 18u,
+               "Streaming index retains XCWT");
+    expectTrue(scene.waters.size() == 1u, "WATR top-level group is admitted");
+    if (!scene.waters.empty()) {
+        const auto& water = scene.waters.front();
+        expectTrue(water.hasVisualData && water.visual[9] == 80.0f && water.opacity == 30 &&
+                   water.colors[0] == 0x273526u && !water.normalTextures[0].empty(),
+                   "WATR preserves packed colours, fog, opacity and noise assets");
+        FalloutWorldTables tables;
+        tables.watersByFormId.emplace(18u, water);
+        auto alternate = water; alternate.formId = 19u;
+        tables.watersByFormId.emplace(19u, alternate);
+        FalloutWorldspaceRecord parent{1u, "Parent"}; parent.waterFormId = 18u;
+        FalloutWorldspaceRecord child{2u, "Child"}; child.parentWorldspaceFormId = 1u;
+        child.waterFormId = 19u;
+        tables.worldspaceDefaultsByFormId.emplace(1u, parent);
+        tables.worldspaceDefaultsByFormId.emplace(2u, child);
+        FalloutCellRecord cell; cell.worldspaceFormId = 2u;
+        expectTrue(tables.findWaterForCell(cell)->formId == 19u, "City selects its own NAM2 water");
+        tables.worldspaceDefaultsByFormId.at(2u).parentFlags = 8u;
+        expectTrue(tables.findWaterForCell(cell)->formId == 18u, "PNAM use-water selects parent");
+        cell.waterFormId = 19u;
+        expectTrue(tables.findWaterForCell(cell)->formId == 19u, "CELL XCWT overrides world water");
+    }
+    fs::remove(path);
+}
+
 void testWorldspaceLodAncestryIsOrderedAndCycleSafe() {
     using namespace odai::importer::fnv;
 
@@ -2208,6 +2321,7 @@ void testSkyrimTerrainPackedPositionsAreFullPrecision() {
     appendPod(fileBytes, static_cast<std::uint32_t>(0));  // strings
     appendPod(fileBytes, static_cast<std::uint32_t>(0));  // max string length
     appendPod(fileBytes, static_cast<std::uint32_t>(0));  // groups
+    const std::size_t rootOffset = fileBytes.size();
     fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
     fileBytes.insert(fileBytes.end(), shapeBlock.begin(), shapeBlock.end());
     appendPod(fileBytes, static_cast<std::uint32_t>(1));  // footer roots
@@ -2229,6 +2343,34 @@ void testSkyrimTerrainPackedPositionsAreFullPrecision() {
             expectNear(decoded[7], 416.0f, 1e-5f, "later BTR vertices do not collapse");
         }
     }
+    // A placement-wrapper root is replaced by REFR, while the child shape's
+    // authored local transform must still be accumulated exactly once.
+    if (model.shapes.size() != 1u) return;
+    const auto originalPositions = model.shapes.front().positions;
+    const float rootX = 900.0f, rootScale = 3.0f, flipped = -1.0f;
+    std::memcpy(fileBytes.data() + rootOffset + 16u, &rootX, 4u);
+    std::memcpy(fileBytes.data() + rootOffset + 28u, &flipped, 4u);
+    std::memcpy(fileBytes.data() + rootOffset + 44u, &flipped, 4u);
+    std::memcpy(fileBytes.data() + rootOffset + 64u, &rootScale, 4u);
+    const float childY = 53.0f;
+    std::memcpy(fileBytes.data() + rootOffset + rootBlock.size() + 20u, &childY, 4u);
+    expectTrue(odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+               "Skyrim placement root transform fixture parses");
+    if (model.shapes.size() == 1u && model.shapes.front().positions.size() == originalPositions.size()) {
+        for (std::size_t i = 0u; i < originalPositions.size(); ++i) {
+            expectNear(model.shapes.front().positions[i],
+                       originalPositions[i] + (i % 3u == 1u ? childY : 0.0f), 1e-5f,
+                       "Skyrim ignores root TRS and preserves child translation");
+        }
+    }
+    const std::int32_t shapeRoot = 1;
+    std::memcpy(fileBytes.data() + fileBytes.size() - 4u, &shapeRoot, 4u);
+    expectTrue(odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+               "Skyrim standalone shape root parses");
+    if (model.shapes.size() == 1u && model.shapes.front().positions.size() == originalPositions.size()) {
+        expectNear(model.shapes.front().positions[1], originalPositions[1] + childY, 1e-5f,
+                   "A root geometry shape retains its authored transform");
+    }
 }
 
 // Skyrim's packed vertex descriptor only says that an RGBA channel EXISTS.
@@ -2237,7 +2379,7 @@ void testSkyrimTerrainPackedPositionsAreFullPrecision() {
 // enabled ramps blend their opaque diffuse into the ground, while disabled
 // bytes must read as 1 rather than punching holes through alpha-tested shapes.
 void testSkyrimLightingShaderVertexAlpha() {
-    const auto parseFixture = [](bool enableVertexAlpha) {
+    const auto parseFixture = [](bool enableVertexAlpha, bool effect = false, bool lit = false) {
         const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
         const auto appendSseAvObjectPrefix = [&](std::vector<std::uint8_t>& block) {
             appendPod(block, static_cast<std::int32_t>(-1));
@@ -2291,15 +2433,25 @@ void testSkyrimLightingShaderVertexAlpha() {
         appendPod(shapeBlock, static_cast<std::uint32_t>(0));
 
         std::vector<std::uint8_t> shaderBlock;
-        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // shader type
+        if (!effect) appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // shader type
         appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // name
         appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // extra data
         appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // controller
-        appendPod(shaderBlock, enableVertexAlpha ? 0x8u : 0u);   // SLSF1
-        appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // SLSF2
-        appendPod(shaderBlock, 0.0f); appendPod(shaderBlock, 0.0f); // UV offset
+        appendPod(shaderBlock, (enableVertexAlpha ? 0x8u : 0u) | (effect ? 0x30u : 0u));   // SLSF1
+        appendPod(shaderBlock, lit ? (1u << 30u) : 0u);   // SLSF2
+        appendPod(shaderBlock, effect ? 0.25f : 0.0f); appendPod(shaderBlock, 0.0f); // UV offset
         appendPod(shaderBlock, 1.0f); appendPod(shaderBlock, 1.0f); // UV scale
-        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // texture set
+        if (effect) {
+            appendSizedString32(shaderBlock, "textures/effects/water.dds");
+            appendPod(shaderBlock, std::uint32_t(3)); // clamp + lighting bytes
+            for (int i = 0; i < 7; ++i) appendPod(shaderBlock, 1.0f); // falloff + RGB
+            appendPod(shaderBlock, 0.5f); // material alpha
+            appendPod(shaderBlock, 1.0f); // base scale
+            appendPod(shaderBlock, 100.0f); // soft depth
+            appendSizedString32(shaderBlock, "textures/effects/palette.dds"); // palette
+        } else {
+            appendPod(shaderBlock, static_cast<std::int32_t>(-1)); // texture set
+        }
 
         std::vector<std::uint8_t> fileBytes;
         const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
@@ -2316,7 +2468,7 @@ void testSkyrimLightingShaderVertexAlpha() {
         appendPod(fileBytes, static_cast<std::uint16_t>(3));
         appendSizedString32(fileBytes, "BSFadeNode");
         appendSizedString32(fileBytes, "BSTriShape");
-        appendSizedString32(fileBytes, "BSLightingShaderProperty");
+        appendSizedString32(fileBytes, effect ? "BSEffectShaderProperty" : "BSLightingShaderProperty");
         appendPod(fileBytes, static_cast<std::uint16_t>(0));
         appendPod(fileBytes, static_cast<std::uint16_t>(1));
         appendPod(fileBytes, static_cast<std::uint16_t>(2));
@@ -2359,6 +2511,23 @@ void testSkyrimLightingShaderVertexAlpha() {
         expectNear(disabled.shapes[0].colors[11], 1.0f, 1e-5f,
                    "even a stored zero alpha is ignored when the shader flag is clear");
     }
+    for (bool lit : {false, true}) {
+        for (bool vertexAlpha : {false, true}) {
+            const auto effect = parseFixture(vertexAlpha, true, lit);
+            expectTrue(effect.shapes.size() == 1u, "effect fixture emits one shape");
+            if (effect.shapes.empty()) continue;
+            const auto& shape = effect.shapes.front();
+            expectTrue(shape.effectPaletteFlags == 3u &&
+                       shape.effectPaletteTexturePath == "textures/effects/palette.dds",
+                       "effect retains authored palette and both remap channels");
+            expectTrue(shape.unlit == !lit, "Effect_Lighting controls emitter bypass");
+            expectNear(shape.uvs[0], 0.25f, 1e-5f, "effect authored UV offset survives");
+            expectNear(shape.colors[7], vertexAlpha ? 64.0f / 255.0f : 0.5f, 1e-5f,
+                       "effect material opacity combines with enabled vertex alpha only");
+            expectTrue(shape.alphaBlend, "effect material opacity enables blending");
+        }
+    }
+
 }
 
 // Builds a NIF whose hierarchy is root -> middle -> NiTriShape -> data, where
@@ -6663,10 +6832,21 @@ void testBethesdaPlacementRotationConventions() {
 
     ImportedSceneInstance laterGeneration;
     writeBethesdaPlacementTransform(laterGeneration, reference, false);
-    expectNear(laterGeneration.transform[1], -1.0f, 1e-5f,
-               "TES4/TES5 placement retains its authored positive angle");
-    expectNear(laterGeneration.transform[8], -1.0f, 1e-5f,
-               "later-generation placement convention remains unchanged");
+    expectNear(laterGeneration.transform[1], 1.0f, 1e-5f,
+               "TES4/TES5 placement uses clockwise authored angles");
+    expectNear(laterGeneration.transform[8], 1.0f, 1e-5f,
+               "TES4/TES5 clockwise Z rotation points toward positive engine Z");
+
+    reference.rotationRadians[0] = 1.57079632679f;
+    reference.rotationRadians[1] = 1.57079632679f;
+    reference.rotationRadians[2] = 0.0f;
+    writeBethesdaPlacementTransform(laterGeneration, reference, false);
+    expectNear(laterGeneration.transform[4], 1.0f, 1e-5f,
+               "compound REFR rotation preserves Bethesda Z-Y-X axis order");
+    expectNear(laterGeneration.transform[8], 0.0f, 1e-5f,
+               "compound REFR rotation negates each authored angle without transposing");
+    expectNear(laterGeneration.transform[10], -1.0f, 1e-5f,
+               "compound REFR rotation retains the expected handedness");
 }
 
 void testOblivionSptImportIsBoundedAndDeterministic() {
@@ -6793,7 +6973,10 @@ int main() {
     testEsmReaderSkipsRecordsByHeader();
     testFalloutRecordExtraction();
     testWorldspaceEntranceUsesPairedDoorArrival();
+    testAuthoredWaterRecords();
     testWorldspaceLodAncestryIsOrderedAndCycleSafe();
+    testPersistentExteriorDummyGrid();
+    testInitialEnableParentState();
     testSkyrimRegionAndSoundRecords();
     testLandLayerOpacityReconstruction();
     testVertexFadeTrianglePartitioning();

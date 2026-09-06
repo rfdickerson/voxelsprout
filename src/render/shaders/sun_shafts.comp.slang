@@ -91,7 +91,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
 
     const float travelDistance = sceneDepth / max(-viewDir.z, 1e-4);
-    const float maxDistance = hasGeometry ? min(travelDistance, 128.0) : 128.0;
+    // Imported Bethesda scenes use game units, not metres. Cover the street
+    // and nearby architecture so occlusion can form visible atmospheric beams.
+    const float shaftDistance = 8192.0;
+    const float maxDistance = hasGeometry ? min(travelDistance, shaftDistance) : shaftDistance;
     if (maxDistance <= 0.05)
     {
         sunShaftTexture[dispatchThreadId.xy] = float4(0.0, 0.0, 0.0, 1.0);
@@ -110,7 +113,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float fogHeightFalloff = max(camera.skyConfig4.y, 0.0);
     const float fogBaseHeight = camera.skyConfig4.z;
     const float sunScatter = max(camera.skyConfig4.w, 0.0);
-    const uint sampleCount = max(pushConstants.sampleCount, 1u);
+    // The imported-scene ray spans a city block; keep shadow transitions
+    // resolved instead of producing broad bands with the old short-ray budget.
+    const uint sampleCount = max(pushConstants.sampleCount, 64u);
     const float stepLength = maxDistance / float(sampleCount);
     const float phase = hgPhase(dot(worldDir, toSun), 0.72);
 

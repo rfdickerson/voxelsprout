@@ -283,18 +283,8 @@ Mat3 makeEngineInstanceRotation(const Mat3& beth) {
     return out;
 }
 
-// REFR rotation order: Bethesda applies X, then Y, then Z (R = Rz*Ry*Rx).
-// TES4/TES5 use the angles as stored; TES3 uses the opposite sign, selected by
-// writeBethesdaPlacementTransform after the common order is composed here.
-//
-// The later-generation angle sign is settled: `odai_bethesda_probe --rotations FalloutNV.esm
-// GSDocMitchellHouse` scores every candidate convention by how much the cell's
-// modular pieces interpenetrate once placed, and positive angles beat negated
-// ones by 1.6x (5.9e7 vs 9.6e7). The order is not separated by that test —
-// ZYX, YZX and ZXY land within 0.5% of each other — so this keeps ZYX, which
-// is both the documented convention and the best of the tied group. If a
-// specific asset ever looks wrong about a diagonal axis, that near-tie is the
-// place to look.
+// Compose the ordinary column-vector Euler matrix. Bethesda's later games use
+// clockwise-positive REFR angles, represented by passing each negated angle.
 Mat3 eulerToMatrixBethesdaOrder(float rx, float ry, float rz) {
     return multiply(rotationZ(rz), multiply(rotationY(ry), rotationX(rx)));
 }
@@ -841,17 +831,17 @@ void writeBethesdaPlacementTransform(
     ImportedSceneInstance& instance,
     const FalloutPlacedReference& reference,
     bool morrowind) {
+    (void)morrowind;  // All supported generations encode clockwise REFR angles.
     const Vec3 worldPos = bethesdaToEngine(
         reference.position[0], reference.position[1], reference.position[2]);
-    // TES3's DATA angles rotate placed objects in the opposite direction from
-    // TES4/TES5's REFR angles. Balmora's modular canal kit makes this measurable:
-    // positive angles make the pieces overlap by 2.24e9 cubic units, while
-    // negating them reduces that to 1.29e9 and closes the authored kit joins.
-    const float angleSign = morrowind ? -1.0f : 1.0f;
-    const Mat3 bethRotation = eulerToMatrixBethesdaOrder(
-        angleSign * reference.rotationRadians[0],
-        angleSign * reference.rotationRadians[1],
-        angleSign * reference.rotationRadians[2]);
+    // REFR angles are clockwise-positive. Negate each angle while preserving
+    // Bethesda's Z * Y * X composition order. Transposing the composed matrix
+    // happens to work for a single axis but reverses the order of compound
+    // rotations, which displaced rotated modular pieces and clutter.
+    Mat3 bethRotation = eulerToMatrixBethesdaOrder(
+        -reference.rotationRadians[0],
+        -reference.rotationRadians[1],
+        -reference.rotationRadians[2]);
     writeTransform(
         instance, worldPos, makeEngineInstanceRotation(bethRotation), reference.scale);
 }
@@ -1077,6 +1067,12 @@ void mergeWorldTablesFromScene(
         put(outTables.soundDescriptorByBaseFormId, formId,
             remap(source.descriptorFormId));
     }
+    for (const auto& source : data.waters) {
+        auto water = source;
+        water.formId = remap(source.formId);
+        if (water.deleted) outTables.watersByFormId.erase(water.formId);
+        else put(outTables.watersByFormId, water.formId, water);
+    }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
         if (!entry.editorId.empty()) {
             put(outTables.worldspaceFormIdsByEditorId, toLowerAsciiCopy(entry.editorId),
@@ -1087,6 +1083,7 @@ void mergeWorldTablesFromScene(
         // map to be found. resolveWorldspaceInheritance() pushes them down.
         FalloutWorldspaceRecord remapped = entry;
         remapped.formId = remap(entry.formId);
+        remapped.waterFormId = remap(entry.waterFormId);
         if (remapped.parentWorldspaceFormId != 0u) {
             remapped.parentWorldspaceFormId = remap(entry.parentWorldspaceFormId);
         }
@@ -1396,6 +1393,9 @@ bool buildFalloutWorldTables(
             outTables.soundDescriptorByBaseFormId.emplace(
                 entry.formId, entry.descriptorFormId);
         }
+    }
+    for (const auto& water : data.waters) {
+        if (!water.deleted) outTables.watersByFormId.emplace(water.formId, water);
     }
     for (const FalloutWorldspaceRecord& entry : data.worldspaces) {
         if (!entry.editorId.empty()) {
@@ -1776,23 +1776,57 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     // sea precisely where there is nothing else to draw.
     const std::size_t firstWaterPatch = m_scene.waterPatches.size();
     if (appendCellWaterPatch(m_scene, cell, m_tables.findWorldspace(cell.worldspaceFormId))) {
-        // Skyrim supplies a 64x64 flow vector texture for each exterior water
-        // cell. Resolve it first: its presence is the format discriminator, so
-        // Fallout/Oblivion/Morrowind retain their existing generic normal.
-        // Tamriel's default WATR (form 0x18) names DefaultWater.dds for all
-        // three normal layers; sampling it at three scales happens in Slang.
+        const auto* authored = m_tables.findWaterForCell(cell);
         const std::string flowPath =
             "textures\\water\\skyrim.esm\\flow." + std::to_string(cell.gridX) +
             "." + std::to_string(cell.gridZ) + ".dds";
-        const std::uint32_t flowTexture = resolveTextureIndex(flowPath, /*linearData=*/true);
-        if (flowTexture != kNoTextureIndex) {
-            const std::uint32_t normalTexture = resolveTextureIndex(
-                "Data\\Textures\\Water\\DefaultWater.dds", /*linearData=*/true);
-            for (std::size_t index = firstWaterPatch; index < m_scene.waterPatches.size(); ++index) {
-                ImportedSceneWaterPatch& water = m_scene.waterPatches[index];
-                water.flowTextureIndex = flowTexture;
-                water.normalTextureIndex = normalTexture;
+        const std::uint32_t flowTexture = (!authored || (authored->flags & 0x08u) != 0u)
+            ? resolveTextureIndex(flowPath, /*linearData=*/true) : kNoTextureIndex;
+        std::uint32_t normals[3]{kNoTextureIndex, kNoTextureIndex, kNoTextureIndex};
+        ImportedWaterAppearance appearance{};
+        if (authored) {
+            std::clog << "[water] " << authored->editorId << " form=" << authored->formId
+                      << " flow=" << ((authored->flags & 8u) != 0u)
+                      << " normal=" << authored->normalTextures[0]
+                      << " fog=" << authored->visual[8] << "," << authored->visual[9] << "\n";
+            for (std::size_t i = 0; i < 3; ++i) {
+                if (!authored->normalTextures[i].empty())
+                    normals[i] = resolveTextureIndex(authored->normalTextures[i], true);
+                float* color = i == 0 ? appearance.shallow :
+                    (i == 1 ? appearance.deep : appearance.reflection);
+                for (std::size_t c = 0; c < 3; ++c) {
+                    const float srgb = float((authored->colors[i] >> (c * 8u)) & 255u) / 255.0f;
+                    color[c] = srgb <= 0.04045f ? srgb / 12.92f :
+                        std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+                }
+                float* layer = i == 0 ? appearance.layer0 :
+                    (i == 1 ? appearance.layer1 : appearance.layer2);
+                layer[0] = authored->visual[43 + i];
+                layer[1] = authored->visual[25 + i] * 0.01745329252f;
+                layer[2] = authored->visual[28 + i];
+                layer[3] = authored->visual[46 + i];
             }
+            appearance.shallow[3] = 1.0f;
+            appearance.deep[3] = float(authored->opacity) / 100.0f;
+            appearance.reflection[3] = authored->visual[6];
+            appearance.optics[0] = authored->visual[8];
+            appearance.optics[1] = authored->visual[9];
+            appearance.optics[2] = authored->visual[33];
+            appearance.optics[3] = authored->visual[49];
+            appearance.lighting[0] = authored->visual[39];
+            appearance.lighting[1] = authored->visual[4];
+            appearance.lighting[2] = authored->visual[42];
+            appearance.lighting[3] = authored->visual[51];
+        } else if (flowTexture != kNoTextureIndex) {
+            normals[0] = resolveTextureIndex("Data\\Textures\\Water\\DefaultWater.dds", true);
+        }
+        for (std::size_t index = firstWaterPatch; index < m_scene.waterPatches.size(); ++index) {
+            auto& water = m_scene.waterPatches[index];
+            water.flowTextureIndex = flowTexture;
+            water.normalTextureIndex = normals[0];
+            water.extraNormalTextureIndices[0] = normals[1];
+            water.extraNormalTextureIndices[1] = normals[2];
+            water.appearance = appearance;
         }
         m_stats.waterPatchesEmitted += m_scene.waterPatches.size() - firstWaterPatch;
     }
@@ -1948,14 +1982,9 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
         // appearing a beat after the terrain because the persistent cell is
         // slow to build -- which reads as a renderer bug, not as a flag.
         //
-        // XESP (enable-parent) state is NOT resolved: the parent can live in
-        // any cell, and its runtime state does not exist in a viewer with no
-        // quest engine. The flag alone is the authored "hidden until story
-        // says otherwise", and honouring just it matches what an unstarted
-        // save shows. A ref that is enable-parented to a disabled parent
-        // WITHOUT carrying the flag itself still draws; measured across the
-        // Skyrim spawn cells that is scenery (ferns under a bridge), not
-        // barriers.
+        // The streamer resolves cross-cell XESP defaults through its complete
+        // reference index and passes the effective disabled bit here. Offline
+        // callers without that index still use the reference's authored flag.
         const bool initiallyVisible = (ref.recordFlags & 0x00000800u) == 0u;
         if (!initiallyVisible) ++m_stats.disabledReferencesSkipped;
             // Lights first, and deliberately ahead of the m_failedStatics gate:
@@ -2345,6 +2374,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         ++m_stats.shadowDecalShapesSkipped;
                         continue;
                     }
+                    const auto paletteTexture = shape.effectPaletteFlags != 0u
+                        ? resolveTextureIndex(shape.effectPaletteTexturePath) : kNoTextureIndex;
                     const std::uint32_t baseVertex = static_cast<std::uint32_t>(mesh.vertices.size());
                     const std::uint32_t partFirstIndex = static_cast<std::uint32_t>(mesh.indices.size());
                     for (std::size_t v = 0; v * 3u < shape.positions.size(); ++v) {
@@ -2370,13 +2401,10 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             vertex.layerWeight[0] = std::clamp(shape.windWeights[v], 0.0f, 1.0f);
                             vertex.layerWeight[1] = shape.windPhases[v] - std::floor(shape.windPhases[v]);
                         }
-                        // Alpha only. The RGB of a Bethesda vertex colour is
-                        // usually a baked ambient-occlusion tint that this
-                        // renderer already gets from its own AO pass, and
-                        // multiplying it in on top would double-darken every
-                        // corner -- so it is deliberately left out while the
-                        // channel that has no other source is taken. See
-                        // ImportedSceneVertex::colorAlpha.
+                        // Opaque geometry retains the existing AO treatment.
+                        // Explicitly blended surfaces need authored RGB too:
+                        // water tint and effect palette selection are material
+                        // inputs, not redundant ambient occlusion.
                         // Skyrim TreeAnim branch meshes store per-vertex tree
                         // data in the color alpha channel. It is not opacity:
                         // multiplying it into the branch texture's alpha cuts
@@ -2388,6 +2416,14 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         if (!skyrimTreeNif &&
                             (v * 4u) + 3u < shape.colors.size()) {
                             vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
+                            if (shape.alphaSemantic == NifAlphaSemantic::ExplicitBlend) {
+                                std::copy_n(&shape.colors[v * 4u], 3u, vertex.color);
+                            }
+                        }
+                        if (paletteTexture != kNoTextureIndex) {
+                            vertex.layerTextureIndex[2] = paletteTexture;
+                            vertex.layerWeight[2] = float(shape.effectPaletteFlags) / 255.0f;
+                            vertex.layerWeight[3] = shape.effectPaletteColorRow * vertex.color[0];
                         }
                         mesh.vertices.push_back(vertex);
                     }

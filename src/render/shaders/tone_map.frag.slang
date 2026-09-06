@@ -961,11 +961,11 @@ float4 main(FragmentInput input) : SV_Target0
     const float shaftFactor = sunShaftTexture.Sample(input.inUv).x;
     if (shaftFactor > 1e-5)
     {
-        const float shaftStrength = (camera.skyConfig4.x * 8.0) + (camera.skyConfig4.w * 0.04);
         const float3 shaftTint = lerp(camera.sunColorShadow.xyz, float3(1.0, 0.95, 0.90), 0.25);
-        // Let shafts affect geometry too (window beams), but attenuate by scene depth for plausibility.
-        const float geometryAttenuation = lerp(1.0, exp(-viewDepth * 0.030), geometryMask);
-        hdrColor += shaftTint * (shaftFactor * shaftStrength * geometryAttenuation * clamp(sunVisibility, 0.0, 1.0));
+        // The volume integration already includes density, scattering strength,
+        // transmittance and shadow visibility along the ray. A hidden sun can
+        // still illuminate the volume in front of an occluding building.
+        hdrColor += shaftTint * shaftFactor;
     }
 
     // tonemapConfig.x selects the curve: 0 keeps the ACES fit every other game

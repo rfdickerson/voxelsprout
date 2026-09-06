@@ -449,8 +449,21 @@ inline constexpr bool shouldUseImportedRayTracedLocalShadows(
         lighting.localShadowMode == ImportedInteriorLighting::LocalShadowMode::RayTraced;
 }
 
+// Exterior lighting has its own controls; enabling bounce must not put an
+// outdoor scene into the CELL/interior lighting path.
+struct ImportedExteriorLighting {
+    float diffuseWrap = 0.35f;
+    float ambientScale = 1.0f;
+    float sunlightScale = 1.0f;
+    float daytimeLocalLightScale = 1.0f;
+    bool screenSpaceGi = false;
+    float bounceStrength = 0.35f;
+};
+
 inline constexpr bool shouldUseImportedScreenSpaceGi(
-    const ImportedInteriorLighting& lighting) {
+    const ImportedInteriorLighting& lighting,
+    const ImportedExteriorLighting& exterior = {}) {
+    if (!lighting.enabled) return exterior.screenSpaceGi;
     return useAuthoredImportedInteriorLighting(lighting) &&
         lighting.indirectLightingMode ==
             ImportedInteriorLighting::IndirectLightingMode::ScreenSpaceDiffuse;

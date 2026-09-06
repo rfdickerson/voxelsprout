@@ -1155,7 +1155,7 @@ bool RendererBackend::createPipePipeline() {
     importedWaterBindings[0].stride = sizeof(ImportedWaterVertex);
     importedWaterBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedWaterAttributes[4]{};
+    VkVertexInputAttributeDescription importedWaterAttributes[13]{};
     importedWaterAttributes[0].location = 0;
     importedWaterAttributes[0].binding = 0;
     importedWaterAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1173,11 +1173,29 @@ bool RendererBackend::createPipePipeline() {
     importedWaterAttributes[3].format = VK_FORMAT_R32_UINT;
     importedWaterAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, flowTextureSlot));
 
+    importedWaterAttributes[4] = {4, 0, VK_FORMAT_R32G32_UINT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, extraNormalTextureSlots))};
+    importedWaterAttributes[5] = {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, shallow))};
+    importedWaterAttributes[6] = {6, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, deep))};
+    importedWaterAttributes[7] = {7, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, reflection))};
+    importedWaterAttributes[8] = {8, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, optics))};
+    importedWaterAttributes[9] = {9, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, layer0))};
+    importedWaterAttributes[10] = {10, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, layer1))};
+    importedWaterAttributes[11] = {11, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, layer2))};
+    importedWaterAttributes[12] = {12, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, lighting))};
     VkPipelineVertexInputStateCreateInfo importedWaterVertexInputInfo{};
     importedWaterVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedWaterVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedWaterVertexInputInfo.pVertexBindingDescriptions = importedWaterBindings;
-    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 13;
     importedWaterVertexInputInfo.pVertexAttributeDescriptions = importedWaterAttributes;
 
     VkGraphicsPipelineCreateInfo importedWaterPipelineCreateInfo = pipelineCreateInfo;
@@ -1971,7 +1989,7 @@ bool RendererBackend::createAoPipelines() {
     importedWaterBindings[0].stride = sizeof(ImportedWaterVertex);
     importedWaterBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription importedWaterAttributes[4]{};
+    VkVertexInputAttributeDescription importedWaterAttributes[13]{};
     importedWaterAttributes[0].location = 0;
     importedWaterAttributes[0].binding = 0;
     importedWaterAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1989,11 +2007,29 @@ bool RendererBackend::createAoPipelines() {
     importedWaterAttributes[3].format = VK_FORMAT_R32_UINT;
     importedWaterAttributes[3].offset = static_cast<uint32_t>(offsetof(ImportedWaterVertex, flowTextureSlot));
 
+    importedWaterAttributes[4] = {4, 0, VK_FORMAT_R32G32_UINT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, extraNormalTextureSlots))};
+    importedWaterAttributes[5] = {5, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, shallow))};
+    importedWaterAttributes[6] = {6, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, deep))};
+    importedWaterAttributes[7] = {7, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, reflection))};
+    importedWaterAttributes[8] = {8, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, optics))};
+    importedWaterAttributes[9] = {9, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, layer0))};
+    importedWaterAttributes[10] = {10, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, layer1))};
+    importedWaterAttributes[11] = {11, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, layer2))};
+    importedWaterAttributes[12] = {12, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+        static_cast<uint32_t>(offsetof(ImportedWaterVertex, appearance) + offsetof(odai::importer::ImportedWaterAppearance, lighting))};
     VkPipelineVertexInputStateCreateInfo importedWaterVertexInputInfo{};
     importedWaterVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     importedWaterVertexInputInfo.vertexBindingDescriptionCount = 1;
     importedWaterVertexInputInfo.pVertexBindingDescriptions = importedWaterBindings;
-    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 4;
+    importedWaterVertexInputInfo.vertexAttributeDescriptionCount = 13;
     importedWaterVertexInputInfo.pVertexAttributeDescriptions = importedWaterAttributes;
 
     VkPipelineRasterizationStateCreateInfo importedWaterRasterizer = rasterizer;

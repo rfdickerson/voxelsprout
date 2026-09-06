@@ -26,7 +26,9 @@ constexpr std::array<const char*, 2> kDeviceExtensions = {
 // driver does not expose it), so it is probed per candidate and enabled only
 // where present -- same treatment as descriptor buffer and ray tracing.
 constexpr const char* kOptionalMemoryPriorityExtension = VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME;
-constexpr uint32_t kBindlessTargetTextureCapacity = 1024;
+// City geometry plus the authored distant terrain atlas ring exceeds 1024.
+// Device selection still clamps this target to the supported descriptor budget.
+constexpr uint32_t kBindlessTargetTextureCapacity = 4096;
 constexpr uint32_t kBindlessMinTextureCapacity = 64;
 constexpr uint32_t kBindlessReservedSampledDescriptors = 16;
 constexpr uint32_t kBindlessTextureIndexDiffuse = 0;
@@ -334,6 +336,8 @@ struct alignas(16) CameraUniform {
     // dense radius, w = feathered outer radius. A fixed anchor keeps the
     // formation attached to its mountain instead of following the camera.
     float mountainCloudConfig2[4];
+    // Exterior diffuse wrap, sky-ambient scale, sunlight scale, reserved.
+    float importedExteriorConfig[4];
 };
 
 struct alignas(16) ChunkPushConstants {

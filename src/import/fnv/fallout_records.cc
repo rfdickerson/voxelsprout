@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
@@ -336,6 +337,28 @@ void parseSoundBaseRecord(const EsmRecordView& record, FalloutSceneData& scene) 
     scene.soundBases.push_back(entry);
 }
 
+void parseWaterRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutWaterRecord entry{};
+    entry.formId = record.formId;
+    entry.deleted = (record.flags & 0x20u) != 0u;
+    for (const auto& sub : record.subrecords) {
+        if (sub.type == "EDID") entry.editorId = subrecordString(sub);
+        else if (sub.type == "ANAM" && sub.size >= 1u) entry.opacity = sub.data[0];
+        else if (sub.type == "FNAM" && sub.size >= 1u) entry.flags = sub.data[0];
+        // Skyrim LE/SSE DNAM only; older games have different layouts.
+        else if (sub.type == "DNAM" && (sub.size == 228u || sub.size == 232u)) {
+            entry.hasVisualData = true;
+            for (std::size_t i = 0; i < entry.visual.size(); ++i)
+                entry.visual[i] = readF32(sub.data + i * 4u);
+            for (std::size_t i = 0; i < 3; ++i)
+                entry.colors[i] = readU32(sub.data + 40u + i * 4u);
+        } else if (sub.type == "NAM2") entry.normalTextures[0] = subrecordString(sub);
+        else if (sub.type == "NAM3") entry.normalTextures[1] = subrecordString(sub);
+        else if (sub.type == "NAM4") entry.normalTextures[2] = subrecordString(sub);
+    }
+    scene.waters.push_back(std::move(entry));
+}
+
 void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene) {
     FalloutWorldspaceRecord entry{};
     entry.formId = record.formId;
@@ -349,6 +372,10 @@ void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene)
             entry.defaultWaterHeight = readF32(sub.data + 4);
         } else if (sub.type == "WNAM" && sub.size >= 4u) {
             entry.parentWorldspaceFormId = readU32(sub.data);
+        } else if (sub.type == "NAM2" && sub.size >= 4u) {
+            entry.waterFormId = readU32(sub.data);
+        } else if (sub.type == "PNAM" && sub.size >= 1u) {
+            entry.parentFlags = sub.data[0];
         }
     }
     scene.worldspaces.push_back(std::move(entry));
@@ -387,6 +414,8 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
             }
             std::memcpy(&entry.fogNear, sub.data + 12, sizeof(entry.fogNear));
             std::memcpy(&entry.fogFar, sub.data + 16, sizeof(entry.fogFar));
+        } else if (sub.type == "XCWT" && sub.size >= 4u) {
+            entry.waterFormId = readU32(sub.data);
         } else if (sub.type == "XCLW" && sub.size >= 4u) {
             // Presence is not the test -- see FalloutCellRecord::hasWater. The
             // threshold only has to separate the one sentinel Bethesda writes
@@ -412,6 +441,11 @@ void parseCellRecord(const EsmRecordView& record, std::uint32_t currentWorldspac
                 entry.regionFormIds.push_back(readU32(sub.data + offset));
             }
         }
+    }
+    // Persistent exterior CELLs can carry a dummy XCLC (0,0), as Solitude
+    // does. They own world-wide references, not the ordinary origin grid cell.
+    if (!entry.isInterior && (record.flags & 0x00000400u) != 0u) {
+        entry.hasGridCoords = false;
     }
     scene.cells.push_back(std::move(entry));
 }
@@ -439,6 +473,20 @@ void parseReferenceRecord(const EsmRecordView& record, FalloutCellRecord* curren
             hasData = true;
         } else if (sub.type == "XSCL" && sub.size >= 4u) {
             ref.scale = readF32(sub.data);
+        } else if (sub.type == "XRGD") {
+            constexpr std::uint32_t kBonePoseSize = 28u;
+            for (std::uint32_t offset = 0u;
+                 offset + kBonePoseSize <= sub.size; offset += kBonePoseSize) {
+                FalloutRagdollBonePose pose;
+                pose.boneId = sub.data[offset];
+                for (std::size_t axis = 0u; axis < 3u; ++axis) {
+                    pose.position[axis] = readF32(
+                        sub.data + offset + 4u + static_cast<std::uint32_t>(axis * 4u));
+                    pose.rotationRadians[axis] = readF32(
+                        sub.data + offset + 16u + static_cast<std::uint32_t>(axis * 4u));
+                }
+                ref.ragdollPose.push_back(pose);
+            }
         } else if (sub.type == "VMAD") {
             ref.vmadBytes.assign(sub.data, sub.data + sub.size);
         } else if (sub.type == "XESP" && sub.size >= 8u) {
@@ -1096,6 +1144,7 @@ bool buildMorrowindCellIndex(
         entry.cellFlags = parsed.cellFlags;
         entry.hasWater = parsed.hasWater;
         entry.waterHeight = parsed.waterHeight;
+        entry.waterFormId = parsed.waterFormId;
         entry.hasGridCoords = parsed.hasGridCoords;
         entry.gridX = parsed.gridX;
         entry.gridZ = parsed.gridZ;
@@ -1257,6 +1306,15 @@ bool buildFalloutCellIndex(
             }
             FalloutCellRecord markerCell;
             parseReferenceRecord(record, &markerCell);
+            if (!markerCell.references.empty()) {
+                const auto& ref = markerCell.references.front();
+                if (ref.hasEnableParent || ref.isDeleted || (ref.recordFlags & 0x800u)) {
+                    outIndex.referenceEnableStates[ref.formId] = {
+                        ref.hasEnableParent ? ref.enableParentFormId : 0u,
+                        ref.enableParentOpposite, (ref.recordFlags & 0x800u) != 0u,
+                        ref.isDeleted};
+                }
+            }
             if (markerCell.references.empty() ||
                 (!markerCell.references.front().isMapMarker &&
                  !markerCell.references.front().isDeleted)) {
@@ -1307,6 +1365,7 @@ bool buildFalloutCellIndex(
         entry.fogFar = parsed.fogFar;
         entry.hasWater = parsed.hasWater;
         entry.waterHeight = parsed.waterHeight;
+        entry.waterFormId = parsed.waterFormId;
         entry.regionFormIds = parsed.regionFormIds;
         entry.cellRecordOffset = pendingCellRecordOffset;
         outIndex.cells.push_back(entry);
@@ -1461,6 +1520,7 @@ bool buildFalloutCellIndex(
             cell.cellFormId = cellFormId;
             cell.worldspaceFormId = remap(cell.worldspaceFormId);
             cell.locationFormId = remap(cell.locationFormId);
+            cell.waterFormId = remap(cell.waterFormId);
             for (std::uint32_t& regionFormId : cell.regionFormIds) {
                 regionFormId = remap(regionFormId);
             }
@@ -1516,6 +1576,14 @@ bool buildFalloutCellIndex(
             const auto found = entryByCellFormId.find(single.cells[cellSlot].cellFormId);
             if (found != entryByCellFormId.end()) {
                 outIndex.cellIndexByReferenceFormId[remap(referenceFormId)] = found->second;
+                const auto state = single.referenceEnableStates.find(referenceFormId);
+                if (state == single.referenceEnableStates.end()) {
+                    outIndex.referenceEnableStates.erase(remap(referenceFormId));
+                } else {
+                    auto value = state->second;
+                    value.parent = remap(value.parent);
+                    outIndex.referenceEnableStates[remap(referenceFormId)] = value;
+                }
             }
         }
         for (FalloutMapMarkerRecord marker : single.mapMarkers) {
@@ -1531,6 +1599,7 @@ bool buildFalloutCellIndex(
         }
         for (FalloutWorldspaceRecord worldspace : single.worldspaces) {
             worldspace.formId = remap(worldspace.formId);
+            worldspace.waterFormId = remap(worldspace.waterFormId);
             worldspace.parentWorldspaceFormId = remap(worldspace.parentWorldspaceFormId);
             worldspaceByFormId.insert_or_assign(worldspace.formId, std::move(worldspace));
         }
@@ -1568,6 +1637,7 @@ void remapCellFormIds(const FalloutLoadOrder& order, std::size_t pluginIndex,
     cell.formId = remap(cell.formId);
     cell.worldspaceFormId = remap(cell.worldspaceFormId);
     cell.locationFormId = remap(cell.locationFormId);
+    cell.waterFormId = remap(cell.waterFormId);
     for (std::uint32_t& regionFormId : cell.regionFormIds) {
         regionFormId = remap(regionFormId);
     }
@@ -1620,6 +1690,7 @@ bool extractFalloutCellMerged(
     outCell.fogFar = entry.fogFar;
     outCell.hasWater = entry.hasWater;
     outCell.waterHeight = entry.waterHeight;
+    outCell.waterFormId = entry.waterFormId;
 
     // References keyed by formID, remembering the order they were first seen so
     // the merged list is deterministic rather than hash-ordered. A later
@@ -1708,6 +1779,27 @@ bool extractMorrowindCellAt(
     return true;
 }
 
+bool initialReferenceEnabled(const FalloutCellIndex& index, std::uint32_t referenceFormId) {
+    std::array<std::uint32_t, 64> visited{};
+    std::size_t count = 0u;
+    bool invert = false;
+    while (count < visited.size()) {
+        if (std::find(visited.begin(), visited.begin() + count, referenceFormId) !=
+            visited.begin() + count) return false;
+        visited[count++] = referenceFormId;
+        const auto found = index.referenceEnableStates.find(referenceFormId);
+        if (found == index.referenceEnableStates.end()) return !invert;
+        const auto& state = found->second;
+        if (state.deleted) return false;
+        if (state.parent == 0u || !index.cellIndexByReferenceFormId.contains(state.parent)) {
+            return (!state.disabled) != invert;
+        }
+        invert = invert != state.opposite;
+        referenceFormId = state.parent;
+    }
+    return false;
+}
+
 bool extractFalloutCellAt(
     EsmReader& reader,
     const FalloutCellIndexEntry& entry,
@@ -1739,6 +1831,7 @@ bool extractFalloutCellAt(
     outCell.fogFar = entry.fogFar;
     outCell.hasWater = entry.hasWater;
     outCell.waterHeight = entry.waterHeight;
+    outCell.waterFormId = entry.waterFormId;
 
     if (entry.childrenGroupSize == 0u) {
         return true;  // a cell with no children group simply has no contents
@@ -1876,7 +1969,7 @@ bool extractFalloutScene(
                 group.rawLabel != "CELL" && group.rawLabel != "LTEX" &&
                 group.rawLabel != "TXST" && group.rawLabel != "REGN" &&
                 group.rawLabel != "SOUN" && group.rawLabel != "SNDR" &&
-                group.rawLabel != "SOPM") {
+                group.rawLabel != "SOPM" && group.rawLabel != "WATR") {
                 return false;
             }
         }
@@ -1927,6 +2020,8 @@ bool extractFalloutScene(
             parseLandTextureRecord(record, outScene);
         } else if (record.type == "TXST") {
             parseTextureSetRecord(record, textureSetPaths);
+        } else if (record.type == "WATR") {
+            parseWaterRecord(record, outScene);
         } else if (record.type == "WRLD") {
             parseWorldspaceRecord(record, outScene);
         } else if (record.type == "CELL") {

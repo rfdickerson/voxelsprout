@@ -169,11 +169,10 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         mainPush.falloffRange = kFalloffRange;
         mainPush.sampleDistributionPower = 2.0f;
         mainPush.thinOccluderCompensation = 0.0f;
-        // Honor the same public intensity control as the SSAO/HBAO/GTAO
-        // estimators.  This used to be a fixed 2.2, so showcase tuning changed
-        // every AO mode except the one it actually selected (XeGTAO).
-        mainPush.finalValuePower =
-            std::clamp(m_shadowDebugSettings.ssaoIntensity, 0.25f, 4.0f);
+        // Store linear visibility. The lighting consumer applies intensity
+        // once, after denoising; doing it here too squares the requested
+        // exponent and turns broad occlusion into muddy dark bands.
+        mainPush.finalValuePower = 1.0f;
         mainPush.fineRadiusScale =
             std::clamp(m_shadowDebugSettings.ssaoFineRadiusScale, 0.0f, 0.95f);
         if (mainPush.fineRadiusScale > 0.0f) {

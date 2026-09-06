@@ -97,6 +97,7 @@ public struct CameraUniform
     public float4 mountainCloudConfig0;
     public float4 mountainCloudConfig1;
     public float4 mountainCloudConfig2;
+    public float4 importedExteriorConfig;
 };
 
 [[vk::binding(0, 0)]]

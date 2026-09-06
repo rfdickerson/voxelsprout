@@ -24,14 +24,26 @@ int main() {
     expect(shouldRenderImportedSky(exterior), "exterior renders sky");
     expect(shouldUseImportedSkyLighting(exterior), "exterior uses sky lighting");
     expect(!shouldUseImportedScreenSpaceGi(exterior), "exterior does not force interior SSGI");
+    ImportedExteriorLighting outdoor{};
+    outdoor.screenSpaceGi = true;
+    expect(shouldUseImportedScreenSpaceGi(exterior, outdoor), "exterior explicitly enables diffuse bounce");
+    expect(shouldRenderImportedDirectionalShadows(exterior) && shouldRenderImportedSky(exterior),
+           "outdoor bounce retains sun shadows and sky");
+    outdoor.screenSpaceGi = false;
+    expect(!shouldUseImportedScreenSpaceGi(exterior, outdoor), "exterior GI can be disabled independently");
+    outdoor.screenSpaceGi = true;
 
     ImportedInteriorLighting interior{};
     interior.enabled = true;
     interior.hasAuthoredLighting = true;
+    expect(!shouldUseImportedScreenSpaceGi(interior, outdoor), "exterior GI cannot override interior policy");
     expect(!shouldRenderImportedDirectionalShadows(interior), "authored interior suppresses sun shadows");
     expect(!shouldRenderImportedSky(interior), "authored interior suppresses sky by default");
     interior.indirectLightingMode = ImportedInteriorLighting::IndirectLightingMode::ScreenSpaceDiffuse;
     expect(shouldUseImportedScreenSpaceGi(interior), "authored interior may request SSGI");
+    interior.hasAuthoredLighting = false;
+    expect(!shouldUseImportedScreenSpaceGi(interior, outdoor), "legacy interior does not inherit exterior GI");
+    interior.hasAuthoredLighting = true;
     interior.localShadowMode = ImportedInteriorLighting::LocalShadowMode::ShadowMapsWithContact;
     expect(shouldUseImportedPointShadowMaps(interior), "interior shadow maps are selected");
     expect(shouldUseImportedContactShadows(interior), "interior contact shadows are selected");

@@ -79,6 +79,7 @@ float terrainDetailNoise(float2 p)
 }
 
 [domain("tri")]
+[partitioning("fractional_odd")]
 DomainOutput main(
     PatchConstants constants,
     float3 bary : SV_DomainLocation,

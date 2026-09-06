@@ -183,6 +183,20 @@ void RendererBackend::recordScreenSpaceGiPass(const FrameExecutionContext& conte
             context.gpuTimestampQueryPool, kGpuTimestampQueryScreenSpaceGiStart);
     }
 
+    // The ping-pong destination was read as history by the previous dispatch
+    // and as lighting by an earlier frame. Finish those reads before reuse.
+    // This is a write-after-read hazard, so an execution dependency suffices.
+    VkMemoryBarrier2 reuseBarrier{};
+    reuseBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    reuseBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    reuseBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    VkDependencyInfo reuseDependency{};
+    reuseDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    reuseDependency.memoryBarrierCount = 1u;
+    reuseDependency.pMemoryBarriers = &reuseBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &reuseDependency);
+
     ScreenSpaceGiPushConstants push{};
     std::memcpy(push.prevViewProj, m_taaPrevViewProjColumnMajor.m,
                 sizeof(push.prevViewProj));
@@ -195,7 +209,8 @@ void RendererBackend::recordScreenSpaceGiPass(const FrameExecutionContext& conte
     push.dispatch[2] =
         (m_screenSpaceGiHistoryValid && m_taaHistoryValid &&
          m_taaPrevViewProjValid) ? 1u : 0u;
-    push.params[0] = 640.0f;
+    push.dispatch[3] = m_importedInteriorLighting.enabled ? 0u : 1u;
+    push.params[0] = m_importedInteriorLighting.enabled ? 640.0f : 900.0f;
     push.params[1] = 4.0f;
     push.params[2] = m_taaPrevJitterNdc[0];
     push.params[3] = m_taaPrevJitterNdc[1];
@@ -225,7 +240,10 @@ void RendererBackend::recordScreenSpaceGiPass(const FrameExecutionContext& conte
     recordBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
     recordBarrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     recordBarrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    recordBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    // This frame's lighting reads the result, and the next GI dispatch reads
+    // it as temporal history. Publish to both consumers on the graphics queue.
+    recordBarrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     recordBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     recordBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     recordBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

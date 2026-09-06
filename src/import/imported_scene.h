@@ -587,6 +587,17 @@ struct ImportedSceneLandscapeCell {
     std::vector<std::uint16_t> textureIndices;
 };
 
+struct ImportedWaterAppearance {
+    float shallow[4]{}; // linear RGB, authored flag
+    float deep[4]{}; // linear RGB, opacity
+    float reflection[4]{}; // linear RGB, Fresnel amount
+    float optics[4]{}; // fog near/far/amount, reflection magnitude
+    float layer0[4]{}; // UV size, direction (radians), speed, amplitude
+    float layer1[4]{};
+    float layer2[4]{};
+    float lighting[4]{}; // specular power, sun power, specular brightness, sun magnitude
+};
+
 struct ImportedSceneWaterPatch {
     float originX = 0.0f;
     float originZ = 0.0f;
@@ -598,6 +609,8 @@ struct ImportedSceneWaterPatch {
     // map referenced by WATR; its exterior flow field is authored per cell.
     std::uint32_t normalTextureIndex = 0xffffffffu;
     std::uint32_t flowTextureIndex = 0xffffffffu;
+    std::uint32_t extraNormalTextureIndices[2]{0xffffffffu, 0xffffffffu};
+    ImportedWaterAppearance appearance{};
 };
 
 struct ImportedSceneLight {

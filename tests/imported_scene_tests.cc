@@ -100,6 +100,11 @@ void testImportedSceneSerialization() {
     waterPatch.waterLevel = 4.0f;
     waterPatch.normalTextureIndex = 3u;
     waterPatch.flowTextureIndex = 5u;
+    waterPatch.extraNormalTextureIndices[0] = 7u;
+    waterPatch.appearance.shallow[3] = 1.0f;
+    waterPatch.appearance.deep[1] = 0.015f;
+    waterPatch.appearance.optics[1] = 80.0f;
+    waterPatch.appearance.layer2[0] = 616.0f;
     scene.waterPatches.push_back(waterPatch);
 
     ImportedSceneLight light{};
@@ -204,6 +209,11 @@ void testImportedSceneSerialization() {
     expectNear(loaded.unresolvedRefs.front().rotationRadians[1], unresolved.rotationRadians[1], 1e-6f, "Imported scene unresolved ref rotation round-trips");
     expectNear(loaded.unresolvedRefs.front().scale, unresolved.scale, 1e-6f, "Imported scene unresolved ref scale round-trips");
     expectTrue(loaded.waterPatches.size() == 1u, "Imported scene water patch count round-trips");
+    expectTrue(loaded.waterPatches.front().extraNormalTextureIndices[0] == 7u &&
+                   loaded.waterPatches.front().appearance.shallow[3] == 1.0f &&
+                   loaded.waterPatches.front().appearance.layer2[0] == 616.0f &&
+                   loaded.waterPatches.front().appearance.optics[1] == 80.0f,
+               "Authored water material survives scene serialization");
     expectNear(loaded.waterPatches.front().waterLevel, waterPatch.waterLevel, 1e-6f, "Imported scene water patch level round-trips");
     expectTrue(loaded.waterPatches.front().normalTextureIndex == 3u &&
                    loaded.waterPatches.front().flowTextureIndex == 5u,
@@ -231,6 +241,11 @@ void testImportedSceneSerialization() {
     expectTrue(runtimeLoaded.instances.empty(), "Imported scene runtime loader skips instance transforms");
     expectTrue(runtimeLoaded.landscapeCells.empty(), "Imported scene runtime loader skips landscape cells");
     expectTrue(runtimeLoaded.waterPatches.size() == 1u, "Imported scene runtime loader keeps water patches");
+    expectTrue(runtimeLoaded.waterPatches.front().extraNormalTextureIndices[0] == 7u &&
+                   runtimeLoaded.waterPatches.front().appearance.shallow[3] == 1.0f &&
+                   runtimeLoaded.waterPatches.front().appearance.layer2[0] == 616.0f &&
+                   runtimeLoaded.waterPatches.front().appearance.optics[1] == 80.0f,
+               "Authored water material survives scene serialization");
     expectTrue(runtimeLoaded.lights.size() == 1u, "Imported scene runtime loader keeps lights");
     expectTrue(runtimeLoaded.particleEmitters.size() == 1u,
                "Imported scene runtime loader keeps particle emitters");
@@ -1238,20 +1253,33 @@ void testStaticNormalMapSidecarPackingAndRoundTrip() {
 
     ImportedScene scene{};
     scene.sourceTag = "synthetic_static_normal_map";
-    scene.textures.resize(2u);
+    scene.textures.resize(3u);
+    scene.textures[2].sourcePath = "textures/effects/palette.dds";
     scene.textures[0].sourcePath = "textures\\architecture\\gate.dds";
     scene.textures[1].sourcePath = "textures\\architecture\\gate_n.dds";
     scene.normalTextureByDiffuseIndex.emplace(0u, 1u);
+    scene.alphaFlagsAuthored = true;
+    scene.textures[0].width = scene.textures[0].height = 1u;
+    scene.textures[0].rgba8 = {255u, 255u, 255u, 255u};
 
     ImportedSceneMesh mesh{};
     mesh.vertices = {
         ImportedSceneVertex{{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
         ImportedSceneVertex{{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
         ImportedSceneVertex{{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}}};
+    for (auto& vertex : mesh.vertices) {
+        vertex.color[0] = 0.2f;
+        vertex.color[1] = 0.3f;
+        vertex.color[2] = 0.4f;
+        vertex.layerTextureIndex[2] = 2u;
+        vertex.layerWeight[2] = 3.0f / 255.0f;
+        vertex.layerWeight[3] = 0.5f;
+    }
     mesh.indices = {0u, 1u, 2u};
     ImportedSceneMeshPart part{};
     part.indexCount = 3u;
     part.textureIndex = 0u;
+    part.alphaBlend = true;
     mesh.parts.push_back(part);
     scene.meshes.push_back(std::move(mesh));
 
@@ -1278,6 +1306,16 @@ void testStaticNormalMapSidecarPackingAndRoundTrip() {
     expectTrue(!loaded.packedVertices.empty() &&
                    loaded.packedVertices.front().layerTextureIndex[0] == 1u,
                "normal-map slot survives through the unchanged packed-vertex layout");
+    expectTrue(!loaded.packedVertices.empty() &&
+                   loaded.packedVertices.front().layerTextureIndex[2] == 2u &&
+                   ((loaded.packedVertices.front().layerWeights >> 16u) & 255u) == 3u &&
+                   (loaded.packedVertices.front().layerWeights >> 24u) == 128u,
+               "effect palette index, flags and row survive packing and runtime load");
+    expectTrue((loaded.packedVertices.front().flags & kImportedSceneMaterialFlagAlphaBlend) != 0u,
+               "opaque diffuse must not demote palette-driven transparency");
+    expectTrue((loaded.packedVertices.front().flags & kImportedSceneMaterialFlagVertexColorTint) != 0u &&
+                   loaded.packedVertices.front().color[0] == 0.2f,
+               "authored transparent vertex tint survives instancing and runtime load");
     fs::remove(path);
 }
 

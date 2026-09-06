@@ -26,14 +26,14 @@ static const uint kBindlessTextureIndexWaterNormal = 8u;
 // tonemapper turned a broad river into an almost emissive cyan card.  Keep the
 // shallow water readable, but let reflected sky and the actual riverbed supply
 // most of its colour.
-static const float3 kWaterShallowTint = float3(0.025, 0.055, 0.045);
-static const float3 kWaterDeepTint = float3(0.006, 0.020, 0.020);
+static const float3 kWaterShallowTint = float3(0.030, 0.038, 0.023);
+static const float3 kWaterDeepTint = float3(0.009, 0.014, 0.010);
 // Bethesda units are much smaller than metres. The previous coefficients
 // removed most red over a typical 100-unit river column while retaining blue,
 // which made even a brown riverbed read as an emissive cyan sheet. Keep the
 // wavelength dependence restrained: Skyrim's water is mostly the refracted
 // bottom and reflected environment, not a body-colour swatch.
-static const float3 kWaterAbsorption = float3(0.0085, 0.0045, 0.0030);
+static const float3 kWaterAbsorption = float3(0.0065, 0.0055, 0.0070);
 
 struct FragmentInput
 {
@@ -42,6 +42,15 @@ struct FragmentInput
     float2 inUv : TEXCOORD1;
     nointerpolation uint inNormalTextureSlot : TEXCOORD2;
     nointerpolation uint inFlowTextureSlot : TEXCOORD3;
+    nointerpolation uint2 inExtraNormals : TEXCOORD4;
+    nointerpolation float4 inshallow : TEXCOORD5;
+    nointerpolation float4 indeep : TEXCOORD6;
+    nointerpolation float4 inreflection : TEXCOORD7;
+    nointerpolation float4 inoptics : TEXCOORD8;
+    nointerpolation float4 inlayer0 : TEXCOORD9;
+    nointerpolation float4 inlayer1 : TEXCOORD10;
+    nointerpolation float4 inlayer2 : TEXCOORD11;
+    nointerpolation float4 inlighting : TEXCOORD12;
 };
 
 struct SceneWaterSample
@@ -226,7 +235,7 @@ SceneWaterSample sampleSceneWater(float4 screenPosition, float3 waterWorldPositi
     const float2 renderTexel = 1.0 / max(camera.contactShadowConfig.xy, float2(1.0, 1.0));
     const float2 baseUv = waterScreenUv(screenPosition);
     const float2 refractedUv = clamp(
-        baseUv + (normal.xz * renderTexel * 7.0),
+        baseUv,
         float2(0.0, 0.0),
         float2(1.0, 1.0));
     const float4 sceneNormalDepth = normalDepthTexture.SampleLevel(refractedUv, 0.0);
@@ -319,7 +328,10 @@ ScreenRefractionSample sampleAnimatedSceneRefraction(
     float overheadView,
     float contactFactor,
     float3 shallowWater,
-    float3 fallbackColor)
+    float3 fallbackColor,
+    float4 authoredOptics,
+    float4 authoredDeep,
+    bool authored)
 {
     ScreenRefractionSample result;
     result.color = fallbackColor;
@@ -345,59 +357,70 @@ ScreenRefractionSample sampleAnimatedSceneRefraction(
         return result;
     }
 
-    const float depthFade = lerp(0.24, 1.0, 1.0 - smoothstep(44.0, 180.0, sceneThickness));
-    const float shorelineDamping = lerp(1.0, 0.42, contactFactor);
-    const float viewFade = 0.48 + (0.52 * overheadView);
-    const float2 refractiveSlope = normal.xz / max(normal.y, 0.35);
-    const float distortionPixels =
-        refractionDistortionPixels *
-        lerp(0.52, 1.0, shallowFactor) *
-        depthFade *
-        shorelineDamping *
-        viewFade;
-    result.distortionPixels = distortionPixels;
-    float2 refractedUv = clamp(
-        baseUv + (refractiveSlope * texelSize * distortionPixels),
-        float2(0.0, 0.0),
-        float2(1.0, 1.0));
-    // A screen-space offset near a shoreline can land on a tree, bank, or the
-    // sky. Sampling that colour as transmission puts dry geometry underneath
-    // the water as a large pale smear. Accept the displaced sample only when
-    // its depth reconstructs to a point both behind and below the water plane;
-    // otherwise use the undistorted pixel, whose opaque surface is the actual
-    // riverbed along this view ray.
-    const float candidateViewDepth = normalDepthTexture.SampleLevel(refractedUv, 0.0).w;
-    const float waterViewDepth = max(-mul(camera.view, float4(waterWorldPosition, 1.0)).z, 0.0);
-    bool validDisplacedBottom = candidateViewDepth > waterViewDepth + 0.02;
-    if (validDisplacedBottom)
+    // Trace Snell's-law transmission in world space and project each sample.
+    // World normal XZ is not a screen-space displacement (it rotates with the
+    // camera), and a fixed pixel offset cannot refract a submerged piling.
+    const float3 incident = normalize(waterWorldPosition - camera.shadowVoxelGridSize.xyz);
+    const float3 direction = refract(incident, normal, kAirToWaterEta);
+    const float maxTravel = min(max(sceneThickness * 1.5, 64.0), 2048.0);
+    const float stepLength = maxTravel / 32.0;
+    float previousTravel = 0.0;
+    float2 hitUv = baseUv;
+    float hitTravel = 0.0;
+    bool hit = false;
+    for (uint i = 1u; i <= 32u; ++i)
     {
-        const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
-        const float3 candidateViewRay = viewRayFromUv(refractedUv);
-        const float3x3 invViewRotation = transpose((float3x3)camera.view);
-        const float3 candidateWorldDir = normalize(mul(invViewRotation, candidateViewRay));
-        const float candidateTravel = candidateViewDepth / max(-candidateViewRay.z, 1e-4);
-        const float3 candidateWorld = cameraWorld + (candidateWorldDir * candidateTravel);
-        validDisplacedBottom = candidateWorld.y <= waterWorldPosition.y + 0.35;
+        const float travel = float(i) * stepLength;
+        const float3 position = waterWorldPosition + direction * travel;
+        const float4 viewPosition = mul(camera.view, float4(position, 1.0));
+        const float4 clip = mul(camera.proj, viewPosition);
+        if (clip.w <= 0.0) break;
+        const float2 uv = clip.xy / clip.w * 0.5 + 0.5;
+        if (any(uv <= 0.0) || any(uv >= 1.0)) break;
+        const float opaqueDepth = normalDepthTexture.SampleLevel(uv, 0.0).w;
+        const float delta = -viewPosition.z - opaqueDepth;
+        if (opaqueDepth > 0.0 && delta >= 0.0)
+        {
+            // Refine the intersection instead of displaying coarse march bands.
+            float lo = previousTravel;
+            float hi = travel;
+            for (uint refinement = 0u; refinement < 5u; ++refinement)
+            {
+                const float mid = (lo + hi) * 0.5;
+                const float4 v = mul(camera.view, float4(waterWorldPosition + direction * mid, 1.0));
+                const float4 c = mul(camera.proj, v);
+                const float2 u = c.xy / c.w * 0.5 + 0.5;
+                const float d = normalDepthTexture.SampleLevel(u, 0.0).w;
+                if (d > 0.0 && -v.z >= d) hi = mid;
+                else lo = mid;
+            }
+            hitTravel = (lo + hi) * 0.5;
+            const float4 v = mul(camera.view, float4(waterWorldPosition + direction * hitTravel, 1.0));
+            const float4 c = mul(camera.proj, v);
+            hitUv = c.xy / c.w * 0.5 + 0.5;
+            const float d = normalDepthTexture.SampleLevel(hitUv, 0.0).w;
+            const float3 ray = viewRayFromUv(hitUv);
+            const float3 worldRay = mul(transpose((float3x3)camera.view), ray);
+            const float3 bottom = camera.shadowVoxelGridSize.xyz + worldRay * (d / max(-ray.z, 1e-4));
+            // Reject foreground geometry and discontinuities, not just sky.
+            hit = d > 0.0 && abs(-v.z - d) < max(3.0, stepLength * 0.5) &&
+                bottom.y < waterWorldPosition.y;
+            break;
+        }
+        previousTravel = travel;
     }
-    if (!validDisplacedBottom)
-    {
-        refractedUv = baseUv;
-    }
-    const float3 opaqueSceneColor = opaqueSceneColorTexture.SampleLevel(refractedUv, 0.0).xyz;
-    const float3 attenuation = exp(-kWaterAbsorption * max(sceneThickness, 0.0));
-    const float3 volumeScatter = lerp(kWaterDeepTint, shallowWater, shallowFactor);
-    const float3 refractedSceneColor =
-        (opaqueSceneColor * attenuation * lerp(0.90, 1.02, shallowFactor)) +
-        (volumeScatter * (float3(1.0, 1.0, 1.0) - attenuation) * 0.38);
-    const float sceneWeight =
-        refractionStrength *
-        0.78 *
-        viewFade *
-        depthFade *
-        lerp(0.58, 1.0, shallowFactor) *
-        lerp(1.0, 0.72, contactFactor);
-    result.weight = saturate(sceneWeight);
-    result.color = lerp(fallbackColor, refractedSceneColor, result.weight);
+    if (!hit) return result;
+    const float fog = saturate((hitTravel - authoredOptics.x) /
+        max(authoredOptics.y - authoredOptics.x, 1.0)) * saturate(authoredOptics.z);
+    const float3 attenuation = authored ? float3((1.0 - fog) * (1.0 - saturate(authoredDeep.w))) :
+        exp(-kWaterAbsorption * hitTravel * max(camera.waterConfig.w, 0.01));
+    const float3 opaqueColor = opaqueSceneColorTexture.SampleLevel(hitUv, 0.0).rgb;
+    const float3 volumeScatter = authored ? lerp(shallowWater, authoredDeep.rgb, fog) :
+        lerp(kWaterDeepTint, shallowWater, shallowFactor);
+    result.weight = saturate(refractionStrength);
+    result.distortionPixels = length((hitUv - baseUv) / texelSize);
+    result.color = lerp(fallbackColor, opaqueColor * attenuation +
+        volumeScatter * (1.0 - attenuation) * (authored ? 1.0 : 0.38), result.weight);
     return result;
 }
 
@@ -723,6 +746,31 @@ float3 largeScaleWaterColor(float3 worldPosition, float3 shallowWater, float3 de
     return lerp(deepWater, midTone, variation * 0.60);
 }
 
+// WATR layers use Bethesda XY coordinates and authored world-unit UV sizes.
+// Each normal stays in that tangent frame; the third component maps to engine -Z.
+WaterSurfaceSample authoredWaterSurface(FragmentInput input)
+{
+    const float4 layers[3] = {input.inlayer0, input.inlayer1, input.inlayer2};
+    const uint slots[3] = {input.inNormalTextureSlot, input.inExtraNormals.x, input.inExtraNormals.y};
+    float2 slope = float2(0.0);
+    float2 velocity = float2(0.0);
+    for (uint i = 0u; i < 3u; ++i) {
+        const float4 layer = layers[i];
+        const float2 wind = float2(cos(layer.y), sin(layer.y));
+        velocity += wind * layer.z;
+        if (slots[i] == 0xffffffffu) continue;
+        const float2 uv = float2(input.inWorldPosition.x, -input.inWorldPosition.z) /
+            max(layer.x, 1.0) - wind * layer.z * camera.skyConfig1.z;
+        const float2 xy = bindlessTextures[NonUniformResourceIndex(slots[i])].Sample(uv).xy * 2.0 - 1.0;
+        slope += xy * layer.w;
+    }
+    WaterSurfaceSample result;
+    result.normal = normalize(float3(slope.x, 1.0, -slope.y));
+    result.flow = length(velocity) > 1e-5 ? normalize(float2(velocity.x, -velocity.y)) : float2(1.0, 0.0);
+    result.speed = length(velocity) / 3.0;
+    return result;
+}
+
 float4 main(FragmentInput input) : SV_Target0
 {
     if (chunkPc.cascadeData.z > 0.5)
@@ -732,7 +780,8 @@ float4 main(FragmentInput input) : SV_Target0
 
     const float3 cameraWorld = camera.shadowVoxelGridSize.xyz;
     const float3 viewDir = normalize(cameraWorld - input.inWorldPosition);
-    const WaterSurfaceSample surface = waterSurface(
+    const bool authoredWater = input.inshallow.w > 0.5;
+    const WaterSurfaceSample surface = authoredWater && input.inFlowTextureSlot == 0xffffffffu ? authoredWaterSurface(input) : waterSurface(
         input.inWorldPosition,
         input.inUv,
         input.inNormalTextureSlot,
@@ -752,7 +801,7 @@ float4 main(FragmentInput input) : SV_Target0
     const float nDotV = saturate(dot(normal, viewDir));
     const float rippleSlope = saturate(length(normal.xz) * 2.25);
     const float overheadView = pow(nDotV, 2.2);
-    const float fresnelBase = 0.020;
+    const float fresnelBase = authoredWater ? saturate(input.inreflection.w) : 0.020;
     const float fresnel = fresnelBase + ((1.0 - fresnelBase) * pow(1.0 - nDotV, 5.0));
     const float fresnelReflect = fresnel;
     if (waterDebugMode > 5.5 && waterDebugMode < 6.5)
@@ -774,8 +823,8 @@ float4 main(FragmentInput input) : SV_Target0
         0.035 + (0.025 * fallbackDepthHint),
         1.0 - smoothstep(3.0, 34.0, sceneWater.thickness),
         sceneWater.valid);
-    const float3 shallowWater = kWaterShallowTint;
-    const float3 deepWater = kWaterDeepTint;
+    const float3 shallowWater = authoredWater ? input.inshallow.rgb : kWaterShallowTint;
+    const float3 deepWater = authoredWater ? input.indeep.rgb : kWaterDeepTint;
     float refractedHitDistance = 18.0;
     float rtDepthFactor = 0.0;
     float rtShallowFactor = shoreFactor;
@@ -864,6 +913,11 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 volumeColor = lerp(shallowWater * 0.42, deepWater * 0.92, smoothstep(0.12, 1.0, rtDepthFactor));
     refractionColor = lerp(transmittedColor, volumeColor, saturate(murkFactor * 0.22));
 #endif
+    if (authoredWater) {
+        const float fog = saturate((refractedHitDistance - input.inoptics.x) /
+            max(input.inoptics.y - input.inoptics.x, 1.0));
+        refractionColor = lerp(shallowWater, deepWater, fog);
+    }
     if (waterDebugMode > 1.5 && waterDebugMode < 2.5)
     {
         return float4(
@@ -884,7 +938,7 @@ float4 main(FragmentInput input) : SV_Target0
         overheadView,
         sceneWater.contact,
         shallowWater,
-        refractionColor);
+        refractionColor, input.inoptics, input.indeep, authoredWater);
     refractionColor = screenRefraction.color;
     if (waterDebugMode > 2.5 && waterDebugMode < 3.5)
     {
@@ -915,11 +969,12 @@ float4 main(FragmentInput input) : SV_Target0
     const float ndotl = saturate(dot(normal, sunDir));
     const float ndoth = saturate(dot(normal, halfVector));
     const float vdoth = saturate(dot(viewDir, halfVector));
-    const float sunGlint = pow(saturate(dot(reflectionDir, sunDir)), 64.0);
+    const float sunGlint = pow(saturate(dot(reflectionDir, sunDir)), authoredWater ? max(input.inlighting.y, 1.0) : 64.0);
     const float windNoise = stableWaterNoise((input.inWorldPosition.xz * 0.014) + (camera.skyConfig1.z * 0.010));
     const float broadSpecular = pow(ndoth, 10.0) * (0.105 + (0.22 * fresnelReflect));
     const float tightSpecular = pow(ndoth, lerp(58.0, 96.0, windNoise)) * (0.070 + (0.22 * fresnelReflect));
-    const float directionalSpecular = (broadSpecular + tightSpecular) * (0.38 + (0.62 * ndotl)) * (0.55 + (0.45 * vdoth));
+    const float directionalSpecular = authoredWater ?
+        pow(ndoth, max(input.inlighting.x, 1.0)) * max(input.inlighting.z, 0.0) * ndotl : (broadSpecular + tightSpecular) * (0.38 + (0.62 * ndotl)) * (0.55 + (0.45 * vdoth));
     const float3 sunScatterTint = shallowWater * lerp(0.025, 0.085, ndotl);
     const float grazingFactor = saturate(1.0 - nDotV);
     const float angleReflectionFactor = saturate(pow(grazingFactor, 1.45));
@@ -929,7 +984,9 @@ float4 main(FragmentInput input) : SV_Target0
     // from above—the opposite of the riverbed-readable Skyrim look. Depth now
     // affects only transmission/absorption; Schlick Fresnel and ripple slope
     // decide reflection.
-    const float reflectionWeight = saturate(fresnelReflect * reflectionStrength);
+    const float reflectionWeight = saturate(fresnelReflect * reflectionStrength *
+        (authoredWater ? input.inoptics.w : 1.0));
+    if (authoredWater) reflectionColor *= input.inreflection.rgb;
     const float3 reflectionBoost = lerp(float3(0.96, 0.98, 0.96), float3(1.08, 1.11, 1.10), angleReflectionFactor);
     const float finalReflectionMix = reflectionWeight;
     // One optical split: transmitted scene below the surface versus reflected
@@ -967,7 +1024,7 @@ float4 main(FragmentInput input) : SV_Target0
     litColor += shallowWater * (causticLift * (0.012 + (0.018 * ndotl)) * saturate(rtShallowFactor + 0.20));
     litColor += lerp(float3(0.38, 0.52, 0.47), float3(0.70, 0.78, 0.71), ndotl) * (foamMask * 0.055);
     litColor += float3(0.08, 0.17, 0.14) * (contactFilmMask * 0.018);
-    litColor += camera.sunColorShadow.xyz * (sunGlint * (0.070 + (fresnelReflect * 0.18)));
+    litColor += camera.sunColorShadow.xyz * (sunGlint * (authoredWater ? max(input.inlighting.w, 0.0) : (0.070 + (fresnelReflect * 0.18))));
     litColor += camera.sunColorShadow.xyz * directionalSpecular;
     litColor += sunScatterTint * 0.45;
     litColor += lerp(shallowWater * 0.022, deepWater * 0.012, bottomDepthFactor);

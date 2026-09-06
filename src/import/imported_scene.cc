@@ -57,7 +57,8 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // v32 assigns semantics to ImportedScenePackedDraw's reserved bytes for
 // vegetation LOD. The raw stride is unchanged, but old caches cannot promise
 // those bytes were initialized by every historical writer.
-constexpr std::uint32_t kImportedSceneVersion = 32u;
+// v34 carries authored WATR appearance and layer texture indices on water patches.
+constexpr std::uint32_t kImportedSceneVersion = 34u;
 // Equal to the current version, deliberately. See above.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
@@ -412,6 +413,33 @@ void demoteFalseAlphaBlendFlags(ImportedScene& scene) {
     std::vector<BlendDemotion> perTexture(scene.textures.size(), BlendDemotion::Keep);
     for (std::size_t i = 0; i < scene.textures.size(); ++i) {
         perTexture[i] = classifyAuthoredBlend(scene.textures[i]);
+    }
+    // Texture alpha alone cannot classify vertex fades or effect palettes.
+    // Their opacity is authored outside the diffuse image. Preserve the blend
+    // for every use of that texture to keep shared/provoking vertices consistent.
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& part : mesh.parts) {
+            if (!part.alphaBlend || part.textureIndex >= perTexture.size()) continue;
+            const auto end = std::min(mesh.indices.size(),
+                std::size_t(part.firstIndex) + part.indexCount);
+            for (std::size_t i = part.firstIndex; i < end; ++i) {
+                if (mesh.indices[i] >= mesh.vertices.size()) continue;
+                const auto& vertex = mesh.vertices[mesh.indices[i]];
+                if (vertex.colorAlpha < 0.999f ||
+                    vertex.layerTextureIndex[2] != kImportedSceneNoTerrainLayer) {
+                    perTexture[part.textureIndex] = BlendDemotion::Keep;
+                    break;
+                }
+            }
+        }
+    }
+    for (const auto& vertex : scene.packedVertices) {
+        if (vertex.textureIndex < perTexture.size() &&
+            (vertex.flags & kImportedSceneMaterialFlagAlphaBlend) != 0u &&
+            (vertex.colorAlpha < 0.999f ||
+             vertex.layerTextureIndex[2] != kImportedSceneNoTerrainLayer)) {
+            perTexture[vertex.textureIndex] = BlendDemotion::Keep;
+        }
     }
     const auto verdictFor = [&](std::uint32_t textureIndex) {
         return textureIndex < perTexture.size() ? perTexture[textureIndex] : BlendDemotion::Keep;
@@ -1177,6 +1205,11 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             dstVertex.color[0] = color.r;
             dstVertex.color[1] = color.g;
             dstVertex.color[2] = color.b;
+            if (srcVertex.color[0] != 1.0f || srcVertex.color[1] != 1.0f ||
+                srcVertex.color[2] != 1.0f) {
+                std::copy_n(srcVertex.color, 3u, dstVertex.color);
+                flags |= kImportedSceneMaterialFlagVertexColorTint;
+            }
             // Carried through even though the RGB above is a per-model
             // stand-in: alpha is authored data whether or not the colour beside
             // it is. See ImportedSceneVertex::colorAlpha.
@@ -1197,6 +1230,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             // in the packed, serialized vertex; no scene format change is
             // needed and older scenes retain the invalid sentinel.
             if ((flags & kImportedSceneMaterialFlagTerrainLayers) == 0u) {
+                if (srcVertex.layerTextureIndex[2] != kImportedSceneNoTerrainLayer) {
+                    dstVertex.layerTextureIndex[2] = srcVertex.layerTextureIndex[2];
+                    dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(srcVertex.layerWeight);
+                }
                 const auto normalIt = scene.normalTextureByDiffuseIndex.find(textureIndex);
                 if (normalIt != scene.normalTextureByDiffuseIndex.end()) {
                     dstVertex.layerTextureIndex[0] = normalIt->second;

@@ -214,7 +214,12 @@ std::string toLowerAscii(std::string value) {
 // 75: Skyrim TREE records retain their already-rooted NIF paths instead of
 // being treated as Oblivion SPT files, and their vertices carry height-anchored
 // wind data. Cached cells built before this version are missing those trees.
-constexpr int kCellBuildVersion = 76;
+// 78: clockwise TES4/TES5 transforms, persistent dummy-grid cells, and XESP defaults.
+// 79: compound TES4/TES5 rotations retain Bethesda's authored Z-Y-X order.
+// 80: Solitude's hinged shop signs use a wall-adjacent static rest pose.
+// 81: Angeline's paired façade lantern follows the corrected sign placement.
+// 82: remove placement offsets and replace Skyrim NIF root-node transforms.
+constexpr int kCellBuildVersion = 88;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -494,6 +499,11 @@ bool CellStreamer::configureWorldspace(
         }
     }
 
+    // Child-world persistent architecture has no grid coordinate and cannot
+    // enter the distance-based load ring. Keep it resident on ordinary launches
+    // and door transitions as well as showcase launches.
+    setPinnedCells({});
+
     m_resolvedCacheDirectory.clear();
     if (!m_cacheDirectory.empty()) {
         const std::filesystem::path candidate =
@@ -560,6 +570,17 @@ bool CellStreamer::hasWorldspace(const std::string& worldspaceEditorId) const {
 
 std::vector<std::string> CellStreamer::currentWorldspaceEditorIdAncestry() const {
     return worldspaceEditorIdAncestry(m_worldTables, m_currentWorldspaceFormId);
+}
+
+void CellStreamer::setPinnedCells(const std::vector<CellCoord>& cells) {
+    std::vector<CellCoord> pinned = cells;
+    const FalloutWorldspaceRecord* world =
+        m_worldTables.findWorldspace(m_currentWorldspaceFormId);
+    if (world != nullptr && world->parentWorldspaceFormId != 0u &&
+        m_availableCells.contains(persistentExteriorCellCoord())) {
+        pinned.push_back(persistentExteriorCellCoord());
+    }
+    m_planner.setPinnedCells(pinned);
 }
 
 bool CellStreamer::hasChildWorldspaceCellInRange(
@@ -878,6 +899,13 @@ void CellStreamer::update(
                 result.soundEmitters = extractSoundEmitters(record, *tables);
             }
 
+            if (extracted && !tables->morrowind) {
+                for (auto& ref : record.references) {
+                    if (!ref.hasEnableParent) continue;
+                    if (initialReferenceEnabled(*cellIndex, ref.formId)) ref.recordFlags &= ~0x800u;
+                    else ref.recordFlags |= 0x800u;
+                }
+            }
             if (extracted && !cachePath.empty()) {
                 std::error_code existsError;
                 if (std::filesystem::exists(cachePath, existsError) && !existsError) {
@@ -1482,12 +1510,15 @@ bool CellStreamer::suggestedSpawnEngineSpace(float outPosition[3]) const {
     }
     std::int64_t sumX = 0;
     std::int64_t sumZ = 0;
+    std::int64_t count = 0;
     for (const auto& [cell, entryIndex] : m_availableCells) {
         (void)entryIndex;
+        if (cell == persistentExteriorCellCoord()) continue;
+        ++count;
         sumX += cell.x;
         sumZ += cell.z;
     }
-    const auto count = static_cast<std::int64_t>(m_availableCells.size());
+    if (count == 0) return false;
     CellCoord centre{
         static_cast<std::int32_t>(sumX / count), static_cast<std::int32_t>(sumZ / count)};
 

@@ -339,6 +339,15 @@ struct FalloutSoundEmitterRecord {
     float position[3] = {};  // engine space, Y-up
 };
 
+// One rigid-body pose from a placed reference's XRGD subrecord. Skyrim writes
+// these for movable statics that were settled in the Creation Kit, including
+// Solitude's hinged shop signs. Each entry is exactly 28 bytes.
+struct FalloutRagdollBonePose {
+    std::uint8_t boneId = 0u;
+    float position[3] = {};
+    float rotationRadians[3] = {};
+};
+
 struct FalloutPlacedReference {
     std::uint32_t formId = 0;
     std::uint32_t baseFormId = 0;  // NAME: the STAT (or other base record) this instance places
@@ -364,6 +373,7 @@ struct FalloutPlacedReference {
     float position[3] = {};        // DATA, world units
     float rotationRadians[3] = {};  // DATA
     float scale = 1.0f;             // XSCL, defaults to 1 when absent
+    std::vector<FalloutRagdollBonePose> ragdollPose;  // XRGD
     // TES5 compiled script attachments. Gameplay adapters decode this outside
     // ImportedScene; retaining bytes avoids coupling import to Papyrus types.
     std::vector<std::uint8_t> vmadBytes;
@@ -569,6 +579,7 @@ struct FalloutCellRecord {
     // absent case resolves to.
     bool hasWater = false;
     float waterHeight = 0.0f;
+    std::uint32_t waterFormId = 0u;
 
     std::vector<FalloutPlacedReference> references;
     // XCLR: the regions this cell belongs to, by REGN formID. A cell can be in
@@ -599,6 +610,18 @@ struct FalloutLandTextureRecord {
     // From that TXST's TX00, or from Oblivion's own ICON with the
     // "landscape\" folder it is relative to already prepended.
     std::string diffuseTexturePath;
+};
+
+struct FalloutWaterRecord {
+    std::uint32_t formId = 0;
+    std::string editorId;
+    bool deleted = false;
+    bool hasVisualData = false;
+    std::uint8_t flags = 0;
+    std::uint8_t opacity = 100;
+    std::array<float, 57> visual{};
+    std::array<std::uint32_t, 3> colors{};
+    std::array<std::string, 3> normalTextures{};
 };
 
 struct FalloutWorldspaceRecord {
@@ -633,12 +656,15 @@ struct FalloutWorldspaceRecord {
     // So resolving this is not a nicety: unresolved, a Skyrim city renders with
     // no sky and underwater. 0 when the record names no parent.
     std::uint32_t parentWorldspaceFormId = 0;
+    std::uint32_t waterFormId = 0; // NAM2
+    std::uint16_t parentFlags = 0; // PNAM, bit 3 inherits water
 };
 
 // Everything extracted from one plugin pass. Populated by extractFalloutScene
 // as a flat pass over the whole file — the caller is expected to filter down
 // to the cells/worldspace it actually wants to cook.
 struct FalloutSceneData {
+    std::vector<FalloutWaterRecord> waters;
     std::vector<FalloutStaticRecord> statics;
     std::vector<FalloutRegionRecord> regions;  // REGN, for discovery notification
     std::vector<FalloutSoundOutputModelRecord> soundOutputModels;
@@ -721,6 +747,7 @@ struct FalloutCellIndexEntry {
     // in full while the streamer rebuilds it from this entry.
     bool hasWater = false;
     float waterHeight = 0.0f;
+    std::uint32_t waterFormId = 0u;
     // EDID, when the cell has one. Interiors are named ("GSDocMitchellHouse");
     // most exterior cells are not. This is what lets a caller ask for a place by
     // name instead of by grid coordinate.
@@ -759,6 +786,13 @@ struct FalloutCellIndexEntry {
     std::uint32_t landRecordSize = 0;
 };
 
+struct FalloutReferenceEnableState {
+    std::uint32_t parent = 0u;
+    bool opposite = false;
+    bool disabled = false;
+    bool deleted = false;
+};
+
 struct FalloutCellIndex {
     // World units one exterior cell covers. 4096 from Oblivion onward, 8192 in
     // Morrowind -- the post spacing is 128 in both, the cell is four times the
@@ -778,7 +812,11 @@ struct FalloutCellIndex {
     // tiny (397 in Skyrim.esm) and drive compass/location discovery without
     // retaining all 693k placed references.
     std::vector<FalloutMapMarkerRecord> mapMarkers;
+    // Only references with non-default initial enable state are retained.
+    std::unordered_map<std::uint32_t, FalloutReferenceEnableState> referenceEnableStates;
 };
+
+bool initialReferenceEnabled(const FalloutCellIndex& index, std::uint32_t referenceFormId);
 
 // One pass that records where every cell's records are without materializing
 // any of them. Reads record headers and group headers only: no LAND

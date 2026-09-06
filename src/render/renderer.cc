@@ -130,6 +130,10 @@ void Renderer::setAutoExposureKeyValue(float keyValue) {
     m_backend->setAutoExposureKeyValue(keyValue);
 }
 
+void Renderer::setAutoExposureRange(float minimum, float maximum) {
+    m_backend->setAutoExposureRange(minimum, maximum);
+}
+
 bool Renderer::isAutoExposureEnabled() const {
     return m_backend->isAutoExposureEnabled();
 }
@@ -338,6 +342,10 @@ void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bo
 
 void Renderer::setImportedInteriorLighting(const ImportedInteriorLighting& lighting) {
     m_backend->setImportedInteriorLighting(lighting);
+}
+
+void Renderer::setImportedExteriorLighting(const ImportedExteriorLighting& lighting) {
+    m_backend->setImportedExteriorLighting(lighting);
 }
 
 void Renderer::setImportedSceneInteriorMode(bool enabled) {

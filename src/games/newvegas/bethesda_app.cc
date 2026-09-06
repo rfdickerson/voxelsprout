@@ -488,15 +488,17 @@ float BethesdaApp::verticalFovDegreesFor(float horizontalFovDegrees, float aspec
 
 audio::AudioConfig BethesdaApp::audioConfig() const {
     audio::AudioConfig config;
+    // Dense walled cities already have several authored positional loops. Keep
+    // their bed behind the score instead of mixing them like open wilderness.
+    if (toLowerAscii(m_streamWorldspace) == "solitudeworld") {
+        config.ambientVolume = 0.18f;
+    }
     if (m_captureAudioRequested) {
         config.offlineMix = true;
         config.offlineSampleRate = 48000u;
         config.offlineChannels = 2u;
-        // Fallout capture keeps licensed radio muted. The Whiterun market is
-        // explicitly a Skyrim audiovisual showcase, so its retail exploration
-        // score belongs in the deterministic offline mix with the rain and
-        // authored city ambience.
-        config.musicVolume = m_whiterunMarketReferenceShowcase ? 0.55f : 0.0f;
+        // Capture the same audible score as interactive playback.
+        config.musicVolume = 0.6f;
     }
     return config;
 }
@@ -3013,6 +3015,21 @@ std::string findMorrowindDataDirectory() {
 }  // namespace
 
 bool BethesdaApp::onInit() {
+    if (m_whiterunMarketReferenceShowcase) {
+        const bool rainy = bethesda::whiterunMarketUsesRainDefaults(
+            m_requestedWeatherEditorId, std::getenv("ODAI_FNV_WEATHER"));
+        if (rainy) {
+            // Preserve the rainy reference's pale plaster highlights and
+            // mountain mist. Explicit tuning remains authoritative; other
+            // weather uses the normal exposure and authored atmosphere.
+            setenv("ODAI_FNV_EXPOSURE_KEY", "0.08", 0);
+            setenv("ODAI_FOG_DENSITY", "0.00022", 0);
+            setenv("ODAI_FOG_FALLOFF", "0.00002", 0);
+            setenv("ODAI_FOG_SCATTER", "0.28", 0);
+        }
+        VOX_LOGI("showcase") << "Whiterun market atmosphere: "
+            << (rainy ? "rainy presentation defaults" : "authored weather defaults");
+    }
     if (oblivionReferenceShowcase()) {
         if (m_streamDirectory.empty()) {
             if (const char* configured = std::getenv("ODAI_OBLIVION_DATA")) {
@@ -3698,6 +3715,57 @@ bool BethesdaApp::onInit() {
     }
 
     m_renderer.setAutoExposureEnabled(true);
+    render::ImportedExteriorLighting exteriorLighting;
+    if (m_whiterunMarketReferenceShowcase) {
+        // The shared 0.70 exposure floor pinned bright exteriors regardless of
+        // the histogram key. Allow adaptation to retain pale plaster detail.
+        m_renderer.setAutoExposureRange(0.25f, 1.75f);
+        auto& lighting = exteriorLighting;
+        lighting.diffuseWrap = 0.12f;
+        lighting.ambientScale = 0.65f;
+        lighting.sunlightScale = 0.90f;
+        lighting.screenSpaceGi = true;
+        lighting.bounceStrength = 0.50f;
+    }
+    {
+        auto& lighting = exteriorLighting;
+        if (toLowerAscii(m_streamWorldspace) == "solitudeworld") {
+            // Preserve sky fill in shade, but let surface orientation and the
+            // sun's cast shadows define the city instead of a broad wrap.
+            lighting.diffuseWrap = 0.08f;
+            lighting.ambientScale = 0.45f;
+            lighting.sunlightScale = 1.20f;
+            lighting.daytimeLocalLightScale = 0.08f;
+            lighting.screenSpaceGi = true;
+            lighting.bounceStrength = 0.35f;
+        }
+        const auto tune = [](const char* name, float& value) {
+            if (const char* env = std::getenv(name)) {
+                const float requested = std::strtof(env, nullptr);
+                if (std::isfinite(requested)) value = requested;
+            }
+        };
+        tune("ODAI_FNV_DIFFUSE_WRAP", lighting.diffuseWrap);
+        tune("ODAI_FNV_AMBIENT_SCALE", lighting.ambientScale);
+        tune("ODAI_FNV_SUNLIGHT_SCALE", lighting.sunlightScale);
+        tune("ODAI_FNV_DAYTIME_LOCAL_LIGHT_SCALE", lighting.daytimeLocalLightScale);
+        tune("ODAI_FNV_GI_STRENGTH", lighting.bounceStrength);
+        if (const char* gi = std::getenv("ODAI_FNV_EXTERIOR_GI")) {
+            lighting.screenSpaceGi = std::strcmp(gi, "off") != 0;
+        }
+        m_renderer.setImportedExteriorLighting(lighting);
+        VOX_LOGI("showcase") << "exterior lighting: wrap=" << lighting.diffuseWrap
+            << " ambient=" << lighting.ambientScale << " sun=" << lighting.sunlightScale
+            << " daytimeLocal=" << lighting.daytimeLocalLightScale
+            << " ssgi=" << lighting.screenSpaceGi << " bounce=" << lighting.bounceStrength;
+    }
+    if (const char* range = std::getenv("ODAI_FNV_EXPOSURE_RANGE")) {
+        float minimum = 0.0f, maximum = 0.0f;
+        if (std::sscanf(range, "%f,%f", &minimum, &maximum) == 2 &&
+            std::isfinite(minimum) && std::isfinite(maximum)) {
+            m_renderer.setAutoExposureRange(minimum, maximum);
+        }
+    }
     if (const char* exposureKey = std::getenv("ODAI_FNV_EXPOSURE_KEY")) {
         m_renderer.setAutoExposureKeyValue(
             static_cast<float>(std::atof(exposureKey)));
@@ -3765,6 +3833,13 @@ bool BethesdaApp::onInit() {
             grade.shadowTint[2] = 0.025f;
             grade.highlightTint[0] = 0.035f;
             grade.highlightTint[1] = 0.012f;
+        } else if (m_whiterunMarketReferenceShowcase) {
+            grade.whiteBalance[2] = 1.02f;
+            grade.contrast = 1.04f;
+            grade.midtoneContrast = 1.10f;
+            grade.saturation = 0.90f;
+            grade.vibrance = 0.0f;
+            grade.shadowDensity = 1.04f;
         } else {
             grade.whiteBalance[0] = 1.02f;
             grade.whiteBalance[2] = 0.94f;
@@ -3774,6 +3849,16 @@ bool BethesdaApp::onInit() {
             grade.vibrance = 0.02f;
             grade.shadowDensity = 0.92f;
         }
+        const auto tuneGrade = [](const char* name, float& value) {
+            if (const char* env = std::getenv(name)) {
+                const float requested = std::strtof(env, nullptr);
+                if (std::isfinite(requested)) value = requested;
+            }
+        };
+        tuneGrade("ODAI_FNV_CONTRAST", grade.contrast);
+        tuneGrade("ODAI_FNV_MIDTONE_CONTRAST", grade.midtoneContrast);
+        tuneGrade("ODAI_FNV_SATURATION", grade.saturation);
+        tuneGrade("ODAI_FNV_SHADOW_DENSITY", grade.shadowDensity);
         m_renderer.setColorGrading(grade);
         VOX_LOGI("newvegas") << "color look: Skyrim "
                                << (m_skyrimForestReferenceShowcase
@@ -4690,7 +4775,7 @@ std::filesystem::path cacheWeatherSound(
 void BethesdaApp::initWeatherAudio() {
     const importer::fnv::FalloutWeatherRecord* weather =
         m_activeWeatherFormId != 0u ? m_weatherTables.findWeather(m_activeWeatherFormId) : nullptr;
-    if (weather == nullptr || m_streamDirectory.empty() || m_streamer == nullptr) {
+    if (m_streamDirectory.empty() || m_streamer == nullptr) {
         return;
     }
 
@@ -4746,7 +4831,7 @@ void BethesdaApp::initWeatherAudio() {
         return {};
     };
 
-    if (weather->hasPrecipitation()) {
+    if (weather != nullptr && weather->hasPrecipitation()) {
         // WTHR has no rain-intensity field -- classification only says "rainy" --
         // so intensity comes from the editor ID, which is a heuristic and named
         // as one. The fallbacks walk down to whatever exists.
@@ -4777,9 +4862,18 @@ void BethesdaApp::initWeatherAudio() {
         }
     }
 
-    if (weather->windSpeed > 40u) {
+    if (weather != nullptr && weather->windSpeed > 40u) {
         const bool strongWind = weather->windSpeed > 80u;
-        m_windLoop = loadFirst(
+        m_windLoop = m_streamIsSkyrim
+            ? loadFirst(
+                strongWind
+                    ? std::initializer_list<const char*>{
+                          "sound\\fx\\ambr\\wind\\mountain\\heavy\\ambr_wind_mountainheavy_lp.wav",
+                          "sound\\fx\\ambr\\wind\\tundra\\ambr_tundra_wind_bed_lp.wav"}
+                    : std::initializer_list<const char*>{
+                          "sound\\fx\\ambr\\wind\\tundra\\ambr_tundra_wind_bed_lp.wav"},
+                "wind")
+            : loadFirst(
             strongWind
                 ? std::initializer_list<const char*>{
                       "sound\\fx\\weather\\amb_windheavy_lp.wav",
@@ -4801,7 +4895,11 @@ void BethesdaApp::initWeatherAudio() {
             const char* requested = std::getenv("ODAI_SKYRIM_MUSIC");
             const std::string virtualPath = requested != nullptr && requested[0] != '\0'
                 ? requested
-                : "music\\explore\\mus_explore_day_01.xwm";
+                : (toLowerAscii(m_streamWorldspace) == "solitudeworld"
+                    ? "music\\explore\\mus_explore_day_02.xwm"
+                    : m_timeOfDayHours < 6.0f || m_timeOfDayHours >= 20.0f
+                    ? "music\\explore\\mus_explore_night_01.xwm"
+                    : "music\\explore\\mus_explore_day_01.xwm");
             std::vector<std::uint8_t> bytes;
             std::string assetError;
             if (assets.resolveAsset(virtualPath, bytes, assetError) && !bytes.empty()) {
@@ -4821,15 +4919,8 @@ void BethesdaApp::initWeatherAudio() {
         return;
     }
 
-    // Radio, not score. Fallout keeps two separate sets of loose music: the
-    // orchestral exploration beds under Data\Music, and the 48 licensed radio
-    // songs under Data\Sound\songs\radionv -- Big Iron, Blue Moon, Johnny
-    // Guitar. The radio station is the one that sounds like Fallout, and it is
-    // what this plays.
-    //
-    // ODAI_FNV_MUSIC takes either a full path or a song name ("Big_Iron",
-    // "MUS_Big_Iron", "MUS_Big_Iron.mp3"); with nothing set, a track is picked
-    // from the station at random, like tuning in.
+    // Prefer the installed orchestral score. Explicit radio requests remain
+    // compatible through ODAI_FNV_MUSIC.
     std::filesystem::path musicPath;
     const std::filesystem::path stationDir = dataFilesPath / "Sound" / "songs" / "radionv";
     if (const char* musicEnv = std::getenv("ODAI_FNV_MUSIC")) {
@@ -4867,10 +4958,15 @@ void BethesdaApp::initWeatherAudio() {
     if (musicPath.empty()) {
         std::vector<std::filesystem::path> station;
         std::error_code iterError;
-        std::filesystem::directory_iterator iterator(stationDir, iterError);
+        std::filesystem::recursive_directory_iterator iterator(
+            dataFilesPath / "Music", std::filesystem::directory_options::skip_permission_denied,
+            iterError);
         if (!iterError) {
             for (const auto& entry : iterator) {
-                if (entry.path().extension() == ".mp3") {
+                std::string extension = entry.path().extension().string();
+                std::transform(extension.begin(), extension.end(), extension.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (extension == ".mp3" || extension == ".wav") {
                     station.push_back(entry.path());
                 }
             }
@@ -4890,10 +4986,10 @@ void BethesdaApp::initWeatherAudio() {
         m_musicTrack = m_audio.loadMusic(musicPath);
         if (m_musicTrack.id != 0u) {
             m_audio.playMusic(m_musicTrack, 4.0f, true);
-            VOX_LOGI("newvegas") << "radio: " << musicPath.stem().string();
+            VOX_LOGI("newvegas") << "music: " << musicPath.stem().string();
         }
     } else {
-        VOX_LOGW("newvegas") << "no radio songs found under " << stationDir.string();
+        VOX_LOGW("newvegas") << "no playable score found under " << (dataFilesPath / "Music").string();
     }
 }
 
@@ -4938,7 +5034,7 @@ audio::SoundHandle BethesdaApp::loadAmbientDescriptor(std::uint32_t descriptorFo
     for (char& c : suffix) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
-    if (suffix != ".wav" && suffix != ".ogg") {
+    if (suffix != ".wav" && suffix != ".ogg" && suffix != ".xwm") {
         VOX_LOGW("newvegas") << "unsupported ambient audio format: " << virtualPath;
         m_ambientSounds.emplace(descriptorFormId, audio::SoundHandle{});
         return {};
@@ -4992,6 +5088,20 @@ void BethesdaApp::updateSkyrimAmbience(float deltaSeconds) {
         importer::fnv::FalloutSoundEmitterRecord emitter;
         float distanceSquared = 0.0f;
     };
+    const bool inSolitude = toLowerAscii(m_streamWorldspace) == "solitudeworld";
+    const auto isWildernessInsect = [](const importer::fnv::FalloutSoundDescriptorRecord* descriptor) {
+        if (descriptor == nullptr) {
+            return false;
+        }
+        std::string identity = toLowerAscii(descriptor->editorId);
+        for (const std::string& path : descriptor->filePaths) {
+            identity += ' ';
+            identity += toLowerAscii(path);
+        }
+        return identity.find("cricket") != std::string::npos ||
+            identity.find("insect") != std::string::npos ||
+            identity.find("cicada") != std::string::npos;
+    };
     std::unordered_map<std::uint32_t, Candidate> nearestByDescriptor;
     for (const auto& [cell, emitters] : m_streamAmbientEmittersByCell) {
         (void)cell;
@@ -5002,6 +5112,9 @@ void BethesdaApp::updateSkyrimAmbience(float deltaSeconds) {
             const float distanceSquared = (dx * dx) + (dy * dy) + (dz * dz);
             const importer::fnv::FalloutSoundDescriptorRecord* descriptor =
                 m_streamer->soundDescriptor(emitter.descriptorFormId);
+            if (inSolitude && isWildernessInsect(descriptor)) {
+                continue;
+            }
             float maxDistance = 4000.0f;
             if (descriptor != nullptr) {
                 if (const auto* output = m_streamer->soundOutputModel(
@@ -5097,6 +5210,12 @@ void BethesdaApp::updateSkyrimAmbience(float deltaSeconds) {
         if (descriptor == nullptr) {
             continue;
         }
+        // Solitude's regional boundary overlaps the surrounding Reach sound
+        // region. Its insect beds belong outside the walls; retain wind and
+        // let the city's tavern, windmill, and object emitters define the street.
+        if (inSolitude && isWildernessInsect(descriptor)) {
+            continue;
+        }
         const audio::SoundHandle sound = loadAmbientDescriptor(regionSound.descriptorFormId);
         if (!sound.valid()) {
             continue;
@@ -5110,6 +5229,11 @@ void BethesdaApp::updateSkyrimAmbience(float deltaSeconds) {
                 }
             }
         } else if (!descriptor->looping) {
+            // Give each event an independent draw; one shared draw makes all
+            // birds, insects and gusts trigger in a synchronized burst.
+            m_ambienceRandomState ^= m_ambienceRandomState << 13u;
+            m_ambienceRandomState ^= m_ambienceRandomState >> 17u;
+            m_ambienceRandomState ^= m_ambienceRandomState << 5u;
             const float roll = static_cast<float>(m_ambienceRandomState % 10000u) / 100.0f;
             if (roll < std::clamp(regionSound.chance, 0.0f, 100.0f)) {
                 m_audio.playSound(sound);
@@ -6571,25 +6695,25 @@ bool BethesdaApp::initStreaming() {
         }
     }
 
-    if (m_streamCacheEnabled) {
-        if (m_streamCacheDirectory.empty()) {
-            if (const char* fromEnv = std::getenv("ODAI_FNV_CACHE_DIR")) {
-                m_streamCacheDirectory = fromEnv;
-            }
+    // Audio extraction needs a writable cache even when cooked cell caching
+    // is disabled. --no-cache controls the streamer, not score decoding.
+    if (m_streamCacheDirectory.empty()) {
+        if (const char* fromEnv = std::getenv("ODAI_FNV_CACHE_DIR")) {
+            m_streamCacheDirectory = fromEnv;
         }
-        if (m_streamCacheDirectory.empty()) {
-            // XDG cache location, falling back to the home directory. Built
-            // cells are derived data: safe to lose, expensive to recompute.
-            if (const char* xdgCache = std::getenv("XDG_CACHE_HOME")) {
-                m_streamCacheDirectory = (std::filesystem::path(xdgCache) / "odai" / "fnv").string();
-            } else if (const char* home = std::getenv("HOME")) {
-                m_streamCacheDirectory =
-                    (std::filesystem::path(home) / ".cache" / "odai" / "fnv").string();
-            }
+    }
+    if (m_streamCacheDirectory.empty()) {
+        // XDG cache location, falling back to the home directory. Built
+        // cells are derived data: safe to lose, expensive to recompute.
+        if (const char* xdgCache = std::getenv("XDG_CACHE_HOME")) {
+            m_streamCacheDirectory = (std::filesystem::path(xdgCache) / "odai" / "fnv").string();
+        } else if (const char* home = std::getenv("HOME")) {
+            m_streamCacheDirectory =
+                (std::filesystem::path(home) / ".cache" / "odai" / "fnv").string();
         }
-        if (!m_streamCacheDirectory.empty()) {
-            m_streamer->setCacheDirectory(std::filesystem::path(m_streamCacheDirectory));
-        }
+    }
+    if (m_streamCacheEnabled && !m_streamCacheDirectory.empty()) {
+        m_streamer->setCacheDirectory(std::filesystem::path(m_streamCacheDirectory));
     }
 
     std::string error;
@@ -6848,6 +6972,7 @@ bool BethesdaApp::initStreaming() {
             const importer::CellCoord& cell,
             const importer::ImportedScene& scene,
             const std::vector<importer::fnv::FalloutNavMeshRecord>& navMeshes) {
+            m_skyrimObjectLodTileValid = false;
             if (m_streamIsMorrowind) {
                 m_bethesdaGameplayResidentCells.insert(cell);
             }
@@ -6891,6 +7016,7 @@ bool BethesdaApp::initStreaming() {
             }
         },
         [this](const importer::CellCoord& cell) {
+            m_skyrimObjectLodTileValid = false;
             m_bethesdaGameplayResidentCells.erase(cell);
             m_collision.removeCell(cell);
             m_actorNavigation.removeCell(cell);
@@ -7692,7 +7818,10 @@ void BethesdaApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
     }
 
     constexpr std::int32_t kTileCells = importer::fnv::kLandLodBlockCells;
-    constexpr std::int32_t kTileRadius = 3;
+    const std::int32_t kTileRadius = [] {
+        const char* value = std::getenv("ODAI_SKYRIM_LOD_RADIUS");
+        return value ? std::clamp(std::atoi(value), 3, 12) : 3;
+    }();
     const float cellSize = m_streamer->cellWorldSize();
     if (cellSize <= 0.0f) {
         return;
@@ -7800,7 +7929,10 @@ void BethesdaApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
                 const std::size_t end = std::min<std::size_t>(
                     mesh.indices.size(), first + sourcePart.indexCount);
                 for (std::size_t index = first; index + 2u < end; index += 3u) {
-                    bool fullyCoveredByDetailedLand = true;
+                    // A child city does not stream its parent's detailed LAND.
+                    // Its load radius therefore cannot replace inherited BTRs.
+                    bool fullyCoveredByDetailedLand =
+                        toLowerAscii(m_skyrimTerrainLodWorldspace) == toLowerAscii(m_streamWorldspace);
                     for (std::size_t corner = 0; corner < 3u; ++corner) {
                         const std::uint32_t vertexIndex = mesh.indices[index + corner];
                         if (vertexIndex >= mesh.vertices.size()) {
@@ -7879,12 +8011,10 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     if (!m_streamIsSkyrim || m_streamer == nullptr) {
         return;
     }
-    // The fixed Whiterun presentation has no visible loading phase. Build its
-    // parent proxy once the child ring is final, so the handoff below can trim
+    // Build the parent proxy once the detailed ring is final, so the handoff can trim
     // against the complete detailed residency set instead of rebuilding the
     // 7x7 BTO window once per arriving cell.
-    if ((m_whiterunReferenceShowcase || m_skyrimForestReferenceShowcase) &&
-        !m_streamer->isStreamingIdle()) {
+    if (!m_streamer->isStreamingIdle()) {
         return;
     }
 
@@ -7896,7 +8026,10 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
     // in the resident tiles is submitted. Seven tiles per axis keeps complete
     // object-LOD features resident to at least ~49k units in every direction;
     // the existing imported page culling keeps off-screen tiles out of draws.
-    constexpr std::int32_t kTileRadius = 3;
+    const std::int32_t kTileRadius = [] {
+        const char* value = std::getenv("ODAI_SKYRIM_LOD_RADIUS");
+        return value ? std::clamp(std::atoi(value), 3, 12) : 3;
+    }();
     const float cellSize = m_streamer->cellWorldSize();
     if (cellSize <= 0.0f) {
         return;
@@ -8035,7 +8168,12 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                     } else {
                         const float dx = distanceToInterval(bethesdaPosition[0], minX, maxX);
                         const float dz = distanceToInterval(bethesdaPosition[1], minZ, maxZ);
-                        if ((dx * dx) + (dz * dz) >= cellSize * cellSize) {
+                        // Child cities can have detailed cells well beyond the
+                        // camera's tile. Apply the residency-based triangle handoff
+                        // to every inherited tile, not just the nearest one.
+                        if (m_skyrimObjectLodWorldspace ==
+                                m_streamer->currentWorldspaceEditorId() &&
+                            (dx * dx) + (dz * dz) >= cellSize * cellSize) {
                             continue;
                         }
                     }
@@ -8043,6 +8181,8 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                         "lod" + std::to_string(kTileCells) + "_" + std::to_string(tx) + "_" +
                         std::to_string(tz);
                     const bool childCityTile = m_whiterunReferenceShowcase ||
+                        m_skyrimObjectLodWorldspace !=
+                            m_streamer->currentWorldspaceEditorId() ||
                         m_streamer->hasChildWorldspaceCellInRange(
                             tx, tz, tx + kTileCells - 1, tz + kTileCells - 1);
                     for (std::size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex) {
@@ -8093,14 +8233,17 @@ void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
                                         (mesh.vertices[ia].position[0] +
                                          mesh.vertices[ib].position[0] +
                                          mesh.vertices[ic].position[0]) / 3.0f;
-                                    const float centreEngineZ =
-                                        (mesh.vertices[ia].position[2] +
-                                         mesh.vertices[ib].position[2] +
-                                         mesh.vertices[ic].position[2]) / 3.0f;
+                                    // BTO vertices remain Bethesda Z-up until
+                                    // their instance transform is packed. Y is
+                                    // northing here; Z is altitude, not engine Z.
+                                    const float centreNorthing =
+                                        (mesh.vertices[ia].position[1] +
+                                         mesh.vertices[ib].position[1] +
+                                         mesh.vertices[ic].position[1]) / 3.0f;
                                     const std::int32_t cellX = static_cast<std::int32_t>(
                                         std::floor(centreX / cellSize));
                                     const std::int32_t cellZ = static_cast<std::int32_t>(
-                                        std::floor(-centreEngineZ / cellSize));
+                                        std::floor(centreNorthing / cellSize));
                                     if (m_streamer->isExteriorCellResident(
                                             m_streamer->currentWorldspaceFormId(), cellX, cellZ)) {
                                         continue;

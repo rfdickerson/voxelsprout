@@ -53,6 +53,7 @@ void writeBethesdaPlacementTransform(
 // record carries the path, so these have to come from a pass over the plugin
 // that is NOT per-cell.
 struct FalloutWorldTables {
+    std::unordered_map<std::uint32_t, FalloutWaterRecord> watersByFormId;
     // STAT formID -> MODL path, relative to Data\Meshes.
     std::unordered_map<std::uint32_t, std::string> staticModelPaths;
     // STAT formID -> editor ID, used only to name meshes readably.
@@ -101,6 +102,16 @@ struct FalloutWorldTables {
     [[nodiscard]] const FalloutWorldspaceRecord* findWorldspace(std::uint32_t formId) const {
         const auto found = worldspaceDefaultsByFormId.find(formId);
         return found == worldspaceDefaultsByFormId.end() ? nullptr : &found->second;
+    }
+    [[nodiscard]] const FalloutWaterRecord* findWaterForCell(const FalloutCellRecord& cell) const {
+        std::uint32_t waterId = cell.waterFormId;
+        const auto* world = findWorldspace(cell.worldspaceFormId);
+        for (int hop = 0; waterId == 0u && world && hop < 8; ++hop) {
+            if ((world->parentFlags & 0x08u) == 0u) waterId = world->waterFormId;
+            world = findWorldspace(world->parentWorldspaceFormId);
+        }
+        const auto found = watersByFormId.find(waterId);
+        return found != watersByFormId.end() && found->second.hasVisualData ? &found->second : nullptr;
     }
     // MORROWIND REFERENCES NAME THEIR BASE BY STRING, so this is how a placed
     // reference reaches its model. Lowercased id -> the synthetic formID the

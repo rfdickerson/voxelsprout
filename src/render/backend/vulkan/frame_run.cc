@@ -1870,9 +1870,14 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                                << " (frustum culled " << importedLightsFrustumCulled << ")";
         }
     }
+    // Authored exterior fill lamps must not erase directional shadows in
+    // daylight. Restore their full strength smoothly as the sun sets.
+    const float exteriorLocalLightScale = m_importedInteriorLighting.enabled ? 1.0f :
+        std::lerp(1.0f, m_importedExteriorLighting.daytimeLocalLightScale,
+                  std::clamp(sunElevationDegrees / 10.0f, 0.0f, 1.0f));
     const float importedLightGlobalIntensity = authoredInteriorLighting
         ? 1.0f
-        : std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f);
+        : std::clamp(m_debugImportedLightIntensity, 0.0f, 8.0f) * exteriorLocalLightScale;
     auto mixImportedLightSignature = [](std::uint64_t hash, std::uint64_t value) {
         hash ^= value;
         hash *= 1099511628211ull;
@@ -2108,7 +2113,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_contactShadowHalfBufferHandle != kInvalidBufferHandle &&
         m_contactShadowFullMaskBufferHandle != kInvalidBufferHandle;
     m_screenSpaceGiActive =
-        shouldUseImportedScreenSpaceGi(m_importedInteriorLighting) &&
+        shouldUseImportedScreenSpaceGi(m_importedInteriorLighting, m_importedExteriorLighting) &&
         m_screenSpaceGiAvailable && m_taaEnabled && useMergedDepthPrepass() &&
         m_contactShadowDepthBufferHandle != kInvalidBufferHandle &&
         m_screenSpaceGiRecordBufferHandles[0] != kInvalidBufferHandle &&
@@ -2120,7 +2125,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.screenSpaceGiConfig[0] = static_cast<float>(m_screenSpaceGiExtent.width);
     mvpUniform.screenSpaceGiConfig[1] = static_cast<float>(m_screenSpaceGiExtent.height);
     mvpUniform.screenSpaceGiConfig[2] = m_screenSpaceGiActive ? 1.0f : 0.0f;
-    mvpUniform.screenSpaceGiConfig[3] = 0.18f;
+    mvpUniform.screenSpaceGiConfig[3] = m_importedInteriorLighting.enabled
+        ? 0.18f : m_importedExteriorLighting.bounceStrength;
+    mvpUniform.importedExteriorConfig[0] = m_importedExteriorLighting.diffuseWrap;
+    mvpUniform.importedExteriorConfig[1] = m_importedExteriorLighting.ambientScale;
+    mvpUniform.importedExteriorConfig[2] = m_importedExteriorLighting.sunlightScale;
+    mvpUniform.importedExteriorConfig[3] = 0.0f;
     mvpUniform.importedPbrConfig[0] = m_importedPbrDefaults.objectRoughness;
     mvpUniform.importedPbrConfig[1] = m_importedPbrDefaults.terrainRoughness;
     mvpUniform.importedPbrConfig[2] = m_importedPbrDefaults.metallic;

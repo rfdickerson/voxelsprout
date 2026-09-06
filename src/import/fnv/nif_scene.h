@@ -87,6 +87,9 @@ struct NifShape {
     // index in the packed vertex's otherwise-unused first layer slot for
     // non-terrain geometry, preserving the cooked-scene binary layout.
     std::string normalTexturePath;
+    std::string effectPaletteTexturePath;
+    std::uint8_t effectPaletteFlags = 0u; // bit 0: color, bit 1: alpha
+    float effectPaletteColorRow = 1.0f;
     // NiAlphaProperty declared alpha testing (flag 0x200) for this shape.
     bool alphaTest = false;
     // NiAlphaProperty's threshold byte, the value alphaTest compares against.

@@ -32,7 +32,9 @@ float4 main(FragmentInput input) : SV_Target
     // below, is the authored coverage channel.
     float3 cloudColor = sampled.rgb * lerp(0.90, 1.10, sunFacing);
 
-    const float vertexFade = lerp(0.35, 1.0, input.inColor.a);
+    // Authored zero-alpha borders must vanish where the sparse sheets end.
+    // A nonzero floor exposes their straight polygon edges against the sky.
+    const float vertexFade = saturate(input.inColor.a);
     const float alpha = saturate(
         sampled.a * authoredTint.w * vertexFade * horizonFade);
     return float4(cloudColor, alpha);

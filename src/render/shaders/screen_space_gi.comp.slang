@@ -19,7 +19,7 @@ struct ScreenSpaceGiPushConstants
 {
     float4x4 prevViewProj;
     uint4 extent;       // full width/height, quarter width/height
-    uint4 dispatch;     // hierarchy mip count, eight-frame phase, history valid, unused
+    uint4 dispatch;     // hierarchy mip count, eight-frame phase, history valid, exterior quality
     float4 params;      // max distance, source luma clamp, previous jitter NDC xy
 };
 
@@ -155,14 +155,12 @@ bool traceDiffuseRay(
     float previousT = 4.0;
     float2 previousUv = 0.0;
     bool previousProjected = false;
-    [unroll]
-    // The original 8/3 trace exceeded the 2 ms p95 target under sustained
-    // load on the LNL iGPU. Keep the quarter-resolution receiver density (the
-    // part that preserves small bounce details) and take the policy's ordered
-    // fallback instead: six hierarchy steps and two binary refinements.
-    for (uint step = 0u; step < 6u; ++step)
+    // Retain the interior performance budget. Outdoor stills cover a wider
+    // range, so take more steps and refine thin timber/stone intersections.
+    const uint stepCount = pc.dispatch.w != 0u ? 10u : 6u;
+    for (uint step = 0u; step < stepCount; ++step)
     {
-        const float fraction = saturate((float(step) + 0.35 + phaseJitter * 0.3) / 6.0);
+        const float fraction = saturate((float(step) + 0.35 + phaseJitter * 0.3) / float(stepCount));
         const float t = lerp(4.0, pc.params.x, fraction * fraction);
         float2 uv;
         float rayDepth;
@@ -181,8 +179,8 @@ bool traceDiffuseRay(
         {
             float low = previousT;
             float high = t;
-            [unroll]
-            for (uint refine = 0u; refine < 2u; ++refine)
+            const uint refinementCount = pc.dispatch.w != 0u ? 4u : 2u;
+            for (uint refine = 0u; refine < refinementCount; ++refine)
             {
                 const float middle = (low + high) * 0.5;
                 float2 middleUv;
@@ -282,8 +280,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 if (all(previousUv > float2(0.0, 0.0)) &&
                     all(previousUv < float2(1.0, 1.0)))
                 {
+                    // Guide records use jittered raster positions; only the
+                    // resolved TAA color above uses unjittered coordinates.
+                    const float2 previousGuideUv = previousClip.xy / previousClip.w * 0.5 + 0.5;
                     const uint2 previousPixel = min(
-                        uint2(previousUv * float2(pc.extent.zw)), pc.extent.zw - 1u);
+                        uint2(saturate(previousGuideUv) * float2(pc.extent.zw)), pc.extent.zw - 1u);
                     const uint4 previousGuide = previousRecords[
                         previousPixel.y * pc.extent.z + previousPixel.x];
                     const float previousDepth = asfloat(previousGuide.z);
@@ -309,6 +310,33 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
     }
 
+    // Accumulate outdoor bounce at the receiver, rejecting disocclusion and
+    // normal changes. Filtering the incident light across the eight ray phases
+    // gives broad walls denser coverage before the final shaded color hits TAA.
+    if (pc.dispatch.w != 0u && pc.dispatch.z != 0u)
+    {
+        const float3 receiverView = viewPositionFromUv(uv, viewDepth);
+        const float3 receiverWorld =
+            mul(camera.contactShadowInvView, float4(receiverView, 1.0)).xyz;
+        const float4 previousClip = mul(pc.prevViewProj, float4(receiverWorld, 1.0));
+        if (previousClip.w > 1e-4)
+        {
+            const float2 previousUv = previousClip.xy / previousClip.w * 0.5 + 0.5;
+            if (all(previousUv > 0.0) && all(previousUv < 1.0))
+            {
+                const uint2 previousPixel = min(uint2(previousUv * float2(pc.extent.zw)), pc.extent.zw - 1u);
+                const uint4 history = previousRecords[previousPixel.y * pc.extent.z + previousPixel.x];
+                if (asfloat(history.z) > 1e-4 &&
+                    abs(asfloat(history.z) - previousClip.w) <= max(8.0, viewDepth * 0.01) &&
+                    dot(unpackOctNormal(history.w), worldNormal) >= 0.9)
+                {
+                    const float3 previousIncident = float3(f16tof32(history.x & 0xffffu),
+                        f16tof32(history.x >> 16u), f16tof32(history.y & 0xffffu));
+                    incident = lerp(incident, clamp(previousIncident, 0.0, pc.params.y), 0.85);
+                }
+            }
+        }
+    }
     const uint2 packedIncident = packIrradiance(incident);
     currentRecords[outputIndex] =
         uint4(packedIncident.x, packedIncident.y, asuint(viewDepth), guideNormal);

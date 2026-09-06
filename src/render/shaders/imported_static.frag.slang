@@ -204,12 +204,16 @@ float3 applyAuthoredStaticNormalMap(FragmentInput input, float3 geometricNormal)
 
     float3 tangent = normalize((dpdx * duvdy.y - dpdy * duvdx.y) / determinant);
     tangent = normalize(tangent - geometricNormal * dot(geometricNormal, tangent));
-    const float handedness = determinant < 0.0 ? -1.0 : 1.0;
+    // UV determinant alone includes screen-space winding. Compare against the
+    // actual increasing-V derivative to preserve mirrored UVs and back faces.
+    const float3 authoredBitangent = (dpdy * duvdx.x - dpdx * duvdy.x) / determinant;
+    const float handedness = dot(cross(geometricNormal, tangent), authoredBitangent) < 0.0 ? -1.0 : 1.0;
     const float3 bitangent = normalize(cross(geometricNormal, tangent)) * handedness;
     const float2 encoded =
         bindlessTextures[input.inLayerTextures[0]].Sample(input.inUv).xy * 2.0 - 1.0;
-    const float3 tangentNormal =
-        float3(encoded, sqrt(saturate(1.0 - dot(encoded, encoded))));
+    const float3 decodedNormal = float3(encoded, sqrt(saturate(1.0 - dot(encoded, encoded))));
+    // Reduce tangent-space slope, retaining a flat map as exactly (0,0,1).
+    const float3 tangentNormal = normalize(float3(decodedNormal.xy * 0.65, max(decodedNormal.z, 0.001)));
     return normalize((tangent * tangentNormal.x) +
                      (bitangent * tangentNormal.y) +
                      (geometricNormal * tangentNormal.z));
@@ -237,18 +241,14 @@ float3 resolveShadingNormal(float3 worldNormal, uint flags, bool isFrontFace)
     return flip ? -normal : normal;
 }
 
-// Screen-space AO is baked at half resolution (see ao.ssaoBlur in swapchain_targets.cc);
-// this mirrors waterScreenUv() in imported_water.frag.slang so the two shaders derive the
-// same full-res-normalized UV from SV_Position without needing the extent as a uniform.
+// AO is stored at half resolution. Use the actual render extent for UVs so
+// odd-sized targets do not shift the contact regions by a pixel.
 float sampleSsaoAmbientFactor(float4 screenPosition)
 {
-    uint texW = 0u;
-    uint texH = 0u;
-    ssaoBlurTexture.GetDimensions(texW, texH);
-    const float2 fullResolutionExtent = float2(float(max(texW, 1u)), float(max(texH, 1u))) * 2.0;
+    const float2 fullResolutionExtent = max(camera.contactShadowConfig.xy, float2(1.0, 1.0));
     const float2 ssaoUv = clamp(screenPosition.xy / fullResolutionExtent, float2(0.0, 0.0), float2(1.0, 1.0));
     const float ssaoRaw = clamp(ssaoBlurTexture.SampleLevel(ssaoUv, 0.0).x, 0.0, 1.0);
-    const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 2.0);
+    const float ssaoIntensity = clamp(camera.shadowConfig2.z, 0.0, 4.0);
     const float ssaoEnable = step(0.5, camera.shadowVoxelGridSize.w);
     return lerp(1.0, pow(max(ssaoRaw, 0.001), ssaoIntensity), ssaoEnable);
 }
@@ -363,6 +363,16 @@ float4 sampleImportedAlbedo(FragmentInput input)
         return float4(input.inColor.rgb, input.inColor.a);
     }
     float4 sampled = bindlessTextures[input.inTextureIndex].Sample(input.inUv);
+    // The authored LOD atlas supplies land cover; Skyrim's shared noise map
+    // restores smaller detail without repeating or replacing that atlas.
+    // Three repeats per four-cell tile, aligned in world space across seams.
+    if (uint(round(input.inLayerWeights.z * 255.0)) == 128u &&
+        input.inLayerTextures.z != kInvalidImportedTextureIndex &&
+        (input.inFlags & kImportedMaterialFlagTerrainLayers) == 0u) {
+        const float2 detailUv = float2(input.inWorldPosition.x, -input.inWorldPosition.z) * (3.0 / 16384.0);
+        const float detail = bindlessTextures[input.inLayerTextures.z].Sample(detailUv).r;
+        sampled.rgb *= clamp(1.0 + 2.0 * (detail - input.inLayerWeights.w), 0.5, 1.5);
+    }
     // VERTEX ALPHA MODULATES TEXTURE ALPHA, and it has to happen before the
     // test rather than after it. Bethesda feathers a road, path or dirt patch
     // into the ground with an alpha-TESTED overlay whose texture alpha is
@@ -374,7 +384,25 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // all three to discard the same fragments -- one of them keeping a fragment
     // the others cut lays depth main then fails to shade, which renders as a
     // hole rather than as a disagreement.
-    sampled.a *= input.inColor.a;
+    const uint paletteFlags = uint(round(input.inLayerWeights.z * 255.0));
+    const bool effectPalette = (input.inFlags & kImportedMaterialFlagTerrainLayers) == 0u &&
+        input.inLayerTextures.z != kInvalidImportedTextureIndex && paletteFlags > 0u && paletteFlags <= 3u;
+    if (effectPalette) {
+        // Skyrim effect palettes use source alpha and material/vertex opacity
+        // as independent lookup coordinates; multiplying them first loses the ramp.
+        if ((paletteFlags & 2u) != 0u) {
+            sampled.a = bindlessTextures[input.inLayerTextures.z].Sample(
+                clamp(float2(sampled.a, input.inColor.a), 0.001, 0.999)).a;
+        } else {
+            sampled.a *= input.inColor.a;
+        }
+        if ((paletteFlags & 1u) != 0u) {
+            sampled.rgb = bindlessTextures[input.inLayerTextures.z].Sample(
+                clamp(float2(sampled.g, input.inLayerWeights.w), 0.001, 0.999)).rgb;
+        }
+    } else {
+        sampled.a *= input.inColor.a;
+    }
     // Fallout's NiAlphaProperty test mode is GREATER: a fragment survives when
     // its alpha is strictly above the authored threshold, so discard on <=.
     if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
@@ -503,7 +531,8 @@ float4 sampleImportedAlbedo(FragmentInput input)
     //
     // Untextured geometry is unaffected either way: it returns inColor as its
     // albedo at the early-out above.
-    if ((input.inFlags & kImportedMaterialFlagVertexColorTint) != 0u)
+    if ((input.inFlags & kImportedMaterialFlagVertexColorTint) != 0u &&
+        !(effectPalette && (paletteFlags & 1u) != 0u))
     {
         return float4(sampled.rgb * input.inColor.rgb, sampled.a);
     }
@@ -1383,6 +1412,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
     float3 normal = resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
+    const float3 geometricNormal = normal;
     normal = applyAuthoredStaticNormalMap(input, normal);
     // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)
     // read as exposed rock or lighter cliff stone; flat faces are unaffected.
@@ -1429,19 +1459,20 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.6);
     const float ndotl = max(dot(normal, -sunDirection), 0.0);
+    const bool interiorMode = chunkPc.cascadeData.y > 0.5;
+    const float diffuseWrap = interiorMode ? 0.35 : camera.importedExteriorConfig.x;
     const float wrappedNdotL = foliageLighting
         ? saturate((ndotl * 0.25) + 0.75)
-        : saturate((ndotl * 0.65) + 0.35);
+        : saturate((ndotl * (1.0 - diffuseWrap)) + diffuseWrap);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
-    const bool interiorMode = chunkPc.cascadeData.y > 0.5;
     const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;
     float shadowVisibility = 1.0;
     if (!authoredInterior && ndotl > 0.0001)
     {
 #ifdef ODAI_RT_SHADOWS
-        shadowVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, normal, ndotl);
+        shadowVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, geometricNormal, max(dot(geometricNormal, -sunDirection), 0.0));
 #else
-        shadowVisibility = sampleImportedCascadedShadow(input.inWorldPosition, normal, viewDepth, ndotl);
+        shadowVisibility = sampleImportedCascadedShadow(input.inWorldPosition, geometricNormal, viewDepth, max(dot(geometricNormal, -sunDirection), 0.0));
 #endif
     }
 
@@ -1473,9 +1504,10 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // hole, and the Mojave's sky bounce is real -- but it is now small next to
     // the sky irradiance that varies with the weather and the hour, rather than
     // dominating it.
-    const float3 legacyAmbient =
+    const float3 legacyAmbient = (
         (interiorMode ? float3(0.045, 0.047, 0.052) : float3(0.055, 0.060, 0.070)) +
-        (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58));
+        (ambientIrradiance * float3(0.92, 0.95, 1.00) * (interiorMode ? 0.22 : 0.58))) *
+        (interiorMode ? 1.0 : camera.importedExteriorConfig.y);
     const float3 ambient = authoredInterior
         ? camera.interiorAmbient.xyz +
             ((camera.interiorDirectional.w > 0.5) ? ambientIrradiance * float3(0.92, 0.95, 1.00) * 0.22
@@ -1544,24 +1576,18 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         ((interiorMode && !authoredInterior) ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
 
-    // wrappedNdotL is ndotl*0.65 + 0.35: a true-cosine core plus a constant
-    // fill that keeps faces turned away from the sun from going black. That
-    // fill is a stand-in for indirect bounce, NOT direct sunlight -- so it is
-    // the part ambient occlusion should darken.
-    //
-    // Leaving it unoccluded is why AO read as too subtle outdoors: the Mojave
-    // at midday is dominated by the sun term, AO only ever multiplied `ambient`,
-    // and every crevice still received the full 0.35 fill. Occluding the fill
-    // (and not the cosine core) darkens contact regions without muddying
-    // surfaces that genuinely face the sun.
-    const float directCore = ndotl * 0.65;
+    // The wrap is a constant fill standing in for indirect bounce. Occlude
+    // that fill separately from the cosine core so AO grounds contact regions
+    // without darkening surfaces that receive direct sunlight.
+    const float directCore = ndotl * (foliageLighting ? 0.25 : (1.0 - diffuseWrap));
     const float directFill = max(wrappedNdotL - directCore, 0.0);
     const float occludedWrap = directCore + (directFill * ambientOcclusion);
     const float3 direct = authoredInterior
         ? camera.interiorDirectional.xyz * occludedWrap
         : camera.sunColorShadow.xyz *
-            (sunIntensity * occludedWrap * directShadowFactor * (interiorMode ? 0.24 : 0.95));
-    float3 screenSpaceGi = (authoredInterior &&
+            (sunIntensity * occludedWrap * directShadowFactor *
+             (interiorMode ? 0.24 : 0.95 * camera.importedExteriorConfig.z));
+    float3 screenSpaceGi = (
         (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u)
         ? sampleImportedScreenSpaceGi(input.inScreenPosition.xy, viewDepth, normal) *
             camera.screenSpaceGiConfig.w
@@ -1622,7 +1648,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         const float3 sunRadiance = authoredInterior
             ? camera.interiorDirectional.xyz
             : camera.sunColorShadow.xyz *
-                (sunIntensity * directShadowFactor * (interiorMode ? 0.24 : 0.62));
+                (sunIntensity * directShadowFactor *
+                 (interiorMode ? 0.24 : 0.62 * camera.importedExteriorConfig.z));
         // kPbrDiffuseConventionScale converts pbrDirectSpecular's normalized BRDF
         // into the same units as the `direct` diffuse term above, which omits the
         // Lambert 1/pi. Without it a metal loses all of its diffuse to

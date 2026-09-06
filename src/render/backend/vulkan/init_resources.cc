@@ -370,8 +370,10 @@ std::vector<DdsMipInfo> appendRgbaNormalMipChain(
     std::uint32_t sourceHeight = height;
     while (sourceWidth > 1u || sourceHeight > 1u) {
         const DdsMipInfo& sourceMip = mipInfos.back();
-        const std::uint32_t destinationWidth = std::max(1u, (sourceWidth + 1u) / 2u);
-        const std::uint32_t destinationHeight = std::max(1u, (sourceHeight + 1u) / 2u);
+        // Conventional Vulkan mip extents round down, including NPOT normals.
+        // Rounding up makes uploads exceed the allocated subresource extent.
+        const std::uint32_t destinationWidth = std::max(1u, sourceWidth / 2u);
+        const std::uint32_t destinationHeight = std::max(1u, sourceHeight / 2u);
         const VkDeviceSize destinationOffset = static_cast<VkDeviceSize>(pixelData.size());
         const VkDeviceSize destinationSize =
             static_cast<VkDeviceSize>(destinationWidth) *

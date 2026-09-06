@@ -1877,6 +1877,14 @@ bool readBsLightingShaderTextureSetRef(
 // deliberately remain on their existing paths.
 struct EffectShaderPropertyBlock {
     std::string sourceTexture;
+    float uvOffset[2]{};
+    float uvScale[2]{1.0f, 1.0f};
+    float baseAlpha = 1.0f;
+    float baseRed = 1.0f;
+    std::string paletteTexture;
+    std::uint8_t paletteFlags = 0u;
+    bool effectLighting = false;
+    bool vertexAlpha = false;
     bool twoSided = false;
     bool valid = false;
 };
@@ -1894,10 +1902,22 @@ bool readBsEffectShaderProperty(
     if (!cursor.read(nameRef) || !cursor.read(extraDataCount) || extraDataCount > 1024u ||
         !cursor.skip(static_cast<std::size_t>(extraDataCount) * 4u) ||
         !cursor.read(controllerRef) || !cursor.read(shaderFlags1) ||
-        !cursor.read(shaderFlags2) || !cursor.skip(8u + 8u) ||
+        !cursor.read(shaderFlags2) || !cursor.read(out.uvOffset[0]) ||
+        !cursor.read(out.uvOffset[1]) || !cursor.read(out.uvScale[0]) ||
+        !cursor.read(out.uvScale[1]) ||
         !cursor.readSizedString<std::uint32_t>(out.sourceTexture)) {
         return false;
     }
+    // Packed clamp/lighting bytes, four falloff floats, then base RGBA.
+    if (userVersion2 <= 100u &&
+        (!cursor.skip(4u + 16u) || !cursor.read(out.baseRed) || !cursor.skip(8u) ||
+         !cursor.read(out.baseAlpha) || !cursor.skip(8u) ||
+         !cursor.readSizedString<std::uint32_t>(out.paletteTexture))) {
+        return false;
+    }
+    out.paletteFlags = static_cast<std::uint8_t>((shaderFlags1 >> 4u) & 3u);
+    out.effectLighting = (shaderFlags2 & (1u << 30u)) != 0u;
+    out.vertexAlpha = (shaderFlags1 & 8u) != 0u;
     // Shared BS shader flag 2: Double_Sided.
     out.twoSided = (shaderFlags2 & 0x10u) != 0u;
     out.valid = true;
@@ -4638,6 +4658,23 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         }
     }
 
+    // Skyrim replaces a file-root NiNode's local placement with the REFR
+    // transform. Preserve child transforms, but do not bake the exporter's
+    // root transform into the geometry a second time. Root shapes (BTR/LOD)
+    // are geometry rather than placement wrappers and keep their transform.
+    if (header.userVersion2 >= 83u) {
+        for (const std::size_t root : stack) {
+            if (!isNiNode[root]) continue;
+            nodeFields[root].translation[0] = 0.0f;
+            nodeFields[root].translation[1] = 0.0f;
+            nodeFields[root].translation[2] = 0.0f;
+            for (int i = 0; i < 9; ++i) {
+                nodeFields[root].rotation[i] = (i % 4 == 0) ? 1.0f : 0.0f;
+            }
+            nodeFields[root].scale = 1.0f;
+        }
+    }
+
     // A SKINNED SHAPE'S GEOMETRY IS TWO HOPS AWAY. Its own dataSize is 0; the
     // vertices are in the NiSkinPartition that its NiSkinInstance names. Both of
     // those blocks come AFTER the shape in file order, so the link can only be
@@ -4885,6 +4922,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             std::string noLightingFallback;
             bool shapeReversedWinding = false;
             bool shapeHasStencilProperty = false;
+            const EffectShaderPropertyBlock* effectMaterial = nullptr;
             bool vertexAlphaResolved = false;
             bool vertexAlphaEnabled = true;  // classic NIFs keep their existing semantics
             const auto applyProperty = [&](std::int32_t propertyRef) {
@@ -4908,9 +4946,15 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 // wrapped foliage lighting instead of taking the unlit exit.
                 shape.unlit = shape.unlit || lightingShaderTreeAnim[propertyIndex];
                 if (effectShaderProperties[propertyIndex].valid) {
-                    // Effect shaders are self-lit by definition. Their source
-                    // texture is inline rather than in a texture-set block.
-                    shape.unlit = true;
+                    // Effect_Lighting distinguishes lit foam/water from emitters.
+                    // The source texture alone does not imply self illumination.
+                    effectMaterial = &effectShaderProperties[propertyIndex];
+                    shape.effectPaletteTexturePath = effectMaterial->paletteTexture;
+                    shape.effectPaletteFlags = effectMaterial->paletteFlags;
+                    shape.effectPaletteColorRow = effectMaterial->baseRed;
+                    shape.unlit = shape.unlit || !effectMaterial->effectLighting;
+                    vertexAlphaResolved = true;
+                    vertexAlphaEnabled = effectMaterial->vertexAlpha;
                     shape.twoSided =
                         shape.twoSided || effectShaderProperties[propertyIndex].twoSided;
                     if (shape.diffuseTexturePath.empty()) {
@@ -5019,7 +5063,23 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
 
             shape.uvs = src.uvs;
+            if (effectMaterial != nullptr) {
+                for (std::size_t i = 0; i + 1u < shape.uvs.size(); i += 2u) {
+                    shape.uvs[i] = shape.uvs[i] * effectMaterial->uvScale[0] + effectMaterial->uvOffset[0];
+                    shape.uvs[i + 1u] = shape.uvs[i + 1u] * effectMaterial->uvScale[1] + effectMaterial->uvOffset[1];
+                }
+            }
             shape.colors = src.colors;
+            if (effectMaterial != nullptr) {
+                if (shape.colors.empty()) {
+                    shape.colors.resize(src.positions.size() / 3u * 4u, 1.0f);
+                }
+                for (std::size_t i = 3u; i < shape.colors.size(); i += 4u) {
+                    shape.colors[i] = (vertexAlphaEnabled ? shape.colors[i] : 1.0f) *
+                        std::clamp(effectMaterial->baseAlpha, 0.0f, 1.0f);
+                }
+                vertexAlphaEnabled = true; // Material opacity is independent of vertex-alpha enable.
+            }
             if (vertexAlphaResolved && !vertexAlphaEnabled) {
                 // NifSkope/Bethesda semantics: a stored colour alpha is 1.0
                 // unless SLSF1_Vertex_Alpha explicitly enables it. Multiplying

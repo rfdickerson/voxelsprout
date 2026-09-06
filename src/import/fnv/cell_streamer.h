@@ -249,7 +249,7 @@ public:
 
     // Capture routes can predeclare their complete exterior corridor. The
     // planner holds those cells through normal-radius eviction until cleared.
-    void setPinnedCells(const std::vector<CellCoord>& cells) { m_planner.setPinnedCells(cells); }
+    void setPinnedCells(const std::vector<CellCoord>& cells);
 
     // Once per frame. Starts loads for cells coming into range, applies whatever
     // finished, and evicts what has left. World units, Fallout space (Z-up, so

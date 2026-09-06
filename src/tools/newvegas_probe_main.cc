@@ -389,6 +389,17 @@ int dumpNifBlocks(const std::filesystem::path& dataPath, const std::string& virt
         for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
             std::cout << "  [" << i << "] " << summary.blockTypeNames[i]
                       << " (" << summary.blockSizes[i] << " bytes)\n";
+            if (summary.blockTypeNames[i] == "BSEffectShaderProperty" && summary.blockSizes[i] >= 20u) {
+                const auto start = summary.blockStarts[i];
+                std::uint32_t extras = 0, flags1 = 0, flags2 = 0;
+                std::memcpy(&extras, bytes.data() + start + 4u, 4u);
+                const auto flagsOffset = 12u + std::size_t(extras) * 4u;
+                if (flagsOffset + 8u <= summary.blockSizes[i]) {
+                    std::memcpy(&flags1, bytes.data() + start + flagsOffset, 4u);
+                    std::memcpy(&flags2, bytes.data() + start + flagsOffset + 4u, 4u);
+                    std::cout << "    shader flags: 0x" << std::hex << flags1 << " / 0x" << flags2 << std::dec << "\n";
+                }
+            }
         }
         // The FOOTER: "Num Roots" u32 then that many block refs, immediately
         // after the last block. NIF states its roots here explicitly, and the
@@ -1491,6 +1502,9 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                       << ", alphaBlend=" << (shape.alphaBlend ? "yes" : "no")
                       << ", alphaSemantic=" << alphaSemanticName(shape.alphaSemantic)
                       << ", diffuse=\"" << shape.diffuseTexturePath << "\""
+                      << ", unlit=" << shape.unlit
+                      << ", palette=\"" << shape.effectPaletteTexturePath << "\""
+                      << ", paletteFlags=" << unsigned(shape.effectPaletteFlags)
                       << (shape.animationNodeName.empty()
                               ? std::string()
                               : (", animated-by=\"" + shape.animationNodeName + "\""))
@@ -1509,6 +1523,13 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
             // is it actually varying" is the question a hard-edged road asks.
             // A constant 1.0 is not a feather; a spread is.
             if (!shape.colors.empty()) {
+                float minRgb = 1.0f, maxRgb = 0.0f;
+                for (std::size_t c = 0; c < shape.colors.size(); ++c) {
+                    if (c % 4u == 3u) continue;
+                    minRgb = std::min(minRgb, shape.colors[c]);
+                    maxRgb = std::max(maxRgb, shape.colors[c]);
+                }
+                std::cout << "      vertex RGB [" << minRgb << ", " << maxRgb << "]\n";
                 float minAlpha = 1.0F;
                 float maxAlpha = 0.0F;
                 std::size_t fadedVertices = 0;
@@ -4050,7 +4071,14 @@ int probePlacements(
                       << "," << ref.position[2] << ") engine=(" << ref.position[0]
                       << "," << ref.position[2] << "," << -ref.position[1] << ")"
                       << " rotation=(" << ref.rotationRadians[0] << "," << ref.rotationRadians[1]
-                      << "," << ref.rotationRadians[2] << ") scale=" << ref.scale << "\n";
+                      << "," << ref.rotationRadians[2] << ") scale=" << ref.scale;
+            for (const FalloutRagdollBonePose& pose : ref.ragdollPose) {
+                std::cout << " xrgd[" << static_cast<unsigned>(pose.boneId) << "]=("
+                          << pose.position[0] << "," << pose.position[1] << ","
+                          << pose.position[2] << "; " << pose.rotationRadians[0] << ","
+                          << pose.rotationRadians[1] << "," << pose.rotationRadians[2] << ")";
+            }
+            std::cout << "\n";
         }
     }
     std::cout << matches << " placement(s) of base 0x" << std::hex

@@ -2,8 +2,25 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace odai::bethesda {
+
+// Match weather lookup's case-insensitive EditorIDs and the runtime's existing
+// environment-over-CLI precedence. A clear-weather market must not inherit the
+// rainy composition's exposure and nearly uniform mountain fog.
+inline bool whiterunMarketUsesRainDefaults(
+    std::string_view requestedWeather, const char* environmentWeather = nullptr) {
+    const std::string_view weather = environmentWeather != nullptr
+        ? std::string_view(environmentWeather) : requestedWeather;
+    constexpr std::string_view rain = "skyrimovercastrain";
+    return weather.size() == rain.size() &&
+        std::equal(weather.begin(), weather.end(), rain.begin(),
+            [](char actual, char expected) {
+                if (actual >= 'A' && actual <= 'Z') actual += 'a' - 'A';
+                return actual == expected;
+            });
+}
 
 // A deterministic camera authored in the main gate's local frame. The paired
 // Tamriel -> WhiterunWorld door supplies the origin and outward-facing yaw, so a

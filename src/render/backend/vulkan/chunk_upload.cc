@@ -1204,6 +1204,8 @@ void RendererBackend::rebuildImportedWaterBuffers() {
             ImportedWaterVertex vertex{};
             vertex.normalTextureSlot = patch.normalTextureIndex;
             vertex.flowTextureSlot = patch.flowTextureIndex;
+            std::copy_n(patch.extraNormalTextureIndices, 2, vertex.extraNormalTextureSlots);
+            vertex.appearance = patch.appearance;
             vertex.position[1] = patch.waterLevel;
             vertex.position[0] = patch.originX;
             vertex.position[2] = patch.originZ;
@@ -2621,6 +2623,12 @@ bool RendererBackend::uploadImportedSceneInternal(
         vertex.flowTextureSlot = patch.flowTextureIndex < importedTextureSlots.size()
             ? importedTextureSlots[patch.flowTextureIndex]
             : kInvalidImportedTextureSlot;
+        vertex.appearance = patch.appearance;
+        for (std::size_t layer = 0; layer < 2; ++layer) {
+            const auto index = patch.extraNormalTextureIndices[layer];
+            vertex.extraNormalTextureSlots[layer] = index < importedTextureSlots.size()
+                ? importedTextureSlots[index] : 0xffffffffu;
+        }
         // Skyrim's flow map is one wrapped 0..1 field per TES4 exterior cell.
         // Shoreline water is split into LAND-grid strips above, so reset-to-0
         // UVs would sample the same corner of that field in every strip and
@@ -2891,6 +2899,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         patch.flowTextureIndex = patch.flowTextureIndex < importedTextureSlots.size()
             ? importedTextureSlots[patch.flowTextureIndex]
             : kInvalidImportedTextureSlot;
+        for (auto& index : patch.extraNormalTextureIndices) {
+            index = index < importedTextureSlots.size() ? importedTextureSlots[index] : 0xffffffffu;
+        }
     }
     chunk.draws.reserve(draws.size());
     for (ImportedMeshDraw& draw : draws) {

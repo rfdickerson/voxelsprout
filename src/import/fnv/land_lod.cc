@@ -118,6 +118,24 @@ bool appendLandLodTier(
         return index;
     };
 
+    // Skyrim ships a shared LOD detail texture in addition to each baked tile.
+    // Keep the tile's authored macro color; carry this scalar detail separately.
+    const auto terrainDetail = set == LandLodSet::SkyrimTerrain
+        ? textureIndexFor("textures/terrain/noise.dds", true) : kNoTextureIndex;
+    float terrainDetailMean = 0.5f;
+    if (terrainDetail != kNoTextureIndex) {
+        auto& texture = out.textures[terrainDetail];
+        if (texture.format == TextureFormat::RGBA8Srgb || texture.format == TextureFormat::RGBA8) {
+            texture.format = TextureFormat::RGBA8; // modulation data, not albedo
+            double sum = 0.0;
+            const auto pixels = std::size_t(texture.width) * texture.height;
+            if (pixels != 0u && texture.rgba8.size() >= pixels * 4u) {
+                for (std::size_t i = 0; i < pixels; ++i) sum += texture.rgba8[i * 4u];
+                terrainDetailMean = float(sum / (255.0 * double(pixels)));
+            }
+        }
+    }
+
     const std::string loweredWorldspace = toLowerCopy(worldspaceEditorId);
     // Snap to the tile lattice: a name built from an arbitrary cell coordinate
     // resolves to nothing, which is indistinguishable from the sparse-grid hole
@@ -189,6 +207,11 @@ bool appendLandLodTier(
                     }
                     if ((v * 4u) + 3u < shape.colors.size()) {
                         vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
+                    }
+                    if (terrainDetail != kNoTextureIndex) {
+                        vertex.layerTextureIndex[2] = terrainDetail;
+                        vertex.layerWeight[2] = 128.0f / 255.0f; // LOD detail, not effect palette
+                        vertex.layerWeight[3] = terrainDetailMean;
                     }
                     mesh.vertices.push_back(vertex);
                 }

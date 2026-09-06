@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
                       << "odai --flythrough [seconds] --capture-video <out.mp4> [fps] [secs]\n"
                       << "  Fly the tour and encode it directly, then quit. Needs ffmpeg on PATH;\n"
                       << "  $ODAI_CAPTURE_ENCODER overrides the auto-detected H.264 encoder.\n"
-                      << "  Add --capture-audio for deterministic 48 kHz engine ambience;\n"
+                      << "  Add --capture-audio for deterministic 48 kHz music and ambience;\n"
                       << "  --capture-seed <u32> fixes regional sound choices.\n"
                       << "  --hour <0..24) fixes the authored time of day.\n"
                       << "odai --flythrough [seconds] --capture-seq <dir> [fps] [seconds]\n"
@@ -530,14 +530,14 @@ int main(int argc, char** argv) {
                        skyrimForestReferenceShowcase ? "0.93" : "0.98", 0);
                 setenv("ODAI_FNV_AO_RADIUS",
                     skyrimForestReferenceShowcase ? "176" :
-                    (whiterunMarketReferenceShowcase ? "300" : "240"), 0);
+                    (whiterunMarketReferenceShowcase ? "180" : "240"), 0);
                 setenv("ODAI_FNV_AO_INTENSITY",
                     skyrimForestReferenceShowcase ? "1.35" :
-                    (whiterunMarketReferenceShowcase ? "2.35" : "1.95"), 0);
+                    (whiterunMarketReferenceShowcase ? "1.70" : "1.95"), 0);
                 setenv("ODAI_FNV_AO_FINE",
-                    whiterunMarketReferenceShowcase ? "0.38" : "0.30", 0);
+                    whiterunMarketReferenceShowcase ? "0.25" : "0.30", 0);
                 setenv("ODAI_XEGTAO_BLUR",
-                    whiterunMarketReferenceShowcase ? "4" : "6", 0);
+                    whiterunMarketReferenceShowcase ? "2" : "6", 0);
                 if (skyrimForestReferenceShowcase) {
                     // Low cloud banks hug Riverwood's mountain shoulders. The
                     // paused showcase clock fixes their procedural phase.
@@ -550,20 +550,6 @@ int main(int argc, char** argv) {
                     // draw-distance override remains authoritative.
                     setenv("ODAI_FNV_SPAWN_ACTOR", "EncDragon01Fire", 0);
                     setenv("ODAI_FNV_ACTOR_DRAW_DISTANCE", "18000", 0);
-                }
-                if (whiterunMarketReferenceShowcase) {
-                    // The rainy market composition is dominated by pale
-                    // plaster and roof shingles. Key it slightly below the
-                    // shared exterior middle-grey target so highlight texture
-                    // survives without changing other Skyrim showcases.
-                    setenv("ODAI_FNV_EXPOSURE_KEY", "0.08", 0);
-                    // A nearly uniform distance fog leaves the market readable
-                    // while collecting visibly across the remote mountain
-                    // silhouette. Explicit atmosphere overrides remain
-                    // authoritative because these defaults never overwrite.
-                    setenv("ODAI_FOG_DENSITY", "0.00022", 0);
-                    setenv("ODAI_FOG_FALLOFF", "0.00002", 0);
-                    setenv("ODAI_FOG_SCATTER", "0.28", 0);
                 }
                 setenv("ODAI_FNV_NOHUD", "1", 0);
                 if (skyrimForestReferenceShowcase) {

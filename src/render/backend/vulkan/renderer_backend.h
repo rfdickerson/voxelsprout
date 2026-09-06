@@ -321,6 +321,22 @@ public:
     void setAutoExposureKeyValue(float keyValue) {
         m_skyDebugSettings.autoExposureKeyValue = std::clamp(keyValue, 0.01f, 1.0f);
     }
+    void setAutoExposureRange(float minimum, float maximum) {
+        m_skyDebugSettings.autoExposureMin = std::clamp(minimum, 0.05f, 32.0f);
+        m_skyDebugSettings.autoExposureMax = std::clamp(
+            maximum, m_skyDebugSettings.autoExposureMin, 32.0f);
+        m_autoExposureHistoryValid = false;
+    }
+    void setImportedExteriorLighting(const ImportedExteriorLighting& lighting) {
+        m_screenSpaceGiHistoryValid = false;
+        m_importedExteriorLighting = lighting;
+        m_importedExteriorLighting.diffuseWrap = std::clamp(lighting.diffuseWrap, 0.0f, 0.5f);
+        m_importedExteriorLighting.ambientScale = std::clamp(lighting.ambientScale, 0.0f, 2.0f);
+        m_importedExteriorLighting.sunlightScale = std::clamp(lighting.sunlightScale, 0.0f, 2.0f);
+        m_importedExteriorLighting.daytimeLocalLightScale =
+            std::clamp(lighting.daytimeLocalLightScale, 0.0f, 1.0f);
+        m_importedExteriorLighting.bounceStrength = std::clamp(lighting.bounceStrength, 0.0f, 1.0f);
+    }
     // Whole-frame debug visualization. See DebugView in renderer_types.h for
     // what each mode shows and why they are one enum rather than a set of
     // toggles. Published to the shaders through CameraUniform::tonemapConfig2.y.
@@ -1274,6 +1290,8 @@ private:
         float uv[2];
         std::uint32_t normalTextureSlot;
         std::uint32_t flowTextureSlot;
+        std::uint32_t extraNormalTextureSlots[2];
+        odai::importer::ImportedWaterAppearance appearance;
     };
 
     struct ReadyMagicaDraw {
@@ -2632,6 +2650,7 @@ private:
     bool m_debugImportedWaterSolid = false;
     bool m_importedSceneInteriorMode = false;
     ImportedInteriorLighting m_importedInteriorLighting{};
+    ImportedExteriorLighting m_importedExteriorLighting{};
     bool m_debugImportedLightsEnabled = true;
     float m_debugImportedLightIntensity = 1.65f;
     float m_debugImportedLightRadiusScale = 3.0f;

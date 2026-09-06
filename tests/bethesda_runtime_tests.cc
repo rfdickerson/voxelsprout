@@ -51,6 +51,30 @@ std::vector<std::uint8_t> ctda(
 
 int main() {
     {
+        const struct WeatherCase {
+            const char* requested;
+            const char* environment;
+            bool rainy;
+        } cases[] = {
+            {"SkyrimOvercastRain", nullptr, true},
+            {"skyrimOVERCASTRAIN", nullptr, true},
+            {"SkyrimClear", nullptr, false},
+            {"SkyrimCloudy", nullptr, false},
+            {"", nullptr, false},
+            {"SkyrimOvercastRainExtra", nullptr, false},
+            {"SkyrimOvercastRain", "SkyrimClear", false},
+            {"SkyrimClear", "SkyrimOvercastRain", true},
+            {"SkyrimOvercastRain", "", false},
+        };
+        // Keep the regression active in optimized screenshot builds too.
+        for (const WeatherCase& test : cases) {
+            if (whiterunMarketUsesRainDefaults(test.requested, test.environment) != test.rainy) {
+                std::cerr << "incorrect Whiterun rain defaults for " << test.requested << '\n';
+                return 1;
+            }
+        }
+    }
+    {
         constexpr OblivionReferenceCamera camera =
             imperialMarketReferenceCamera();
         assert(std::abs(camera.horizontalFovDegrees - 70.0f) < 0.001f);
