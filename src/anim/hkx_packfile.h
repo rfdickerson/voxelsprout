@@ -113,6 +113,23 @@ enum class HkxBehaviorNodeKind : std::uint8_t {
     TransitionEffect,
 };
 
+struct HkxBehaviorTimeInterval {
+    std::int32_t enterEventId = -1, exitEventId = -1;
+    float enterTime = 0.0f, exitTime = 0.0f;
+};
+
+struct HkxBehaviorTransition {
+    HkxBehaviorTimeInterval triggerInterval, initiateInterval;
+    std::int32_t eventId = -1, toStateId = -1;
+    std::int32_t fromNestedStateId = -1, toNestedStateId = -1;
+    std::int16_t priority = 0;
+    std::uint16_t flags = 0;
+    // Node index when decoded; presence remains explicit for unsupported effects.
+    std::int32_t effectNode = -1;
+    bool hasEffect = false, hasCondition = false;
+    std::string conditionClass;
+};
+
 // A fixup-backed, immutable description of the authored generator topology.
 // Runtime graph instances compile this catalog into their own state and never
 // retain pointers into the source packfile.
@@ -121,6 +138,8 @@ struct HkxBehaviorNode {
     std::string name;
     std::string assetPath;
     std::vector<std::uint32_t> children;
+    // State-local rules, or wildcard rules on a StateMachine. Source order retained.
+    std::vector<HkxBehaviorTransition> transitions;
     std::int32_t stateId = -1;
     std::int32_t startStateId = -1;
     float weight = 1.0f;

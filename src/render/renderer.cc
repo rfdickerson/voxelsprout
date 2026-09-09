@@ -42,6 +42,13 @@ void Renderer::removeImportedSceneChunk(std::size_t chunkIndex) {
     m_backend->removeImportedSceneChunkAt(chunkIndex);
 }
 
+bool Renderer::isImportedSceneChunkReady(std::size_t chunkIndex) const {
+    return m_backend->isImportedSceneChunkReady(chunkIndex);
+}
+void Renderer::setImportedSceneChunkLodTransition(std::size_t chunkIndex, float progress, float role, float seed) {
+    m_backend->setImportedSceneChunkLodTransition(chunkIndex, progress, role, seed);
+}
+
 bool Renderer::waitForImportedSceneUploads() {
     return m_backend->waitForImportedSceneUploads();
 }
@@ -102,6 +109,10 @@ void Renderer::setTaaEnabled(bool enabled) {
 
 void Renderer::setRayTracingEnabled(bool enabled) {
     m_backend->setRayTracingEnabled(enabled);
+}
+
+bool Renderer::prepareFrameCapture() {
+    return m_backend->prepareFrameCapture();
 }
 
 bool Renderer::captureFrameToFile(const std::string& outputPath) {
@@ -376,3 +387,7 @@ void Renderer::shutdown() {
 }
 
 } // namespace odai::render
+
+void odai::render::Renderer::setImageSpace(const ImageSpacePostSettings& settings) {
+    m_backend->setImageSpace(settings);
+}

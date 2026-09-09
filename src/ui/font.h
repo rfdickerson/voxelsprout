@@ -49,6 +49,8 @@ struct ShapedGlyph {
 
 class Font {
 public:
+    bool loadSwfFont(const std::vector<std::uint8_t>& file, const std::string& face,
+                     float pixels, std::string& error);
     Font();
     ~Font();
     Font(Font&&) noexcept;

@@ -76,7 +76,8 @@ struct VoxelPreview {
 // file twice and release the wrong slot.
 inline std::string normalizedImportedTextureKey(
     std::string_view sourcePath,
-    odai::importer::TextureFormat format = odai::importer::TextureFormat::RGBA8) {
+    odai::importer::TextureFormat format = odai::importer::TextureFormat::RGBA8,
+    bool linearData = false, std::uint8_t clampMode = 3, std::uint32_t layers = 1) {
     std::string key(sourcePath);
     for (char& c : key) {
         if (c == '\\') {
@@ -88,6 +89,9 @@ inline std::string normalizedImportedTextureKey(
     if (key.empty()) {
         return key;
     }
+    key += "|layers=" + std::to_string(layers);
+    key += "|clamp=" + std::to_string(clampMode);
+    if (linearData) key += "|linear-data";
     key += "|format=" + std::to_string(static_cast<unsigned>(format));
     return key;
 }
@@ -317,6 +321,8 @@ public:
     // the compute resources built but never dispatched. A scene whose light
     // levels do not happen to match that fixed exposure renders uniformly too
     // dark or too bright with no way for the app to say otherwise.
+    void setImageSpace(const ImageSpacePostSettings& settings) { m_imageSpace = settings; }
+    ImageSpacePostSettings m_imageSpace;
     void setAutoExposureEnabled(bool enabled) { m_skyDebugSettings.autoExposureEnabled = enabled; }
     void setAutoExposureKeyValue(float keyValue) {
         m_skyDebugSettings.autoExposureKeyValue = std::clamp(keyValue, 0.01f, 1.0f);
@@ -404,9 +410,9 @@ public:
     // to spend on an integrated GPU at a large window size -- 1x is a straight
     // ~2x cut to main-pass cost.
     void setRequestedMsaaSamples(uint32_t samples) { m_requestedMsaaSamples = samples; }
-    // Writes the last presented swapchain image to a binary PPM. See
-    // frame_capture.cc for why this exists rather than relying on an external
-    // screenshot tool.
+    // Request a copy while the next frame's swapchain image is still acquired.
+    bool prepareFrameCapture();
+    void recordFrameCapture(VkCommandBuffer commandBuffer, uint32_t imageIndex);
     bool captureLastFrameToFile(const std::string& outputPath);
     // The same readback, handed back as tightly packed RGB instead of written
     // to a file -- what a video capture wants, so a sequence never touches the
@@ -433,6 +439,8 @@ public:
     std::size_t addImportedSceneChunk(const odai::importer::ImportedScene& scene);
     void removeImportedSceneChunkAt(std::size_t chunkIndex);
     bool waitForImportedSceneUploads();
+    bool isImportedSceneChunkReady(std::size_t chunkIndex) const;
+    void setImportedSceneChunkLodTransition(std::size_t chunkIndex, float progress, float role, float seed);
     // Number of chunk slots, live or evicted. Indices remain valid across
     // evictions, so this only grows within a scene.
     [[nodiscard]] std::size_t importedSceneChunkCount() const { return m_importedSceneChunks.size(); }
@@ -755,7 +763,7 @@ private:
     bool createTransferResources();
     bool createPipeBuffers();
     bool createPipePipeline();
-    bool createImportedFireParticlePipeline();
+    bool createImportedFireParticlePipeline(bool mist = false);
     bool createAoPipelines();
     bool createPreviewBuffers();
     bool createEnvironmentResources();
@@ -1231,9 +1239,10 @@ private:
         std::uint32_t textureIndex = 0xffffffffu;
         std::uint32_t flags = 0u;
         std::uint32_t layerWeights = 0u;
+        std::uint32_t lightingMaterialIndex = 0xffffffffu;
     };
 
-    // 48 bytes, down from 72.
+    // 64 bytes, including terrain normal slots and a typed lighting index.
     //
     // Position and UV stay full float and MUST: position feeds the clip-space
     // transform that the merged depth prepass and the main pass have to agree on
@@ -1274,8 +1283,13 @@ private:
         std::uint32_t packedLayerTexture01 = 0xffffffffu;
         std::uint32_t packedLayerTexture23 = 0xffffffffu;
         std::uint32_t layerWeights = 0u;
+        std::uint32_t packedTerrainNormal01 = 0xffffffffu;
+        std::uint32_t packedTerrainNormal23 = 0xffffffffu;
+        std::uint32_t packedTerrainNormal45 = 0xffffffffu;
+        std::uint32_t lightingMaterialIndex = 0xffffffffu;
+        std::uint32_t terrainSurface01 = 0, terrainSurface23 = 0, terrainSurface45 = 0;
     };
-    static_assert(sizeof(ImportedMeshVertex) == 48,
+    static_assert(sizeof(ImportedMeshVertex) == 76,
                   "ImportedMeshVertex is a GPU layout: pass_pipelines.cc's attribute offsets "
                   "and skinning.comp.slang's SkinnedVertexOut mirror it byte for byte.");
 
@@ -1332,6 +1346,7 @@ private:
         // vertex. Blended draws are skipped by the depth prepass and the shadow
         // pass, and replayed after the opaque draws in the main pass.
         bool blended = false;
+        odai::importer::ImportedBlendMode blendMode = odai::importer::ImportedBlendMode::Alpha;
         // World-space AABB centre, used only to sort the blended replay
         // back-to-front. Computed at upload for blended draws and left at the
         // origin for opaque ones, which never consult it.
@@ -1352,6 +1367,8 @@ private:
         // different thresholds are not the same draw.
         std::uint8_t alphaThreshold = 128;
         std::uint32_t rigidAnimationIndex = 0xffffffffu;
+        std::size_t ownerChunk = kInvalidImportedChunkIndex;
+        std::array<float, 4> lodTransition{};
     };
 
     struct ImportedScenePageDrawRange {
@@ -1383,6 +1400,7 @@ private:
     };
 
     struct ImportedSceneChunk {
+        std::uint64_t readyTimelineValue = 0;
         // Arena ranges, in vertices and indices rather than bytes. See
         // ImportedMeshDraw::vertexOffset for why vertex units.
         std::uint64_t firstVertex = 0;
@@ -1394,6 +1412,7 @@ private:
         // Bindless slots this chunk acquired, to be released when it unloads.
         // Slots shared with a still-resident chunk survive on their refcount.
         std::vector<std::uint32_t> textureSlots;
+        std::vector<std::uint32_t> lightingMaterialSlots;
         // This chunk's punctual lights, owned here rather than appended
         // straight into m_importedLocalLights. The flat list is rebuilt from
         // the live chunks in rebuildImportedDrawTables(); appending directly
@@ -1424,6 +1443,8 @@ private:
     // Vulkan-free and unit tested; this struct is only the handles that table's
     // decisions apply to. Entry i here corresponds to slot index i there.
     struct ImportedTextureResource {
+        bool cube = false;
+        std::uint8_t clampMode = 3;
         VkImage image = VK_NULL_HANDLE;
         VmaAllocation allocation = VK_NULL_HANDLE;
         VkImageView imageView = VK_NULL_HANDLE;
@@ -1560,6 +1581,7 @@ private:
     };
 
     struct MainPassInputs {
+        float cameraPosition[3]{};
         const FrameChunkDrawData* frameChunkDrawData = nullptr;
         const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
         VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
@@ -1571,6 +1593,8 @@ private:
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
         std::uint32_t importedTerrainDrawCount = 0;
+        std::span<const ImportedMeshDraw> reflectionMeshDraws;
+        std::uint32_t reflectionTerrainDrawCount = 0;
         // Indices into importedMeshDraws naming every blended draw, farthest
         // from the camera first. Rebuilt on the main thread each frame because
         // the correct order depends on where the camera is; empty when the
@@ -1676,21 +1700,16 @@ private:
     // Future render-graph integration can manage this as a backend target.
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_swapchainFormat = VK_FORMAT_UNDEFINED;
-    // Swapchain index of the most recent successful present, so a capture knows
-    // which image actually holds the frame the user is looking at.
+    // Swapchain index of the most recent successful present.
     uint32_t m_lastPresentedImageIndex = UINT32_MAX;
 
-    // Frame-capture readback, kept alive between captures. This used to be
-    // one-shot -- a buffer, an allocation, a command pool and a
-    // vkDeviceWaitIdle per call -- which is fine for the single screenshot it
-    // was written for and ruinous for a video: a 360-frame capture spent about
-    // 1.3 s per frame in setup and teardown while the frame itself rendered in
-    // tens of milliseconds. Reused across captures and torn down at shutdown.
-    // Rebuilt whenever the swapchain extent changes.
+    // Reusable readback buffer, filled before presentation only on requested frames.
+    // Rebuilt when the swapchain extent changes; released after GPU completion.
     VkBuffer m_captureBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_captureMemory = VK_NULL_HANDLE;
-    VkCommandPool m_captureCommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer m_captureCommandBuffer = VK_NULL_HANDLE;
+    bool m_captureSupported = false;
+    bool m_captureRequested = false;
+    bool m_captureRecorded = false;
     VkDeviceSize m_captureBufferBytes = 0;
     // Cached-side copy of the mapping, so the channel swizzle reads normal
     // memory rather than the device mapping. Held so it is allocated once.
@@ -1962,6 +1981,9 @@ private:
     // last frame's jitter, and the history image does not, so the shader has to
     // subtract this to land on the history's own grid.
     std::array<float, 2> m_taaPrevJitterNdc{0.0f, 0.0f};
+    std::array<float, 4> m_taaDepthProjection{};
+    std::array<float, 4> m_taaPrevDepthProjection{};
+    bool m_taaHistoryHasDepth = false;
     VkDescriptorSetLayout m_taaDescriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_taaPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_taaPipeline = VK_NULL_HANDLE;
@@ -2022,6 +2044,7 @@ private:
         // Tunable because the right values depend on the upscale ratio and on
         // how noisy the input is, and neither is knowable from one scene.
         float upscaleTuning[4];
+        float previousDepthProjection[4];
     };
     struct TaaPushConstants {
         std::uint32_t width;
@@ -2093,7 +2116,8 @@ private:
     // tables) or the atlas is recreated.
     std::array<odai::math::Matrix4, kShadowCascadeCount> m_shadowRenderedMatrices{};
     std::array<bool, kShadowCascadeCount> m_shadowRenderedValid{};
-    std::uint32_t m_shadowInterleaveParity = 0;
+    std::uint32_t m_shadowUpdateFrame = 0;
+    std::array<std::uint32_t, 4> m_directionalShadowResolution = {2048u, 2048u, 2048u, 2048u};
     std::array<VkImage, 2> m_voxelGiImages{};
     std::array<VkImageView, 2> m_voxelGiImageViews{};
     std::array<VkDeviceMemory, 2> m_voxelGiImageMemories{};
@@ -2153,8 +2177,16 @@ private:
     // reading the previous values. Sized for the full table always, so the
     // binding is valid from init onward even with no scene loaded.
     BufferHandle m_importedMaterialBufferHandle = kInvalidBufferHandle;
-    std::array<importer::GpuImportedMaterial, importer::kImportedSceneMaterialTableCapacity>
-        m_importedMaterialTable{};
+    std::vector<importer::GpuImportedMaterial> m_importedMaterialTable =
+        std::vector<importer::GpuImportedMaterial>(importer::kImportedGpuMaterialCapacity);
+    importer::ImportedMaterialSlots m_importedLightingSlots;
+    struct AnimatedMaterialInstance {
+        importer::ImportedNifLightingMaterial source;
+        importer::GpuImportedMaterial base;
+        double startTime=-1;
+    };
+    std::unordered_map<std::uint32_t,AnimatedMaterialInstance> m_animatedMaterials;
+    double m_materialAnimationTimeSeconds=0;
     // Countdown, not a flag: one edit must reach every frame-in-flight region.
     std::uint32_t m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
     bool m_strategyMapMode = false;
@@ -2274,6 +2306,7 @@ private:
         // uploadSkinnedActorTextures. Kept per instance so a re-upload (or
         // teardown) releases exactly what it took.
         std::vector<std::uint32_t> textureSlots;
+        std::vector<std::uint32_t> lightingMaterialSlots;
     };
     std::array<SkinnedInstanceSlot, kMaxSkinnedInstances> m_skinningInstances{};
     // One past the highest instanceIndex ever uploaded via
@@ -2319,11 +2352,15 @@ private:
     VkPipeline& m_skyCloudPipeline = m_pipelineManager.skyCloudPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
     VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
+    VkPipeline& m_importedMistParticlePipeline = m_pipelineManager.importedMistParticlePipeline;
+    std::unordered_map<std::string,float> m_mistStartTimes;
     VkPipeline& m_importedFireParticlePipeline =
         m_pipelineManager.importedFireParticlePipeline;
     VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
     VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
+    VkPipeline& m_importedStaticPipelineAdditive = m_pipelineManager.importedStaticPipelineAdditive;
+    VkPipeline& m_importedStaticPipelineAdditiveTwoSided = m_pipelineManager.importedStaticPipelineAdditiveTwoSided;
     VkPipeline& m_importedStaticPipelineBlended = m_pipelineManager.importedStaticPipelineBlended;
     VkPipeline& m_importedStaticPipelineBlendedTwoSided =
         m_pipelineManager.importedStaticPipelineBlendedTwoSided;
@@ -2495,6 +2532,7 @@ private:
     GpuArenaAllocator m_importedVertexArena;
     GpuArenaAllocator m_importedIndexArena;
     std::vector<ImportedMeshDraw> m_visibleImportedMeshDraws;
+    std::vector<ImportedMeshDraw> m_visibleImportedReflectionMeshDraws;
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
     std::vector<std::uint32_t> m_importedTextureSlots;
     std::vector<std::uint8_t> m_visibleImportedPageScratch;
@@ -2554,6 +2592,7 @@ private:
     std::vector<ImportedTextureResource> m_importedTextureResources;
     BindlessSlotTable m_importedTextureSlotTable;
     VkSampler m_importedTextureSampler = VK_NULL_HANDLE;
+    std::array<VkSampler,3> m_importedClampSamplers{};
     ImportedTextureResource m_fogMapTextureResource{};
     VkSampler m_fogMapSampler = VK_NULL_HANDLE;
     float m_fogMapInvExtentX = 0.0f;
@@ -2681,6 +2720,7 @@ private:
     // both, holds the two together; this codebase has already been bitten once
     // by a silently drifting mirrored constant.
     std::uint32_t m_weatherCloudSlots[kWeatherCloudLayerCount] = {~0u, ~0u, ~0u, ~0u};
+    std::uint32_t m_nightSkySlots[kNightSkyTextureCount] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
     // Everything about the active weather's cloud layers except their pixels,
     // which live in the bindless table under m_weatherCloudSlots.
     WeatherCloudLayer m_weatherCloudLayers[kWeatherCloudLayerCount] = {};
@@ -2799,7 +2839,10 @@ private:
     // In practice the Mojave has two or three distinct thresholds across
     // thousands of draws, so ~3000 vkCmdDrawIndexed calls collapse to ~3
     // vkCmdDrawIndexedIndirect calls per pass.
+    void pushImportedLodTransition(VkCommandBuffer commandBuffer, const std::array<float, 4>& transition);
     struct ImportedIndirectBatch {
+        std::array<float, 4> lodTransition{};
+        std::size_t bucket = 0;
         VkDeviceSize bufferOffset = 0;  // byte offset into the frame arena slice
         std::uint32_t drawCount = 0;
         std::uint8_t alphaThreshold = 128;

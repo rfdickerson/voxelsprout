@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -73,6 +74,7 @@ struct FalloutActorBase {
     // Worn/carried items (CNTO). An NPC_'s clothing lives here; resolving these
     // to ARMO biped models is what stops the townsfolk rendering naked.
     std::vector<std::uint32_t> inventoryFormIds;
+    std::vector<std::pair<std::uint32_t, std::int32_t>> inventoryStacks;
     // TES5 DOFT. Skyrim moved an NPC's worn set out of CNTO and into an OTFT
     // record; guards usually carry only weapons in CNTO, so ignoring this
     // leaves every otherwise-valid actor undressed.
@@ -264,6 +266,10 @@ struct FalloutActorScan {
     // LVLI records. List records themselves are never returned. `seed` should
     // be the persistent placed-reference ID so stream order cannot alter loot.
     [[nodiscard]] std::vector<std::uint32_t> materializeInventory(
+        std::uint32_t baseFormId, std::uint32_t seed) const;
+
+    // Gameplay quantities, kept separately from wardrobe mesh selection.
+    [[nodiscard]] std::map<std::uint32_t, std::int32_t> materializeInventoryStacks(
         std::uint32_t baseFormId, std::uint32_t seed) const;
 
     // The VTYP an actor speaks with, or 0. Its own VTCK first, then its RACE's

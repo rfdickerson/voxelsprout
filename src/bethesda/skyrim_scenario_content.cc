@@ -2,6 +2,8 @@
 
 #include "bethesda/record_resolver.h"
 #include "bethesda/skyrim_runtime_records.h"
+#include "bethesda/skyrim_persistent_references.h"
+#include <memory>
 #include "import/fnv/esm_reader.h"
 #include "import/fnv/strings_table.h"
 
@@ -123,6 +125,7 @@ bool loadSkyrimScenarioContent(
 
     std::unordered_map<std::string, importer::fnv::FalloutStringTable> stringTables;
     std::set<std::string> unavailableStringTables;
+    std::map<std::string, importer::fnv::FalloutStringTable> journalTables;
     const auto resolveObjectiveText = [&](SkyrimQuestDefinition& definition,
                                           std::size_t sourcePluginIndex) {
         const std::string sourcePlugin =
@@ -146,6 +149,18 @@ bool loadSkyrimScenarioContent(
             }
             table = stringTables.emplace(plugin, std::move(loaded)).first;
         }
+        if (const auto* title = table->second.find(definition.titleId)) definition.title = *title;
+        auto journal = journalTables.find(plugin);
+        if (journal == journalTables.end()) {
+            importer::fnv::FalloutStringTable loaded;
+            std::string error;
+            (void)importer::fnv::loadFalloutStringTable(assets, sourcePlugin,
+                importer::fnv::falloutStringLanguage(), importer::fnv::FalloutStringFileKind::DlStrings,
+                loaded, error);
+            journal = journalTables.emplace(plugin, std::move(loaded)).first;
+        }
+        for (auto& stage : definition.stages) for (auto& entry : stage.logEntries)
+            if (const auto* text = journal->second.find(entry.textId)) entry.text = *text;
         for (SkyrimQuestObjectiveDefinition& objective : definition.objectives) {
             if (const std::string* text = table->second.find(objective.displayTextId)) {
                 objective.displayText = *text;
@@ -161,9 +176,15 @@ bool loadSkyrimScenarioContent(
         resolveObjectiveText(definition, definitionSourcePluginIndices.at(definition.record));
     }
 
+    std::map<RecordKey, SkyrimItemDefinition> items;
+    if (!loadSkyrimItems(loadOrder, assets, items, outError)) return false;
+    session.setSkyrimItems(std::move(items));
+
     const auto* loadOrderPointer = &loadOrder;
+    const auto reachedReferences = std::make_shared<std::set<std::uint32_t>>();
     const BethesdaSession::ResolvedFormResolver referenceResolver =
-        [loadOrderPointer](std::uint32_t formId) -> std::optional<ObjectId> {
+        [loadOrderPointer, reachedReferences](std::uint32_t formId) -> std::optional<ObjectId> {
+        if (formId != 0u) reachedReferences->insert(formId);
         RecordKey stable;
         std::string error;
         if (!stableRecordKey(*loadOrderPointer, formId, stable, error)) return std::nullopt;
@@ -1090,31 +1111,6 @@ bool loadSkyrimScenarioContent(
         }
     }
 
-    // applyScenario establishes seed identities before retail definitions and
-    // VMAD instances exist. Replay only script-backed startup stages now so
-    // their authored fragments/objectives run exactly once against the fully
-    // registered quest. MQ101 is intentionally excluded by scriptsRequired.
-    for (const ScenarioQuestSeed& seed : scenario.prerequisiteQuests) {
-        const auto questRecord = std::find_if(
-            scenario.questRecords.begin(), scenario.questRecords.end(),
-            [&](const ScenarioQuestRecord& value) {
-                return lowerAscii(value.editorId) == lowerAscii(seed.editorId);
-            });
-        if (questRecord == scenario.questRecords.end() || !questRecord->scriptsRequired) continue;
-        QuestRuntimeState* state = session.findQuest(ObjectId::persistent(
-            makeRecordKey(questRecord->plugin, questRecord->localFormId)));
-        if (state == nullptr) {
-            outError = "scenario startup quest is not registered: " + seed.editorId;
-            return false;
-        }
-        state->completedStages.erase(std::remove(
-            state->completedStages.begin(), state->completedStages.end(), seed.stage),
-            state->completedStages.end());
-        session.setQuestStage(seed.editorId, seed.stage, seed.completed);
-        outReport.diagnostics.push_back(
-            "replayed authored startup stage " + seed.editorId + ":" +
-            std::to_string(seed.stage));
-    }
     outReport.diagnostics.push_back(
         "registered " + std::to_string(outReport.dialogueBranchesRegistered) +
         " Skyrim DLBR branches, " +
@@ -1370,6 +1366,34 @@ bool loadSkyrimScenarioContent(
         outReport.diagnostics.push_back(
             "attached " + std::to_string(outReport.transitiveScriptInstances) +
             " transitive winning-record VMAD script instances");
+    }
+    if (!materializeSkyrimPersistentReferences(
+            loadOrder, *reachedReferences, session.world(), outError)) return false;
+
+    // applyScenario establishes seed identities before retail definitions and
+    // VMAD instances exist. Replay only script-backed startup stages now so
+    // their authored fragments/objectives run exactly once against the fully
+    // registered quest. MQ101 is intentionally excluded by scriptsRequired.
+    for (const ScenarioQuestSeed& seed : scenario.prerequisiteQuests) {
+        const auto questRecord = std::find_if(
+            scenario.questRecords.begin(), scenario.questRecords.end(),
+            [&](const ScenarioQuestRecord& value) {
+                return lowerAscii(value.editorId) == lowerAscii(seed.editorId);
+            });
+        if (questRecord == scenario.questRecords.end() || !questRecord->scriptsRequired) continue;
+        QuestRuntimeState* state = session.findQuest(ObjectId::persistent(
+            makeRecordKey(questRecord->plugin, questRecord->localFormId)));
+        if (state == nullptr) {
+            outError = "scenario startup quest is not registered: " + seed.editorId;
+            return false;
+        }
+        state->completedStages.erase(std::remove(
+            state->completedStages.begin(), state->completedStages.end(), seed.stage),
+            state->completedStages.end());
+        session.setQuestStage(seed.editorId, seed.stage, seed.completed);
+        outReport.diagnostics.push_back(
+            "replayed authored startup stage " + seed.editorId + ":" +
+            std::to_string(seed.stage));
     }
     outReport.unresolvedCallBindings =
         session.papyrus().unresolvedCallBindings(rootFunctions);

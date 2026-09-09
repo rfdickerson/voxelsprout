@@ -143,6 +143,10 @@ public:
 
     [[nodiscard]] const std::vector<std::string>& warnings() const { return m_warnings; }
     [[nodiscard]] std::size_t archiveCount() const { return m_archives.size(); }
+    // Unique canonical candidates from the same indexed layers as resolution.
+    // Use resolveAssetWithProvider to inspect the winning bytes, never reopen
+    // an arbitrary archive selected from this inventory.
+    [[nodiscard]] std::vector<std::string> virtualPaths() const;
     [[nodiscard]] std::size_t modDirectoryCount() const { return m_modDirectories.size(); }
     [[nodiscard]] std::size_t modFileCount() const;
     [[nodiscard]] const std::filesystem::path& dataFilesPath() const { return m_dataFilesPath; }
@@ -173,6 +177,8 @@ private:
         const std::filesystem::path& dataFilesPath, std::uint32_t contentMask);
 
     std::filesystem::path m_dataFilesPath;
+    // Canonical virtual keys for case-insensitive base loose-file lookup on POSIX.
+    std::unordered_map<std::string,std::filesystem::path> m_baseLooseFiles;
     std::vector<BsaArchive> m_archives;  // load order; later entries win
     std::vector<ModDirectory> m_modDirectories;  // load order; later entries win
     // Remembered from open() so a mod directory added afterwards filters its

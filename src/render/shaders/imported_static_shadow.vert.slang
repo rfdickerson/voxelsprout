@@ -1,5 +1,7 @@
+import imported_material_table;
 import camera_uniform;
 import chunk_push_constants;
+import imported_grass;
 
 struct VertexInput
 {
@@ -12,6 +14,7 @@ struct VertexInput
     [[vk::location(4)]] uint inTextureIndex : TEXCOORD4;
     [[vk::location(5)]] uint inFlags : TEXCOORD5;
     [[vk::location(7)]] uint inLayerWeights : TEXCOORD7;
+    [[vk::location(10)]] uint inLightingMaterial : TEXCOORD10;
 };
 
 struct VertexOutput
@@ -20,12 +23,15 @@ struct VertexOutput
     float2 outUv : TEXCOORD0;
     nointerpolation uint outTextureIndex : TEXCOORD1;
     nointerpolation uint outFlags : TEXCOORD2;
+    float outAlpha : TEXCOORD3;
+    float3 outWorldPosition : TEXCOORD4;
 };
 
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
-    float3 worldPosition = input.inPosition;
+    float3 worldPosition = fadeImportedGrass(input.inPosition, input.inFlags,
+        input.inLayerWeights, camera.shadowVoxelGridSize.xyz);
     static const uint kFoliageWindFlag = 1u << 9u;
     if ((input.inFlags & kFoliageWindFlag) != 0u)
     {
@@ -58,8 +64,18 @@ VertexOutput main(VertexInput input)
         const int cascadeIndex = clamp(int(chunkPc.cascadeData.x + 0.5), 0, 3);
         output.position = mul(camera.lightViewProj[cascadeIndex], float4(worldPosition, 1.0));
     }
+    output.outWorldPosition = worldPosition;
     output.outUv = input.inUv;
     output.outTextureIndex = input.inTextureIndex;
     output.outFlags = input.inFlags;
+    output.outAlpha=1;
+    if(input.inLightingMaterial!=0xffffffffu) {
+        const GpuImportedMaterial material=importedMaterials[input.inLightingMaterial];
+        if(material.animationState.y!=0) {
+            output.outUv=input.inUv*material.animationUv.zw+material.animationUv.xy;
+            output.outAlpha=material.animationColor.a;
+            if(material.animationState.x!=0xffffffffu) output.outTextureIndex=material.animationState.x;
+        }
+    }
     return output;
 }

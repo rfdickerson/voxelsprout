@@ -6,6 +6,8 @@ import light_clusters;
 
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
+[[vk::binding(1, 1)]]
+SamplerCube<float4> bindlessCubes[];
 
 // Fixed bindless slot for the fog-of-war R8 texture.
 static const int kBindlessIndexFogMap = 10;
@@ -73,7 +75,7 @@ static const uint kInvalidImportedTextureIndex = 0xffffffffu;
 
 // Named material library. Bits 24-31 of the flags word index this table; 0 means
 // "no library material" and the legacy bits 8-23 are used instead. Mirrored from
-// src/import/imported_material.h -- the struct below must stay 32 bytes and keep
+// src/import/imported_material.h -- the shared struct must stay 160 bytes and keep
 // this field order, because the CPU side memcpys the whole table in.
 //
 // Slot 0 is a reserved sentinel and is never read: it exists so the index stored
@@ -82,14 +84,7 @@ static const uint kInvalidImportedTextureIndex = 0xffffffffu;
 static const uint kImportedMaterialIndexShift = 24u;
 static const uint kImportedMaterialIndexMask = 0xffu;
 
-struct GpuImportedMaterial
-{
-    float4 baseColorMetallic;  // rgb = base color tint, w = metallic
-    float4 emissiveRoughness;  // rgb = emissive radiance, w = roughness
-};
-
-[[vk::binding(13, 0)]]
-StructuredBuffer<GpuImportedMaterial> importedMaterials;
+import imported_material_table;
 
 uint importedMaterialIndex(uint flags)
 {
@@ -176,18 +171,63 @@ struct FragmentInput
     nointerpolation uint inFlags : TEXCOORD5;
     nointerpolation uint4 inLayerTextures : TEXCOORD6;
     float4 inLayerWeights : TEXCOORD7;
+    nointerpolation uint4 terrainNormals : TEXCOORD8;
+    nointerpolation uint terrainNormal4 : TEXCOORD9;
+    nointerpolation uint lightingMaterial : TEXCOORD10;
+    nointerpolation uint4 terrainSurface : TEXCOORD11;
+    nointerpolation uint terrainSurface4 : TEXCOORD12;
 };
+
+// Shared by albedo and normal blending so boundaries stay aligned.
+float authoredTerrainLayerWeight(FragmentInput input, uint layer)
+{
+    const float raw = saturate(input.inLayerWeights[layer]);
+    if ((input.inFlags & kImportedMaterialFlagTerrainNormalizedLayers) != 0u)
+        return raw;
+    const float2 uv = input.inWorldPosition.xz;
+    const float noise = terrainBlendNoise(uv / max(camera.terrainBlendConfig.y, 1.0)) * 0.65
+        + terrainBlendNoise(uv / max(camera.terrainBlendConfig.z, 1.0)) * 0.35 - 0.5;
+    const float perturbed = saturate(raw + noise * max(camera.terrainBlendConfig.w, 0.0)
+        * (1.0 - abs(raw * 2.0 - 1.0)));
+    return lerp(perturbed, smoothstep(0.22, 0.78, perturbed), saturate(camera.terrainBlendConfig.x));
+}
+
+float3 sampleAuthoredNormal(uint textureIndex, float2 uv)
+{
+    if (textureIndex == kInvalidImportedTextureIndex) return float3(0.0, 0.0, 1.0);
+    const float2 xy = bindlessTextures[textureIndex].Sample(uv).xy * 2.0 - 1.0;
+    return normalize(float3(xy, max(sqrt(saturate(1.0 - dot(xy, xy))), 0.001)));
+}
 
 // Bethesda static NIFs provide tangent-space normals in BSShaderTextureSet
 // slot 1, but the imported vertex stream intentionally carries no tangent.
 // Reconstruct the cotangent frame from position/UV derivatives in the fragment
 // instead. This is stable across instancing and rigid animation, and lets the
-// normal-map slot ride in the existing non-terrain layer field without
-// widening the cooked or GPU vertex formats.
+// static normal-map slot use the non-terrain layer field. Terrain has an
+// explicit base-plus-overlay normal binding alongside its albedo layers.
+float3 sampleTerrainNormal(uint textureIndex, uint properties, float2 uv,
+    float3 tangent, float3 bitangent, float3 geometricNormal)
+{
+    if (textureIndex == kInvalidImportedTextureIndex) return float3(0, 0, 1);
+    if ((properties & 0x400u) == 0u) return sampleAuthoredNormal(textureIndex, uv);
+    // LAND is in world coordinates: Bethesda model-space normal XYZ is Z-up.
+    const float3 source = bindlessTextures[NonUniformResourceIndex(textureIndex)].Sample(uv).rgb * 2.0 - 1.0;
+    const float3 world = normalize(float3(source.x, source.z, -source.y));
+    return float3(dot(world, tangent), dot(world, bitangent), dot(world, geometricNormal));
+}
+
 float3 applyAuthoredStaticNormalMap(FragmentInput input, float3 geometricNormal)
 {
-    if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u ||
-        input.inLayerTextures[0] == kInvalidImportedTextureIndex)
+    if (input.lightingMaterial != kInvalidImportedTextureIndex &&
+        (importedMaterials[input.lightingMaterial].sourceFlags.x & (1u << 12u)) != 0u)
+        return geometricNormal; // model-space maps require an authored basis path
+
+    const uint staticNormalTexture = input.lightingMaterial != kInvalidImportedTextureIndex
+        ? importedMaterials[input.lightingMaterial].textures.x : input.inLayerTextures[0];
+    const bool terrain = any(input.terrainNormals != uint4(kInvalidImportedTextureIndex)) ||
+        input.terrainNormal4 != kInvalidImportedTextureIndex;
+    if (!terrain && ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u ||
+        staticNormalTexture == kInvalidImportedTextureIndex))
     {
         return geometricNormal;
     }
@@ -209,11 +249,22 @@ float3 applyAuthoredStaticNormalMap(FragmentInput input, float3 geometricNormal)
     const float3 authoredBitangent = (dpdy * duvdx.x - dpdx * duvdy.x) / determinant;
     const float handedness = dot(cross(geometricNormal, tangent), authoredBitangent) < 0.0 ? -1.0 : 1.0;
     const float3 bitangent = normalize(cross(geometricNormal, tangent)) * handedness;
-    const float2 encoded =
-        bindlessTextures[input.inLayerTextures[0]].Sample(input.inUv).xy * 2.0 - 1.0;
-    const float3 decodedNormal = float3(encoded, sqrt(saturate(1.0 - dot(encoded, encoded))));
-    // Reduce tangent-space slope, retaining a flat map as exactly (0,0,1).
-    const float3 tangentNormal = normalize(float3(decodedNormal.xy * 0.65, max(decodedNormal.z, 0.001)));
+    float3 tangentNormal = terrain
+        ? sampleTerrainNormal(input.terrainNormals[0], input.terrainSurface[0], input.inUv, tangent, bitangent, geometricNormal)
+        : sampleAuthoredNormal(staticNormalTexture, input.inUv);
+    if (terrain)
+    {
+        for (uint layer = 0u; layer < 4u; ++layer)
+        {
+            if (input.inLayerTextures[layer] == kInvalidImportedTextureIndex) continue;
+            const uint normalIndex = layer < 3u ? input.terrainNormals[layer + 1u] : input.terrainNormal4;
+            // Missing normals are flat, so opaque overlays suppress the base relief.
+            const uint props = layer < 3u ? input.terrainSurface[layer + 1u] : input.terrainSurface4;
+            tangentNormal = lerp(tangentNormal, sampleTerrainNormal(normalIndex, props, input.inUv, tangent, bitangent, geometricNormal),
+                authoredTerrainLayerWeight(input, layer));
+        }
+        tangentNormal = normalize(tangentNormal);
+    }
     return normalize((tangent * tangentNormal.x) +
                      (bitangent * tangentNormal.y) +
                      (geometricNormal * tangentNormal.z));
@@ -245,6 +296,8 @@ float3 resolveShadingNormal(float3 worldNormal, uint flags, bool isFrontFace)
 // odd-sized targets do not shift the contact regions by a pixel.
 float sampleSsaoAmbientFactor(float4 screenPosition)
 {
+    // Main-camera screen-space buffers cannot describe the mirrored view.
+    if (chunkPc.cascadeData.x > 0.5) return 1.0;
     const float2 fullResolutionExtent = max(camera.contactShadowConfig.xy, float2(1.0, 1.0));
     const float2 ssaoUv = clamp(screenPosition.xy / fullResolutionExtent, float2(0.0, 0.0), float2(1.0, 1.0));
     const float ssaoRaw = clamp(ssaoBlurTexture.SampleLevel(ssaoUv, 0.0).x, 0.0, 1.0);
@@ -430,48 +483,6 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // that they are each half strength.
     if ((input.inFlags & kImportedMaterialFlagTerrainLayers) != 0u)
     {
-        const bool normalizedTerrainLayers =
-            (input.inFlags & kImportedMaterialFlagTerrainNormalizedLayers) != 0u;
-        // VTXT authors one opacity per landscape post -- a value every 128 units
-        // -- and interpolating that linearly across the triangles makes every
-        // blend boundary a straight, grid-aligned edge. That is the blockiness,
-        // and it is in the interpolation, not the data: the same weights can
-        // produce an organic boundary.
-        //
-        // Two corrections, one noise sample shared by all four layers because
-        // the noise perturbs WHERE the boundary falls, not which layer it
-        // belongs to.
-        //
-        //   - Perturb the weight by value noise, so the boundary wanders across
-        //     the lattice instead of following it. Two octaves: the coarse one
-        //     breaks up long straight runs, the fine one gives the edge grain.
-        //   - Sharpen with smoothstep. A linear ramp spreads every transition
-        //     across a full 128-unit cell, which reads as a soft rectangle;
-        //     tightening it puts the transition where the noise put it.
-        //
-        // Both are no-ops where a layer is fully present or fully absent, so
-        // large single-texture areas are untouched.
-        // Both scales come from the uniform (see renderer_shared.h). They were
-        // 220 and 70 world units, which is the trap: VTXT authors one opacity
-        // every 128 units, so noise finer than that displaces a boundary by only
-        // a few tens of units and cannot break up the lattice it is sitting on.
-        // The noise has to be COARSER than the data it is hiding.
-        float blendNoiseSigned = 0.0;
-        float blendSharpness = 0.0;
-        float blendNoiseAmount = 0.0;
-        if (!normalizedTerrainLayers)
-        {
-            const float2 blendNoiseUv = input.inWorldPosition.xz;
-            const float coarseUnits = max(camera.terrainBlendConfig.y, 1.0);
-            const float fineUnits = max(camera.terrainBlendConfig.z, 1.0);
-            const float blendNoise =
-                (terrainBlendNoise(blendNoiseUv * (1.0 / coarseUnits)) * 0.65) +
-                (terrainBlendNoise(blendNoiseUv * (1.0 / fineUnits)) * 0.35);
-            blendNoiseSigned = blendNoise - 0.5;
-            blendSharpness = saturate(camera.terrainBlendConfig.x);
-            blendNoiseAmount = max(camera.terrainBlendConfig.w, 0.0);
-        }
-
         for (uint layer = 0u; layer < 4u; ++layer)
         {
             const uint layerTexture = input.inLayerTextures[layer];
@@ -480,29 +491,7 @@ float4 sampleImportedAlbedo(FragmentInput input)
             {
                 continue;
             }
-            // Scaled by how mid-transition the weight is, so the noise cannot
-            // punch holes in a fully opaque layer or speckle a fully absent one.
-            const float transitionAmount = 1.0 - abs((rawWeight * 2.0) - 1.0);
-            const float perturbed =
-                saturate(rawWeight + (blendNoiseSigned * blendNoiseAmount * transitionAmount));
-            // Blended toward the raw value rather than always applying the
-            // smoothstep. At sharpness 0 this is exactly the authored weight,
-            // which is the control: the ONLY thing that separates "the wedges
-            // are in the LAND data" from "the wedges are this curve amplifying
-            // a piecewise-linear field" is being able to turn the curve off.
-            //
-            // Sharpening is why they appear. rawWeight is interpolated linearly
-            // across a triangle, so its iso-contours kink at every triangle
-            // edge; compressing the transition into a narrow band magnifies
-            // those kinks into visible facets, and the noise that should hide
-            // them is scaled by transitionAmount, which decays to zero exactly
-            // where the contour is sharpest.
-            // Morrowind's synthetic weights already encode an exact normalized
-            // bilinear mixture. Applying VTXT's independent noise/sharpening to
-            // them destroys that partition and makes seams or texture islands.
-            const float layerWeight = normalizedTerrainLayers
-                ? rawWeight
-                : lerp(perturbed, smoothstep(0.22, 0.78, perturbed), blendSharpness);
+            const float layerWeight = authoredTerrainLayerWeight(input, layer);
             if (layerWeight <= 0.0)
             {
                 continue;
@@ -535,6 +524,10 @@ float4 sampleImportedAlbedo(FragmentInput input)
         !(effectPalette && (paletteFlags & 1u) != 0u))
     {
         return float4(sampled.rgb * input.inColor.rgb, sampled.a);
+    }
+    if(effectPalette && (paletteFlags & 1u)!=0u && input.lightingMaterial!=0xffffffffu) {
+        const GpuImportedMaterial material=importedMaterials[input.lightingMaterial];
+        if(material.animationState.y!=0u) sampled.rgb*=material.animationPalette.y;
     }
     return sampled;
 }
@@ -872,7 +865,7 @@ float3 evaluateImportedLocalLights(
     // (grid dimensions zero -- see lightClustersActive) so a missing mask can
     // only ever cost performance, never light.
     uint2 mask;
-    if (lightClustersActive())
+    if (lightClustersActive() && chunkPc.cascadeData.x <= 0.5)
     {
         mask = clusterLightMask[lightClusterIndexForFragment(screenPosition, viewDepth)];
     }
@@ -884,7 +877,7 @@ float3 evaluateImportedLocalLights(
     }
 
     uint2 contactMask = uint2(0u, 0u);
-    if (camera.contactShadowConfig.z > 0.5)
+    if (camera.contactShadowConfig.z > 0.5 && chunkPc.cascadeData.x <= 0.5)
     {
         const uint2 contactExtent = max(
             uint2(camera.contactShadowConfig.xy + 0.5), uint2(1u, 1u));
@@ -1061,31 +1054,26 @@ float sampleImportedShadowPcf(
 
     float visibility = 0.0;
     float weightSum = 0.0;
-    // Two paths, and the split is measured rather than stylistic.
-    //
-    // This used to iterate -3..3 (49 steps) and `continue` past everything
-    // outside kernelRadius, which is 1 by default -- 40 of 49 iterations per
-    // fragment branching and doing nothing, and the cascade blend region runs
-    // the whole thing twice. Constant bounds let the compiler unroll to exactly
-    // nine taps: 7.42 -> 6.49 ms of main pass at identical output. Making the
-    // bounds follow kernelRadius dynamically instead only reached 7.11, because
-    // a runtime trip count blocks the unroll -- so the default radius gets a
-    // fixed 3x3 and the wider kernels, which only the debug UI selects, take the
-    // general path.
+    // The default tent has a closed four-tap form; wider debug kernels
+    // retain the general weighted loop.
     if (kernelRadius <= 1)
     {
-        [unroll]
-        for (int y = -1; y <= 1; ++y)
-        {
-            [unroll]
-            for (int x = -1; x <= 1; ++x)
-            {
-                const float2 uv = shadowUv + float2(float(x), float(y)) * texelSize;
-                const float weight = float(2 - abs(x)) * float(2 - abs(y));
-                visibility += shadowMap.SampleCmpLevelZero(uv, shadowDepthRef + bias) * weight;
-                weightSum += weight;
-            }
-        }
+        // Combine adjacent tent weights into hardware bilinear PCF taps.
+        // This is the same nine-tap separable 1:2:1 filter, evaluated with
+        // four comparisons; fractional texel position preserves its footprint.
+        const float2 texelPosition = shadowUv / texelSize - 0.5;
+        const float2 base = floor(texelPosition);
+        const float2 f = frac(texelPosition);
+        const float2 w0 = 3.0 - 2.0 * f;
+        const float2 w1 = 1.0 + 2.0 * f;
+        const float2 uv0 = (base + 0.5 - 1.0 + (2.0 - f) / w0) * texelSize;
+        const float2 uv1 = (base + 0.5 + 1.0 + f / w1) * texelSize;
+        visibility =
+            shadowMap.SampleCmpLevelZero(float2(uv0.x, uv0.y), shadowDepthRef + bias) * w0.x * w0.y +
+            shadowMap.SampleCmpLevelZero(float2(uv1.x, uv0.y), shadowDepthRef + bias) * w1.x * w0.y +
+            shadowMap.SampleCmpLevelZero(float2(uv0.x, uv1.y), shadowDepthRef + bias) * w0.x * w1.y +
+            shadowMap.SampleCmpLevelZero(float2(uv1.x, uv1.y), shadowDepthRef + bias) * w1.x * w1.y;
+        weightSum = 16.0;
     }
     else
     {
@@ -1312,8 +1300,13 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
         float3 tint = float3(1.0, 1.0, 1.0);
         float3 emissive = float3(0.0, 0.0, 0.0);
         bool usePbr = false;
-        const PbrSurface surface =
+        PbrSurface surface =
             resolveImportedMaterialWithDefaults(input.inFlags, tint, emissive, usePbr);
+        if (input.lightingMaterial != kInvalidImportedTextureIndex &&
+            importedMaterials[input.lightingMaterial].sourceFlags.w != 0u) {
+            surface.roughness = importedMaterials[input.lightingMaterial].emissiveRoughness.w;
+            surface.metallic = 0.0;
+        }
         const float value = (view == kDebugViewRoughness) ? surface.roughness : surface.metallic;
         return float4(debugRamp(value), 1.0);
     }
@@ -1354,6 +1347,7 @@ float4 debugViewColor(FragmentInput input, uint view, float3 normal, float viewD
 
 float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
 {
+    applyImportedLodTransition(input.inWorldPosition);
     // The mirrored planar pass contains only geometry above the water. Without
     // this clip, the riverbed is reflected upward and appears as a second,
     // inverted landscape in the surface. A small tolerance keeps coplanar bank
@@ -1411,7 +1405,11 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     {
         return float4(albedoFull.rgb * 3.0, albedoFull.a);
     }
-    float3 normal = resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
+    const bool treeLodLighting = (input.inFlags & ((1u << 13u) | (1u << 2u))) == (1u << 13u);
+    // The tree atlas contains the crown's shading. Card orientation must not
+    // relight each half as a solid wall, or the crossed planes become visible.
+    float3 normal = treeLodLighting ? float3(0.0, 1.0, 0.0) :
+        resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
     const float3 geometricNormal = normal;
     normal = applyAuthoredStaticNormalMap(input, normal);
     // Slope-based rock/cliff blending. Steep faces (terrain skirts, cliff rims)
@@ -1426,8 +1424,64 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     float3 materialTint = float3(1.0, 1.0, 1.0);
     float3 materialEmissive = float3(0.0, 0.0, 0.0);
     bool usePbr = false;
-    const PbrSurface surface = resolveImportedMaterialWithDefaults(
+    PbrSurface surface = resolveImportedMaterialWithDefaults(
         input.inFlags, materialTint, materialEmissive, usePbr);
+    float3 authoredSpecularScale = float3(1.0);
+    // LTEX exponent and TXST normal/gloss are blended in the same ordered
+    // opacity stack as albedo; missing overlays suppress the underlying gloss.
+    if ((input.terrainSurface.x & 0x8000u) != 0u ||
+        any((input.terrainSurface & uint4(0x8000u)) != uint4(0u)) ||
+        (input.terrainSurface4 & 0x8000u) != 0u) {
+        float roughness = surface.roughness;
+        float glossMask = 0.0;
+        for (uint layer = 0; layer < 5u; ++layer) {
+            if (layer > 0u && input.inLayerTextures[layer - 1u] == kInvalidImportedTextureIndex) continue;
+            const uint props = layer < 4u ? input.terrainSurface[layer] : input.terrainSurface4;
+            const uint normalMap = layer < 4u ? input.terrainNormals[layer] : input.terrainNormal4;
+            const bool authored = (props & 0x8000u) != 0u;
+            const float exponent = float(props & 255u);
+            const float layerRoughness = authored
+                ? clamp(pow(2.0 / (exponent + 2.0), 0.25), 0.04, 1.0) : surface.roughness;
+            float layerMask = 0.0;
+            if (authored) {
+                // DNAM No Specular Map means uniform specular, not no lighting.
+                layerMask = (props & 0x100u) != 0u ? 1.0 :
+                    (normalMap != kInvalidImportedTextureIndex
+                        ? bindlessTextures[NonUniformResourceIndex(normalMap)].Sample(input.inUv).a : 0.0);
+            }
+            const float weight = layer == 0u ? 1.0 : authoredTerrainLayerWeight(input, layer - 1u);
+            roughness = lerp(roughness, layerRoughness, weight);
+            glossMask = lerp(glossMask, layerMask, weight);
+        }
+        surface.roughness = roughness;
+        surface.metallic = 0.0;
+        authoredSpecularScale = float3(glossMask);
+        usePbr = true;
+    }
+    bool authoredEnvironment = false;
+    if (input.lightingMaterial != kInvalidImportedTextureIndex)
+    {
+        const GpuImportedMaterial material = importedMaterials[input.lightingMaterial];
+        authoredEnvironment = material.sourceFlags.z == 1u && (material.sourceFlags.x & 128u) != 0u &&
+            material.textures.z != kInvalidImportedTextureIndex && material.environment.x > 0.0;
+        if (material.sourceFlags.w != 0u)
+        {
+            usePbr = true;
+            surface.metallic = 0.0;
+            surface.roughness = material.emissiveRoughness.w;
+            float mask = 1.0;
+            // Tangent-space Skyrim normal maps carry specular intensity in alpha.
+            if (material.textures.x != kInvalidImportedTextureIndex)
+                mask = bindlessTextures[material.textures.x].Sample(input.inUv).a;
+            authoredSpecularScale = material.specularStrength.rgb * material.specularStrength.w * mask;
+            materialEmissive = material.emissiveRoughness.rgb;
+            if ((material.sourceFlags.y & (1u << 6u)) != 0u)
+            {
+                materialEmissive *= material.textures.y == kInvalidImportedTextureIndex
+                    ? float3(0.0) : bindlessTextures[material.textures.y].Sample(input.inUv).rgb;
+            }
+        }
+    }
 
     float3 albedo = albedoFull.rgb * materialTint;
     albedo = applyOrganicDistantMountainSnow(
@@ -1458,11 +1512,17 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float3 shNormalIrradiance = evaluateShIrradiance(normal);
     const float3 shHemisphereIrradiance = evaluateShHemisphereIrradiance(normal);
     const float3 ambientIrradiance = lerp(shNormalIrradiance, shHemisphereIrradiance, 0.6);
-    const float ndotl = max(dot(normal, -sunDirection), 0.0);
+    const float ndotl = treeLodLighting ? 0.5 : max(dot(normal, -sunDirection), 0.0);
     const bool interiorMode = chunkPc.cascadeData.y > 0.5;
     const float diffuseWrap = interiorMode ? 0.35 : camera.importedExteriorConfig.x;
+    // Two-sided Skyrim foliage uses a restrained view-independent transmission
+    // lobe. This keeps backlit needles colored by the authored albedo while the
+    // ordinary shadow term still anchors the trunk and branch cards.
+    const float foliageTransmission = foliageLighting
+        ? pow(saturate(dot(-normal, -sunDirection)), 1.5) * 0.32
+        : 0.0;
     const float wrappedNdotL = foliageLighting
-        ? saturate((ndotl * 0.25) + 0.75)
+        ? saturate((ndotl * 0.45) + 0.42 + foliageTransmission)
         : saturate((ndotl * (1.0 - diffuseWrap)) + diffuseWrap);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;
@@ -1579,7 +1639,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // The wrap is a constant fill standing in for indirect bounce. Occlude
     // that fill separately from the cosine core so AO grounds contact regions
     // without darkening surfaces that receive direct sunlight.
-    const float directCore = ndotl * (foliageLighting ? 0.25 : (1.0 - diffuseWrap));
+    const float directCore = ndotl * (foliageLighting ? 0.45 : (1.0 - diffuseWrap));
     const float directFill = max(wrappedNdotL - directCore, 0.0);
     const float occludedWrap = directCore + (directFill * ambientOcclusion);
     const float3 direct = authoredInterior
@@ -1588,7 +1648,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
             (sunIntensity * occludedWrap * directShadowFactor *
              (interiorMode ? 0.24 : 0.95 * camera.importedExteriorConfig.z));
     float3 screenSpaceGi = (
-        (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u)
+        (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u &&
+        chunkPc.cascadeData.x <= 0.5)
         ? sampleImportedScreenSpaceGi(input.inScreenPosition.xy, viewDepth, normal) *
             camera.screenSpaceGiConfig.w
         : float3(0.0, 0.0, 0.0);
@@ -1664,7 +1725,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         // split-sum factor is a reflectance, and being handed irradiance instead
         // of radiance already carries the pi. See pbr.slang.
         const float ndotv = saturate(dot(normal, viewDir));
-        specular += pbrAmbientSpecular(
+        if (!authoredEnvironment) specular += pbrAmbientSpecular(
             surface,
             albedo,
             ((ambient * ambientOcclusion) + voxelGi),
@@ -1678,6 +1739,22 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // Emissive is added after the lighting sum, not folded into albedo: it is
     // radiance the surface produces, so it must not be scaled by incoming light
     // or by pbrDiffuseScale (a fully metallic emitter still glows).
+    specular *= authoredSpecularScale;
+    if (authoredEnvironment) {
+        const GpuImportedMaterial material = importedMaterials[input.lightingMaterial];
+        if (material.sourceFlags.z == 1u && (material.sourceFlags.x & 128u) != 0u &&
+            material.textures.z != kInvalidImportedTextureIndex && material.environment.x > 0.0) {
+            float mask = material.textures.w != kInvalidImportedTextureIndex
+                ? bindlessTextures[material.textures.w].Sample(input.inUv).r
+                : (material.textures.x != kInvalidImportedTextureIndex
+                    ? bindlessTextures[material.textures.x].Sample(input.inUv).a : 1.0);
+            const float3 reflected = reflect(-viewDir,normal);
+            // Engine coordinates are (Skyrim X, Skyrim Z, -Skyrim Y).
+            const float3 cubeDirection = float3(reflected.x,-reflected.z,reflected.y);
+            specular += bindlessCubes[NonUniformResourceIndex(material.textures.z)].SampleLevel(cubeDirection,
+                surface.roughness * material.environment.y).rgb * mask * material.environment.x * ambientOcclusion;
+        }
+    }
     float3 shaded =
         ((diffuseLight * albedo * pbrDiffuseScale(surface.metallic)) + specular +
          (float3(1.0, 0.98, 0.94) * (rim * rimWeight)) + materialEmissive);

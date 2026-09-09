@@ -14,6 +14,8 @@ namespace odai::bethesda {
 struct SkyrimQuestLogEntryDefinition {
     std::uint8_t flags = 0u;
     std::vector<Condition> conditions;
+    std::uint32_t textId = 0;
+    std::string text;
 };
 
 struct SkyrimQuestStageDefinition {
@@ -57,6 +59,8 @@ struct SkyrimQuestAliasDefinition {
 struct SkyrimQuestDefinition {
     RecordKey record;
     std::string editorId;
+    std::uint32_t titleId = 0;
+    std::string title;
     std::uint16_t questFlags = 0u;
     std::uint8_t priority = 0u;
     std::vector<SkyrimQuestStageDefinition> stages;

@@ -1,3 +1,4 @@
+#include "import/imported_lighting_material.h"
 // PBR material tests.
 //
 // Two things are under test here, and they are deliberately in one file because
@@ -216,7 +217,7 @@ void testMaterialIndexPacking() {
     // The layout is worth asserting on its own: the GPU record is memcpy'd into
     // a descriptor range and mirrored in the shader, so a size change silently
     // reinterprets the entire table.
-    check(sizeof(GpuImportedMaterial) == 32u, "GpuImportedMaterial is 32 bytes");
+    check(sizeof(GpuImportedMaterial) == 160u, "GpuImportedMaterial is 160 bytes");
     check(alignof(GpuImportedMaterial) == 16u, "GpuImportedMaterial is 16-byte aligned");
     // 52 through v19, 68 through v20, 72 through v24; v21 widened the terrain
     // layer texture indices and a packed weight word, v25 appended colorAlpha.
@@ -362,8 +363,47 @@ void testEnergyConservation() {
 
 }  // namespace
 
+void testAuthoredNifMaterials() {
+    using namespace odai::importer;
+    ImportedNifLightingMaterial source;
+    source.valid = 1;
+    source.flags1 = 1u | (1u << 22);
+    source.specular[0] = 0.25f;
+    source.specularStrength = 2;
+    source.emissive[1] = 0.5f;
+    source.emissiveMultiplier = 4;
+    source.glossiness = 0;
+    source.textures[1] = 1;
+    source.textures[2] = 99;
+    source.textures[4] = 0;
+    source.textures[5] = 1;
+    source.environmentScale = 0.75f;
+    const std::uint32_t slots[] = {17,42};
+    auto gpu = makeImportedNifGpuMaterial(source,slots);
+    check(gpu.textures[2] == 17 && gpu.textures[3] == 42 && gpu.environment[0] == 0.75f,
+          "cube, mask, and environment strength retain independent material roles");
+    checkNear(gpu.emissiveRoughness[3],1,1e-6,"zero gloss gives rough dielectric");
+    checkNear(gpu.emissiveRoughness[1],2,1e-6,"authored emission remains HDR");
+    checkNear(gpu.specularStrength[0],0.25,1e-6,"authored specular color retained");
+    checkNear(gpu.specularStrength[3],2,1e-6,"authored specular strength retained");
+    check(gpu.textures[0] == 42 && gpu.textures[1] == 0xffffffffu,"material texture residency remaps missing dependencies safely");
+    source.flags1 = 0;
+    source.glossiness = 510;
+    gpu = makeImportedNifGpuMaterial(source,slots);
+    checkNear(gpu.emissiveRoughness[3],0.25,1e-6,"authored gloss controls GGX roughness");
+    check(gpu.specularStrength[3] == 0 && gpu.emissiveRoughness[1] == 0,"disabled specular and non-emissive foliage stay disabled");
+    source.shaderType = 7;
+    check(makeImportedNifGpuMaterial(source,slots).sourceFlags[3] == 0,"unsupported shader families retain explicit fallback");
+    ImportedMaterialSlots pool;
+    const auto first = pool.acquire(), second = pool.acquire();
+    check(first >= 256 && first != second,"streamed material slots do not alias legacy library or other cells");
+    pool.release(first);
+    check(pool.acquire() == first && pool.acquire() != second,"evicted slot is reusable without changing live cell identity");
+}
+
 int main() {
     std::printf("PBR material tests\n\n");
+    testAuthoredNifMaterials();
     testMaterialPackRoundTrip();
     testMaterialIndexPacking();
     testBrdfReferenceValues();

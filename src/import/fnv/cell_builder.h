@@ -65,6 +65,14 @@ struct FalloutWorldTables {
     std::unordered_map<std::uint32_t, FalloutStaticRecord> treesByFormId;
     // LTEX formID -> diffuse texture path, already resolved through TXST.
     std::unordered_map<std::uint32_t, std::string> landTexturePaths;
+    std::unordered_map<std::uint32_t, std::array<std::string, 8>> textureSets;
+    std::unordered_map<std::uint32_t, std::uint16_t> textureSetFlags;
+    std::unordered_map<std::uint32_t, std::uint32_t> landTextureSetIds;
+    std::unordered_map<std::uint32_t, std::array<std::string, 8>> landTextureSlots;
+    std::unordered_map<std::uint32_t, std::uint16_t> landSurfaceProperties;
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> landGrass;
+    std::unordered_map<std::uint32_t, FalloutGrassRecord> grasses;
+    bool skyrim = false;
     // TES3 VTEX palette entries are scoped to the plugin that authored LAND.
     // Key: (source plugin index << 32) | stored LTEX index-plus-one.
     std::unordered_map<std::uint64_t, std::string> morrowindLandTexturePaths;
@@ -127,6 +135,11 @@ struct FalloutWorldTables {
     // the light it casts are both wanted.
     std::unordered_map<std::uint32_t, FalloutLightRecord> lightsByFormId;
 };
+
+// Stable per-cell scatter in Bethesda coordinates; no runtime object IDs.
+std::vector<FalloutPlacedReference> scatterSkyrimGrass(
+    const FalloutCellRecord& cell, const FalloutWorldTables& tables);
+bool grassWaterAllowed(const FalloutGrassRecord& grass, float heightAboveWater);
 
 // Current worldspace first, followed by its WNAM ancestors. The walk is
 // bounded and cycle-safe because malformed plugin chains must not hang startup.
@@ -252,6 +265,7 @@ struct CellBuildStats {
     std::size_t nifsParsed = 0;
     std::size_t extremeUvShapes = 0;
     std::size_t effectMeshesSkipped = 0;
+    std::size_t refractionShapesSkipped = 0;
     std::size_t particleEmittersPlaced = 0;
     // Animated banner meshes settled into a deterministic gravity rest pose
     // with Jolt before their vertices are packed into the scene cache.
@@ -267,6 +281,7 @@ struct CellBuildStats {
     // Cells that contributed a water surface. Zero across most of the Mojave
     // and nonzero along any coast, lake or river.
     std::size_t waterPatchesEmitted = 0;
+    std::size_t grassInstances = 0;
 
     // References that were placed in the cell and then drew nothing.
     //
@@ -339,7 +354,7 @@ public:
 
     // Resolves a texture path to a scene texture index, decoding and caching on
     // first use. Public because the LOD cooker needs the same behaviour.
-    std::uint32_t resolveTextureIndex(const std::string& texturePath, bool linearData = false);
+    std::uint32_t resolveTextureIndex(const std::string& texturePath, bool linearData = false, std::uint32_t clampMode = 3, bool cube = false);
 
     // Most-used BTXT base texture across `cells`, as a scene texture index, for
     // feeding back into setFallbackLandTexture(). Resolves (and so caches) the
@@ -403,6 +418,8 @@ public:
 private:
     void noteDroppedReference(std::uint32_t baseFormId, StaticDropReason reason);
     std::unordered_map<std::uint32_t, StaticDropReason> m_failedStatics;
+    std::unordered_set<std::uint32_t> m_checkedParticleModels;
+    std::unordered_map<std::uint32_t, NifMist> m_particleDefinitions;
 
 public:
     // Which base records produced no geometry, and why -- for diagnostics that

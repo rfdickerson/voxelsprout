@@ -61,6 +61,9 @@ bool readSkyrimQuest(
         const std::span<const std::uint8_t> bytes(subrecord.data, subrecord.size);
         if (subrecord.type == "EDID") {
             parsed.editorId = zstring(subrecord);
+        } else if (subrecord.type == "FULL") {
+            if (bytes.size() == 4) parsed.titleId = u32(bytes.data());
+            else parsed.title = zstring(subrecord);
         } else if (subrecord.type == "DNAM") {
             if (bytes.size() < 4u) {
                 outError = "QUST DNAM is shorter than 4 bytes";
@@ -93,8 +96,11 @@ bool readSkyrimQuest(
                 return false;
             }
             currentStage->logEntryFlags.push_back(bytes[0]);
-            currentStage->logEntries.push_back(SkyrimQuestLogEntryDefinition{bytes[0], {}});
+            currentStage->logEntries.push_back(SkyrimQuestLogEntryDefinition{bytes[0], {}, 0, {}});
             currentLogEntry = &currentStage->logEntries.back();
+        } else if (subrecord.type == "CNAM" && currentLogEntry != nullptr) {
+            if (bytes.size() == 4) currentLogEntry->textId = u32(bytes.data());
+            else currentLogEntry->text = zstring(subrecord);
         } else if (subrecord.type == "QOBJ") {
             if (bytes.size() < 2u) {
                 outError = "QUST QOBJ is shorter than 2 bytes";

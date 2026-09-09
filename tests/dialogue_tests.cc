@@ -256,9 +256,35 @@ void testCyclicAutoNextDoesNotHang() {
     expectTrue(runtime.isFinished(), "a cyclic autoNext chain is treated as a dead end, not a hang");
 }
 
+void testMovedOwnerPreservesConversation() {
+    DialogueTree tree;
+    tree.startNode = "greet";
+    DialogueNode greet;
+    greet.id = "greet";
+    DialogueChoice choice;
+    choice.targetNode = "reply";
+    greet.choices.push_back(choice);
+    DialogueNode reply;
+    reply.id = "reply";
+    tree.nodes.emplace("greet", greet);
+    tree.nodes.emplace("reply", reply);
+    MapDialogueContext context;
+    DialogueRuntime runtime;
+    runtime.begin(tree, context);
+    auto movedTree = std::move(tree);
+    MapDialogueContext movedContext = std::move(context);
+    runtime.rebindMovedOwner(movedTree, movedContext);
+    expectTrue(runtime.currentNode() == &movedTree.nodes.at("greet"),
+               "owner relocation preserves current dialogue node");
+    runtime.choose(*runtime.availableChoices().front());
+    expectTrue(runtime.currentNode() == &movedTree.nodes.at("reply"),
+               "dialogue continues through the relocated owner");
+}
+
 }  // namespace
 
 int main() {
+    testMovedOwnerPreservesConversation();
     testLoadsSimpleTree();
     testMalformedJsonRecordsError();
     testMissingNodesObjectRecordsError();

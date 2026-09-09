@@ -1,6 +1,8 @@
+import imported_material_table;
 import camera_uniform;
 import chunk_push_constants;
 import imported_vertex_pack;
+import imported_grass;
 
 struct VertexInput
 {
@@ -24,6 +26,11 @@ struct VertexInput
     // 32-bit invalid sentinel it always did.
     [[vk::location(6)]] uint4 inLayerTextures : TEXCOORD6;
     [[vk::location(7)]] uint inLayerWeights : TEXCOORD7;
+    [[vk::location(8)]] uint4 inTerrainNormals : TEXCOORD8;
+    [[vk::location(9)]] uint2 inTerrainNormal4 : TEXCOORD9;
+    [[vk::location(10)]] uint inLightingMaterial : TEXCOORD10;
+    [[vk::location(11)]] uint4 inTerrainSurface : TEXCOORD11;
+    [[vk::location(12)]] uint2 inTerrainSurface4 : TEXCOORD12;
 };
 
 struct VertexOutput
@@ -41,12 +48,18 @@ struct VertexOutput
     // has to vary across the surface for a layer to fade in rather than appear
     // in hard per-vertex blocks.
     float4 outLayerWeights : TEXCOORD7;
+    nointerpolation uint4 terrainNormals : TEXCOORD8;
+    nointerpolation uint terrainNormal4 : TEXCOORD9;
+    nointerpolation uint lightingMaterial : TEXCOORD10;
+    nointerpolation uint4 terrainSurface : TEXCOORD11;
+    nointerpolation uint terrainSurface4 : TEXCOORD12;
 };
 
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
-    float3 worldPosition = input.inPosition;
+    float3 worldPosition = fadeImportedGrass(input.inPosition, input.inFlags,
+        input.inLayerWeights, camera.shadowVoxelGridSize.xyz);
     float3 worldNormal = decodeImportedVertexNormal(input.inNormalOct);
     static const uint kFoliageWindFlag = 1u << 9u;
     if ((input.inFlags & kFoliageWindFlag) != 0u)
@@ -89,6 +102,25 @@ VertexOutput main(VertexInput input)
         float((input.inLayerWeights >> 8) & 0xffu) / 255.0,
         float((input.inLayerWeights >> 16) & 0xffu) / 255.0,
         float((input.inLayerWeights >> 24) & 0xffu) / 255.0);
+    output.terrainNormals = select(input.inTerrainNormals == uint4(0xffffu),
+        uint4(0xffffffffu), input.inTerrainNormals);
+    output.terrainNormal4 = input.inTerrainNormal4.x == 0xffffu
+        ? 0xffffffffu : input.inTerrainNormal4.x;
+    output.lightingMaterial = input.inLightingMaterial;
+    output.terrainSurface = input.inTerrainSurface;
+    output.terrainSurface4 = input.inTerrainSurface4.x;
+    if(input.inLightingMaterial != 0xffffffffu) {
+        const GpuImportedMaterial material=importedMaterials[input.inLightingMaterial];
+        if(material.animationState.y!=0) {
+            output.outUv=input.inUv*material.animationUv.zw+material.animationUv.xy;
+            output.outColor*=material.animationColor;
+            if(material.sourceFlags.z==0xffffffffu)
+                output.outLayerWeights.w=material.animationPalette.x;
+            // Animated effect tint is authored even when vertex RGB was absent.
+            output.outFlags |= 8u;
+            if(material.animationState.x!=0xffffffffu) output.outTextureIndex=material.animationState.x;
+        }
+    }
     float3 rasterPosition = worldPosition;
     // A camera mirrored across y=h is equivalent to reflecting every world
     // point across that plane and rendering it through the original camera.

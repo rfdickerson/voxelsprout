@@ -11,6 +11,46 @@
 
 namespace odai::render {
 
+inline float celestialNightVisibility(float sunElevationDegrees) {
+    const float t = std::clamp(-sunElevationDegrees / 6.0f, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+inline float authoredNightAmbientWeight(bool enabled, float lightingWeight,
+                                        float sunElevationDegrees) {
+    if (!enabled) return 0.0f;
+    const float t = std::clamp(1.0f - sunElevationDegrees / 6.0f, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t) * std::clamp(lightingWeight, 0.0f, 1.0f);
+}
+
+
+// Homogeneous clip-plane rejection stays valid for boxes crossing the eye.
+// Dividing by w and keeping every box with a behind-camera corner defeats
+// culling for whole cells behind the viewer.
+inline bool importedBoundsIntersectClip(const float low[3], const float high[3],
+                                       const math::Matrix4& matrix, float margin) {
+    for (int axis = 0; axis < 3; ++axis)
+        if (!std::isfinite(low[axis]) || !std::isfinite(high[axis]) || low[axis] > high[axis]) return true;
+    unsigned outsideAll = 63u;
+    for (unsigned corner = 0; corner < 8; ++corner) {
+        const auto clip = math::multiply(matrix, math::Vector4{
+            (corner & 1u) ? high[0] : low[0], (corner & 2u) ? high[1] : low[1],
+            (corner & 4u) ? high[2] : low[2], 1.0f});
+        if (!std::isfinite(clip.x) || !std::isfinite(clip.y) ||
+            !std::isfinite(clip.z) || !std::isfinite(clip.w)) return true;
+        const float slack = std::max(margin, 0.0f) * std::abs(clip.w);
+        unsigned outside = 0u;
+        if (clip.x < -clip.w - slack) outside |= 1u;
+        if (clip.x >  clip.w + slack) outside |= 2u;
+        if (clip.y < -clip.w - slack) outside |= 4u;
+        if (clip.y >  clip.w + slack) outside |= 8u;
+        if (clip.z < -slack) outside |= 16u;
+        if (clip.z > clip.w + slack) outside |= 32u;
+        outsideAll &= outside;
+    }
+    return outsideAll == 0u;
+}
+
 inline constexpr std::uint32_t screenSpaceGiQuarterExtent(std::uint32_t fullExtent) {
     return std::max(1u, (fullExtent + 3u) / 4u);
 }
@@ -67,6 +107,20 @@ inline CameraFrameDerived computeCameraFrame(const CameraPose& camera) {
         static_cast<int>(std::floor(camera.y / static_cast<float>(world::Chunk::kSizeY))),
         static_cast<int>(std::floor(camera.z / static_cast<float>(world::Chunk::kSizeZ)))
     };
+}
+
+inline math::Matrix4 computeCameraView(const CameraPose& camera) {
+    // Form the basis at the origin. Constructing target = eye + unitForward
+    // first rounds the direction at Skyrim's large world coordinates; lookAt
+    // then subtracts eye again and turns that rounding into camera rotation.
+    auto view = math::lookAt(math::Vector3{0, 0, 0},
+        computeCameraForward(camera.yawDegrees, camera.pitchDegrees),
+        math::Vector3{0, 1, 0});
+    for (int row = 0; row < 3; ++row) {
+        view(row, 3) = -(view(row, 0) * camera.x + view(row, 1) * camera.y +
+                         view(row, 2) * camera.z);
+    }
+    return view;
 }
 
 inline math::Vector3 computeSunDirection(float yawDegrees, float pitchDegrees) {

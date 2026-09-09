@@ -18,13 +18,16 @@ public:
     VkPipeline tonemapPipeline = VK_NULL_HANDLE;
     VkPipeline pipePipeline = VK_NULL_HANDLE;
     VkPipeline importedFireParticlePipeline = VK_NULL_HANDLE;
+    VkPipeline importedMistParticlePipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticPipeline = VK_NULL_HANDLE;
     // Same shaders as importedStaticPipeline, with alpha blending on and depth
     // writes off — used for the blended tail of each imported chunk's draws.
     VkPipeline importedStaticPipelineBlended = VK_NULL_HANDLE;
+    VkPipeline importedStaticPipelineAdditive = VK_NULL_HANDLE;
     // ...and the same again with back-face culling off, for draws whose source
     // marked them two-sided.
     VkPipeline importedStaticPipelineBlendedTwoSided = VK_NULL_HANDLE;
+    VkPipeline importedStaticPipelineAdditiveTwoSided = VK_NULL_HANDLE;
     // Opaque two-sided. A shape whose NiStencilProperty says DRAW_BOTH needs
     // culling off whether or not it is blended; only the blended half had a
     // variant, so opaque DRAW_BOTH geometry was back-face culled and went
@@ -182,6 +185,7 @@ public:
             vkDestroyPipeline(device, pipePipeline, nullptr);
             pipePipeline = VK_NULL_HANDLE;
         }
+        if(importedMistParticlePipeline!=VK_NULL_HANDLE){vkDestroyPipeline(device,importedMistParticlePipeline,nullptr);importedMistParticlePipeline=VK_NULL_HANDLE;}
         if (importedFireParticlePipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedFireParticlePipeline, nullptr);
             importedFireParticlePipeline = VK_NULL_HANDLE;
@@ -189,6 +193,10 @@ public:
         if (importedStaticPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipeline, nullptr);
             importedStaticPipeline = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipelineAdditive != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipelineAdditive, nullptr);
+            importedStaticPipelineAdditive = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineBlended != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlended, nullptr);
@@ -205,6 +213,10 @@ public:
         if (importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticDepthPrewritePipelineTwoSided, nullptr);
             importedStaticDepthPrewritePipelineTwoSided = VK_NULL_HANDLE;
+        }
+        if (importedStaticPipelineAdditiveTwoSided != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, importedStaticPipelineAdditiveTwoSided, nullptr);
+            importedStaticPipelineAdditiveTwoSided = VK_NULL_HANDLE;
         }
         if (importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) {
             vkDestroyPipeline(device, importedStaticPipelineBlendedTwoSided, nullptr);

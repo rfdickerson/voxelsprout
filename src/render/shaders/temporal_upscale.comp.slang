@@ -58,6 +58,7 @@ struct TemporalUpscaleUniform
     // projection, converted back), zw = input extent in pixels.
     float4 jitterAndInputExtent;
     float4 upscaleTuning;
+    float4 previousDepthProjection;
 };
 
 [[vk::binding(5, 0)]]
@@ -233,7 +234,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         // else. Preferring velocity is the whole reason it was built.
         float2 previousUv = float2(-1.0, -1.0);
         const float4 velocity = velocityTexture.SampleLevel(uv, 0.0);
-        if (velocity.z > 0.5)
+        if (upscale.upscaleTuning.w > 0.5 && velocity.z > 0.5)
         {
             // NDC delta -> UV delta. NDC spans 2 across the screen and UV spans
             // 1, so the factor is 0.5.

@@ -129,16 +129,25 @@ bool RendererBackend::buildImportedIndirectBatches(
     // threshold is a push constant, two-sidedness is the pipeline -- so both
     // have to be part of the grouping key.
     constexpr std::size_t kBucketCount = 512;
-    const auto bucketOf = [](const ImportedMeshDraw& draw) -> std::size_t {
-        return static_cast<std::size_t>(draw.alphaThreshold) | (draw.twoSided ? 256u : 0u);
+    struct FadeBucket { std::size_t base; std::array<float, 4> state; };
+    std::vector<FadeBucket> fades;
+    const auto bucketOf = [&](const ImportedMeshDraw& draw) -> std::size_t {
+        const std::size_t base = static_cast<std::size_t>(draw.alphaThreshold) | (draw.twoSided ? 256u : 0u);
+        if (draw.lodTransition[1] == 0.0f) return base;
+        for (std::size_t i = 0; i < fades.size(); ++i)
+            if (fades[i].base == base && fades[i].state == draw.lodTransition) return kBucketCount + i;
+        fades.push_back({base, draw.lodTransition});
+        return kBucketCount + fades.size() - 1;
     };
-    std::array<std::uint32_t, kBucketCount> countPerThreshold{};
+    std::vector<std::uint32_t> countPerThreshold(kBucketCount);
     std::size_t totalIncluded = 0;
     for (std::size_t i = 0; i < draws.size(); ++i) {
         if (draws[i].blended || draws[i].rigidAnimationIndex != 0xffffffffu || !include(i)) {
             continue;
         }
-        ++countPerThreshold[bucketOf(draws[i])];
+        const auto bucket = bucketOf(draws[i]);
+        if (bucket >= countPerThreshold.size()) countPerThreshold.resize(bucket + 1);
+        ++countPerThreshold[bucket];
         ++totalIncluded;
     }
     if (totalIncluded == 0) {
@@ -147,7 +156,7 @@ bool RendererBackend::buildImportedIndirectBatches(
 
     // Lay the groups out contiguously, then fill them by walking the draws once
     // more and writing each into its group's cursor.
-    std::array<std::uint32_t, kBucketCount> groupStart{};
+    std::vector<std::uint32_t> groupStart(countPerThreshold.size());
     std::uint32_t cursor = 0;
     for (std::size_t threshold = 0; threshold < countPerThreshold.size(); ++threshold) {
         if (countPerThreshold[threshold] == 0u) {
@@ -156,19 +165,21 @@ bool RendererBackend::buildImportedIndirectBatches(
         groupStart[threshold] = cursor;
         ImportedIndirectBatch batch{};
         batch.drawCount = countPerThreshold[threshold];
-        batch.alphaThreshold = static_cast<std::uint8_t>(threshold & 0xffu);
-        batch.twoSided = (threshold & 256u) != 0u;
+        batch.bucket = threshold;
+        const auto base = threshold < kBucketCount ? threshold : fades[threshold - kBucketCount].base;
+        if (threshold >= kBucketCount) batch.lodTransition = fades[threshold - kBucketCount].state;
+        batch.alphaThreshold = static_cast<std::uint8_t>(base & 0xffu);
+        batch.twoSided = (base & 256u) != 0u;
         batch.bufferOffset = static_cast<VkDeviceSize>(cursor) * sizeof(VkDrawIndexedIndirectCommand);
         m_importedIndirectBatches.push_back(batch);
         cursor += countPerThreshold[threshold];
     }
 
     m_importedIndirectScratch.resize(totalIncluded);
-    std::array<std::uint32_t, kBucketCount> writeCursor = groupStart;
+    auto writeCursor = groupStart;
     // Per group, the command written most recently, so an incoming draw can be
     // MERGED into it instead of becoming its own command.
-    std::array<std::uint32_t, kBucketCount> lastWritten{};
-    lastWritten.fill(kNoCommand);
+    std::vector<std::uint32_t> lastWritten(countPerThreshold.size(), kNoCommand);
 
     for (std::size_t i = 0; i < draws.size(); ++i) {
         if (draws[i].blended || draws[i].rigidAnimationIndex != 0xffffffffu || !include(i)) {
@@ -216,8 +227,7 @@ bool RendererBackend::buildImportedIndirectBatches(
     // offset and count to what was actually written.
     std::uint32_t compactCursor = 0;
     for (ImportedIndirectBatch& batch : m_importedIndirectBatches) {
-        const std::size_t bucket =
-            static_cast<std::size_t>(batch.alphaThreshold) | (batch.twoSided ? 256u : 0u);
+        const std::size_t bucket = batch.bucket;
         const std::uint32_t written = writeCursor[bucket] - groupStart[bucket];
         for (std::uint32_t k = 0; k < written; ++k) {
             m_importedIndirectScratch[compactCursor + k] =

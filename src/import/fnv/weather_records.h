@@ -21,6 +21,7 @@
 #include "import/fnv/plugin_load_order.h"
 
 namespace odai::importer::fnv {
+struct EsmRecordView;
 
 // FNV weather colors are authored per time of day. Fallout 3 had four slots;
 // New Vegas added noon and midnight, which is why NAM0 is 240 bytes (10 color
@@ -203,8 +204,27 @@ struct FalloutWeatherRecord {
     // Bit flags: 1 = pleasant, 2 = cloudy, 4 = rainy, 8 = snow.
     std::uint8_t classification = 0;
 
+    std::uint32_t precipitationFormId = 0, visualEffectFormId = 0;
+    std::vector<std::uint32_t> skyStatics;
+    std::string auroraModel;
+    std::uint8_t precipitationBegin = 0, precipitationEnd = 0;
+    std::uint8_t windDirection = 0, windDirectionRange = 0;
+    float fogDayMax = 1, fogNightMax = 1;
+
     [[nodiscard]] bool hasPrecipitation() const { return (classification & 0x0Cu) != 0u; }
 };
+
+// Skyrim SPGD. Values remain in authored units; the current screen-space rain
+// fallback consumes density/type only. Texture and geometry await particle support.
+struct WeatherPrecipitationRecord {
+    std::uint32_t formId = 0;
+    std::string editorId, texture;
+    float gravityVelocity = 0, rotationVelocity = 0;
+    float sizeX = 0, sizeY = 0, centerMin = 0, centerMax = 0, rotationRange = 0;
+    std::uint32_t subtexturesX = 1, subtexturesY = 1, type = 0, boxSize = 0;
+    float density = 1;
+};
+bool parseWeatherPrecipitation(const EsmRecordView&, WeatherPrecipitationRecord&, std::string&);
 
 // CLMT: which weathers a region may run, and when the sun moves.
 struct FalloutClimateWeatherEntry {
@@ -227,9 +247,13 @@ struct FalloutClimateRecord {
 
 // Everything a load order says about weather, already merged.
 struct FalloutWeatherTables {
+    // Skyrim GMST iMasserSize/iSecundaSize, in authored units.
+    float moonSizes[2] = {90.0f, 40.0f};
     // By remapped formID. A later plugin's record with the same ID replaces the
     // earlier one, which is exactly how an override plugin is meant to work.
     std::unordered_map<std::uint32_t, FalloutWeatherRecord> weathers;
+    std::unordered_map<std::uint32_t, WeatherPrecipitationRecord> precipitation;
+    std::vector<std::string> presentationDiagnostics;
     std::unordered_map<std::uint32_t, FalloutClimateRecord> climates;
     // WRLD -> its CNAM climate, so a worldspace can name the weathers it runs.
     std::unordered_map<std::uint32_t, std::uint32_t> climateByWorldspaceFormId;
@@ -252,10 +276,14 @@ struct FalloutWeatherTables {
     [[nodiscard]] const FalloutWeatherRecord* findWeatherByEditorId(const std::string& editorId) const;
 };
 
-// Walks every plugin in `order`, extracting WTHR/CLMT records and each WRLD's
+// Rain-only fallback. A present but unresolved SPGD never becomes guessed rain.
+float weatherRainIntensity(const FalloutWeatherTables&, const FalloutWeatherRecord&, bool skyrim);
+float sampleWeatherFogFar(const FalloutWeatherRecord&, float hour, float dawn, float dusk);
+
+// Walks every plugin in `order`, extracting WTHR/CLMT/SPGD records and each WRLD's
 // climate assignment, remapping formIDs as it goes.
 //
-// Only the top-level WTHR/CLMT/WRLD groups are entered; the world-children
+// Only the top-level WTHR/CLMT/WRLD/SPGD groups are entered; the world-children
 // groups that hold nearly all of FalloutNV.esm's 234 MB are skipped without
 // being read, so this costs a group-header walk rather than a file read.
 bool buildFalloutWeatherTables(

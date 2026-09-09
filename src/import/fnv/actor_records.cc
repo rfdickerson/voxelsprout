@@ -1,4 +1,5 @@
 #include "import/fnv/actor_records.h"
+#include <limits>
 
 #include "import/fnv/esm_reader.h"
 
@@ -579,6 +580,43 @@ const FalloutActorBase* FalloutActorScan::inheritedFrom(
     return current;
 }
 
+std::map<std::uint32_t, std::int32_t> FalloutActorScan::materializeInventoryStacks(
+    std::uint32_t baseFormId, std::uint32_t seed) const {
+    const auto* source = inheritedFrom(baseFormId, kActorTemplateUseInventory);
+    if (source == nullptr) return {};
+    auto pending = source->inventoryStacks;
+    if (pending.empty()) {
+        for (auto item : source->inventoryFormIds) pending.emplace_back(item, 1);
+    }
+    std::map<std::uint32_t, std::int32_t> result;
+    std::uint32_t expansions = 0u;
+    for (std::size_t cursor = 0u; cursor < pending.size() && cursor < 256u; ++cursor) {
+        const auto [item, count] = pending[cursor];
+        if (item == 0u || count <= 0) continue;
+        const auto list = leveledItems.find(item);
+        if (list == leveledItems.end()) {
+            result[item] = static_cast<std::int32_t>(std::min<std::int64_t>(
+                static_cast<std::int64_t>(result[item]) + count,
+                std::numeric_limits<std::int32_t>::max()));
+            continue;
+        }
+        ++expansions;
+        if (list->second.empty()) continue;
+        const auto all = leveledItemUseAll.find(item);
+        if (all != leveledItemUseAll.end() && all->second) {
+            for (auto child : list->second) {
+                if (pending.size() >= 256u) break;
+                pending.emplace_back(child, count);
+            }
+        } else if (pending.size() < 256u) {
+            std::uint32_t choice = seed ^ item ^ (expansions * 0x9e3779b9u);
+            choice ^= choice << 13u; choice ^= choice >> 17u; choice ^= choice << 5u;
+            pending.emplace_back(list->second[choice % list->second.size()], count);
+        }
+    }
+    return result;
+}
+
 std::vector<std::uint32_t> FalloutActorScan::materializeInventory(
     std::uint32_t baseFormId,
     std::uint32_t seed) const {
@@ -655,6 +693,7 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
         base.raceFormId = remap(base.raceFormId);
         base.voiceTypeFormId = remap(base.voiceTypeFormId);
         base.defaultOutfitFormId = remap(base.defaultOutfitFormId);
+        for (auto& [item, count] : base.inventoryStacks) { (void)count; item = remap(item); }
         for (std::uint32_t& item : base.inventoryFormIds) {
             item = remap(item);
         }
@@ -967,6 +1006,8 @@ bool findActorsNear(
                     base.voiceTypeFormId = readU32(sub);
                 } else if (sub.type == "CNTO" && sub.size >= 4u) {
                     base.inventoryFormIds.push_back(readU32(sub));
+                    const auto count = sub.size >= 8u ? static_cast<std::int32_t>(readU32(sub, 4u)) : 1;
+                    if (count > 0) base.inventoryStacks.emplace_back(readU32(sub), count);
                 } else if (sub.type == "DOFT" && sub.size >= 4u) {
                     base.defaultOutfitFormId = readU32(sub);
                 } else if (sub.type == "ACBS" && sub.size >= 4u) {

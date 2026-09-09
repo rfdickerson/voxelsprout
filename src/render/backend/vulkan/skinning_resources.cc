@@ -399,7 +399,8 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             // VUID-VkBufferDeviceAddressInfo-buffer-02601 and the address that
             // comes back does not point at the buffer, so the compute pass reads
             // garbage and the whole frame renders black.
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
             "skinned mesh rest-pose vertex",
             newRestPoseHandle)) {
         return false;
@@ -636,7 +637,7 @@ std::vector<std::uint32_t> RendererBackend::uploadSkinnedActorTextures(
             continue;
         }
         slots[i] = acquireImportedTexture(
-            normalizedImportedTextureKey(texture.sourcePath, texture.format), texture, commandBuffer,
+            normalizedImportedTextureKey(texture.sourcePath, texture.format, texture.linearData, texture.clampMode, texture.arrayLayers), texture, commandBuffer,
             stagingBufferHandles);
         if (slots[i] != kInvalidImportedTextureSlot) {
             slot.textureSlots.push_back(slots[i]);

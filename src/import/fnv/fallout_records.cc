@@ -376,6 +376,8 @@ void parseWorldspaceRecord(const EsmRecordView& record, FalloutSceneData& scene)
             entry.waterFormId = readU32(sub.data);
         } else if (sub.type == "PNAM" && sub.size >= 1u) {
             entry.parentFlags = sub.data[0];
+        } else if (sub.type == "DATA" && sub.size >= 1u) {
+            entry.noGrass = (sub.data[0] & 0x80u) != 0u;
         }
     }
     scene.worldspaces.push_back(std::move(entry));
@@ -797,12 +799,21 @@ void decodeLandColors(const std::uint8_t* vclrData, FalloutLandRecord& land) {
 // TXST holds a texture set; TX00 is its diffuse slot. Collected separately
 // because an LTEX only names the TXST by formID, and the TXST may appear
 // either before or after it in the file.
-void parseTextureSetRecord(const EsmRecordView& record, std::unordered_map<std::uint32_t, std::string>& outPaths) {
+void parseTextureSetRecord(const EsmRecordView& record,
+    std::unordered_map<std::uint32_t, std::array<std::string, 8>>& outPaths,
+    std::unordered_map<std::uint32_t, std::uint16_t>& outFlags) {
+    auto& paths=outPaths[record.formId];
+    outFlags[record.formId] = 0;
+    // Records replace whole texture sets; omitted slots do not inherit from
+    // an earlier occurrence (including an earlier record in the same file).
+    paths = {};
+    if ((record.flags & 0x20u)!=0u) { paths={}; return; }
     for (const EsmSubrecordView& sub : record.subrecords) {
-        if (sub.type == "TX00" && sub.size > 0u) {
-            outPaths[record.formId] = subrecordString(sub);
-            return;
-        }
+        if (sub.type.size()==4 && sub.type.substr(0,3)=="TX0" &&
+            sub.type[3]>='0' && sub.type[3]<='7' && sub.size>0u)
+            paths[sub.type[3]-'0']=subrecordString(sub);
+        if (sub.type == "DNAM" && sub.size == 2u)
+            outFlags[record.formId] = std::uint16_t(sub.data[0]) | (std::uint16_t(sub.data[1]) << 8u);
     }
 }
 
@@ -826,17 +837,49 @@ constexpr std::string_view kOblivionLandTextureFolder = "landscape\\";
 void parseLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
     FalloutLandTextureRecord landTexture{};
     landTexture.formId = record.formId;
+    landTexture.deleted = (record.flags & 0x20u) != 0u;
     for (const EsmSubrecordView& sub : record.subrecords) {
         if (sub.type == "EDID") {
             landTexture.editorId = subrecordString(sub);
         } else if (sub.type == "TNAM" && sub.size >= 4u) {
             landTexture.textureSetFormId = readU32(sub.data);
+        } else if (sub.type == "SNAM" && sub.size == 1u) {
+            landTexture.specularExponent = sub.data[0];
+            landTexture.hasSpecularExponent = true;
+        } else if (sub.type == "GNAM" && sub.size == 4u) {
+            landTexture.grassFormIds.push_back(readU32(sub.data));
         } else if (sub.type == "ICON" && sub.size > 0u) {
             landTexture.diffuseTexturePath =
                 std::string(kOblivionLandTextureFolder) + subrecordString(sub);
         }
     }
     outScene.landTextures.push_back(std::move(landTexture));
+}
+
+// TES5 GRAS DATA, as defined by xEdit's wbDefinitionsTES5.pas (32 bytes).
+void parseGrassRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutGrassRecord grass{};
+    grass.formId = record.formId;
+    grass.deleted = (record.flags & 0x20u) != 0u;
+    for (const auto& sub : record.subrecords) {
+        if (sub.type == "MODL") grass.modelPath = subrecordString(sub);
+        if (sub.type != "DATA" || sub.size < 32u) continue;
+        grass.density = std::min<std::uint8_t>(sub.data[0], 100u);
+        grass.minSlope = sub.data[1];
+        grass.maxSlope = sub.data[2];
+        grass.waterDistance = std::uint16_t(sub.data[4]) | (std::uint16_t(sub.data[5]) << 8u);
+        grass.waterMode = readU32(sub.data + 8);
+        grass.positionRange = readF32(sub.data + 12);
+        grass.heightRange = readF32(sub.data + 16);
+        grass.colorRange = readF32(sub.data + 20);
+        grass.wavePeriod = readF32(sub.data + 24);
+        grass.flags = sub.data[28];
+        grass.valid = grass.minSlope <= grass.maxSlope && grass.maxSlope <= 90 &&
+            grass.waterMode <= 7 && std::isfinite(grass.positionRange) &&
+            std::isfinite(grass.heightRange) && std::isfinite(grass.colorRange) &&
+            std::isfinite(grass.wavePeriod);
+    }
+    scene.grasses.push_back(std::move(grass));
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,6 +1843,23 @@ bool initialReferenceEnabled(const FalloutCellIndex& index, std::uint32_t refere
     return false;
 }
 
+bool extractFalloutLandscapeAt(EsmReader& reader, const FalloutCellIndexEntry& entry,
+                              FalloutCellRecord& outCell, std::string& outError) {
+    outCell = {};
+    if (reader.pluginFormat() == EsmPluginFormat::kMorrowind) {
+        // World maps currently use TES4+ cells; preserve the TES3 sibling path.
+        return extractMorrowindCellAt(reader, entry, outCell, outError);
+    }
+    if (!entry.childrenGroupSize) return true;
+    EsmReader::Visitor visitor;
+    visitor.onRecordHeader = [](const EsmRecordHeaderView& record) { return record.type == "LAND"; };
+    visitor.onRecord = [&](const EsmRecordView& record) { parseLandRecord(record, &outCell); };
+    if (!reader.walkRange(entry.childrenGroupOffset, entry.childrenGroupOffset + entry.childrenGroupSize, visitor)) {
+        outError = reader.lastError(); return false;
+    }
+    return true;
+}
+
 bool extractFalloutCellAt(
     EsmReader& reader,
     const FalloutCellIndexEntry& entry,
@@ -1912,7 +1972,7 @@ bool extractFalloutScene(
 
     // TXST diffuse paths, resolved into landTextures after the walk since an
     // LTEX may be parsed before the TXST it names.
-    std::unordered_map<std::uint32_t, std::string> textureSetPaths;
+    auto& textureSetPaths = outScene.textureSets;
 
     std::vector<std::uint32_t> worldspaceStack;
     // Index (not formID) into outScene.cells, re-resolved to a pointer on
@@ -1969,7 +2029,7 @@ bool extractFalloutScene(
                 group.rawLabel != "CELL" && group.rawLabel != "LTEX" &&
                 group.rawLabel != "TXST" && group.rawLabel != "REGN" &&
                 group.rawLabel != "SOUN" && group.rawLabel != "SNDR" &&
-                group.rawLabel != "SOPM" && group.rawLabel != "WATR") {
+                group.rawLabel != "SOPM" && group.rawLabel != "WATR" && group.rawLabel != "GRAS") {
                 return false;
             }
         }
@@ -2018,8 +2078,10 @@ bool extractFalloutScene(
             parseSoundOutputModelRecord(record, outScene);
         } else if (record.type == "LTEX") {
             parseLandTextureRecord(record, outScene);
+        } else if (record.type == "GRAS") {
+            parseGrassRecord(record, outScene);
         } else if (record.type == "TXST") {
-            parseTextureSetRecord(record, textureSetPaths);
+            parseTextureSetRecord(record, textureSetPaths, outScene.textureSetFlags);
         } else if (record.type == "WATR") {
             parseWaterRecord(record, outScene);
         } else if (record.type == "WRLD") {
@@ -2047,12 +2109,19 @@ bool extractFalloutScene(
     // Only fills a path that is still empty, so an Oblivion LTEX's own ICON is
     // not clobbered by a coincidental TXST match on formID 0.
     for (FalloutLandTextureRecord& landTexture : outScene.landTextures) {
+        if (landTexture.deleted) {
+            landTexture.texturePaths = {};
+            landTexture.diffuseTexturePath.clear();
+            continue;
+        }
         if (!landTexture.diffuseTexturePath.empty()) {
             continue;
         }
+        if (landTexture.textureSetFormId == 0u) continue;
         const auto it = textureSetPaths.find(landTexture.textureSetFormId);
         if (it != textureSetPaths.end()) {
-            landTexture.diffuseTexturePath = it->second;
+            landTexture.texturePaths = it->second;
+            landTexture.diffuseTexturePath = it->second[0];
         }
     }
     return true;

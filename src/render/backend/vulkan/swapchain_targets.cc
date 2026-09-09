@@ -735,10 +735,16 @@ bool RendererBackend::createHdrResolveTargets() {
     m_waterRefractionImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
     m_waterRefractionTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
     m_waterRefractionImageInitialized.assign(frameTargetCount, false);
+    const char* reflectionScaleEnv = std::getenv("ODAI_WATER_REFLECTION_DIVISOR");
+    const uint32_t reflectionDivisor = reflectionScaleEnv
+        ? static_cast<uint32_t>(std::clamp(std::atoi(reflectionScaleEnv), 1, 4)) : 2u;
     m_waterReflectionExtent = {
-        std::max(1u, (m_renderExtent.width + 1u) / 2u),
-        std::max(1u, (m_renderExtent.height + 1u) / 2u),
+        std::max(1u, (m_renderExtent.width + reflectionDivisor - 1u) / reflectionDivisor),
+        std::max(1u, (m_renderExtent.height + reflectionDivisor - 1u) / reflectionDivisor),
     };
+    VOX_LOGI("render") << "planar reflection target " << m_waterReflectionExtent.width
+                       << "x" << m_waterReflectionExtent.height
+                       << " (scene remains " << m_renderExtent.width << "x" << m_renderExtent.height << ")";
     m_waterReflectionImages.assign(frameTargetCount, VK_NULL_HANDLE);
     m_waterReflectionImageViews.assign(frameTargetCount, VK_NULL_HANDLE);
     m_waterReflectionTransientHandles.assign(frameTargetCount, kInvalidTransientImageHandle);
@@ -989,7 +995,7 @@ bool RendererBackend::createHdrResolveTargets() {
 
 bool RendererBackend::createWaterReflectionHistoryTargets() {
     destroyWaterReflectionHistoryTargets();
-    if (m_renderExtent.width == 0u || m_renderExtent.height == 0u) {
+    if (m_waterReflectionExtent.width == 0u || m_waterReflectionExtent.height == 0u) {
         return false;
     }
 
@@ -998,7 +1004,7 @@ bool RendererBackend::createWaterReflectionHistoryTargets() {
         colorDesc.imageType = VK_IMAGE_TYPE_2D;
         colorDesc.viewType = VK_IMAGE_VIEW_TYPE_2D;
         colorDesc.format = m_hdrColorFormat;
-        colorDesc.extent = {m_renderExtent.width, m_renderExtent.height, 1u};
+        colorDesc.extent = {m_waterReflectionExtent.width, m_waterReflectionExtent.height, 1u};
         colorDesc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         colorDesc.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         colorDesc.mipLevels = 1;

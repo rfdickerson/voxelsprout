@@ -156,6 +156,19 @@ float3 viewPositionFromUv(float2 uv, float viewDepth)
     return float3((ndcXY.x / projX) * depthScale, (ndcXY.y / projY) * depthScale, -viewDepth);
 }
 
+// Reconstruct at the texel actually fetched. Combining a nearest depth with
+// the unsnapped march UV fabricates height on sloping ground; coarse mips make
+// that error large enough to look like a shadow along road overlays.
+float3 sampleHorizonPosition(int mip, float2 uv)
+{
+    uint width, height;
+    depthPyramid[mip].GetDimensions(width, height);
+    const int2 pixel = clamp(int2(floor(uv * float2(width, height))),
+                             int2(0), int2(width, height) - 1);
+    const float depth = depthPyramid[mip].Load(int3(pixel, 0));
+    return viewPositionFromUv((float2(pixel) + 0.5) / float2(width, height), depth);
+}
+
 // Rotation taking `from` to `to`, both unit. Used to lift the slice-local bent
 // normal back into view space.
 float3x3 rotFromTo(float3 from, float3 to)
@@ -229,8 +242,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     }
 
     const float3 viewNormal = decodeViewNormal(centerSample.xyz);
-    const float3 centerPos = viewPositionFromUv(uv, centerDepth);
-    const float3 viewVec = normalize(-centerPos);
+    const float3 surfacePos = viewPositionFromUv(uv, centerDepth);
+    const float3 viewVec = normalize(-surfacePos);
+    // The prepass stores linear depth in FP16. Quantization and nearly coplanar
+    // road overlays otherwise put samples just above their own tangent plane,
+    // creating false contact shadows. Lift the ray origin by one half-precision
+    // relative rounding interval, capped relative to the AO radius so genuine
+    // foundation/rock contacts remain. Apply to both coarse and fine horizons.
+    const float surfaceBias = min(0.25 + centerDepth * 0.0005,
+                                  max(pushConstants.effectRadius, 1e-4) * 0.02);
+    const float3 centerPos = surfacePos + viewNormal * surfaceBias;
 
     // Neighbour depths come from pyramid MIP0 rather than the normal-depth
     // texture: it is the same values, already point-sampled, and the four taps
@@ -361,11 +382,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             // Uniform across the wave in practice (neighbouring pixels take the
             // same step), so this indexes without divergence.
             const int mipIndex = int(mipLevel);
-            const float depth0 = depthPyramid[mipIndex].SampleLevel(saturate(uv0), 0.0);
-            const float depth1 = depthPyramid[mipIndex].SampleLevel(saturate(uv1), 0.0);
-
-            const float3 samplePos0 = viewPositionFromUv(uv0, depth0);
-            const float3 samplePos1 = viewPositionFromUv(uv1, depth1);
+            const float3 samplePos0 = sampleHorizonPosition(mipIndex, uv0);
+            const float3 samplePos1 = sampleHorizonPosition(mipIndex, uv1);
             const float3 sampleDelta0 = samplePos0 - centerPos;
             const float3 sampleDelta1 = samplePos1 - centerPos;
             const float sampleDist0 = max(length(sampleDelta0), 1e-5);
@@ -406,10 +424,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                     0.0, kDepthMipLevels - 1.0));
                 const float2 fineUv0 = uv + fineOffset;
                 const float2 fineUv1 = uv - fineOffset;
-                const float fineDepth0 = depthPyramid[fineMipIndex].SampleLevel(saturate(fineUv0), 0.0);
-                const float fineDepth1 = depthPyramid[fineMipIndex].SampleLevel(saturate(fineUv1), 0.0);
-                const float3 fineDelta0 = viewPositionFromUv(fineUv0, fineDepth0) - centerPos;
-                const float3 fineDelta1 = viewPositionFromUv(fineUv1, fineDepth1) - centerPos;
+                const float3 fineDelta0 = sampleHorizonPosition(fineMipIndex, fineUv0) - centerPos;
+                const float3 fineDelta1 = sampleHorizonPosition(fineMipIndex, fineUv1) - centerPos;
                 const float fineDist0 = max(length(fineDelta0), 1e-5);
                 const float fineDist1 = max(length(fineDelta1), 1e-5);
                 const float fineWeight0 = saturate((fineDist0 * fineFalloffMul) + fineFalloffAdd);

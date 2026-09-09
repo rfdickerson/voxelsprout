@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <iterator>
 #include <mutex>
+#include <map>
 #include <system_error>
 #include <utility>
 
@@ -219,7 +220,23 @@ std::string toLowerAscii(std::string value) {
 // 80: Solitude's hinged shop signs use a wall-adjacent static rest pose.
 // 81: Angeline's paired façade lantern follows the corrected sign placement.
 // 82: remove placement offsets and replace Skyrim NIF root-node transforms.
-constexpr int kCellBuildVersion = 88;
+// 89: authored Skyrim LTEX/GRAS ground cover, owned by streamed cells.
+// 90: Preserve normals for height-only grass scaling.
+// 91: Authored lighting UV transforms and per-shape normal map identity.
+// 92: Apply lighting material opacity independently of vertex-alpha enable.
+// 99: canonical base loose-file lookup can resolve previously missed assets.
+// 100: respect BSLightingShaderProperty's independent vertex-RGB enable flag.
+// 101: LTEX/TXST overrides clear removed and unresolved texture channels.
+// 102: typed material animation tracks and unbaked animated UV/opacity.
+// 103: admit supported animated effect geometry through the cell filter.
+// 104: Skyrim uses authored LIGH emitters only; discard synthetic fire lights.
+// 105: preserve authored additive blending for NIF light shafts.
+// 108: terrain surface properties, HDR cubes, animated normal/glow frames,
+// and capability-based authored particle admission.
+// 109: preserve emitter initial color and optional particle modifier defaults.
+// 110: never shade scene-refraction normal maps as visible albedo.
+// 111: limit neutral refraction fallback to alpha-blended distortion surfaces.
+constexpr int kCellBuildVersion = 111;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -360,6 +377,7 @@ struct CellStreamer::Pending {
     struct Result {
         CellCoord cell;
         ImportedScene scene;
+        std::shared_ptr<PreparedCellData> prepared;
         std::vector<FalloutNavMeshRecord> navMeshes;
         std::vector<FalloutSoundEmitterRecord> soundEmitters;
         bool succeeded = false;
@@ -873,7 +891,8 @@ void CellStreamer::update(
         }
         DecodedTextureCache* textureCache = &m_textureCache;
         const std::uint32_t maxTextureSize = m_maxTextureSize;
-        m_jobs->enqueue([pending, esmPath, entry, cell, assets, tables, cachePath, textureCache,
+        const CellPreparation prepareCell = m_prepareCell;
+        m_jobs->enqueue([prepareCell, pending, esmPath, entry, cell, assets, tables, cachePath, textureCache,
                          maxTextureSize, cellIndex, loadOrder]() {
             const core::Stopwatch buildTimer;
             Pending::Result result;
@@ -926,6 +945,11 @@ void CellStreamer::update(
                         // fix having regressed, twenty minutes after it
                         // demonstrably worked.
                         result.waterPatches = result.scene.waterPatches.size();
+                        if (prepareCell) {
+                            result.prepared = prepareCell(result.scene, result.error);
+                            result.succeeded = result.prepared != nullptr;
+                            result.buildMs = buildTimer.elapsedMs();
+                        }
                         std::lock_guard<std::mutex> lock(pending->mutex);
                         pending->completed.push_back(std::move(result));
                         if (pending->inFlight > 0u) {
@@ -982,6 +1006,10 @@ void CellStreamer::update(
                             result.cacheWriteFailed = true;
                         }
                     }
+            }
+            if (result.succeeded && prepareCell) {
+                result.prepared = prepareCell(result.scene, result.error);
+                result.succeeded = result.prepared != nullptr;
             }
             result.buildMs = buildTimer.elapsedMs();
 
@@ -1074,6 +1102,9 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         }
         if (result.scene.packedIndices.empty()) {
             ++m_stats.emptyScenes;
+            if (m_publishPreparedCell && result.prepared) {
+                m_publishPreparedCell(result.cell, std::move(result.prepared));
+            }
             if (m_onCellResident) {
                 m_onCellResident(result.cell, result.scene, result.navMeshes);
             }
@@ -1106,6 +1137,9 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
             ++m_stats.loadFailures;
             m_planner.markEvicted(result.cell);
             continue;
+        }
+        if (m_publishPreparedCell && result.prepared) {
+            m_publishPreparedCell(result.cell, std::move(result.prepared));
         }
         m_residentChunks.emplace(result.cell, chunkIndex);
         ++m_stats.scenesLoaded;
@@ -1500,6 +1534,86 @@ bool CellStreamer::buildWaterGuardScene(
         outError = "water guard found no authored wet cells in " +
             std::to_string(extractedCells) + " candidates";
         return false;
+    }
+    return true;
+}
+
+bool CellStreamer::advanceWorldMapTerrain(WorldMapTerrain& terrain, std::string& error) const {
+    constexpr int samples = 8;
+    if (terrain.complete) return true;
+    const auto cachePath = m_resolvedCacheDirectory / "world-map-v1.bin";
+    if (terrain.cells.empty()) {
+        terrain.started = std::chrono::steady_clock::now();
+        if (!m_resolvedCacheDirectory.empty() && loadWorldMapRaster(cachePath, terrain)) {
+            terrain.complete = true;
+            VOX_LOGI("map") << "loaded cached landscape in " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - terrain.started).count() << " ms: " << cachePath.string();
+            return true;
+        }
+        int maxX = -100000, maxY = -100000;
+        terrain.minX = terrain.minY = 100000;
+        for (const auto& [cell, index] : m_availableCells) {
+            (void)index;
+            if (cell == persistentExteriorCellCoord()) continue;
+            terrain.cells.push_back(cell);
+            terrain.minX = std::min(terrain.minX, cell.x);
+            terrain.minY = std::min(terrain.minY, cell.z);
+            maxX = std::max(maxX, cell.x); maxY = std::max(maxY, cell.z);
+        }
+        terrain.cellsX = maxX - terrain.minX + 1; terrain.cellsY = maxY - terrain.minY + 1;
+        if (terrain.cells.empty() || terrain.cellsX > 256 || terrain.cellsY > 256) {
+            error = "World map landscape bounds are empty or exceed 256 cells.";
+            terrain.complete = true;
+            return false;
+        }
+        terrain.width = terrain.cellsX * samples; terrain.height = terrain.cellsY * samples;
+        terrain.heights.assign(std::size_t(terrain.width) * terrain.height, -32000.f);
+        terrain.water.assign(terrain.heights.size(), 0);
+    }
+    EsmReader reader;
+    if (!m_useLoadOrder && !reader.open(m_esmPath)) { error = reader.lastError(); return false; }
+    std::map<std::size_t, std::unique_ptr<EsmReader>> readers;
+    const auto end = std::min(terrain.cells.size(), terrain.cursor + 64);
+    for (; terrain.cursor < end; ++terrain.cursor) {
+        const auto cell = terrain.cells[terrain.cursor];
+        const auto& entry = m_cellIndex.cells[m_availableCells.at(cell)];
+        FalloutCellRecord record;
+        std::string detail;
+        bool ok = true;
+        if (m_useLoadOrder) {
+            // Only the last contribution containing LAND wins. Reference-only
+            // overrides need not instantiate thousands of placed objects.
+            for (auto contribution = entry.contributions.rbegin(); contribution != entry.contributions.rend(); ++contribution) {
+                if (contribution->pluginIndex >= m_cellIndex.pluginPaths.size()) continue;
+                auto& source = readers[contribution->pluginIndex];
+                if (!source) {
+                    source = std::make_unique<EsmReader>();
+                    if (!source->open(m_cellIndex.pluginPaths[contribution->pluginIndex])) { ok = false; break; }
+                }
+                auto single = entry;
+                single.childrenGroupOffset = contribution->childrenGroupOffset;
+                single.childrenGroupSize = contribution->childrenGroupSize;
+                single.landRecordOffset = contribution->landRecordOffset;
+                single.landRecordSize = contribution->landRecordSize;
+                ok = extractFalloutLandscapeAt(*source, single, record, detail);
+                if (!ok || record.land) break;
+            }
+        } else ok = extractFalloutLandscapeAt(reader, entry, record, detail);
+        if (!ok) { error = "Map landscape read failed: " + detail; return false; }
+        if (!record.land || !record.land->hasHeights) continue;
+        const auto& land = *record.land;
+        for (int y = 0; y < samples; ++y) for (int x = 0; x < samples; ++x) {
+            const int sx = (x * (land.gridSize - 1)) / samples, sy = (y * (land.gridSize - 1)) / samples;
+            const int px = (cell.x - terrain.minX) * samples + x;
+            const int py = terrain.height - 1 - ((cell.z - terrain.minY) * samples + y);
+            const auto pixel = std::size_t(py) * terrain.width + px;
+            terrain.heights[pixel] = land.heights[sy * land.gridSize + sx];
+            terrain.water[pixel] = entry.hasWater && terrain.heights[pixel] < entry.waterHeight;
+        }
+    }
+    terrain.complete = terrain.cursor == terrain.cells.size();
+    if (terrain.complete && !m_resolvedCacheDirectory.empty()) {
+        if (saveWorldMapRaster(cachePath, terrain)) VOX_LOGI("map") << "cached landscape after " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - terrain.started).count() << " ms: " << cachePath.string();
+        else VOX_LOGW("map") << "could not cache landscape " << cachePath.string();
     }
     return true;
 }

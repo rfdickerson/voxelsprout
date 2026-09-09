@@ -1,3 +1,4 @@
+#include "import/imported_lighting_material.h"
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
@@ -233,7 +234,7 @@ bool RendererBackend::createDescriptorResources() {
         materialTableBinding.binding = 13;
         materialTableBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         materialTableBinding.descriptorCount = 1;
-        materialTableBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        materialTableBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
         bindings.push_back(materialTableBinding);
 
         if (!createDescriptorSetLayout(
@@ -271,13 +272,15 @@ bool RendererBackend::createDescriptorResources() {
             bindlessTexturesBinding.descriptorCount = m_bindlessTextureCapacity;
             bindlessTexturesBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-            const VkDescriptorBindingFlags bindlessBindingFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+            const VkDescriptorBindingFlags bindlessBindingFlags[2] = {VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT};
             VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCreateInfo{};
             bindingFlagsCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-            bindingFlagsCreateInfo.bindingCount = 1;
-            bindingFlagsCreateInfo.pBindingFlags = &bindlessBindingFlags;
+            bindingFlagsCreateInfo.bindingCount = 2;
+            bindingFlagsCreateInfo.pBindingFlags = bindlessBindingFlags;
 
-            const std::array<VkDescriptorSetLayoutBinding, 1> bindlessBindings = {bindlessTexturesBinding};
+            auto cubeBinding = bindlessTexturesBinding;
+            cubeBinding.binding = 1;
+            const std::array<VkDescriptorSetLayoutBinding, 2> bindlessBindings = {bindlessTexturesBinding,cubeBinding};
             if (!createDescriptorSetLayout(
                     bindlessBindings,
                     m_bindlessDescriptorSetLayout,
@@ -484,6 +487,15 @@ void RendererBackend::updateFrameDescriptorSets(
             ? vkGetBufferDeviceAddress(m_device, &exposureAddrInfo) : 0;
         writeDescriptorBufferStorage(m_mainBufferSet, region, mainOffset(2), exposureAddress, autoExposureStateBufferInfo.range);
 
+        // This frame's fence has retired before descriptor updates. Only its
+        // buffer region is written; other frames keep their sampled values.
+        for(auto& [slot,instance]:m_animatedMaterials) {
+            if(instance.startTime<0 || m_materialAnimationTimeSeconds<instance.startTime)
+                instance.startTime=m_materialAnimationTimeSeconds;
+            m_importedMaterialTable[slot]=importer::sampleImportedMaterial(instance.source,
+                instance.base,float(m_materialAnimationTimeSeconds-instance.startTime));
+        }
+
         // Material table (binding 13). Each frame in flight gets its own region
         // of the buffer, so an edit landing between frames cannot mutate memory
         // the GPU is still reading. The CPU mirror is copied in only when it
@@ -492,18 +504,25 @@ void RendererBackend::updateFrameDescriptorSets(
         if (materialBuffer != VK_NULL_HANDLE) {
             constexpr VkDeviceSize kMaterialRegionSize =
                 static_cast<VkDeviceSize>(sizeof(importer::GpuImportedMaterial)) *
-                importer::kImportedSceneMaterialTableCapacity;
+                importer::kImportedGpuMaterialCapacity;
             const VkDeviceSize materialRegionOffset = kMaterialRegionSize * region;
             // Dirty is a countdown, not a flag: each frame in flight owns a
             // separate region, so one edit has to be copied into every one of
             // them before it is fully applied.
-            if (m_importedMaterialTableDirtyFrames > 0u) {
+            if (m_importedMaterialTableDirtyFrames > 0u || !m_animatedMaterials.empty()) {
                 if (void* mapped = m_bufferAllocator.mapBuffer(
                         m_importedMaterialBufferHandle, materialRegionOffset, kMaterialRegionSize)) {
-                    std::memcpy(mapped, m_importedMaterialTable.data(),
-                                static_cast<std::size_t>(kMaterialRegionSize));
+                    if(m_importedMaterialTableDirtyFrames>0u) {
+                        std::memcpy(mapped,m_importedMaterialTable.data(),static_cast<std::size_t>(kMaterialRegionSize));
+                        --m_importedMaterialTableDirtyFrames;
+                    } else {
+                        for(const auto& [slot,instance]:m_animatedMaterials) {
+                            (void)instance;
+                            std::memcpy(static_cast<std::byte*>(mapped)+slot*sizeof(importer::GpuImportedMaterial),
+                                &m_importedMaterialTable[slot],sizeof(importer::GpuImportedMaterial));
+                        }
+                    }
                     m_bufferAllocator.unmapBuffer(m_importedMaterialBufferHandle);
-                    --m_importedMaterialTableDirtyFrames;
                 }
             }
             VkBufferDeviceAddressInfo materialAddrInfo{};
@@ -813,7 +832,10 @@ void RendererBackend::updateFrameDescriptorSets(
             return std::clamp(static_cast<float>(std::atof(env)), 0.0f, 0.99f);
         }();
         uniformData.params[0] = s_historyWeight;
-        uniformData.params[1] = (m_taaHistoryValid && m_taaPrevViewProjValid) ? 1.0f : 0.0f;
+        const bool historyFormatMatches = m_taaHistoryHasDepth == !temporalUpscaleActive();
+        uniformData.params[1] = (m_taaHistoryValid && m_taaPrevViewProjValid && historyFormatMatches) ? 1.0f : 0.0f;
+        std::copy(m_taaPrevDepthProjection.begin(), m_taaPrevDepthProjection.end(),
+                  uniformData.previousDepthProjection);
         // THIS frame's jitter, in input PIXELS, plus the input extent. The
         // upscaler needs the jitter in pixels rather than NDC because it works
         // on the input sample grid -- it has to know where each low-res texel
@@ -839,7 +861,12 @@ void RendererBackend::updateFrameDescriptorSets(
         uniformData.upscaleTuning[0] = s_clampStatic;
         uniformData.upscaleTuning[1] = 1.25f;
         uniformData.upscaleTuning[2] = s_maxBlend;
-        uniformData.upscaleTuning[3] = 0.0f;
+        // The descriptor falls back to normal/depth when velocity is absent;
+        // its normal Z must never be mistaken for the velocity validity bit.
+        const bool velocityAvailable = aoFrameIndex < m_velocityImageViews.size() &&
+            m_velocityImageViews[aoFrameIndex] != VK_NULL_HANDLE &&
+            m_velocityImageInitialized[aoFrameIndex];
+        uniformData.upscaleTuning[3] = velocityAvailable ? 1.0f : 0.0f;
         // LAST frame's jitter, which the shader takes back out of the
         // reprojected UV. prevViewProj is the matrix that frame actually
         // rendered with, so it carries that frame's jitter -- but the history
@@ -949,8 +976,8 @@ void RendererBackend::updateFrameDescriptorSets(
             static_cast<float>(m_waterReflectionExtent.width);
         uniformData.extentParams[1] =
             static_cast<float>(m_waterReflectionExtent.height);
-        uniformData.extentParams[2] = static_cast<float>(m_renderExtent.width);
-        uniformData.extentParams[3] = static_cast<float>(m_renderExtent.height);
+        uniformData.extentParams[2] = static_cast<float>(m_waterReflectionExtent.width);
+        uniformData.extentParams[3] = static_cast<float>(m_waterReflectionExtent.height);
         uniformData.projectionParams[0] = m_waterReflectionProjection[0];
         uniformData.projectionParams[1] = m_waterReflectionProjection[1];
 
@@ -1072,7 +1099,15 @@ void RendererBackend::updateFrameDescriptorSets(
             if (texture.imageView == VK_NULL_HANDLE || m_importedTextureSampler == VK_NULL_HANDLE) {
                 continue;
             }
-            bindlessImageInfos[bindlessIndex].sampler = m_importedTextureSampler;
+            if (texture.cube) {
+                writeDescriptorBufferCombinedImageSamplerArray(m_bindlessBufferSet,0u,
+                    descriptorBufferBindingOffset(m_bindlessDescriptorSetLayout,1),
+                    static_cast<uint32_t>(bindlessIndex),m_bindlessTextureCapacity,
+                    texture.imageView,m_importedClampSamplers[0],VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                continue;
+            }
+            bindlessImageInfos[bindlessIndex].sampler = texture.clampMode < 3
+                ? m_importedClampSamplers[texture.clampMode] : m_importedTextureSampler;
             bindlessImageInfos[bindlessIndex].imageView = texture.imageView;
             bindlessImageInfos[bindlessIndex].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }

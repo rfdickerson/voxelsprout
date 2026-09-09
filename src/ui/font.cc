@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <stdexcept>
+#include <zlib.h>
 
 #define STB_RECT_PACK_IMPLEMENTATION
 #include <stb_rect_pack.h>
@@ -1487,6 +1489,251 @@ bool Font::loadCache(const std::string& cachePath, const std::string& ttfPath,
     }
 
     return in.good();
+}
+
+// Read only embedded DefineFont2/3 outlines, never SWF bytecode or display actions.
+// Layout follows Adobe SWF File Format v19, DefineFont2/3 and SHAPE records.
+bool Font::loadSwfFont(const std::vector<std::uint8_t> &file, const std::string &face, float pixels,
+                       std::string &error) {
+    struct Reader {
+        const std::vector<std::uint8_t> &b;
+        std::size_t bit = 0;
+        std::uint32_t bits(unsigned n) {
+            if (n > 32 || bit + n > b.size() * 8)
+                throw std::runtime_error("truncated SWF font");
+            std::uint32_t v = 0;
+            while (n--) {
+                v = (v << 1) | ((b[bit / 8] >> (7 - bit % 8)) & 1);
+                ++bit;
+            }
+            return v;
+        }
+        int signedBits(unsigned n) {
+            if (!n)
+                return 0;
+            auto v = bits(n);
+            return n < 32 && (v & (1u << (n - 1))) ? static_cast<int>(v | (~0u << n))
+                                                   : static_cast<int>(v);
+        }
+        void align() { bit = (bit + 7) & ~std::size_t(7); }
+        std::uint32_t le(unsigned n) {
+            align();
+            std::uint32_t v = 0;
+            for (unsigned i = 0; i < n; ++i)
+                v |= bits(8) << (8 * i);
+            return v;
+        }
+        void seek(std::size_t p) {
+            if (p > b.size())
+                throw std::runtime_error("invalid SWF offset");
+            bit = p * 8;
+        }
+        std::size_t pos() const { return (bit + 7) / 8; }
+    };
+    try {
+        if (file.size() < 12 || pixels < 4 || pixels > 160)
+            throw std::runtime_error("invalid font input");
+        std::vector<std::uint8_t> bytes = file;
+        const auto size = std::uint32_t(file[4]) | (std::uint32_t(file[5]) << 8) |
+                          (std::uint32_t(file[6]) << 16) | (std::uint32_t(file[7]) << 24);
+        if (size < 12 || size > 32 * 1024 * 1024)
+            throw std::runtime_error("invalid SWF size");
+        if (file[0] == 'C' && file[1] == 'W' && file[2] == 'S') {
+            bytes.resize(size);
+            uLongf length = size - 8;
+            if (uncompress(bytes.data() + 8, &length, file.data() + 8, file.size() - 8) != Z_OK ||
+                length != size - 8)
+                throw std::runtime_error("cannot inflate SWF font");
+        } else if (file[0] != 'F' || file[1] != 'W' || file[2] != 'S' || size != file.size())
+            throw std::runtime_error("unsupported font container");
+        Reader r{bytes};
+        r.seek(8);
+        auto rectBits = r.bits(5);
+        for (int i = 0; i < 4; ++i)
+            r.bits(rectBits);
+        r.align();
+        r.le(2);
+        r.le(2);
+        while (r.pos() + 2 <= bytes.size()) {
+            const auto header = r.le(2);
+            const auto type = header >> 6;
+            auto length = header & 63;
+            if (length == 63)
+                length = r.le(4);
+            const auto start = r.pos();
+            if (length > bytes.size() - start)
+                throw std::runtime_error("invalid font tag");
+            const auto end = start + length;
+            if (type != 48 && type != 75) {
+                r.seek(end);
+                continue;
+            }
+            r.le(2);
+            auto flags = r.le(1);
+            r.le(1);
+            auto nameSize = r.le(1);
+            std::string name;
+            for (unsigned i = 0; i < nameSize; ++i)
+                name += static_cast<char>(r.le(1));
+            while (!name.empty() && name.back() == 0)
+                name.pop_back();
+            if (name != face) {
+                r.seek(end);
+                continue;
+            }
+            auto count = r.le(2);
+            if (!count || count > 8192 || !(flags & 128))
+                throw std::runtime_error("font has no usable layout");
+            const auto offsetsStart = r.pos();
+            const unsigned offsetSize = (flags & 8) ? 4 : 2;
+            std::vector<std::uint32_t> offsets(count + 1);
+            for (auto &offset : offsets)
+                offset = r.le(offsetSize);
+            if (offsets.back() > end - offsetsStart)
+                throw std::runtime_error("invalid glyph table");
+            r.seek(offsetsStart + offsets.back());
+            std::vector<std::uint32_t> codes(count);
+            for (auto &code : codes)
+                code = r.le((flags & 4) ? 2 : 1);
+            float ascent = r.le(2), descent = r.le(2);
+            r.le(2);
+            std::vector<int> advances(count);
+            for (auto &advance : advances)
+                advance = static_cast<std::int16_t>(r.le(2));
+            if (ascent + descent <= 0)
+                throw std::runtime_error("invalid font metrics");
+            const float scale = pixels / (ascent + descent);
+            Font result;
+            result.m_atlasWidth = result.m_atlasHeight = 2048;
+            result.m_atlas.assign(2048 * 2048, 0);
+            result.m_ascent = ascent * scale;
+            result.m_descent = descent * scale;
+            result.m_lineHeight = pixels;
+            int ax = 2, ay = 2, rowHeight = 0;
+            for (unsigned g = 0; g < count; ++g) {
+                if (codes[g] < 32 || codes[g] > 255)
+                    continue;
+                if (offsets[g] > offsets[g + 1] || offsets[g + 1] > offsets.back())
+                    throw std::runtime_error("invalid glyph offsets");
+                r.seek(offsetsStart + offsets[g]);
+                auto fillBits = r.bits(4);
+                auto lineBits = r.bits(4);
+                std::vector<stbtt_vertex> vertices;
+                int x = 0, y = 0;
+                bool closed = true;
+                int sx = 0, sy = 0;
+                const auto emit = [&](unsigned char kind, int vx, int vy, int cx = 0, int cy = 0) {
+                    for (int v : {vx, vy, cx, cy})
+                        if (v < -32768 || v > 32767)
+                            throw std::runtime_error("glyph coordinate overflow");
+                    stbtt_vertex v{};
+                    v.type = kind;
+                    v.x = vx;
+                    v.y = vy;
+                    v.cx = cx;
+                    v.cy = cy;
+                    vertices.push_back(v);
+                };
+                while (true) {
+                    if (r.pos() > offsetsStart + offsets[g + 1] || vertices.size() > 16384)
+                        throw std::runtime_error("invalid glyph shape");
+                    if (!r.bits(1)) {
+                        auto state = r.bits(5);
+                        if (!state)
+                            break;
+                        if (state & 16)
+                            throw std::runtime_error("unsupported font fill table");
+                        if (state & 1) {
+                            if (!closed)
+                                emit(STBTT_vline, sx, sy);
+                            auto n = r.bits(5);
+                            x = r.signedBits(n);
+                            y = r.signedBits(n);
+                            sx = x;
+                            sy = y;
+                            emit(STBTT_vmove, x, y);
+                            closed = false;
+                        }
+                        if (state & 2)
+                            r.bits(fillBits);
+                        if (state & 4)
+                            r.bits(fillBits);
+                        if (state & 8)
+                            r.bits(lineBits);
+                    } else {
+                        const bool straight = r.bits(1);
+                        auto n = r.bits(4) + 2;
+                        if (straight) {
+                            if (r.bits(1)) {
+                                x += r.signedBits(n);
+                                y += r.signedBits(n);
+                            } else if (r.bits(1))
+                                y += r.signedBits(n);
+                            else
+                                x += r.signedBits(n);
+                            emit(STBTT_vline, x, y);
+                        } else {
+                            int cx = x + r.signedBits(n), cy = y + r.signedBits(n);
+                            x = cx + r.signedBits(n);
+                            y = cy + r.signedBits(n);
+                            emit(STBTT_vcurve, x, y, cx, cy);
+                        }
+                    }
+                }
+                if (!closed)
+                    emit(STBTT_vline, sx, sy);
+                int minX = 0, minY = 0, maxX = 0, maxY = 0;
+                for (const auto &v : vertices) {
+                    minX = std::min(minX, int(v.x));
+                    minY = std::min(minY, int(v.y));
+                    maxX = std::max(maxX, int(v.x));
+                    maxY = std::max(maxY, int(v.y));
+                    if (v.type == STBTT_vcurve) {
+                        minX = std::min(minX, int(v.cx));
+                        minY = std::min(minY, int(v.cy));
+                        maxX = std::max(maxX, int(v.cx));
+                        maxY = std::max(maxY, int(v.cy));
+                    }
+                }
+                int x0 = static_cast<int>(std::floor(minX * scale)),
+                    y0 = static_cast<int>(std::floor(minY * scale));
+                int bw = static_cast<int>(std::ceil(maxX * scale)) - x0 + 1,
+                    bh = static_cast<int>(std::ceil(maxY * scale)) - y0 + 1;
+                if (bw > 2044 || bh > 2044)
+                    throw std::runtime_error("glyph too large");
+                if (ax + bw + 2 >= 2048) {
+                    ax = 2;
+                    ay += rowHeight + 2;
+                    rowHeight = 0;
+                }
+                if (ay + bh + 2 >= 2048)
+                    throw std::runtime_error("font atlas full");
+                if (!vertices.empty()) {
+                    stbtt__bitmap bitmap{bw, bh, 2048, result.m_atlas.data() + ay * 2048 + ax};
+                    stbtt_Rasterize(&bitmap, 0.25f, vertices.data(),
+                                    static_cast<int>(vertices.size()), scale, scale, 0, 0, x0, y0,
+                                    0, nullptr);
+                }
+                Glyph glyph;
+                glyph.size = {float(bw), float(bh)};
+                glyph.bearing = {float(x0), float(-y0)};
+                glyph.advance = advances[g] * scale;
+                glyph.uv = {ax / 2048.f, ay / 2048.f, (ax + bw) / 2048.f, (ay + bh) / 2048.f};
+                result.m_glyphs[codes[g]] = glyph;
+                ax += bw + 2;
+                rowHeight = std::max(rowHeight, bh);
+            }
+            result.m_missing = result.m_glyphs['?'];
+            result.rebuildAsciiCache();
+            *this = std::move(result);
+            error.clear();
+            return true;
+        }
+        throw std::runtime_error("embedded font not found: " + face);
+    } catch (const std::exception &e) {
+        error = e.what();
+        return false;
+    }
 }
 
 }  // namespace odai::ui

@@ -1,4 +1,7 @@
+#include "import/dds.h"
 #include "games/newvegas/bethesda_app.h"
+
+#include "import/fnv/strings_table.h"
 
 #include "bethesda/save_game.h"
 #include "bethesda/record_resolver.h"
@@ -829,40 +832,20 @@ bool BethesdaApp::lootActor(int actorIndex) {
         m_toasts.push("Cannot search", error, "loot");
         return false;
     }
-    const bethesda::ScenarioDefinition* scenario =
-        bethesda::findScenario(m_scenarioId);
-    if (scenario == nullptr) return false;
-    const bethesda::LootTransferResult result = m_bethesdaSession.lootObject(
-        bethesda::ObjectId::persistent(
-            bethesda::makeRecordKey(scenario->basePlugin, 0x14u)),
-        bethesda::ObjectId::persistent(std::move(actorReference)));
-    if (!result.accepted) {
-        m_toasts.push("Cannot search", result.diagnostic, "loot");
-        return false;
+    if (!m_streamIsSkyrim) {
+        const auto result = m_bethesdaSession.lootObject(m_bethesdaSession.playerObject(),
+            bethesda::ObjectId::persistent(actorReference));
+        m_toasts.push(result.accepted ? "Items collected" : "Cannot search", result.diagnostic, "loot");
+        return result.accepted;
     }
-    if (result.transferred.empty()) {
-        m_toasts.push(actor.displayName(), result.diagnostic, "loot");
-        return true;
-    }
-    bethesda::RecordKey goldenClawItem;
-    if (const bethesda::QuestRuntimeState* ms13 =
-            m_bethesdaSession.findQuest("MS13")) {
-        const auto clawAlias = std::find_if(
-            ms13->aliases.begin(), ms13->aliases.end(),
-            [](const bethesda::QuestAliasRuntimeState& alias) {
-                return toLowerAscii(alias.name) == "goldenclaw";
-            });
-        if (clawAlias != ms13->aliases.end()) {
-            goldenClawItem = clawAlias->createdObject;
-        }
-    }
-    for (const bethesda::InventoryEntry& entry : result.transferred) {
-        const bool goldenClaw = goldenClawItem.valid() && entry.item == goldenClawItem;
-        const std::string itemName = goldenClaw ? "Golden Claw" : entry.item.toString();
-        m_toasts.push("Item added", itemName +
-            (entry.count == 1 ? std::string{} : " x" + std::to_string(entry.count)),
-            "loot:" + entry.item.toString());
-    }
+    m_inventorySource = bethesda::ObjectId::persistent(std::move(actorReference));
+    m_inventoryBook = {};
+    m_giftMenuChoice = 0;
+    m_playerInventoryOpen = true;
+    m_meleeAttackPending = false;
+    m_bethesdaSession.physics().setCharacterInput(
+        m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
+    setMouseCaptured(false);
     return true;
 }
 
@@ -1034,6 +1017,15 @@ bool BethesdaApp::configureGoldenClawPuzzleForCurrentSpace(std::string& outError
             return false;
         }
         existing = m_bethesdaSession.world().find(keyholeObject);
+    }
+    if (existing != nullptr && existing->kind == bethesda::RuntimeObjectKind::Activator &&
+        !existing->activatorState.has_value()) {
+        bethesda::WorldCommand configure;
+        configure.type = bethesda::WorldCommandType::SetActivatorState;
+        configure.target = keyholeObject;
+        configure.activatorState = activator;
+        (void)m_bethesdaSession.world().queue(std::move(configure));
+        (void)m_bethesdaSession.world().applyQueuedCommands();
     }
     if (existing == nullptr ||
         existing->kind != bethesda::RuntimeObjectKind::Activator ||
@@ -1757,6 +1749,7 @@ bool BethesdaApp::completeDoorTransition(
             m_skyrimObjectLodChunk = render::Renderer::kInvalidImportedChunkIndex;
             m_skyrimObjectLodTileValid = false;
         }
+        clearSkyrimObjectLodTiles();
         m_skyrimObjectLodWorldspace.clear();
         if (m_skyrimTreeLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
             m_renderer.removeImportedSceneChunk(m_skyrimTreeLodChunk);
@@ -1854,6 +1847,7 @@ bool BethesdaApp::completeDoorTransition(
             m_skyrimObjectLodChunk = render::Renderer::kInvalidImportedChunkIndex;
         }
         m_skyrimObjectLodTileValid = false;
+        clearSkyrimObjectLodTiles();
         m_skyrimObjectLodWorldspace.clear();
         if (m_skyrimTreeLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
             m_renderer.removeImportedSceneChunk(m_skyrimTreeLodChunk);
@@ -2418,28 +2412,13 @@ bool BethesdaApp::runtimeSpaceIsResident(
 }
 
 void BethesdaApp::reloadActorsForCurrentSpace() {
+    const core::Stopwatch actorReloadTimer;
     // Fallout/New Vegas still give Victor special startup treatment. Skyrim's
     // streamed traversal has no fixed companion and can rebuild the nearby
     // population uniformly whenever a door changes ownership space.
     if (!m_streamIsSkyrim || m_streamer == nullptr) {
         return;
     }
-
-    endConversation();
-    unregisterBethesdaActorControllers();
-    for (SkinnedActor& actor : m_actors) {
-        // Cell eviction is not an authored Disable. The persistent runtime
-        // object's enabled bit belongs to quest/scripts and must survive this
-        // presentation residency change unchanged.
-        if (actor.uploaded) {
-            m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
-        }
-    }
-    m_actors.clear();
-    m_victorIndex = -1;
-    m_activationActor = -1;
-    m_activationLootActor = -1;
-    queueActorUploads();
 
     const float engineCentre[3] = {m_cameraX, m_cameraY, m_cameraZ};
     float bethesdaCentre[3] = {};
@@ -2484,18 +2463,63 @@ void BethesdaApp::reloadActorsForCurrentSpace() {
         const float dy = placement.position[1] - bethesdaCentre[1];
         return ((dx * dx) + (dy * dy)) <= (kActorLoadRadius * kActorLoadRadius);
     };
+    // Retain resident presentation, animation, controller and GPU slots. Only
+    // actors leaving this population need to release their local resources.
+    const auto talkingSlot = talkingActor() != nullptr
+        ? talkingActor()->instanceSlot : 0u;
+    const auto remainsResident = [&](const SkinnedActor& actor) {
+        importer::fnv::FalloutActorPlacement placement{};
+        placement.refFormId = actor.referenceFormId;
+        const float engine[3] = {actor.position[0], actor.position[1], actor.position[2]};
+        importer::fnv::CellStreamer::engineToFallout(engine, placement.position);
+        return runtimePlacementResolver(placement) && !placement.initiallyDisabled;
+    };
+    // End dialogue before compaction changes the index of its speaker.
+    if (talkingActor() != nullptr && !remainsResident(*talkingActor())) endConversation();
+    std::erase_if(m_actors, [&](SkinnedActor& actor) {
+        if (remainsResident(actor)) return false;
+        if (const auto id = runtimeObjectIdForActor(actor); id.has_value()) {
+            (void)m_bethesdaSession.unregisterActorController(*id);
+        }
+        if (actor.uploaded) m_renderer.setSkinnedActorVisible(actor.instanceSlot, false);
+        return true;
+    });
+    if (talkingSlot != 0u && m_talkingActor >= 0) {
+        const auto it = std::find_if(m_actors.begin(), m_actors.end(), [&](const auto& actor) {
+            return actor.instanceSlot == talkingSlot;
+        });
+        m_talkingActor = it == m_actors.end() ? -1 : static_cast<int>(it - m_actors.begin());
+    }
+    m_activationActor = -1;
+    m_activationLootActor = -1;
+    const std::size_t retainedCount = m_actors.size();
+    std::vector<SkinnedActor> retained = std::move(m_actors);
+    m_actors.clear();
+    const auto slotLimit = thirdPersonPlayerShowcase()
+        ? kPlayerAvatarSkinnedInstance : render::kMaxSkinnedInstances;
+    const auto isRetained = [&](std::uint32_t reference) {
+        return std::any_of(retained.begin(), retained.end(), [&](const auto& actor) {
+            return actor.referenceFormId == reference;
+        });
+    };
     const std::filesystem::path dataPath(m_streamDirectory);
     loadGoodspringsActors(
         dataPath / m_streamPlugin,
         m_streamLoadOrder.empty() ? nullptr : &m_streamLoadOrder,
         m_streamer->assets(), bethesdaCentre, kActorLoadRadius,
         kFirstCrowdSkinnedInstance,
-        (thirdPersonPlayerShowcase()
-             ? kPlayerAvatarSkinnedInstance
-             : render::kMaxSkinnedInstances) - kFirstCrowdSkinnedInstance,
-        {}, {}, m_actors, actorStats,
+        slotLimit - kFirstCrowdSkinnedInstance - retainedCount,
+        {}, [&](std::uint32_t reference) { return !isRetained(reference); }, m_actors, actorStats,
         &m_skyrimActorCatalog, &m_skyrimActorVoiceFolderPlugin,
         runtimePlacementResolver);
+
+    std::uint32_t freeSlot = kFirstCrowdSkinnedInstance;
+    for (auto& actor : m_actors) {
+        while (std::any_of(retained.begin(), retained.end(), [&](const auto& previous) {
+            return previous.instanceSlot == freeSlot;
+        })) ++freeSlot;
+        actor.instanceSlot = freeSlot++;
+    }
 
     arrangeActorParadeIfRequested();
 
@@ -2524,12 +2548,25 @@ void BethesdaApp::reloadActorsForCurrentSpace() {
     // Existing ObjectIds restore their runtime transform before controllers
     // are registered. New catalog entries are registered from authored data.
     restoreBethesdaActorsFromSession();
+    const std::size_t addedCount = m_actors.size();
+    for (auto& actor : m_actors) retained.push_back(std::move(actor));
+    m_actors = std::move(retained);
+    for (auto& actor : m_actors) actor.runtime.rebindMovedOwner(actor.tree, actor.context);
+    m_victorIndex = -1;
+    queueActorUploads();
+    VOX_LOGI("performance") << "actor residency refresh: retained=" << retainedCount
+        << " added=" << addedCount << " total=" << m_actors.size()
+        << " time=" << actorReloadTimer.elapsedMs() << " ms";
+
     m_skyrimActorResidencyDirty = false;
     std::string puzzleError;
     if (!configureGoldenClawPuzzleForCurrentSpace(puzzleError)) {
         VOX_LOGE("scenario") << "Golden Claw compatibility error: " << puzzleError;
         m_toasts.push("Compatibility error", puzzleError, "golden-claw-compatibility");
     }
+    if (actorReloadTimer.elapsedMs() > 16.f)
+        VOX_LOGI("performance") << "actor residency rebuild: " << actorReloadTimer.elapsedMs() << " ms";
+
 }
 
 void BethesdaApp::queueActorUploads() {
@@ -2539,7 +2576,7 @@ void BethesdaApp::queueActorUploads() {
     m_actorTotalTextureCount = 0u;
     m_actorsUploadPending = std::any_of(
         m_actors.begin(), m_actors.end(), [](const SkinnedActor& actor) {
-            return !actor.character.vertices.empty() && !actor.draws.empty() &&
+            return !actor.uploaded && !actor.character.vertices.empty() && !actor.draws.empty() &&
                 actor.instanceSlot != 0u;
         });
 }
@@ -2577,7 +2614,7 @@ void BethesdaApp::realizePendingActorUploads(std::size_t maxActorUploads) {
         // TES3 keeps activation proxies even when an optional creature or
         // modded body mesh cannot be assembled. Those proxies must not upload
         // an empty template into renderer slot zero.
-        if (actor.character.vertices.empty() || actor.draws.empty() ||
+        if (actor.uploaded || actor.character.vertices.empty() || actor.draws.empty() ||
             actor.instanceSlot == 0u) {
             continue;
         }
@@ -2606,6 +2643,36 @@ void BethesdaApp::realizePendingActorUploads(std::size_t maxActorUploads) {
             << "actors uploaded: " << m_actorUploadSuccessCount << "/"
             << m_actors.size() << ", " << m_actorUploadedTextureCount << "/"
             << m_actorTotalTextureCount << " textures bound";
+        // Opt-in installed-data regression probe: refresh a populated, uploaded
+        // set without moving the player or injecting gameplay state.
+        static bool residencyProbeDone = false;
+        if (m_streamIsSkyrim && !residencyProbeDone &&
+            std::getenv("ODAI_ACTOR_RESIDENCY_PROBE") != nullptr) {
+            residencyProbeDone = true;
+            struct Snapshot {
+                std::uint32_t reference, slot;
+                float animationTime;
+                bool uploaded, controller;
+            };
+            std::vector<Snapshot> before;
+            for (const auto& actor : m_actors) before.push_back({
+                actor.referenceFormId, actor.instanceSlot, actor.animationSeconds,
+                actor.uploaded, actor.runtimeControllerOwned});
+            reloadActorsForCurrentSpace();
+            bool preserved = m_actors.size() == before.size() && !m_actorsUploadPending;
+            for (const auto& previous : before) {
+                const auto found = std::find_if(m_actors.begin(), m_actors.end(), [&](const auto& actor) {
+                    return actor.referenceFormId == previous.reference;
+                });
+                preserved = preserved && found != m_actors.end() &&
+                    found->instanceSlot == previous.slot &&
+                    found->animationSeconds == previous.animationTime &&
+                    found->uploaded == previous.uploaded &&
+                    found->runtimeControllerOwned == previous.controller;
+            }
+            VOX_LOGI("performance") << "actor residency preservation probe: "
+                << (preserved ? "PASS" : "FAIL") << " actors=" << before.size();
+        }
     }
 }
 
@@ -3620,9 +3687,12 @@ bool BethesdaApp::onInit() {
     // "the shader's own clamp ceiling in ssao.comp.slang", which would have made
     // every value above it identical. Both estimators clamp to [0.25, 512]
     // (ssao.comp.slang and frame_pass_ssao.cc), so the sweep above is real.
-    float aoRadius = 300.0f;
-    float aoBias = 40.0f;
-    float aoIntensity = 1.7f;
+    // Skyrim's village scale benefits from a tighter contact radius than the
+    // Mojave default: foundations and tree roots remain grounded without a
+    // broad dark halo across pale timber walls.
+    float aoRadius = m_streamIsSkyrim ? 220.0f : 300.0f;
+    float aoBias = m_streamIsSkyrim ? 32.0f : 40.0f;
+    float aoIntensity = m_streamIsSkyrim ? 1.55f : 1.7f;
     if (const char* env = std::getenv("ODAI_FNV_AO_RADIUS")) {
         aoRadius = static_cast<float>(std::atof(env));
     }
@@ -3638,7 +3708,7 @@ bool BethesdaApp::onInit() {
     // one at ~22% of it catches where objects meet the ground. One radius
     // cannot do both -- the march has a fixed step count, so widening it just
     // spreads the same samples further apart.
-    float aoFineScale = 0.22f;
+    float aoFineScale = m_streamIsSkyrim ? 0.28f : 0.22f;
     if (const char* env = std::getenv("ODAI_FNV_AO_FINE")) {
         aoFineScale = static_cast<float>(std::atof(env));
     }
@@ -3716,7 +3786,52 @@ bool BethesdaApp::onInit() {
     }
 
     m_renderer.setAutoExposureEnabled(true);
-    render::ImportedExteriorLighting exteriorLighting;
+
+    // Diagnostic A/B: ODAI_FNV_NOTEX forces every imported surface to shade from
+    // its vertex colour instead of its texture. Comparing a capture with and
+    // without it answers a question that is otherwise guesswork -- whether a
+    // washed-out surface is showing a pale TEXTURE or is falling back to vertex
+    // colour and being blown out by lighting. The two look identical on screen.
+    if (const char* noTextures = std::getenv("ODAI_FNV_NOTEX")) {
+        if (noTextures[0] != '\0' && noTextures[0] != '0') {
+            m_renderer.setImportedSceneDebugState(true, true, false, false, false);
+            VOX_LOGI("newvegas") << "ODAI_FNV_NOTEX: imported textures disabled (vertex colour only)";
+        }
+    }
+
+    // Start hour override. Lighting bugs and "it's just a dim hour" look the
+    // same in a single capture; being able to shoot the same view at several
+    // times of day separates them.
+    if (!m_timeOfDayExplicit) {
+      if (const char* hourEnv = std::getenv("ODAI_FNV_HOUR")) {
+        const float hour = static_cast<float>(std::atof(hourEnv));
+        if (hour >= 0.0f && hour < 24.0f) {
+            m_timeOfDayHours = hour;
+        }
+      }
+    }
+    applyTimeOfDay();
+
+    // Last, so the streamer inherits the pass-stack configuration above rather
+    // than paying for ray tracing and voxel GI on every streamed cell.
+    if (streamingMode && !initStreaming()) {
+        return false;
+    }
+    // initStreaming identifies the game from the active plugin headers. Apply
+    // game-specific lighting only after that identity exists, before the first
+    // frame; otherwise Skyrim silently inherits the generic exterior policy.
+    render::ImportedExteriorLighting exteriorLighting = m_streamIsSkyrim
+        ? render::skyrimSeExteriorLighting()
+        : render::ImportedExteriorLighting{};
+    if (m_streamIsSkyrim) {
+        // Let authored weather drive the exposure while retaining highlight
+        // detail in Riverwood's pale logs, roofs and water reflections.
+        // Leave headroom for IMGS brightness/contrast after tonemapping. The
+        // earlier target lifted pale wood and the sky into the shoulder, losing
+        // color separation. A low floor lets bright views adapt without clipping.
+        m_renderer.setAutoExposureRange(0.18f, 1.45f);
+        m_renderer.setAutoExposureKeyValue(0.10f);
+    }
     if (m_whiterunMarketReferenceShowcase) {
         // The shared 0.70 exposure floor pinned bright exteriors regardless of
         // the histogram key. Allow adaptation to retain pale plaster detail.
@@ -3772,36 +3887,6 @@ bool BethesdaApp::onInit() {
             static_cast<float>(std::atof(exposureKey)));
     }
 
-    // Diagnostic A/B: ODAI_FNV_NOTEX forces every imported surface to shade from
-    // its vertex colour instead of its texture. Comparing a capture with and
-    // without it answers a question that is otherwise guesswork -- whether a
-    // washed-out surface is showing a pale TEXTURE or is falling back to vertex
-    // colour and being blown out by lighting. The two look identical on screen.
-    if (const char* noTextures = std::getenv("ODAI_FNV_NOTEX")) {
-        if (noTextures[0] != '\0' && noTextures[0] != '0') {
-            m_renderer.setImportedSceneDebugState(true, true, false, false, false);
-            VOX_LOGI("newvegas") << "ODAI_FNV_NOTEX: imported textures disabled (vertex colour only)";
-        }
-    }
-
-    // Start hour override. Lighting bugs and "it's just a dim hour" look the
-    // same in a single capture; being able to shoot the same view at several
-    // times of day separates them.
-    if (!m_timeOfDayExplicit) {
-      if (const char* hourEnv = std::getenv("ODAI_FNV_HOUR")) {
-        const float hour = static_cast<float>(std::atof(hourEnv));
-        if (hour >= 0.0f && hour < 24.0f) {
-            m_timeOfDayHours = hour;
-        }
-      }
-    }
-    applyTimeOfDay();
-
-    // Last, so the streamer inherits the pass-stack configuration above rather
-    // than paying for ray tracing and voxel GI on every streamed cell.
-    if (streamingMode && !initStreaming()) {
-        return false;
-    }
     if ((!m_scenarioId.empty() || m_streamIsMorrowind) && !initBethesdaSession()) {
         return false;
     }
@@ -3836,19 +3921,22 @@ bool BethesdaApp::onInit() {
             grade.highlightTint[1] = 0.012f;
         } else if (m_whiterunMarketReferenceShowcase) {
             grade.whiteBalance[2] = 1.02f;
-            grade.contrast = 1.04f;
+            grade.contrast = 1.0f; // Preserve night shadows beneath authored IMGS contrast.
             grade.midtoneContrast = 1.10f;
             grade.saturation = 0.90f;
             grade.vibrance = 0.0f;
             grade.shadowDensity = 1.04f;
         } else {
+            // The linear contrast operator clips dark values before the
+            // shadow control can recover them. Preserve the black range and
+            // use a mild midtone adjustment for everyday Skyrim play.
             grade.whiteBalance[0] = 1.02f;
-            grade.whiteBalance[2] = 0.94f;
-            grade.contrast = 1.10f;
-            grade.midtoneContrast = 1.22f;
-            grade.saturation = 0.92f;
+            grade.whiteBalance[2] = 0.98f;
+            grade.contrast = 1.0f;
+            grade.midtoneContrast = 1.06f;
+            grade.saturation = 0.96f;
             grade.vibrance = 0.02f;
-            grade.shadowDensity = 0.92f;
+            grade.shadowDensity = 1.0f;
         }
         const auto tuneGrade = [](const char* name, float& value) {
             if (const char* env = std::getenv(name)) {
@@ -3947,10 +4035,17 @@ bool BethesdaApp::onInit() {
         if (demoMode == "weather") {
             openWeatherPicker();
         }
-        if (!m_menuOpen && demoMode != "journal") {
+        if (demoMode == "map") { m_skyrimMapOpen = m_playerInventoryOpen = true; }
+        if (demoMode == "quests") {
+            m_skyrimQuestLogOpen = m_playerInventoryOpen = true;
+        }
+        if (demoMode == "inventory") {
+            m_playerInventoryOpen = true;
+        }
+        if (!m_menuOpen && demoMode != "journal" && demoMode != "inventory" && demoMode != "quests" && demoMode != "map") {
             m_banner.push("Goodsprings", "Location discovered", "region:Goodsprings");
         }
-        if (demoMode != "journal") {
+        if (demoMode != "journal" && demoMode != "inventory" && demoMode != "quests" && demoMode != "map") {
             m_toasts.push("Stimpak", "Added to inventory");
             m_toasts.push("Quest updated", "Back in the Saddle");
         }
@@ -4244,6 +4339,8 @@ void BethesdaApp::applyTimeOfDay() {
 }
 
 void BethesdaApp::initWeather() {
+    m_imageSpaceModifiers.clear();
+    m_imageSpaceCrossFade.clear();
     if (m_streamDirectory.empty()) {
         return;  // a cooked scene has no plugin to read weather from
     }
@@ -4294,6 +4391,18 @@ void BethesdaApp::initWeather() {
         return;
     }
 
+    if (m_streamIsSkyrim) {
+        if (!importer::fnv::buildImageSpaceTables(*weatherOrder, m_imageSpaceTables, error)) {
+            VOX_LOGW("newvegas") << "image-space import failed: " << error;
+            m_imageSpaceTables = {};
+        }
+        VOX_LOGI("newvegas") << "image spaces: " << m_imageSpaceTables.spaces.size()
+            << " IMGS, " << m_imageSpaceTables.modifiers.size() << " IMAD, "
+            << m_imageSpaceTables.diagnostics.size() << " malformed records";
+        for (const auto& diagnostic : m_imageSpaceTables.diagnostics)
+            VOX_LOGW("newvegas") << "image-space " << diagnostic;
+    }
+
     std::string loadOrderText;
     for (const auto& entry : weatherOrder->entries()) {
         if (!loadOrderText.empty()) {
@@ -4319,7 +4428,9 @@ void BethesdaApp::initWeather() {
         }
     }
 
-    if (m_activeWeatherFormId == 0u) {
+    {
+        // A forced WTHR still uses the worldspace climate clock. Resolve TNAM
+        // even when weather selection itself was overridden.
         // Fall back to the climate of the worldspace WE ARE STREAMING: whichever
         // of its weathers has the highest chance is the closest thing to "what
         // you would normally see here" without running the mod's selection
@@ -4399,14 +4510,16 @@ void BethesdaApp::initWeather() {
             }
             VOX_LOGI("newvegas") << "climate " << bestClimate->editorId << ": sunrise peaks "
                                  << m_sunriseHour << "h, sunset " << m_sunsetHour << "h";
-            const auto best = std::max_element(
-                bestClimate->weathers.begin(), bestClimate->weathers.end(),
-                [](const auto& a, const auto& b) { return a.chance < b.chance; });
-            m_activeWeatherFormId = best->weatherFormId;
-            const importer::fnv::FalloutWeatherRecord* weather =
-                m_weatherTables.findWeather(m_activeWeatherFormId);
-            VOX_LOGI("newvegas") << "weather from climate " << bestClimate->editorId << ": "
-                                 << (weather != nullptr ? weather->editorId : "<unresolved>");
+            if (m_activeWeatherFormId == 0u) {
+                const auto best = std::max_element(
+                    bestClimate->weathers.begin(), bestClimate->weathers.end(),
+                    [](const auto& a, const auto& b) { return a.chance < b.chance; });
+                m_activeWeatherFormId = best->weatherFormId;
+                const importer::fnv::FalloutWeatherRecord* weather =
+                    m_weatherTables.findWeather(m_activeWeatherFormId);
+                VOX_LOGI("newvegas") << "weather from climate " << bestClimate->editorId << ": "
+                                     << (weather != nullptr ? weather->editorId : "<unresolved>");
+            }
         }
     }
 
@@ -4605,6 +4718,89 @@ bool buildSkyrimWeatherCloudMesh(
     return true;
 }
 
+// Keep the shipped Stars.nif geometry and UVs: it is not an equirectangular map.
+// The two discs deliberately select the shipped full-phase textures for this
+// presentation. Calendar-driven phase selection is not inferred from weather.
+void appendSkyrimNightSky(const importer::fnv::FalloutAssetSource& assets,
+                         render::WeatherCloudTextures& textures,
+                         render::WeatherCloudMesh& clouds, const float moonSizes[2]) {
+    render::WeatherCloudMesh sky;
+    const auto loadTexture = [&](const std::string& path, int slot) {
+        std::vector<std::uint8_t> data;
+        std::string error;
+        auto& texture = textures.nightSky[slot];
+        if (!assets.resolveTexture(path, data, error) ||
+            !importer::loadDdsFromMemory(data.data(), data.size(), texture)) {
+            VOX_LOGW("newvegas") << "night sky texture unavailable: " << path << " " << error;
+            return false;
+        }
+        texture.sourcePath = path;
+        VOX_LOGI("newvegas") << "authored night sky texture " << path << " "
+            << texture.width << "x" << texture.height;
+        return true;
+    };
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    importer::fnv::NifModel stars;
+    if (assets.resolveMesh("Sky\\Stars.nif", bytes, error) &&
+        importer::fnv::parseNifStaticMesh(bytes, stars, error)) {
+        for (std::size_t i = 0; i < std::min<std::size_t>(4, stars.shapes.size()); ++i) {
+            const auto& shape = stars.shapes[i];
+            if (!shape.skyMaterial.valid || !loadTexture(shape.skyMaterial.texture, int(i))) continue;
+            const std::uint32_t base = static_cast<std::uint32_t>(sky.vertices.size());
+            const auto count = shape.positions.size() / 3;
+            if (shape.uvs.size() < count * 2 || std::any_of(shape.triangleIndices.begin(),
+                shape.triangleIndices.end(), [&](auto index) { return index >= count; })) continue;
+            for (std::size_t v = 0; v < count; ++v) {
+                render::WeatherCloudMeshVertex vertex;
+                vertex.position[0] = shape.positions[v*3] * 1000;
+                vertex.position[1] = shape.positions[v*3+2] * 1000;
+                vertex.position[2] = -shape.positions[v*3+1] * 1000;
+                for (int axis = 0; axis < 2; ++axis)
+                    vertex.uv[axis] = shape.uvs[v*2+axis] * shape.skyMaterial.uvScale[axis]
+                        + shape.skyMaterial.uvOffset[axis];
+                if (shape.colors.size() >= (v+1)*4) std::copy_n(&shape.colors[v*4], 4, vertex.color);
+                vertex.layer = 4 + static_cast<std::uint32_t>(i);
+                sky.vertices.push_back(vertex);
+            }
+            for (auto index : shape.triangleIndices) sky.indices.push_back(base + index);
+            VOX_LOGI("newvegas") << "authored night sky surface " << shape.name
+                << " type=" << shape.skyMaterial.objectType << " vertices=" << count;
+        }
+    } else VOX_LOGW("newvegas") << "authored Stars.nif unavailable: " << error;
+    // Retail GMST sizes are 90 (Masser), 40 (Secunda). Conversion to angular
+    // extent is a renderer mapping; these are sky discs, never world lights.
+    const float* sizes = moonSizes;
+    const float azimuth[2] = {-12, 9}, elevation[2] = {29, 38};
+    const char* paths[2] = {"Sky\\Masser_full.dds", "Sky\\Secunda_full.dds"};
+    for (int moon = 0; moon < 2; ++moon) {
+        if (!loadTexture(paths[moon], 4 + moon)) continue;
+        const float az = azimuth[moon] * kPi / 180, el = elevation[moon] * kPi / 180;
+        const float center[3] = {std::cos(az)*std::cos(el), std::sin(el), std::sin(az)*std::cos(el)};
+        const float right[3] = {-std::sin(az), 0, std::cos(az)};
+        const float up[3] = {-std::cos(az)*std::sin(el), std::cos(el), -std::sin(az)*std::sin(el)};
+        const auto base = static_cast<std::uint32_t>(sky.vertices.size());
+        for (int corner = 0; corner < 4; ++corner) {
+            render::WeatherCloudMeshVertex vertex;
+            const float x = (corner & 1) ? 1 : -1, y = (corner & 2) ? -1 : 1;
+            for (int axis = 0; axis < 3; ++axis)
+                vertex.position[axis] = 16000 * (center[axis] +
+                    (right[axis]*x + up[axis]*y) * sizes[moon] * 0.0005f);
+            vertex.uv[0] = (corner & 1) ? 1 : 0;
+            vertex.uv[1] = (corner & 2) ? 1 : 0;
+            vertex.layer = 8 + moon;
+            sky.vertices.push_back(vertex);
+        }
+        for (auto index : {0u, 1u, 2u, 2u, 1u, 3u}) sky.indices.push_back(base + index);
+    }
+    // Stars, then moon discs, then translucent clouds. Existing sky depth tests
+    // keep all three behind the world's opaque geometry.
+    const auto offset = static_cast<std::uint32_t>(sky.vertices.size());
+    sky.vertices.insert(sky.vertices.end(), clouds.vertices.begin(), clouds.vertices.end());
+    for (auto index : clouds.indices) sky.indices.push_back(offset + index);
+    clouds = std::move(sky);
+}
+
 }  // namespace
 
 // Everything that has to happen when the active weather changes: cloud layers
@@ -4693,6 +4889,7 @@ void BethesdaApp::selectWeather(std::uint32_t weatherFormId) {
             std::string cloudMeshError;
             if (buildSkyrimWeatherCloudMesh(
                     assets, *active, m_cloudLayerSource, cloudMesh, cloudMeshError)) {
+                if (m_streamIsSkyrim) appendSkyrimNightSky(assets, clouds, cloudMesh, m_weatherTables.moonSizes);
                 m_renderer.setWeatherCloudMesh(cloudMesh);
             } else {
                 m_renderer.setWeatherCloudMesh(render::WeatherCloudMesh{});
@@ -5373,12 +5570,13 @@ void BethesdaApp::applyWeather() {
         const float value = env != nullptr ? static_cast<float>(std::atof(env)) : 1.6f;
         return value > 0.0f ? value : 1.6f;
     }();
-    // Enhanced Shaders runs 1.25 by day and 0.9 at night against these same
-    // weather records; 1.15 is a compromise for a single global value.
-    static const float s_skySaturation = []() {
+    // Preserve Skyrim's authored chromatic direction. Earlier games retain
+    // their existing presentation default; explicit overrides apply to either.
+    const float skySaturation = [&]() {
+        const float fallback = m_streamIsSkyrim ? 1.0f : 1.15f;
         const char* env = std::getenv("ODAI_FNV_SKY_SATURATION");
-        const float value = env != nullptr ? static_cast<float>(std::atof(env)) : 1.15f;
-        return value > 0.0f ? value : 1.15f;
+        const float value = env != nullptr ? static_cast<float>(std::atof(env)) : fallback;
+        return std::isfinite(value) && value > 0.0f ? value : fallback;
     }();
     const auto decode = [&](const importer::fnv::FalloutColorRgb& color, float* out) {
         const auto channel = [](std::uint8_t value) {
@@ -5407,7 +5605,7 @@ void BethesdaApp::applyWeather() {
         for (int i = 0; i < 3; ++i) {
             // pow on the unit direction is ENB's saturation control; above 1
             // pushes the dominant channel further ahead of the others.
-            out[i] = std::pow(linear[i] / magnitude, s_skySaturation) * shaped;
+            out[i] = std::pow(linear[i] / magnitude, skySaturation) * shaped;
         }
     };
 
@@ -5437,35 +5635,33 @@ void BethesdaApp::applyWeather() {
         decode(skyColor(FalloutWeatherColor::Fog), params.fogColor);
     }
     if (m_streamIsSkyrim) {
-        // `decode` lifts display-referred WTHR bytes enough for an emissive HDR
-        // sky to survive exposure and ACES. Fog is not emissive: feeding that
-        // same lifted value into both aerial perspective and volumetric fog
-        // lights distant geometry twice, and Skyrim's pale blue far-fog turns
-        // Whiterun into a cyan silhouette. Keep the authored hue, but compress
-        // and neutralise the atmospheric stops before they become incident
-        // radiance. Clouds retain their separate authored tints below.
-        const auto restrainAtmosphere = [](float* color, float neutralAmount, float gain) {
-            const float luma =
-                (color[0] * 0.2126f) + (color[1] * 0.7152f) + (color[2] * 0.0722f);
-            for (int channel = 0; channel < 3; ++channel) {
-                color[channel] = std::lerp(color[channel], luma, neutralAmount) * gain;
-            }
+        // Keep the established HDR brightness mapping, but preserve WTHR
+        // chromaticity. An additional luminance blend here used to erase the
+        // authored sky/fog tint before IMGS cinematic grading was applied.
+        const auto scaleAtmosphere = [](float* color, float gain) {
+            for (int channel = 0; channel < 3; ++channel) color[channel] *= gain;
         };
-        restrainAtmosphere(params.skyUpper, 0.45f, 0.85f);
-        restrainAtmosphere(params.skyLower, 0.50f, 0.82f);
-        restrainAtmosphere(params.horizon, 0.55f, 0.80f);
-        restrainAtmosphere(params.fogColor, 0.58f, 0.72f);
+        scaleAtmosphere(params.skyUpper, 0.85f);
+        scaleAtmosphere(params.skyLower, 0.82f);
+        scaleAtmosphere(params.horizon, 0.80f);
+        scaleAtmosphere(params.fogColor, 0.72f);
     }
-    // Day fog until dusk, night fog after; the record authors the two
-    // separately and there is no third value to interpolate toward.
-    const bool daytime = hour >= dawn && hour < dusk;
-    params.fogFarDistance = daytime ? weather->fogDayFar : weather->fogNightFar;
-    if ((weather->classification & 0x04u) != 0u) {
-        const std::string weatherName = toLowerAscii(weather->editorId);
-        const bool heavy = weatherName.find("heavy") != std::string::npos ||
-            weatherName.find("storm") != std::string::npos ||
-            weatherName.find("overcast") != std::string::npos;
-        params.precipitationIntensity = heavy ? 1.0f : 0.68f;
+    params.hasAuthoredWind = m_streamIsSkyrim;
+    params.windHeadingDegrees = weather->windDirection * (360.0f / 255.0f);
+    params.windRangeDegrees = weather->windDirectionRange * (180.0f / 255.0f);
+    params.windSpeed = weather->windSpeed / 255.0f;
+    params.fogFarDistance = importer::fnv::sampleWeatherFogFar(*weather, hour, dawn, dusk);
+    params.precipitationIntensity = importer::fnv::weatherRainIntensity(
+        m_weatherTables, *weather, m_streamIsSkyrim);
+    if (m_streamIsSkyrim) {
+        const auto precipitation = m_weatherTables.precipitation.find(weather->precipitationFormId);
+        if (precipitation != m_weatherTables.precipitation.end() && precipitation->second.type == 0) {
+            const auto& rain = precipitation->second;
+            params.rainWidth = std::clamp(rain.sizeX, 0.05f, 4.0f);
+            params.rainLength = std::clamp(rain.sizeY, 0.1f, 32.0f);
+            params.rainSpeed = std::clamp(std::abs(rain.gravityVelocity), 1.0f, 4000.0f);
+            params.rainRange = std::clamp(float(rain.boxSize), 128.0f, 1600.0f);
+        }
     }
 
     // Sunlight and Ambient light the GROUND. These two channels were read out
@@ -5491,6 +5687,12 @@ void BethesdaApp::applyWeather() {
         return env != nullptr ? std::clamp(static_cast<float>(std::atof(env)), 0.0f, 1.0f) : 1.0f;
     }();
     params.lightingWeight = s_lightingWeight;
+    params.authoredNightAmbient = m_streamIsSkyrim;
+    if (m_streamIsSkyrim) {
+        decodeLinear(skyColor(FalloutWeatherColor::Stars), params.starsColor);
+        // Reproducible full-moon pose at 00:30; rotates with the game clock.
+        params.celestialRotation = (hour - 0.5f) * kPi / 12.0f;
+    }
     // DATA's Sun Glare byte, which is the one field in that block the sky can
     // use directly. SkyrimCloudy authors 153 of 255; a fog weather authors far
     // less, and the difference is a sun with a halo against one that is a bare
@@ -6062,7 +6264,14 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         // of the tour and leave an equally long frozen tail at the endpoint.
         const bool captureWaiting =
             (!m_captureVideoPath.empty() || !m_captureDirectory.empty()) && !m_captureStarted;
-        updateFlythrough(captureWaiting ? 0.0f : deltaSeconds);
+        static int tourWarmup = []() {
+            const char* value = std::getenv("ODAI_TOUR_WARMUP_FRAMES");
+            return value ? std::clamp(std::atoi(value), 0, 10000) : 0;
+        }();
+        const bool warming = tourWarmup > 0;
+        if (!captureWaiting && warming) --tourWarmup;
+        const float tourDt = std::getenv("ODAI_TOUR_FIXED_DT") ? 1.0f / 60.0f : deltaSeconds;
+        updateFlythrough(captureWaiting || warming ? 0.0f : tourDt);
         return;
     }
 
@@ -6073,6 +6282,26 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     // attributable to the code rather than to how the tester moved.
     static const bool s_bench = std::getenv("ODAI_FNV_BENCH") != nullptr;
     if (s_bench) {
+        // Frame-sequence acceptance must start at the requested pose after
+        // streaming warmup, just like the scripted tour. Otherwise worker
+        // timing consumes an unpredictable prefix of the benchmark route.
+        if ((!m_captureVideoPath.empty() || !m_captureDirectory.empty()) && !m_captureStarted) {
+            float groundHeight = 0.0f;
+            if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) m_cameraY = groundHeight + kEyeHeightUnits;
+            return;
+        }
+        // Optional stationary preroll for performance runs. Sequence capture
+        // has its own streaming preroll above; leave this at zero there.
+        static int benchWarmupRemaining = []() {
+            const char* value = std::getenv("ODAI_FNV_BENCH_WARMUP_FRAMES");
+            return value ? std::clamp(std::atoi(value), 0, 10000) : 0;
+        }();
+        if (benchWarmupRemaining > 0) {
+            --benchWarmupRemaining;
+            float groundHeight = 0;
+            if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) m_cameraY = groundHeight + kEyeHeightUnits;
+            return;
+        }
         // ODAI_FNV_BENCH_FIXED_DT=1 advances by a FIXED step instead of real
         // elapsed time, which makes frame N land at exactly the same camera
         // position on every run. That is what lets two captures taken one frame
@@ -6127,6 +6356,11 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         return;
     }
 
+    // Stationary screenshots and fixed-clock acceptance sequences must not
+    // consume desktop input. Tours and benchmark motion returned above.
+    if (!m_screenshotPath.empty() ||
+        (m_captureFixedDt > 0.0f && (!m_captureDirectory.empty() || !m_captureVideoPath.empty()))) return;
+
     // Mouselook from raw cursor deltas; GameApp has put the cursor in
     // GLFW_CURSOR_DISABLED mode so it reports unbounded relative motion.
     double cursorX = 0.0;
@@ -6156,8 +6390,8 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     const bool giftMenuOpen = m_bethesdaSessionConfigured &&
         !m_bethesdaSession.giftMenuRequests().empty();
     const bool canControlPlayer =
-        !inConversation && !m_menuOpen && !giftMenuOpen && !playerDead;
-    if (m_mouseCaptured && !suppressMouseLook && !inConversation && !giftMenuOpen) {
+        !inConversation && !m_menuOpen && !giftMenuOpen && !m_playerInventoryOpen && !m_scenarioSpawnPending && !playerDead;
+    if (m_mouseCaptured && !suppressMouseLook && !inConversation && !giftMenuOpen && !m_playerInventoryOpen) {
         if (m_hasCursorSample) {
             m_yawDegrees += static_cast<float>(cursorX - m_lastCursorX) * kMouseSensitivity;
             m_pitchDegrees -= static_cast<float>(cursorY - m_lastCursorY) * kMouseSensitivity;
@@ -6419,7 +6653,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         const auto physical = m_bethesdaSession.physics().characterState(playerId);
         if (canControlPlayer && keyDown(m_window, GLFW_KEY_SPACE) &&
             physical.has_value() && physical->grounded) {
-            input.desiredVelocity.y = kJumpUnitsPerSecond;
+            input.desiredVelocity.y = m_streamIsSkyrim ? 320.0f : kJumpUnitsPerSecond;
         }
         if (thirdPersonPlayerShowcase() && lengthSquared > 1.0e-6f) {
             const float wanted = actorYawForDirection(moveX, moveZ);
@@ -6700,11 +6934,14 @@ bool BethesdaApp::initStreaming() {
         }
     }
 
-    // ODAI_FNV_TEX_SIZE is the mip-drop ceiling. The 512 default is what makes
-    // the base game fit; a high-resolution texture pack is invisible without
-    // raising it, because its art gets dropped straight back down. Memory goes
-    // as the square, so this is the knob to reach for first when the GPU starts
-    // complaining.
+    // Preserve Skyrim's authored surface detail in normal gameplay as well as
+    // the fixed reference views. The ceiling participates in the stream cache
+    // key, so old 512px cooked cells cannot hide the higher-resolution mips.
+    // Keep the explicit override for memory-constrained GPUs and texture packs.
+    if (m_streamIsSkyrim) {
+        m_streamer->setMaxTextureSize(2048u);
+        VOX_LOGI("newvegas") << "Skyrim texture ceiling: 2048 px";
+    }
     if (const char* texSizeEnv = std::getenv("ODAI_FNV_TEX_SIZE")) {
         const int requested = std::atoi(texSizeEnv);
         if (requested >= 0) {
@@ -6986,12 +7223,24 @@ bool BethesdaApp::initStreaming() {
                     << " embedded closed-door part(s), before presentation";
             });
     }
+    if (m_streamIsSkyrim && !m_scenarioId.empty()) {
+        m_streamer->setCellPreparation(prepareBethesdaCollision,
+            [this](const importer::CellCoord& cell,
+                   std::shared_ptr<importer::fnv::CellStreamer::PreparedCellData> payload) {
+                auto mesh = std::static_pointer_cast<BethesdaCollisionMesh>(std::move(payload));
+                m_bethesdaCollisionByCell.insert_or_assign(cell, std::move(*mesh));
+            });
+    }
     m_streamer->setCellCallbacks(
         [this](
             const importer::CellCoord& cell,
             const importer::ImportedScene& scene,
             const std::vector<importer::fnv::FalloutNavMeshRecord>& navMeshes) {
             m_skyrimObjectLodTileValid = false;
+            // Tree trimming depends on the resident cells, not only the
+            // camera cell. A late arrival must replace its billboards even
+            // when the camera has stopped after crossing the boundary.
+            m_skyrimTreeLodCellValid = false;
             if (m_streamIsMorrowind) {
                 m_bethesdaGameplayResidentCells.insert(cell);
             }
@@ -6999,13 +7248,23 @@ bool BethesdaApp::initStreaming() {
             // collision implementations. Otherwise the lightweight capsule
             // resolver can stand on an invisible door/FX hull that Jolt has
             // correctly omitted from the same streamed cell.
+            const core::Stopwatch residencyTimer;
             if (!m_scenarioId.empty() || m_streamIsMorrowind) {
                 cacheBethesdaCollisionCell(cell, scene);
             }
+            const float physicsMs = residencyTimer.elapsedMs();
             m_collision.addCell(cell, scene, m_disabledBethesdaCollisionReferences);
+            const float collisionMs = residencyTimer.elapsedMs() - physicsMs;
             m_actorNavigation.addCell(cell, navMeshes);
             if (navMeshes.empty() && (m_streamIsMorrowind || m_streamIsOblivion)) {
                 m_actorNavigation.addGeneratedCell(cell, scene);
+            }
+            if (std::getenv("ODAI_DEBUG_CHUNK_TIMING") != nullptr ||
+                residencyTimer.elapsedMs() > 16.0f) {
+                VOX_LOGI("performance") << "cell residency " << cell.x << "," << cell.z
+                    << " physics=" << physicsMs << " collision=" << collisionMs
+                    << " navigation=" << residencyTimer.elapsedMs() - physicsMs - collisionMs
+                    << " ms";
             }
             m_streamDoorsByCell[cell] = scene.doors;
             rebuildStreamDoors();
@@ -7036,6 +7295,7 @@ bool BethesdaApp::initStreaming() {
         },
         [this](const importer::CellCoord& cell) {
             m_skyrimObjectLodTileValid = false;
+            m_skyrimTreeLodCellValid = false;
             m_bethesdaGameplayResidentCells.erase(cell);
             m_collision.removeCell(cell);
             m_actorNavigation.removeCell(cell);
@@ -7127,7 +7387,8 @@ bool BethesdaApp::initStreaming() {
     // the recording even though every mesh eventually loads. Preload and pin
     // the whole corridor before its first captured frame instead.
     const bool isVideoTourCapture = m_flythroughSeconds > 0.0f &&
-        (!m_captureVideoPath.empty() || !m_captureDirectory.empty());
+        (!m_captureVideoPath.empty() || !m_captureDirectory.empty()) &&
+        std::getenv("ODAI_TOUR_STREAMING") == nullptr;
     if (isVideoTourCapture) {
         constexpr int kTourPreloadSamples = 96;
         std::unordered_set<importer::CellCoord, importer::CellCoordHash> pinnedCells;
@@ -7550,6 +7811,13 @@ bool BethesdaApp::initStreaming() {
             m_skyrimCityAuthoredSpawnFeet = {
                 m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
             m_skyrimCitySpawnSettlementPending = true;
+        }
+        if (spawnedAtScenarioMarker) {
+            m_scenarioSpawnFeet = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+            const float cellSize = m_streamer->cellWorldSize();
+            m_scenarioSpawnCell = {static_cast<std::int32_t>(std::floor(m_cameraX / cellSize)),
+                                  static_cast<std::int32_t>(std::floor(-m_cameraZ / cellSize))};
+            m_scenarioSpawnPending = true;
         }
         VOX_LOGI("newvegas") << "spawn (engine space): x=" << m_cameraX
                              << " y=" << m_cameraY << " (height) z=" << m_cameraZ;
@@ -8020,320 +8288,222 @@ void BethesdaApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
                          << " triangles, " << stats.textures << " textures, in " << ms << " ms";
 }
 
-void BethesdaApp::updateSkyrimObjectLod(const float bethesdaPosition[3]) {
-    // See updateSkyrimTerrainLod: actor-only runs should not build the 49-tile
-    // BTO skyline behind a deliberately hidden world.
-    const char* drawMode = std::getenv("ODAI_FNV_DRAW");
-    if (drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) {
-        return;
-    }
-    if (!m_streamIsSkyrim || m_streamer == nullptr) {
-        return;
-    }
-    // Build the parent proxy once the detailed ring is final, so the handoff can trim
-    // against the complete detailed residency set instead of rebuilding the
-    // 7x7 BTO window once per arriving cell.
-    if (!m_streamer->isStreamingIdle()) {
-        return;
-    }
+BethesdaApp::~BethesdaApp() {
+    // Worker requests hold a const pointer to the streamer's immutable assets.
+    // Drain before member destruction releases that resolver.
+    if (m_streamJobs) m_streamJobs->waitIdle();
+}
 
-    constexpr std::int32_t kTileCells = importer::fnv::kLandLodBlockCells;
-    // A 3x3 BTO window only reaches roughly 20-31k units from the camera,
-    // depending on where the camera sits inside its current tile. Skyrim's
-    // mountains routinely cross that boundary while still clearly visible,
-    // producing a hard partial-mountain silhouette even though every triangle
-    // in the resident tiles is submitted. Seven tiles per axis keeps complete
-    // object-LOD features resident to at least ~49k units in every direction;
-    // the existing imported page culling keeps off-screen tiles out of draws.
-    const std::int32_t kTileRadius = [] {
+void BethesdaApp::clearSkyrimObjectLodTiles() {
+    for (auto& [cell, tile] : m_objectLodTiles) {
+        if (tile.chunk != render::Renderer::kInvalidImportedChunkIndex)
+            m_renderer.removeImportedSceneChunk(tile.chunk);
+        m_renderer.removeImportedSceneChunk(tile.outgoingChunk);
+    }
+    // Futures are promise-backed, so stale jobs finish without blocking this
+    // frame or publishing into the new worldspace.
+    m_objectLodTiles.clear();
+    m_objectLodGeneration.clear();
+    m_skyrimObjectLodTileValid = false;
+}
+
+void BethesdaApp::updateSkyrimObjectLod(const float position[3], const float velocity[3], float deltaSeconds) {
+    const char* drawMode = std::getenv("ODAI_FNV_DRAW");
+    if (!m_streamIsSkyrim || !m_streamer || !m_streamJobs ||
+        (drawMode && std::strcmp(drawMode, "actors") == 0)) return;
+    const auto worldspace = m_streamer->currentWorldspaceEditorId();
+    if (m_objectLodGeneration != worldspace) {
+        clearSkyrimObjectLodTiles();
+        m_objectLodGeneration = worldspace;
+    }
+    const bool fixed = m_captureRoutePreloadActive && m_captureSkyrimLodBoundsValid;
+    if (fixed && m_captureSkyrimObjectLodFrozen) {
+        m_skyrimObjectLodTileValid = true;
+        return;
+    }
+    constexpr int span = 4;
+    const float size = m_streamer->cellWorldSize();
+    if (size <= 0) return;
+    const int radius = [] {
         const char* value = std::getenv("ODAI_SKYRIM_LOD_RADIUS");
         return value ? std::clamp(std::atoi(value), 3, 12) : 3;
     }();
-    const float cellSize = m_streamer->cellWorldSize();
-    if (cellSize <= 0.0f) {
-        return;
-    }
-    const auto cellX = static_cast<std::int32_t>(std::floor(bethesdaPosition[0] / cellSize));
-    const auto cellZ = static_cast<std::int32_t>(std::floor(bethesdaPosition[1] / cellSize));
-    const auto tileX = importer::fnv::landLodTileOrigin(cellX, kTileCells);
-    const auto tileZ = importer::fnv::landLodTileOrigin(cellZ, kTileCells);
-    const bool fixedCaptureLod =
-        m_captureRoutePreloadActive && m_captureSkyrimLodBoundsValid;
-    if ((fixedCaptureLod && m_captureSkyrimObjectLodFrozen) ||
-        (!fixedCaptureLod && m_skyrimObjectLodTileValid &&
-         tileX == m_skyrimObjectLodTileX && tileZ == m_skyrimObjectLodTileZ)) {
-        return;
-    }
-
-    // BTO geometry is already in world space and all nine tiles share one
-    // atlas, so build the window as ONE ImportedScene. Besides avoiding nine
-    // atlas decodes, this gives the renderer one replaceable chunk when the
-    // camera crosses a four-cell boundary.
-    importer::ImportedScene scene;
-    importer::fnv::LandLodTierStats stats;
-    std::string error;
-    const auto start = std::chrono::steady_clock::now();
-    const importer::fnv::FalloutAssetSource& assets = m_streamer->assets();
-    const std::int32_t firstX =
-        (fixedCaptureLod ? m_captureSkyrimLodMinTileX : tileX) -
-        (kTileRadius * kTileCells);
-    const std::int32_t firstZ =
-        (fixedCaptureLod ? m_captureSkyrimLodMinTileZ : tileZ) -
-        (kTileRadius * kTileCells);
-    const std::int32_t lastX =
-        (fixedCaptureLod ? m_captureSkyrimLodMaxTileX : tileX) +
-        (kTileRadius * kTileCells);
-    const std::int32_t lastZ =
-        (fixedCaptureLod ? m_captureSkyrimLodMaxTileZ : tileZ) +
-        (kTileRadius * kTileCells);
-    std::vector<std::string> lodWorldspaces =
-        m_streamer->currentWorldspaceEditorIdAncestry();
-    if (!m_skyrimObjectLodWorldspace.empty()) {
-        const auto cached = std::find(
-            lodWorldspaces.begin(), lodWorldspaces.end(), m_skyrimObjectLodWorldspace);
-        if (cached != lodWorldspaces.end()) {
-            std::rotate(lodWorldspaces.begin(), cached, cached + 1);
+    const auto origin = [&](float value) {
+        return importer::fnv::landLodTileOrigin(static_cast<int>(std::floor(value / size)), span);
+    };
+    const int tx = origin(position[0]), tz = origin(position[1]);
+    const int x0 = (fixed ? m_captureSkyrimLodMinTileX : tx) - radius * span;
+    const int z0 = (fixed ? m_captureSkyrimLodMinTileZ : tz) - radius * span;
+    const int x1 = (fixed ? m_captureSkyrimLodMaxTileX : tx) + radius * span;
+    const int z1 = (fixed ? m_captureSkyrimLodMaxTileZ : tz) + radius * span;
+    // Preload only the next window's entering strip. Clamp prediction to one
+    // tile; these entries remain CPU-only until inside the visible window.
+    const int px = fixed ? tx : origin(position[0] + std::clamp(velocity[0] * 3.0f, -size * span, size * span));
+    const int pz = fixed ? tz : origin(position[1] + std::clamp(velocity[1] * 3.0f, -size * span, size * span));
+    std::vector<importer::CellCoord> desired;
+    for (int z = std::min(z0, z0 + pz - tz); z <= std::max(z1, z1 + pz - tz); z += span) {
+        for (int x = std::min(x0, x0 + px - tx); x <= std::max(x1, x1 + px - tx); x += span) {
+            const bool visible = x >= x0 && x <= x1 && z >= z0 && z <= z1;
+            const bool predicted = x >= x0 + px - tx && x <= x1 + px - tx &&
+                z >= z0 + pz - tz && z <= z1 + pz - tz;
+            if (!visible && !predicted) continue;
+            const importer::CellCoord key{x,z};
+            desired.push_back(key);
+            auto& tile = m_objectLodTiles[key];
+            if (!visible && tile.visible) {
+                m_renderer.removeImportedSceneChunk(tile.chunk);
+                m_renderer.removeImportedSceneChunk(tile.outgoingChunk);
+                tile.chunk = tile.outgoingChunk = render::Renderer::kInvalidImportedChunkIndex;
+                tile.published.reset();
+                tile.transitioning = false;
+            }
+            tile.visible = visible;
+            ObjectLodRequest request;
+            request.handoff.tileX = x; request.handoff.tileZ = z;
+            request.child = m_streamer->hasChildWorldspaceCellInRange(x,z,x+3,z+3);
+            request.showcase = m_whiterunReferenceShowcase;
+            request.fixed = fixed;
+            bool allPinned = true;
+            for (int dz = 0; dz < span; ++dz) for (int dx = 0; dx < span; ++dx) {
+                const importer::CellCoord cell{x+dx,z+dz};
+                allPinned = allPinned && m_capturePinnedCells.contains(cell);
+                if (m_streamer->isExteriorCellResident(m_streamer->currentWorldspaceFormId(), cell.x, cell.z))
+                    request.handoff.residentMask |= std::uint16_t(1u << (dz*span+dx));
+            }
+            const auto distance = [](float p, float low, float high) {
+                return std::max({low-p, p-high, 0.0f});
+            };
+            const float dx = distance(position[0], x*size, (x+span)*size);
+            const float dz = distance(position[1], z*size, (z+span)*size);
+            request.near = fixed ? (request.showcase ? x==tx && z==tz : allPinned)
+                                 : dx*dx+dz*dz < size*size;
+            if (std::getenv("ODAI_DEBUG_KEEP_SKYRIM_BTO")) {
+                request.near = false; request.child = false; request.showcase = false;
+                request.handoff.residentMask = 0;
+            }
+            tile.wanted = request;
         }
     }
-    bool built = false;
-    std::string attempts;
-    for (const std::string& worldspace : lodWorldspaces) {
-        importer::ImportedScene candidate;
-        importer::fnv::LandLodTierStats candidateStats;
-        std::string candidateError;
-        if (importer::fnv::appendLandLodTier(
-                [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
-                    return assets.resolveMesh(path, bytes, candidateError);
-                },
-                [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
-                    return assets.resolveTexture(path, bytes, candidateError);
-                },
-                worldspace, importer::fnv::LandLodSet::SkyrimObjects, kTileCells,
-                firstX, firstZ, lastX, lastZ, 0.0f, candidate, candidateStats,
-                candidateError)) {
-            scene = std::move(candidate);
-            scene.sourceTag = "skyrim_object_lod:" + worldspace;
-            stats = candidateStats;
-            built = true;
-            if (m_skyrimObjectLodWorldspace != worldspace) {
-                VOX_LOGI("newvegas") << "Skyrim object LOD for "
-                                     << m_streamWorldspace << " resolved from "
-                                     << worldspace;
-                m_skyrimObjectLodWorldspace = worldspace;
-            }
-            break;
-        }
-        if (!attempts.empty()) attempts += "; ";
-        attempts += worldspace + ": " + candidateError;
+    // Reclaim outgoing tiles only outside both current and predicted windows.
+    for (auto it=m_objectLodTiles.begin(); it!=m_objectLodTiles.end();) {
+        if (std::find(desired.begin(), desired.end(), it->first) == desired.end()) {
+            if (it->second.chunk != render::Renderer::kInvalidImportedChunkIndex)
+                m_renderer.removeImportedSceneChunk(it->second.chunk);
+            m_renderer.removeImportedSceneChunk(it->second.outgoingChunk);
+            it = m_objectLodTiles.erase(it);
+        } else ++it;
     }
-    if (!built) error = attempts;
-
-    std::size_t replacement = render::Renderer::kInvalidImportedChunkIndex;
-    if (built) {
-        // A BTO is a coarse stand-in for objects covered by four detailed
-        // cells. It must disappear before the camera reaches the tile, not
-        // only after crossing its boundary: otherwise Whiterun's whole coarse
-        // city pops back in when the player is a few hundred units across the
-        // neighbouring tile edge. Keep a one-cell hand-off band around every
-        // BTO tile. At the pinned southern approach Whiterun is ~6100 units
-        // beyond that band and remains complete; on the near approach its BTO
-        // yields to the authored city shells before the low-detail rocks and
-        // roofs become visible.
-        const auto distanceToInterval = [](float value, float low, float high) {
-            if (value < low) {
-                return low - value;
+    std::sort(desired.begin(), desired.end(), [&](const auto& a, const auto& b) {
+        const bool av=m_objectLodTiles.at(a).visible, bv=m_objectLodTiles.at(b).visible;
+        if (av != bv) return av;
+        const auto d = [&](const auto& c) { return std::abs(c.x-tx)+std::abs(c.z-tz); };
+        if (d(a) != d(b)) return d(a)<d(b);
+        return a.x != b.x ? a.x<b.x : a.z<b.z;
+    });
+    bool applied = false, complete = true;
+    unsigned hiddenPrepared = 0, outstanding = 0;
+    for (const auto& [key,tile] : m_objectLodTiles) {
+        if (tile.pending.valid() || tile.ready) {
+            ++outstanding;
+            if (!tile.visible) ++hiddenPrepared;
+        }
+    }
+    for (const auto& key : desired) {
+        auto& tile = m_objectLodTiles.at(key);
+        if (tile.pending.valid() && tile.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            try {
+                tile.ready = tile.pending.get();
+            } catch (const std::exception& error) {
+                --outstanding;
+                VOX_LOGW("newvegas") << "object LOD preparation failed: " << key.x << "," << key.z
+                    << " " << error.what();
+                // Retain the old representation. Retry on the next selection change.
+                tile.published = tile.wanted;
             }
-            return value > high ? value - high : 0.0f;
-        };
-        const bool keepAllBtoShapes =
-            std::getenv("ODAI_DEBUG_KEEP_SKYRIM_BTO") != nullptr;
-        std::vector<std::size_t> nearMeshIndices;
-        if (!keepAllBtoShapes) {
-            for (std::int32_t tz = firstZ; tz <= lastZ; tz += kTileCells) {
-                for (std::int32_t tx = firstX; tx <= lastX; tx += kTileCells) {
-                    const float minX = static_cast<float>(tx) * cellSize;
-                    const float maxX = static_cast<float>(tx + kTileCells) * cellSize;
-                    const float minZ = static_cast<float>(tz) * cellSize;
-                    const float maxZ = static_cast<float>(tz + kTileCells) * cellSize;
-                    if (fixedCaptureLod) {
-                        // Whiterun is a child worldspace whose visible 3x3
-                        // detail ring occupies only part of Tamriel's 4x4 BTO
-                        // tile. Requiring all sixteen parent cells to be pinned
-                        // therefore retained the LargeRef city proxy directly
-                        // over the resident gate—the blurry "door" in the
-                        // reference view. The fixed camera has already proved
-                        // its complete visible ring resident, so its containing
-                        // parent tile yields as one authored LOD unit.
-                        if (m_whiterunReferenceShowcase) {
-                            if (tx != tileX || tz != tileZ) {
-                                continue;
-                            }
-                        } else {
-                            bool detailedTileResident = true;
-                            for (std::int32_t cz = tz;
-                                 cz < tz + kTileCells && detailedTileResident; ++cz) {
-                                for (std::int32_t cx = tx; cx < tx + kTileCells; ++cx) {
-                                    if (!m_capturePinnedCells.contains(
-                                            importer::CellCoord{cx, cz})) {
-                                        detailedTileResident = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!detailedTileResident) {
-                                continue;
-                            }
-                        }
-                    } else {
-                        const float dx = distanceToInterval(bethesdaPosition[0], minX, maxX);
-                        const float dz = distanceToInterval(bethesdaPosition[1], minZ, maxZ);
-                        // Child cities can have detailed cells well beyond the
-                        // camera's tile. Apply the residency-based triangle handoff
-                        // to every inherited tile, not just the nearest one.
-                        if (m_skyrimObjectLodWorldspace ==
-                                m_streamer->currentWorldspaceEditorId() &&
-                            (dx * dx) + (dz * dz) >= cellSize * cellSize) {
-                            continue;
-                        }
-                    }
-                    const std::string meshNamePrefix =
-                        "lod" + std::to_string(kTileCells) + "_" + std::to_string(tx) + "_" +
-                        std::to_string(tz);
-                    const bool childCityTile = m_whiterunReferenceShowcase ||
-                        m_skyrimObjectLodWorldspace !=
-                            m_streamer->currentWorldspaceEditorId() ||
-                        m_streamer->hasChildWorldspaceCellInRange(
-                            tx, tz, tx + kTileCells - 1, tz + kTileCells - 1);
-                    for (std::size_t meshIndex = 0; meshIndex < scene.meshes.size(); ++meshIndex) {
-                        importer::ImportedSceneMesh& mesh = scene.meshes[meshIndex];
-                        const std::string& meshName = mesh.name;
-                        const bool belongsToTile =
-                            meshName == meshNamePrefix ||
-                            meshName.starts_with(meshNamePrefix + "_");
-                        if (!belongsToTile) {
-                            continue;
-                        }
-                        if (childCityTile) {
-                            // The fixed reference prewarms every detailed cell
-                            // that can contribute to its view. Its containing
-                            // parent tile can therefore yield completely; this
-                            // also avoids retaining a coarse gate leaf whose
-                            // triangles straddle a detailed-cell boundary.
-                            if (m_whiterunReferenceShowcase) {
-                                nearMeshIndices.push_back(meshIndex);
-                                continue;
-                            }
-                            // A parent BTO may merge the whole walled city into
-                            // one mesh, so dropping the mesh creates holes when
-                            // only part of the child is resident. Clip at the
-                            // triangle centroid instead: detailed child cells
-                            // replace their exact footprint while the proxy
-                            // remains everywhere else.
-                            std::vector<std::uint32_t> keptIndices;
-                            std::vector<importer::ImportedSceneMeshPart> keptParts;
-                            keptIndices.reserve(mesh.indices.size());
-                            keptParts.reserve(mesh.parts.size());
-                            for (const importer::ImportedSceneMeshPart& sourcePart : mesh.parts) {
-                                importer::ImportedSceneMeshPart part = sourcePart;
-                                part.firstIndex = static_cast<std::uint32_t>(keptIndices.size());
-                                const std::size_t begin = sourcePart.firstIndex;
-                                const std::size_t end = std::min(
-                                    begin + static_cast<std::size_t>(sourcePart.indexCount),
-                                    mesh.indices.size());
-                                for (std::size_t i = begin; i + 2u < end; i += 3u) {
-                                    const std::uint32_t ia = mesh.indices[i];
-                                    const std::uint32_t ib = mesh.indices[i + 1u];
-                                    const std::uint32_t ic = mesh.indices[i + 2u];
-                                    if (ia >= mesh.vertices.size() || ib >= mesh.vertices.size() ||
-                                        ic >= mesh.vertices.size()) {
-                                        continue;
-                                    }
-                                    const float centreX =
-                                        (mesh.vertices[ia].position[0] +
-                                         mesh.vertices[ib].position[0] +
-                                         mesh.vertices[ic].position[0]) / 3.0f;
-                                    // BTO vertices remain Bethesda Z-up until
-                                    // their instance transform is packed. Y is
-                                    // northing here; Z is altitude, not engine Z.
-                                    const float centreNorthing =
-                                        (mesh.vertices[ia].position[1] +
-                                         mesh.vertices[ib].position[1] +
-                                         mesh.vertices[ic].position[1]) / 3.0f;
-                                    const std::int32_t cellX = static_cast<std::int32_t>(
-                                        std::floor(centreX / cellSize));
-                                    const std::int32_t cellZ = static_cast<std::int32_t>(
-                                        std::floor(centreNorthing / cellSize));
-                                    if (m_streamer->isExteriorCellResident(
-                                            m_streamer->currentWorldspaceFormId(), cellX, cellZ)) {
-                                        continue;
-                                    }
-                                    keptIndices.push_back(ia);
-                                    keptIndices.push_back(ib);
-                                    keptIndices.push_back(ic);
-                                }
-                                part.indexCount = static_cast<std::uint32_t>(keptIndices.size()) -
-                                    part.firstIndex;
-                                if (part.indexCount != 0u) {
-                                    keptParts.push_back(part);
-                                }
-                            }
-                            mesh.indices = std::move(keptIndices);
-                            mesh.parts = std::move(keptParts);
-                            continue;
-                        }
-                        const bool largeReference = meshName.ends_with("_largeref");
-                        if (!largeReference) {
-                            nearMeshIndices.push_back(meshIndex);
-                        }
-                    }
+        }
+        if (tile.ready && tile.ready->request != tile.wanted) {
+            tile.ready.reset(); --outstanding;
+        }
+        const float fadeSeed = float((std::uint32_t(key.x) * 73856093u ^ std::uint32_t(key.z) * 19349663u) & 65535u);
+        if (tile.transitioning && (tile.chunk == render::Renderer::kInvalidImportedChunkIndex ||
+                m_renderer.isImportedSceneChunkReady(tile.chunk))) {
+            tile.fadeSeconds += std::clamp(deltaSeconds, 0.0f, 0.05f);
+            const float progress = std::min(tile.fadeSeconds / 0.4f, 1.0f);
+            m_renderer.setImportedSceneChunkLodTransition(tile.chunk, progress, 1.0f, fadeSeed);
+            m_renderer.setImportedSceneChunkLodTransition(tile.outgoingChunk, progress, -1.0f, fadeSeed);
+            if (progress >= 1.0f) {
+                m_renderer.removeImportedSceneChunk(tile.outgoingChunk);
+                tile.outgoingChunk = render::Renderer::kInvalidImportedChunkIndex;
+                m_renderer.setImportedSceneChunkLodTransition(tile.chunk, 1.0f, 0.0f, 0.0f);
+                tile.transitioning = false;
+            }
+        }
+        if (tile.visible && tile.ready && !applied && !tile.transitioning) {
+            const core::Stopwatch timer;
+            auto ready = std::move(tile.ready);
+            --outstanding;
+            const auto replacement = ready->scene.packedIndices.empty()
+                ? render::Renderer::kInvalidImportedChunkIndex
+                : m_renderer.addImportedSceneChunk(ready->scene);
+            if (!ready->scene.packedIndices.empty() && replacement == render::Renderer::kInvalidImportedChunkIndex) {
+                VOX_LOGW("newvegas") << "object LOD tile upload failed: " << key.x << "," << key.z;
+            } else {
+                tile.outgoingChunk = tile.chunk;
+                tile.chunk = replacement;
+                tile.fadeSeconds = 0.0f;
+                tile.transitioning = tile.chunk != render::Renderer::kInvalidImportedChunkIndex ||
+                    tile.outgoingChunk != render::Renderer::kInvalidImportedChunkIndex;
+                m_renderer.setImportedSceneChunkLodTransition(tile.chunk, 0.0f, 1.0f, fadeSeed);
+                m_renderer.setImportedSceneChunkLodTransition(tile.outgoingChunk, 0.0f, -1.0f, fadeSeed);
+                tile.published = ready->request;
+                if (ready->built) m_skyrimObjectLodWorldspace = ready->sourceWorldspace;
+                if (std::getenv("ODAI_DEBUG_CHUNK_TIMING"))
+                    VOX_LOGI("performance") << "object LOD tile publish " << key.x << "," << key.z
+                        << " ms=" << timer.elapsedMs() << " triangles=" << ready->scene.packedIndices.size()/3;
+            }
+            applied = true;
+        }
+        const bool satisfied = tile.published && *tile.published == tile.wanted;
+        if (tile.visible && (!satisfied || tile.transitioning)) complete = false;
+        if (satisfied || tile.ready || tile.pending.valid() || outstanding >= 4u || m_objectLodJobs->load() >= 2u ||
+            (!tile.visible && hiddenPrepared >= 2u)) continue;
+        auto request = tile.wanted;
+        auto worlds = m_streamer->currentWorldspaceEditorIdAncestry();
+        const auto* assets = &m_streamer->assets();
+        auto count = m_objectLodJobs;
+        auto task = std::make_shared<std::packaged_task<std::shared_ptr<PreparedObjectLod>()>>(
+            [request, worlds, worldspace, assets, count]() {
+                struct Finish { std::shared_ptr<std::atomic<unsigned>> count; ~Finish(){--*count;} } finish{count};
+                auto result = std::make_shared<PreparedObjectLod>(); result->request = request;
+                for (const auto& source : worlds) {
+                    importer::ImportedScene scene;
+                    importer::fnv::LandLodTierStats stats;
+                    if (!importer::fnv::appendLandLodTier(
+                        [&](const auto& path, auto& bytes){return assets->resolveMesh(path,bytes,result->error);},
+                        [&](const auto& path, auto& bytes){return assets->resolveTexture(path,bytes,result->error);},
+                        source, importer::fnv::LandLodSet::SkyrimObjects, 4,
+                        request.handoff.tileX,request.handoff.tileZ,request.handoff.tileX,request.handoff.tileZ,
+                        0,scene,stats,result->error)) continue;
+                    auto handoff = request.handoff;
+                    const bool inherited = source != worldspace;
+                    handoff.clipResident = (request.child || inherited) && (request.near || (!request.fixed && inherited));
+                    handoff.dropAll = request.showcase && request.near;
+                    handoff.dropRegular = request.near && !handoff.clipResident;
+                    importer::fnv::applySkyrimLodHandoff(scene,handoff);
+                    scene.sourceTag = "skyrim_object_lod:"+source;
+                    result->scene = std::move(scene); result->sourceWorldspace = source; result->built = true;
+                    break;
                 }
-            }
-        } else {
-            VOX_LOGW("newvegas")
-                << "ODAI_DEBUG_KEEP_SKYRIM_BTO active: near-tile object LOD handoff disabled";
-        }
-        scene.instances.erase(
-            std::remove_if(
-                scene.instances.begin(), scene.instances.end(),
-                [&](const importer::ImportedSceneInstance& instance) {
-                    return std::find(
-                               nearMeshIndices.begin(), nearMeshIndices.end(),
-                               static_cast<std::size_t>(instance.meshIndex)) !=
-                           nearMeshIndices.end();
-                }),
-            scene.instances.end());
-        if (m_whiterunReferenceShowcase) {
-            VOX_LOGI("showcase")
-                << "Whiterun reference object-LOD handoff removed "
-                << nearMeshIndices.size()
-                << " parent BTO mesh(es) from the detailed gate tile";
-        }
-        importer::buildImportedScenePackedRenderData(scene);
-        importer::buildImportedScenePageRanges(scene);
-        replacement = m_renderer.addImportedSceneChunk(scene);
+                return result;
+            });
+        tile.pending = task->get_future(); ++*count;
+        ++outstanding;
+        m_streamJobs->enqueue([task](){(*task)();});
+        if (!tile.visible) ++hiddenPrepared;
     }
-    if (m_skyrimObjectLodChunk != render::Renderer::kInvalidImportedChunkIndex) {
-        m_renderer.removeImportedSceneChunk(m_skyrimObjectLodChunk);
-    }
-    m_skyrimObjectLodChunk = replacement;
-    m_skyrimObjectLodTileX = tileX;
-    m_skyrimObjectLodTileZ = tileZ;
-    m_skyrimObjectLodTileValid = true;
-    m_captureSkyrimObjectLodFrozen = fixedCaptureLod;
-
-    if (!built) {
-        VOX_LOGI("newvegas") << "no Skyrim object LOD around tile " << tileX << ","
-                             << tileZ << ": " << error;
-        return;
-    }
-    const double ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
-    VOX_LOGI("newvegas") << (fixedCaptureLod ? "fixed capture Skyrim object LOD" :
-                                                "Skyrim object LOD around tile")
-                         << " " << tileX << "," << tileZ
-                         << ": " << stats.tilesParsed << " BTO tiles, " << stats.triangles
-                         << " triangles, " << stats.textures << " atlas texture(s), in "
-                         << ms << " ms";
+    m_skyrimObjectLodTileX = tx; m_skyrimObjectLodTileZ = tz;
+    m_skyrimObjectLodTileValid = complete;
+    if (fixed && complete) m_captureSkyrimObjectLodFrozen = true;
 }
 
 void BethesdaApp::updateSkyrimTreeLod(const float bethesdaPosition[3]) {
@@ -8555,7 +8725,9 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
     }
     if (m_interiorStarted) {
         if (m_bethesdaCollisionBroadPhaseDirty && m_bethesdaSessionConfigured) {
-            m_bethesdaSession.physics().optimizeBroadPhase();
+            const core::Stopwatch broadPhaseTimer;
+        m_bethesdaSession.physics().optimizeBroadPhase();
+        if (broadPhaseTimer.elapsedMs() > 16.f) VOX_LOGI("performance") << "collision broad-phase rebuild: " << broadPhaseTimer.elapsedMs() << " ms";
             m_bethesdaCollisionBroadPhaseDirty = false;
         }
         return;
@@ -8596,11 +8768,13 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
     // 25-cell arrival performs one rebuild rather than one per rendered frame.
     if (m_bethesdaCollisionBroadPhaseDirty &&
         m_streamer->isStreamingIdle() && m_bethesdaSessionConfigured) {
+        const core::Stopwatch broadPhaseTimer;
         m_bethesdaSession.physics().optimizeBroadPhase();
+        if (broadPhaseTimer.elapsedMs() > 16.f) VOX_LOGI("performance") << "collision broad-phase rebuild: " << broadPhaseTimer.elapsedMs() << " ms";
         m_bethesdaCollisionBroadPhaseDirty = false;
     }
     updateSkyrimTerrainLod(falloutPosition);
-    updateSkyrimObjectLod(falloutPosition);
+    updateSkyrimObjectLod(falloutPosition, falloutVelocity, deltaSeconds);
     updateSkyrimTreeLod(falloutPosition);
 
     // Actor placements and quest aliases are gameplay residency, not renderer
@@ -8658,9 +8832,11 @@ void BethesdaApp::onTick(float deltaSeconds) {
         deltaSeconds = m_captureFixedDt;
     }
     if (m_bethesdaSessionConfigured) {
+        if (m_scenarioSpawnPending) (void)settleScenarioSpawn();
         syncBethesdaPlayerState(false);
         const bethesda::BethesdaSessionStep sessionStep =
-            m_bethesdaSession.advance(static_cast<double>(deltaSeconds),
+            m_bethesdaSession.advance(
+                (m_playerInventoryOpen || m_scenarioSpawnPending) ? 0.0 : static_cast<double>(deltaSeconds),
                 [this](std::uint64_t, double fixedStepSeconds) {
                     stepBethesdaActorControllers(
                         static_cast<float>(fixedStepSeconds));
@@ -8669,7 +8845,7 @@ void BethesdaApp::onTick(float deltaSeconds) {
                         const float pitch = m_pitchDegrees * (kPi / 180.0f);
                         const float horizontal = std::cos(pitch);
                         const bethesda::MeleeAttackResult attack =
-                            m_bethesdaSession.performMeleeAttack(
+                            m_bethesdaSession.performEquippedMeleeAttack(
                                 m_bethesdaSession.playerObject(),
                                 {std::cos(yaw) * horizontal, std::sin(pitch),
                                     std::sin(yaw) * horizontal});
@@ -8720,12 +8896,13 @@ void BethesdaApp::onTick(float deltaSeconds) {
     pollNavInput(deltaSeconds);
     updateTes3JournalInput();
     updateGiftMenu();
+    updatePlayerInventory();
     const bool giftMenuOpen = m_bethesdaSessionConfigured &&
         !m_bethesdaSession.giftMenuRequests().empty();
     const bool meleeDown =
         glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     if (meleeDown && !m_meleeAttackButtonLatch && m_bethesdaSessionConfigured &&
-        !m_menuOpen && !m_tes3JournalOpen && !giftMenuOpen && m_talkingActor < 0 &&
+        !m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && !giftMenuOpen && m_talkingActor < 0 &&
         m_doorTransitionPhase == DoorTransitionPhase::None) {
         m_meleeAttackPending = true;
     }
@@ -8740,7 +8917,7 @@ void BethesdaApp::onTick(float deltaSeconds) {
     // A conversation counts for the same reason, and now more literally: the
     // dialogue card is centred large type, and "Goodsprings / Location
     // discovered" landed straight across Victor's first two replies.
-    if (!m_menuOpen && !m_tes3JournalOpen && !giftMenuOpen && m_talkingActor < 0) {
+    if (!m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && !giftMenuOpen && m_talkingActor < 0) {
         m_banner.update(deltaSeconds);
     }
     // Region lookup walks the cell index, so it is polled a few times a second
@@ -9033,10 +9210,11 @@ void BethesdaApp::onTick(float deltaSeconds) {
         : odai::math::Vector3{m_cameraX, m_cameraY, m_cameraZ};
     const float cameraPosition[3] = {
         activationOrigin.x, activationOrigin.y, activationOrigin.z};
-    m_activationLootActor = (m_talkingActor >= 0 || m_tes3JournalOpen)
-        ? -1 : findLootableActorInReach();
+    const bool canActivateWorld = !m_menuOpen && !giftMenuOpen &&
+        !m_playerInventoryOpen && !m_tes3JournalOpen && m_talkingActor < 0;
+    m_activationLootActor = canActivateWorld ? findLootableActorInReach() : -1;
     m_activationActor = -1;
-    if (!m_tes3JournalOpen && m_talkingActor < 0 && m_activationLootActor < 0) {
+    if (canActivateWorld && m_activationLootActor < 0) {
         m_activationActor = (m_bethesdaSessionConfigured && m_streamIsMorrowind)
             ? findTes3DialogueActorInReach(
                   cameraPosition, m_yawDegrees * (kPi / 180.0f))
@@ -9047,8 +9225,7 @@ void BethesdaApp::onTick(float deltaSeconds) {
                   m_actors, cameraPosition, m_yawDegrees * (kPi / 180.0f));
     }
     const bool clawPuzzleInReach = m_activationLootActor < 0 &&
-        m_activationActor < 0 && !m_menuOpen &&
-        m_talkingActor < 0 && goldenClawPuzzleInReach();
+        m_activationActor < 0 && canActivateWorld && goldenClawPuzzleInReach();
     static constexpr std::array<int, 3> kClawRingKeys = {
         GLFW_KEY_1, GLFW_KEY_2, GLFW_KEY_3};
     bool rotatedClawRing = false;
@@ -9068,19 +9245,19 @@ void BethesdaApp::onTick(float deltaSeconds) {
     const bool doorPressed = keyDown(m_window, GLFW_KEY_E);
     const bool doorEdge = doorPressed && !m_doorKeyLatch;
     m_doorKeyLatch = doorPressed;
-    if (!m_tes3JournalOpen && doorEdge && m_activationLootActor >= 0) {
+    if (canActivateWorld && doorEdge && m_activationLootActor >= 0) {
         (void)lootActor(m_activationLootActor);
         return;
     }
-    if (!m_tes3JournalOpen && doorEdge && m_activationActor >= 0) {
+    if (canActivateWorld && doorEdge && m_activationActor >= 0) {
         beginConversation(m_activationActor);
         // The line itself is started by the single speakActorLine poll above,
         // on the next tick.
         return;  // E opened a conversation; do not also walk through a door
     }
-    if (!m_tes3JournalOpen && doorEdge && clawPuzzleInReach) {
+    if (canActivateWorld && doorEdge && clawPuzzleInReach) {
         (void)useGoldenClawPuzzle();
-    } else if (!m_tes3JournalOpen && doorEdge) {
+    } else if (canActivateWorld && doorEdge) {
         const int doorIndex = findUsableDoor();
         if (doorIndex >= 0) {
             useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
@@ -9271,7 +9448,7 @@ void BethesdaApp::pollNavInput(float deltaSeconds) {
     const bool giftMenuOpen = m_bethesdaSessionConfigured &&
         !m_bethesdaSession.giftMenuRequests().empty();
     if (m_nav.pressed(ui::UiNavAction::Menu) &&
-        m_talkingActor < 0 && !giftMenuOpen && !m_tes3JournalOpen) {
+        m_talkingActor < 0 && !giftMenuOpen && !m_playerInventoryOpen && !m_tes3JournalOpen) {
         // The weather picker is a sub-page of the menu, so Escape backs out of
         // it one level rather than closing everything. Closing straight to the
         // world would make the picker feel like a separate mode the player had
@@ -9380,16 +9557,192 @@ void BethesdaApp::updateTes3JournalInput() {
     }
 }
 
+std::string BethesdaApp::inventoryItemName(const bethesda::RecordKey& item) {
+    const auto* definition = m_bethesdaSession.skyrimItem(item);
+    return definition && !definition->name.empty() ? definition->name : item.toString();
+}
+
+std::vector<std::size_t> BethesdaApp::visibleInventoryItems() const {
+    const auto id = m_inventorySource.valid() ? m_inventorySource : m_bethesdaSession.playerObject();
+    const auto* source = m_bethesdaSession.world().find(id);
+    std::vector<std::size_t> items;
+    if (!source) return items;
+    for (std::size_t i = 0; i < source->inventory.size(); ++i) {
+        const auto* item = m_bethesdaSession.skyrimItem(source->inventory[i].item);
+        const std::string type = item ? item->recordType : "";
+        const int category = type == "WEAP" || type == "AMMO" ? 1 :
+            type == "ARMO" ? 2 : type == "ALCH" ? 3 : type == "BOOK" ? 4 :
+            type == "INGR" ? 5 : 6;
+        if (m_inventoryCategory == 0 || m_inventoryCategory == category) items.push_back(i);
+    }
+    return items;
+}
+
+void BethesdaApp::updatePlayerInventory() {
+    GLFWgamepadstate pad{};
+    const bool hasPad = glfwGetGamepadState(GLFW_JOYSTICK_1, &pad) == GLFW_TRUE;
+    const bool down = keyDown(m_window, GLFW_KEY_I) ||
+        (hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_BACK] == GLFW_PRESS);
+    const bool edge = down && !m_playerInventoryKeyLatch;
+    m_playerInventoryKeyLatch = down;
+    const bool takeAllDown = keyDown(m_window, GLFW_KEY_R) ||
+        (hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_X] == GLFW_PRESS);
+    const bool takeAll = takeAllDown && !m_inventoryTakeAllLatch;
+    m_inventoryTakeAllLatch = takeAllDown;
+    if (!m_bethesdaSessionConfigured || !m_streamIsSkyrim) return;
+    const bool giftOpen = !m_bethesdaSession.giftMenuRequests().empty();
+    if (!m_interiorStarted) {
+        const auto eye = bethesdaPlayerEyePosition();
+        m_mapPlayerX = eye.x; m_mapPlayerY = -eye.z; m_mapPlayerKnown = true;
+    }
+    const bool mapDown = keyDown(m_window, GLFW_KEY_M);
+    const bool mapEdge = mapDown && !m_mapKeyLatch;
+    m_mapKeyLatch = mapDown;
+    if (mapEdge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+        m_doorTransitionPhase == DoorTransitionPhase::None &&
+        (!m_playerInventoryOpen || m_skyrimMapOpen)) {
+        m_skyrimMapOpen = !m_skyrimMapOpen;
+        m_playerInventoryOpen = m_skyrimMapOpen;
+        if (m_skyrimMapOpen) {
+            m_mapCenterX = m_mapPlayerKnown ? m_mapPlayerX : 0;
+            m_mapCenterY = m_mapPlayerKnown ? m_mapPlayerY : 0;
+        }
+        m_meleeAttackPending = false;
+        m_bethesdaSession.physics().setCharacterInput(m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
+        setMouseCaptured(!m_skyrimMapOpen);
+    }
+    if (m_skyrimMapOpen) {
+        if (m_nav.pressed(ui::UiNavAction::Cancel) || edge) {
+            m_skyrimMapOpen = m_playerInventoryOpen = false; setMouseCaptured(true); return;
+        }
+        const double now = glfwGetTime();
+        const float dt = float(std::clamp(now - m_mapLastTime, 0.0, 0.05)); m_mapLastTime = now;
+        float dx = float(keyDown(m_window, GLFW_KEY_RIGHT)) - float(keyDown(m_window, GLFW_KEY_LEFT));
+        float dy = float(keyDown(m_window, GLFW_KEY_UP)) - float(keyDown(m_window, GLFW_KEY_DOWN));
+        if (hasPad) { dx += pad.axes[GLFW_GAMEPAD_AXIS_LEFT_X]; dy -= pad.axes[GLFW_GAMEPAD_AXIS_LEFT_Y]; }
+        if (std::abs(dx) > 0.15f) m_mapCenterX += dx * m_mapSpan * dt * 0.6f;
+        if (std::abs(dy) > 0.15f) m_mapCenterY += dy * m_mapSpan * dt * 0.6f;
+        float zoom = float(keyDown(m_window, GLFW_KEY_MINUS)) - float(keyDown(m_window, GLFW_KEY_EQUAL));
+        if (hasPad) zoom += (pad.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER] - pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER]) * 0.5f;
+        m_mapSpan = std::clamp(m_mapSpan * std::exp(zoom * dt * 1.5f - m_uiInput.scrollDelta * 0.12f), 12000.f, 1000000.f);
+        if (keyDown(m_window, GLFW_KEY_C) || (hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_Y])) {
+            if (m_mapPlayerKnown) { m_mapCenterX = m_mapPlayerX; m_mapCenterY = m_mapPlayerY; }
+        }
+        if (keyDown(m_window, GLFW_KEY_DELETE)) m_mapDestinationSet = false;
+        if (m_mapTerrain.cellsX > 0 && m_streamer) {
+            const float cell = m_streamer->cellWorldSize();
+            m_mapCenterX = std::clamp(m_mapCenterX, m_mapTerrain.minX * cell, (m_mapTerrain.minX + m_mapTerrain.cellsX) * cell);
+            m_mapCenterY = std::clamp(m_mapCenterY, m_mapTerrain.minY * cell, (m_mapTerrain.minY + m_mapTerrain.cellsY) * cell);
+        }
+        if (std::abs(dx) > 0.15f || std::abs(dy) > 0.15f) m_mapUsingMouse = false;
+        return;
+    }
+    const bool journalDown = keyDown(m_window, GLFW_KEY_J);
+    const bool journalEdge = journalDown && !m_questLogKeyLatch;
+    m_questLogKeyLatch = journalDown;
+    if (journalEdge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+        m_doorTransitionPhase == DoorTransitionPhase::None &&
+        (!m_playerInventoryOpen || m_skyrimQuestLogOpen)) {
+        m_skyrimQuestLogOpen = !m_skyrimQuestLogOpen;
+        m_playerInventoryOpen = m_skyrimQuestLogOpen;
+        m_meleeAttackPending = false;
+        m_bethesdaSession.physics().setCharacterInput(
+            m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
+        setMouseCaptured(!m_skyrimQuestLogOpen);
+    }
+    if (m_skyrimQuestLogOpen) {
+        if (m_nav.pressed(ui::UiNavAction::Cancel) || edge) {
+            m_skyrimQuestLogOpen = m_playerInventoryOpen = false;
+            setMouseCaptured(true);
+            return;
+        }
+        if (m_nav.pressed(ui::UiNavAction::Left) || m_nav.pressed(ui::UiNavAction::Right)) {
+            m_questLogCompleted = !m_questLogCompleted;
+            m_questLogChoice = m_questLogScroll = 0;
+        }
+        if (m_nav.pressed(ui::UiNavAction::Up)) { m_questLogChoice = std::max(0, m_questLogChoice - 1); m_questLogScroll = 0; }
+        if (m_nav.pressed(ui::UiNavAction::Down)) { ++m_questLogChoice; m_questLogScroll = 0; }
+        if (keyDown(m_window, GLFW_KEY_PAGE_DOWN) || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y] > 0.5f)) ++m_questLogScroll;
+        if (keyDown(m_window, GLFW_KEY_PAGE_UP) || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y] < -0.5f)) m_questLogScroll = std::max(0, m_questLogScroll - 1);
+        return;
+    }
+    if (edge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+        m_doorTransitionPhase == DoorTransitionPhase::None) {
+        m_playerInventoryOpen = !m_playerInventoryOpen;
+        m_inventorySource = {};
+        m_inventoryBook = {};
+        m_giftMenuChoice = 0;
+        m_meleeAttackPending = false;
+        m_bethesdaSession.physics().setCharacterInput(
+            m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
+        setMouseCaptured(!m_playerInventoryOpen);
+    }
+    if (!m_playerInventoryOpen) return;
+    if (m_inventoryBook.valid()) {
+        if (m_nav.pressed(ui::UiNavAction::Up)) m_inventoryBookScroll = std::max(0, m_inventoryBookScroll - 1);
+        if (m_nav.pressed(ui::UiNavAction::Down)) ++m_inventoryBookScroll;
+        if (m_nav.pressed(ui::UiNavAction::Cancel)) m_inventoryBook = {};
+        return;
+    }
+    const auto playerId = m_bethesdaSession.playerObject();
+    const auto* source = m_bethesdaSession.world().find(m_inventorySource.valid() ? m_inventorySource : playerId);
+    if (m_nav.pressed(ui::UiNavAction::Left)) m_inventoryCategoryFocus = true;
+    if (m_nav.pressed(ui::UiNavAction::Right)) m_inventoryCategoryFocus = false;
+    if (m_inventoryCategoryFocus) {
+        if (m_nav.pressed(ui::UiNavAction::Up)) { m_inventoryCategory = (m_inventoryCategory + 6) % 7; m_giftMenuChoice = 0; }
+        if (m_nav.pressed(ui::UiNavAction::Down)) { m_inventoryCategory = (m_inventoryCategory + 1) % 7; m_giftMenuChoice = 0; }
+        if (m_nav.pressed(ui::UiNavAction::Accept)) m_inventoryCategoryFocus = false;
+        if (m_nav.pressed(ui::UiNavAction::Cancel)) { m_playerInventoryOpen = false; setMouseCaptured(true); }
+        return;
+    }
+    const auto visible = visibleInventoryItems();
+    const int count = static_cast<int>(visible.size());
+    m_giftMenuChoice = std::clamp(m_giftMenuChoice, 0, std::max(0, count - 1));
+    if (count > 0 && m_nav.pressed(ui::UiNavAction::Up)) m_giftMenuChoice = (m_giftMenuChoice + count - 1) % count;
+    if (count > 0 && m_nav.pressed(ui::UiNavAction::Down)) m_giftMenuChoice = (m_giftMenuChoice + 1) % count;
+    if (count > 0 && (m_nav.pressed(ui::UiNavAction::Accept) || (takeAll && m_inventorySource.valid()))) {
+        const auto item = source->inventory[visible[static_cast<std::size_t>(m_giftMenuChoice)]].item;
+        const auto* definition = m_bethesdaSession.skyrimItem(item);
+        std::string error;
+        bool accepted = false;
+        if (m_inventorySource.valid()) {
+            const auto result = m_bethesdaSession.lootObject(playerId, m_inventorySource,
+                takeAll ? bethesda::RecordKey{} : item, takeAll ? 0 : 1);
+            accepted = result.accepted;
+            error = result.diagnostic;
+            if (accepted) m_toasts.push("Items collected", takeAll ? "All items" : inventoryItemName(item), "loot");
+        } else if (definition && !definition->text.empty()) {
+            m_inventoryBook = item;
+            m_inventoryBookScroll = 0;
+            return;
+        } else accepted = m_bethesdaSession.useInventoryItem(playerId, item, error);
+        if (accepted) {
+            // Leave the paused menu so the accepted action reaches the next fixed tick.
+            m_playerInventoryOpen = false;
+            m_inventorySource = {};
+            setMouseCaptured(true);
+        } else m_toasts.push("Cannot use item", error, "inventory-use");
+    }
+    if (m_nav.pressed(ui::UiNavAction::Cancel)) {
+        m_playerInventoryOpen = false;
+        m_inventorySource = {};
+        setMouseCaptured(true);
+    }
+}
+
 void BethesdaApp::updateGiftMenu() {
     if (!m_bethesdaSessionConfigured ||
         m_bethesdaSession.giftMenuRequests().empty()) {
         m_presentedGiftMenuSequence = 0u;
-        m_giftMenuChoice = 0;
+        if (!m_playerInventoryOpen) m_giftMenuChoice = 0;
         return;
     }
     const bethesda::GiftMenuRequestState request =
         m_bethesdaSession.giftMenuRequests().front();
     if (m_presentedGiftMenuSequence != request.sequence) {
+        m_playerInventoryOpen = false;
+        m_inventoryBook = {};
+        m_inventorySource = {};
         m_presentedGiftMenuSequence = request.sequence;
         m_giftMenuChoice = 0;
         endConversation();
@@ -9416,7 +9769,7 @@ void BethesdaApp::updateGiftMenu() {
         if (transfer.accepted) {
             m_toasts.push(
                 request.playerGives ? "Item given" : "Item received",
-                entry.item.toString(), "gift-transfer:" + entry.item.toString());
+                inventoryItemName(entry.item), "gift-transfer:" + entry.item.toString());
         } else {
             m_toasts.push("Gift transfer unavailable", transfer.diagnostic, "gift-transfer-error");
         }
@@ -9500,6 +9853,7 @@ void BethesdaApp::updateRegionDiscovery() {
 }
 
 void BethesdaApp::saveTraversalState(bool force) {
+    if (!m_screenshotPath.empty() || !m_captureDirectory.empty() || !m_captureVideoPath.empty()) return;
     // Scenario sessions are persisted exclusively through the versioned ODAI
     // save. Keeping the legacy camera-only traversal JSON beside it would
     // create two competing authorities for player position and world time.
@@ -9556,14 +9910,16 @@ void BethesdaApp::onShutdown() {
                 << " nav=" << (actor.projectedToNavigation ? "projected" : "fallback");
         }
     }
-    if (!m_whiterunReferenceShowcase &&
+    if (m_screenshotPath.empty() && m_captureDirectory.empty() && m_captureVideoPath.empty() &&
+        !m_whiterunReferenceShowcase &&
         m_bethesdaSessionConfigured && !m_gameplaySavePath.empty()) {
         (void)saveGameplayState();
     }
-    if (!m_whiterunReferenceShowcase) {
+    if (m_screenshotPath.empty() && m_captureDirectory.empty() && !m_whiterunReferenceShowcase) {
         saveTraversalState(true);
     }
     clearSkyrimAmbience();
+    if (m_streamJobs) m_streamJobs->waitIdle();
     if (m_streamer) {
         m_streamer->waitIdle();
     }
@@ -9582,6 +9938,73 @@ void BethesdaApp::setScenario(std::string id) {
     m_streamWorldspaceExplicit = true;
     m_resumeEnabled = false;
     m_explicitStart = true;
+}
+
+BethesdaApp::BethesdaCollisionMesh BethesdaApp::buildBethesdaCollisionMesh(
+    const importer::ImportedScene& scene) {
+    BethesdaCollisionMesh mesh;
+    mesh.vertices.reserve(scene.collisionTriangles.size() * 3u);
+    mesh.indices.reserve(scene.collisionTriangles.size() * 3u);
+    mesh.triangleSourceReferenceFormIds.reserve(scene.collisionTriangles.size());
+    const auto appendTriangle = [&](const float* vertices, std::uint32_t sourceReferenceFormId) {
+        if (mesh.vertices.size() >
+            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - 3u) return;
+        const std::uint32_t first = static_cast<std::uint32_t>(mesh.vertices.size());
+        mesh.vertices.push_back({vertices[0], vertices[1], vertices[2]});
+        // Imported scene collision is counter-clockwise (also consumed by
+        // CollisionWorld). The physics upload API accepts clockwise triangles
+        // and reverses them, so convert at this boundary for LAND and objects.
+        mesh.vertices.push_back({vertices[6], vertices[7], vertices[8]});
+        mesh.vertices.push_back({vertices[3], vertices[4], vertices[5]});
+        mesh.indices.insert(mesh.indices.end(), {first, first + 1u, first + 2u});
+        mesh.triangleSourceReferenceFormIds.push_back(sourceReferenceFormId);
+    };
+    for (const importer::ImportedSceneCollisionTriangle& triangle :
+         scene.collisionTriangles) {
+        appendTriangle(triangle.vertices, triangle.sourceReferenceFormId);
+    }
+    if (!scene.meshes.empty() && scene.meshes.front().name == "terrain") {
+        const importer::ImportedSceneMesh& terrain = scene.meshes.front();
+        for (std::size_t offset = 0u; offset + 2u < terrain.indices.size(); offset += 3u) {
+            const std::uint32_t a = terrain.indices[offset];
+            const std::uint32_t b = terrain.indices[offset + 1u];
+            const std::uint32_t c = terrain.indices[offset + 2u];
+            if (a >= terrain.vertices.size() || b >= terrain.vertices.size() ||
+                c >= terrain.vertices.size()) continue;
+            float vertices[9] = {};
+            std::copy_n(terrain.vertices[a].position, 3u, vertices);
+            std::copy_n(terrain.vertices[b].position, 3u, vertices + 3u);
+            std::copy_n(terrain.vertices[c].position, 3u, vertices + 6u);
+            appendTriangle(vertices, 0u);
+        }
+    }
+    return mesh;
+}
+
+std::shared_ptr<importer::fnv::CellStreamer::PreparedCellData>
+BethesdaApp::prepareBethesdaCollision(const importer::ImportedScene& scene, std::string& error) {
+    const core::Stopwatch timer;
+    auto mesh = std::make_shared<BethesdaCollisionMesh>(buildBethesdaCollisionMesh(scene));
+    mesh->awaitingPublication = true;
+    for (const auto& instance : scene.instances) {
+        if (!instance.initiallyVisible && instance.sourceReferenceFormId != 0u) {
+            mesh->preparedDisabledReferences.insert(instance.sourceReferenceFormId);
+        }
+    }
+    std::vector<std::uint32_t> indices;
+    indices.reserve(mesh->indices.size());
+    for (std::size_t t = 0; t < mesh->triangleSourceReferenceFormIds.size(); ++t) {
+        if (mesh->preparedDisabledReferences.contains(mesh->triangleSourceReferenceFormIds[t])) continue;
+        indices.insert(indices.end(), mesh->indices.begin() + t * 3u, mesh->indices.begin() + t * 3u + 3u);
+    }
+    if (!indices.empty()) {
+        mesh->prepared = bethesda::BethesdaPhysicsWorld::prepareStaticCollision(mesh->vertices, indices, error);
+        if (!mesh->prepared.valid()) return {};
+    }
+    if (std::getenv("ODAI_DEBUG_CHUNK_TIMING") != nullptr) {
+        VOX_LOGI("performance") << "worker collision preparation: " << timer.elapsedMs() << " ms";
+    }
+    return mesh;
 }
 
 void BethesdaApp::cacheBethesdaCollisionCell(
@@ -9701,35 +10124,15 @@ void BethesdaApp::cacheBethesdaCollisionCell(
         upsertMorrowindGameplayCell(cell);
         refreshBethesdaGameplayResidency();
     }
-    const auto appendTriangle = [&](const float* vertices, std::uint32_t sourceReferenceFormId) {
-        if (mesh.vertices.size() >
-            static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) - 3u) return;
-        const std::uint32_t first = static_cast<std::uint32_t>(mesh.vertices.size());
-        mesh.vertices.push_back({vertices[0], vertices[1], vertices[2]});
-        mesh.vertices.push_back({vertices[3], vertices[4], vertices[5]});
-        mesh.vertices.push_back({vertices[6], vertices[7], vertices[8]});
-        mesh.indices.insert(mesh.indices.end(), {first, first + 1u, first + 2u});
-        mesh.triangleSourceReferenceFormIds.push_back(sourceReferenceFormId);
-    };
-    for (const importer::ImportedSceneCollisionTriangle& triangle :
-         scene.collisionTriangles) {
-        appendTriangle(triangle.vertices, triangle.sourceReferenceFormId);
+    // Worker-prepared cells were inserted immediately before this callback.
+    // Non-streamed interiors and visibility changes retain the synchronous API.
+    const auto ready = m_bethesdaCollisionByCell.find(cell);
+    if (ready != m_bethesdaCollisionByCell.end() && ready->second.awaitingPublication) {
+        ready->second.awaitingPublication = false;
+        registerBethesdaCollisionCell(cell);
+        return;
     }
-    if (!scene.meshes.empty() && scene.meshes.front().name == "terrain") {
-        const importer::ImportedSceneMesh& terrain = scene.meshes.front();
-        for (std::size_t offset = 0u; offset + 2u < terrain.indices.size(); offset += 3u) {
-            const std::uint32_t a = terrain.indices[offset];
-            const std::uint32_t b = terrain.indices[offset + 1u];
-            const std::uint32_t c = terrain.indices[offset + 2u];
-            if (a >= terrain.vertices.size() || b >= terrain.vertices.size() ||
-                c >= terrain.vertices.size()) continue;
-            float vertices[9] = {};
-            std::copy_n(terrain.vertices[a].position, 3u, vertices);
-            std::copy_n(terrain.vertices[b].position, 3u, vertices + 3u);
-            std::copy_n(terrain.vertices[c].position, 3u, vertices + 6u);
-            appendTriangle(vertices, 0u);
-        }
-    }
+    mesh = buildBethesdaCollisionMesh(scene);
     if (mesh.indices.empty()) {
         m_bethesdaCollisionByCell.erase(cell);
         return;
@@ -9753,42 +10156,57 @@ void BethesdaApp::registerBethesdaCollisionCell(const importer::CellCoord& cell)
     const auto found = m_bethesdaCollisionByCell.find(cell);
     if (found == m_bethesdaCollisionByCell.end()) return;
     const BethesdaCollisionMesh& mesh = found->second;
-    std::vector<odai::math::Vector3> filteredVertices;
-    std::vector<std::uint32_t> filteredIndices;
-    filteredVertices.reserve(mesh.vertices.size());
-    filteredIndices.reserve(mesh.indices.size());
-    const std::size_t triangleCount = mesh.indices.size() / 3u;
-    for (std::size_t triangle = 0u; triangle < triangleCount; ++triangle) {
-        const std::uint32_t source =
-            triangle < mesh.triangleSourceReferenceFormIds.size()
-                ? mesh.triangleSourceReferenceFormIds[triangle]
-                : 0u;
-        if (source != 0u && m_disabledBethesdaCollisionReferences.contains(source)) {
-            continue;
-        }
-        const std::size_t indexOffset = triangle * 3u;
-        const std::uint32_t a = mesh.indices[indexOffset];
-        const std::uint32_t b = mesh.indices[indexOffset + 1u];
-        const std::uint32_t c = mesh.indices[indexOffset + 2u];
-        if (a >= mesh.vertices.size() || b >= mesh.vertices.size() ||
-            c >= mesh.vertices.size()) {
-            continue;
-        }
-        const std::uint32_t first = static_cast<std::uint32_t>(filteredVertices.size());
-        filteredVertices.push_back(mesh.vertices[a]);
-        filteredVertices.push_back(mesh.vertices[b]);
-        filteredVertices.push_back(mesh.vertices[c]);
-        filteredIndices.insert(
-            filteredIndices.end(), {first, first + 1u, first + 2u});
-    }
-    const std::uint64_t token = physicsResidencyToken(cell);
-    if (filteredIndices.empty()) {
-        (void)m_bethesdaSession.physics().removeStreamedStaticCollision(token);
-        return;
-    }
     std::string error;
-    if (!m_bethesdaSession.physics().addStreamedStaticCollision(
-            token, filteredVertices, filteredIndices, error)) {
+    const bool preparedMatches = mesh.prepared.valid() && std::all_of(
+        mesh.triangleSourceReferenceFormIds.begin(), mesh.triangleSourceReferenceFormIds.end(),
+        [&](std::uint32_t reference) {
+            return mesh.preparedDisabledReferences.contains(reference) ==
+                m_disabledBethesdaCollisionReferences.contains(reference);
+        });
+    const auto install = [&]() -> bool {
+        if (preparedMatches) {
+            return m_bethesdaSession.physics().addPreparedStreamedStaticCollision(
+                physicsResidencyToken(cell), mesh.prepared, error);
+        }
+        // A script may change enable state while preparation is in flight.
+        // Rebuild that exceptional shape against current state before publishing.
+        std::vector<odai::math::Vector3> filteredVertices;
+        std::vector<std::uint32_t> filteredIndices;
+        filteredVertices.reserve(mesh.vertices.size());
+        filteredIndices.reserve(mesh.indices.size());
+        const std::size_t triangleCount = mesh.indices.size() / 3u;
+        for (std::size_t triangle = 0u; triangle < triangleCount; ++triangle) {
+            const std::uint32_t source =
+                triangle < mesh.triangleSourceReferenceFormIds.size()
+                    ? mesh.triangleSourceReferenceFormIds[triangle]
+                    : 0u;
+            if (source != 0u && m_disabledBethesdaCollisionReferences.contains(source)) {
+                continue;
+            }
+            const std::size_t indexOffset = triangle * 3u;
+            const std::uint32_t a = mesh.indices[indexOffset];
+            const std::uint32_t b = mesh.indices[indexOffset + 1u];
+            const std::uint32_t c = mesh.indices[indexOffset + 2u];
+            if (a >= mesh.vertices.size() || b >= mesh.vertices.size() ||
+                c >= mesh.vertices.size()) {
+                continue;
+            }
+            const std::uint32_t first = static_cast<std::uint32_t>(filteredVertices.size());
+            filteredVertices.push_back(mesh.vertices[a]);
+            filteredVertices.push_back(mesh.vertices[b]);
+            filteredVertices.push_back(mesh.vertices[c]);
+            filteredIndices.insert(
+                filteredIndices.end(), {first, first + 1u, first + 2u});
+        }
+        const std::uint64_t token = physicsResidencyToken(cell);
+        if (filteredIndices.empty()) {
+            (void)m_bethesdaSession.physics().removeStreamedStaticCollision(token);
+            return true;
+        }
+        return m_bethesdaSession.physics().addStreamedStaticCollision(
+            token, filteredVertices, filteredIndices, error);
+    };
+    if (!install()) {
         VOX_LOGW("physics") << "could not restore collision cell " << cell.x << ","
                             << cell.z << ": " << error;
     } else {
@@ -10686,6 +11104,51 @@ bool BethesdaApp::registerBethesdaPlayerController() {
     return true;
 }
 
+bool BethesdaApp::settleScenarioSpawn() {
+    if (!m_scenarioSpawnPending) return true;
+    static double lastReport = 0;
+    if (glfwGetTime() - lastReport > 3.0) {
+        lastReport = glfwGetTime();
+        float visualY = 0;
+        const bool visual = m_collision.groundHeight(m_scenarioSpawnFeet.x, m_scenarioSpawnFeet.z, m_scenarioSpawnFeet.y, visualY);
+        const auto hit = m_bethesdaSession.physics().castDown({m_scenarioSpawnFeet.x, visualY + 128, m_scenarioSpawnFeet.z}, 256);
+        VOX_LOGI("physics") << "spawn waiting: controller=" << m_bethesdaPlayerControllerRegistered
+            << " cell=" << m_bethesdaCollisionByCell.contains(m_scenarioSpawnCell)
+            << " visual=" << visual << " y=" << visualY << " hit=" << bool(hit)
+            << " normal=" << (hit ? hit->normal.y : 0);
+    }
+
+    if (!m_bethesdaPlayerControllerRegistered || !m_streamer ||
+        !m_bethesdaCollisionByCell.contains(m_scenarioSpawnCell)) return false;
+    const auto player = m_bethesdaSession.playerObject();
+    const auto state = m_bethesdaSession.physics().characterState(player);
+    if (!state) return false;
+    // The map marker identifies horizontal location; its authored height is
+    // not a capsule placement. Query resident physics before enabling gravity.
+    float terrainY = 0;
+    if (!m_collision.groundHeight(m_scenarioSpawnFeet.x, m_scenarioSpawnFeet.z,
+                                  m_scenarioSpawnFeet.y, terrainY)) return false;
+    const auto ground = m_bethesdaSession.physics().castDown(
+        {m_scenarioSpawnFeet.x, terrainY + 128.f, m_scenarioSpawnFeet.z}, 256.f);
+    if (!ground || ground->normal.y < 0.64f) return false;
+    bethesda::PhysicsCharacterSnapshot settled;
+    settled.object = player;
+    settled.rotation = state->rotation;
+    settled.position = {m_scenarioSpawnFeet.x, ground->position.y + 0.1f, m_scenarioSpawnFeet.z};
+    settled.velocity = {};
+    settled.groundNormal = ground->normal;
+    settled.grounded = true;
+    std::string error;
+    if (!m_bethesdaSession.physics().restoreCharacter(settled, error)) return false;
+    m_scenarioSpawnPending = false;
+    m_bethesdaControllerOwnsCamera = true;
+    pullBethesdaPlayerControllerState();
+    syncBethesdaPlayerState(true);
+    VOX_LOGI("physics") << "scenario spawn settled on resident ground at "
+        << settled.position.x << ", " << settled.position.y << ", " << settled.position.z;
+    return true;
+}
+
 bool BethesdaApp::settleSkyrimCityShowcasePlayer() {
     if (!m_skyrimCitySpawnSettlementPending ||
         !m_bethesdaPlayerControllerRegistered || !m_bethesdaSessionConfigured) {
@@ -11349,7 +11812,9 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
             object.interior = m_interiorStarted;
             object.inDialogueWithPlayer = actor.talking;
             object.location = location;
-            for (const std::uint32_t itemFormId : actor.inventoryFormIds) {
+            auto inventoryStacks = actor.inventoryStacks;
+            if (inventoryStacks.empty()) for (auto form : actor.inventoryFormIds) inventoryStacks.emplace_back(form, 1);
+            for (const auto& [itemFormId, count] : inventoryStacks) {
                 bethesda::RecordKey item;
                 if (!bethesda::stableRecordKey(
                         m_streamLoadOrder, itemFormId, item, error)) {
@@ -11363,9 +11828,9 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
                         return entry.item == item;
                     });
                 if (existingItem == object.inventory.end()) {
-                    object.inventory.push_back({std::move(item), 1, false});
+                    object.inventory.push_back({std::move(item), count, false});
                 } else {
-                    ++existingItem->count;
+                    existingItem->count += count;
                 }
             }
             std::sort(object.inventory.begin(), object.inventory.end(),
@@ -11405,6 +11870,13 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
             continue;
         }
         (void)m_bethesdaSession.bindQuestInventoryForActor(id, base, error);
+        if (!existing->aiState.has_value()) {
+            bethesda::WorldCommand ai;
+            ai.type = bethesda::WorldCommandType::SetAiState;
+            ai.target = id;
+            ai.aiState = runtimeAiStateFor(actor, m_streamLoadOrder);
+            (void)m_bethesdaSession.world().queue(std::move(ai));
+        }
         actor.renderVisible = existing->enabled;
         if (actor.scriptedMoveArrived && existing->navigationRequest.has_value() &&
             existing->navigationRequest->revision == actor.scriptedMoveRevision) {
@@ -11530,6 +12002,8 @@ void BethesdaApp::restoreBethesdaActorsFromSession() {
 }
 
 bool BethesdaApp::saveGameplayState() {
+    if (!m_screenshotPath.empty() || !m_captureDirectory.empty() ||
+        !m_captureVideoPath.empty()) return false;
     if (!m_bethesdaSessionConfigured || m_gameplaySavePath.empty()) return false;
     syncBethesdaPlayerState(true);
     std::string error;
@@ -11560,6 +12034,7 @@ bool BethesdaApp::loadGameplayState() {
         VOX_LOGE("save") << error;
         return false;
     }
+    m_scenarioSpawnPending = false; // Loading restores the saved placement, not the fresh-start marker.
     const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
     if (playerId.valid()) {
         const bethesda::RuntimeObject* player = m_bethesdaSession.world().find(playerId);
@@ -11641,6 +12116,44 @@ void BethesdaApp::drawPipBoyHud() {
         }
     }
 
+    if (m_streamIsSkyrim && !m_menuOpen && m_talkingActor < 0) {
+        ensureSkyrimUiFont();
+        const auto& font = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+        const float w = float(screenWidth), h = float(screenHeight);
+        const ui::UiColor silver{0.78f,0.79f,0.75f,0.9f}, white{0.95f,0.95f,0.90f,1};
+        const ui::UiRect compass{w*.32f, h*.045f, w*.68f, h*.045f + font.lineHeightPx()*1.25f};
+        m_uiDrawList.addRectFilled(compass, {0.01f,0.015f,0.015f,0.65f});
+        m_uiDrawList.addRect(compass, silver, 1.f);
+        m_uiDrawList.pushClip(compass);
+        const float heading = std::fmod(m_yawDegrees + 450.f, 360.f);
+        const char* points[] = {"N", "E", "S", "W"};
+        for (int i=0; i<4; ++i) {
+            const float turn = std::fmod(float(i)*90.f - heading + 540.f,360.f)-180.f;
+            const float x = w*.5f + turn/120.f*(compass.maxX-compass.minX);
+            m_uiDrawList.addText(font, points[i], {x-font.measureText(points[i])*.5f,compass.minY},white);
+        }
+        m_uiDrawList.popClip();
+        m_uiDrawList.addRectFilled({w*.5f-1,compass.maxY-4,w*.5f+1,compass.maxY+2},silver);
+        // Small unobtrusive aiming point; labels only appear for usable targets.
+        m_uiDrawList.addRectFilled({w*.5f-1,h*.5f-1,w*.5f+1,h*.5f+1},silver);
+        const auto* player = m_bethesdaSession.world().find(m_bethesdaSession.playerObject());
+        if (player && player->actorValues) {
+            const auto& values = *player->actorValues;
+            const auto meter = [&](float center, float value, float maximum, ui::UiColor color) {
+                if (maximum <= 0 || value >= maximum) return;
+                const float fraction = std::clamp(value/maximum,0.f,1.f);
+                const ui::UiRect bounds{w*center-w*.06f,h*.945f,w*center+w*.06f,h*.945f+8.f*scale};
+                m_uiDrawList.addRectFilled(bounds,{0.015f,0.015f,0.015f,0.8f});
+                m_uiDrawList.addRectFilled({bounds.minX+2,bounds.minY+2,bounds.minX+2+(bounds.maxX-bounds.minX-4)*fraction,bounds.maxY-2},color);
+                m_uiDrawList.addRect(bounds,silver,1.f);
+            };
+            meter(.25f,values.magicka,values.maxMagicka,{.12f,.48f,.75f,1});
+            meter(.5f,values.health,values.maxHealth,{.63f,.08f,.09f,1});
+            meter(.75f,values.stamina,values.maxStamina,{.05f,.43f,.26f,1});
+        }
+    }
+
+    if (!m_streamIsSkyrim) {
     // Status strip, bottom-left: the readouts that belong on screen all the
     // time. Kept to one line so it never competes with the world.
     const int hours = static_cast<int>(m_timeOfDayHours);
@@ -11666,9 +12179,11 @@ void BethesdaApp::drawPipBoyHud() {
         ui::UiVec2{statusRect.minX + (margin * 0.75f), statusRect.minY + (5.0f * scale)},
         kPipGreen);
 
+    }
+
     // Interaction prompt, centred low -- where an action prompt belongs, and
     // labelled for whichever device is driving.
-    const bool clawPuzzleInReach = !m_menuOpen && m_activationLootActor < 0 &&
+    const bool clawPuzzleInReach = !m_menuOpen && !m_playerInventoryOpen && m_activationLootActor < 0 &&
         m_activationActor < 0 &&
         goldenClawPuzzleInReach();
     if (clawPuzzleInReach) {
@@ -11687,7 +12202,7 @@ void BethesdaApp::drawPipBoyHud() {
                        static_cast<float>(screenHeight) - (96.0f * scale)},
             kPipGreen);
     } else if (const int usableDoor = findUsableDoor();
-               usableDoor >= 0 && !m_menuOpen &&
+               usableDoor >= 0 && !m_menuOpen && !m_playerInventoryOpen &&
                m_activationLootActor < 0 && m_activationActor < 0) {
         const importer::ImportedSceneDoor& door = m_doors[static_cast<std::size_t>(usableDoor)];
         char prompt[192];
@@ -11709,7 +12224,7 @@ void BethesdaApp::drawPipBoyHud() {
     // -Z. So north sits at yaw 270 and compass degrees are (yaw + 90) mod 360 --
     // worth writing down because getting it wrong gives a compass that is
     // plausibly wrong by 90 degrees, which is worse than none.
-    {
+    if (!m_streamIsSkyrim) {
         const auto compassDegrees = [](float yawDegrees) {
             float d = std::fmod(yawDegrees + 90.0f, 360.0f);
             return d < 0.0f ? d + 360.0f : d;
@@ -11832,14 +12347,14 @@ void BethesdaApp::drawPipBoyHud() {
     // data. Skyrim wording is resolved from the owning plugin's localized
     // STRINGS table; stable identities remain a visible fallback for mods with
     // absent or malformed localization data.
-    if (m_bethesdaSessionConfigured && !m_menuOpen) {
+    if (!m_streamIsSkyrim && m_bethesdaSessionConfigured && !m_menuOpen && !m_playerInventoryOpen) {
         std::vector<std::string> objectiveLines;
         for (const auto& [editorId, quest] : m_bethesdaSession.quests()) {
             for (const bethesda::QuestObjectiveState& objective : quest.objectives) {
                 if (!objective.displayed || objective.completed) continue;
                 const std::string label = objective.displayText.empty()
                     ? editorId + " objective " + std::to_string(objective.index)
-                    : objective.displayText;
+                    : m_bethesdaSession.resolveQuestText(quest, objective.displayText);
                 objectiveLines.push_back(
                     std::string(objective.failed ? "[!] " : "[ ] ") + label);
             }
@@ -11904,9 +12419,13 @@ void BethesdaApp::drawPipBoyHud() {
     // showing "Tab" to someone holding a controller is worse than showing
     // nothing.
     const char* hint = m_navDriving
-        ? "(Start) menu   (LS) move   (A) use   J journal"
-        : "J journal   Esc menu   [ ] time   P quit   Tab cursor";
-    m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
+        ? (m_streamIsSkyrim
+            ? "(Start) menu   (LS) move   (A) use   I inventory"
+            : "(Start) menu   (LS) move   (A) use   J journal")
+        : (m_streamIsSkyrim
+            ? "I inventory   E use   Esc menu   [ ] time   P quit   Tab cursor"
+            : "J journal   Esc menu   [ ] time   P quit   Tab cursor");
+    if (!m_streamIsSkyrim) m_uiDrawList.addText(m_uiFont, hint, ui::UiVec2{margin, margin}, kPipGreenDim);
 }
 
 void BethesdaApp::buildWeatherChoices() {
@@ -12620,7 +13139,7 @@ void BethesdaApp::drawHud() {
         }
         return;
     }
-    drawPipBoyHud();
+    if (!m_playerInventoryOpen) drawPipBoyHud();
     drawPauseMenu();
     drawGiftMenu();
     drawTes3Journal();
@@ -12641,7 +13160,7 @@ void BethesdaApp::drawHud() {
     // body face -- the size jump between them is what makes the location name
     // read as the headline rather than as another line of HUD text. Falls back
     // to the body face if loadFonts was not given a display size.
-    if (!m_menuOpen && !m_tes3JournalOpen && m_talkingActor < 0) {
+    if (!m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && m_talkingActor < 0) {
         const ui::Font& bannerFont = m_uiFontDisplay.valid() ? m_uiFontDisplay : m_uiFont;
         m_banner.draw(m_uiDrawList, bannerFont, m_uiFont, screen, contentScale());
     }
@@ -12680,15 +13199,648 @@ void BethesdaApp::drawTes3Journal() {
         ui::UiColor{0.20f, 0.14f, 0.09f, 0.92f});
 }
 
-void BethesdaApp::drawGiftMenu() {
-    if (!m_bethesdaSessionConfigured ||
-        m_bethesdaSession.giftMenuRequests().empty()) {
+ui::UiTextureId BethesdaApp::inventoryPreviewTexture(const std::string &path, bool alpha) {
+    if (path.empty() || !m_streamer)
+        return ui::kUiNoTexture;
+    const std::string cacheKey = path + (alpha ? "#alpha" : "#opaque");
+    if (const auto found = m_previewTextures.find(cacheKey); found != m_previewTextures.end())
+        return found->second;
+    // UI textures have renderer lifetime; cap this presentation cache explicitly.
+    if (m_previewTextures.size() >= 128)
+        return ui::kUiNoTexture;
+    ui::UiTextureId id = ui::kUiNoTexture;
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    importer::ImportedSceneTexture texture;
+    if (m_streamer->assets().resolveTexture(path, bytes, error) &&
+        importer::loadDdsFromMemory(bytes.data(), bytes.size(), texture)) {
+        importer::dropDdsMipLevels(texture, 512);
+        const auto format = texture.format;
+        if (texture.width <= 2048 && texture.height <= 2048 && texture.width > 0 &&
+            texture.height > 0) {
+            std::vector<std::uint8_t> rgba;
+            if (format == importer::TextureFormat::RGBA8)
+                rgba = texture.rgba8;
+            else if (format == importer::TextureFormat::BC1 ||
+                     format == importer::TextureFormat::BC2 ||
+                     format == importer::TextureFormat::BC3) {
+                const unsigned blockSize = format == importer::TextureFormat::BC1 ? 8 : 16;
+                const unsigned bx = (texture.width + 3) / 4, by = (texture.height + 3) / 4;
+                if (texture.rgba8.size() >= std::size_t(bx) * by * blockSize) {
+                    rgba.resize(std::size_t(texture.width) * texture.height * 4);
+                    for (unsigned y = 0; y < by; ++y)
+                        for (unsigned x = 0; x < bx; ++x) {
+                            const auto *block = texture.rgba8.data() + (y * bx + x) * blockSize;
+                            const auto *colors = block + (blockSize == 8 ? 0 : 8);
+                            unsigned c0 = colors[0] | (colors[1] << 8),
+                                     c1 = colors[2] | (colors[3] << 8);
+                            unsigned palette[4][4]{};
+                            for (int c = 0; c < 2; ++c) {
+                                unsigned v = c ? c1 : c0;
+                                palette[c][0] = ((v >> 11) & 31) * 255 / 31;
+                                palette[c][1] = ((v >> 5) & 63) * 255 / 63;
+                                palette[c][2] = (v & 31) * 255 / 31;
+                                palette[c][3] = 255;
+                            }
+                            for (int c = 0; c < 3; ++c) {
+                                palette[2][c] = (c0 > c1 || blockSize == 16)
+                                                    ? (2 * palette[0][c] + palette[1][c]) / 3
+                                                    : (palette[0][c] + palette[1][c]) / 2;
+                                palette[3][c] = (c0 > c1 || blockSize == 16)
+                                                    ? (palette[0][c] + 2 * palette[1][c]) / 3
+                                                    : 0;
+                            }
+                            palette[2][3] = 255;
+                            palette[3][3] = (c0 > c1 || blockSize == 16) ? 255 : 0;
+                            std::uint32_t indices =
+                                std::uint32_t(colors[4]) | (std::uint32_t(colors[5]) << 8) |
+                                (std::uint32_t(colors[6]) << 16) | (std::uint32_t(colors[7]) << 24);
+                            unsigned alpha[8]{block[0], block[1]};
+                            std::uint64_t alphaIndices = 0;
+                            if (format == importer::TextureFormat::BC3) {
+                                for (int i = 0; i < 6; ++i)
+                                    alphaIndices |= std::uint64_t(block[i + 2]) << (8 * i);
+                                if (alpha[0] > alpha[1])
+                                    for (unsigned i = 2; i < 8; ++i)
+                                        alpha[i] = ((8 - i) * alpha[0] + (i - 1) * alpha[1]) / 7;
+                                else {
+                                    for (unsigned i = 2; i < 6; ++i)
+                                        alpha[i] = ((6 - i) * alpha[0] + (i - 1) * alpha[1]) / 5;
+                                    alpha[6] = 0;
+                                    alpha[7] = 255;
+                                }
+                            }
+                            for (unsigned py = 0; py < 4; ++py)
+                                for (unsigned px = 0; px < 4; ++px) {
+                                    unsigned i = py * 4 + px, tx = x * 4 + px, ty = y * 4 + py;
+                                    if (tx >= texture.width || ty >= texture.height)
+                                        continue;
+                                    auto *pixel =
+                                        rgba.data() + (std::size_t(ty) * texture.width + tx) * 4;
+                                    auto ci = (indices >> (2 * i)) & 3;
+                                    for (int c = 0; c < 4; ++c)
+                                        pixel[c] = palette[ci][c];
+                                    if (format == importer::TextureFormat::BC3)
+                                        pixel[3] = alpha[(alphaIndices >> (3 * i)) & 7];
+                                    if (format == importer::TextureFormat::BC2)
+                                        pixel[3] = ((block[i / 2] >> ((i % 2) * 4)) & 15) * 17;
+                                }
+                        }
+                }
+            }
+            if (rgba.size() >= std::size_t(texture.width) * texture.height * 4) {
+                if (!alpha) for (std::size_t i=3; i<rgba.size(); i+=4) rgba[i]=255;
+                id = m_renderer.registerUiTextureRgba8Mipmapped(rgba.data(), texture.width, texture.height);
+            }
+        }
+    }
+    if (id == ui::kUiNoTexture) {
+        VOX_LOGW("inventory") << "preview texture unavailable or unsupported: " << path;
+    }
+    m_previewTextures.emplace(cacheKey, id);
+    return id;
+}
+
+void BethesdaApp::drawInventoryPreview(const bethesda::RecordKey &item, const ui::UiRect &bounds) {
+    if (m_previewItem != item) {
+        m_previewItem = item;
+        m_previewModel = {};
+        m_previewError.clear();
+        m_previewStartTime = glfwGetTime();
+        m_previewLastTime = m_previewStartTime;
+        m_previewYaw = 0.75f;
+        m_previewPitch = 0.24f;
+        const auto *definition = m_bethesdaSession.skyrimItem(item);
+        std::vector<std::uint8_t> bytes;
+        if (!m_streamer || !definition || definition->model.empty())
+            m_previewError = "No model available";
+        else if (!m_streamer->assets().resolveMesh(definition->model, bytes, m_previewError) ||
+                 !importer::fnv::parseNifStaticMesh(bytes, m_previewModel, m_previewError)) {
+            VOX_LOGW("inventory") << "preview " << item.toString() << ": " << m_previewError;
+            m_previewModel = {};
+        }
+        // Skyrim weapon NIFs also carry their separate sheath mesh. Inventory
+        // inspection shows the unsheathed weapon, so exclude that authored part.
+        if (definition && definition->recordType == "WEAP") {
+            std::erase_if(m_previewModel.shapes, [](const auto& shape) {
+                const auto name = toLowerAscii(shape.name);
+                return name == "scb" || name.starts_with("scabbard");
+            });
+        }
+        std::array<float, 3> lo{1e20f, 1e20f, 1e20f}, hi{-1e20f, -1e20f, -1e20f};
+        std::size_t vertices = 0;
+        for (const auto &shape : m_previewModel.shapes) {
+            vertices += shape.positions.size() / 3;
+            for (std::size_t i = 0; i + 2 < shape.positions.size(); i += 3)
+                for (int c = 0; c < 3; ++c) {
+                    lo[c] = std::min(lo[c], shape.positions[i + c]);
+                    hi[c] = std::max(hi[c], shape.positions[i + c]);
+                }
+        }
+        if (vertices > 200000) {
+            m_previewModel = {};
+            m_previewError = "Preview model exceeds geometry limit";
+        }
+        for (int c = 0; c < 3; ++c)
+            m_previewCenter[c] = (lo[c] + hi[c]) * 0.5f;
+        m_previewRadius = std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 0.001f}) * 0.5f;
+        m_previewLongAxis = 2;
+        if (hi[0] - lo[0] > hi[m_previewLongAxis] - lo[m_previewLongAxis])
+            m_previewLongAxis = 0;
+        if (hi[1] - lo[1] > hi[m_previewLongAxis] - lo[m_previewLongAxis])
+            m_previewLongAxis = 1;
+    }
+    if (m_previewModel.shapes.empty()) {
+        const auto &font = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+        m_uiDrawList.addText(font, "Preview unavailable",
+                             {bounds.minX, bounds.minY + bounds.height() * 0.5f}, kPipGreenDim);
         return;
     }
-    const bethesda::GiftMenuRequestState& request =
-        m_bethesdaSession.giftMenuRequests().front();
+    // Presentation-only orthographic orbit. The world, camera and fixed-step
+    // clock remain paused; model-space positions never enter gameplay state.
+    const double now = glfwGetTime();
+    const float dt = static_cast<float>(std::clamp(now - m_previewLastTime, 0.0, 0.05));
+    m_previewLastTime = now;
+    double mx = 0, my = 0;
+    glfwGetCursorPos(m_window, &mx, &my);
+    int ww = 1, wh = 1;
+    glfwGetWindowSize(m_window, &ww, &wh);
+    int fw = 1, fh = 1;
+    framebufferSize(fw, fh);
+    const bool down = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (down && !m_previewDragging &&
+        bounds.contains(float(mx * fw / std::max(1, ww)), float(my * fh / std::max(1, wh))))
+        m_previewDragging = true;
+    if (m_previewDragging && down) {
+        m_previewYaw += float(mx - m_previewMouseX) * 0.008f;
+        m_previewPitch += float(my - m_previewMouseY) * 0.008f;
+    }
+    if (!down)
+        m_previewDragging = false;
+    m_previewMouseX = mx;
+    m_previewMouseY = my;
+    GLFWgamepadstate pad{};
+    float orbit = 0, tilt = 0;
+    if (glfwGetGamepadState(GLFW_JOYSTICK_1, &pad)) {
+        orbit = pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_X];
+        tilt = pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y];
+    }
+    if (keyDown(m_window, GLFW_KEY_Q))
+        orbit = -1;
+    if (keyDown(m_window, GLFW_KEY_E))
+        orbit = 1;
+    if (std::abs(orbit) > 0.15f)
+        m_previewYaw += orbit * dt * 2;
+    else if (!m_previewDragging)
+        m_previewYaw += dt * 0.45f;
+    if (std::abs(tilt) > 0.15f)
+        m_previewPitch += tilt * dt * 2;
+    m_previewPitch = std::clamp(m_previewPitch, -1.55f, 1.55f);
+    const float angle = m_previewYaw;
+    const float cs = std::cos(angle), sn = std::sin(angle);
+    const float scale = std::min(bounds.width(), bounds.height()) * 0.42f / m_previewRadius;
+    const auto transform = [&](float x, float y, float z) {
+        x -= m_previewCenter[0];
+        y -= m_previewCenter[1];
+        z -= m_previewCenter[2];
+        if (m_previewLongAxis == 0) {
+            std::swap(x, z);
+            x = -x;
+        }
+        if (m_previewLongAxis == 1) {
+            std::swap(y, z);
+            y = -y;
+        }
+        const float rx = cs * x - sn * y, depth = sn * x + cs * y;
+        const float cp = std::cos(m_previewPitch), sp = std::sin(m_previewPitch);
+        return std::array<float, 3>{(bounds.minX + bounds.maxX) * 0.5f + rx * scale,
+                                    (bounds.minY + bounds.maxY) * 0.5f -
+                                        (z * cp - depth * sp) * scale,
+                                    depth * cp + z * sp};
+    };
+    struct Face {
+        std::array<ui::UiVertex, 3> v;
+        float depth;
+    };
+    std::vector<Face> faces;
+    for (const auto &shape : m_previewModel.shapes) {
+        const auto texture = inventoryPreviewTexture(shape.diffuseTexturePath, shape.alphaBlend || shape.alphaSemantic == importer::fnv::NifAlphaSemantic::Cutout);
+        for (std::size_t t = 0; t + 2 < shape.triangleIndices.size(); t += 3) {
+            Face face{};
+            bool valid = true;
+            std::array<std::array<float, 3>, 3> p;
+            for (int c = 0; c < 3; ++c) {
+                auto i = shape.triangleIndices[t + c];
+                if (i >= shape.positions.size() / 3) {
+                    valid = false;
+                    break;
+                }
+                p[c] = transform(shape.positions[i * 3], shape.positions[i * 3 + 1],
+                                 shape.positions[i * 3 + 2]);
+                for (float f : p[c])
+                    if (!std::isfinite(f))
+                        valid = false;
+                face.v[c].posPx[0] = p[c][0];
+                face.v[c].posPx[1] = p[c][1];
+                face.depth += p[c][2];
+            }
+            if (!valid)
+                continue;
+            // Soft studio key plus fill makes silhouette and relief readable
+            // independently of the lighting in the paused cell.
+            float ux = (p[1][0] - p[0][0]) / scale, uy = (p[1][1] - p[0][1]) / scale,
+                  uz = p[1][2] - p[0][2];
+            float vx = (p[2][0] - p[0][0]) / scale, vy = (p[2][1] - p[0][1]) / scale,
+                  vz = p[2][2] - p[0][2];
+            float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            const float norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (norm < 1e-8f)
+                continue;
+            const float light =
+                0.65f + 0.35f * std::abs((-0.4f * nx - 0.5f * ny + 0.76f * nz) / norm);
+            for (int c = 0; c < 3; ++c) {
+                const auto i = shape.triangleIndices[t + c];
+                ui::UiColor color{light, light, light, 1};
+                if (shape.colors.size() >= i * 4 + 4) {
+                    color.r *= shape.colors[i * 4];
+                    color.g *= shape.colors[i * 4 + 1];
+                    color.b *= shape.colors[i * 4 + 2];
+                    color.a = shape.colors[i * 4 + 3];
+                }
+                face.v[c].rgba8 = color.packAbgr8();
+                face.v[c].mode = static_cast<std::uint32_t>(ui::UiDrawMode::SolidColor);
+                if (texture != ui::kUiNoTexture && shape.uvs.size() >= i * 2 + 2) {
+                    face.v[c].mode =
+                        static_cast<std::uint32_t>(ui::UiDrawMode::Textured) | (texture << 8u);
+                    face.v[c].uv[0] = shape.uvs[i * 2];
+                    face.v[c].uv[1] = shape.uvs[i * 2 + 1];
+                }
+            }
+            faces.push_back(face);
+        }
+    }
+    std::stable_sort(faces.begin(), faces.end(),
+                     [](const Face &a, const Face &b) { return a.depth < b.depth; });
+    m_uiDrawList.pushClip(bounds);
+    const std::uint32_t indices[]{0, 1, 2};
+    for (const auto &face : faces)
+        m_uiDrawList.addTriangleMesh(face.v.data(), 3, indices, 3);
+    m_uiDrawList.popClip();
+    const auto &font = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+    m_uiDrawList.addText(font, "Drag / Right stick  Inspect     Q / E  Rotate",
+                         {bounds.minX, bounds.maxY}, kPipGreenDim);
+}
+
+void BethesdaApp::ensureSkyrimUiFont() {
+    if (!m_skyrimInventoryFontAttempted && m_streamer) {
+        m_skyrimInventoryFontAttempted = true;
+        std::vector<std::uint8_t> bytes;
+        std::string error;
+        bool found = m_streamer->assets().resolveAsset("interface\\fonts_en.swf", bytes, error);
+        if (!found) {
+            importer::fnv::BsaArchive archive;
+            if (archive.open(std::filesystem::path(m_streamDirectory) / "Skyrim - Interface.bsa")) {
+                if (const auto* entry = archive.find("interface\\fonts_en.swf")) found = archive.extract(*entry, bytes, error);
+            }
+        }
+        if (found && m_skyrimInventoryFont.loadSwfFont(bytes, "Futura Condensed", m_uiFont.lineHeightPx(), error)) {
+            m_skyrimInventoryFont.setTextureId(m_renderer.registerUiFontAtlas(
+                m_skyrimInventoryFont.atlasPixels().data(), m_skyrimInventoryFont.atlasWidth(), m_skyrimInventoryFont.atlasHeight()));
+            VOX_LOGI("inventory") << "loaded installed Futura Condensed outlines";
+        } else VOX_LOGW("inventory") << "installed UI font unavailable: " << error;
+    }
+}
+
+void BethesdaApp::drawSkyrimMap() {
+    ensureSkyrimUiFont();
+    const auto& font = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+    int sw = 0, sh = 0; framebufferSize(sw, sh);
+    const float w = float(sw), h = float(sh), footer = h * 0.90f;
+    const ui::UiColor white{0.91f, 0.93f, 0.88f, 1}, dark{0.12f, 0.18f, 0.18f, 1}, cyan{0.40f, 0.91f, 0.95f, 1};
+    const auto text = [&](const std::string& value, float x, float y, ui::UiColor color) {
+        m_uiDrawList.addText(font, value, {x, y}, color);
+    };
+    if (m_streamer && !m_mapTerrain.complete && m_mapError.empty()) {
+        if (!m_streamer->advanceWorldMapTerrain(m_mapTerrain, m_mapError)) {
+            m_mapTerrain.complete = true;
+            VOX_LOGW("map") << m_mapError;
+        }
+    }
+    if (m_mapTerrain.complete && m_mapTexture == ui::kUiNoTexture && !m_mapTerrain.heights.empty()) {
+        const int tw = m_mapTerrain.width, th = m_mapTerrain.height;
+        std::vector<std::uint8_t> pixels(std::size_t(tw) * th * 4);
+        const auto height = [&](int x, int y) { return m_mapTerrain.heights[std::size_t(std::clamp(y, 0, th-1)) * tw + std::clamp(x, 0, tw-1)]; };
+        for (int y = 0; y < th; ++y) for (int x = 0; x < tw; ++x) {
+            const float z = height(x, y);
+            float r = 0.28f, g = 0.40f, b = 0.43f;
+            if (z > -14000 && !m_mapTerrain.water[std::size_t(y) * tw + x]) {
+                const float snow = std::clamp((z - 5000.f) / 16000.f, 0.f, 1.f);
+                const float shade = std::clamp(0.82f + (height(x-1,y) - height(x+1,y) + height(x,y+1) - height(x,y-1)) / 4500.f, 0.38f, 1.18f);
+                r = (0.39f + snow * 0.44f) * shade;
+                g = (0.46f + snow * 0.39f) * shade;
+                b = (0.41f + snow * 0.44f) * shade;
+            }
+            const auto offset = (std::size_t(y) * tw + x) * 4;
+            pixels[offset] = std::uint8_t(std::clamp(r,0.f,1.f)*255);
+            pixels[offset+1] = std::uint8_t(std::clamp(g,0.f,1.f)*255);
+            pixels[offset+2] = std::uint8_t(std::clamp(b,0.f,1.f)*255); pixels[offset+3]=255;
+        }
+        m_mapTexture = m_renderer.registerUiTextureRgba8Mipmapped(pixels.data(), tw, th);
+    }
+    m_uiDrawList.addRectFilled({0, 0, w, h}, {0.20f, 0.29f, 0.31f, 1});
+    const float scale = w / m_mapSpan;
+    const auto px = [&](float x) { return w * 0.5f + (x - m_mapCenterX) * scale; };
+    const auto py = [&](float y) { return footer * 0.5f - (y - m_mapCenterY) * scale; };
+    m_uiDrawList.pushClip({0,0,w,footer});
+    if (m_mapTexture != ui::kUiNoTexture) {
+        const float cell = m_streamer->cellWorldSize();
+        m_uiDrawList.addImage({px(m_mapTerrain.minX * cell), py((m_mapTerrain.minY + m_mapTerrain.cellsY) * cell),
+            px((m_mapTerrain.minX + m_mapTerrain.cellsX) * cell), py(m_mapTerrain.minY * cell)}, m_mapTexture);
+    }
+    double mouseX = 0, mouseY = 0; glfwGetCursorPos(m_window, &mouseX, &mouseY);
+    int ww = 1, wh = 1; glfwGetWindowSize(m_window, &ww, &wh);
+    const bool mouseSelect = glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (std::abs(mouseX - m_mapMouseX) + std::abs(mouseY - m_mapMouseY) > 1.0) m_mapUsingMouse = true;
+    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) {
+        m_mapCenterX -= float(mouseX - m_mapMouseX) * w / float(std::max(1,ww)) / scale;
+        m_mapCenterY += float(mouseY - m_mapMouseY) * h / float(std::max(1,wh)) / scale;
+    }
+    m_mapMouseX = mouseX; m_mapMouseY = mouseY;
+    const float cursorX = m_mapUsingMouse ? float(mouseX) * w / float(std::max(1,ww)) : w * 0.5f;
+    const float cursorY = m_mapUsingMouse ? float(mouseY) * h / float(std::max(1,wh)) : footer * 0.5f;
+    const importer::fnv::FalloutMapMarkerRecord* selected = nullptr;
+    float nearest = 35.f * contentScale();
+    if (m_streamer) for (const auto& marker : m_streamer->mapMarkers()) {
+        if (marker.deleted || marker.initiallyDisabled || marker.name.empty() || marker.worldspaceFormId != m_streamer->currentWorldspaceFormId()) continue;
+        // Keep the opening route readable without granting discovery or travel rights.
+        const std::string markerName = toLowerAscii(marker.name);
+        const bool routeLandmark = markerName == "riverwood" || markerName == "bleak falls barrow";
+        if (!routeLandmark && !(marker.flags & 1u) && !m_discoveredMarkerIds.contains(marker.referenceFormId)) continue;
+        const float x = px(marker.position[0]), y = py(marker.position[1]);
+        if (x < -20 || y < -20 || x > w+20 || y > footer+20) continue;
+        const float distance = std::hypot(x-cursorX, y-cursorY);
+        if (distance < nearest) { selected = &marker; nearest = distance; }
+        const float size = 14.f * contentScale();
+        // Distinct silhouettes group authored city, settlement, cave and ruin types.
+        m_uiDrawList.addRectFilled({x-size-2,y-size-2,x+size+2,y+size+2}, dark);
+        m_uiDrawList.addRect({x-size,y-size,x+size,y+size}, white, 2.f);
+        const char* glyph = marker.type == 1 ? "#" : marker.type == 2 ? "^" : marker.type == 3 ? "+" : marker.type == 4 ? "O" : "*";
+        text(glyph, x-font.measureText(glyph)*0.5f, y-font.lineHeightPx()*0.5f, white);
+        if (routeLandmark || m_mapSpan < 350000.f) {
+            const float labelX = x - font.measureText(marker.name) * 0.5f;
+            text(marker.name, labelX + 1, y + size + 4, dark);
+            text(marker.name, labelX, y + size + 3, white);
+        }
+    }
+    const bool select = mouseSelect || m_nav.pressed(ui::UiNavAction::Accept);
+    if (select && !m_mapSelectLatch && cursorY < footer) {
+        m_mapDestinationSet = true;
+        m_mapDestinationX = selected ? selected->position[0] : m_mapCenterX + (cursorX-w*0.5f)/scale;
+        m_mapDestinationY = selected ? selected->position[1] : m_mapCenterY - (cursorY-footer*0.5f)/scale;
+    }
+    m_mapSelectLatch = select;
+    if (m_mapPlayerKnown) text("V", px(m_mapPlayerX)-font.measureText("V")*.5f, py(m_mapPlayerY), cyan);
+    if (m_mapDestinationSet) {
+        text("X", px(m_mapDestinationX), py(m_mapDestinationY), {0.95f,0.80f,0.35f,1});
+    }
+    m_uiDrawList.addRect({w*.5f-5, footer*.5f-5, w*.5f+5, footer*.5f+5}, white, 1);
+    m_uiDrawList.popClip();
+    m_uiDrawList.addRectFilled({0,footer,w,h}, {0.015f,0.025f,0.03f,0.92f});
+    text(selected ? selected->name : "SKYRIM", w*.025f, footer + font.lineHeightPx()*.35f, white);
+    text("Arrows / LS / RMB  Pan     Wheel / +/- / Triggers  Zoom     C / Y  Current location     Enter / A / Click  Destination     Del  Clear     M / Esc / B  Close",
+        w*.025f, h-font.lineHeightPx()*1.5f, white);
+    text("N", w*.5f, font.lineHeightPx(), white);
+    if (!m_mapTerrain.complete) text("Reading landscape... " + std::to_string(m_mapTerrain.cursor) + " / " + std::to_string(m_mapTerrain.cells.size()), w*.025f, font.lineHeightPx(), white);
+    if (!m_mapError.empty()) text(m_mapError, w*.025f, font.lineHeightPx(), white);
+    if (m_interiorStarted && !m_mapPlayerKnown) text("Interior: exterior position unavailable", w*.025f, font.lineHeightPx()*2.5f, white);
+}
+
+void BethesdaApp::drawSkyrimQuestLog() {
+    ensureSkyrimUiFont();
+    const ui::Font& font = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+    int sw = 0, sh = 0;
+    framebufferSize(sw, sh);
+    const float w = float(sw), h = float(sh), line = font.lineHeightPx();
+    const float pad = w * 0.025f, top = h * 0.13f, bottom = h * 0.91f, split = w * 0.32f;
+    const ui::UiColor white{0.92f, 0.92f, 0.89f, 1}, dim{0.62f, 0.63f, 0.62f, 1}, rule{0.66f, 0.68f, 0.66f, 0.65f};
+    const auto text = [&](const std::string& value, float x, float y, ui::UiColor color) {
+        m_uiDrawList.addText(font, value, {x, y}, color);
+    };
+    const auto horizontal = [&](float x, float end, float y) {
+        m_uiDrawList.addRectFilled({x, y, end, y + 1}, rule);
+    };
+    m_uiDrawList.addRectFilled({0, 0, w, h}, {0.015f, 0.02f, 0.024f, 0.45f});
+    m_uiDrawList.addRectFilled({pad, top, w - pad, bottom}, {0.018f, 0.024f, 0.027f, 0.73f});
+    m_uiDrawList.addRect({pad, top, w - pad, bottom}, rule, 1.0f);
+    m_uiDrawList.addRectFilled({split, top, split + 1, bottom}, rule);
+    horizontal(pad, w - pad, h * 0.035f);
+    horizontal(pad, w - pad, h * 0.105f);
+    text("<   QUESTS   >", w * 0.16f, h * 0.05f, m_questLogCompleted ? dim : white);
+    text("COMPLETED", w * 0.53f, h * 0.05f, m_questLogCompleted ? white : dim);
+    std::vector<const bethesda::QuestRuntimeState*> quests;
+    for (const auto& [id, quest] : m_bethesdaSession.quests()) {
+        const bool finished = quest.completed || quest.failed;
+        const bool visible = std::any_of(quest.objectives.begin(), quest.objectives.end(), [](const auto& objective) {
+            return objective.displayed || objective.completed || objective.failed;
+        });
+        if (finished == m_questLogCompleted && (visible || (quest.running && !m_bethesdaSession.questJournalSummary(quest).empty()) || (finished && m_bethesdaSession.questJournalTitle(quest) != quest.editorId))) quests.push_back(&quest);
+    }
+    std::stable_sort(quests.begin(), quests.end(), [&](const auto* a, const auto* b) {
+        return m_bethesdaSession.questJournalTitle(*a) < m_bethesdaSession.questJournalTitle(*b);
+    });
+    m_questLogChoice = std::clamp(m_questLogChoice, 0, std::max(0, int(quests.size()) - 1));
+    const float row = line * 1.8f;
+    const int rows = std::max(1, int((bottom - top - pad * 2) / row));
+    const int first = std::max(0, m_questLogChoice - rows + 1);
+    m_uiDrawList.pushClip({pad, top, split, bottom});
+    for (int i = first; i < std::min(int(quests.size()), first + rows); ++i) {
+        const float y = top + pad + float(i - first) * row;
+        const bool selected = i == m_questLogChoice;
+        if (selected) m_uiDrawList.addRectFilled({pad + 1, y - 4, split - 1, y + row - 4}, {0.7f, 0.72f, 0.7f, 0.10f});
+        std::string title = m_bethesdaSession.questJournalTitle(*quests[i]);
+        while (!title.empty() && font.measureText(title) > split - pad * 3) {
+            std::size_t last = title.size() - 1;
+            while (last > 0 && (static_cast<unsigned char>(title[last]) & 0xc0u) == 0x80u) --last;
+            title.resize(last);
+        }
+        text(title, pad * 1.6f, y, selected ? white : dim);
+        if (selected) text(">", split - pad * 0.7f, y, white);
+    }
+    m_uiDrawList.popClip();
+    if (quests.empty()) {
+        text(m_questLogCompleted ? "No completed quests" : "No active quests", split + pad, top + pad, dim);
+    } else {
+        const auto& quest = *quests[m_questLogChoice];
+        const float left = split + pad, right = w - pad * 2;
+        const std::string title = m_bethesdaSession.questJournalTitle(quest);
+        float y = top + pad;
+        m_uiDrawList.pushClip({left, top, w - pad, bottom});
+        for (const auto& value : wrapTextToWidth(font, title, right - left)) {
+            text(value, (left + right - font.measureText(value)) * 0.5f, y, white); y += line * 1.25f;
+        }
+        horizontal(left, right, y + line * 0.35f);
+        y += line * 1.4f;
+        std::vector<std::pair<std::string, bool>> detail;
+        const auto summary = m_bethesdaSession.questJournalSummary(quest);
+        for (const auto& value : wrapTextToWidth(font, summary, right - left - pad)) detail.emplace_back(value, false);
+        if (!summary.empty()) detail.emplace_back("", false);
+        detail.emplace_back(quest.failed ? "QUEST FAILED" : quest.completed ? "QUEST COMPLETED" : "OBJECTIVES", false);
+        detail.emplace_back("", false);
+        for (const auto& objective : quest.objectives) {
+            if (!objective.displayed && !objective.completed && !objective.failed) continue;
+            const std::string label = std::string(objective.failed ? "[!] " : objective.completed ? "[x] " : "<> ") +
+                m_bethesdaSession.resolveQuestText(quest, objective.displayText.empty() ? "Objective " + std::to_string(objective.index) : objective.displayText);
+            for (const auto& value : wrapTextToWidth(font, label, right - left - pad)) detail.emplace_back(value, objective.completed || objective.failed);
+        }
+        const int visible = std::max(1, int((bottom - y - line) / (line * 1.35f)));
+        m_questLogScroll = std::clamp(m_questLogScroll, 0, std::max(0, int(detail.size()) - visible));
+        for (int i = m_questLogScroll; i < std::min(int(detail.size()), m_questLogScroll + visible); ++i) {
+            text(detail[i].first, left, y, detail[i].second ? dim : white); y += line * 1.35f;
+        }
+        if (int(detail.size()) > visible) {
+            const float trackTop = top + pad * 3, trackHeight = bottom - trackTop - pad;
+            const float thumb = trackHeight * float(visible) / float(detail.size());
+            const float offset = (trackHeight - thumb) * float(m_questLogScroll) / float(int(detail.size()) - visible);
+            m_uiDrawList.addRectFilled({right + pad * 0.4f, trackTop, right + pad * 0.4f + 1, bottom - pad}, rule);
+            m_uiDrawList.addRectFilled({right + pad * 0.4f - 2, trackTop + offset, right + pad * 0.4f + 3, trackTop + offset + thumb}, white);
+        }
+        m_uiDrawList.popClip();
+    }
+    text("Up/Down  Select     Left/Right  Active / Completed     PgUp/PgDn / Right stick  Scroll     J / Esc / B  Close", pad, h * 0.95f, dim);
+}
+
+void BethesdaApp::drawSkyrimInventory() {
+    ensureSkyrimUiFont();
+    const ui::Font& inventoryFont = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+    int sw = 0, sh = 0;
+    framebufferSize(sw, sh);
+    const float w = static_cast<float>(sw), h = static_cast<float>(sh);
+    const float line = inventoryFont.lineHeightPx();
+    const float pad = std::max(12.0f, w * 0.018f);
+    const float row = line * 1.65f;
+    const float footer = h - line * 2.8f;
+    const float categoryRight = w * 0.19f, itemsRight = w * 0.47f;
+    const ui::UiColor white{0.91f, 0.91f, 0.88f, 1.0f};
+    const ui::UiColor dim{0.60f, 0.62f, 0.61f, 1.0f};
+    const ui::UiColor rule{0.64f, 0.67f, 0.66f, 0.65f};
+    const auto text = [&](const std::string& value, float x, float y, ui::UiColor color) {
+        m_uiDrawList.addText(inventoryFont, value, {x, y}, color);
+    };
+    const auto fit = [&](std::string value, float width) {
+        if (inventoryFont.measureText(value) <= width) return value;
+        while (!value.empty() && inventoryFont.measureText(value + "...") > width) {
+            std::size_t last = value.size() - 1;
+            while (last > 0 && (static_cast<unsigned char>(value[last]) & 0xc0u) == 0x80u) --last;
+            value.resize(last);
+        }
+        return value + "...";
+    };
+    m_uiDrawList.addRectFilled({0, 0, w, h}, {0.015f, 0.020f, 0.022f, 0.20f});
+    m_uiDrawList.addRectFilled({0, 0, categoryRight, footer}, {0.035f, 0.043f, 0.047f, 0.82f});
+    m_uiDrawList.addRectFilled({categoryRight, 0, itemsRight, footer}, {0.012f, 0.016f, 0.019f, 0.83f});
+    for (const float x : {pad * 0.35f, categoryRight, itemsRight})
+        m_uiDrawList.addRectFilled({x, 0, x + 1.0f, footer}, rule);
+    text(m_inventorySource.valid() ? "SEARCH" : "ITEMS", pad, h * 0.10f, white);
+    const char* categories[] = {"ALL", "WEAPONS", "APPAREL", "POTIONS", "BOOKS", "INGREDIENTS", "MISC"};
+    float y = std::max(h * 0.27f, line * 3.0f);
+    // Keep all categories visible on shorter windows.
+    const float categoryRow = std::min(row, (footer - y - line) / 7.0f);
+    for (int i = 0; i < 7; ++i) {
+        const bool selected = i == m_inventoryCategory;
+        if (selected) {
+            m_uiDrawList.addRectFilled({pad * 0.4f, y - 4, categoryRight - 2, y + categoryRow - 4},
+                {0.65f, 0.67f, 0.65f, m_inventoryCategoryFocus ? 0.16f : 0.07f});
+            text(">", categoryRight - pad, y, white);
+        }
+        text(categories[i], pad, y, selected ? white : dim);
+        y += categoryRow;
+    }
+    const auto* source = m_bethesdaSession.world().find(m_inventorySource.valid()
+        ? m_inventorySource : m_bethesdaSession.playerObject());
+    const auto visible = visibleInventoryItems();
+    const int count = static_cast<int>(visible.size());
+    m_giftMenuChoice = std::clamp(m_giftMenuChoice, 0, std::max(0, count - 1));
+    const float startY = h * 0.27f;
+    const int rows = std::max(1, static_cast<int>((footer - startY - line) / row));
+    const int first = std::max(0, m_giftMenuChoice - rows + 1);
+    if (count == 0) text("No items", categoryRight + pad, startY, dim);
+    for (int i = first; i < std::min(count, first + rows); ++i) {
+        const auto& entry = source->inventory[visible[static_cast<std::size_t>(i)]];
+        const bool selected = i == m_giftMenuChoice;
+        const float iy = startY + (i - first) * row;
+        const std::string suffix = (entry.count > 1 ? " (" + std::to_string(entry.count) + ")" : "") +
+            std::string(entry.equipped ? "  [E]" : "");
+        if (selected && !m_inventoryCategoryFocus) text(">", categoryRight + pad * 0.3f, iy, white);
+        text(fit(inventoryItemName(entry.item), itemsRight - categoryRight - 2 * pad - inventoryFont.measureText(suffix)) + suffix,
+            categoryRight + pad, iy, selected ? white : dim);
+    }
+    const float left = w * 0.55f, right = w * 0.94f;
+    const ui::UiRect card{left, h * 0.58f, right, footer - line};
+    m_uiDrawList.addRectFilled(card, {0.018f, 0.022f, 0.025f, 0.82f});
+    m_uiDrawList.addRect(card, rule, 1.0f);
+    // Small doubled corner brackets echo Skyrim's restrained metal frame.
+    const float corner = pad * 0.45f;
+    for (float x : {left, right}) for (float cy : {card.minY, card.maxY}) {
+        m_uiDrawList.addRect({x - corner * 0.35f, cy - corner * 0.35f,
+            x + corner * 0.35f, cy + corner * 0.35f}, rule, 1.0f);
+    }
+    if (count > 0) {
+        const auto& entry = source->inventory[visible[static_cast<std::size_t>(m_giftMenuChoice)]];
+        drawInventoryPreview(entry.item, {left, h * 0.07f, right, h * 0.54f});
+        const auto* item = m_bethesdaSession.skyrimItem(entry.item);
+        const auto name = fit(inventoryItemName(entry.item), right - left - 2 * pad);
+        text(name, (left + right - inventoryFont.measureText(name)) * 0.5f, card.minY + line, white);
+        const float dividerY = card.minY + line * 2.5f;
+        m_uiDrawList.addRectFilled({left + pad, dividerY, right - pad, dividerY + 1}, rule);
+        std::string stats = "QUANTITY  " + std::to_string(entry.count);
+        if (item && item->meleeDamage > 0) stats = "DAMAGE  " + std::to_string(static_cast<int>(item->meleeDamage)) + "     " + stats;
+        if (item && item->healing > 0) stats = "RESTORE HEALTH  " + std::to_string(static_cast<int>(item->healing));
+        text(fit(stats, right - left - 2 * pad), left + pad, dividerY + line * 0.5f, white);
+        const std::string action = m_inventorySource.valid() ? "Take this item" :
+            item && !item->text.empty() ? "Read this book" :
+            item && item->meleeDamage > 0 ? (entry.equipped ? "Equipped" : "Equip weapon") :
+            item && item->healing > 0 ? "Use potion" : "Carried item";
+        text(action, left + pad, card.maxY - line * 1.8f, dim);
+    } else {
+        text(source && !source->inventory.empty() ? "No items in this category" : "Your inventory is empty", left + pad, card.minY + line, white);
+        text("Collect items to view them here.", left + pad, card.minY + line * 3, dim);
+    }
+    m_uiDrawList.addRectFilled({0, footer, w, h}, {0.01f, 0.014f, 0.018f, 0.92f});
+    m_uiDrawList.addRectFilled({0, footer, w, footer + 1}, rule);
+    const std::string controls = m_inventorySource.valid()
+        ? "Enter / A  Take     R / X  Take all     Esc / B  Exit"
+        : "Enter / A  Equip / Use / Read     Esc / B  Exit";
+    text(controls, pad, footer + line * 0.5f, white);
+    text("Left / Right  Column     Up / Down  Browse", pad, footer + line * 1.55f, dim);
+    const auto* player = m_bethesdaSession.world().find(m_bethesdaSession.playerObject());
+    if (player && player->actorValues) {
+        const auto& av = *player->actorValues;
+        const float x = w * 0.82f, barY = footer + line * 1.5f;
+        text("HEALTH", x, footer + line * 0.25f, dim);
+        m_uiDrawList.addRect({x, barY, w - pad, barY + line * 0.4f}, rule);
+        const float ratio = std::clamp(av.health / std::max(1.0f, av.maxHealth), 0.0f, 1.0f);
+        m_uiDrawList.addRectFilled({x + 3, barY + 3, x + 3 + (w - pad - x - 6) * ratio,
+            barY + line * 0.4f - 3}, {0.55f, 0.08f, 0.07f, 1.0f});
+    }
+}
+
+void BethesdaApp::drawGiftMenu() {
+    if (m_skyrimMapOpen) { drawSkyrimMap(); return; }
+    if (m_skyrimQuestLogOpen) { drawSkyrimQuestLog(); return; }
+    if (!m_bethesdaSessionConfigured ||
+        (m_bethesdaSession.giftMenuRequests().empty() && !m_playerInventoryOpen)) {
+        return;
+    }
+    if (m_playerInventoryOpen && m_streamIsSkyrim && !m_inventoryBook.valid()) {
+        drawSkyrimInventory();
+        return;
+    }
+    const bethesda::GiftMenuRequestState request = m_playerInventoryOpen
+        ? bethesda::GiftMenuRequestState{}
+        : m_bethesdaSession.giftMenuRequests().front();
     const bethesda::ObjectId sourceId =
-        request.playerGives ? request.player : request.actor;
+        m_playerInventoryOpen ? (m_inventorySource.valid() ? m_inventorySource : m_bethesdaSession.playerObject())
+        : request.playerGives ? request.player : request.actor;
     const bethesda::RuntimeObject* source =
         m_bethesdaSession.world().find(sourceId);
 
@@ -12701,8 +13853,9 @@ void BethesdaApp::drawGiftMenu() {
     const float lineHeight = m_uiFont.lineHeightPx() + (10.0f * scale);
     const std::size_t itemCount = source == nullptr ? 0u : source->inventory.size();
     const std::size_t visibleCount = std::min<std::size_t>(itemCount, 10u);
-    const float height = padding * 2.0f + lineHeight *
-        static_cast<float>(visibleCount + 3u);
+    const float height = m_inventoryBook.valid()
+        ? std::min(600.0f * scale, static_cast<float>(screenHeight) * 0.8f)
+        : padding * 2.0f + lineHeight * static_cast<float>(visibleCount + 3u);
     const ui::UiRect screen{0.0f, 0.0f,
         static_cast<float>(screenWidth), static_cast<float>(screenHeight)};
     const ui::UiRect panel{
@@ -12716,7 +13869,35 @@ void BethesdaApp::drawGiftMenu() {
     m_uiDrawList.addRoundRectFilled(panel, kPipPanelSolid, 8.0f * scale);
     m_uiDrawList.addRoundRect(panel, kPipGreen, 8.0f * scale, 2.0f * scale);
 
-    const std::string title = request.playerGives ? "GIVE ITEMS" : "TAKE SUPPLIES";
+    if (m_playerInventoryOpen && m_inventoryBook.valid()) {
+        const auto* book = m_bethesdaSession.skyrimItem(m_inventoryBook);
+        std::string plain;
+        if (book) {
+            // Book markup is presentation data, never executable UI content.
+            for (std::size_t i = 0; i < book->text.size();) {
+                if (book->text[i] == '<') {
+                    const auto end = book->text.find('>', i);
+                    if (end == std::string::npos) { plain.append(book->text.substr(i)); break; }
+                    const auto tag = toLowerAscii(book->text.substr(i + 1, end - i - 1));
+                    if (tag == "br" || tag == "br/" || tag == "/p" || tag == "p" || tag == "pagebreak") plain += '\n';
+                    i = end + 1;
+                } else plain += book->text[i++];
+            }
+        }
+        const auto lines = wrapTextToWidth(m_uiFont, plain, width - 2.0f * padding);
+        const int rows = std::max(1, static_cast<int>((height - 2.0f * padding) / lineHeight) - 2);
+        m_inventoryBookScroll = std::clamp(m_inventoryBookScroll, 0, std::max(0, static_cast<int>(lines.size()) - rows));
+        m_uiDrawList.addText(m_uiFontBold.valid() ? m_uiFontBold : m_uiFont,
+            inventoryItemName(m_inventoryBook), {panel.minX + padding, panel.minY + padding}, kPipGreen);
+        for (int row = 0; row < rows && row + m_inventoryBookScroll < static_cast<int>(lines.size()); ++row)
+            m_uiDrawList.addText(m_uiFont, lines[static_cast<std::size_t>(row + m_inventoryBookScroll)],
+                {panel.minX + padding, panel.minY + padding + (row + 1) * lineHeight}, kPipGreenDim);
+        m_uiDrawList.addText(m_uiFont, "Up/Down  scroll     Esc / B  back",
+            {panel.minX + padding, panel.maxY - padding}, kPipGreenDim);
+        return;
+    }
+
+    const std::string title = m_playerInventoryOpen ? (m_inventorySource.valid() ? "LOOT" : "INVENTORY") : request.playerGives ? "GIVE ITEMS" : "TAKE SUPPLIES";
     m_uiDrawList.addText(m_uiFontBold.valid() ? m_uiFontBold : m_uiFont, title,
         ui::UiVec2{panel.minX + padding, panel.minY + padding}, kPipGreen);
     float y = panel.minY + padding + lineHeight;
@@ -12743,8 +13924,21 @@ void BethesdaApp::drawGiftMenu() {
                     ui::UiColor{kPipGreen.r, kPipGreen.g, kPipGreen.b, 0.20f},
                     3.0f * scale);
             }
-            const std::string label = (selected ? "> " : "  ") +
-                entry.item.toString() + "  x" + std::to_string(entry.count);
+            std::string name = inventoryItemName(entry.item);
+            const std::string suffix = "  x" + std::to_string(entry.count) + (entry.equipped ? " [E]" : "");
+            const float available = width - 2.0f * padding - m_uiFont.measureText(
+                "> " + suffix + "...");
+            bool shortened = false;
+            while (!name.empty() && m_uiFont.measureText(name) > available) {
+                // Remove a complete UTF-8 code point, not one of its continuation bytes.
+                std::size_t last = name.size() - 1u;
+                while (last > 0u && (static_cast<unsigned char>(name[last]) & 0xc0u) == 0x80u)
+                    --last;
+                name.resize(last);
+                shortened = true;
+            }
+            const std::string label = (selected ? "> " : "  ") + name +
+                (shortened ? "..." : "") + suffix;
             m_uiDrawList.addText(m_uiFont, label,
                 ui::UiVec2{panel.minX + padding, y + (4.0f * scale)},
                 selected ? kPipGreen : kPipGreenDim);
@@ -12758,7 +13952,11 @@ void BethesdaApp::drawGiftMenu() {
             kPipGreenDim);
     }
     const std::string footer =
-        "Up/Down  select     Enter  transfer one     Esc  done";
+        m_playerInventoryOpen
+        ? (m_inventorySource.valid()
+            ? "Enter / A  take one   R / X  take all   Esc / B  close"
+            : "Enter / A  equip/use/read   Up/Down  browse   Esc / B  close")
+        : "Up/Down  select     Enter  transfer one     Esc  done";
     m_uiDrawList.addText(m_uiFont, footer,
         ui::UiVec2{panel.minX + padding, panel.maxY - padding}, kPipGreenDim);
 }
@@ -12944,7 +14142,8 @@ bool BethesdaApp::finishCaptureVideo() {
     return true;
 }
 
-void BethesdaApp::onRender(float /*deltaSeconds*/) {
+void BethesdaApp::onRender(float deltaSeconds) {
+    applyImageSpace(deltaSeconds);
     // Before beginFrameDraw: the backend consumes the pending pose while
     // recording this frame, so setting it afterwards would always be a frame
     // late -- invisible on a still bind pose, and a lag on an animated one.
@@ -12971,13 +14170,14 @@ void BethesdaApp::onRender(float /*deltaSeconds*/) {
         {std::cos(yawRadians) * cosPitch, std::sin(pitchRadians),
          std::sin(yawRadians) * cosPitch},
         {0.0f, 1.0f, 0.0f}});
+    if (!m_screenshotPath.empty() || !m_captureVideoPath.empty() || !m_captureDirectory.empty()) {
+        m_renderer.prepareFrameCapture();
+    }
     submitFrame(camera);
 
-    // Capture AFTER submitFrame: the capture reads the last presented image, so
-    // running it before there is one gets nothing. The warm-up frames matter
-    // too -- auto-exposure adapts over several frames, so a capture on frame 0
-    // shows a mid-adaptation image rather than what the scene settles at.
-    if (!m_screenshotPath.empty()) {
+    // Consume the copy recorded before presentation. Warmup still waits for
+    // exposure and streaming to settle before saving the image.
+    if (!m_screenshotPath.empty() && (!m_skyrimMapOpen || m_mapTerrain.complete)) {
         ++m_framesRendered;
         // A FRAME COUNT IS NOT A STREAMING WAIT, and this path was still
         // counting frames alone long after the video path stopped. On an empty
@@ -13087,3 +14287,92 @@ void BethesdaApp::onRender(float /*deltaSeconds*/) {
 }
 
 }  // namespace odai::games::newvegas
+
+void odai::games::newvegas::BethesdaApp::applyImageSpace(float deltaSeconds) {
+  const auto commands = m_bethesdaSession.takeImageSpaceCommands();
+  render::ImageSpacePostSettings post;
+  if (!m_streamIsSkyrim || std::getenv("ODAI_SKYRIM_NO_IMAGE_SPACE")) {
+    m_imageSpaceModifiers.clear();
+    m_imageSpaceCrossFade.clear();
+    m_renderer.setImageSpace(post);
+    return;
+  }
+  for (const auto &command : commands) {
+    if (command.crossFade && command.remove) {
+      m_imageSpaceCrossFade.apply(0, command.fadeDuration);
+      continue;
+    }
+    std::uint32_t id = 0;
+    std::string error;
+    if (!bethesda::resolvedFormId(m_streamLoadOrder, command.record, id, error))
+      continue;
+    if (command.crossFade) {
+      if (m_imageSpaceTables.modifiers.contains(id)) m_imageSpaceCrossFade.apply(id, command.fadeDuration);
+      continue;
+    }
+    std::erase_if(m_imageSpaceModifiers,
+                  [id](const auto &active) { return active.formId == id; });
+    if (!command.remove && m_imageSpaceTables.modifiers.contains(id))
+      m_imageSpaceModifiers.push_back({id, 0.0f, command.strength});
+  }
+  bool found = false;
+  auto source = importer::fnv::sampleWeatherImageSpace(
+      m_imageSpaceTables, m_activeWeatherFormId, m_timeOfDayHours,
+      m_sunriseHour, m_sunsetHour, found);
+  if (!m_currentInteriorEditorId.empty()) {
+    found = false;
+    source = {};
+    const auto binding = m_imageSpaceTables.cellImageSpaceByEditorId.find(
+        m_currentInteriorEditorId);
+    if (binding != m_imageSpaceTables.cellImageSpaceByEditorId.end()) {
+      const auto it = m_imageSpaceTables.spaces.find(binding->second);
+      if (it != m_imageSpaceTables.spaces.end()) {
+        source = it->second.settings;
+        found = true;
+      }
+    }
+  }
+  for (auto &active : m_imageSpaceModifiers) {
+    const auto it = m_imageSpaceTables.modifiers.find(active.formId);
+    if (it == m_imageSpaceTables.modifiers.end() ||
+        (it->second.animatable && active.elapsed > it->second.duration))
+      continue;
+    source = importer::fnv::applyImageSpaceModifier(
+        source, it->second, active.elapsed, active.strength);
+    active.elapsed += std::max(deltaSeconds, 0.0f);
+    found = true;
+  }
+  std::erase_if(m_imageSpaceModifiers, [&](const auto &active) {
+    const auto it = m_imageSpaceTables.modifiers.find(active.formId);
+    return it == m_imageSpaceTables.modifiers.end() ||
+           (it->second.animatable && active.elapsed > it->second.duration);
+  });
+  if (m_imageSpaceCrossFade.active()) {
+    source = m_imageSpaceCrossFade.sample(source, m_imageSpaceTables, deltaSeconds);
+    found = true;
+  }
+  post.enabled = found;
+  post.grading = std::getenv("ODAI_FNV_COLOR_LOOK") == nullptr &&
+                 std::getenv("ODAI_FNV_CONTRAST") == nullptr &&
+                 std::getenv("ODAI_FNV_SATURATION") == nullptr;
+  post.adaptation = std::getenv("ODAI_FNV_EXPOSURE_KEY") == nullptr &&
+                    std::getenv("ODAI_FNV_EXPOSURE_RANGE") == nullptr;
+  // Skyrim authoring units differ from our exponential adaptation and HDR
+  // bloom gain. Preserve source values; normalize only at the renderer
+  // boundary.
+  post.adaptSpeed = std::max(source.hdr[0], 0.0f) / 30.0f;
+  post.bloomRadius = source.hdr[1];
+  post.bloomThreshold = source.hdr[2];
+  post.bloomScale = source.hdr[3] * 0.01f;
+  post.saturation = source.cinematic[0];
+  post.brightness = source.cinematic[1];
+  post.contrast = source.cinematic[2];
+  for (int i = 0; i < 3; ++i)
+    post.tint[i] = source.tint[i + 1];
+  post.tint[3] = source.tint[0];
+  post.dofDistance = source.dof[1];
+  post.dofRange = source.dof[2];
+  post.dofRadius = importer::fnv::imageSpaceDofRadius(source);
+  std::copy(source.fade.begin(), source.fade.end(), post.fade);
+  m_renderer.setImageSpace(post);
+}

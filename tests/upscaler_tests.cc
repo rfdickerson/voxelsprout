@@ -75,6 +75,12 @@ void testXessFollowsBuildConfiguration() {
 // preset is only comparable across backends if it means the same internal
 // resolution on each.
 void testQualityPresetsDriveRenderScale() {
+    // Selecting temporal AA alone must not silently lower the framebuffer's
+    // native resolution. Reduced resolution requires an explicit quality choice.
+    UpscalerSettings native{};
+    native.backend = UpscalerBackend::Temporal;
+    assert(native.quality == UpscalerQuality::Native);
+    assert(nearlyEqual(odai::render::resolveUpscaler(native, false).renderScale, 1.0f));
     assert(nearlyEqual(upscalerQualityScale(UpscalerQuality::Quality), 1.0f / 1.5f));
     assert(nearlyEqual(upscalerQualityScale(UpscalerQuality::Performance), 0.5f));
     assert(nearlyEqual(upscalerQualityScale(UpscalerQuality::UltraPerformance), 1.0f / 3.0f));

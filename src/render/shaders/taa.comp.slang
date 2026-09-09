@@ -14,25 +14,16 @@
 // Averaging across frames is the only tool that touches it, which is what
 // every modern engine ships TAA for.
 //
-// Reprojection is CAMERA-ONLY: history UV comes from re-projecting the
-// reconstructed world position through last frame's view-projection. There are
-// no per-object motion vectors, which is correct for everything this renderer
-// currently draws through the imported path -- the Mojave's geometry is
-// static. When skinned actors reach the screen they will ghost under this
-// scheme; that is the point at which this pass needs a velocity input, not
-// before.
+// Dynamic surfaces use the actor velocity buffer; static geometry falls back
+// to camera/depth reprojection. Motion reduces history weight to limit trails
+// at disocclusions and on surfaces without complete dynamic velocity coverage.
 //
-// No projection jitter yet either. Jitter buys sub-pixel EDGE refinement;
-// the measured artifact is texture shimmer, which history accumulation fixes
-// with or without jitter. Adding jitter later only touches the projection
-// setup and this file's unjitter of the current sample.
-//
-// Ghosting control is a 3x3 neighborhood clamp in RGB: history is clamped to
-// the min/max of the current frame's local neighborhood, so stale colors
-// (disocclusions, lighting changes like the day cycle) converge in a few
-// frames instead of smearing.
+// Variance clipping limits stale history at disocclusions and on animated
+// materials without velocity coverage. Projection jitter is removed during
+// reprojection so it is not interpreted as surface motion.
 
 import camera_uniform;
+#include "../taa_depth_policy.h"
 
 [[vk::binding(1, 0)]]
 Sampler2D<float4> currentColorTexture;
@@ -49,6 +40,9 @@ Sampler2D<float4> normalDepthTexture;
 [[vk::binding(4, 0)]]
 RWTexture2D<float4> outputTexture;
 
+[[vk::binding(6, 0)]]
+Sampler2D<float4> velocityTexture;
+
 struct TaaUniform
 {
     float4x4 invView;       // view space -> world space
@@ -57,11 +51,11 @@ struct TaaUniform
     // zw = LAST frame's sub-pixel jitter in NDC, which prevViewProj carries and
     // the history image does not.
     float4 params;
-    // Read only by temporal_upscale.comp.slang, which shares this descriptor set
-    // layout. Declared here so both shaders agree on the struct's size and every
-    // field before it is read from the same offset.
+    // Shared with temporal_upscale.comp.slang: current jitter/input extent,
+    // reconstruction tuning, and velocity availability in upscaleTuning.w.
     float4 jitterAndInputExtent;
     float4 upscaleTuning;
+    float4 previousDepthProjection;
 };
 
 [[vk::binding(5, 0)]]
@@ -135,7 +129,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 result = current;
 
     const float historyWeight = taa.params.x * taa.params.y;
-    const float viewDepth = normalDepthTexture.SampleLevel(uv, 0.0).w;
+    uint depthWidth, depthHeight;
+    normalDepthTexture.GetDimensions(depthWidth, depthHeight);
+    const uint2 depthPixel = min(uint2(uv * float2(depthWidth, depthHeight)),
+        uint2(depthWidth, depthHeight) - 1u);
+    // Point-sample depth: filtering across silhouettes fabricates a surface.
+    const float viewDepth = normalDepthTexture.Load(int3(depthPixel, 0)).w;
     // Sky (depth cleared to 0) takes no history: it was measured stable
     // without TAA, and reprojecting it needs a rotation-only path this pass
     // does not carry.
@@ -151,10 +150,51 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
             // that frame's jitter, while the history image it addresses is the
             // resolved result on the fixed output grid and carries none.
             const float2 previousNdc = (previousClip.xy / previousClip.w) - taa.params.zw;
-            const float2 previousUv = (previousNdc * 0.5) + 0.5;
+            float2 previousUv = (previousNdc * 0.5) + 0.5;
+            float previousNdcDepth = previousClip.z / previousClip.w;
+            bool dynamicSurface = false;
+            if (taa.upscaleTuning.w > 0.5)
+            {
+                // Point-load the validity bit: filtering across a silhouette
+                // would mix foreground velocity with the static background.
+                const uint2 velocityPixel = min(uint2(uv * taa.jitterAndInputExtent.zw),
+                    uint2(taa.jitterAndInputExtent.zw) - 1u);
+                const float4 velocity = velocityTexture.Load(int3(velocityPixel, 0));
+                dynamicSurface = velocity.z > 0.5;
+                if (dynamicSurface) {
+                    previousUv = uv + velocity.xy * 0.5;
+                    previousNdcDepth = velocity.w;
+                }
+            }
+            const float motionPixels = length((previousUv - uv) * taa.jitterAndInputExtent.zw);
+            const float motionHistoryLimit = lerp(0.88, 0.35, smoothstep(0.5, 8.0, motionPixels));
+            const float responsiveWeight = min(historyWeight,
+                dynamicSurface ? min(motionHistoryLimit, 0.5) : motionHistoryLimit);
             if (all(previousUv >= float2(0.0, 0.0)) && all(previousUv <= float2(1.0, 1.0)))
             {
-                float3 history = historyColorTexture.SampleLevel(previousUv, 0.0).rgb;
+                const float4 p = taa.previousDepthProjection;
+                const float expectedDepth = taaViewDepth(previousNdcDepth, p.x, p.y, p.z, p.w);
+                // Validate each bilinear tap before mixing colours; testing an
+                // interpolated depth would admit foreground at silhouettes.
+                const float2 historyPosition = previousUv * float2(pushConstants.width, pushConstants.height) - 0.5;
+                const int2 basePixel = int2(floor(historyPosition));
+                const float2 fraction = frac(historyPosition);
+                float3 history = float3(0.0);
+                float confidence = 0.0;
+                [unroll] for (int y = 0; y < 2; ++y) {
+                    [unroll] for (int x = 0; x < 2; ++x) {
+                        const int2 pixel = basePixel + int2(x, y);
+                        if (any(pixel < int2(0)) || any(pixel >= int2(pushConstants.width, pushConstants.height))) continue;
+                        const float4 sample = historyColorTexture.Load(int3(pixel, 0));
+                        const float depth = exp2(sample.a) - 1.0;
+                        if (!taaDepthMatches(depth, expectedDepth)) continue;
+                        const float weight = (x == 0 ? 1.0 - fraction.x : fraction.x) *
+                                             (y == 0 ? 1.0 - fraction.y : fraction.y);
+                        history += sample.rgb * weight;
+                        confidence += weight;
+                    }
+                }
+                history /= max(confidence, 1e-6);
 
                 // VARIANCE CLIPPING (Salvi 2016) in YCoCg, replacing a min/max
                 // box in RGB. The box is the mean of the 3x3 neighbourhood plus
@@ -165,9 +205,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 // This matters more than it used to. A min/max box is the
                 // LOOSEST bound the neighbourhood admits -- one bright texel
                 // opens it wide enough to accept nearly any history -- and the
-                // town now walks. Without per-object velocity a moving actor's
-                // history reprojects to where the BACKGROUND was, and only this
-                // bound stands between that and a smear trailing every settler.
+                // town now walks. Even correct object motion cannot recover
+                // history for newly uncovered background; this bound limits
+                // stale foreground colour at those disocclusions.
                 // Jitter also raises the stakes: it deliberately makes the
                 // current frame differ sub-pixel each frame, which widens a
                 // min/max box further still.
@@ -208,10 +248,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
                 const float3 historyYCoCg =
                     min(max(rgbToYCoCg(history), clipMin), clipMax);
                 history = yCoCgToRgb(historyYCoCg);
-                result = lerp(current, history, historyWeight);
+                result = lerp(current, history, responsiveWeight * taaHistoryConfidence(confidence));
             }
         }
     }
 
-    outputTexture[dispatchThreadId.xy] = float4(result, 1.0);
+    // Native TAA history alpha holds logarithmic view depth (sky = zero).
+    // Log encoding retains useful FP16 precision beyond 65,504 world units.
+    outputTexture[dispatchThreadId.xy] = float4(result, log2(1.0 + max(viewDepth, 0.0)));
 }

@@ -1,3 +1,4 @@
+#include "import/fnv/skyrim_lod_handoff.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -2379,7 +2380,8 @@ void testSkyrimTerrainPackedPositionsAreFullPrecision() {
 // enabled ramps blend their opaque diffuse into the ground, while disabled
 // bytes must read as 1 rather than punching holes through alpha-tested shapes.
 void testSkyrimLightingShaderVertexAlpha() {
-    const auto parseFixture = [](bool enableVertexAlpha, bool effect = false, bool lit = false) {
+    const auto parseFixture = [](bool enableVertexAlpha, bool effect = false, bool lit = false,
+                                 bool enableVertexColors = false, bool animated = false, int sky = 0, std::uint32_t extraFlags = 0) {
         const std::array<float, 9> identityRotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
         const auto appendSseAvObjectPrefix = [&](std::vector<std::uint8_t>& block) {
             appendPod(block, static_cast<std::int32_t>(-1));
@@ -2422,9 +2424,9 @@ void testSkyrimLightingShaderVertexAlpha() {
             appendPod(shapeBlock, static_cast<std::uint32_t>(0));
             appendPod(shapeBlock, static_cast<std::uint16_t>(0));
             appendPod(shapeBlock, static_cast<std::uint16_t>(0));
-            shapeBlock.push_back(255u);
-            shapeBlock.push_back(255u);
-            shapeBlock.push_back(255u);
+            shapeBlock.push_back(32u);
+            shapeBlock.push_back(128u);
+            shapeBlock.push_back(224u);
             shapeBlock.push_back(alpha[vertex]);
         }
         appendPod(shapeBlock, static_cast<std::uint16_t>(0));
@@ -2433,15 +2435,19 @@ void testSkyrimLightingShaderVertexAlpha() {
         appendPod(shapeBlock, static_cast<std::uint32_t>(0));
 
         std::vector<std::uint8_t> shaderBlock;
-        if (!effect) appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // shader type
+        if (!effect && !sky) appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // shader type
         appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // name
         appendPod(shaderBlock, static_cast<std::uint32_t>(0));   // extra data
-        appendPod(shaderBlock, static_cast<std::int32_t>(-1));   // controller
-        appendPod(shaderBlock, (enableVertexAlpha ? 0x8u : 0u) | (effect ? 0x30u : 0u));   // SLSF1
-        appendPod(shaderBlock, lit ? (1u << 30u) : 0u);   // SLSF2
-        appendPod(shaderBlock, effect ? 0.25f : 0.0f); appendPod(shaderBlock, 0.0f); // UV offset
+        appendPod(shaderBlock, static_cast<std::int32_t>(animated ? 3 : -1));   // controller
+        appendPod(shaderBlock, (enableVertexAlpha ? 0x8u : 0u) | (effect ? 0x30u : 0u) | extraFlags);   // SLSF1
+        appendPod(shaderBlock, (lit ? (1u << 30u) : 0u) |
+                              (enableVertexColors ? (1u << 5u) : 0u));   // SLSF2
+        appendPod(shaderBlock, 0.25f); appendPod(shaderBlock, 0.0f); // UV offset
         appendPod(shaderBlock, 1.0f); appendPod(shaderBlock, 1.0f); // UV scale
-        if (effect) {
+        if (sky) {
+            appendSizedString32(shaderBlock, "textures/sky/synthetic.dds");
+            if (sky == 1) appendPod(shaderBlock, std::uint32_t(5));
+        } else if (effect) {
             appendSizedString32(shaderBlock, "textures/effects/water.dds");
             appendPod(shaderBlock, std::uint32_t(3)); // clamp + lighting bytes
             for (int i = 0; i < 7; ++i) appendPod(shaderBlock, 1.0f); // falloff + RGB
@@ -2451,8 +2457,21 @@ void testSkyrimLightingShaderVertexAlpha() {
             appendSizedString32(shaderBlock, "textures/effects/palette.dds"); // palette
         } else {
             appendPod(shaderBlock, static_cast<std::int32_t>(-1)); // texture set
+            if (lit) {
+                for (float value : {0.1f,0.2f,0.3f,2.0f}) appendPod(shaderBlock,value);
+                appendPod(shaderBlock,std::uint32_t(3)); // clamp mode
+                for (float value : {0.75f,0.0f,64.0f,0.4f,0.5f,0.6f,1.5f}) appendPod(shaderBlock,value);
+            }
         }
 
+        std::vector<std::uint8_t> controllerBlock, interpolatorBlock, keysBlock;
+        appendPod(controllerBlock,std::int32_t(-1));appendPod(controllerBlock,std::uint16_t(8));
+        for(float value:{1.f,0.f,0.f,2.f})appendPod(controllerBlock,value);
+        appendPod(controllerBlock,std::int32_t(2));appendPod(controllerBlock,std::int32_t(4));
+        appendPod(controllerBlock,std::uint32_t(effect?6:20));
+        appendPod(interpolatorBlock,0.f);appendPod(interpolatorBlock,std::int32_t(5));
+        appendPod(keysBlock,2u);appendPod(keysBlock,1u);
+        for(float value:{0.f,0.f,2.f,1.f})appendPod(keysBlock,value);
         std::vector<std::uint8_t> fileBytes;
         const std::string headerLine = "Gamebryo File Format, Version 20.2.0.7";
         fileBytes.insert(fileBytes.end(), headerLine.begin(), headerLine.end());
@@ -2460,27 +2479,36 @@ void testSkyrimLightingShaderVertexAlpha() {
         appendPod(fileBytes, static_cast<std::uint32_t>(0x14020007u));
         appendPod(fileBytes, static_cast<std::uint8_t>(1));
         appendPod(fileBytes, static_cast<std::uint32_t>(12));
-        appendPod(fileBytes, static_cast<std::uint32_t>(3));
+        appendPod(fileBytes, static_cast<std::uint32_t>(animated ? 6 : 3));
         appendPod(fileBytes, static_cast<std::uint32_t>(100));
         appendSizedString8(fileBytes, "");
         appendSizedString8(fileBytes, "");
         appendSizedString8(fileBytes, "");
-        appendPod(fileBytes, static_cast<std::uint16_t>(3));
+        appendPod(fileBytes, static_cast<std::uint16_t>(animated ? 6 : 3));
         appendSizedString32(fileBytes, "BSFadeNode");
         appendSizedString32(fileBytes, "BSTriShape");
-        appendSizedString32(fileBytes, effect ? "BSEffectShaderProperty" : "BSLightingShaderProperty");
+        appendSizedString32(fileBytes, sky ? "BSSkyShaderProperty" : effect ? "BSEffectShaderProperty" : "BSLightingShaderProperty");
+        if(animated) {
+            appendSizedString32(fileBytes,effect?"BSEffectShaderPropertyFloatController":"BSLightingShaderPropertyFloatController");
+            appendSizedString32(fileBytes,"NiFloatInterpolator");appendSizedString32(fileBytes,"NiFloatData");
+        }
         appendPod(fileBytes, static_cast<std::uint16_t>(0));
         appendPod(fileBytes, static_cast<std::uint16_t>(1));
         appendPod(fileBytes, static_cast<std::uint16_t>(2));
+        if(animated) for(std::uint16_t i=3;i<6;++i)appendPod(fileBytes,i);
         appendPod(fileBytes, static_cast<std::uint32_t>(rootBlock.size()));
         appendPod(fileBytes, static_cast<std::uint32_t>(shapeBlock.size()));
         appendPod(fileBytes, static_cast<std::uint32_t>(shaderBlock.size()));
+        if(animated) for(auto size:{controllerBlock.size(),interpolatorBlock.size(),keysBlock.size()})
+            appendPod(fileBytes,std::uint32_t(size));
         appendPod(fileBytes, static_cast<std::uint32_t>(0));
         appendPod(fileBytes, static_cast<std::uint32_t>(0));
         appendPod(fileBytes, static_cast<std::uint32_t>(0));
         fileBytes.insert(fileBytes.end(), rootBlock.begin(), rootBlock.end());
         fileBytes.insert(fileBytes.end(), shapeBlock.begin(), shapeBlock.end());
         fileBytes.insert(fileBytes.end(), shaderBlock.begin(), shaderBlock.end());
+        if(animated) for(const auto* block:{&controllerBlock,&interpolatorBlock,&keysBlock})
+            fileBytes.insert(fileBytes.end(),block->begin(),block->end());
         appendPod(fileBytes, static_cast<std::uint32_t>(1));
         appendPod(fileBytes, static_cast<std::int32_t>(0));
 
@@ -2492,6 +2520,31 @@ void testSkyrimLightingShaderVertexAlpha() {
         return model;
     };
 
+    for (int kind : {1, 2}) {
+        const auto sky = parseFixture(false, false, false, false, false, kind);
+        expectTrue(sky.shapes.size() == 1, "sky material fixture retains geometry");
+        if (!sky.shapes.empty()) {
+            const auto& material = sky.shapes[0].skyMaterial;
+            expectTrue(material.valid == (kind == 1), "truncated sky material is not published");
+            if (material.valid) {
+                expectTrue(material.texture == "textures/sky/synthetic.dds", "sky texture preserved");
+                expectTrue(material.objectType == 5, "sky object type preserved");
+                expectNear(material.uvOffset[0], 0.25f, 1e-6f, "sky UV offset preserved");
+                expectTrue(sky.shapes[0].unlit, "sky material is emissive, not world lighting");
+            }
+        }
+    }
+    for(bool effect:{false,true}) {
+        const auto animated=parseFixture(false,effect,true,false,true);
+        expectTrue(animated.shapes.size()==1,"animated material NIF emits shape");
+        if(animated.shapes.empty())continue;
+        const auto& shape=animated.shapes[0];
+        expectTrue(shape.materialAnimations.size()==1 && shape.unsupportedMaterialControllers==0,
+                   "linked material controller reaches emitted shape");
+        expectNear(shape.uvs[0],0.f,1e-5f,"animated UV remains unbaked for runtime evaluation");
+        expectNear(shape.colors[3],1.f,1e-5f,"animated material opacity remains independent of vertex coverage");
+        expectNear(shape.lightingMaterial.alpha,effect?.5f:.75f,1e-5f,"animated source opacity preserved");
+    }
     const auto enabled = parseFixture(true);
     expectTrue(enabled.shapes.size() == 1u, "vertex-alpha fixture emits one shape");
     if (enabled.shapes.size() == 1u) {
@@ -2501,6 +2554,41 @@ void testSkyrimLightingShaderVertexAlpha() {
                    "enabled vertex alpha preserves its authored coverage");
     }
 
+    // RGB tint, vertex coverage and material opacity are independent. Exercise
+    // all combinations, including a truncated optional lighting tail.
+    for (bool rgb : {false, true}) {
+        for (bool alpha : {false, true}) {
+            for (bool materialOpacity : {false, true}) {
+                const auto model = parseFixture(alpha, false, materialOpacity, rgb);
+                expectTrue(model.shapes.size() == 1u, "vertex RGB fixture emits a shape");
+                if (model.shapes.size() != 1u) continue;
+                const auto& colors = model.shapes.front().colors;
+                expectTrue(colors.size() == 12u, "vertex RGB fixture retains RGBA stream");
+                if (colors.size() != 12u) continue;
+                for (std::size_t vertex = 0; vertex < 3; ++vertex) {
+                    for (std::size_t channel = 0; channel < 3; ++channel) {
+                        constexpr float authored[] = {32.f/255.f, 128.f/255.f, 224.f/255.f};
+                        expectNear(colors[vertex*4+channel], rgb ? authored[channel] : 1.f, 1e-5f,
+                                   "only enabled vertex RGB modulates material color");
+                    }
+                }
+                expectNear(colors[7], (alpha ? 128.f/255.f : 1.f) *
+                                     (materialOpacity ? .75f : 1.f), 1e-5f,
+                           "RGB flag cannot change vertex or material opacity");
+            }
+        }
+    }
+
+    for (auto flag : {1u << 15u, 1u << 16u}) {
+        const auto refractive = parseFixture(false, false, true, false, false, 0, flag);
+        expectTrue(refractive.shapes.size() == 1 &&
+                   refractive.shapes[0].lightingMaterial.requiresSceneRefraction(),
+                   "Refraction flags survive import even with zero current strength");
+    }
+    const auto ordinary = parseFixture(false, false, true);
+    expectTrue(!ordinary.shapes.empty() &&
+               !ordinary.shapes[0].lightingMaterial.requiresSceneRefraction(),
+               "Ordinary materials do not require scene refraction");
     const auto disabled = parseFixture(false);
     expectTrue(disabled.shapes.size() == 1u, "disabled-alpha fixture emits one shape");
     if (disabled.shapes.size() == 1u) {
@@ -2512,6 +2600,27 @@ void testSkyrimLightingShaderVertexAlpha() {
                    "even a stored zero alpha is ignored when the shader flag is clear");
     }
     for (bool lit : {false, true}) {
+        const auto lighting = parseFixture(false, false, lit);
+        expectTrue(!lighting.shapes.empty() && lighting.shapes.front().lightingMaterial.present,
+                   "lighting metadata survives even when the texture set is missing");
+        if (!lighting.shapes.empty()) {
+            expectNear(lighting.shapes.front().lightingMaterial.uvOffset[0], 0.25f, 1e-5f,
+                       "lighting UV offset is decoded rather than skipped");
+            expectTrue(lighting.shapes.front().lightingMaterial.parametersValid==lit,
+                       "material tails distinguish complete and truncated payloads");
+            if (lit) {
+                expectTrue(lighting.shapes.front().lightingMaterial.textureClampMode == 3,
+                           "authored wrap mode survives material parsing");
+                expectNear(lighting.shapes.front().lightingMaterial.glossiness,64.0f,1e-5f,
+                           "glossiness follows refraction strength without skipping a field");
+                expectNear(lighting.shapes.front().lightingMaterial.specularStrength,1.5f,1e-5f,
+                           "authored specular strength survives decoding");
+                expectNear(lighting.shapes.front().uvs[0],0.25f,1e-5f,
+                           "lighting UV transform reaches emitted geometry once");
+                expectNear(lighting.shapes.front().colors[3],0.75f,1e-5f,
+                           "material opacity applies when vertex alpha is disabled");
+            }
+        }
         for (bool vertexAlpha : {false, true}) {
             const auto effect = parseFixture(vertexAlpha, true, lit);
             expectTrue(effect.shapes.size() == 1u, "effect fixture emits one shape");
@@ -2928,6 +3037,26 @@ void testNifParserInheritsPropertiesFromParentNodes() {
             !shape.alphaBlend,
             "blend+test still resolves to cutout when inherited, exactly as when owned");
     }
+    // The same inherited property also carries the authored blend factors.
+    // Keep the source-alpha glass case distinct from additive light shafts.
+    const std::size_t flagOffset = fileBytes.size() - 8u - 3u;
+    for (const std::uint16_t flags : {0x100du, 0x10edu}) {
+        fileBytes[flagOffset] = static_cast<std::uint8_t>(flags);
+        fileBytes[flagOffset + 1u] = static_cast<std::uint8_t>(flags >> 8u);
+        model = {};
+        expectTrue(odai::importer::fnv::parseNifStaticMesh(fileBytes, model, error),
+                   "Inherited blended fixture parses");
+        expectTrue(model.shapes.size() == 1u, "Blended fixture retains its shape");
+        if (model.shapes.size() == 1u) {
+            expectTrue(model.shapes[0].alphaBlend, "Blended fixture remains transparent");
+            const auto expected = flags == 0x100du
+                ? odai::importer::ImportedBlendMode::Additive
+                : odai::importer::ImportedBlendMode::Alpha;
+            expectTrue(model.shapes[0].blendMode == expected,
+                       "Inherited authored additive and alpha factors remain distinct");
+        }
+    }
+
 }
 
 // An index past the block's own vertices does NOT fault and does not draw
@@ -3324,6 +3453,9 @@ void testAsyncAssetLoaderDeduplicatesAndLoadsConcurrently() {
     FalloutAssetSource source;
     expectTrue(source.open(dataDir), "asset source opens the data directory");
     expectTrue(source.archiveCount() == 1u, "asset source indexes the synthetic archive");
+    const auto inventory=source.virtualPaths();
+    expectTrue(inventory==std::vector<std::string>{"meshes\\x\\ex_wall_01.nif","textures\\x\\tx_wall_01.dds"},
+               "asset inventory is canonical, sorted, and omits archive containers");
 
     std::string error;
     std::vector<std::uint8_t> meshBytes;
@@ -3810,6 +3942,80 @@ void testOblivionWeatherFogAndCloudTints() {
 //
 // This pins the pairing rather than the parse: the assertion that matters is
 // that the surviving layer carries the tint and alpha of ITS OWN index.
+void testWeatherPresentation() {
+    using namespace odai::importer::fnv;
+    std::vector<std::uint8_t> data;
+    for (float v : {100.0f, 0.1f, 2.0f, 8.0f, 10.0f, 20.0f, 0.5f}) appendPod(data, v);
+    for (std::uint32_t v : {2u, 4u, 0u, 1000u}) appendPod(data, v);
+    appendPod(data, 0.25f);
+    EsmRecordView record; record.type = "SPGD"; record.formId = 0x123;
+    record.subrecords.push_back({"DATA", data.data(), static_cast<std::uint32_t>(data.size())});
+    WeatherPrecipitationRecord parsed; std::string error;
+    expectTrue(parseWeatherPrecipitation(record, parsed, error), "SPGD full layout parses");
+    expectTrue(parsed.gravityVelocity == 100 && parsed.subtexturesY == 4 && parsed.density == 0.25f,
+               "SPGD authored geometry and density survive");
+    for (auto size : {40u, 44u}) {
+        record.subrecords[0].size = size;
+        expectTrue(parseWeatherPrecipitation(record, parsed, error) && parsed.density == 1,
+                   "legacy SPGD optional fields default neutrally");
+    }
+    record.subrecords[0].size = 47;
+    expectTrue(!parseWeatherPrecipitation(record, parsed, error), "truncated SPGD rejected");
+    record.subrecords[0].size = 48;
+    const float invalid = std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(data.data() + 44, &invalid, 4);
+    expectTrue(!parseWeatherPrecipitation(record, parsed, error), "nonfinite density rejected");
+    const float density = 0.25f; std::memcpy(data.data() + 44, &density, 4);
+    parseWeatherPrecipitation(record, parsed, error);
+    FalloutWeatherTables tables; tables.precipitation[0x123] = parsed;
+    FalloutWeatherRecord weather; weather.precipitationFormId = 0x123;
+    weather.editorId = "MisleadingHeavySnowStorm";
+    expectTrue(std::abs(weatherRainIntensity(tables, weather, true) - (1.0f - std::exp(-0.25f))) < 1e-6f,
+               "rain follows SPGD density rather than names or classification");
+    tables.precipitation[0x123].density = 2;
+    const float storm = weatherRainIntensity(tables, weather, true);
+    tables.precipitation[0x123].density = 1;
+    expectTrue(storm > weatherRainIntensity(tables, weather, true) && storm < 1,
+               "authored storm density remains stronger than ordinary rain");
+    tables.precipitation[0x123].type = 1;
+    expectTrue(weatherRainIntensity(tables, weather, true) == 0, "snow never draws rain");
+    weather.precipitationFormId = 0;
+    expectTrue(weatherRainIntensity(tables, weather, true) == 0, "null precipitation remains dry");
+    weather.precipitationFormId = 0x999;
+    expectTrue(weatherRainIntensity(tables, weather, true) == 0, "missing precipitation remains dry");
+    weather.fogDayFar = 100000; weather.fogNightFar = 50000;
+    expectTrue(sampleWeatherFogFar(weather, 12, 6, 19) == 100000 &&
+               sampleWeatherFogFar(weather, 0, 6, 19) == 50000 &&
+               sampleWeatherFogFar(weather, 6, 6, 19) == 75000 &&
+               sampleWeatherFogFar(weather, 30, 6, 19) == 75000,
+               "fog blends through dawn and wraps midnight");
+    // Winning malformed/deleted overrides must not revive an older emitter.
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "odai_weather_presentation";
+    fs::create_directories(dir);
+    const auto writePlugin = [&](const char* name, const std::vector<std::string>& masters,
+                                 const std::vector<std::uint8_t>& body, std::uint32_t flags) {
+        auto bytes = buildTes4Record(masters, EsmPluginFormat::kFallout3);
+        const auto group = buildGroup("SPGD", 0, buildRecord("SPGD", 0x123, flags, body,
+            EsmPluginFormat::kFallout3), EsmPluginFormat::kFallout3);
+        bytes.insert(bytes.end(), group.begin(), group.end());
+        std::ofstream out(dir / name, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    };
+    writePlugin("Skyrim.esm", {}, buildSubrecord("DATA", data), 0);
+    writePlugin("Patch.esp", {"Skyrim.esm"}, buildSubrecord("DATA", data), 0);
+    FalloutLoadOrder order;
+    expectTrue(order.open(dir, {"Skyrim.esm", "Patch.esp"}, error), "precipitation load order opens");
+    expectTrue(buildFalloutWeatherTables(order, tables, error) && tables.precipitation.size() == 1,
+               "winning SPGD resolves through masters");
+    writePlugin("Patch.esp", {"Skyrim.esm"}, {}, 0);
+    expectTrue(buildFalloutWeatherTables(order, tables, error) && tables.precipitation.empty() &&
+               tables.presentationDiagnostics.size() == 1, "malformed winning SPGD masks old data");
+    writePlugin("Patch.esp", {"Skyrim.esm"}, {}, 0x20);
+    expectTrue(buildFalloutWeatherTables(order, tables, error) && tables.precipitation.empty() &&
+               tables.presentationDiagnostics.empty(), "deleted winning SPGD masks old data");
+    fs::remove_all(dir);
+}
+
 void testSkyrimWeatherCloudLayers() {
     namespace fs = std::filesystem;
     using namespace odai::importer::fnv;
@@ -3904,11 +4110,22 @@ void testSkyrimWeatherCloudLayers() {
         append(buildSubrecord("FNAM", fnam));
     }
     append(buildSubrecord("DATA", std::vector<std::uint8_t>(19, 0u)));
+    std::vector<std::uint8_t> precipRef; appendPod(precipRef, std::uint32_t{0x123});
+    append(buildSubrecord("MNAM", precipRef));
+    append(buildSubrecord("TNAM", precipRef));
+    append(buildSubrecord("MODL", stringPayload("Sky\\Aurora.nif")));
 
     std::vector<std::uint8_t> file = buildTes4Record({}, kFormat);
     const auto record = buildRecord("WTHR", 0x00012F89u, 0u, body, kFormat);
     const auto group = buildGroup("WTHR", 0, record, kFormat);
     file.insert(file.end(), group.begin(), group.end());
+    std::vector<std::uint8_t> moonBody = buildSubrecord("EDID", stringPayload("iMasserSize"));
+    std::vector<std::uint8_t> moonSize; appendPod(moonSize, std::uint32_t{72});
+    const auto sizeSub = buildSubrecord("DATA", moonSize);
+    moonBody.insert(moonBody.end(), sizeSub.begin(), sizeSub.end());
+    const auto moonGroup = buildGroup("GMST", 0,
+        buildRecord("GMST", 0x1234, 0, moonBody, kFormat), kFormat);
+    file.insert(file.end(), moonGroup.begin(), moonGroup.end());
     {
         std::ofstream out(dataDir / "Skyrim.esm", std::ios::binary | std::ios::trunc);
         out.write(reinterpret_cast<const char*>(file.data()),
@@ -3929,6 +4146,8 @@ void testSkyrimWeatherCloudLayers() {
         return;
     }
 
+    expectTrue(tables.moonSizes[0] == 72 && tables.moonSizes[1] == 40,
+               "authored moon size is consumed; absent setting retains retail default");
     const FalloutWeatherRecord* weather = tables.findWeatherByEditorId("TestSkyrimCloudy");
     expectTrue(weather != nullptr, "the Skyrim WTHR is found by editor ID");
     if (weather == nullptr) {
@@ -3936,6 +4155,9 @@ void testSkyrimWeatherCloudLayers() {
         return;
     }
 
+    expectTrue(weather->precipitationFormId == 0x123 && weather->skyStatics.size() == 1 &&
+               weather->auroraModel == "Sky\\Aurora.nif" && weather->fogDayMax == 0.875f,
+               "weather presentation references and maximum fog survive import");
     expectTrue(weather->cloudMapping == FalloutCloudMapping::TilingPlane,
                "an x0TX cloud block marks the record's textures as tiling sheets");
     expectTrue(weather->cloudLayers.size() == 2u,
@@ -3976,6 +4198,37 @@ void testSkyrimWeatherCloudLayers() {
     expectTrue(weather->fogDayFar == 100000.0f && weather->fogNightFar == 50000.0f,
                "an eight-float FNAM still reads the four distances");
 
+    for (int mode : {0, 1, 2}) {
+        auto patchBody = buildSubrecord("EDID", stringPayload("iMasserSize"));
+        std::vector<std::uint8_t> payload;
+        if (mode == 0) appendPod(payload, std::uint32_t{96});
+        else payload.push_back(0); // malformed winning value must not retain 72
+        const auto sub = buildSubrecord("DATA", payload);
+        patchBody.insert(patchBody.end(), sub.begin(), sub.end());
+        auto patch = buildTes4Record({"Skyrim.esm"}, kFormat);
+        const auto group = buildGroup("GMST", 0,
+            buildRecord("GMST", 0x1234, mode == 2 ? 0x20u : 0u, patchBody, kFormat), kFormat);
+        patch.insert(patch.end(), group.begin(), group.end());
+        { std::ofstream out(dataDir / "Patch.esp", std::ios::binary | std::ios::trunc);
+          out.write(reinterpret_cast<const char*>(patch.data()), patch.size()); }
+        expectTrue(order.open(dataDir, {"Skyrim.esm", "Patch.esp"}, error) &&
+                   buildFalloutWeatherTables(order, tables, error), "moon override loads");
+        expectTrue(tables.moonSizes[0] == (mode == 0 ? 96 : 90),
+                   "winning moon size, malformed and deleted overrides resolve predictably");
+    }
+    for (bool skyrim : {false, true}) {
+        FalloutAssetSource assets;
+        FalloutWorldTables world; world.skyrim = skyrim;
+        CellSceneBuilder builder(assets, world);
+        odai::importer::ImportedSceneParticleEmitter fire;
+        fire.effect = odai::importer::ImportedParticleEffect::Fire;
+        fire.sourceId = "synthetic_test_fire";
+        builder.scene().particleEmitters.push_back(fire);
+        odai::importer::ImportedScene scene;
+        builder.finish(scene);
+        expectTrue(scene.lights.size() == (skyrim ? 0u : 1u),
+                   "Skyrim fire cannot invent LIGH emitters; other game fallback retained");
+    }
     fs::remove_all(dataDir, cleanupError);
 }
 
@@ -6906,6 +7159,56 @@ void testOblivionSptImportIsBoundedAndDeterministic() {
                "malformed SPT header produces an actionable diagnostic");
 }
 
+void testSkyrimObjectLodHandoff() {
+    using namespace odai::importer;
+    ImportedScene source;
+    ImportedSceneMesh mesh;
+    mesh.name = "lod4_4_-12";
+    for (int cell = 0; cell < 2; ++cell) {
+        for (int v = 0; v < 3; ++v) {
+            ImportedSceneVertex vertex;
+            vertex.position[0] = (4 + cell) * 4096.0f + 100.0f + (v == 1 ? 10.0f : 0.0f);
+            vertex.position[1] = -12 * 4096.0f + 100.0f + (v == 2 ? 10.0f : 0.0f);
+            vertex.position[2] = 12000.0f;
+            mesh.indices.push_back(static_cast<std::uint32_t>(mesh.vertices.size()));
+            mesh.vertices.push_back(vertex);
+        }
+    }
+    ImportedSceneMeshPart part;
+    part.indexCount = 6; part.textureIndex = 7;
+    mesh.parts.push_back(part);
+    source.meshes.push_back(mesh);
+    mesh.name += "_largeref";
+    source.meshes.push_back(mesh);
+    for (int n = 0; n < 2; ++n) {
+        ImportedSceneInstance instance; instance.meshIndex = n;
+        instance.transform[0] = instance.transform[5] = instance.transform[10] = instance.transform[15] = 1;
+        source.instances.push_back(instance);
+    }
+    fnv::SkyrimLodHandoff h;
+    h.tileX = 4; h.tileZ = -12; h.dropRegular = true;
+    auto regular = source;
+    fnv::applySkyrimLodHandoff(regular,h);
+    expectTrue(regular.instances.size() == 1 && regular.instances[0].meshIndex == 1,
+        "near tile handoff retains authored large references");
+    h.dropAll = true;
+    auto complete = source;
+    fnv::applySkyrimLodHandoff(complete,h);
+    expectTrue(complete.instances.empty() && complete.packedIndices.empty(),
+        "complete tile handoff publishes no stale packed geometry");
+    h.dropAll = false; h.clipResident = true; h.residentMask = 1;
+    auto partial = source;
+    fnv::applySkyrimLodHandoff(partial,h);
+    expectTrue(partial.instances.size() == 2 && partial.meshes[0].indices.size() == 3 &&
+        partial.meshes[1].indices.size() == 3 && partial.meshes[0].parts[0].textureIndex == 7,
+        "partial city clips only resident cell footprints including large references");
+    h.residentMask = 0;
+    auto evicted = source;
+    fnv::applySkyrimLodHandoff(evicted,h);
+    expectTrue(evicted.meshes[0].indices.size() == 6,
+        "evicted detail restores original proxy coverage");
+}
+
 void testSkyrimTreeLodParsingIsBounded() {
     using namespace odai::importer::fnv;
 
@@ -6946,6 +7249,70 @@ void testSkyrimTreeLodParsingIsBounded() {
                    trees[0].position[1] == -61440.0f,
                "Skyrim BTT retains type, reference identity, and world transform");
 
+    // Synthetic atlas and BTT exercise the actual imported -> packed path.
+    // Keep the complete mip chain; no game assets enter the test fixture.
+    std::vector<std::uint8_t> atlas(448u, 0xffu);
+    std::fill_n(atlas.begin(), 128u, 0u);
+    const auto word = [&](std::size_t offset, std::uint32_t value) {
+        std::memcpy(atlas.data() + offset, &value, sizeof(value));
+    };
+    word(0, 0x20534444u); word(4, 124u); word(12, 8u); word(16, 8u);
+    word(28, 2u); word(76, 32u); word(80, 0x41u); word(88, 32u);
+    word(92, 0xffu); word(96, 0xff00u); word(100, 0xff0000u); word(104, 0xff000000u);
+    odai::importer::ImportedScene lodScene;
+    SkyrimTreeLodStats lodStats;
+    const auto meshResolver = [&](const std::string& path, std::vector<std::uint8_t>& bytes) {
+        bytes = path.ends_with(".lst") ? list : tile;
+        return true;
+    };
+    const auto textureResolver = [&](const std::string&, std::vector<std::uint8_t>& bytes) {
+        bytes = atlas;
+        return true;
+    };
+    expectTrue(appendSkyrimTreeLod(meshResolver, textureResolver, "Tamriel",
+        16, -16, 16, -16, {}, lodScene, lodStats, error), "synthetic tree LOD builds");
+    expectTrue(lodStats.instances == 1u && lodStats.triangles == 4u &&
+        lodScene.meshes[0].vertices.size() == 8u, "retail tree LOD uses two crossed planes");
+    expectTrue(lodScene.textures[0].width == 8u && lodScene.textures[0].mipLevelCount == 2u,
+        "tree LOD retains authored atlas resolution and mips");
+    expectTrue(lodScene.textures[0].format == odai::importer::TextureFormat::RGBA8Srgb,
+        "legacy RGBA tree atlas is sampled as authored color, not linear data");
+    const auto& lodVertices = lodScene.meshes[0].vertices;
+    const float cardDot = lodVertices[0].normal[0] * lodVertices[4].normal[0] +
+        lodVertices[0].normal[2] * lodVertices[4].normal[2];
+    expectTrue(std::abs(cardDot) < 1e-5f, "tree cards intersect at ninety degrees");
+    odai::importer::buildImportedScenePackedRenderData(lodScene);
+    expectTrue(!lodScene.packedVertices.empty() &&
+        (lodScene.packedVertices[0].flags & odai::importer::kImportedSceneMaterialFlagTreeLod) != 0u,
+        "tree atlas lighting identity survives runtime packing");
+    expectTrue((lodScene.packedVertices[0].flags & odai::importer::kImportedSceneMaterialFlagFoliageWind) == 0u,
+        "distant cards do not invent whole-crown wind deformation");
+    const auto lodPath = std::filesystem::temp_directory_path() / "odai_synthetic_tree_lod.scene";
+    expectTrue(odai::importer::saveImportedScene(lodScene, lodPath), "tree LOD cooks");
+    odai::importer::ImportedScene reloadedLod;
+    expectTrue(odai::importer::loadImportedSceneRuntime(lodPath, reloadedLod) &&
+        !reloadedLod.packedVertices.empty() &&
+        (reloadedLod.packedVertices[0].flags & odai::importer::kImportedSceneMaterialFlagTreeLod) != 0u &&
+        reloadedLod.textures[0].format == odai::importer::TextureFormat::RGBA8Srgb,
+        "cooked runtime reload retains tree lighting and atlas color space");
+    std::filesystem::remove(lodPath);
+
+    // Keep the camera/tile fixed while detail arrives and is later evicted.
+    // A residency refresh must remove and restore exactly the owning tree.
+    for (const bool resident : {false, true, false}) {
+        odai::importer::ImportedScene refreshed;
+        SkyrimTreeLodStats refreshedStats;
+        const auto detail = [resident](std::int32_t x, std::int32_t z) {
+            return resident && x == 16 && z == -15;
+        };
+        expectTrue(appendSkyrimTreeLod(meshResolver, textureResolver, "Tamriel",
+            16, -16, 16, -16, detail, refreshed, refreshedStats, error),
+            "tree LOD refresh supports late detail arrival and eviction");
+        expectTrue(refreshedStats.instances == (resident ? 0u : 1u) &&
+            refreshedStats.instancesTrimmed == (resident ? 1u : 0u),
+            "fixed-camera tree handoff follows current detail residency");
+    }
+
     tile.pop_back();
     expectTrue(!parseSkyrimTreeLodTile(tile, trees, error) &&
                    error.find("instance count") != std::string::npos,
@@ -6959,7 +7326,266 @@ void testSkyrimTreeLodParsingIsBounded() {
                "non-finite Skyrim tree atlas data is rejected explicitly");
 }
 
+void testTextureSetSlotsAndOverrides() {
+    using namespace odai::importer::fnv;
+    const auto dir=std::filesystem::temp_directory_path()/"odai-txst-coverage-test";
+    std::filesystem::create_directories(dir);
+    const auto write=[&](const char* name,const auto& bytes) {
+        std::ofstream file(dir/name,std::ios::binary);
+        file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());
+    };
+    auto base=buildTes4Record({},EsmPluginFormat::kFallout3);
+    auto body=buildSubrecord("TX00",stringPayload("landscape/base.dds"));
+    auto normal=buildSubrecord("TX01",stringPayload("landscape/base_n.dds"));
+    body.insert(body.end(),normal.begin(),normal.end());
+    for (int slot = 2; slot < 8; ++slot) {
+        const auto channel = buildSubrecord(("TX0" + std::to_string(slot)).c_str(),
+            stringPayload("landscape/channel" + std::to_string(slot) + ".dds"));
+        body.insert(body.end(), channel.begin(), channel.end());
+    }
+    const auto authoredFlags = buildSubrecord("DNAM", {5u, 0u});
+    body.insert(body.end(), authoredFlags.begin(), authoredFlags.end());
+    auto group=buildGroup("TXST",0,buildRecord("TXST",0x100,0,body));
+    base.insert(base.end(),group.begin(),group.end());
+    std::vector<std::uint8_t> link;
+    appendPod(link,std::uint32_t(0x100));
+    auto landBody = buildSubrecord("TNAM",link);
+    const auto exponent = buildSubrecord("SNAM", {64u});
+    landBody.insert(landBody.end(), exponent.begin(), exponent.end());
+    group=buildGroup("LTEX",0,buildRecord("LTEX",0x200,0,landBody));
+    base.insert(base.end(),group.begin(),group.end());
+    write("Base.esm",base);
+    auto patch=buildTes4Record({"Base.esm"},EsmPluginFormat::kFallout3);
+    body=buildSubrecord("TX00",stringPayload("landscape/override.dds"));
+    normal=buildSubrecord("TX01",stringPayload("landscape/override_n.dds"));
+    body.insert(body.end(),normal.begin(),normal.end());
+    group=buildGroup("TXST",0,buildRecord("TXST",0x100,0,body));
+    patch.insert(patch.end(),group.begin(),group.end());
+    write("Patch.esp",patch);
+    std::string error;
+    FalloutWorldTables tables;
+    expectTrue(buildFalloutWorldTables(dir/"Base.esm",tables,error),"TXST single-plugin tables load");
+    expectTrue(tables.landTextureSlots.at(0x200)[1]=="landscape/base_n.dds",
+               "LTEX retains the authored normal texture slot");
+    for (int slot = 2; slot < 8; ++slot)
+        expectTrue(tables.landTextureSlots.at(0x200)[slot] ==
+                   "landscape/channel" + std::to_string(slot) + ".dds",
+                   "all authored TXST channels survive LTEX resolution");
+    expectTrue(tables.textureSetFlags.at(0x100) == 5u && tables.landSurfaceProperties.at(0x200) == 0x8040u,
+               "Authored TXST flags and LTEX byte exponent survive source parsing");
+    FalloutLoadOrder order;
+    expectTrue(order.open(dir,{"Patch.esp"},error),"TXST override load order opens");
+    expectTrue(buildFalloutWorldTables(order,tables,error),"TXST override tables merge");
+    expectTrue(tables.landTexturePaths.at(0x200)=="landscape/override.dds" &&
+               tables.landTextureSlots.at(0x200)[1]=="landscape/override_n.dds",
+               "TXST-only overrides update LTEX diffuse and normal without repeating LTEX");
+    for (int slot = 2; slot < 8; ++slot)
+        expectTrue(tables.landTextureSlots.at(0x200)[slot].empty(),
+                   "omitted channels in the winning TXST do not inherit");
+
+    expectTrue(tables.textureSetFlags.at(0x100) == 0u, "TXST-only override clears omitted flags");
+    const auto checkOverride = [&](const char* type, std::uint32_t id,
+                                    std::uint32_t flags, const auto& payload) {
+        auto bytes = buildTes4Record({"Base.esm"}, EsmPluginFormat::kFallout3);
+        const auto records = buildGroup(type, 0, buildRecord(type, id, flags, payload));
+        bytes.insert(bytes.end(), records.begin(), records.end());
+        write("Removal.esp", bytes);
+        FalloutLoadOrder removal;
+        expectTrue(removal.open(dir, {"Removal.esp"}, error), "terrain removal order opens");
+        expectTrue(buildFalloutWorldTables(removal, tables, error), "terrain removal tables build");
+        expectTrue(tables.landTexturePaths.at(0x200).empty(),
+                   "removed or unresolved winning terrain material has no stale diffuse");
+        for (const auto& slot : tables.landTextureSlots.at(0x200))
+            expectTrue(slot.empty(), "removed terrain material has no stale texture channels");
+    };
+    checkOverride("LTEX", 0x200, 0, std::vector<std::uint8_t>{}); // removed TNAM
+    std::vector<std::uint8_t> missing;
+    appendPod(missing, std::uint32_t(0x999));
+    checkOverride("LTEX", 0x200, 0, buildSubrecord("TNAM", missing));
+    checkOverride("LTEX", 0x200, 0x20, buildSubrecord("TNAM", link));
+    checkOverride("TXST", 0x100, 0x20, body);
+    checkOverride("TXST", 0x100, 0, buildSubrecord("TX00", {}));
+
+    // Repeated records in one file must have the same whole-record semantics.
+    auto repeated = base;
+    group = buildGroup("TXST", 0, buildRecord("TXST", 0x100, 0,
+        buildSubrecord("TX00", stringPayload("landscape/last.dds"))));
+    repeated.insert(repeated.end(), group.begin(), group.end());
+    write("Repeated.esm", repeated);
+    expectTrue(buildFalloutWorldTables(dir/"Repeated.esm", tables, error),
+               "repeated TXST fixture loads");
+    expectTrue(tables.landTexturePaths.at(0x200) == "landscape/last.dds" &&
+               tables.landTextureSlots.at(0x200)[1].empty(),
+               "last TXST record clears earlier normal slots within one file");
+    std::filesystem::remove_all(dir);
+}
+
+void testSkyrimGrassPipeline() {
+    using namespace odai::importer::fnv;
+    const auto path = std::filesystem::temp_directory_path() / "odai-grass-fixture.esm";
+    auto bytes = buildTes4Record({}, EsmPluginFormat::kFallout3);
+    auto grassBody = buildSubrecord("MODL", stringPayload("landscape\\grass\\fixture.nif"));
+    std::vector<std::uint8_t> data(32u, 0u);
+    data[0] = 100; data[2] = 45; data[4] = 12; data[28] = 2;
+    auto sub = buildSubrecord("DATA", data);
+    grassBody.insert(grassBody.end(), sub.begin(), sub.end());
+    auto group = buildGroup("GRAS", 0, buildRecord("GRAS", 0x123, 0, grassBody));
+    bytes.insert(bytes.end(), group.begin(), group.end());
+    group = buildGroup("GRAS", 0, buildRecord("GRAS", 0x124, 0,
+        buildSubrecord("DATA", std::vector<std::uint8_t>(16u))));
+    bytes.insert(bytes.end(), group.begin(), group.end());
+    group = buildGroup("GRAS", 0, buildRecord("GRAS", 0x125, 0x20, grassBody));
+    bytes.insert(bytes.end(), group.begin(), group.end());
+    std::vector<std::uint8_t> id;
+    appendPod(id, std::uint32_t(0x123));
+    group = buildGroup("LTEX", 0, buildRecord("LTEX", 0x456, 0, buildSubrecord("GNAM", id)));
+    bytes.insert(bytes.end(), group.begin(), group.end());
+    {
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+    FalloutWorldTables tables;
+    std::string error;
+    expectTrue(buildFalloutWorldTables(path, tables, error), "grass fixture world tables load");
+    std::filesystem::remove(path);
+    expectTrue(tables.grasses.size()==3 && tables.landGrass.at(0x456)==std::vector<std::uint32_t>{0x123},
+               "GRAS top-level group and LTEX GNAM association reach world tables");
+    expectTrue(!tables.grasses.at(0x124).valid && tables.grasses.at(0x125).deleted,
+               "truncated GRAS DATA and deleted records remain unusable tombstones");
+    auto& grass = tables.grasses.at(0x123);
+    expectTrue(grass.valid && grass.waterDistance==12 && grass.maxSlope==45 && grass.flags==2,
+               "GRAS DATA preserves density, slope, water and scaling fields");
+    FalloutCellRecord cell{};
+    cell.gridX=-1; cell.gridZ=-2; cell.hasGridCoords=true;
+    cell.land=std::make_unique<FalloutLandRecord>();
+    cell.land->hasHeights=true;
+    cell.land->heights.assign(kLandVertexCount, 100.0f);
+    for (auto& texture : cell.land->quadrantBaseTextureFormId) texture=0x456;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "grass generation is Skyrim-only");
+    tables.skyrim=true;
+    tables.worldspaceDefaultsByFormId[0].noGrass=true;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "worldspace No Grass suppresses placement");
+    tables.worldspaceDefaultsByFormId.clear();
+    const auto first=scatterSkyrimGrass(cell,tables);
+    const auto second=scatterSkyrimGrass(cell,tables);
+    expectTrue(first.size()==4096 && second.size()==first.size(), "density 100 fills the bounded candidate grid");
+    for (std::size_t i=0; i<first.size(); ++i) {
+        expectTrue(first[i].position[0]==second[i].position[0] && first[i].position[1]==second[i].position[1] &&
+                   first[i].rotationRadians[2]==second[i].rotationRadians[2], "grass scatter is deterministic");
+        expectTrue(first[i].position[0]>=-4096 && first[i].position[0]<0 &&
+                   first[i].position[1]>=-8192 && first[i].position[1]<-4096 &&
+                   first[i].position[2]==100 && first[i].formId==0,
+                   "grass roots stay in their negative-coordinate cell without gameplay IDs");
+    }
+    FalloutLandTextureLayer road{};
+    road.textureFormId=0x999;
+    for (float& value : road.opacity) value=1;
+    cell.land->textureLayers.push_back(road);
+    expectTrue(scatterSkyrimGrass(cell,tables).size()==3072, "opaque grassless road suppresses underlying grass");
+    cell.land->textureLayers.clear();
+    cell.gridX=0;
+    for (const auto& root : scatterSkyrimGrass(cell,tables)) {
+        expectTrue(root.position[0]>=0 && root.position[0]<4096,
+                   "adjacent cell owns a disjoint half-open root domain");
+    }
+    cell.gridX=-1;
+    grass.valid=false;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "invalid grass emits no roots");
+    grass.valid=true;
+    grass.density=0;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "zero density emits no roots");
+    grass.density=100; grass.deleted=true;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "deleted grass emits no roots");
+    grass.deleted=false;
+    cell.hasWater=true; cell.waterHeight=95;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "above-water minimum excludes shoreline roots");
+    cell.waterHeight=0;
+    expectTrue(scatterSkyrimGrass(cell,tables).size()==4096, "dry ground satisfies water clearance");
+    cell.isInterior=true;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "interiors do not generate grass");
+    cell.isInterior=false;
+    cell.hasWater=false;
+    grass.flags |= 4u;
+    for (int y=0;y<33;++y) for(int x=0;x<33;++x) cell.land->heights[y*33+x]=float(x)*32;
+    const auto sloped=scatterSkyrimGrass(cell,tables);
+    expectTrue(sloped.size()==4096, "gentle slope remains eligible");
+    for (const auto& root : sloped) {
+        odai::importer::ImportedSceneInstance instance;
+        writeBethesdaPlacementTransform(instance,root,false);
+        const float length=std::sqrt(1.0f+0.25f*0.25f);
+        expectTrue(std::abs(instance.transform[2]+0.25f/length)<1e-5f &&
+                   std::abs(instance.transform[6]-1.0f/length)<1e-5f &&
+                   std::abs(instance.transform[10])<1e-5f,
+                   "fit-to-slope aligns local Z with the LAND normal at every yaw");
+    }
+    for (int y=0;y<33;++y) for(int x=0;x<33;++x) cell.land->heights[y*33+x]=float(x)*256;
+    expectTrue(scatterSkyrimGrass(cell,tables).empty(), "steep terrain fails authored slope maximum");
+    for (std::uint32_t mode=0;mode<8;++mode) {
+        grass.waterMode=mode;
+        const bool above[]={true,false,false,false,true,false,false,true};
+        const bool below[]={false,false,true,false,true,false,true,false};
+        expectTrue(grassWaterAllowed(grass,20)==above[mode] && grassWaterAllowed(grass,-20)==below[mode],
+                   "all eight water placement modes preserve their sidedness");
+    }
+
+    if (const char* installed = std::getenv("ODAI_GRASS_TEST_DATA")) {
+        const std::filesystem::path directory(installed);
+        FalloutWorldTables retail;
+        expectTrue(buildFalloutWorldTables(directory / "Skyrim.esm", retail, error),
+                   "installed Skyrim grass tables load");
+        const auto tamriel = retail.worldspaceFormIdsByEditorId.at("tamriel");
+        FalloutExtractFilter filter{};
+        filter.wantWorldspace = [tamriel](auto id) { return id==tamriel; };
+        filter.wantCellContents = [](const auto& c) {
+            return c.gridX>=4 && c.gridX<=5 && c.gridZ>=-11 && c.gridZ<=-10;
+        };
+        FalloutSceneData sceneData;
+        expectTrue(extractFalloutScene(directory / "Skyrim.esm", filter, sceneData, error),
+                   "installed Riverwood LAND extracts");
+        FalloutAssetSource assets;
+        expectTrue(assets.open(directory), "installed grass assets open");
+        std::size_t total=0;
+        for (auto& c : sceneData.cells) {
+            if (!c.land) continue;
+            const auto roots=scatterSkyrimGrass(c,retail);
+            if (roots.empty()) continue;
+            auto authoredReferences=std::move(c.references);
+            CellSceneBuilder builder(assets,retail);
+            builder.addCell(c);
+            odai::importer::ImportedScene built;
+            builder.finish(built);
+            const auto placed=builder.stats().grassInstances;
+            expectTrue(placed==roots.size(), "every accepted retail root builds original NIF geometry");
+            expectTrue(built.collisionTriangles.empty(), "generated grass adds no physics collision");
+            std::size_t marked=0;
+            for (const auto& v : built.packedVertices) if ((v.flags & odai::importer::kImportedSceneMaterialFlagGrass)!=0) ++marked;
+            expectTrue(marked>0, "retail grass reaches packed render vertices");
+            expectTrue(builder.stats().unresolvedTexturePaths.empty(), "retail grass textures resolve");
+            const auto scenePath=std::filesystem::temp_directory_path()/"odai-grass-scene.bin";
+            expectTrue(odai::importer::saveImportedScene(built,scenePath), "grass cooked scene saves");
+            odai::importer::ImportedScene loaded;
+            expectTrue(odai::importer::loadImportedScene(scenePath,loaded), "grass cooked scene loads");
+            std::filesystem::remove(scenePath);
+            std::size_t reloaded=0;
+            for (const auto& v : loaded.packedVertices)
+                if ((v.flags & odai::importer::kImportedSceneMaterialFlagGrass)!=0) ++reloaded;
+            expectTrue(reloaded==marked, "grass material flag survives existing scene serialization");
+            c.references=std::move(authoredReferences);
+            CellSceneBuilder occupied(assets,retail);
+            occupied.addCell(c);
+            expectTrue(occupied.stats().grassInstances<=placed, "placed geometry can only exclude roots");
+            total+=placed;
+            std::cout << "[grass retail] cell=" << c.gridX << ',' << c.gridZ << " roots=" << placed
+                      << " grassVertices=" << marked << " models=" << built.meshes.size()-1
+                      << " afterCollision=" << occupied.stats().grassInstances << '\n';
+        }
+        expectTrue(total>0, "Riverwood produces authored grass");
+    }
+}
+
 int main() {
+    testTextureSetSlotsAndOverrides();
+    testSkyrimGrassPipeline();
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/true);
     testBsaArchiveReadsOblivionV103();
@@ -6983,6 +7609,7 @@ int main() {
     testNifShapeWindingRepairUsesAuthoredNormals();
     testBethesdaPlacementRotationConventions();
     testOblivionSptImportIsBoundedAndDeterministic();
+    testSkyrimObjectLodHandoff();
     testSkyrimTreeLodParsingIsBounded();
     testNifParserExtractsTransformedGeometry();
     testSkyrimTerrainPackedPositionsAreFullPrecision();
@@ -7014,6 +7641,7 @@ int main() {
     testDeterministicActorInventoryExpansion();
     testOblivionWeatherFogAndCloudTints();
     testSkyrimWeatherCloudLayers();
+    testWeatherPresentation();
     testBethesdaFireParticleEffectClassification();
     testAnimatedBannerSettlesUnderJoltGravity();
     testMorrowindSkeletonNamesAndSkinLayout();

@@ -8,6 +8,7 @@
 #include "bethesda/runtime_render_delta.h"
 #include "bethesda/scenario.h"
 #include "bethesda/skyrim_quest.h"
+#include "bethesda/skyrim_items.h"
 #include "bethesda/skyrim_dialogue.h"
 #include "bethesda/tes3_runtime.h"
 #include "import/fnv/content_profile.h"
@@ -204,6 +205,15 @@ public:
     [[nodiscard]] MeleeAttackResult performMeleeAttack(
         ObjectId attacker, const odai::math::Vector3& forward,
         float damage = 25.0f, float rangeBethesdaUnits = 180.0f);
+    void setSkyrimItems(std::map<RecordKey, SkyrimItemDefinition> items) { m_skyrimItems = std::move(items); }
+    [[nodiscard]] const SkyrimItemDefinition* skyrimItem(const RecordKey& key) const {
+        const auto found = m_skyrimItems.find(key);
+        return found == m_skyrimItems.end() ? nullptr : &found->second;
+    }
+    // Validated UI/headless intent; atomic item mutation occurs on the next fixed tick.
+    bool useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error);
+    [[nodiscard]] MeleeAttackResult performEquippedMeleeAttack(
+        ObjectId actor, const odai::math::Vector3& forward);
     bool rotatePuzzleRing(ObjectId door, std::size_t ringIndex, std::string& outError);
     [[nodiscard]] PuzzleDoorActivationResult activatePuzzleDoor(
         ObjectId player, ObjectId door, const RecordKey& requiredItem,
@@ -214,7 +224,8 @@ public:
         ObjectId actor, const RecordKey& actorBase, std::string& outError);
     std::size_t bindDynamicQuestAliasesForObject(
         ObjectId object, std::string& outError);
-    [[nodiscard]] LootTransferResult lootObject(ObjectId player, ObjectId source);
+    [[nodiscard]] LootTransferResult lootObject(ObjectId player, ObjectId source,
+        const RecordKey& onlyItem = {}, std::int32_t count = 0);
     [[nodiscard]] const std::vector<GiftMenuRequestState>& giftMenuRequests() const {
         return m_giftMenuRequests;
     }
@@ -320,6 +331,12 @@ public:
     [[nodiscard]] std::vector<RecordKey>& discoveriesForRestore() { return m_discoveries; }
     [[nodiscard]] const std::map<RecordKey, bool>& scenes() const { return m_scenes; }
     [[nodiscard]] std::map<RecordKey, bool>& scenesForRestore() { return m_scenes; }
+    struct ImageSpaceCommand { RecordKey record; float strength = 1.0f; bool remove = false; bool crossFade = false; float fadeDuration = 1.0f; };
+    std::vector<ImageSpaceCommand> takeImageSpaceCommands() {
+        auto result = std::move(m_imageSpaceCommands);
+        m_imageSpaceCommands.clear();
+        return result;
+    }
     [[nodiscard]] const RecordKey& forcedWeather() const { return m_forcedWeather; }
     RecordKey& forcedWeatherForRestore() { return m_forcedWeather; }
     [[nodiscard]] const std::map<RecordKey, LocationRuntimeState>& locations() const {
@@ -363,6 +380,9 @@ public:
     void setLocationLoaded(const RecordKey& location, bool loaded);
     void clearLoadedLocations();
 
+    std::string questJournalTitle(const QuestRuntimeState& quest) const;
+    std::string questJournalSummary(const QuestRuntimeState& quest) const;
+    std::string resolveQuestText(const QuestRuntimeState& quest, std::string text) const;
     QuestRuntimeState& quest(const std::string& editorId);
     [[nodiscard]] const QuestRuntimeState* findQuest(const std::string& editorId) const;
     [[nodiscard]] QuestRuntimeState* findQuest(const ObjectId& questObject);
@@ -418,6 +438,11 @@ private:
     PapyrusVm m_papyrus;
     Tes3Runtime m_tes3;
     ObjectId m_playerObject;
+    struct QuestJournalDefinition {
+        std::string title;
+        std::vector<SkyrimQuestStageDefinition> stages;
+    };
+    std::map<RecordKey, QuestJournalDefinition> m_questJournal;
     std::map<std::string, QuestRuntimeState> m_quests;
     std::map<std::string, std::vector<QuestStageFragmentRuntime>> m_questStageFragments;
     std::map<RecordKey, SkyrimDialogueTopicDefinition> m_dialogueTopics;
@@ -426,7 +451,9 @@ private:
     std::map<std::string, std::int64_t> m_statistics;
     std::vector<RecordKey> m_discoveries;
     std::map<RecordKey, bool> m_scenes;
+    std::map<RecordKey, SkyrimItemDefinition> m_skyrimItems;
     RecordKey m_forcedWeather;
+    std::vector<ImageSpaceCommand> m_imageSpaceCommands;
     std::map<RecordKey, LocationRuntimeState> m_locations;
     std::map<RecordKey, float> m_globalVariables;
     std::vector<StoryEventRuntimeState> m_storyEvents;

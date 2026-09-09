@@ -28,7 +28,8 @@ VertexOutput main(VertexInput input)
     // dome. Offset its deterministic rotation so the clear-weather upper deck
     // crosses the forward view instead of leaving only its atlas-fringes at
     // the extreme sides of the reference composition.
-    const float rotation = (time * 0.0045) + 1.5707963;
+    const bool celestial = input.inTextureIndex >= 4u;
+    const float rotation = celestial ? camera.nightSkyTint.w : (time * 0.0045) + 1.5707963;
     const float s = sin(rotation);
     const float c = cos(rotation);
 
@@ -45,7 +46,7 @@ VertexOutput main(VertexInput input)
     output.position = clipPosition;
     output.outLocalDirection = normalize(localPosition);
     output.outColor = input.inColor;
-    output.outUv = input.inUv + float2(time * 0.000035, 0.0);
+    output.outUv = input.inUv + (celestial ? float2(0.0) : float2(time * 0.000035, 0.0));
     output.outTextureIndex = input.inTextureIndex;
     return output;
 }

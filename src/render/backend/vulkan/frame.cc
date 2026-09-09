@@ -403,6 +403,8 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
                 << " ssaoBlur=" << m_debugGpuSsaoBlurTimeMs
                 << " skinning=" << m_debugGpuSkinningTimeMs
                 << " main=" << m_debugGpuMainTimeMs
+                << " reflectionAndSetup=" << durationMs(
+                    kGpuTimestampQueryScreenSpaceGiEnd, kGpuTimestampQueryMainStart)
                 << " (prewrite=" << m_debugGpuPrewriteTimeMs << ")"
                 << " velocity=" << m_debugGpuVelocityTimeMs
                 << " taa=" << m_debugGpuTaaTimeMs

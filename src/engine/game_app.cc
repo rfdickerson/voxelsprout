@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string_view>
 
 namespace odai::engine {
@@ -55,11 +56,8 @@ bool GameApp::init(const char* title) {
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-    // Explicit capture/benchmark sizes stay fixed. Interactive launches maximize
-    // to the desktop work area and retain GLFW's platform-native HiDPI framebuffer
-    // scaling, so a 1920x1080 logical window on a 2x display gets a true 3840x2160
-    // presentation surface. The temporal upscaler keeps the expensive 3D passes
-    // below that resolution; UI is composited afterward at the framebuffer extent.
+    // Window dimensions are logical desktop points; the framebuffer follows
+    // display DPI. Exact-pixel capture tools explicitly opt out of DPI scaling.
     int winW = 1600, winH = 900;
     bool explicitWindowSize = false;
     const bool nativeLogicalPresentation = [] {
@@ -78,12 +76,13 @@ bool GameApp::init(const char* title) {
         }
     }
 #ifdef GLFW_SCALE_FRAMEBUFFER
-    // An explicit size is a render-size contract, not a logical-point request.
-    // On a 2x Wayland display a 1920x1080 window otherwise creates a 3840x2160
-    // swapchain, quadrupling every full-resolution pass and producing a 4K
-    // capture despite the caller asking for 1080p. Leave platform-native HiDPI
-    // behavior alone for the default interactive window.
-    if (explicitWindowSize || nativeLogicalPresentation) {
+    const bool explicitWindowUsesDpi = [] {
+        const char* value = std::getenv("ODAI_WINDOW_HIDPI");
+        return value == nullptr || value[0] != '0';
+    }();
+    // Native DPI is the default for both sized and maximized windows.
+    // ODAI_WINDOW_HIDPI=0 is reserved for explicit output-pixel captures.
+    if (!explicitWindowUsesDpi || nativeLogicalPresentation) {
         glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
     }
 #endif
@@ -195,6 +194,14 @@ bool GameApp::init(const char* title) {
 
 void GameApp::run() {
     double prevTime = glfwGetTime();
+    std::ofstream frameCsv;
+    if (const char* path = std::getenv("ODAI_FRAME_STATS_CSV")) {
+        frameCsv.open(path);
+        if (frameCsv) frameCsv << "frame,interval_ms,cpu_ms,tick_ms,render_ms\n";
+        else VOX_LOGW("engine") << "cannot open frame statistics CSV: " << path;
+    }
+    std::uint64_t measuredFrame = 0;
+
 
     if (const char* statsEnv = std::getenv("ODAI_FRAME_STATS")) {
         m_frameStatsSeconds = std::atof(statsEnv);
@@ -322,6 +329,13 @@ void GameApp::run() {
         }
 
         m_frameProfiler.endFrame(frameWatch.elapsedMs());
+        if (frameCsv) {
+            frameCsv << measuredFrame << ',' << frameIntervalSeconds * 1000.0 << ','
+                << m_frameProfiler.channel(GameZone::Frame).lastMs() << ','
+                << m_frameProfiler.channel(GameZone::Tick).lastMs() << ','
+                << m_frameProfiler.channel(GameZone::Render).lastMs() << '\n';
+        }
+        ++measuredFrame;
 
         // ODAI_FRAME_STATS=<seconds>: collect wall-clock frame intervals, print
         // a distribution, and quit.
@@ -337,10 +351,13 @@ void GameApp::run() {
             m_frameStatsElapsed += dt;
             if (m_frameStatsElapsed >= m_frameStatsSeconds) {
                 reportFrameStats();
+                m_frameStatsSeconds = 0.0;
                 glfwSetWindowShouldClose(m_window, GLFW_TRUE);
             }
         }
     }
+    if (m_frameStatsSeconds > 0.0 && !m_frameIntervalsMs.empty()) reportFrameStats();
+
 }
 
 void GameApp::reportFrameStats() {

@@ -16,7 +16,25 @@ public struct ChunkPushConstants
     public float4 rigidAnimationTransform[3];
     // x > 0.5 enables the transform for this draw.
     public float4 rigidAnimationParams;
+    public float4 lodTransition;
 };
 
 [[vk::push_constant]]
 public ConstantBuffer<ChunkPushConstants> chunkPc;
+
+// Stable in world space and identical in depth, colour, reflection and shadow
+// passes. Complementary thresholds keep matching surfaces covered exactly once.
+public void applyImportedLodTransition(float3 worldPosition)
+{
+    const float role = chunkPc.lodTransition.y;
+    [branch] if (role != 0.0)
+    {
+        uint3 cell = uint3(int3(floor(worldPosition * 0.25)));
+        uint h = cell.x * 1597334677u ^ cell.y * 3812015801u ^ cell.z * 2798796415u;
+        h ^= uint(chunkPc.lodTransition.z) * 2654435761u;
+        h ^= h >> 16; h *= 2246822519u; h ^= h >> 13;
+        const float threshold = float(h & 65535u) / 65536.0;
+        const bool incoming = threshold < saturate(chunkPc.lodTransition.x);
+        if ((role > 0.0 && !incoming) || (role < 0.0 && incoming)) discard;
+    }
+}

@@ -1479,6 +1479,8 @@ bool loadGoodspringsActors(
         actor.referenceTypeFormIds = placement.referenceTypeFormIds;
         actor.inventoryFormIds =
             scan.materializeInventory(placement.baseFormId, placement.refFormId);
+        const auto inventoryStacks = scan.materializeInventoryStacks(placement.baseFormId, placement.refFormId);
+        actor.inventoryStacks.assign(inventoryStacks.begin(), inventoryStacks.end());
         actor.placed = true;
         actor.character = built.character;
         actor.standingHeightUnits = actorStandingHeight(built.character);

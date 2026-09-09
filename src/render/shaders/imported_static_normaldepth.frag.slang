@@ -21,6 +21,7 @@ struct FragmentInput
 
 float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
 {
+    applyImportedLodTransition(input.inWorldPosition);
     if (input.inTextureIndex != kInvalidImportedTextureIndex &&
         (input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
         (bindlessTextures[input.inTextureIndex].Sample(input.inUv).a * input.inColor.a) <=
@@ -39,6 +40,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     {
         worldNormal = -worldNormal;
     }
+    if ((input.inFlags & ((1u << 13u) | (1u << 2u))) == (1u << 13u))
+        worldNormal = float3(0.0, 1.0, 0.0);
     const float3 viewNormal = normalize(mul(camera.view, float4(worldNormal, 0.0)).xyz);
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     return float4((viewNormal * 0.5) + 0.5, viewDepth);

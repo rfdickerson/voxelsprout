@@ -35,6 +35,9 @@ bool writeDds(const std::filesystem::path& path,
               std::uint32_t mipLevelCount, TextureFormat format,
               const std::uint8_t* mipData, std::size_t mipDataSize);
 
+// Validates a complete cube and returns the face-major byte count, or zero.
+std::size_t ddsCubeByteCount(const ImportedSceneTexture& texture);
+
 // Bytes per compressed 4×4 block for format; returns 0 for RGBA8.
 std::uint32_t ddsBlockBytes(TextureFormat format);
 

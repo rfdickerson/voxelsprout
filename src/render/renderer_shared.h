@@ -192,6 +192,9 @@ struct alignas(16) CameraUniform {
     float colorGrading1[4];
     float colorGrading2[4];
     float colorGrading3[4];
+    float imageSpaceCinematic[4];
+    float imageSpaceTint[4];
+    float imageSpaceFade[4];
     float dofConfig[4];
     float dofConfig2[4];
     float waterConfig[4];
@@ -208,10 +211,13 @@ struct alignas(16) CameraUniform {
     // before. Appended at the end of the block so no existing field's offset
     // moves. Mirrored in src/render/shaders/camera_uniform.slang.
     float weatherSkyUpper[4];  // [0..2]=linear rgb at zenith, [3]=blend weight 0..1
+    float weatherRain[4]; // width, length, fall speed, view range
     float weatherSkyLower[4];  // [0..2]=linear rgb above the horizon band, [3]=unused
     float weatherHorizon[4];   // [0..2]=linear rgb at the horizon line, [3]=sun-glare scale
     float weatherFog[4];       // [0..2]=linear fog rgb, [3]=fog far distance in world units
     // Four cloud layers. [0..2]=linear tint, [3]=opacity (0 = layer off).
+    float nightSkySlots[2][4];
+    float nightSkyTint[4]; // RGB stars from WTHR, w = celestial rotation
     float weatherCloudTint[4][4];
     // [0]=bindless texture slot as a float, [1]=drift u, [2]=scale (dome scale
     // for a fisheye, tiling count otherwise), [3]=drift v. Slot is carried as a
@@ -352,7 +358,10 @@ struct alignas(16) ChunkPushConstants {
     // the implicit final row is (0,0,0,1). animationParams.x enables it.
     float rigidAnimationTransform[3][4];
     float rigidAnimationParams[4];
+    // progress, incoming (+1) / outgoing (-1) / disabled (0), stable seed, spare.
+    float lodTransition[4];
 };
+static_assert(sizeof(ChunkPushConstants) == 128);
 
 struct alignas(16) ChunkInstanceData {
     float chunkOffset[4];

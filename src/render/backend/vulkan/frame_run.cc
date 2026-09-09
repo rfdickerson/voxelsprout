@@ -1,3 +1,4 @@
+#include "render/weather_wind_policy.h"
 #include "render/backend/vulkan/renderer_backend.h"
 #include "render/upscale/upscale_contract.h"
 
@@ -214,6 +215,10 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     }
     CoreFrameGraphOrderValidator coreFramePassOrderValidator(*coreFrameGraphPlan);
 
+    // A capture must submit its requested frame before readback. Interactive
+    // pacing may yield after a short wait, but that would discard a video frame
+    // or fail a still under 4K/validation load. Keep waits bounded for WSI.
+    const uint64_t renderWaitBudget = m_captureRequested ? 1000000000ull : frameWaitBudgetNs();
     collectCompletedBufferReleases();
     uint64_t completedTimelineValueBeforeFrame = completedTimelineValue();
     m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValueBeforeFrame);
@@ -221,7 +226,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         // Too many frames queued: block on the oldest one instead of dropping
         // this frame and re-spinning the main loop at sleep granularity.
         const uint64_t oldestQueuedValue = oldestQueuedFrameTimelineValue(completedTimelineValueBeforeFrame);
-        (void)waitTimelineValue(oldestQueuedValue, frameWaitBudgetNs(), &cpuWaitFrameSlotMs);
+        (void)waitTimelineValue(oldestQueuedValue, renderWaitBudget, &cpuWaitFrameSlotMs);
         cpuWaitMs += cpuWaitFrameSlotMs;
         m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
         completedTimelineValueBeforeFrame = completedTimelineValue();
@@ -238,7 +243,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         // device-loss/stall diagnostics reachable.
         const float waitStartMs = cpuWaitFrameSlotMs;
         const bool frameSlotReady =
-            waitTimelineValue(m_frameTimelineValues[m_currentFrame], frameWaitBudgetNs(), &cpuWaitFrameSlotMs);
+            waitTimelineValue(m_frameTimelineValues[m_currentFrame], renderWaitBudget, &cpuWaitFrameSlotMs);
         cpuWaitMs += cpuWaitFrameSlotMs - waitStartMs;
         m_framePacingStats.cpuWaitFrameSlotMs = cpuWaitFrameSlotMs;
         if (!frameSlotReady) {
@@ -273,7 +278,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         if (transferSlot.inFlightTimelineValue == 0 || transferSlot.stagingFrameIndex != m_currentFrame) {
             continue;
         }
-        if (!waitTimelineValue(transferSlot.inFlightTimelineValue, frameWaitBudgetNs(), &cpuWaitTransferMs)) {
+        if (!waitTimelineValue(transferSlot.inFlightTimelineValue, renderWaitBudget, &cpuWaitTransferMs)) {
             cpuWaitMs += cpuWaitTransferMs;
             m_framePacingStats.cpuWaitTransferMs = cpuWaitTransferMs;
             return;
@@ -446,7 +451,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     const VkResult acquireResult = vkAcquireNextImageKHR(
         m_device,
         m_swapchain,
-        kAcquireNextImageTimeoutNs,
+        m_captureRequested ? renderWaitBudget : kAcquireNextImageTimeoutNs,
         frame.imageAvailable,
         VK_NULL_HANDLE,
         &imageIndex
@@ -623,7 +628,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     const int cameraChunkZ = cameraFrame.chunkZ;
     const odai::math::Vector3 forward = cameraFrame.forward;
 
-    const odai::math::Matrix4 view = lookAt(eye, eye + forward, odai::math::Vector3{0.0f, 1.0f, 0.0f});
+    const odai::math::Matrix4 view = computeCameraView(camera);
     odai::math::Matrix4 projection;
     if (camera.orthographic) {
         const float halfH = camera.orthoHalfHeight;
@@ -741,6 +746,10 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_taaInvViewColumnMajor = transpose(odai::math::inverse(view));
         m_taaPrevViewProjColumnMajor = transpose(m_taaPrevViewProj);
     }
+    const std::array<float, 4> depthProjection = {
+        projection(2, 2), projection(2, 3), projection(3, 2), projection(3, 3)};
+    m_taaPrevDepthProjection = m_taaPrevViewProjValid ? m_taaDepthProjection : depthProjection;
+    m_taaDepthProjection = depthProjection;
     const bool taaPrevWasValid = m_taaPrevViewProjValid;
     (void)taaPrevWasValid;
     // The velocity pass keeps its own copies because it must run whether or not
@@ -844,10 +853,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     effectiveSkySettings.sunHazeFalloff = m_skyTuningRuntime.sunHazeFalloff;
     const bool isNight = sunElevationDegrees <= 0.0f;
     if (isNight) {
-        // Hard night mode: low, cool ambient sky and no direct sun disk/halo.
+        // Procedural night fallback. Authored weather already contains dusk
+        // and night brightness, so do not darken that sky a second time.
         effectiveSkySettings.rayleighStrength = 0.12f;
         effectiveSkySettings.mieStrength = 0.015f;
-        effectiveSkySettings.skyExposure = 0.14f;
+        effectiveSkySettings.skyExposure = std::lerp(
+            0.14f, effectiveSkySettings.skyExposure, std::clamp(m_weatherSky.weight, 0.0f, 1.0f));
         effectiveSkySettings.sunDiskIntensity = 0.0f;
         effectiveSkySettings.sunHaloIntensity = 0.0f;
     }
@@ -1009,8 +1020,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                                            (halfHeight * halfHeight));
             VOX_LOGI("render") << "shadow cascade " << cascadeIndex << ": far=" << cascadeFar
                                << " radius=" << radius
-                               << " texels=" << kShadowCascadeResolution[cascadeIndex]
-                               << " texelSize=" << ((2.0f * radius) / static_cast<float>(kShadowCascadeResolution[cascadeIndex]));
+                               << " texels=" << m_directionalShadowResolution[cascadeIndex]
+                               << " texelSize=" << ((2.0f * radius) / static_cast<float>(m_directionalShadowResolution[cascadeIndex]));
         }
     }
 
@@ -1092,7 +1103,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         const float cascadeRadius =
             orthoSceneFit ? boundingRadius : m_shadowStableCascadeRadii[cascadeIndex];
         const float orthoWidth = 2.0f * cascadeRadius;
-        const float texelSize = orthoWidth / static_cast<float>(kShadowCascadeResolution[cascadeIndex]);
+        const float texelSize = orthoWidth / static_cast<float>(m_directionalShadowResolution[cascadeIndex]);
 
         // Keep the light farther than the cascade sphere but avoid overly large depth spans.
         const float lightDistance = (cascadeRadius * 1.9f) + 48.0f;
@@ -1158,30 +1169,16 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         lightViewProjMatrices[cascadeIndex] = lightProjection * lightView;
     }
 
-    // Cascade interleaving: skip re-rendering a cascade whose atlas tile is
-    // still exactly right, and alternate the two far cascades under motion.
-    //
-    // Two skip conditions, one exact and one approximate:
-    //   * The computed matrix is BITWISE the one the tile was rendered with.
-    //     Texel snapping and radius quantization make this the common case for
-    //     a slow or stationary camera, and the skip is then free -- the tile
-    //     would have been re-rendered identical.
-    //   * Far cascades (2, 3) alternate by frame parity while moving. Their
-    //     texels are tens of world units, so serving a tile whose snap origin
-    //     is one frame stale moves distant shadows by less than a screen pixel
-    //     -- and it halves the largest single block of repeated geometry work
-    //     in the frame.
-    //
-    // A skipped cascade samples with the matrix its tile was RENDERED with
-    // (cached), never this frame's -- content and matrix must agree or far
-    // shadows swim. Animated actors and rigid imported machinery break the
-    // exact-skip (they move without moving the matrix); see the note below for
-    // why that does not also rule out deferring the far cascades.
+    // Update the nearest cascade every frame and one farther cascade per frame.
+    // Round-robin scheduling bounds far history age to two frames without
+    // periodically combining every expensive map into one frame. Reuse each
+    // tile's rendered matrix alongside its depth; residency changes invalidate
+    // the tiles, and ODAI_SHADOW_INTERLEAVE=0 requests full-rate updates.
     std::uint32_t shadowSkipCascadeMask = 0;
     static const bool s_shadowInterleaveDisabled =
         std::getenv("ODAI_SHADOW_INTERLEAVE") != nullptr &&
         std::getenv("ODAI_SHADOW_INTERLEAVE")[0] == '0';
-    m_shadowInterleaveParity ^= 1u;
+    ++m_shadowUpdateFrame;
     const bool anyAnimatedShadowCasters =
         !m_skinningMeshDraws.empty() || !m_importedRigidAnimations.empty();
     if (!s_shadowInterleaveDisabled) {
@@ -1197,26 +1194,13 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                     m_shadowRenderedMatrices[cascadeIndex].m,
                     lightViewProjMatrices[cascadeIndex].m,
                     sizeof(lightViewProjMatrices[cascadeIndex].m)) == 0;
-            // THE EXACT-SKIP AND THE PARITY DEFERRAL ARE DIFFERENT CLAIMS, and
-            // conflating them is what made a single skinned actor cost the
-            // whole atlas.
-            //
-            // The exact-skip says "nothing in this cascade moved", which a
-            // animated caster falsifies: it animates without moving the light
-            // matrix, so its shadow would freeze while the caster moved.
-            //
-            // The parity deferral says only "this cascade may be one frame
-            // stale", which is a bound on ERROR rather than a claim of
-            // stillness -- and it is only applied to cascades 2 and 3, which
-            // start 107 world units out and have texels 0.75 and 3.4 units
-            // across. An actor covers a fraction of one of those texels per
-            // frame. Refusing it whenever any skinned actor exists anywhere was
-            // free when the Fallout viewer had none; with a populated town it
-            // means every cascade re-renders every frame forever.
+            // An unchanged matrix only permits indefinite reuse when no
+            // animated caster exists. Scheduled reuse is independently bounded.
             const bool canExactSkip = matrixUnchanged && !anyAnimatedShadowCasters;
-            const bool parityDefersFarCascade =
-                cascadeIndex >= 2u && ((cascadeIndex & 1u) == m_shadowInterleaveParity);
-            if (canExactSkip || parityDefersFarCascade) {
+            const bool scheduleDefersFarCascade =
+                cascadeIndex > 0u &&
+                (m_shadowUpdateFrame % 3u != cascadeIndex - 1u);
+            if (canExactSkip || scheduleDefersFarCascade) {
                 shadowSkipCascadeMask |= (1u << cascadeIndex);
                 lightViewProjMatrices[cascadeIndex] = m_shadowRenderedMatrices[cascadeIndex];
             }
@@ -1258,6 +1242,22 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         }
     }
 
+    // NAM0 night ambient already contains its intensity and hue. Blend over
+    // twilight instead of multiplying a second procedural blue night palette.
+    const float nightAmbientWeight = authoredNightAmbientWeight(
+        m_weatherSky.authoredNightAmbient, m_weatherSky.lightingWeight, sunElevationDegrees);
+    if (nightAmbientWeight > 0.0f) {
+        constexpr float kShY00 = 0.282095f;
+        for (std::size_t i = 0; i < shIrradiance.size(); ++i) {
+            auto& coefficient = shIrradiance[i];
+            const float gain = i == 0 ? 1.0f / kShY00 : 0.0f;
+            coefficient = odai::math::Vector3{
+                std::lerp(coefficient.x, m_weatherSky.ambientColor[0] * gain, nightAmbientWeight),
+                std::lerp(coefficient.y, m_weatherSky.ambientColor[1] * gain, nightAmbientWeight),
+                std::lerp(coefficient.z, m_weatherSky.ambientColor[2] * gain, nightAmbientWeight)};
+        }
+    }
+
     const std::optional<FrameArenaSlice> mvpSliceOpt =
         m_frameArena.allocateUpload(
             sizeof(CameraUniform),
@@ -1293,7 +1293,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             sizeof(mvpUniform.invLightViewProj[cascadeIndex])
         );
         mvpUniform.shadowCascadeSplits[cascadeIndex] = cascadeDistances[cascadeIndex];
-        const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
+        ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
+        atlasRect.size = m_directionalShadowResolution[cascadeIndex];
         mvpUniform.shadowAtlasUvRects[cascadeIndex][0] = static_cast<float>(atlasRect.x) / static_cast<float>(kShadowAtlasSize);
         mvpUniform.shadowAtlasUvRects[cascadeIndex][1] = static_cast<float>(atlasRect.y) / static_cast<float>(kShadowAtlasSize);
         mvpUniform.shadowAtlasUvRects[cascadeIndex][2] = static_cast<float>(atlasRect.size) / static_cast<float>(kShadowAtlasSize);
@@ -1389,6 +1390,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         : frameNowSeconds;
     const float flowTimeSeconds = static_cast<float>(std::fmod(visualTimeSeconds, 4096.0));
     m_importedRigidAnimationTimeSeconds = flowTimeSeconds;
+    m_materialAnimationTimeSeconds = visualTimeSeconds;
     mvpUniform.skyConfig1[0] = effectiveSkySettings.sunDiskIntensity;
     mvpUniform.skyConfig1[1] = effectiveSkySettings.sunHaloIntensity;
     mvpUniform.skyConfig1[2] = flowTimeSeconds;
@@ -1397,6 +1399,13 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.foliageWind[1] = 0.62f;
     mvpUniform.foliageWind[2] = 8.0f;
     mvpUniform.foliageWind[3] = flowTimeSeconds;
+    if (m_weatherSky.hasAuthoredWind) {
+        const auto wind = sampleAuthoredWeatherWind(m_weatherSky.windHeadingDegrees,
+            m_weatherSky.windRangeDegrees, m_weatherSky.windSpeed, visualTimeSeconds);
+        mvpUniform.foliageWind[0] = wind[0];
+        mvpUniform.foliageWind[1] = wind[1];
+        mvpUniform.foliageWind[2] = 8.0f * wind[2];
+    }
     if (const char* enabled = std::getenv("ODAI_MOUNTAIN_CLOUDS");
         enabled != nullptr && enabled[0] != '\0' && enabled[0] != '0') {
         // A presentation can pin the bank to an authored landmark. Other
@@ -1532,9 +1541,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         mvpUniform.weatherHorizon[channel] = m_weatherSky.horizon[channel];
         mvpUniform.weatherFog[channel] = m_weatherSky.fogColor[channel];
     }
-    // Spare channel: WTHR-driven rain strength. Keeping this in the existing
-    // camera block avoids another descriptor, image, or synchronization edge
-    // for a purely procedural full-screen effect.
+    mvpUniform.weatherRain[0] = m_weatherSky.rainWidth;
+    mvpUniform.weatherRain[1] = m_weatherSky.rainLength;
+    mvpUniform.weatherRain[2] = m_weatherSky.rainSpeed;
+    mvpUniform.weatherRain[3] = m_weatherSky.rainRange;
+    // WTHR-driven rain strength. World-space rain reuses the camera block
+    // and the existing scene-depth read; no new synchronization edge.
     mvpUniform.weatherSkyLower[3] =
         std::clamp(m_weatherSky.precipitationIntensity, 0.0f, 1.0f);
     // Spare channel: the weather's sun-glare scale. 1 when no weather is
@@ -1543,6 +1555,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         (m_weatherSky.weight > 0.0f) ? std::clamp(m_weatherSky.sunGlare, 0.0f, 1.0f) : 1.0f;
     mvpUniform.weatherFog[3] = m_weatherSky.fogFarDistance;
 
+    for (int i = 0; i < 8; ++i)
+        mvpUniform.nightSkySlots[i / 4][i % 4] = i < kNightSkyTextureCount &&
+            m_nightSkySlots[i] != kInvalidImportedTextureSlot ? float(m_nightSkySlots[i]) : -1.0f;
+    for (int i = 0; i < 3; ++i)
+        mvpUniform.nightSkyTint[i] = m_weatherSky.starsColor[i] * celestialNightVisibility(sunElevationDegrees);
+    mvpUniform.nightSkyTint[3] = m_weatherSky.celestialRotation;
     for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
         const bool hasSlot = m_weatherCloudSlots[layer] != kInvalidImportedTextureSlot;
         for (int channel = 0; channel < 3; ++channel) {
@@ -1645,11 +1663,42 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.colorGrading3[1] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintG, -1.0f, 1.0f);
     mvpUniform.colorGrading3[2] = std::clamp(m_skyDebugSettings.colorGradingHighlightTintB, -1.0f, 1.0f);
     mvpUniform.colorGrading3[3] = 0.0f;
+    mvpUniform.imageSpaceCinematic[0] = 1.0f;
+    mvpUniform.imageSpaceCinematic[1] = 1.0f;
+    mvpUniform.imageSpaceCinematic[2] = 1.0f;
+    mvpUniform.imageSpaceCinematic[3] = 1.0f;
+    std::fill_n(mvpUniform.imageSpaceTint, 4, 0.0f);
+    std::fill_n(mvpUniform.imageSpaceFade, 4, 0.0f);
+    if (m_imageSpace.enabled) {
+        mvpUniform.skyConfig3[0] = std::clamp(m_imageSpace.bloomThreshold, 0.0f, 16.0f);
+        mvpUniform.skyConfig3[2] = std::clamp(m_imageSpace.bloomScale, 0.0f, 8.0f);
+        mvpUniform.skyConfig3[3] = 0.0f;
+        mvpUniform.imageSpaceCinematic[3] = std::clamp(m_imageSpace.bloomRadius, 0.0f, 7.0f);
+        if (m_imageSpace.grading) {
+            mvpUniform.imageSpaceCinematic[0] = std::clamp(m_imageSpace.saturation, 0.0f, 4.0f);
+            mvpUniform.imageSpaceCinematic[1] = std::clamp(m_imageSpace.brightness, 0.0f, 8.0f);
+            mvpUniform.imageSpaceCinematic[2] = std::clamp(m_imageSpace.contrast, 0.0f, 4.0f);
+            std::copy_n(m_imageSpace.tint, 4, mvpUniform.imageSpaceTint);
+            std::copy_n(m_imageSpace.fade, 4, mvpUniform.imageSpaceFade);
+        }
+    }
+
     mvpUniform.dofConfig[0] = m_skyDebugSettings.depthOfFieldEnabled ? 1.0f : 0.0f;
     mvpUniform.dofConfig[1] = std::clamp(m_skyDebugSettings.depthOfFieldFocusDistance, 0.5f, 5000.0f);
     mvpUniform.dofConfig[2] = std::clamp(m_skyDebugSettings.depthOfFieldFocusRange, 0.5f, 1000.0f);
     mvpUniform.dofConfig[3] = std::clamp(m_skyDebugSettings.depthOfFieldMaxRadiusPixels, 0.0f, 20.0f);
     mvpUniform.dofConfig2[0] = std::clamp(m_skyDebugSettings.depthOfFieldNearBlurScale, 0.25f, 3.0f);
+    // Explicit dialogue/debug DOF wins. Authored exterior no-sky DOF uses
+    // Bethesda world distances, which can exceed the old debug-slider limits.
+    if (m_imageSpace.enabled && !m_skyDebugSettings.depthOfFieldEnabled &&
+        m_imageSpace.dofRadius > 0.0f) {
+        mvpUniform.dofConfig[0] = 1.0f;
+        mvpUniform.dofConfig[1] = std::clamp(m_imageSpace.dofDistance, 0.5f, 1000000.0f);
+        mvpUniform.dofConfig[2] = std::clamp(m_imageSpace.dofRange, 0.5f, 1000000.0f);
+        mvpUniform.dofConfig[3] = std::clamp(m_imageSpace.dofRadius, 0.0f, 20.0f);
+        mvpUniform.dofConfig2[0] = 0.0f;
+    }
+
     mvpUniform.dofConfig2[1] = std::clamp(m_skyDebugSettings.waterRefractionStrength, 0.0f, 3.0f);
     mvpUniform.dofConfig2[2] =
         std::clamp(m_skyDebugSettings.waterRefractionDistortionPixels, 0.0f, 160.0f);
@@ -2843,62 +2892,14 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         if (pageRange.drawCount == 0u) {
             return false;
         }
-        if (pageRange.boundsMin[0] > pageRange.boundsMax[0] ||
-            pageRange.boundsMin[1] > pageRange.boundsMax[1] ||
-            pageRange.boundsMin[2] > pageRange.boundsMax[2]) {
-            return true;
-        }
-
-        std::array<odai::math::Vector3, 8> corners = {
-            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMin[1], pageRange.boundsMin[2]},
-            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMin[1], pageRange.boundsMin[2]},
-            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMax[1], pageRange.boundsMin[2]},
-            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMax[1], pageRange.boundsMin[2]},
-            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMin[1], pageRange.boundsMax[2]},
-            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMin[1], pageRange.boundsMax[2]},
-            odai::math::Vector3{pageRange.boundsMin[0], pageRange.boundsMax[1], pageRange.boundsMax[2]},
-            odai::math::Vector3{pageRange.boundsMax[0], pageRange.boundsMax[1], pageRange.boundsMax[2]},
-        };
-
-        float ndcMinX = std::numeric_limits<float>::max();
-        float ndcMinY = std::numeric_limits<float>::max();
-        float ndcMinZ = std::numeric_limits<float>::max();
-        float ndcMaxX = std::numeric_limits<float>::lowest();
-        float ndcMaxY = std::numeric_limits<float>::lowest();
-        float ndcMaxZ = std::numeric_limits<float>::lowest();
-        for (const odai::math::Vector3& corner : corners) {
-            const odai::math::Vector4 clip =
-                odai::math::multiply(clipMatrix, odai::math::Vector4{corner, 1.0f});
-            // Any corner at/behind the near plane makes the perspective divide
-            // (sign-flipped w) produce garbage NDC, which would wrongly cull pages
-            // straddling the camera — common for foreground chunks and the whole-map
-            // overlay under the tilted 3D camera. Treat such pages as visible.
-            if (clip.w <= 1e-4f) {
-                return true;
-            }
-            const float invW = 1.0f / clip.w;
-            const float ndcX = clip.x * invW;
-            const float ndcY = clip.y * invW;
-            const float ndcZ = clip.z * invW;
-            ndcMinX = std::min(ndcMinX, ndcX);
-            ndcMinY = std::min(ndcMinY, ndcY);
-            ndcMinZ = std::min(ndcMinZ, ndcZ);
-            ndcMaxX = std::max(ndcMaxX, ndcX);
-            ndcMaxY = std::max(ndcMaxY, ndcY);
-            ndcMaxZ = std::max(ndcMaxZ, ndcZ);
-        }
-
-        return !(ndcMaxX < (-1.0f - clipMargin) ||
-                 ndcMinX > (1.0f + clipMargin) ||
-                 ndcMaxY < (-1.0f - clipMargin) ||
-                 ndcMinY > (1.0f + clipMargin) ||
-                 ndcMaxZ < (0.0f - clipMargin) ||
-                 ndcMinZ > (1.0f + clipMargin));
+        return importedBoundsIntersectClip(pageRange.boundsMin, pageRange.boundsMax,
+                                           clipMatrix, clipMargin);
     };
     auto buildVisibleImportedDraws = [&](
                                       const odai::math::Matrix4& clipMatrix,
                                       float clipMargin,
-                                      std::vector<ImportedMeshDraw>& outDraws
+                                      std::vector<ImportedMeshDraw>& outDraws,
+                                      float minimumY = -std::numeric_limits<float>::infinity()
                                   ) -> std::uint32_t {
         outDraws.clear();
         if (outDraws.capacity() < m_importedMeshDraws.size()) {
@@ -2917,6 +2918,9 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_visibleImportedPageScratch.assign(m_importedPageDrawRanges.size(), 0u);
         m_visibleImportedPageOrder.clear();
         for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
+            // Reflected fragments below the water plane are discarded anyway.
+            // Keep a conservative movement margin around authored page bounds.
+            if (m_importedPageDrawRanges[pageIndex].boundsMax[1] < minimumY - 32.0f) continue;
             if (!importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
                 continue;
             }
@@ -3094,12 +3098,30 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             m_visibleImportedMeshDraws.data(),
             m_visibleImportedMeshDraws.size());
         importedTerrainDrawCountForFrame = m_visibleImportedTerrainDrawCount;
+        const auto mainNearTerrainCount = m_visibleImportedNearTerrainDrawCount;
         for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             m_visibleImportedShadowTerrainDrawCounts[cascadeIndex] = buildVisibleImportedDraws(
                 lightViewProjMatrices[cascadeIndex],
                 kImportedShadowClipMargin,
                 m_visibleImportedShadowMeshDraws[cascadeIndex]);
         }
+        m_visibleImportedNearTerrainDrawCount = mainNearTerrainCount;
+    }
+    // Reflections use the mirrored frustum, not the main-view draw list.
+    // Main-view visibility both wastes work below the reflection and misses
+    // objects visible only in the water.
+    std::span<const ImportedMeshDraw> reflectionDraws(m_importedMeshDraws);
+    std::uint32_t reflectionTerrainCount = m_importedTerrainDrawCount;
+    if (importedPageCullingEnabled && m_waterReflectionPlaneValid) {
+        const auto savedNearCount = m_visibleImportedNearTerrainDrawCount;
+        auto mirror = odai::math::Matrix4::identity();
+        mirror(1, 1) = -1.0f;
+        mirror(1, 3) = 2.0f * m_waterReflectionPlaneHeight;
+        reflectionTerrainCount = buildVisibleImportedDraws(
+            mvp * mirror, 0.04f, m_visibleImportedReflectionMeshDraws,
+            m_waterReflectionPlaneHeight);
+        reflectionDraws = m_visibleImportedReflectionMeshDraws;
+        m_visibleImportedNearTerrainDrawCount = savedNearCount;
     }
     // Back-to-front order for the blended replay in the main pass.
     //
@@ -3647,6 +3669,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mainPassInputs.importedVertexBuffer = importedVertexBuffer;
     mainPassInputs.importedIndexBuffer = importedIndexBuffer;
     mainPassInputs.importedMeshDraws = importedMeshDrawsForFrame;
+    mainPassInputs.reflectionMeshDraws = reflectionDraws;
+    mainPassInputs.reflectionTerrainDrawCount = reflectionTerrainCount;
     mainPassInputs.importedTerrainDrawCount = importedTerrainDrawCountForFrame;
     mainPassInputs.importedBlendedDrawOrder = std::span<const std::uint32_t>(
         m_importedBlendedDrawOrder.data(), m_importedBlendedDrawOrder.size());
@@ -3656,6 +3680,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mainPassInputs.importedActorIndexBuffer = importedActorIndexBuffer;
     mainPassInputs.importedActorIndexOffset =
         importedActorIndexOffset;
+    mainPassInputs.cameraPosition[0]=camera.x;mainPassInputs.cameraPosition[1]=camera.y;mainPassInputs.cameraPosition[2]=camera.z;
     mainPassInputs.importedActorMeshDraws = importedActorMeshDraws;
     mainPassInputs.importedActorBlendedDrawOrder = std::span<const std::uint32_t>(
         m_importedActorBlendedDrawOrder.data(), m_importedActorBlendedDrawOrder.size());
@@ -3917,6 +3942,10 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         updatePushConstants.maxExposure = maxExposure;
         updatePushConstants.adaptUpRate = std::clamp(m_skyDebugSettings.autoExposureAdaptUp, 0.05f, 20.0f);
         updatePushConstants.adaptDownRate = std::clamp(m_skyDebugSettings.autoExposureAdaptDown, 0.05f, 20.0f);
+        if (m_imageSpace.enabled && m_imageSpace.adaptation) {
+            updatePushConstants.adaptUpRate = std::clamp(m_imageSpace.adaptSpeed, 0.0f, 20.0f);
+            updatePushConstants.adaptDownRate = updatePushConstants.adaptUpRate;
+        }
         updatePushConstants.deltaTimeSeconds = std::clamp(frameDeltaSeconds, 0.0f, 0.25f);
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_autoExposureUpdatePipeline);
@@ -4146,6 +4175,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);
     writeGpuTimestampBottom(kGpuTimestampQueryPostEnd);
+    recordFrameCapture(commandBuffer, imageIndex);
 
     transitionImageLayout(
         commandBuffer,

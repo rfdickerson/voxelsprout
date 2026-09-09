@@ -130,6 +130,7 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
     m_papyrus.clearRuntimeState();
     m_tes3.clear();
     m_quests.clear();
+    m_questJournal.clear();
     m_questStageFragments.clear();
     m_dialogueTopics.clear();
     m_dialogueBranches.clear();
@@ -137,7 +138,9 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
     m_statistics.clear();
     m_discoveries.clear();
     m_scenes.clear();
+    m_skyrimItems.clear();
     m_forcedWeather = {};
+    m_imageSpaceCommands.clear();
     m_locations.clear();
     m_globalVariables.clear();
     m_storyEvents.clear();
@@ -367,6 +370,52 @@ bool BethesdaSession::queueActorAnimationEvent(
     found->second.thirdPerson.queueEvent(event);
     if (found->second.firstPersonView != nullptr) found->second.firstPerson.queueEvent(std::move(event));
     return true;
+}
+
+bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error) {
+    const auto* definition = skyrimItem(item);
+    const auto* owner = m_world.find(actor);
+    if (!definition || !owner || !owner->actorValues || owner->actorValues->dead ||
+        !owner->enabled || owner->kind != RuntimeObjectKind::Actor ||
+        std::none_of(owner->inventory.begin(), owner->inventory.end(), [&](const auto& entry) {
+            return entry.item == item && entry.count > 0;
+        })) { error = "Item is not available to a living actor"; return false; }
+    WorldCommand command;
+    command.target = actor;
+    command.item = item;
+    if (definition->meleeDamage > 0 && std::isfinite(definition->meleeDamage)) {
+        command.type = WorldCommandType::EquipMeleeWeapon;
+    } else if (definition->healing > 0 && std::isfinite(definition->healing)) {
+        for (const auto& [name, quest] : m_quests) {
+            (void)name;
+            for (const auto& alias : quest.aliases) {
+                if (alias.createdObject == item && quest.running && !quest.completed) {
+                    error = "This item is needed by an active quest"; return false;
+                }
+            }
+        }
+        if (owner->actorValues->health >= owner->actorValues->maxHealth) {
+            error = "Health is already full"; return false;
+        }
+        command.type = WorldCommandType::ConsumeHealingItem;
+        command.actorValueDelta = definition->healing;
+    } else { error = "This item's effects are not supported yet"; return false; }
+    (void)m_world.queue(std::move(command));
+    error.clear();return true;
+}
+
+MeleeAttackResult BethesdaSession::performEquippedMeleeAttack(
+    ObjectId actor, const odai::math::Vector3& forward) {
+    float damage = 25.0f;
+    if (const auto* owner = m_world.find(actor)) {
+        for (const auto& entry : owner->inventory) {
+            if (!entry.equipped || entry.count <= 0) continue;
+            if (const auto* definition = skyrimItem(entry.item); definition && definition->meleeDamage > 0) {
+                damage = definition->meleeDamage;break;
+            }
+        }
+    }
+    return performMeleeAttack(actor, forward, damage);
 }
 
 MeleeAttackResult BethesdaSession::performMeleeAttack(
@@ -651,12 +700,15 @@ std::size_t BethesdaSession::bindDynamicQuestAliasesForObject(
     return bound;
 }
 
-LootTransferResult BethesdaSession::lootObject(ObjectId player, ObjectId source) {
+LootTransferResult BethesdaSession::lootObject(ObjectId player, ObjectId source,
+    const RecordKey& onlyItem, std::int32_t count) {
     LootTransferResult result;
     const RuntimeObject* playerObject = m_world.find(player);
     const RuntimeObject* sourceObject = m_world.find(source);
     if (playerObject == nullptr || playerObject->kind != RuntimeObjectKind::Actor ||
-        sourceObject == nullptr ||
+        sourceObject == nullptr || source == player ||
+        (playerObject->actorValues && playerObject->actorValues->dead) ||
+        (onlyItem.valid() && count <= 0) ||
         (sourceObject->kind != RuntimeObjectKind::Actor &&
          sourceObject->kind != RuntimeObjectKind::Container)) {
         result.diagnostic = "looting requires a resident player and actor/container source";
@@ -669,38 +721,24 @@ LootTransferResult BethesdaSession::lootObject(ObjectId player, ObjectId source)
     }
     result.accepted = true;
     for (const InventoryEntry& entry : sourceObject->inventory) {
-        if (!entry.item.valid() || entry.count <= 0) continue;
-        result.transferred.push_back({entry.item, entry.count, false});
+        if (!entry.item.valid() || entry.count <= 0 || (onlyItem.valid() && entry.item != onlyItem)) continue;
+        if (onlyItem.valid() && entry.count < count) { result.accepted = false; result.diagnostic = "Not enough items"; return result; }
+        result.transferred.push_back({entry.item, onlyItem.valid() ? count : entry.count, false});
     }
     std::sort(result.transferred.begin(), result.transferred.end(),
         [](const InventoryEntry& left, const InventoryEntry& right) {
             return left.item < right.item;
         });
     for (const InventoryEntry& entry : result.transferred) {
-        WorldCommand remove;
-        remove.type = WorldCommandType::RemoveItem;
-        remove.target = source;
-        remove.item = entry.item;
-        remove.itemCount = entry.count;
-        (void)m_world.queue(std::move(remove));
-        WorldCommand add;
-        add.type = WorldCommandType::AddItem;
-        add.target = player;
-        add.item = entry.item;
-        add.itemCount = entry.count;
-        (void)m_world.queue(std::move(add));
-        for (const auto& [questName, questState] : m_quests) {
-            (void)questName;
-            for (const QuestAliasRuntimeState& alias : questState.aliases) {
-                if (alias.createdObject == entry.item) {
-                    queueQuestAliasEvent(alias.handle, "OnContainerChanged",
-                        {PapyrusValue::fromObject(player),
-                         PapyrusValue::fromObject(source)});
-                }
-            }
-        }
+        WorldCommand transfer;
+        transfer.type = WorldCommandType::TransferItem;
+        transfer.target = source;
+        transfer.other = player;
+        transfer.item = entry.item;
+        transfer.itemCount = entry.count;
+        (void)m_world.queue(std::move(transfer));
     }
-    if (result.transferred.empty()) result.diagnostic = "Nothing to take";
+    if (result.transferred.empty()) { result.diagnostic = "Nothing to take"; result.accepted = !onlyItem.valid(); }
     return result;
 }
 
@@ -1351,6 +1389,7 @@ bool BethesdaSession::registerQuestDefinition(
         return false;
     }
     state.record = definition.record;
+    m_questJournal[definition.record] = {definition.title, definition.stages};
     std::vector<QuestStageFragmentRuntime> fragments;
     fragments.reserve(definition.stageFragments.size());
     for (const VmadQuestFragment& fragment : definition.stageFragments) {
@@ -1572,6 +1611,47 @@ void BethesdaSession::setQuestStage(const std::string& editorId, std::int32_t st
     }
 }
 
+std::string BethesdaSession::questJournalTitle(const QuestRuntimeState& quest) const {
+    const auto found = m_questJournal.find(quest.record);
+    return found != m_questJournal.end() && !found->second.title.empty() ? found->second.title : quest.editorId;
+}
+
+std::string BethesdaSession::resolveQuestText(const QuestRuntimeState& quest, std::string text) const {
+    std::size_t offset = 0;
+    while ((offset = text.find("<Alias=", offset)) != std::string::npos) {
+        const auto end = text.find('>', offset);
+        if (end == std::string::npos) break;
+        const auto name = text.substr(offset + 7, end - offset - 7);
+        std::string replacement = name;
+        for (const auto& alias : quest.aliases) {
+            if (normalizedEditorId(alias.name) != normalizedEditorId(name)) continue;
+            const auto* object = m_world.find(alias.target);
+            const RecordKey key = object ? object->base : alias.target.reference;
+            if (const auto* definition = skyrimItem(key); definition && !definition->name.empty()) replacement = definition->name;
+            break;
+        }
+        text.replace(offset, end - offset + 1, replacement);
+        offset += replacement.size();
+    }
+    return text;
+}
+
+std::string BethesdaSession::questJournalSummary(const QuestRuntimeState& quest) const {
+    const auto found = m_questJournal.find(quest.record);
+    if (found == m_questJournal.end()) return {};
+    for (auto stage = found->second.stages.rbegin(); stage != found->second.stages.rend(); ++stage) {
+        if (std::find(quest.completedStages.begin(), quest.completedStages.end(), stage->index) == quest.completedStages.end()) continue;
+        for (const auto& entry : stage->logEntries) {
+            if (entry.text.empty()) continue;
+            SkyrimDialogueInfoDefinition info;
+            info.quest = quest.record; info.conditions = entry.conditions;
+            if (!evaluateDialogueConditions(info, m_playerObject, m_playerObject, true).matched) continue;
+            return resolveQuestText(quest, entry.text);
+        }
+    }
+    return {};
+}
+
 void BethesdaSession::setScenePlaying(const RecordKey& scene, bool playing) {
     if (scene.valid()) m_scenes.insert_or_assign(scene, playing);
 }
@@ -1770,6 +1850,47 @@ void BethesdaSession::registerSkyrimNatives() {
             }
             // ODAI input contexts are independently owned and already enabled
             // at this post-Helgen bootstrap boundary.
+            return result;
+        });
+    for (const int mode : {0, 1, 2}) {
+        const bool remove = mode == 1;
+        const bool crossFade = mode == 2;
+        m_papyrus.registerNative(crossFade ? "ImageSpaceModifier.ApplyCrossFade" : remove ? "ImageSpaceModifier.Remove" : "ImageSpaceModifier.Apply",
+            [this, remove, crossFade](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+                NativeCallResult result;
+                if (arguments.empty() || arguments.size() > (remove ? 1u : 2u) ||
+                    arguments[0].type != PapyrusValueType::Object ||
+                    arguments[0].object.kind != ObjectIdKind::PersistentReference) {
+                    result.error = "ImageSpaceModifier expects a record receiver and optional strength";
+                    return result;
+                }
+                float strength = 1.0f;
+                if (arguments.size() == 2u) {
+                    if (arguments[1].type != PapyrusValueType::Float &&
+                        arguments[1].type != PapyrusValueType::Integer) {
+                        result.error = "ImageSpaceModifier strength must be numeric";
+                        return result;
+                    }
+                    strength = static_cast<float>(arguments[1].type == PapyrusValueType::Float
+                        ? arguments[1].real : arguments[1].integer);
+                    if (!std::isfinite(strength)) {result.error="nonfinite image-space strength";return result;}
+                }
+                m_imageSpaceCommands.push_back({arguments[0].object.reference,
+                    crossFade ? 1.0f : std::clamp(strength, 0.0f, 1.0f), remove, crossFade, std::max(strength, 0.0f)});
+                return result;
+            });
+    }
+    m_papyrus.registerNative("ImageSpaceModifier.RemoveCrossFade",
+        [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+            NativeCallResult result;
+            float duration = 1;
+            if (arguments.size() > 1 || (!arguments.empty() &&
+                arguments[0].type != PapyrusValueType::Float && arguments[0].type != PapyrusValueType::Integer)) {
+                result.error = "RemoveCrossFade expects an optional duration"; return result;
+            }
+            if (!arguments.empty()) duration = float(arguments[0].type == PapyrusValueType::Float ? arguments[0].real : arguments[0].integer);
+            if (!std::isfinite(duration)) { result.error = "nonfinite cross-fade duration"; return result; }
+            m_imageSpaceCommands.push_back({{}, 1, true, true, std::max(duration, 0.f)});
             return result;
         });
     m_papyrus.registerNative("Weather.ForceActive",
@@ -4060,6 +4181,17 @@ void BethesdaSession::simulateTick(
     result.diagnostics.insert(result.diagnostics.end(),
         std::make_move_iterator(commands.diagnostics.begin()),
         std::make_move_iterator(commands.diagnostics.end()));
+    for (const auto& transfer : commands.itemTransfers) {
+        for (const auto& [name, quest] : m_quests) {
+            (void)name;
+            for (const auto& alias : quest.aliases) {
+                if (alias.createdObject == transfer.item) {
+                    queueQuestAliasEvent(alias.handle, "OnContainerChanged",
+                        {PapyrusValue::fromObject(transfer.destination), PapyrusValue::fromObject(transfer.source)});
+                }
+            }
+        }
+    }
     // Object events observe the fully applied deterministic mutation batch.
     // They begin on the next fixed tick and are already present in VM
     // snapshots if a save occurs at this frame boundary.

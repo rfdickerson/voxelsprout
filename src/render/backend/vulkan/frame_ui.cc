@@ -374,6 +374,12 @@ void RendererBackend::buildFrameStatsUi() {
         return;
     }
 
+    // Keep the primary playtest measurement above expandable detail tables.
+    ImGui::Text("FPS: %.1f (submitted)", m_debugFps);
+    if (m_debugPresentedFps > 0.f) ImGui::Text("Presented FPS: %.1f", m_debugPresentedFps);
+    ImGui::Text("Frame: %.2f ms", m_debugFrameTimeMs);
+    ImGui::Separator();
+
     // Whatever the game pushed this frame.
     const auto buildGameStatGroups = [this]() {
         for (const DebugStatGroup& group : m_debugStatGroups) {

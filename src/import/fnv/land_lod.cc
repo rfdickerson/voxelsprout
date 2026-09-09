@@ -109,6 +109,9 @@ bool appendLandLodTier(
             return kNoTextureIndex;
         }
         texture.sourcePath = texturePath;
+        if (!linearData && texture.format == TextureFormat::RGBA8) {
+            texture.format = TextureFormat::RGBA8Srgb;
+        }
         if (linearData && texture.format == TextureFormat::BC1) {
             texture.format = TextureFormat::BC1Linear;
         }
@@ -206,6 +209,7 @@ bool appendLandLodTier(
                         vertex.uv[1] = shape.uvs[(v * 2u) + 1u];
                     }
                     if ((v * 4u) + 3u < shape.colors.size()) {
+                        std::copy_n(&shape.colors[v * 4u], 3u, vertex.color);
                         vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
                     }
                     if (terrainDetail != kNoTextureIndex) {

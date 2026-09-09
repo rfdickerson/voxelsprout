@@ -1423,6 +1423,10 @@ bool saveOdaiGameAtomic(
     const std::filesystem::path& path,
     const BethesdaSession& session,
     std::string& outError) {
+    if (session.world().hasPendingCommands()) {
+        outError = "cannot save before pending gameplay actions reach a fixed-tick boundary";
+        return false;
+    }
     const Json payload = sessionPayload(session);
     const std::string payloadBytes = payload.dump();
     const Json root{{"format", "odai-save"}, {"version", kOdaiSaveVersion},

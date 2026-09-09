@@ -19,13 +19,9 @@ int main(int argc, char** argv) {
     // show here (texture shimmer, alpha-test cutout crawl) anyway. setenv with
     // overwrite=0, so an explicit ODAI_MSAA from the user still wins.
     setenv("ODAI_MSAA", "1", 0);
-    // Keep the window, presentation and UI at the display resolution, but shade
-    // the 3D scene at 1920x1080 and let the temporal backend reconstruct it.
-    // The measured 3200x1800 Skyrim frame is fill-bound at ~35 ms; this removes
-    // 62.5% of its scene pixels without softening native-resolution text.
-    // ODAI_RENDER_SIZE and the older ODAI_RENDER_SCALE both remain explicit
-    // overrides, with scale taking precedence when both are supplied.
-    setenv("ODAI_RENDER_SIZE", "1920x1080", 0);
+    // Native framebuffer resolution is the interactive default. Reduced scene
+    // resolution remains opt-in through upscaler quality or explicit render
+    // size/scale overrides; do not silently stretch a 1080p scene on HiDPI displays.
     // NO SHADOW DISTANCE OVERRIDE. There used to be a
     // setenv("ODAI_SHADOW_DISTANCE", "3500", 0) here, sitting under the render
     // scale comment above with no comment of its own, and it silently beat
@@ -428,7 +424,6 @@ int main(int argc, char** argv) {
             if (!renderResolutionExplicit) {
                 setenv("ODAI_RENDER_SCALE", "1.0", 1);
             }
-            setenv("ODAI_NATIVE_LOGICAL_PRESENT", "1", 0);
             setenv("ODAI_FNV_AO", "xegtao", 0);
             // The Anvil reference uses a broad grounding lobe and a restrained
             // contact lobe in the single XeGTAO dispatch. Imperial Market keeps
@@ -478,21 +473,10 @@ int main(int argc, char** argv) {
             // need a console-style performance budget. These are defaults,
             // not locks: an explicitly supplied environment setting wins.
             if (!renderResolutionExplicit) {
-                // The fixed reference view is a still-image quality target and
-                // has enough headroom on the reference LNL GPU to shade at the
-                // presentation extent. Keep playable city showcases at their
-                // measured 0.8 scale. Explicit environment overrides remain
-                // authoritative for both paths.
-                setenv("ODAI_RENDER_SCALE",
-                       (whiterunReferenceShowcase || skyrimForestReferenceShowcase)
-                           ? "1.0" : "0.8", 1);
+                // Native framebuffer rendering is the default in every showcase.
+                // Explicit resolution overrides remain authoritative.
+                setenv("ODAI_RENDER_SCALE", "1.0", 1);
             }
-            // GLFW's default HiDPI behavior made the maximized 1440x844 window
-            // present at 2880x1688. The full-resolution post/UI pass alone cost
-            // ~3.6 ms on the reference iGPU. Keep the same maximized logical
-            // window but present one pixel per logical pixel; an explicit user
-            // value of 0 retains native HiDPI presentation.
-            setenv("ODAI_NATIVE_LOGICAL_PRESENT", "1", 0);
             setenv("ODAI_FNV_AO",
                    (whiterunReferenceShowcase || skyrimForestReferenceShowcase)
                        ? "xegtao" : "off", 0);

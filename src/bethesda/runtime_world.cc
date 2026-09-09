@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -449,6 +450,48 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                         "cannot remove absent item " + command.item.toString() + " from " +
                         command.target.toString());
                 }
+                break;
+            }
+            case WorldCommandType::TransferItem: {
+                auto* destination = find(command.other);
+                auto* entry = inventoryEntry(*object, command.item);
+                if (!destination || destination == object || command.itemCount <= 0 ||
+                    !entry || entry->count < command.itemCount) {
+                    result.diagnostics.push_back("item transfer source no longer owns the requested quantity");
+                    break;
+                }
+                auto* received = inventoryEntry(*destination, command.item);
+                if (received && received->count > std::numeric_limits<std::int32_t>::max() - command.itemCount) {
+                    result.diagnostics.push_back("item transfer would overflow destination stack");break;
+                }
+                if (received) received->count += command.itemCount;
+                else destination->inventory.push_back({command.item, command.itemCount, false});
+                entry->count -= command.itemCount;
+                if (entry->count == 0) std::erase_if(object->inventory, [&](const auto& owned) { return owned.item == command.item; });
+                result.itemTransfers.push_back({command.target, command.other, command.item, command.itemCount});
+                ++result.applied;
+                break;
+            }
+            case WorldCommandType::EquipMeleeWeapon:
+            case WorldCommandType::ConsumeHealingItem: {
+                auto* entry = inventoryEntry(*object, command.item);
+                if (object->kind != RuntimeObjectKind::Actor || !object->enabled ||
+                    !object->actorValues || object->actorValues->dead || !entry || entry->count <= 0) {
+                    result.diagnostics.push_back("inventory action requires a living owner and owned item");
+                    break;
+                }
+                if (command.type == WorldCommandType::EquipMeleeWeapon) {
+                    for (auto& owned : object->inventory) owned.equipped = owned.item == command.item;
+                } else {
+                    auto& values = *object->actorValues;
+                    if (!std::isfinite(command.actorValueDelta) || command.actorValueDelta <= 0.f ||
+                        values.health >= values.maxHealth) break;
+                    values.health = std::min(values.maxHealth, values.health + command.actorValueDelta);
+                    if (--entry->count == 0) {
+                        std::erase_if(object->inventory, [&](const InventoryEntry& owned) { return owned.item == command.item; });
+                    }
+                }
+                ++result.applied;
                 break;
             }
             case WorldCommandType::SetEquipped: {

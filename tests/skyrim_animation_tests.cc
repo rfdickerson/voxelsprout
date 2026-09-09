@@ -204,7 +204,7 @@ std::vector<std::uint8_t> syntheticBehaviorGraphPackfile(
         "hkbBehaviorGraph", "hkbStateMachine", "hkbStateMachineStateInfo",
         "hkbManualSelectorGenerator", "hkbBlenderGenerator",
         "hkbBlenderGeneratorChild", "hkbClipGenerator",
-        "hkbBlendingTransitionEffect"};
+        "hkbBlendingTransitionEffect", "hkbStateMachineTransitionInfoArray"};
     std::vector<std::uint32_t> classOffsets;
     std::size_t classBytes = 0u;
     for (const std::string& name : classNames) {
@@ -245,7 +245,10 @@ std::vector<std::uint8_t> syntheticBehaviorGraphPackfile(
         {blender + 0x38u, textOffsets[4]}, {blender + 0x60u, blenderArray},
         {blenderArray, child}, {child + 0x30u, clip},
         {clip + 0x38u, textOffsets[5]}, {clip + 0x48u, textOffsets[6]},
-        {transition + 0x38u, textOffsets[7]}};
+        {transition + 0x38u, textOffsets[7]},
+        {state + 0x50u, 0x830u}, {machine + 0xa0u, 0x830u},
+        {0x840u, 0x850u}, {0x870u, transition},
+        {0x878u, selector}};
     const std::size_t globalFixups = localFixups + std::size(fixups) * 8u;
     const std::size_t virtualFixups = globalFixups;
     const std::size_t exports = virtualFixups + classNames.size() * 12u;
@@ -291,12 +294,19 @@ std::vector<std::uint8_t> syntheticBehaviorGraphPackfile(
     writeF32(bytes, dataStart + child + 0x40u, 0.75f);
     writeF32(bytes, dataStart + clip + 0x60u, 1.25f);
     writeF32(bytes, dataStart + transition + 0x50u, 0.20f);
+    writeU32(bytes, dataStart + 0x848u, 1u);
+    writeU32(bytes, dataStart + 0x880u, 42u);
+    writeU32(bytes, dataStart + 0x884u, 7u);
+    writeU32(bytes, dataStart + 0x888u, 0xffffffffu);
+    writeU32(bytes, dataStart + 0x88cu, 0xffffffffu);
+    writeU32(bytes, dataStart + 0x890u, 0x12340003u);
+    writeF32(bytes, dataStart + 0x858u, 0.25f);
     for (std::size_t index = 0; index < std::size(fixups); ++index) {
         writeU32(bytes, dataStart + localFixups + index * 8u, fixups[index].first);
         writeU32(bytes, dataStart + localFixups + index * 8u + 4u, fixups[index].second);
     }
     const std::uint32_t objectOffsets[]{
-        graph, machine, state, selector, blender, child, clip, transition};
+        graph, machine, state, selector, blender, child, clip, transition, 0x830u};
     for (std::size_t index = 0; index < classNames.size(); ++index) {
         const std::size_t entry = dataStart + virtualFixups + index * 12u;
         writeU32(bytes, entry, objectOffsets[index]);
@@ -417,9 +427,27 @@ void testHkxBehaviorGraphDecoding() {
     const auto& transition = findKind(odai::anim::HkxBehaviorNodeKind::TransitionEffect);
     assert(std::fabs(transition.transitionDuration - 0.20f) < 1.0e-6f);
 
+    assert(state.transitions.size() == 1u && machine.transitions.size() == 1u);
+    const auto& rule = state.transitions.front();
+    assert(rule.eventId == 42 && rule.toStateId == 7 && rule.fromNestedStateId == -1);
+    assert(rule.priority == 3 && rule.flags == 0x1234u);
+    assert(rule.hasEffect && rule.effectNode >= 0 && rule.hasCondition);
+    assert(rule.conditionClass == "hkbManualSelectorGenerator");
+    assert(rule.triggerInterval.enterTime == 0.25f);
+    auto corrupt = bytes;
+    writeU32(corrupt, dataStart + 0x848u, 0xffffffffu);
+    assert(!odai::anim::decodeHkxBehaviorGraph(corrupt, graph, error));
+    corrupt = bytes;
+    writeU32(corrupt, dataStart + 0x858u, 0x7fc00000u);
+    assert(!odai::anim::decodeHkxBehaviorGraph(corrupt, graph, error));
+    odai::anim::HkxReadLimits limits;
+    limits.maxBehaviorEdges = 1;
+    assert(!odai::anim::decodeHkxBehaviorGraph(bytes, graph, error, limits));
+
     writeU32(bytes, dataStart + 0x100u + 0x98u, 0xffffffffu);
     assert(!odai::anim::decodeHkxBehaviorGraph(bytes, graph, error));
     assert(error.find("state array") != std::string::npos);
+    assert(graph.nodes.empty());
 }
 
 odai::anim::Skeleton makeRig() {

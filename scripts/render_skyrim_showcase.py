@@ -321,6 +321,7 @@ def main() -> int:
 
         environment = os.environ.copy()
         environment.update({
+            "ODAI_WINDOW_HIDPI": "0",
             "ODAI_WINDOW_SIZE": f"{manifest['width']}x{manifest['height']}",
             "ODAI_RENDER_SIZE": f"{manifest['width']}x{manifest['height']}",
             "ODAI_FNV_NOHUD": "1",

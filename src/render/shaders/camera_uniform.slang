@@ -31,6 +31,9 @@ public struct CameraUniform
     public float4 colorGrading1;
     public float4 colorGrading2;
     public float4 colorGrading3;
+    public float4 imageSpaceCinematic;
+    public float4 imageSpaceTint;
+    public float4 imageSpaceFade;
     public float4 dofConfig;
     public float4 dofConfig2;
     public float4 waterConfig;
@@ -45,6 +48,7 @@ public struct CameraUniform
     // blend weight over the procedural sky, and 0 means "procedural only".
     // Mirrored in MvpUniform in src/render/renderer_shared.h.
     public float4 weatherSkyUpper;
+    public float4 weatherRain;
     public float4 weatherSkyLower;
     // w: the weather's sun-glare scale, 1 when no weather is published.
     public float4 weatherHorizon;
@@ -52,6 +56,8 @@ public struct CameraUniform
     // Four cloud layers: tint.rgb + opacity in w, then
     // (bindless slot, drift u, scale, drift v), then
     // (band low dir.y, band high dir.y, mapping mode, unused).
+    public float4 nightSkySlots[2];
+    public float4 nightSkyTint;
     public float4 weatherCloudTint[4];
     public float4 weatherCloudParams[4];
     public float4 weatherCloudBand[4];

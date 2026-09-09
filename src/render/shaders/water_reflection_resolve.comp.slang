@@ -1,4 +1,4 @@
-// Half-resolution planar reflection reconstruction and temporal resolve.
+// Planar reflection filtering and temporal resolve at reflection resolution.
 // The raw reflection is stable world geometry; water-normal distortion is
 // applied later by imported_water.frag, so accumulating here removes raster
 // shimmer without dragging the animated surface behind the camera.

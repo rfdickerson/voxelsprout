@@ -75,7 +75,7 @@ ODAI never reads or writes retail `.ess` saves.
   events implement the native state required by the installed route closure.
 - CTDA parsing/evaluation is shared and supports strict or diagnostic-permissive
   handling, including OR chains and all six comparison operators.
-- `OdaiSaveV7` is checksummed, staged/atomic, and contains the content
+- `OdaiSaveV10` is checksummed, staged/atomic, and contains the content
   fingerprint, scenario, fixed clock, RNG, objects/inventories, quest state,
   actor AI path cursors, and VM threads/globals plus Jolt character and
   behavior-graph snapshots. Changed profiles reconcile through `RecordKey` or
@@ -98,9 +98,17 @@ ODAI never reads or writes retail `.ess` saves.
   placed Arvel actor exactly once instead of granting either at bootstrap.
   Dead actors are searchable with `E`; transfers use paired deterministic
   remove/add commands, zero-count entries are erased, and created-item
-  provenance round-trips in V7 so reload cannot duplicate loot. Materialization,
+  provenance round-trips in V10 so reload cannot duplicate loot. Materialization,
   transfer, and lethal damage post alias `OnContainerChanged`/`OnDeath` events
   only after their deterministic world-command batch has applied.
+- The Skyrim player inventory opens with `I`, browses with Up/Down or the
+  controller D-pad, and closes with `I`/Escape/controller B. It displays the
+  session player's saved inventory and counts, resolves item FULL names from
+  winning plugins and their localized STRINGS tables, and shares those names
+  with loot/gift notifications. Simulation pauses while browsing; movement,
+  attacks, dialogue activation, doors, and puzzle input are blocked. The view
+  cannot grant, drop, or transfer quest items. `ODAI_FNV_UI_DEMO=inventory`
+  opens this same view for screenshot QA without adding items.
 - TES5 dynamic aliases also decode forced-location `ALFL`, reference-alias
   `ALFA`, reference-type `ALRT`, and actor placement `XLRT`. The MQ103
   BleakFallsBoss alias therefore binds the installed boss reference only when
@@ -199,12 +207,49 @@ odai_bethesda_probe <Data> --scenario-check skyrim-bleak-falls
 |---|---|---|
 | Foundation | Partial | All retained tests pass and unreachable generators are unlinked. Vulkan backend still exposes a legacy chunk helper/API. |
 | Content/VM | Partial | Synthetic malformed-input, opcode, call-stack, event-order, timer, latent-call, full QUST/INFO VMAD tails, typed DLBR/DIAL/INFO parsing including RNAM, branch-root/TCLT selection, dialogue phase dispatch, auto-property, CTDA log/dialogue selection, LCTN, GLOB, and strict-failure fixtures pass. The installed-data scenario probe loads 4 route quests, 236 stage fragments, 65 alias-script blocks, 25 DLBR branches, 127 DIAL topics, 239 INFO variants, and 49 INFO fragments; follows the reachable PEX/cross-quest closure; registers 81 locations and 91 globals; replays MQ102 stage 10 with objective 10 visible while MQ103 remains at 0; and reports zero unresolved reachable native calls. Physical route behavior remains outside this gate. |
-| Simulation | Partial | Fixed-step replay hashes, actor values, inventory, quest-created actor loot, outfits, activation commands, VMAD-backed puzzle state, location/global/story state, persistent movement requests, authored reference goals, cross-record NAVM stitching, resident teleport actions, per-reference streamed/interior Jolt collision, fixed-tick AI intent, occluded player/AI melee, damage/death state, and deterministic animation graph state exist. Retail faction hostility, death/ragdoll, general containers/leveled loot/equipment, authored claw-door HKX motion/audio, cross-space packages, Skyrim preferred links, and full retail HKX binding remain. |
-| Save | Partial | V7 exactly round-trips nested VM, objects, navigation, typed AI walk/door actions, combat targets/cooldowns, activator puzzle state, quest-created spawned-item identity/provenance, outfits, physical characters, and graph events; checksum rejection, interrupted-commit recovery, fingerprint reconciliation, and mandatory v1-v6 migration fixtures pass. The installed-data assertion now save/reloads immediately after MQ103 stage 190 and rechecks the removed Dragonstone plus alias identity. Mid-response dialogue flow and dungeon streaming boundaries remain. |
-| Playable | Blocked | The authored MQ102 Riverwood startup stage now runs, keeps MQ103 at 0, and displays objective 10. Retail alias inventory/event assertions reach MS13 stage 40, and the installed keyhole/ring VMAD drives puzzle requirements, input, persistent collision/visibility, and stage 50. The fixture-assisted MQ103 assertion dynamically fills the retail boss alias, kills it through the physical combat path, loots the authored Dragonstone, reaches stage 180, and then completes the stage-190 Farengar fragment without a direct item grant. The headless hand-ins still depend on explicitly reported stage and residency injection; they are fragment assertions, not a completed route. MQ102’s Riverwood-to-Whiterun conversations, Arvel web/escape/combat, authored stage-50/60 triggers, natural boss streaming/encounter packages, the pre-acquired-Dragonstone Farengar branch, hostility/faction assignment, death/ragdoll presentation, general loot/equipment, authored claw-door motion/audio, dialogue save boundaries, and continuous traversal remain incomplete. `release_gate_passed` is false. |
+| Simulation | Partial | Fixed-step replay hashes, actor values, inventory, quest-created actor loot, outfits, activation commands, VMAD-backed puzzle state, location/global/story state, persistent movement requests, authored reference goals, cross-record NAVM stitching, resident teleport actions, per-reference streamed/interior Jolt collision, fixed-tick AI intent, occluded player/AI melee, damage/death state, and deterministic animation graph state exist. Retail faction hostility, death/ragdoll, general container presentation/full leveled loot, authored claw-door HKX motion/audio, cross-space packages, Skyrim preferred links, and full retail HKX binding remain. |
+| Save | Partial | V10 exactly round-trips nested VM, objects, navigation, typed AI walk/door actions, combat targets/cooldowns, activator puzzle state, quest-created spawned-item identity/provenance, outfits, physical characters, and graph events; checksum rejection, interrupted-commit recovery, fingerprint reconciliation, and mandatory v1-v6 migration fixtures pass. The installed-data assertion now save/reloads immediately after MQ103 stage 190 and rechecks the removed Dragonstone plus alias identity. Mid-response dialogue flow and dungeon streaming boundaries remain. |
+| Playable | Blocked | The authored MQ102 Riverwood startup stage now runs, keeps MQ103 at 0, and displays objective 10. Retail alias inventory/event assertions reach MS13 stage 40, and the installed keyhole/ring VMAD drives puzzle requirements, input, persistent collision/visibility, and stage 50. The fixture-assisted MQ103 assertion dynamically fills the retail boss alias, kills it through the physical combat path, loots the authored Dragonstone, reaches stage 180, and then completes the stage-190 Farengar fragment without a direct item grant. The headless hand-ins still depend on explicitly reported stage and residency injection; they are fragment assertions, not a completed route. MQ102’s Riverwood-to-Whiterun conversations, the entrance pillar lever/gate, Arvel web/escape/combat, authored stage-50/60 triggers, natural boss streaming/encounter packages, the pre-acquired-Dragonstone Farengar branch, hostility/faction assignment, death/ragdoll presentation, general container presentation/full leveled loot, authored claw-door motion/audio, dialogue save boundaries, and continuous traversal remain incomplete. `release_gate_passed` is false. |
 | Rendering | Partial | Runtime deltas are consumed separately from immutable `ImportedScene`; validation/device-loss/cell-churn soak gates have not run here. |
 | Performance | Not measured | Requires an installed-data release build and RX 6600/RTX 3060-class reference machine. |
 | Release | Not reached | Depends on all preceding route, soak, and performance gates. |
 
 This table is intentionally a release checklist, not a claim of gameplay parity
 with OpenMW or Skyrim.
+
+## September 6 implementation validation
+
+The runtime and all 32 CTest targets build/pass with `linux-vcpkg`. The installed
+scenario fragment probe passes, including the previously failing Alvor bootstrap,
+and still reports `release_gate_passed: false`. These are fixture-assisted quest
+assertions, not continuous-route acceptance.
+
+Startup now resolves reached placed references into persistent gameplay objects
+before executing bootstrap fragments. Inventory quantities are materialized from
+CNTO independently of actor presentation; subsequent presentation attachment does
+not reset existing state. Directly reached references are covered; unique-NPC-base
+resolution and a complete executable SCEN lifecycle remain unfinished.
+
+The reusable item catalog resolves localized names and book text, supported melee
+weapon damage, and immediate single-effect healing potions. Player inventory is
+modal; corpse selection supports take-one/take-all. Transfer commands validate and
+move stacks atomically, and emit alias container-change events only after success.
+Equipment, healing, duplicate transfer rejection, and save/reload are covered by
+fixtures. A graphical Riverwood Trader smoke run renders the empty inventory
+panel with the session paused; neither its temporary gameplay-save path nor its
+traversal-save path is created. Populated inventory graphical interaction remains
+unverified. Unsupported consumable effects are explicitly rejected. Golden Claw
+model inspection and general container interaction presentation remain unfinished.
+
+The existing save writer is V10, with existing older-format readers retained;
+this change uses the existing inventory/equipment fields without changing cooked
+scene or chunk layouts. Saving with pending world commands is rejected before
+writing, to avoid losing a queued inventory action. Screenshot/video capture runs
+suppress gameplay and traversal saves, including manual-save input.
+
+The entrance `defaultPillarPuzzleLever`, `MS13WebDestructibleSCRIPT`, and
+`WordWallTriggerScript` still require authored gameplay execution beyond the
+existing claw-door adapter. Scene phases, trigger/destruction delivery, web release
+and escape, word-wall/boss sequencing, faction hostility/essential behavior, and
+continuous-route save boundaries remain incomplete. No complete-route driver or
+successful graphical dungeon playthrough is claimed.

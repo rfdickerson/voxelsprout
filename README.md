@@ -57,7 +57,28 @@ It starts at Riverwood, seeds the completed MQ101/Helgen prerequisite, then
 replays MQ102's authored Riverwood startup stage after its retail VMAD is
 attached, and uses checksummed ODAI saves (`F5`/`F9`, or
 `--save-game`/`--load-game`). It does
-not read or write Skyrim `.ess` files. The deterministic session, world registry,
+not read or write Skyrim `.ess` files. Press `I` (controller Back) to open the
+player inventory. Its Skyrim-style category and item columns use Left/Right
+to change column and Up/Down to browse. Enter/A equips supported melee weapons,
+uses immediate healing potions, or reads books. Escape/B closes the view.
+Inventory shows saved item counts and pauses gameplay. Search defeated actors
+with `E`, then Enter/A takes one item or R/X takes all. Item names, book text,
+weapon damage, and supported healing effects come from installed records.
+The Skyrim inventory reads Futura Condensed outlines from the installed
+`Interface/fonts_en.swf` and previews the selected item's installed NIF model.
+Drag the preview or use the right stick to orbit/tilt; Q/E also rotates it.
+The preview uses orthographic projection and simple studio lighting; BC1/BC2/BC3
+and RGBA8 diffuse textures are supported, with a shaded mesh fallback for other
+formats. It does not reproduce retail enchantment effects or material shaders.
+No game models, textures, or fonts are bundled with the repository.
+Screenshot and video capture runs suppress traversal and gameplay saves.
+Skyrim streaming retains textures up to 2048 pixels by default; set
+`ODAI_FNV_TEX_SIZE=512` for the previous lower-memory ceiling. Higher-resolution
+textures increase GPU memory use. Imported normal maps retain their authored
+surface strength. The default Skyrim grade preserves dark values instead of
+clipping them with extra global contrast.
+
+The deterministic session, world registry,
 VMAD/PEX readers, strict script diagnostics, and save lifecycle are implemented;
 the Golden Claw/Dragonstone route is not yet release-gate complete. See
 [`docs/SKYRIM_FIRST_RUNTIME.md`](docs/SKYRIM_FIRST_RUNTIME.md) for exact gate status.
@@ -114,3 +135,38 @@ conditions pass; `INFO.RNAM` overrides the topic prompt, `TCLT` gates linked
 choices, and begin/end fragments are separated by response completion.
 
 See `docs/index.md` for profile, import, and mod-root usage.
+
+The Skyrim quest journal opens with **J** and pauses gameplay. Use Up/Down or
+D-pad to select a quest, Left/Right to switch active/completed quests, and
+Page Up/Page Down or the right stick to scroll the entry. J, Escape, or B closes
+it. The journal uses the installed Futura Condensed font, localized quest titles
+and stage journal text, and live objective completion/failure state. It shows
+only reached journal stages and player-visible objectives; opening it does not
+advance quests. `ODAI_FNV_UI_DEMO=quests` opens it for isolated UI captures.
+
+The Skyrim world map opens with **M** and pauses gameplay. Pan with arrow keys,
+left stick, or right mouse drag; zoom with the wheel, +/- or controller triggers.
+C/Y centers the last known exterior player position. Select a visible location
+or place a session destination with Enter/A or a click; Delete clears it.
+The map draws shaded terrain from installed LAND heights and water levels through
+the resolved load order, with authored visible and discovered location markers.
+It loads in bounded batches without making map cells gameplay-resident. This is
+a topographic world map with simplified marker symbols; retail 3D cloud effects,
+local interior maps, fast travel, and saved custom destinations are not implemented.
+`ODAI_FNV_UI_DEMO=map` opens the map for isolated captures, waiting for terrain.
+
+Riverwood and Bleak Falls Barrow remain visible and labeled on the world map
+before discovery, using their installed marker positions. This does not mark
+them discovered or grant fast travel.
+
+World-map rasters are now cached atomically as `world-map-v1.bin` in the existing
+content/load-order/worldspace cache directory. The first open reads only LAND
+records (skipping placed objects and navigation); later launches load the bounded,
+checksummed raster directly. Content changes select a new cache directory, and
+corrupt or truncated cache files rebuild automatically. No player save is changed.
+
+Imported terrain uses its original mesh by default. The experimental smoothing
+and procedural displacement path is available with `ODAI_TERRAIN_TESS=1`, but
+subdivision runs in both the depth and main passes and is expensive in Riverwood.
+Leave this variable unset (or set it to `0`) for normal play. This setting does not
+change imported assets, collision meshes, or cache formats.

@@ -2,7 +2,10 @@
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
+#include "import/imported_lighting_material.h"
+#include "import/dds.h"
 #include "core/frame_profiler.h"
+#include "render/backend/vulkan/frame_math.h"
 #include "core/log.h"
 #include "math/math.h"
 #include "world/chunk_mesher.h"
@@ -102,6 +105,8 @@ std::uint32_t blockBytesForImportedFormat(odai::importer::TextureFormat format) 
         case odai::importer::TextureFormat::BC2:
         case odai::importer::TextureFormat::BC3:
         case odai::importer::TextureFormat::BC5:
+        case odai::importer::TextureFormat::BC6HUfloat:
+        case odai::importer::TextureFormat::BC6HSfloat:
         case odai::importer::TextureFormat::BC7: return 16u;
         default:                                 return 0u;
     }
@@ -116,7 +121,7 @@ VkFormat vkFormatForImportedTexture(const odai::importer::ImportedSceneTexture& 
     std::string normalizedPath = texture.sourcePath;
     std::transform(normalizedPath.begin(), normalizedPath.end(), normalizedPath.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const bool tangentSpaceData =
+    const bool tangentSpaceData = texture.linearData ||
         normalizedPath.ends_with("_n.dds") || normalizedPath.ends_with("_msn.dds");
     switch (format) {
         // Color albedo (BC1/BC3/BC7) holds sRGB-encoded bytes, so use the _SRGB views:
@@ -124,7 +129,7 @@ VkFormat vkFormatForImportedTexture(const odai::importer::ImportedSceneTexture& 
         // pipeline. Without this the raw sRGB values are read as linear (~2x too bright)
         // and terrain renders as washed-out pastel. BC4/BC5 are data (single/dual
         // channel — e.g. the water normal map) and must stay UNORM/linear.
-        case odai::importer::TextureFormat::BC1: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC1: return tangentSpaceData ? VK_FORMAT_BC1_RGB_UNORM_BLOCK : VK_FORMAT_BC1_RGB_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC1Linear: return VK_FORMAT_BC1_RGB_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC2:
             return tangentSpaceData ? VK_FORMAT_BC2_UNORM_BLOCK : VK_FORMAT_BC2_SRGB_BLOCK;
@@ -132,9 +137,11 @@ VkFormat vkFormatForImportedTexture(const odai::importer::ImportedSceneTexture& 
             return tangentSpaceData ? VK_FORMAT_BC3_UNORM_BLOCK : VK_FORMAT_BC3_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC4: return VK_FORMAT_BC4_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC5: return VK_FORMAT_BC5_UNORM_BLOCK;
+        case odai::importer::TextureFormat::BC6HUfloat: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+        case odai::importer::TextureFormat::BC6HSfloat: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
         case odai::importer::TextureFormat::BC7:
             return tangentSpaceData ? VK_FORMAT_BC7_UNORM_BLOCK : VK_FORMAT_BC7_SRGB_BLOCK;
-        case odai::importer::TextureFormat::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
+        case odai::importer::TextureFormat::RGBA8Srgb: return tangentSpaceData ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB;
         default:                                      return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -508,6 +515,8 @@ void RendererBackend::clearGpuScene() {
     m_importedPageDrawRanges.clear();
     // Chunks and arenas go together: the buffers backing them were just
     // released above, so every recorded offset is now meaningless.
+    for (const auto& chunk : m_importedSceneChunks)
+        for (auto slot : chunk.lightingMaterialSlots) { m_animatedMaterials.erase(slot); m_importedLightingSlots.release(slot); }
     m_importedSceneChunks.clear();
     m_freeImportedSceneChunks.clear();
     m_lastImportedChunkIndex = kInvalidImportedChunkIndex;
@@ -527,6 +536,7 @@ void RendererBackend::clearGpuScene() {
     m_debugImportedGiVoxelizedCellCount = 0;
     m_importedLocalLights.clear();
     m_importedParticleEmitters.clear();
+    m_mistStartTimes.clear();
     m_debugImportedLightSelectedCount = 0;
     m_importedIndexCount = 0;
     m_importedTerrainDrawCount = 0;
@@ -666,7 +676,11 @@ std::size_t RendererBackend::addImportedSceneChunk(const odai::importer::Importe
     // chunk whose pages were dropped -- e.g. by the coverage check above --
     // has every draw silently excluded. Worth a line at add time; that failure
     // renders as "uploaded fine, never drawn".
+    const core::Stopwatch waterTimer;
     rebuildImportedWaterBuffers();
+    if (std::getenv("ODAI_DEBUG_CHUNK_TIMING") != nullptr) {
+        VOX_LOGI("render") << "chunk water rebuild ms=" << waterTimer.elapsedMs();
+    }
     const ImportedSceneChunk& added = m_importedSceneChunks[m_lastImportedChunkIndex];
     VOX_LOGI("render") << "chunk " << m_lastImportedChunkIndex << " added: draws="
                        << added.draws.size() << " pages=" << added.pageRanges.size();
@@ -767,6 +781,19 @@ bool RendererBackend::uploadIntoBufferRange(
         }
     }
     if (!uploadFailed) {
+        // A later queue submission is not a memory dependency. This also
+        // orders recycled ranges after earlier draws and arena growth copies.
+        VkMemoryBarrier2 arenaBarrier{};
+        arenaBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        arenaBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        arenaBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+        arenaBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        arenaBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo arenaDependency{};
+        arenaDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        arenaDependency.memoryBarrierCount = 1;
+        arenaDependency.pMemoryBarriers = &arenaBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &arenaDependency);
         VkBufferCopy copyRegion{};
         copyRegion.srcOffset = 0;
         copyRegion.dstOffset = destinationByteOffset;
@@ -866,6 +893,19 @@ bool RendererBackend::copyBufferRange(
         }
     }
     if (!copyFailed) {
+        // A later queue submission is not a memory dependency. This also
+        // orders recycled ranges after earlier draws and arena growth copies.
+        VkMemoryBarrier2 arenaBarrier{};
+        arenaBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        arenaBarrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        arenaBarrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+        arenaBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        arenaBarrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo arenaDependency{};
+        arenaDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        arenaDependency.memoryBarrierCount = 1;
+        arenaDependency.pMemoryBarriers = &arenaBarrier;
+        vkCmdPipelineBarrier2(commandBuffer, &arenaDependency);
         VkBufferCopy copyRegion{};
         copyRegion.size = byteSize;
         vkCmdCopyBuffer(
@@ -946,15 +986,13 @@ bool RendererBackend::ensureImportedArenaCapacity(
     // would round a 3.29M-vertex scene up to 4.19M and cost ~110 MB across the
     // three arenas that a one-shot uploadImportedScene() never needs.
     //
-    // A fragmentation retry is sized exactly too. Doubling is the right policy
-    // for a working set that is genuinely getting bigger, but this arena never
-    // shrinks, so paying it for a hole in the free list ratchets the buffer up
-    // permanently -- at ~100 bytes per vertex across the main and shadow streams,
-    // one doubling of an 8M-vertex arena is 800 MB the session never gives back.
+    // Fragmentation retries gain bounded slack: exact-size tails caused repeated
+    // relocations as individually retained LOD tiles/cells arrived. Avoid doubling
+    // the entire arena for a free-list hole; add at most 262144 elements (about
+    // 26 MiB across both vertex streams, or 1 MiB of indices).
     const auto nextCapacity = [pastCapacity](std::uint64_t current, std::uint64_t needed) {
-        if (current == 0 || pastCapacity) {
-            return needed;
-        }
+        if (current == 0) return needed;
+        if (pastCapacity) return needed + std::min<std::uint64_t>(current / 8u, 262144u);
         std::uint64_t capacity = current;
         while (capacity < needed) {
             capacity *= 2u;
@@ -1102,6 +1140,8 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     chunk.draws.shrink_to_fit();
     chunk.pageRanges.clear();
     chunk.pageRanges.shrink_to_fit();
+    for (auto slot : chunk.lightingMaterialSlots) { m_animatedMaterials.erase(slot); m_importedLightingSlots.release(slot); }
+    chunk.lightingMaterialSlots.clear();
     chunk.textureSlots.clear();
     chunk.textureSlots.shrink_to_fit();
     // Lights were being left on the dead chunk. rebuildImportedDrawTables skips
@@ -1109,6 +1149,7 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
     // rest of the session -- and an interior cell carries a lot of them.
     chunk.lights.clear();
     chunk.lights.shrink_to_fit();
+    for(const auto& emitter:chunk.particleEmitters)m_mistStartTimes.erase(emitter.sourceId);
     chunk.particleEmitters.clear();
     chunk.particleEmitters.shrink_to_fit();
     chunk.rigidAnimations.clear();
@@ -1125,6 +1166,30 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
 
     rebuildImportedDrawTables();
     rebuildImportedWaterBuffers();
+}
+
+bool RendererBackend::isImportedSceneChunkReady(std::size_t index) const {
+    return index < m_importedSceneChunks.size() && m_importedSceneChunks[index].alive &&
+        isTimelineValueReached(m_importedSceneChunks[index].readyTimelineValue);
+}
+
+void RendererBackend::setImportedSceneChunkLodTransition(
+    std::size_t index, float progress, float role, float seed) {
+    if (index >= m_importedSceneChunks.size() || !m_importedSceneChunks[index].alive) return;
+    const std::array<float, 4> state{std::clamp(progress, 0.0f, 1.0f), role, seed, 0.0f};
+    auto& chunk = m_importedSceneChunks[index];
+    if (chunk.draws.empty() || chunk.draws.front().lodTransition == state) return;
+    for (auto& draw : chunk.draws) draw.lodTransition = state;
+    for (auto& draw : m_importedMeshDraws) if (draw.ownerChunk == index) draw.lodTransition = state;
+    // Only invalidate cached cascades that can contain this tile's casters.
+    // Fading a far skyline strip must not redraw every nearby shadow each frame.
+    for (std::size_t cascade = 0; cascade < m_shadowRenderedValid.size(); ++cascade) {
+        if (!m_shadowRenderedValid[cascade]) continue;
+        if (chunk.pageRanges.empty() || std::any_of(chunk.pageRanges.begin(), chunk.pageRanges.end(),
+                [&](const auto& page) { return importedBoundsIntersectClip(page.boundsMin, page.boundsMax,
+                    m_shadowRenderedMatrices[cascade], 0.05f); })) m_shadowRenderedValid[cascade] = false;
+    }
+    m_interiorPointShadowAtlasValid = false;
 }
 
 void RendererBackend::rebuildImportedDrawTables() {
@@ -1151,6 +1216,7 @@ void RendererBackend::rebuildImportedDrawTables() {
             static_cast<std::uint32_t>(m_importedRigidAnimations.size());
         for (const ImportedMeshDraw& sourceDraw : chunk.draws) {
             ImportedMeshDraw draw = sourceDraw;
+            draw.ownerChunk = static_cast<std::size_t>(&chunk - m_importedSceneChunks.data());
             if (draw.rigidAnimationIndex != 0xffffffffu) {
                 draw.rigidAnimationIndex += animationBase;
             }
@@ -1240,7 +1306,7 @@ void RendererBackend::rebuildImportedWaterBuffers() {
     // The early-out is what keeps this affordable. Streaming across dry ground
     // -- which is most of the Mojave and most of Tamriel -- adds and evicts
     // cells constantly while the water set never changes, and the rebuild below
-    // stalls the device. Comparing the built vertices rather than the patch
+    // replaces GPU buffers. Comparing the built vertices rather than the patch
     // count catches a same-sized set at a different height too.
     if (waterVertices.size() == m_importedWaterVerticesResident.size() &&
         std::memcmp(
@@ -1249,22 +1315,13 @@ void RendererBackend::rebuildImportedWaterBuffers() {
         return;
     }
 
-    // Destroying a buffer the GPU may still be reading is the one real hazard
-    // here, and this takes the same way out the fog-map re-upload does: wait for
-    // idle first. Affordable only because of the early-out above -- crossing a
-    // shoreline is a handful of events in a session, not a per-cell cost.
-    if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle ||
-        m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
-        vkDeviceWaitIdle(m_device);
-        if (m_importedWaterVertexBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(m_importedWaterVertexBufferHandle);
-            m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
-        }
-        if (m_importedWaterIndexBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(m_importedWaterIndexBufferHandle);
-            m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
-        }
-    }
+    // Submitted frames retain the old water buffers until their graphics
+    // timeline value completes. Replacing a few water patches must not drain
+    // the entire GPU queue on every shoreline cell application.
+    scheduleBufferRelease(m_importedWaterVertexBufferHandle, m_lastGraphicsTimelineValue);
+    scheduleBufferRelease(m_importedWaterIndexBufferHandle, m_lastGraphicsTimelineValue);
+    m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
+    m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     m_importedWaterIndexCount = 0;
     m_importedWaterVerticesResident = waterVertices;
     if (waterVertices.empty() || waterIndices.empty()) {
@@ -1397,6 +1454,19 @@ bool RendererBackend::ensureImportedTextureSampler() {
         m_importedTextureSampler = VK_NULL_HANDLE;
         return false;
     }
+    for (std::uint32_t mode = 0; mode < 3; ++mode) {
+        samplerCreateInfo.addressModeU = (mode & 2u) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerCreateInfo.addressModeV = (mode & 1u) ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (vkCreateSampler(m_device, &samplerCreateInfo, nullptr, &m_importedClampSamplers[mode]) != VK_SUCCESS) {
+            for (auto& sampler : m_importedClampSamplers) {
+                if (sampler != VK_NULL_HANDLE) vkDestroySampler(m_device,sampler,nullptr);
+                sampler = VK_NULL_HANDLE;
+            }
+            vkDestroySampler(m_device,m_importedTextureSampler,nullptr);
+            m_importedTextureSampler = VK_NULL_HANDLE;
+            return false;
+        }
+    }
     setObjectName(
         VK_OBJECT_TYPE_SAMPLER,
         vkHandleToUint64(m_importedTextureSampler),
@@ -1487,19 +1557,30 @@ void RendererBackend::setWeatherCloudMesh(const WeatherCloudMesh& mesh) {
 }
 
 void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
-    // Release first, then acquire: the refcount makes re-acquiring a texture the
+    // Acquire before releasing: the refcount makes re-acquiring a texture the
     // previous weather also used a no-op rather than an upload, and doing it in
     // this order keeps the count from briefly dropping to zero and freeing the
     // image we are about to ask for again.
-    std::uint32_t previousSlots[kWeatherCloudLayerCount];
-    for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
-        previousSlots[layer] = m_weatherCloudSlots[layer];
-        m_weatherCloudSlots[layer] = kInvalidImportedTextureSlot;
-        m_weatherCloudLayers[layer] = clouds.layers[layer];
-        // The pixels are already in the bindless table (or about to be); the
-        // copy here is only the drawing parameters, so drop the payload rather
-        // than keeping a second copy of every cloud texture alive per frame.
-        m_weatherCloudLayers[layer].texture = odai::importer::ImportedSceneTexture{};
+    constexpr int count = kWeatherCloudLayerCount + kNightSkyTextureCount;
+    const auto slotAt = [&](int index) -> std::uint32_t& {
+        return index < kWeatherCloudLayerCount ? m_weatherCloudSlots[index]
+            : m_nightSkySlots[index - kWeatherCloudLayerCount];
+    };
+    const auto textureAt = [&](int index) -> const importer::ImportedSceneTexture& {
+        return index < kWeatherCloudLayerCount ? clouds.layers[index].texture
+            : clouds.nightSky[index - kWeatherCloudLayerCount];
+    };
+    std::uint32_t previousSlots[count];
+    for (int layer = 0; layer < count; ++layer) {
+        previousSlots[layer] = slotAt(layer);
+        slotAt(layer) = kInvalidImportedTextureSlot;
+        if (layer < kWeatherCloudLayerCount) {
+            m_weatherCloudLayers[layer] = clouds.layers[layer];
+            // The pixels are already in the bindless table (or about to be); the
+            // copy here is only the drawing parameters, so drop the payload rather
+            // than keeping a second copy of every cloud texture alive per frame.
+            m_weatherCloudLayers[layer].texture = odai::importer::ImportedSceneTexture{};
+        }
     }
 
     // Same gate acquireImportedTexture applies; checking it here avoids
@@ -1513,8 +1594,8 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     }
 
     bool anyLayer = false;
-    for (const auto& layer : clouds.layers) {
-        anyLayer = anyLayer || !layer.texture.rgba8.empty();
+    for (int layer = 0; layer < count; ++layer) {
+        anyLayer = anyLayer || !textureAt(layer).rgba8.empty();
     }
     if (!anyLayer) {
         for (const std::uint32_t slot : previousSlots) {
@@ -1555,13 +1636,13 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
     }
 
     std::vector<BufferHandle> stagingBufferHandles;
-    for (int layer = 0; layer < kWeatherCloudLayerCount; ++layer) {
-        const odai::importer::ImportedSceneTexture& texture = clouds.layers[layer].texture;
+    for (int layer = 0; layer < count; ++layer) {
+        const odai::importer::ImportedSceneTexture& texture = textureAt(layer);
         if (texture.rgba8.empty()) {
             continue;
         }
-        m_weatherCloudSlots[layer] = acquireImportedTexture(
-            normalizedImportedTextureKey(texture.sourcePath, texture.format), texture, commandBuffer,
+        slotAt(layer) = acquireImportedTexture(
+            normalizedImportedTextureKey(texture.sourcePath, texture.format, texture.linearData, texture.clampMode, texture.arrayLayers), texture, commandBuffer,
             stagingBufferHandles);
     }
 
@@ -1617,12 +1698,15 @@ std::uint32_t RendererBackend::acquireImportedTexture(
         return kInvalidImportedTextureSlot;
     }
 
+    if ((srcTexture.arrayLayers != 1 && srcTexture.arrayLayers != 6) ||
+        (srcTexture.arrayLayers == 6 && (importer::ddsCubeByteCount(srcTexture) == 0 ||
+            srcTexture.rgba8.size() != importer::ddsCubeByteCount(srcTexture)))) return kInvalidImportedTextureSlot;
     if (srcTexture.width == 0u || srcTexture.height == 0u || srcTexture.rgba8.empty()) {
         return kInvalidImportedTextureSlot;
     }
 
     const std::uint32_t inferredMipLevelCount =
-        inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size());
+        inferImportedTextureMipLevelCount(srcTexture.width, srcTexture.height, srcTexture.rgba8.size() / srcTexture.arrayLayers);
     std::uint32_t mipLevelCount = 0;
     if (srcTexture.format != odai::importer::TextureFormat::RGBA8 &&
         srcTexture.format != odai::importer::TextureFormat::RGBA8Srgb) {
@@ -1690,6 +1774,7 @@ std::uint32_t RendererBackend::acquireImportedTexture(
 
     VkImageCreateInfo imageCreateInfo{};
     imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCreateInfo.flags = srcTexture.arrayLayers == 6 ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
     imageCreateInfo.format = textureFormat;
     imageCreateInfo.extent = {srcTexture.width, srcTexture.height, 1};
@@ -1710,7 +1795,7 @@ std::uint32_t RendererBackend::acquireImportedTexture(
                                << " " << srcTexture.width << "x" << srcTexture.height << ")";
         }
     }
-    imageCreateInfo.arrayLayers = 1;
+    imageCreateInfo.arrayLayers = srcTexture.arrayLayers;
     imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -1718,6 +1803,8 @@ std::uint32_t RendererBackend::acquireImportedTexture(
     imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     ImportedTextureResource resource{};
+    resource.clampMode = srcTexture.clampMode;
+    resource.cube = srcTexture.arrayLayers == 6;
     VmaAllocationCreateInfo allocationCreateInfo{};
     allocationCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     allocationCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1733,13 +1820,13 @@ std::uint32_t RendererBackend::acquireImportedTexture(
     VkImageViewCreateInfo viewCreateInfo{};
     viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewCreateInfo.image = resource.image;
-    viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewCreateInfo.viewType = resource.cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
     viewCreateInfo.format = textureFormat;
     viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewCreateInfo.subresourceRange.baseMipLevel = 0;
     viewCreateInfo.subresourceRange.levelCount = mipLevelCount;
     viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-    viewCreateInfo.subresourceRange.layerCount = 1;
+    viewCreateInfo.subresourceRange.layerCount = srcTexture.arrayLayers;
     const VkResult imageViewResult = vkCreateImageView(m_device, &viewCreateInfo, nullptr, &resource.imageView);
     if (imageViewResult != VK_SUCCESS) {
         logVkFailure("vkCreateImageView(importedTexture)", imageViewResult);
@@ -1762,19 +1849,20 @@ std::uint32_t RendererBackend::acquireImportedTexture(
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, mipLevelCount);
+        VK_IMAGE_ASPECT_COLOR_BIT, 0, srcTexture.arrayLayers, 0, mipLevelCount);
 
     std::vector<VkBufferImageCopy> copyRegions;
     copyRegions.reserve(mipLevelCount);
+    for (std::uint32_t face = 0; face < srcTexture.arrayLayers; ++face)
     for (std::uint32_t mipLevel = 0; mipLevel < mipLevelCount; ++mipLevel) {
         VkBufferImageCopy copyRegion{};
-        copyRegion.bufferOffset = importedTextureMipOffsetFmt(
+        copyRegion.bufferOffset = face * (srcTexture.rgba8.size() / srcTexture.arrayLayers) + importedTextureMipOffsetFmt(
             srcTexture.width, srcTexture.height, mipLevel, srcTexture.format);
         copyRegion.bufferRowLength = 0;
         copyRegion.bufferImageHeight = 0;
         copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         copyRegion.imageSubresource.mipLevel = mipLevel;
-        copyRegion.imageSubresource.baseArrayLayer = 0;
+        copyRegion.imageSubresource.baseArrayLayer = face;
         copyRegion.imageSubresource.layerCount = 1;
         copyRegion.imageOffset = {0, 0, 0};
         copyRegion.imageExtent = {
@@ -1797,7 +1885,7 @@ std::uint32_t RendererBackend::acquireImportedTexture(
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, mipLevelCount);
+        VK_IMAGE_ASPECT_COLOR_BIT, 0, srcTexture.arrayLayers, 0, mipLevelCount);
 
     m_importedTextureResources[slotIndex] = resource;
     return static_cast<std::uint32_t>(kBindlessTextureStaticCount + slotIndex);
@@ -1815,9 +1903,12 @@ void RendererBackend::releaseImportedTexture(std::uint32_t slot) {
         return;  // still referenced by another resident cell
     }
     ImportedTextureResource& resource = m_importedTextureResources[slotIndex];
-    // Deferred: an in-flight frame may still be sampling this image.
+    // An empty/failed chunk may release its slots before the first frame uses
+    // them. Its asynchronous texture copy still owns the images in that case.
+    // Both submissions signal the render timeline; retire after both users.
     scheduleImageRelease(
-        resource.image, resource.allocation, resource.imageView, m_lastGraphicsTimelineValue);
+        resource.image, resource.allocation, resource.imageView,
+        std::max(m_lastGraphicsTimelineValue, m_pendingTransferTimelineValue));
     resource = ImportedTextureResource{};
 }
 
@@ -1965,7 +2056,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         for (std::size_t textureIndex = 0; textureIndex < uploadScene.textures.size(); ++textureIndex) {
             const odai::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
             const std::uint32_t slot = acquireImportedTexture(
-                normalizedImportedTextureKey(srcTexture.sourcePath, srcTexture.format),
+                normalizedImportedTextureKey(srcTexture.sourcePath, srcTexture.format, srcTexture.linearData, srcTexture.clampMode, srcTexture.arrayLayers),
                 srcTexture,
                 commandBuffer,
                 stagingBufferHandles);
@@ -2281,6 +2372,26 @@ bool RendererBackend::uploadImportedSceneInternal(
     // range of a pre-sized vector, so there is nothing to synchronize but
     // join().
     core::Stopwatch subTimer;
+    std::vector<std::uint32_t> lightingSlots(uploadScene.lightingMaterials.size(), 0xffffffffu);
+    struct LightingSlotGuard {
+        importer::ImportedMaterialSlots& pool;
+        std::vector<std::uint32_t>& slots;
+        bool committed = false;
+        ~LightingSlotGuard() { if (!committed) for (auto slot : slots) pool.release(slot); }
+    } lightingGuard{m_importedLightingSlots,lightingSlots};
+    for (std::size_t i = 0; i < uploadScene.lightingMaterials.size(); ++i) {
+        const auto& source = uploadScene.lightingMaterials[i];
+        if (!source.valid) continue;
+        const auto slot = m_importedLightingSlots.acquire();
+        if (slot == 0xffffffffu) { VOX_LOGE("render") << "NIF material residency exhausted"; return false; }
+        lightingSlots[i] = slot;
+        auto& gpu = m_importedMaterialTable[slot];
+        gpu = importer::makeImportedNifGpuMaterial(source, importedTextureSlots);
+        if (source.textures[4] < uploadScene.textures.size() && uploadScene.textures[source.textures[4]].arrayLayers == 6)
+            gpu.environment[1] = float(uploadScene.textures[source.textures[4]].mipLevelCount - 1);
+        else gpu.textures[2] = 0xffffffffu;
+    }
+    m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
     vertices.resize(uploadScene.packedVertices.size());
     std::vector<ImportedShadowVertex> shadowVertices(uploadScene.packedVertices.size());
     const float subResizeMs = subTimer.elapsedMs();
@@ -2318,6 +2429,24 @@ bool RendererBackend::uploadImportedSceneInternal(
                 dstVertex.packedLayerTexture23 = odai::importer::packImportedVertexLayerPair(
                     remappedLayers[2], remappedLayers[3]);
                 dstVertex.layerWeights = srcVertex.layerWeights;
+                if (v<uploadScene.packedTerrainNormals.size()) {
+                    std::uint32_t normals[6]={0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu};
+                    for (std::size_t layer=0;layer<5;++layer) {
+                        const auto index=uploadScene.packedTerrainNormals[v].textures[layer];
+                        if (index<importedTextureSlots.size()) normals[layer]=importedTextureSlots[index];
+                    }
+                    const auto& surface = uploadScene.packedTerrainNormals[v].surfaceProperties;
+                    dstVertex.terrainSurface01 = surface[0] | (std::uint32_t(surface[1]) << 16u);
+                    dstVertex.terrainSurface23 = surface[2] | (std::uint32_t(surface[3]) << 16u);
+                    dstVertex.terrainSurface45 = surface[4];
+                    dstVertex.packedTerrainNormal01=odai::importer::packImportedVertexLayerPair(normals[0],normals[1]);
+                    dstVertex.packedTerrainNormal23=odai::importer::packImportedVertexLayerPair(normals[2],normals[3]);
+                    dstVertex.packedTerrainNormal45=odai::importer::packImportedVertexLayerPair(normals[4],normals[5]);
+                }
+                if (v < uploadScene.packedLightingMaterialIndices.size()) {
+                    const auto material = uploadScene.packedLightingMaterialIndices[v];
+                    if (material < lightingSlots.size()) dstVertex.lightingMaterialIndex = lightingSlots[material];
+                }
                 vertices[v] = dstVertex;
                 // The compact shadow stream is derived in the same pass: it is
                 // a strict projection of the vertex just built, and deriving it
@@ -2332,6 +2461,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                 shadowVertex.textureIndex = dstVertex.textureIndex;
                 shadowVertex.flags = dstVertex.flags;
                 shadowVertex.layerWeights = dstVertex.layerWeights;
+                shadowVertex.lightingMaterialIndex = dstVertex.lightingMaterialIndex;
                 shadowVertices[v] = shadowVertex;
             }
         };
@@ -2423,6 +2553,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                                 std::uint32_t indexCount,
                                 bool terrainDraw,
                                 bool blendedDraw,
+                                odai::importer::ImportedBlendMode blendMode,
                                 bool twoSidedDraw,
                                 std::uint8_t alphaThreshold,
                                 std::uint32_t rigidAnimationIndex,
@@ -2443,6 +2574,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             // folded into one vkCmdDrawIndexed even when their index ranges abut.
             if (lastMergedDrawWasTerrain == terrainDraw &&
                 previous.blended == blendedDraw &&
+                previous.blendMode == blendMode &&
                 previous.twoSided == twoSidedDraw &&
                 previous.alphaThreshold == alphaThreshold &&
                 previous.rigidAnimationIndex == rigidAnimationIndex &&
@@ -2471,6 +2603,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         draw.firstIndex = firstIndex;
         draw.indexCount = indexCount;
         draw.blended = blendedDraw;
+        draw.blendMode = blendMode;
         draw.twoSided = twoSidedDraw;
         draw.alphaThreshold = alphaThreshold;
         draw.rigidAnimationIndex = rigidAnimationIndex;
@@ -2604,6 +2737,7 @@ bool RendererBackend::uploadImportedSceneInternal(
             srcDraw.indexCount,
             drawIndex < sourceTerrainDrawCount,
             blendedDraw,
+            srcDraw.blendMode(),
             packedDrawIsTwoSided(srcDraw),
             srcDraw.alphaThreshold,
             srcDraw.rigidAnimationIndex,
@@ -2887,9 +3021,26 @@ bool RendererBackend::uploadImportedSceneInternal(
     // Ownership of every acquired slot passes to the chunk here; from this point
     // removeImportedSceneChunk is what releases them.
     chunk.textureSlots = importedTextureSlots;
+    chunk.lightingMaterialSlots = lightingSlots;
+    for(std::size_t i=0;i<lightingSlots.size();++i) {
+        const auto slot=lightingSlots[i];
+        if(slot==0xffffffffu || uploadScene.lightingMaterials[i].animations.empty()) continue;
+        AnimatedMaterialInstance instance;
+        instance.source=uploadScene.lightingMaterials[i];
+        instance.base=m_importedMaterialTable[slot];
+
+        for(auto& track:instance.source.animations) for(auto& texture:track.textures)
+            texture=texture<importedTextureSlots.size()?importedTextureSlots[texture]:0xffffffffu;
+        VOX_LOGI("render") << "material animation resident slot=" << slot
+            << " tracks=" << instance.source.animations.size();
+        m_animatedMaterials.insert_or_assign(slot,std::move(instance));
+    }
+    lightingGuard.committed = true;
     textureSlotGuard.commit();
     chunk.lights = std::move(chunkLights);
     chunk.particleEmitters = uploadScene.particleEmitters;
+    for(auto& emitter:chunk.particleEmitters) if(emitter.effect==odai::importer::ImportedParticleEffect::Mist)
+        emitter.textureIndex=emitter.textureIndex<importedTextureSlots.size()?importedTextureSlots[emitter.textureIndex]:kInvalidImportedTextureSlot;
     chunk.rigidAnimations = uploadScene.rigidAnimations;
     chunk.waterPatches = uploadScene.waterPatches;
     for (odai::importer::ImportedSceneWaterPatch& patch : chunk.waterPatches) {
@@ -2913,6 +3064,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         draw.vertexOffset = static_cast<std::int32_t>(firstVertex);
         chunk.draws.push_back(draw);
     }
+    chunk.readyTimelineValue = m_pendingTransferTimelineValue;
     chunk.pageRanges = std::move(pageDrawRanges);
     // Reuse a slot an evicted chunk left behind, or append if there is none.
     // Indices stay valid for the lifetime of a live chunk either way -- a caller
@@ -3185,6 +3337,7 @@ bool RendererBackend::uploadImportedSceneInternal(
                                << ")";
         }
     }
+    const core::Stopwatch rtPreparationTimer;
     // Gate on rayTracingRuntimeReady() (extensions loaded + function pointers resolved),
     // not just rayTracingCoreReady() (hardware/driver merely supports the extensions).
     // rebuildRayTracingScene() -- the only consumer of RtImportedSceneRecord::geometry --
@@ -3230,6 +3383,9 @@ bool RendererBackend::uploadImportedSceneInternal(
         }
     } else {
         refreshShadowStats();
+    }
+    if (logChunkTiming) {
+        VOX_LOGI("render") << "chunk RT preparation ms=" << rtPreparationTimer.elapsedMs();
     }
     return true;
 }

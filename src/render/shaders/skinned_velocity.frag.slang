@@ -1,6 +1,6 @@
 // Writes the per-pixel motion vector for a skinned actor.
 //
-// Output is float4(motionNdcXY, 1, 0). The .z = 1 is a VALIDITY FLAG, and it is
+// Output is float4(motionNdcXY, 1, previousNdcDepth). The .z = 1 is a VALIDITY FLAG, and it is
 // what makes a partial velocity buffer usable: the target is cleared to zero, so
 // a consumer reads .z to distinguish "this pixel has a real dynamic motion
 // vector" from "nothing wrote here, fall back to reprojecting depth through
@@ -44,5 +44,5 @@ float4 main(FragmentInput input) : SV_Target0
     // Points BACKWARD, from where the surface is now to where it was: that is
     // what a history lookup needs, and it is the convention taa.comp.slang
     // already uses for its depth-derived reprojection.
-    return float4(previousNdc - currentNdc, 1.0, 0.0);
+    return float4(previousNdc - currentNdc, 1.0, input.previousClip.z / previousW);
 }

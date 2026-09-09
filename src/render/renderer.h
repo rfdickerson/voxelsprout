@@ -61,6 +61,8 @@ public:
     // Capture-only readiness fence. Waits on the upload timeline values already
     // signalled by chunk staging; it never drains unrelated device work.
     bool waitForImportedSceneUploads();
+    bool isImportedSceneChunkReady(std::size_t chunkIndex) const;
+    void setImportedSceneChunkLodTransition(std::size_t chunkIndex, float progress, float role, float seed);
     [[nodiscard]] std::size_t liveImportedSceneChunkCount() const;
     [[nodiscard]] std::size_t importedLocalLightCount() const;
 
@@ -123,6 +125,7 @@ public:
     // Set the whole post grade at once. setNeutralColorGrading() is exactly
     // setColorGrading(ColorGradingSettings{}).
     void setColorGrading(const ColorGradingSettings& settings);
+    void setImageSpace(const ImageSpacePostSettings& settings);
     [[nodiscard]] bool isAutoExposureEnabled() const;
     // Replaces the shaded frame with a single visualization of what the main
     // pass shaded with -- see DebugView. Off by default and free when off: the
@@ -141,11 +144,9 @@ public:
     // pipeline. 4 is the default. On a fill-rate-bound device this is the
     // cheapest large reduction in main-pass cost available.
     void setMsaaSamples(std::uint32_t samples);
-    // Writes the last presented frame to a binary PPM (convert with e.g.
-    // `ffmpeg -i shot.ppm shot.png`). Diagnostic, not a feature: it stalls the
-    // device, so call it once rather than per frame. false if nothing has been
-    // presented yet. See frame_capture.cc for why this lives in the engine
-    // instead of relying on an external screenshot tool.
+    // Request capture before rendering the frame, then consume the readback below.
+    bool prepareFrameCapture();
+    // Write the requested frame to binary PPM after rendering completes.
     bool captureFrameToFile(const std::string& outputPath);
     // The same readback as tightly packed RGB, for streaming a sequence into an
     // encoder rather than to disk (see render/video_writer.h). Unlike the file

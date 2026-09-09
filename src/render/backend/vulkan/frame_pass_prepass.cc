@@ -248,6 +248,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
                         pushAlphaThreshold(batch.alphaThreshold);
                         pushRigidAnimation(0xffffffffu);
+                        pushImportedLodTransition(commandBuffer, batch.lodTransition);
                         countDrawCalls(m_debugDrawCallsPrepass, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, terrainIndirectBuffer,
@@ -294,6 +295,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     }
                     pushAlphaThreshold(batch.alphaThreshold);
                     pushRigidAnimation(0xffffffffu);
+                    pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
@@ -315,6 +317,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     }
                     pushAlphaThreshold(draw.alphaThreshold);
                     pushRigidAnimation(draw.rigidAnimationIndex);
+                    pushImportedLodTransition(commandBuffer, draw.lodTransition);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
@@ -339,6 +342,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     }
                     pushAlphaThreshold(importedDraw.alphaThreshold);
                     pushRigidAnimation(importedDraw.rigidAnimationIndex);
+                    pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,

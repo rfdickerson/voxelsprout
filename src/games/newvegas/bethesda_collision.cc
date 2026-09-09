@@ -176,6 +176,12 @@ void CollisionWorld::addCell(
             continue;
         }
         const importer::ImportedSceneMesh& mesh = scene.meshes[instance.meshIndex];
+        if (!mesh.parts.empty() && std::all_of(mesh.parts.begin(), mesh.parts.end(),
+                [](const auto& part) {
+                    return (part.vegetationReserved[0] & importer::kImportedSceneMeshPartGrass) != 0;
+                })) {
+            continue;
+        }
         if (mesh.name == "terrain" || mesh.vertices.empty() || mesh.indices.size() < 3u) {
             continue;  // terrain is a height field, not a triangle soup
         }

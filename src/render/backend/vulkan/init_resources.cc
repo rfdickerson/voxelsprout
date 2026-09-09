@@ -2602,6 +2602,13 @@ bool RendererBackend::createDiffuseTextureResources() {
 
 
 bool RendererBackend::createShadowResources() {
+    // Keep the nearest map sharp; performance profiles can reduce farther
+    // tiles without changing shadow distance or the atlas allocation.
+    if (const char* value = std::getenv("ODAI_SHADOW_FAR_RESOLUTION")) {
+        const int requested = std::atoi(value);
+        const uint32_t size = requested <= 512 ? 512u : (requested <= 1024 ? 1024u : 2048u);
+        for (uint32_t i = 1; i < 4; ++i) m_directionalShadowResolution[i] = size;
+    }
     if (
         m_shadowDepthImage != VK_NULL_HANDLE &&
         m_shadowDepthImageView != VK_NULL_HANDLE &&

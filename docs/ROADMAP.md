@@ -9,6 +9,17 @@
 
 ## Rendering
 
+The current Skyrim visual work is tracked in the
+[Skyrim visual parity roadmap](SKYRIM_VISUAL_ROADMAP.md), updated 2026-09-08.
+Coverage reporting, standard lighting/terrain materials, supported cubemaps,
+image-space records, grass placement and the mill-mist fixture are implemented
+within their documented subsets. Native HiDPI presentation and Skyrim lighting
+startup order are corrected. Next priorities are animated waterfall/creek
+materials, broader authored particles and world-space precipitation. Retail
+matching, runtime-consumption instrumentation and the final validation matrix
+remain open.
+
+
 - Preserve explicit Vulkan pass/barrier control.
 - Improve terrain tessellation, water/fire, authored skies and clouds, local lights,
   GPU skinning, velocity/TAA, AO/XeGTAO, SSGI, contact shadows, post-processing,

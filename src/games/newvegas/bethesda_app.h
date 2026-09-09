@@ -1,4 +1,10 @@
 #pragma once
+#include "import/fnv/image_space_records.h"
+
+#include "import/fnv/nif_scene.h"
+#include "import/fnv/skyrim_lod_handoff.h"
+#include <atomic>
+#include <future>
 
 #include "games/newvegas/bethesda_actors.h"
 #include "audio/wav_writer.h"
@@ -66,6 +72,7 @@ int loadTourFile(const std::string& path);
 
 class BethesdaApp : public engine::GameApp {
 public:
+    ~BethesdaApp() override;
     // Normal exploration FOV, and the narrowed one a conversation eases to.
     // 75 -> 55 is a 1.36x magnification: enough that Victor reads as the
     // subject of the shot, gentle enough not to feel like a cutscene.
@@ -402,7 +409,8 @@ protected:
     // Skyrim stores generated distant buildings in four-cell .bto tiles.
     // Keep a small window around the camera so child-worldspace cities (most
     // visibly Whiterun) retain their authored skyline from the parent world.
-    void updateSkyrimObjectLod(const float bethesdaPosition[3]);
+    void updateSkyrimObjectLod(const float bethesdaPosition[3], const float velocity[3], float deltaSeconds);
+    void clearSkyrimObjectLodTiles();
     // Skyrim's near trees are NIFs; distant forest coverage is a separate BTT
     // atlas set. Keep the latter outside detailed cell residency.
     void updateSkyrimTreeLod(const float bethesdaPosition[3]);
@@ -419,6 +427,12 @@ private:
     // Reads WTHR/CLMT across the load order and picks the active weather. No-op
     // unless a plugin beyond the base game is loaded or a weather was named.
     void initWeather();
+    void applyImageSpace(float deltaSeconds);
+    importer::fnv::ImageSpaceTables m_imageSpaceTables;
+    struct ActiveImageSpaceModifier { std::uint32_t formId; float elapsed; float strength; };
+    std::vector<ActiveImageSpaceModifier> m_imageSpaceModifiers;
+    importer::fnv::ImageSpaceCrossFade m_imageSpaceCrossFade;
+
     // Pushes the active weather's colours for the current hour at the renderer.
     // Called from applyTimeOfDay, so moving time also moves the sky.
     void applyWeather();
@@ -440,6 +454,32 @@ private:
     std::int32_t m_skyrimObjectLodTileZ = 0;
     bool m_skyrimObjectLodTileValid = false;
     std::string m_skyrimObjectLodWorldspace;
+    struct ObjectLodRequest {
+        importer::fnv::SkyrimLodHandoff handoff;
+        bool near = false, child = false, showcase = false, fixed = false;
+        bool operator==(const ObjectLodRequest&) const = default;
+    };
+    struct PreparedObjectLod {
+        importer::ImportedScene scene;
+        ObjectLodRequest request;
+        std::string sourceWorldspace;
+        std::string error;
+        bool built = false;
+    };
+    struct ObjectLodTile {
+        ObjectLodRequest wanted;
+        std::optional<ObjectLodRequest> published;
+        std::future<std::shared_ptr<PreparedObjectLod>> pending;
+        std::shared_ptr<PreparedObjectLod> ready;
+        std::size_t chunk = static_cast<std::size_t>(-1);
+        bool visible = false;
+        std::size_t outgoingChunk = static_cast<std::size_t>(-1);
+        float fadeSeconds = 0.0f;
+        bool transitioning = false;
+    };
+    std::unordered_map<importer::CellCoord, ObjectLodTile, importer::CellCoordHash> m_objectLodTiles;
+    std::string m_objectLodGeneration;
+    std::shared_ptr<std::atomic<unsigned>> m_objectLodJobs = std::make_shared<std::atomic<unsigned>>(0);
     std::size_t m_skyrimTreeLodChunk = static_cast<std::size_t>(-1);
     std::int32_t m_skyrimTreeLodCellX = 0;
     std::int32_t m_skyrimTreeLodCellZ = 0;
@@ -469,6 +509,12 @@ private:
     // about simply stops working.
     void pollNavInput(float deltaSeconds);
     void updateGiftMenu();
+    void updatePlayerInventory();
+    bool settleScenarioSpawn();
+    bool m_scenarioSpawnPending = false;
+    odai::math::Vector3 m_scenarioSpawnFeet{};
+    importer::CellCoord m_scenarioSpawnCell{};
+    std::string inventoryItemName(const bethesda::RecordKey& item);
     // Checks the regions covering the camera and toasts any not seen before.
     void updateRegionDiscovery();
     void saveTraversalState(bool force);
@@ -481,6 +527,13 @@ private:
     // acts on app state directly.
     void drawPauseMenu();
     void drawGiftMenu();
+    void ensureSkyrimUiFont();
+    void drawSkyrimQuestLog();
+    void drawSkyrimMap();
+    void drawSkyrimInventory();
+    ui::UiTextureId inventoryPreviewTexture(const std::string& path, bool alpha);
+    void drawInventoryPreview(const bethesda::RecordKey& item, const ui::UiRect& bounds);
+    std::vector<std::size_t> visibleInventoryItems() const;
     void updateTes3JournalInput();
     void syncTes3JournalPanel();
     void drawTes3Journal();
@@ -963,6 +1016,48 @@ private:
     std::int32_t m_tes3StartQuestIndex = 0;
     std::string m_tes3PinnedQuest;
     std::size_t m_tes3JournalSyncedVisits = 0u;
+    bool m_playerInventoryOpen = false; // Shared gameplay pause for inventory and quest journal.
+    bool m_skyrimMapOpen = false;
+    bool m_mapKeyLatch = false;
+    bool m_mapSelectLatch = false;
+    bool m_mapUsingMouse = false;
+    double m_mapMouseX = 0, m_mapMouseY = 0;
+    float m_mapCenterX = 0, m_mapCenterY = 0, m_mapSpan = 300000;
+    float m_mapPlayerX = 0, m_mapPlayerY = 0;
+    bool m_mapPlayerKnown = false;
+    bool m_mapDestinationSet = false;
+    float m_mapDestinationX = 0, m_mapDestinationY = 0;
+    double m_mapLastTime = 0;
+    importer::fnv::CellStreamer::WorldMapTerrain m_mapTerrain;
+    ui::UiTextureId m_mapTexture = ui::kUiNoTexture;
+    std::string m_mapError;
+    bool m_skyrimQuestLogOpen = false;
+    bool m_questLogKeyLatch = false;
+    bool m_questLogCompleted = false;
+    int m_questLogChoice = 0;
+    int m_questLogScroll = 0;
+    bethesda::ObjectId m_inventorySource;
+    bethesda::RecordKey m_inventoryBook;
+    int m_inventoryBookScroll = 0;
+    ui::Font m_skyrimInventoryFont;
+    bool m_skyrimInventoryFontAttempted = false;
+    bethesda::RecordKey m_previewItem;
+    importer::fnv::NifModel m_previewModel;
+    std::array<float, 3> m_previewCenter{};
+    float m_previewRadius = 1.0f;
+    int m_previewLongAxis = 2;
+    float m_previewYaw = 0.0f;
+    float m_previewPitch = 0.24f;
+    double m_previewLastTime = 0.0;
+    double m_previewMouseX = 0.0, m_previewMouseY = 0.0;
+    bool m_previewDragging = false;
+    std::string m_previewError;
+    double m_previewStartTime = 0;
+    std::map<std::string, ui::UiTextureId> m_previewTextures;
+    int m_inventoryCategory = 0;
+    bool m_inventoryCategoryFocus = false;
+    bool m_inventoryTakeAllLatch = false;
+    bool m_playerInventoryKeyLatch = false;
     int m_giftMenuChoice = 0;
     std::uint64_t m_presentedGiftMenuSequence = 0u;
     // Weather picker, a sub-page of the pause menu. Choices are remapped
@@ -1016,12 +1111,19 @@ private:
     // using the older height field built from the whole scene.
     CollisionWorld m_collision;
     ActorNavigationWorld m_actorNavigation;
-    struct BethesdaCollisionMesh {
+    struct BethesdaCollisionMesh : importer::fnv::CellStreamer::PreparedCellData {
         std::vector<odai::math::Vector3> vertices;
         std::vector<std::uint32_t> indices;
         // One entry per triangle, parallel to indices in groups of three.
         std::vector<std::uint32_t> triangleSourceReferenceFormIds;
+        bethesda::PreparedStaticCollision prepared;
+        bool awaitingPublication = false;
+        std::unordered_set<std::uint32_t> preparedDisabledReferences;
     };
+    static BethesdaCollisionMesh buildBethesdaCollisionMesh(const importer::ImportedScene& scene);
+    static std::shared_ptr<importer::fnv::CellStreamer::PreparedCellData>
+        prepareBethesdaCollision(const importer::ImportedScene& scene, std::string& error);
+
     std::unordered_map<importer::CellCoord, BethesdaCollisionMesh,
         importer::CellCoordHash> m_bethesdaCollisionByCell;
     std::unordered_set<importer::CellCoord, importer::CellCoordHash>

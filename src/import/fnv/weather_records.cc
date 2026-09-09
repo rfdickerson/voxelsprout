@@ -241,6 +241,64 @@ std::int32_t readI32(const std::uint8_t* bytes) {
 
 }  // namespace
 
+bool parseWeatherPrecipitation(const EsmRecordView& record, WeatherPrecipitationRecord& out,
+                               std::string& error) {
+    out = {}; out.formId = record.formId; error.clear();
+    bool data = false;
+    for (const auto& sub : record.subrecords) {
+        if (sub.type == "EDID") out.editorId = readZeroTerminated(sub);
+        else if (sub.type == "ICON") out.texture = readZeroTerminated(sub);
+        else if (sub.type == "DATA") {
+            if (sub.size != 40 && sub.size != 44 && sub.size != 48) {
+                error = "SPGD DATA must contain 40, 44 or 48 bytes"; return false;
+            }
+            float* values[] = {&out.gravityVelocity, &out.rotationVelocity, &out.sizeX,
+                &out.sizeY, &out.centerMin, &out.centerMax, &out.rotationRange};
+            for (int i = 0; i < 7; ++i) {
+                *values[i] = readFloat(sub.data + i * 4);
+                if (!std::isfinite(*values[i])) { error = "nonfinite SPGD value"; return false; }
+            }
+            out.subtexturesX = readU32(sub.data + 28);
+            out.subtexturesY = readU32(sub.data + 32);
+            out.type = readU32(sub.data + 36);
+            if (sub.size >= 44) out.boxSize = readU32(sub.data + 40);
+            if (sub.size >= 48) out.density = readFloat(sub.data + 44);
+            if (!std::isfinite(out.density) || out.density < 0 || out.sizeX < 0 ||
+                out.sizeY < 0) {
+                error = "invalid SPGD geometry/density"; return false;
+            }
+            data = true;
+        }
+    }
+    if (!data) error = "missing SPGD DATA";
+    return data;
+}
+
+float weatherRainIntensity(const FalloutWeatherTables& tables,
+                           const FalloutWeatherRecord& weather, bool skyrim) {
+    if (skyrim) {
+        const auto it = tables.precipitation.find(weather.precipitationFormId);
+        if (it == tables.precipitation.end() || it->second.type != 0) return 0;
+        // Convert authored density to bounded coverage without collapsing normal
+        // rain (density 1) and storm rain (density 2) to the same strength.
+        return -std::expm1(-it->second.density);
+    }
+    if (!(weather.classification & 4u)) return 0;
+    const auto name = toLowerAsciiCopy(weather.editorId);
+    return name.find("heavy") != std::string::npos || name.find("storm") != std::string::npos ||
+        name.find("overcast") != std::string::npos ? 1.0f : 0.68f;
+}
+
+float sampleWeatherFogFar(const FalloutWeatherRecord& w, float hour, float dawn, float dusk) {
+    if (!std::isfinite(hour) || !std::isfinite(dawn) || !std::isfinite(dusk) || dusk <= dawn)
+        return w.fogDayFar;
+    hour = std::fmod(std::fmod(hour, 24.0f) + 24.0f, 24.0f);
+    // Dawn/dusk are midpoints of the transition, consistent with sky slots.
+    const float day = std::clamp((hour - dawn + 1.0f) * 0.5f, 0.0f, 1.0f) *
+                      (1.0f - std::clamp((hour - dusk + 1.0f) * 0.5f, 0.0f, 1.0f));
+    return std::lerp(w.fogNightFar, w.fogDayFar, day);
+}
+
 const FalloutWeatherRecord* FalloutWeatherTables::findWeather(std::uint32_t formId) const {
     const auto found = weathers.find(formId);
     return found == weathers.end() ? nullptr : &found->second;
@@ -269,7 +327,7 @@ bool buildFalloutWeatherTables(
         }
 
         EsmReader::Visitor visitor;
-        // Only the three top-level groups matter. Refusing every nested group
+        // Only weather, climate, world and precipitation groups matter. Refusing nested groups
         // is what keeps this cheap: nearly all of FalloutNV.esm lives under
         // world-children groups, and a WRLD record's climate is on the record
         // itself, not among its cells.
@@ -278,14 +336,43 @@ bool buildFalloutWeatherTables(
                 return false;
             }
             return group.rawLabel == "WTHR" || group.rawLabel == "CLMT" ||
-                group.rawLabel == "WRLD";
+                group.rawLabel == "WRLD" || group.rawLabel == "SPGD" || group.rawLabel == "GMST";
         };
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
-            return header.type == "WTHR" || header.type == "CLMT" || header.type == "WRLD";
+            return header.type == "WTHR" || header.type == "CLMT" || header.type == "WRLD" || header.type == "SPGD" || header.type == "GMST";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
             const std::uint32_t formId = order.remapFormId(pluginIndex, record.formId);
 
+            if (record.type == "GMST") {
+                std::string name;
+                const EsmSubrecordView* data = nullptr;
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "EDID") name = toLowerAsciiCopy(readZeroTerminated(sub));
+                    if (sub.type == "DATA") data = &sub;
+                }
+                const int index = name == "imassersize" ? 0 : name == "isecundasize" ? 1 : -1;
+                if (index >= 0) {
+                    outTables.moonSizes[index] = index == 0 ? 90.0f : 40.0f;
+                    if ((record.flags & 0x20u) == 0 && data) {
+                        const auto size = data->size == 4 ? readU32(data->data) : 0u;
+                        if (size > 0 && size <= 1000) outTables.moonSizes[index] = float(size);
+                        else outTables.presentationDiagnostics.push_back(name + ": malformed moon size");
+                    }
+                }
+                return;
+            }
+            if (record.type == "SPGD") {
+                outTables.precipitation.erase(formId);
+                if ((record.flags & 0x20u) != 0) return;
+                WeatherPrecipitationRecord precipitation;
+                std::string error;
+                if (parseWeatherPrecipitation(record, precipitation, error)) {
+                    precipitation.formId = formId;
+                    outTables.precipitation[formId] = std::move(precipitation);
+                } else outTables.presentationDiagnostics.push_back(std::to_string(formId) + ": " + error);
+                return;
+            }
             if (record.type == "WTHR") {
                 FalloutWeatherRecord weather;
                 weather.formId = formId;
@@ -295,7 +382,14 @@ bool buildFalloutWeatherTables(
                 // and QNAM all arrive AFTER the texture names they describe.
                 CloudLayerScratch clouds;
                 for (const EsmSubrecordView& sub : record.subrecords) {
-                    if (sub.type == "EDID") {
+                    if ((sub.type == "MNAM" || sub.type == "NNAM" || sub.type == "TNAM") && sub.size == 4) {
+                        const auto raw = readU32(sub.data);
+                        const auto ref = raw ? order.remapFormId(pluginIndex, raw) : 0;
+                        if (sub.type == "MNAM") weather.precipitationFormId = ref;
+                        else if (sub.type == "NNAM") weather.visualEffectFormId = ref;
+                        else if (ref) weather.skyStatics.push_back(ref);
+                    } else if (sub.type == "MODL") weather.auroraModel = readZeroTerminated(sub);
+                    else if (sub.type == "EDID") {
                         weather.editorId = readZeroTerminated(sub);
                     } else if (sub.type == "DNAM") {
                         clouds.textures[0] = readZeroTerminated(sub);
@@ -386,6 +480,10 @@ bool buildFalloutWeatherTables(
                         // because the no-weather fallback is 160000 and
                         // Oblivion's own Clear authors 170000, so the default
                         // sky looked right and only --weather was broken.
+                        if (sub.size >= 32) {
+                            weather.fogDayMax = readFloat(sub.data + 24);
+                            weather.fogNightMax = readFloat(sub.data + 28);
+                        }
                         weather.fogDayNear = readFloat(sub.data);
                         weather.fogDayFar = readFloat(sub.data + 4);
                         weather.fogNightNear = readFloat(sub.data + 8);
@@ -402,6 +500,12 @@ bool buildFalloutWeatherTables(
                         weather.sunGlare = sub.data[4];
                         weather.sunDamage = sub.data[5];
                         weather.classification = sub.data[11];
+                        weather.precipitationBegin = sub.data[6];
+                        weather.precipitationEnd = sub.data[7];
+                        if (sub.size >= 19) {
+                            weather.windDirection = sub.data[17];
+                            weather.windDirectionRange = sub.data[18];
+                        }
                     }
                 }
                 // OBLIVION HAS NO PNAM. Its cloud tints live in the two NAM0

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "import/fnv/world_map_cache.h"
+
 // Streams Fallout exterior cells in and out around the player.
 //
 // Wires together the pieces built for it:
@@ -271,6 +273,17 @@ public:
         m_onCellEvicted = std::move(onEvicted);
     }
 
+    struct PreparedCellData { virtual ~PreparedCellData() = default; };
+    using CellPreparation = std::function<std::shared_ptr<PreparedCellData>(
+        const ImportedScene&, std::string&)>;
+    using PreparedCellCallback = std::function<void(const CellCoord&, std::shared_ptr<PreparedCellData>)>;
+    // Preparation runs on the existing cell workers, before a result can be
+    // published. The worker callback must own its inputs, not access live state.
+    void setCellPreparation(CellPreparation prepare, PreparedCellCallback publish) {
+        m_prepareCell = std::move(prepare);
+        m_publishPreparedCell = std::move(publish);
+    }
+
     // A presentation may adjust transient scene visibility after cache load
     // and before upload. The callback never participates in cache writes, so
     // it cannot change the cooked/streamed scene format or contaminate another
@@ -305,6 +318,16 @@ public:
     //
     // Extracts the centre cell's records synchronously (~0.5 ms) to read its
     // terrain heights. Returns false when no cells are available.
+    struct WorldMapTerrain : WorldMapRaster {
+        std::chrono::steady_clock::time_point started;
+        std::size_t cursor = 0;
+        std::vector<CellCoord> cells;
+        bool complete = false;
+    };
+    // Bounded batches read LAND through the resolved load order without streaming
+    // scene geometry or changing gameplay residency. Raster rows run north to south.
+    bool advanceWorldMapTerrain(WorldMapTerrain& terrain, std::string& error) const;
+
     bool suggestedSpawnEngineSpace(float outPosition[3]) const;
 
     // True when no cell build is in flight and none is waiting to be applied.
@@ -527,6 +550,8 @@ private:
     // Grid coordinate -> the renderer chunk index holding it.
     std::unordered_map<CellCoord, std::size_t, CellCoordHash> m_residentChunks;
     std::shared_ptr<Pending> m_pending;
+    CellPreparation m_prepareCell;
+    PreparedCellCallback m_publishPreparedCell;
     CellResidentCallback m_onCellResident;
     ScenePresentationOverride m_scenePresentationOverride;
     CellEvictedCallback m_onCellEvicted;

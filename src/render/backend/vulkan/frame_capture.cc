@@ -1,4 +1,4 @@
-// Frame capture: copy the last presented swapchain image to a file.
+// Frame capture: copy the acquired image before presentation, then read it on the CPU.
 //
 // This exists because there was no way to see what the renderer actually drew
 // without a human looking at a monitor. On a Wayland desktop an external
@@ -16,6 +16,7 @@
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
+#include <GLFW/glfw3.h>
 
 #include <cstdio>
 #include <cstring>
@@ -23,6 +24,8 @@
 #include <vector>
 
 namespace odai::render {
+
+#include "render/renderer_shared.h"
 
 namespace {
 
@@ -56,19 +59,16 @@ void RendererBackend::destroyFrameCaptureResources() {
     if (m_device == VK_NULL_HANDLE) {
         return;
     }
-    if (m_captureCommandPool != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(m_device, m_captureCommandPool, nullptr);
-        m_captureCommandPool = VK_NULL_HANDLE;
-        m_captureCommandBuffer = VK_NULL_HANDLE;
+    if (m_captureBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(m_device, m_captureBuffer, nullptr);
+        m_captureBuffer = VK_NULL_HANDLE;
     }
     if (m_captureMemory != VK_NULL_HANDLE) {
         vkFreeMemory(m_device, m_captureMemory, nullptr);
         m_captureMemory = VK_NULL_HANDLE;
     }
-    if (m_captureBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(m_device, m_captureBuffer, nullptr);
-        m_captureBuffer = VK_NULL_HANDLE;
-    }
+    m_captureRequested = false;
+    m_captureRecorded = false;
     m_captureBufferBytes = 0;
 }
 
@@ -96,36 +96,20 @@ bool RendererBackend::captureLastFrameToFile(const std::string& outputPath) {
     return wrote;
 }
 
-bool RendererBackend::captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
-                                          std::uint32_t& outWidth,
-                                          std::uint32_t& outHeight) {
-    if (m_device == VK_NULL_HANDLE || m_swapchainImages.empty()) {
-        VOX_LOGE("render") << "frame capture: renderer not initialized";
+bool RendererBackend::prepareFrameCapture() {
+    m_captureRecorded = false;
+    m_captureRequested = false;
+    if (m_device == VK_NULL_HANDLE || !m_captureSupported || m_swapchainImages.empty()) {
         return false;
     }
-    if (m_lastPresentedImageIndex >= m_swapchainImages.size()) {
-        VOX_LOGE("render") << "frame capture: no frame has been presented yet";
-        return false;
-    }
-    int redByte = 0;
-    int greenByte = 0;
-    int blueByte = 0;
-    if (!channelOrderForFormat(m_swapchainFormat, redByte, greenByte, blueByte)) {
-        VOX_LOGE("render") << "frame capture: unsupported swapchain format "
-                           << static_cast<int>(m_swapchainFormat);
-        return false;
-    }
-
-    const VkImage sourceImage = m_swapchainImages[m_lastPresentedImageIndex];
-    const uint32_t width = m_swapchainExtent.width;
-    const uint32_t height = m_swapchainExtent.height;
-    const VkDeviceSize imageBytes = static_cast<VkDeviceSize>(width) * height * 4u;
-
+    const VkDeviceSize imageBytes = static_cast<VkDeviceSize>(m_swapchainExtent.width) *
+        m_swapchainExtent.height * 4u;
     // Build the readback resources once and keep them. A video capture calls
     // this every frame, and creating a buffer, an allocation and a command pool
     // per call -- plus a full-device wait -- dominated the frame time by more
     // than an order of magnitude over the render itself.
     if (m_captureBufferBytes != imageBytes) {
+        vkQueueWaitIdle(m_graphicsQueue);
         destroyFrameCaptureResources();
 
         VkBufferCreateInfo bufferCreateInfo{};
@@ -181,120 +165,72 @@ bool RendererBackend::captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
             return false;
         }
 
-        VkCommandPoolCreateInfo poolCreateInfo{};
-        poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        poolCreateInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
-        bool built =
-            vkCreateCommandPool(m_device, &poolCreateInfo, nullptr, &m_captureCommandPool) ==
-            VK_SUCCESS;
-        if (built) {
-            VkCommandBufferAllocateInfo commandAllocateInfo{};
-            commandAllocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            commandAllocateInfo.commandPool = m_captureCommandPool;
-            commandAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            commandAllocateInfo.commandBufferCount = 1;
-            built = vkAllocateCommandBuffers(m_device, &commandAllocateInfo,
-                                             &m_captureCommandBuffer) == VK_SUCCESS;
-        }
-        if (!built) {
-            VOX_LOGE("render") << "frame capture: command buffer setup failed";
-            destroyFrameCaptureResources();
-            return false;
-        }
         m_captureBufferBytes = imageBytes;
     }
+    m_captureRequested = true;
+    return true;
+}
 
-    VkBuffer readbackBuffer = m_captureBuffer;
-    VkDeviceMemory readbackMemory = m_captureMemory;
-    VkCommandBuffer commandBuffer = m_captureCommandBuffer;
+void RendererBackend::recordFrameCapture(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+    if (!m_captureRequested || m_captureBuffer == VK_NULL_HANDLE ||
+        m_captureBufferBytes != static_cast<VkDeviceSize>(m_swapchainExtent.width) *
+            m_swapchainExtent.height * 4u) {
+        return;
+    }
+    m_captureRequested = false;
+    transitionImageLayout(commandBuffer, m_swapchainImages[imageIndex],
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkBufferMemoryBarrier2 reuse{};
+    reuse.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    reuse.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    reuse.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    reuse.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    reuse.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    reuse.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    reuse.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    reuse.buffer = m_captureBuffer;
+    reuse.size = VK_WHOLE_SIZE;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.bufferMemoryBarrierCount = 1;
+    dependency.pBufferMemoryBarriers = &reuse;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {m_swapchainExtent.width, m_swapchainExtent.height, 1};
+    vkCmdCopyImageToBuffer(commandBuffer, m_swapchainImages[imageIndex],
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_captureBuffer, 1, &copy);
+    reuse.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    reuse.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+    reuse.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    transitionImageLayout(commandBuffer, m_swapchainImages[imageIndex],
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    m_captureRecorded = true;
+}
 
-    // The frame being read is the one already presented, so waiting on the
-    // graphics queue after the copy below is enough -- the old full-device wait
-    // here was belt-and-braces and cost more than everything else combined.
-    vkResetCommandBuffer(commandBuffer, 0);
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-        VOX_LOGE("render") << "frame capture: vkBeginCommandBuffer failed";
+bool RendererBackend::captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
+                                          std::uint32_t& outWidth,
+                                          std::uint32_t& outHeight) {
+    if (m_device == VK_NULL_HANDLE || !m_captureRecorded) {
+        VOX_LOGE("render") << "frame capture: prepareFrameCapture must precede a rendered frame";
         return false;
     }
-
-    // The presented image sits in PRESENT_SRC_KHR and must be put back there:
-    // the swapchain image is not ours to leave in another layout, and the next
-    // acquire of this index would otherwise transition from a layout the
-    // renderer did not expect.
-    const auto barrier = [&](VkImageLayout oldLayout,
-                             VkImageLayout newLayout,
-                             VkPipelineStageFlags2 srcStage,
-                             VkAccessFlags2 srcAccess,
-                             VkPipelineStageFlags2 dstStage,
-                             VkAccessFlags2 dstAccess) {
-        VkImageMemoryBarrier2 imageBarrier{};
-        imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        imageBarrier.srcStageMask = srcStage;
-        imageBarrier.srcAccessMask = srcAccess;
-        imageBarrier.dstStageMask = dstStage;
-        imageBarrier.dstAccessMask = dstAccess;
-        imageBarrier.oldLayout = oldLayout;
-        imageBarrier.newLayout = newLayout;
-        imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        imageBarrier.image = sourceImage;
-        imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        imageBarrier.subresourceRange.baseMipLevel = 0;
-        imageBarrier.subresourceRange.levelCount = 1;
-        imageBarrier.subresourceRange.baseArrayLayer = 0;
-        imageBarrier.subresourceRange.layerCount = 1;
-        VkDependencyInfo dependencyInfo{};
-        dependencyInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dependencyInfo.imageMemoryBarrierCount = 1;
-        dependencyInfo.pImageMemoryBarriers = &imageBarrier;
-        vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
-    };
-
-    barrier(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            VK_ACCESS_2_MEMORY_READ_BIT,
-            VK_PIPELINE_STAGE_2_COPY_BIT,
-            VK_ACCESS_2_TRANSFER_READ_BIT);
-
-    VkBufferImageCopy copyRegion{};
-    copyRegion.bufferOffset = 0;
-    copyRegion.bufferRowLength = 0;
-    copyRegion.bufferImageHeight = 0;
-    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copyRegion.imageSubresource.mipLevel = 0;
-    copyRegion.imageSubresource.baseArrayLayer = 0;
-    copyRegion.imageSubresource.layerCount = 1;
-    copyRegion.imageOffset = {0, 0, 0};
-    copyRegion.imageExtent = {width, height, 1};
-    vkCmdCopyImageToBuffer(
-        commandBuffer, sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readbackBuffer, 1, &copyRegion);
-
-    barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            VK_PIPELINE_STAGE_2_COPY_BIT,
-            VK_ACCESS_2_TRANSFER_READ_BIT,
-            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            VK_ACCESS_2_MEMORY_READ_BIT);
-
-    bool submitted = vkEndCommandBuffer(commandBuffer) == VK_SUCCESS;
-    if (submitted) {
-        VkSubmitInfo submitInfo{};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        submitted = vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) == VK_SUCCESS;
+    int redByte = 0, greenByte = 0, blueByte = 0;
+    if (!channelOrderForFormat(m_swapchainFormat, redByte, greenByte, blueByte)) {
+        return false;
     }
-    if (submitted) {
-        submitted = vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS;
-    }
-
+    const uint32_t width = m_swapchainExtent.width;
+    const uint32_t height = m_swapchainExtent.height;
+    const VkDeviceSize imageBytes = static_cast<VkDeviceSize>(width) * height * 4u;
+    const VkDeviceMemory readbackMemory = m_captureMemory;
     bool read = false;
-    if (submitted) {
+    if (vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS) {
         void* mapped = nullptr;
         if (vkMapMemory(m_device, readbackMemory, 0, imageBytes, 0, &mapped) == VK_SUCCESS &&
             mapped != nullptr) {

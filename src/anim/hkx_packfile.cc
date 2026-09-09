@@ -848,10 +848,11 @@ bool decodeHkxAnimationSkeleton(std::span<const std::uint8_t> bytes,
 }
 
 bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
-                            HkxDecodedBehaviorGraph& outGraph,
+                            HkxDecodedBehaviorGraph& outResult,
                             std::string& outError,
                             const HkxReadLimits& limits) {
-    outGraph = HkxDecodedBehaviorGraph{};
+    outResult = HkxDecodedBehaviorGraph{};
+    HkxDecodedBehaviorGraph outGraph;
     outError.clear();
     HkxPackfileSummary summary;
     if (!inspectHkxPackfile(bytes, summary, outError, limits)) return false;
@@ -938,6 +939,63 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
         return true;
     };
 
+    std::size_t transitionCount = 0;
+    const auto readTransitions = [&](const HkxObjectRecord& object, std::size_t offset,
+                                     HkxBehaviorNode& node) {
+        const auto arrayObject = reader.resolve(object.section, object.offset + offset);
+        if (!arrayObject) return true;
+        const auto typed = std::find_if(summary.objects.begin(), summary.objects.end(),
+            [&](const auto& candidate) {
+                return candidate.section == arrayObject->section &&
+                    candidate.offset == arrayObject->offset &&
+                    candidate.className == "hkbStateMachineTransitionInfoArray";
+            });
+        if (typed == summary.objects.end()) return false;
+        std::uint32_t count = 0;
+        if (!reader.read(arrayObject->section, arrayObject->offset + 0x18u, count) ||
+            count > limits.maxBehaviorEdges - transitionCount) return false;
+        transitionCount += count;
+        if (!count) return true;
+        const auto data = reader.resolve(arrayObject->section, arrayObject->offset + 0x10u);
+        std::span<const std::uint8_t> raw;
+        if (!data || !reader.bytes(data->section, data->offset,
+                static_cast<std::size_t>(count) * 0x48u, raw)) return false;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::size_t base = data->offset + i * 0x48u;
+            HkxBehaviorTransition rule;
+            const auto readInterval = [&](std::size_t field, HkxBehaviorTimeInterval& interval) {
+                return reader.read(data->section, base + field, interval.enterEventId) &&
+                    reader.read(data->section, base + field + 4u, interval.exitEventId) &&
+                    reader.read(data->section, base + field + 8u, interval.enterTime) &&
+                    reader.read(data->section, base + field + 12u, interval.exitTime) &&
+                    std::isfinite(interval.enterTime) && std::isfinite(interval.exitTime);
+            };
+            if (!readInterval(0, rule.triggerInterval) ||
+                !readInterval(0x10u, rule.initiateInterval) ||
+                !reader.read(data->section, base + 0x30u, rule.eventId) ||
+                !reader.read(data->section, base + 0x34u, rule.toStateId) ||
+                !reader.read(data->section, base + 0x38u, rule.fromNestedStateId) ||
+                !reader.read(data->section, base + 0x3cu, rule.toNestedStateId) ||
+                !reader.read(data->section, base + 0x40u, rule.priority) ||
+                !reader.read(data->section, base + 0x42u, rule.flags)) return false;
+            if (const auto effect = reader.resolve(data->section, base + 0x20u)) {
+                rule.hasEffect = true;
+                const auto found = nodeByObject.find(referenceKey(effect->section, effect->offset));
+                if (found != nodeByObject.end() &&
+                    outGraph.nodes[found->second].kind == HkxBehaviorNodeKind::TransitionEffect)
+                    rule.effectNode = static_cast<std::int32_t>(found->second);
+            }
+            if (const auto condition = reader.resolve(data->section, base + 0x28u)) {
+                rule.hasCondition = true;
+                for (const auto& candidate : summary.objects)
+                    if (candidate.section == condition->section && candidate.offset == condition->offset)
+                        rule.conditionClass = candidate.className;
+            }
+            node.transitions.push_back(std::move(rule));
+        }
+        return true;
+    };
+
     bool foundGraph = false;
     for (std::size_t index = 0; index < objects.size(); ++index) {
         const HkxObjectRecord& object = *objects[index];
@@ -958,7 +1016,8 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
             case HkxBehaviorNodeKind::StateMachine:
                 (void)readName(object, 0x38u, node.name);
                 if (!reader.read(object.section, object.offset + 0x68u, node.startStateId) ||
-                    !readChildren(object, 0x90u, node)) {
+                    !readChildren(object, 0x90u, node) ||
+                    !readTransitions(object, 0xa0u, node)) {
                     outError = "invalid hkbStateMachine state array";
                     return false;
                 }
@@ -966,7 +1025,8 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                 break;
             case HkxBehaviorNodeKind::State:
                 if (!readName(object, 0x60u, node.name) ||
-                    !reader.read(object.section, object.offset + 0x68u, node.stateId)) {
+                    !reader.read(object.section, object.offset + 0x68u, node.stateId) ||
+                    !readTransitions(object, 0x50u, node)) {
                     outError = "invalid hkbStateMachineStateInfo";
                     return false;
                 }
@@ -1037,6 +1097,7 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
         outGraph = HkxDecodedBehaviorGraph{};
         return false;
     }
+    outResult = std::move(outGraph);
     return true;
 }
 

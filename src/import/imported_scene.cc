@@ -1,4 +1,5 @@
 #include "import/imported_scene.h"
+#include "import/dds.h"
 
 #include <algorithm>
 #include <array>
@@ -25,24 +26,12 @@ namespace odai::importer {
 namespace {
 
 constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
-// FORMAT VERSION, AND THE ONLY ONE THAT LOADS.
+// Current cooked format; the previous unchanged raw layout remains readable.
 //
-// This file used to carry every layout back to v15 -- a legacy stride table,
-// three field-by-field expansion paths, and a version gate on every section.
-// That machinery served files nobody has. A cooked scene is either a cell
-// cache, keyed by kCellBuildVersion AND the plugin/load-order fingerprint, or a
-// hand-cooked .bin from a tree old enough to predate several vertex widenings;
-// in both cases the current build cannot consult it and would rebuild anyway.
-// The reader rejects anything below the floor cleanly and the caller rebuilds,
-// which is the same outcome with none of the code.
-//
-// v25 widened both vertex structs with `colorAlpha` (authored vertex alpha, see
-// ImportedSceneVertex::colorAlpha) -- and a widening is exactly the change that
-// used to demand a new expansion branch. There is nowhere to add one now, so a
-// widening means bumping kImportedSceneVersion AND
-// kMinSupportedImportedSceneVersion AND kCellBuildVersion together. The
-// static_asserts on both struct sizes below are what force that question:
-// change a struct without touching them and the build stops.
+// Raw vertex and part layouts must stay compatible with the supported floor.
+// Appended sections can use neutral defaults for older files. Changes to raw
+// strides require an explicit migration or a raised minimum version, together
+// with a cell-cache semantic version bump.
 // v26 appends placed particle emitters after the alpha-authored byte. They are
 // field-written (not raw-blitted) so the renderer-facing preset can evolve
 // without inheriting a platform ABI.
@@ -58,11 +47,11 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // vegetation LOD. The raw stride is unchanged, but old caches cannot promise
 // those bytes were initialized by every historical writer.
 // v34 carries authored WATR appearance and layer texture indices on water patches.
-constexpr std::uint32_t kImportedSceneVersion = 34u;
-// Equal to the current version, deliberately. See above.
-constexpr std::uint32_t kMinSupportedImportedSceneVersion = kImportedSceneVersion;
+constexpr std::uint32_t kImportedSceneVersion = 40u;
+// v35 appends typed terrain normal bindings; v34 loads with neutral defaults.
+constexpr std::uint32_t kMinSupportedImportedSceneVersion = 34u;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
-    static_cast<std::uint8_t>(TextureFormat::RGBA8Srgb);
+    static_cast<std::uint8_t>(TextureFormat::BC6HSfloat);
 
 // pageRanges are serialized as a raw array, so the layout must stay packed.
 static_assert(sizeof(ImportedScenePageRange) == 36u);
@@ -89,7 +78,7 @@ bool readSceneCollision(
 void writeSceneParticleEmitters(
     std::ostream& output, const std::vector<ImportedSceneParticleEmitter>& emitters);
 bool readSceneParticleEmitters(
-    std::istream& input, std::vector<ImportedSceneParticleEmitter>& out);
+    std::istream& input, std::vector<ImportedSceneParticleEmitter>& out, std::uint32_t version);
 void writeSceneRigidAnimations(
     std::ostream& output, const std::vector<ImportedSceneRigidAnimation>& animations);
 bool readSceneRigidAnimations(
@@ -686,11 +675,16 @@ void writeSceneParticleEmitters(
         writeValue(output, emitter.particleSize);
         writeValue(output, emitter.particleCount);
         writeValue(output, emitter.seed);
+        writeValue(output, emitter.textureIndex);
+        for(float v:emitter.mistTransform) writeValue(output,v);
+        const auto bytes=emitter.mist ? fnv::encodeNifMist(*emitter.mist) : std::vector<std::uint8_t>{};
+        writeValue(output,std::uint32_t(bytes.size()));
+        output.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());
     }
 }
 
 bool readSceneParticleEmitters(
-    std::istream& input, std::vector<ImportedSceneParticleEmitter>& out) {
+    std::istream& input, std::vector<ImportedSceneParticleEmitter>& out, std::uint32_t version) {
     std::uint32_t count = 0;
     if (!readValue(input, count) || count > 65536u) {
         return false;
@@ -699,7 +693,7 @@ bool readSceneParticleEmitters(
     for (ImportedSceneParticleEmitter& emitter : out) {
         std::uint32_t effect = 0u;
         if (!readString(input, emitter.sourceId) || !readValue(input, effect) ||
-            effect != static_cast<std::uint32_t>(ImportedParticleEffect::Fire) ||
+            (effect != 1u && (version < 38 || effect != 2u)) ||
             !readExact(input, emitter.position, sizeof(emitter.position)) ||
             !readExact(input, emitter.color, sizeof(emitter.color)) ||
             !readValue(input, emitter.intensity) ||
@@ -710,6 +704,15 @@ bool readSceneParticleEmitters(
             !readValue(input, emitter.particleCount) ||
             !readValue(input, emitter.seed)) {
             return false;
+        }
+        if(version>=38) {
+            std::uint32_t count=0;
+            if(!readValue(input,emitter.textureIndex)||!readExact(input,emitter.mistTransform.data(),48)||
+               !readValue(input,count)||count>1024*1024) return false;
+            std::vector<std::uint8_t> bytes(count);
+            if(!readExact(input,bytes.data(),bytes.size())) return false;
+            if(count) {emitter.mist.emplace();if(!fnv::decodeNifMist(bytes,*emitter.mist))return false;}
+            if((effect==2)!=emitter.mist.has_value())return false;
         }
         emitter.effect = static_cast<ImportedParticleEffect>(effect);
     }
@@ -1135,6 +1138,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
     // alphaFlagsAuthored in opposite senses).
     demoteFalseAlphaBlendFlags(scene);
     scene.packedVertices.clear();
+    scene.packedTerrainNormals.clear();
+    scene.packedLightingMaterialIndices.clear();
     scene.packedIndices.clear();
     scene.packedDraws.clear();
     scene.rigidAnimations.clear();
@@ -1189,12 +1194,22 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                 srcVertex.position[1],
                 srcVertex.position[2]
             };
-            const std::array<float, 3> localNormal{
+            std::array<float, 3> localNormal{
                 srcVertex.normal[0],
                 srcVertex.normal[1],
                 srcVertex.normal[2]
             };
             const std::array<float, 3> worldPosition = transformPoint(transform, localPosition);
+            if ((flags & kImportedSceneMaterialFlagGrass) != 0u) {
+                // Grass may vary only its height. For orthogonal rotation/scale
+                // columns this produces the inverse-transpose normal transform.
+                for (int column = 0; column < 3; ++column) {
+                    const float lengthSquared = transform[column]*transform[column] +
+                        transform[4+column]*transform[4+column] +
+                        transform[8+column]*transform[8+column];
+                    localNormal[column] /= std::max(lengthSquared, 1e-12f);
+                }
+            }
             const std::array<float, 3> worldNormal = normalizeVector(transformDirection(transform, localNormal));
             dstVertex.position[0] = worldPosition[0];
             dstVertex.position[1] = worldPosition[1];
@@ -1218,10 +1233,16 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
             dstVertex.uv[1] = srcVertex.uv[1];
             dstVertex.textureIndex = textureIndex;
             dstVertex.flags = flags;
+            if ((flags & kImportedSceneMaterialFlagGrass) != 0u) {
+                const float height = std::max(0.0f, worldPosition[1] - transform[7]);
+                const auto heightBits = std::uint32_t(std::clamp(height * 4.0f, 0.0f, 65535.0f));
+                dstVertex.layerWeights = heightBits << 16u;
+            }
             if (srcVertex.layerTextureIndex[3] == kImportedSceneFoliageWindMarker) {
                 const float windPayload[4] = {
                     srcVertex.layerWeight[0], srcVertex.layerWeight[1], 0.0f, 0.0f};
-                dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(windPayload);
+                dstVertex.layerWeights = (dstVertex.layerWeights & 0xffff0000u) |
+                    (packImportedSceneTerrainLayerWeights(windPayload) & 0xffffu);
                 dstVertex.flags |= kImportedSceneMaterialFlagFoliageWind;
             }
             // Static Bethesda materials use layer slot 0 as a runtime normal
@@ -1235,7 +1256,9 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     dstVertex.layerWeights = packImportedSceneTerrainLayerWeights(srcVertex.layerWeight);
                 }
                 const auto normalIt = scene.normalTextureByDiffuseIndex.find(textureIndex);
-                if (normalIt != scene.normalTextureByDiffuseIndex.end()) {
+                if (srcVertex.layerTextureIndex[0] != kImportedSceneNoTerrainLayer) {
+                    dstVertex.layerTextureIndex[0] = srcVertex.layerTextureIndex[0];
+                } else if (normalIt != scene.normalTextureByDiffuseIndex.end()) {
                     dstVertex.layerTextureIndex[0] = normalIt->second;
                 }
             }
@@ -1260,7 +1283,8 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
         const auto emitDraw = [&](std::uint32_t drawFirstIndex,
                                   std::uint8_t alphaThreshold,
                                   std::uint32_t rigidAnimationIndex,
-                                  std::uint8_t vegetationLod) {
+                                  std::uint8_t vegetationLod,
+                                  ImportedBlendMode blendMode = ImportedBlendMode::Alpha) {
             const std::uint32_t indexCount =
                 static_cast<std::uint32_t>(scene.packedIndices.size() - drawFirstIndex);
             if (indexCount == 0u) {
@@ -1277,6 +1301,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                 draw.reserved[1] = static_cast<std::uint8_t>(vegetationGroup & 0xffu);
                 draw.reserved[2] = static_cast<std::uint8_t>(vegetationGroup >> 8u);
             }
+            draw.setBlendMode(blendMode);
             scene.packedDraws.push_back(draw);
         };
 
@@ -1324,7 +1349,11 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     ((part.vegetationReserved[0] &
                       kImportedSceneMeshPartDistantLodSnow) != 0u
                          ? kImportedSceneMaterialFlagDistantLodSnow
-                         : 0u);
+                         : 0u) |
+                    ((part.vegetationReserved[0] & kImportedSceneMeshPartGrass) != 0u
+                         ? kImportedSceneMaterialFlagGrass : 0u) |
+                    ((part.vegetationReserved[0] & kImportedSceneMeshPartTreeLod) != 0u
+                         ? kImportedSceneMaterialFlagTreeLod : 0u);
                 for (std::size_t indexOffset = firstPartIndex; indexOffset < lastPartIndex; ++indexOffset) {
                     const std::uint32_t index = mesh.indices[indexOffset];
                     if (index >= mesh.vertices.size()) {
@@ -1333,6 +1362,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     std::uint32_t& remappedIndex = remappedVertexIndices[index];
                     if (remappedIndex == std::numeric_limits<std::uint32_t>::max()) {
                         remappedIndex = appendVertex(mesh.vertices[index], part.textureIndex, partFlags);
+                        scene.packedLightingMaterialIndices.resize(scene.packedVertices.size(), 0xffffffffu);
+                        const auto partIndex = static_cast<std::size_t>(&part - mesh.parts.data());
+                        if (partIndex < mesh.lightingMaterialIndices.size())
+                            scene.packedLightingMaterialIndices[remappedIndex] = mesh.lightingMaterialIndices[partIndex];
                     }
                     scene.packedIndices.push_back(remappedIndex);
                 }
@@ -1342,7 +1375,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         : 0xffffffffu;
                 emitDraw(
                     partDrawFirstIndex, part.alphaThreshold, animationIndex,
-                    part.vegetationLod);
+                    part.vegetationLod, part.blendMode);
             }
         }
     };
@@ -1446,6 +1479,10 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                         }
                         remappedIndex = static_cast<std::uint32_t>(scene.packedVertices.size());
                         scene.packedVertices.push_back(dstVertex);
+                        scene.packedTerrainNormals.resize(scene.packedVertices.size());
+                        const auto partIndex=static_cast<std::size_t>(&part-terrainMesh.parts.data());
+                        if (partIndex<terrainMesh.terrainNormals.size())
+                            scene.packedTerrainNormals.back()=terrainMesh.terrainNormals[partIndex];
                         expandBounds(dstVertex);
                     }
                     scene.packedIndices.push_back(remappedIndex);
@@ -1457,6 +1494,7 @@ void buildImportedScenePackedRenderData(ImportedScene& scene) {
                     draw.firstIndex = firstIndex;
                     draw.indexCount = indexCount;
                     draw.alphaThreshold = part.alphaThreshold;
+                    draw.setBlendMode(part.blendMode);
                     scene.packedDraws.push_back(draw);
                 }
             }
@@ -1608,7 +1646,7 @@ void buildImportedScenePageRanges(ImportedScene& scene, float pageSize) {
         const std::size_t lastIndex = std::min(
             firstIndex + static_cast<std::size_t>(srcDraw.indexCount), scene.packedIndices.size());
 
-        ImportedScenePackedDraw dstDraw{};
+        ImportedScenePackedDraw dstDraw = srcDraw;
         dstDraw.firstIndex = static_cast<std::uint32_t>(newIndices.size());
         dstDraw.indexCount = static_cast<std::uint32_t>(lastIndex - firstIndex);
         dstDraw.alphaThreshold = srcDraw.alphaThreshold;
@@ -1669,6 +1707,197 @@ std::string importedSceneInteriorFileName(
 
 const std::string& getImportedSceneLastError() {
     return g_lastImportedSceneError;
+}
+
+namespace {
+bool readCubeSection(std::istream& input, ImportedScene& scene) {
+    std::uint32_t count;
+    if (!readValue(input,count) || count != scene.textures.size()) return false;
+    for (auto& texture : scene.textures) {
+        if (!readValue(input,texture.arrayLayers) ||
+            (texture.arrayLayers != 1 && texture.arrayLayers != 6) ||
+            (texture.arrayLayers == 6 && (ddsCubeByteCount(texture) == 0 || texture.rgba8.size() != ddsCubeByteCount(texture)))) return false;
+    }
+    if (!readValue(input,count) || count != scene.lightingMaterials.size()) return false;
+    for (auto& material : scene.lightingMaterials)
+        if (!readValue(input,material.environmentScale) || !std::isfinite(material.environmentScale) || material.environmentScale < 0) return false;
+    return true;
+}
+// v39: explicit per-material animation tracks, appended after v37 cube data.
+void writeMaterialAnimations(std::ostream& out, const ImportedScene& scene) {
+    writeValue(out,std::uint32_t(scene.lightingMaterials.size()));
+    for(const auto& m:scene.lightingMaterials) {
+        writeValue(out,std::uint32_t(m.animations.size()));
+        for(const auto& t:m.animations) {
+            writeValue(out,std::uint32_t(t.target));writeValue(out,t.interpolation);writeValue(out,t.cycle);
+            writeValue(out,t.frequency);writeValue(out,t.phase);writeValue(out,t.start);writeValue(out,t.stop);
+            writeValue(out,std::uint32_t(t.backwards));writeValue(out,std::uint32_t(t.keys.size()));
+            for(const auto& k:t.keys) {writeValue(out,k.time);writeValue(out,k.value);writeValue(out,k.forward);writeValue(out,k.backward);
+                writeValue(out,k.tension);writeValue(out,k.bias);writeValue(out,k.continuity);}
+            writeValue(out,std::uint32_t(t.textures.size()));
+            for(std::size_t i=0;i<t.textures.size();++i) {
+                writeValue(out,t.textures[i]);writeString(out,i<t.texturePaths.size()?t.texturePaths[i]:std::string{});
+            }
+        }
+    }
+}
+bool readMaterialAnimations(std::istream& in, ImportedScene& scene) {
+    std::uint32_t n;
+    if(!readValue(in,n)||n!=scene.lightingMaterials.size())return false;
+    std::size_t totalKeys=0,totalTracks=0,totalFrames=0;
+    for(auto& m:scene.lightingMaterials) {
+        if(!readValue(in,n)||n>256||(totalTracks+=n)>65536)return false;
+        m.animations.resize(n);
+        for(auto& t:m.animations) {
+            std::uint32_t target,backwards,count;
+            if(!readValue(in,target)||!readValue(in,t.interpolation)||!readValue(in,t.cycle)||
+                !readValue(in,t.frequency)||!readValue(in,t.phase)||!readValue(in,t.start)||!readValue(in,t.stop)||
+                !readValue(in,backwards)||backwards>1||!readValue(in,count)||count>65536||
+                (totalKeys+=count)>4000000)return false;
+            t.target=MaterialAnimatedValue(target);t.backwards=backwards!=0;t.keys.resize(count);
+            for(auto& k:t.keys) if(!readValue(in,k.time)||!readValue(in,k.value)||
+                !readValue(in,k.forward)||!readValue(in,k.backward)||!readValue(in,k.tension)||
+                !readValue(in,k.bias)||!readValue(in,k.continuity))return false;
+            if(!validMaterialAnimationTrack(t)||!readValue(in,count)||count>4096||(totalFrames+=count)>65536)return false;
+            t.textures.resize(count);t.texturePaths.resize(count);
+            for(std::size_t i=0;i<count;++i) if(!readValue(in,t.textures[i])||
+                (t.textures[i]!=0xffffffffu&&t.textures[i]>=scene.textures.size())||!readString(in,t.texturePaths[i]))return false;
+        }
+    }
+    return true;
+}
+void writeLightingSection(std::ostream& output, const ImportedScene& scene) {
+    writeValue(output,static_cast<std::uint32_t>(scene.textures.size()));
+    for (const auto& texture : scene.textures) { writeValue(output,std::uint8_t(texture.linearData)); writeValue(output,texture.clampMode); }
+    writeValue(output, static_cast<std::uint32_t>(scene.lightingMaterials.size()));
+    for (const auto& m : scene.lightingMaterials) {
+        writeValue(output,m.shaderType); writeValue(output,m.flags1); writeValue(output,m.flags2);
+        writeValue(output,m.valid);
+        writeValue(output,m.textureClampMode); writeValue(output,m.refractionStrength);
+        for (auto x : m.uvOffset) writeValue(output,x);
+        for (auto x : m.uvScale) writeValue(output,x);
+        for (auto x : m.emissive) writeValue(output,x);
+        writeValue(output,m.emissiveMultiplier);
+        for (auto x : m.specular) writeValue(output,x);
+        writeValue(output,m.specularStrength); writeValue(output,m.glossiness); writeValue(output,m.alpha);
+        for (auto x : m.textures) writeValue(output,x);
+        for (const auto& path : m.texturePaths) writeString(output,path);
+    }
+    const auto indices = [&](const auto& values) {
+        writeValue(output,static_cast<std::uint32_t>(values.size()));
+        for (auto x : values) writeValue(output,x);
+    };
+    indices(scene.packedLightingMaterialIndices);
+    writeValue(output,static_cast<std::uint32_t>(scene.meshes.size()));
+    for (const auto& mesh : scene.meshes) indices(mesh.lightingMaterialIndices);
+}
+bool readLightingSection(std::istream& input, ImportedScene& scene, std::size_t sourceMeshCount) {
+    std::uint32_t textureCount = 0;
+    if (!readValue(input,textureCount) || textureCount != scene.textures.size()) return false;
+    for (auto& texture : scene.textures) {
+        std::uint8_t linear = 0;
+        if (!readValue(input,linear) || linear > 1) return false;
+        texture.linearData = linear != 0;
+        if (!readValue(input,texture.clampMode) || texture.clampMode > 3) return false;
+    }
+    std::uint32_t count = 0;
+    if (!readValue(input,count) || count > (1u << 20)) return false;
+    scene.lightingMaterials.resize(count);
+    const auto number = [&](float& value) { return readValue(input,value) && std::isfinite(value); };
+    for (auto& m : scene.lightingMaterials) {
+        if (!readValue(input,m.shaderType) || !readValue(input,m.flags1) ||
+            !readValue(input,m.flags2) || !readValue(input,m.valid) || m.valid > 1) return false;
+        if (!readValue(input,m.textureClampMode) || m.textureClampMode > 3 || !number(m.refractionStrength)) return false;
+        for (auto& x : m.uvOffset) if (!number(x)) return false;
+        for (auto& x : m.uvScale) if (!number(x)) return false;
+        for (auto& x : m.emissive) if (!number(x)) return false;
+        if (!number(m.emissiveMultiplier)) return false;
+        for (auto& x : m.specular) if (!number(x)) return false;
+        if (!number(m.specularStrength) || !number(m.glossiness) || !number(m.alpha)) return false;
+        for (auto& x : m.textures)
+            if (!readValue(input,x) || (x != 0xffffffffu && x >= scene.textures.size())) return false;
+        for (auto& path : m.texturePaths) if (!readString(input,path)) return false;
+    }
+    const auto indices = [&](std::vector<std::uint32_t>& values, std::size_t maximum) {
+        std::uint32_t size = 0;
+        if (!readValue(input,size) || size > maximum) return false;
+        values.resize(size);
+        for (auto& x : values)
+            if (!readValue(input,x) || (x != 0xffffffffu && x >= count)) return false;
+        return true;
+    };
+    if (!indices(scene.packedLightingMaterialIndices,scene.packedVertices.size())) return false;
+    std::uint32_t meshes = 0;
+    if (!readValue(input,meshes) || meshes != sourceMeshCount) return false;
+    for (std::size_t i = 0; i < meshes; ++i) {
+        std::vector<std::uint32_t> ignored;
+        if (!indices(scene.meshes.empty() ? ignored : scene.meshes[i].lightingMaterialIndices,
+            scene.meshes.empty() ? (1u << 20) : scene.meshes[i].parts.size())) return false;
+    }
+    return true;
+}
+void writeTerrainSurfaceSection(std::ostream& output, const ImportedScene& scene) {
+    const auto write = [&](const auto& bindings) {
+        writeValue(output, std::uint32_t(bindings.size()));
+        for (const auto& b : bindings) for (auto v : b.surfaceProperties) writeValue(output, v);
+    };
+    write(scene.packedTerrainNormals);
+    writeValue(output, std::uint32_t(scene.meshes.size()));
+    for (const auto& mesh : scene.meshes) write(mesh.terrainNormals);
+}
+bool readTerrainSurfaceSection(std::istream& input, ImportedScene& scene, std::uint32_t meshCount) {
+    const auto read = [&](auto& bindings, bool retain) {
+        std::uint32_t count = 0;
+        if (!readValue(input, count) || count > (1u << 24) ||
+            (retain && count != bindings.size())) return false;
+        for (std::uint32_t i = 0; i < count; ++i) for (int j = 0; j < 5; ++j) {
+            std::uint16_t value = 0;
+            if (!readValue(input, value) || (value & 0x7800u)) return false;
+            if (retain) bindings[i].surfaceProperties[j] = value;
+        }
+        return true;
+    };
+    if (!read(scene.packedTerrainNormals, true)) return false;
+    std::uint32_t count = 0;
+    if (!readValue(input, count) || count != meshCount) return false;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::vector<ImportedTerrainNormalBinding> ignored;
+        if (!read(scene.meshes.empty() ? ignored : scene.meshes[i].terrainNormals,
+                  !scene.meshes.empty())) return false;
+    }
+    return true;
+}
+void writeTerrainNormalBindings(std::ostream& output,
+    const std::vector<ImportedTerrainNormalBinding>& bindings) {
+    writeValue(output,static_cast<std::uint32_t>(bindings.size()));
+    for (const auto& binding : bindings)
+        for (auto texture : binding.textures) writeValue(output,texture);
+}
+bool readTerrainNormalBindings(std::istream& input,
+    std::vector<ImportedTerrainNormalBinding>& bindings, std::size_t maximum,
+    std::size_t textureCount) {
+    std::uint32_t count=0;
+    if (!readValue(input,count) || count>maximum) return false;
+    bindings.resize(count);
+    for (auto& binding : bindings) for (auto& texture : binding.textures) {
+        if (!readValue(input,texture) || (texture!=0xffffffffu && texture>=textureCount)) return false;
+    }
+    return true;
+}
+bool readTerrainNormalSection(std::istream& input, ImportedScene& scene,
+    std::size_t sourceMeshCount, bool keepMeshes) {
+    if (!readTerrainNormalBindings(input,scene.packedTerrainNormals,
+            scene.packedVertices.size(),scene.textures.size())) return false;
+    std::uint32_t meshCount=0;
+    if (!readValue(input,meshCount) || meshCount!=sourceMeshCount) return false;
+    for (std::size_t i=0;i<meshCount;++i) {
+        std::vector<ImportedTerrainNormalBinding> ignored;
+        auto& bindings=keepMeshes ? scene.meshes[i].terrainNormals : ignored;
+        const auto maximum=keepMeshes ? scene.meshes[i].parts.size() : std::size_t(1u<<20);
+        if (!readTerrainNormalBindings(input,bindings,maximum,scene.textures.size())) return false;
+    }
+    return true;
+}
 }
 
 bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& outputPath) {
@@ -1838,6 +2067,18 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     writeSceneRigidAnimations(output, scene.rigidAnimations);
     // v29: authored static collision, already transformed to scene space.
     writeSceneCollision(output, scene.collisionTriangles);
+    // v35 appends explicit terrain material texture bindings. v34 readers in
+    // this build retain neutral defaults; historic vertex/part strides stay fixed.
+    writeTerrainNormalBindings(output,scene.packedTerrainNormals);
+    writeValue(output,static_cast<std::uint32_t>(scene.meshes.size()));
+    for (const auto& mesh : scene.meshes) writeTerrainNormalBindings(output,mesh.terrainNormals);
+    writeLightingSection(output,scene);
+    writeValue(output,static_cast<std::uint32_t>(scene.textures.size()));
+    for (const auto& texture : scene.textures) writeValue(output,texture.arrayLayers);
+    writeValue(output,static_cast<std::uint32_t>(scene.lightingMaterials.size()));
+    for (const auto& material : scene.lightingMaterials) writeValue(output,material.environmentScale);
+    writeMaterialAnimations(output,scene);
+    writeTerrainSurfaceSection(output,scene);
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -2094,7 +2335,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         return false;
     }
     scene.alphaFlagsAuthored = authored != 0u;
-    if (!readSceneParticleEmitters(input, scene.particleEmitters)) {
+    if (!readSceneParticleEmitters(input, scene.particleEmitters, version)) {
         setLastImportedSceneError(
             "Failed to read imported scene particle emitters: " + inputPath.string());
         return false;
@@ -2112,6 +2353,24 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
         return false;
     }
 
+    if (version>=35u && !readTerrainNormalSection(input,scene,meshCount,!scene.meshes.empty())) {
+        setLastImportedSceneError("Invalid terrain normal bindings: " + inputPath.string());
+        return false;
+    }
+    if (version >= 36u && !readLightingSection(input,scene,meshCount)) {
+        g_lastImportedSceneError = "invalid NIF lighting material section";
+        return false;
+    }
+    if (version >= 37u && !readCubeSection(input,scene)) {
+        setLastImportedSceneError("Invalid cubemap section"); return false;
+    }
+    if (version >= 39u && !readMaterialAnimations(input,scene)) {
+        setLastImportedSceneError("Invalid material animation section"); return false;
+    }
+
+    if (version >= 40u && !readTerrainSurfaceSection(input, scene, meshCount)) {
+        setLastImportedSceneError("Invalid terrain surface section"); return false;
+    }
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
     // authored, this one corrects one that was authored wrong. Exactly one
@@ -2352,7 +2611,7 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         return false;
     }
     scene.alphaFlagsAuthored = authored != 0u;
-    if (!readSceneParticleEmitters(input, scene.particleEmitters)) {
+    if (!readSceneParticleEmitters(input, scene.particleEmitters, version)) {
         setLastImportedSceneError(
             "Failed to read imported scene particle emitters: " + inputPath.string());
         return false;
@@ -2370,6 +2629,24 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
         return false;
     }
 
+    if (version>=35u && !readTerrainNormalSection(input,scene,meshCount,!scene.meshes.empty())) {
+        setLastImportedSceneError("Invalid terrain normal bindings: " + inputPath.string());
+        return false;
+    }
+    if (version >= 36u && !readLightingSection(input,scene,meshCount)) {
+        g_lastImportedSceneError = "invalid NIF lighting material section";
+        return false;
+    }
+    if (version >= 37u && !readCubeSection(input,scene)) {
+        setLastImportedSceneError("Invalid cubemap section"); return false;
+    }
+    if (version >= 39u && !readMaterialAnimations(input,scene)) {
+        setLastImportedSceneError("Invalid material animation section"); return false;
+    }
+
+    if (version >= 40u && !readTerrainSurfaceSection(input, scene, meshCount)) {
+        setLastImportedSceneError("Invalid terrain surface section"); return false;
+    }
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
     // authored, this one corrects one that was authored wrong. Exactly one

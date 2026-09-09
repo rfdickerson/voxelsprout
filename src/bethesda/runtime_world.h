@@ -290,6 +290,9 @@ enum class WorldCommandType : std::uint8_t {
     RemoveItem,
     SetEquipped,
     TeleportToReference,
+    EquipMeleeWeapon,
+    ConsumeHealingItem,
+    TransferItem,
 };
 
 // Commands are the sole cross-system mutation seam. Sequence is assigned by
@@ -331,7 +334,15 @@ struct WorldCommand {
     bool equipped = false;
 };
 
+struct ItemTransferDelta {
+    ObjectId source;
+    ObjectId destination;
+    RecordKey item;
+    std::int32_t count = 0;
+};
+
 struct CommandApplyResult {
+    std::vector<ItemTransferDelta> itemTransfers;
     std::size_t applied = 0u;
     bool residencyChanged = false;
     std::vector<std::string> diagnostics;
@@ -364,6 +375,7 @@ public:
         std::uint64_t nextRuntimeId,
         std::uint64_t nextCommandSequence,
         std::string& outError);
+    [[nodiscard]] bool hasPendingCommands() const { return !m_commands.empty(); }
     void clear();
 
 private:

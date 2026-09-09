@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cmath>
 #include <iostream>
+#include <future>
+#include <array>
 #include <vector>
 
 using namespace odai::bethesda;
@@ -50,6 +52,40 @@ std::vector<std::uint8_t> ctda(
 }  // namespace
 
 int main() {
+    // Mesh BVHs can be prepared simultaneously without a live physics world.
+    // Publication/removal are explicit, and bad replacements keep the floor.
+    {
+        std::array<std::future<PreparedStaticCollision>, 4> jobs;
+        for (auto& job : jobs) job = std::async(std::launch::async, [] {
+            const std::vector<odai::math::Vector3> floor{
+                {-100, 0, -100}, {100, 0, -100}, {100, 0, 100}, {-100, 0, 100}};
+            const std::vector<std::uint32_t> indices{0, 1, 2, 0, 2, 3};
+            std::string error;
+            auto result = BethesdaPhysicsWorld::prepareStaticCollision(floor, indices, error);
+            assert(result.valid() && error.empty());
+            return result;
+        });
+        BethesdaPhysicsWorld physics;
+        std::string error;
+        assert(physics.initialize(error));
+        for (auto& job : jobs) {
+            auto prepared = job.get();
+            assert(!physics.castDown({10, 100, 20}, 200).has_value());
+            assert(physics.addPreparedStreamedStaticCollision(42, prepared, error));
+            prepared = {}; // the published body owns its shape
+            const auto hit = physics.castDown({10, 100, 20}, 200);
+            assert(hit.has_value() && hit->normal.y > 0.99f);
+            assert(!physics.addPreparedStreamedStaticCollision(42, {}, error));
+            assert(physics.castDown({10, 100, 20}, 200).has_value());
+            assert(physics.removeStreamedStaticCollision(42));
+            assert(!physics.castDown({10, 100, 20}, 200).has_value());
+        }
+        const std::vector<odai::math::Vector3> vertices{{0, 0, 0}};
+        const std::vector<std::uint32_t> invalid{0, 1, 2};
+        assert(!BethesdaPhysicsWorld::prepareStaticCollision(vertices, invalid, error).valid());
+        assert(!error.empty());
+    }
+
     {
         const struct WeatherCase {
             const char* requested;
@@ -828,11 +864,13 @@ int main() {
             static_cast<std::uint32_t>(owned.second.size())});
     };
     addSubrecord("EDID", {'M', 'S', '1', '3', 0u});
+    addSubrecord("FULL", {0x42u, 0u, 0u, 0u});
     std::vector<std::uint8_t> dnam(12u, 0u);
     dnam[0] = 3u; dnam[2] = 60u;
     addSubrecord("DNAM", std::move(dnam));
     addSubrecord("INDX", {30u, 0u});
     addSubrecord("QSDT", {1u});
+    addSubrecord("CNAM", {0x43u, 0u, 0u, 0u});
     std::vector<std::uint8_t> stageCondition = ctda(0u, false, 1.0f, 42u);
     stageCondition[12] = 0x34u; stageCondition[13] = 0x12u;
     addSubrecord("CTDA", std::move(stageCondition));
@@ -868,6 +906,8 @@ int main() {
     SkyrimQuestDefinition questDefinition;
     assert(readSkyrimQuest(
         questRecord, makeRecordKey("Skyrim.esm", 0x39645u), questDefinition, error));
+    assert(questDefinition.titleId == 0x42u);
+    assert(questDefinition.stages[0].logEntries[0].textId == 0x43u);
     assert(questDefinition.editorId == "MS13" && questDefinition.questFlags == 3u &&
            questDefinition.priority == 60u);
     assert(questDefinition.stages.size() == 1u && questDefinition.stages[0].index == 30u &&
@@ -1317,6 +1357,32 @@ int main() {
     assert(session.storyEvents().size() == 1u &&
            session.storyEvents()[0].keyword == runtimeKeyword);
     assert(session.scriptDebugLogs() == std::vector<std::string>{"scenario-fixture"});
+
+    const auto imageModifier = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x123u));
+    PapyrusFunction imageSpaceFunction;
+    imageSpaceFunction.name="Fixture.ImageSpace";
+    PapyrusInstruction applyImageSpace;
+    applyImageSpace.opcode=PapyrusOpcode::CallMethod;
+    applyImageSpace.targetType="ImageSpaceModifier";
+    applyImageSpace.name="Apply";
+    applyImageSpace.operands={PapyrusOperand::fromLiteral(PapyrusValue::fromObject(imageModifier)),
+        PapyrusOperand::fromLiteral(PapyrusValue::fromFloat(0.4))};
+    auto removeImageSpace=applyImageSpace;
+    removeImageSpace.name="Remove";
+    removeImageSpace.operands.resize(1);
+    auto crossImageSpace = applyImageSpace;
+    crossImageSpace.name="ApplyCrossFade";
+    crossImageSpace.operands[1]=PapyrusOperand::fromLiteral(PapyrusValue::fromFloat(2.5));
+    imageSpaceFunction.instructions={applyImageSpace,removeImageSpace,crossImageSpace,finishQuest};
+    assert(session.papyrus().registerFunction(std::move(imageSpaceFunction),error));
+    assert(session.papyrus().startFunction("Fixture.ImageSpace",{},error)!=0u);
+    assert(session.advance(1.0/60.0).diagnostics.empty());
+    const auto imageCommands=session.takeImageSpaceCommands();
+    assert(imageCommands.size()==3 && !imageCommands[0].remove && imageCommands[1].remove);
+    assert(imageCommands[2].crossFade && imageCommands[2].fadeDuration==2.5f && imageCommands[2].strength==1.0f);
+    assert(imageCommands[0].record==imageModifier.reference &&
+        std::abs(imageCommands[0].strength-0.4f)<1e-6f);
+    assert(session.takeImageSpaceCommands().empty());
 
     std::cout << "bethesda runtime tests passed\n";
     return 0;

@@ -44,6 +44,7 @@
 // approximation rather than going flat.
 
 #include <cstdint>
+#include <vector>
 
 namespace odai::importer {
 
@@ -57,15 +58,40 @@ inline constexpr std::uint32_t kImportedSceneMaterialIndexMask = 0xffu;
 // Including the reserved slot 0, so 255 authorable materials.
 inline constexpr std::uint32_t kImportedSceneMaterialTableCapacity = 256u;
 
-// GPU-side material record. Two float4s: the layout is then identical under
+// Streamed NIF slots are separate from the legacy 8-bit library indices.
+inline constexpr std::uint32_t kImportedGpuMaterialCapacity = 65536u;
+
+class ImportedMaterialSlots {
+public:
+    std::uint32_t acquire() {
+        if (!free_.empty()) { const auto slot = free_.back(); free_.pop_back(); return slot; }
+        return next_ < kImportedGpuMaterialCapacity ? next_++ : 0xffffffffu;
+    }
+    void release(std::uint32_t slot) {
+        if (slot >= kImportedSceneMaterialTableCapacity && slot < next_) free_.push_back(slot);
+    }
+private:
+    std::uint32_t next_ = kImportedSceneMaterialTableCapacity;
+    std::vector<std::uint32_t> free_;
+};
+
+// GPU-side material record. Six 16-byte vectors: the layout is then identical under
 // std140 and std430, which sidesteps the alignment question entirely and
 // matches the house style (every CameraUniform field is a float[4]). Metallic
 // and roughness ride in the .w lanes that would otherwise be padding.
 struct alignas(16) GpuImportedMaterial {
     float baseColorMetallic[4] = {1.0f, 1.0f, 1.0f, 0.0f};  // rgb = tint, w = metallic
     float emissiveRoughness[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // rgb = emissive, w = roughness
+    float environment[4] = {}; // scale, maximum mip level, reserved
+    float specularStrength[4] = {1, 1, 1, 1};
+    std::uint32_t textures[4] = {0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu};
+    std::uint32_t sourceFlags[4] = {}; // flags1, flags2, shader family, supported
+    float animationUv[4] = {0,0,1,1}; // offset xy, scale zw; animated vertices retain source UVs
+    float animationColor[4] = {1,1,1,1}; // effect tint RGB, material alpha
+    float animationPalette[4] = {1,1,0,0}; // effect palette color row, emissive multiplier
+    std::uint32_t animationState[4] = {0xffffffffu,0,0,0}; // diffuse frame, enabled, reserved
 };
-static_assert(sizeof(GpuImportedMaterial) == 32u,
+static_assert(sizeof(GpuImportedMaterial) == 160u,
               "GpuImportedMaterial is mirrored in imported_static.frag.slang and sized into the "
               "descriptor range; changing it silently reinterprets the whole table");
 static_assert(alignof(GpuImportedMaterial) == 16u);

@@ -229,6 +229,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         }
                         pushPointThreshold(batch.alphaThreshold);
                         pushPointAnimation(0xffffffffu);
+                        pushImportedLodTransition(commandBuffer, batch.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer,
@@ -250,6 +251,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
                     pushPointThreshold(draw.alphaThreshold);
                     pushPointAnimation(draw.rigidAnimationIndex);
+                    pushImportedLodTransition(commandBuffer, draw.lodTransition);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
@@ -319,7 +321,8 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 const std::string cascadeLabel = "Shadow Cascade " + std::to_string(cascadeIndex);
                 insertDebugLabel(commandBuffer, cascadeLabel.c_str(), 0.48f, 0.32f, 0.32f, 1.0f);
             }
-            const ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
+            ShadowAtlasRect atlasRect = kShadowAtlasRects[cascadeIndex];
+            atlasRect.size = m_directionalShadowResolution[cascadeIndex];
             VkViewport shadowViewport{};
             shadowViewport.x = static_cast<float>(atlasRect.x);
             shadowViewport.y = static_cast<float>(atlasRect.y);
@@ -529,6 +532,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         }
                         pushAlphaThreshold(batch.alphaThreshold);
                         pushRigidAnimation(0xffffffffu);
+                        pushImportedLodTransition(commandBuffer, batch.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
@@ -552,6 +556,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         }
                         pushAlphaThreshold(draw.alphaThreshold);
                         pushRigidAnimation(draw.rigidAnimationIndex);
+                        pushImportedLodTransition(commandBuffer, draw.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexed(
                             commandBuffer, draw.indexCount, 1, draw.firstIndex,
@@ -572,6 +577,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         }
                         pushAlphaThreshold(importedDraw.alphaThreshold);
                         pushRigidAnimation(importedDraw.rigidAnimationIndex);
+                        pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
                         vkCmdDrawIndexed(
                             commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -890,7 +896,8 @@ void RendererBackend::dumpShadowAtlas(const char* outputPath) {
                 // Per cascade tile, because a whole-atlas percentage hides
                 // "cascade 0 is empty and cascade 3 is fine".
                 for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
-                    const ShadowAtlasRect rect = kShadowAtlasRects[cascadeIndex];
+                    ShadowAtlasRect rect = kShadowAtlasRects[cascadeIndex];
+                    rect.size = m_directionalShadowResolution[cascadeIndex];
                     std::size_t tileNonZero = 0;
                     float tileMin = 1.0f;
                     float tileMax = 0.0f;

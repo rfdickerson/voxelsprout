@@ -584,7 +584,9 @@ void appendTerrainCell(
     const odai::importer::fnv::FalloutCellRecord& cell,
     const std::function<std::uint32_t(std::uint32_t)>& resolveLandTexture,
     const std::function<std::uint32_t(std::uint32_t)>& resolveLandTextureExact,
-    std::size_t& outDroppedLayerCount
+    std::size_t& outDroppedLayerCount,
+    const std::function<std::uint32_t(std::uint32_t)>& resolveLandNormal,
+    const std::function<std::uint16_t(std::uint32_t)>& resolveLandSurface
 ) {
     if (cell.land == nullptr) {
         return;
@@ -822,6 +824,15 @@ void appendTerrainCell(
         const std::uint32_t textureIndex = resolveLandTexture(land.quadrantBaseTextureFormId[quadrant]);
         terrainMesh.parts.push_back(
             ImportedSceneMeshPart{quadrantFirstIndex, quadrantIndexCount, textureIndex, false});
+        odai::importer::ImportedTerrainNormalBinding normals;
+        normals.textures[0]=resolveLandNormal(land.quadrantBaseTextureFormId[quadrant]);
+        normals.surfaceProperties[0]=resolveLandSurface(land.quadrantBaseTextureFormId[quadrant]);
+        for (std::size_t layer=0;layer<quadrantLayers.size();++layer) {
+            normals.textures[layer+1]=resolveLandNormal(quadrantLayers[layer].layer->textureFormId);
+            normals.surfaceProperties[layer+1]=resolveLandSurface(quadrantLayers[layer].layer->textureFormId);
+        }
+        terrainMesh.terrainNormals.resize(terrainMesh.parts.size());
+        terrainMesh.terrainNormals.back()=normals;
     }
 }
 
@@ -1004,9 +1015,31 @@ void mergeWorldTablesFromScene(
         put(outTables.lightsByFormId, light.formId, light);
     }
     for (const FalloutLandTextureRecord& entry : data.landTextures) {
-        if (!entry.diffuseTexturePath.empty()) {
-            put(outTables.landTexturePaths, remap(entry.formId), entry.diffuseTexturePath);
-        }
+        put(outTables.landTextureSetIds, remap(entry.formId),
+            entry.deleted ? 0u : remap(entry.textureSetFormId));
+        put(outTables.landSurfaceProperties, remap(entry.formId),
+            std::uint16_t(!entry.deleted && entry.hasSpecularExponent ? 0x8000u | entry.specularExponent : 0u));
+        auto ids = entry.deleted ? std::vector<std::uint32_t>{} : entry.grassFormIds;
+        for (auto& id : ids) id = remap(id);
+        put(outTables.landGrass, remap(entry.formId), ids);
+        // A winning LTEX replaces its complete definition. Clear old resolved
+        // channels even when TNAM is absent or names a missing TXST; otherwise
+        // removed materials silently survive from the previous plugin.
+        put(outTables.landTexturePaths, remap(entry.formId),
+            entry.deleted ? std::string{} : entry.diffuseTexturePath);
+        put(outTables.landTextureSlots, remap(entry.formId),
+            entry.deleted ? std::array<std::string,8>{} : entry.texturePaths);
+    }
+    for (auto grass : data.grasses) {
+        grass.formId = remap(grass.formId);
+        put(outTables.grasses, grass.formId, grass);
+        put(outTables.staticModelPaths, grass.formId, grass.modelPath);
+        put(outTables.staticRecordTypes, grass.formId, std::string("GRAS"));
+    }
+    for (const auto& [id, slots] : data.textureSets) {
+        put(outTables.textureSets, remap(id), slots);
+        const auto flags = data.textureSetFlags.find(id);
+        put(outTables.textureSetFlags, remap(id), flags == data.textureSetFlags.end() ? std::uint16_t(0) : flags->second);
     }
     for (const FalloutRegionRecord& entry : data.regions) {
         const std::uint32_t formId = remap(entry.formId);
@@ -1088,6 +1121,15 @@ void mergeWorldTablesFromScene(
             remapped.parentWorldspaceFormId = remap(entry.parentWorldspaceFormId);
         }
         put(outTables.worldspaceDefaultsByFormId, remapped.formId, remapped);
+    }
+    // Resolve against merged records: a TXST-only override need not repeat LTEX.
+    for (const auto& [landId, setId] : outTables.landTextureSetIds) {
+        if (setId==0u) continue;
+        const auto found=outTables.textureSets.find(setId);
+        const auto slots = found == outTables.textureSets.end()
+            ? std::array<std::string,8>{} : found->second;
+        outTables.landTextureSlots[landId]=slots;
+        outTables.landTexturePaths[landId]=slots[0];
     }
     resolveWorldspaceInheritance(outTables);
 }
@@ -1235,6 +1277,7 @@ bool buildFalloutWorldTables(
     std::unordered_map<std::uint64_t, std::string> morrowindPaletteEditorIds;
     std::unordered_map<std::string, std::string> morrowindTexturePathsByEditorId;
     for (const FalloutLoadOrderEntry& entry : order.entries()) {
+        outTables.skyrim = outTables.skyrim || toLowerAsciiCopy(entry.header.fileName) == "skyrim.esm";
         if (entry.slot.kind == FalloutPluginSlotKind::Regular) {
             outTables.pluginFileNamesByRegularSlot.insert_or_assign(
                 entry.slot.index, entry.header.fileName);
@@ -1325,6 +1368,7 @@ bool buildFalloutWorldTables(
 bool buildFalloutWorldTables(
     const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError) {
     outTables = FalloutWorldTables{};
+    outTables.skyrim = toLowerAsciiCopy(esmPath.filename().string()) == "skyrim.esm";
 
     // Reject every worldspace group and every cell's contents: this pass wants
     // only the top-level STAT / LIGH / LTEX / TXST / WRLD / REGN records. Nothing per-cell is
@@ -1361,12 +1405,25 @@ bool buildFalloutWorldTables(
         outTables.lightsByFormId.emplace(entry.formId, entry);
     }
     for (const FalloutLandTextureRecord& entry : data.landTextures) {
+        outTables.landTextureSetIds.emplace(entry.formId, entry.textureSetFormId);
+        outTables.landSurfaceProperties.emplace(entry.formId,
+            std::uint16_t(!entry.deleted && entry.hasSpecularExponent ? 0x8000u | entry.specularExponent : 0u));
+        outTables.landTextureSlots.emplace(entry.formId, entry.texturePaths);
         if (!entry.diffuseTexturePath.empty()) {
             outTables.landTexturePaths.emplace(entry.formId, entry.diffuseTexturePath);
             outTables.morrowindLandTexturePaths.emplace(
                 static_cast<std::uint64_t>(entry.formId), entry.diffuseTexturePath);
         }
+        outTables.landGrass.emplace(entry.formId,
+            entry.deleted ? std::vector<std::uint32_t>{} : entry.grassFormIds);
     }
+    for (const auto& grass : data.grasses) {
+        outTables.grasses.emplace(grass.formId, grass);
+        outTables.staticModelPaths.emplace(grass.formId, grass.modelPath);
+        outTables.staticRecordTypes.emplace(grass.formId, "GRAS");
+    }
+    outTables.textureSets=data.textureSets;
+    outTables.textureSetFlags=data.textureSetFlags;
     for (const FalloutRegionRecord& entry : data.regions) {
         if (entry.isDiscoverable()) {
             outTables.regionNamesByFormId.emplace(entry.formId, entry.mapName);
@@ -1473,7 +1530,7 @@ const std::string* CellSceneBuilder::staticModelPathFor(std::uint32_t baseFormId
 }
 
 std::uint32_t CellSceneBuilder::resolveTextureIndex(
-    const std::string& texturePath, bool linearData) {
+    const std::string& texturePath, bool linearData, std::uint32_t clampMode, bool cube) {
     if (texturePath.empty()) {
         return kNoTextureIndex;
     }
@@ -1481,6 +1538,8 @@ std::uint32_t CellSceneBuilder::resolveTextureIndex(
     // cache with its own private copy, so a path spelled differently from the
     // one that resolved could occupy a second slot.
     std::string key = toLowerAsciiCopy(normalizeTexturePath(texturePath));
+    key += cube ? "|cube" : "|2d";
+    key += "|clamp=" + std::to_string(clampMode);
     if (linearData) {
         key += "|linear-data";
     }
@@ -1529,8 +1588,12 @@ std::uint32_t CellSceneBuilder::resolveTextureIndex(
         }
         texture.sourcePath = texturePath;
     }
+    if (texture.arrayLayers != (cube ? 6u : 1u)) { m_failedTexturePaths.insert(key); return kNoTextureIndex; }
+    texture.linearData = linearData;
+    texture.clampMode = static_cast<std::uint8_t>(std::min(clampMode,3u));
     // DDS does not carry colour-space intent. Most DXT1 assets are albedo and
     // use an sRGB image view, but Skyrim's DefaultWater.dds is vector data.
+    if (!linearData && texture.format == TextureFormat::RGBA8) texture.format = TextureFormat::RGBA8Srgb;
     if (linearData && texture.format == TextureFormat::BC1) {
         texture.format = TextureFormat::BC1Linear;
     }
@@ -1857,7 +1920,21 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     };
     appendTerrainCell(
         m_scene.meshes[m_terrainMeshIndex], cell, resolveInherited, resolveExact,
-        m_stats.droppedTerrainLayers);
+        m_stats.droppedTerrainLayers, [this](std::uint32_t id) {
+            const auto found=m_tables.landTextureSlots.find(id);
+            return found==m_tables.landTextureSlots.end() || found->second[1].empty()
+                ? kNoTextureIndex : resolveTextureIndex(found->second[1], true);
+        }, [this](std::uint32_t id) -> std::uint16_t {
+            if (!m_tables.skyrim) return 0;
+            const auto props = m_tables.landSurfaceProperties.find(id);
+            std::uint16_t value = props == m_tables.landSurfaceProperties.end() ? 0 : props->second;
+            const auto set = m_tables.landTextureSetIds.find(id);
+            if (set != m_tables.landTextureSetIds.end()) {
+                const auto flags = m_tables.textureSetFlags.find(set->second);
+                if (flags != m_tables.textureSetFlags.end()) value |= (flags->second & 7u) << 8u;
+            }
+            return value;
+        });
 }
 
 // A LIGH reference becomes an ImportedSceneLight. The renderer's punctual-light
@@ -1974,6 +2051,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             refPtr = &resolvedRef;
         }
         const FalloutPlacedReference& ref = *refPtr;
+        const bool grassPlacement = ref.formId == 0u && m_tables.grasses.contains(ref.baseFormId);
         // INITIALLY DISABLED REFERENCES DO NOT RENDER, and nothing here had
         // ever checked. These are quest objects waiting for a script -- and
         // some are enormous: Skyrim's MG07 blizzard barrier is a dome measured
@@ -2003,8 +2081,50 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             // failed-base cache: the same fire base can be placed many times
             // and every REFR needs its own emitter.
             const std::string* placedModelPath = staticModelPathFor(ref.baseFormId);
-            if (placedModelPath != nullptr && isEffectOnlyModelPath(*placedModelPath)) {
-                if (isFireParticleEffectModelPath(*placedModelPath)) {
+            bool authoredParticlesPlaced = false;
+            if (placedModelPath != nullptr && m_tables.skyrim) {
+                std::string path = *placedModelPath;
+                for (char& c : path) c = c == '/' ? '\\' : char(std::tolower(static_cast<unsigned char>(c)));
+                if (path.starts_with("effects\\")) {
+                    if (m_checkedParticleModels.insert(ref.baseFormId).second) {
+                        std::vector<std::uint8_t> bytes;
+                        std::string error;
+                        NifBlockSummary blocks;
+                        if (m_assets.resolveMesh(*placedModelPath, bytes, error) &&
+                            parseNifBlockSummary(bytes, blocks, error) &&
+                            std::find(blocks.blockTypeNames.begin(), blocks.blockTypeNames.end(), "NiParticleSystem") != blocks.blockTypeNames.end()) {
+                            NifMist definition;
+                            if (parseNifMist(bytes, definition, error))
+                                m_particleDefinitions.emplace(ref.baseFormId, std::move(definition));
+                            else std::cerr << "[particles] unsupported authored system; existing fallback retained: "
+                                           << *placedModelPath << ": " << error << "\n";
+                        }
+                    }
+                    const auto found = m_particleDefinitions.find(ref.baseFormId);
+                    if (found != m_particleDefinitions.end()) {
+                        ImportedSceneParticleEmitter emitter;
+                        emitter.effect = ImportedParticleEffect::Mist;
+                        emitter.sourceId = "refr_" + formIdHex(ref.formId) + "_particles";
+                        emitter.seed = ref.formId;
+                        emitter.textureIndex = resolveTextureIndex(found->second.texture);
+                        ImportedSceneInstance placement;
+                        writeBethesdaPlacementTransform(placement, ref, false);
+                        std::copy_n(placement.transform, 12, emitter.mistTransform.begin());
+                        emitter.mist = found->second;
+                        if (emitter.textureIndex != kNoTextureIndex) {
+                            m_scene.particleEmitters.push_back(std::move(emitter));
+                            ++m_stats.particleEmittersPlaced;
+                            authoredParticlesPlaced = true;
+                        }
+                    }
+                    // This known effect-only fixture has no static geometry.
+                    // Other supported files may contain visible meshes as well.
+                    if (authoredParticlesPlaced && path == "effects\\ambient\\fxmistmillwheel01.nif") continue;
+                }
+            }
+            if (placedModelPath != nullptr && isEffectOnlyModelPath(*placedModelPath) &&
+                (!m_tables.skyrim || isFireParticleEffectModelPath(*placedModelPath))) {
+                if (!authoredParticlesPlaced && isFireParticleEffectModelPath(*placedModelPath)) {
                     addCellFireEmitter(ref, *placedModelPath);
                 }
                 ++m_stats.effectMeshesSkipped;
@@ -2120,6 +2240,22 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     noteDroppedReference(ref.baseFormId, StaticDropReason::kMeshUnreadable);
                     continue;
                 }
+                if (m_tables.skyrim && isEffectOnlyModelPath(staticModelPath)) {
+                    // Directory names are not geometry types. Waterfall/creek
+                    // sheets use ordinary triangles with animated materials.
+                    // Admit the supported material subset, keeping unsupported
+                    // effect geometry out of the static path and collision.
+                    std::erase_if(nifModel.shapes,[](const NifShape& shape) {
+                        return shape.materialAnimations.empty() || shape.unsupportedMaterialControllers!=0;
+                    });
+                    nifModel.collisionTriangles.clear();
+                    if(nifModel.shapes.empty()) {
+                        ++m_stats.effectMeshesSkipped;
+                        m_failedStatics.emplace(ref.baseFormId,StaticDropReason::kIntentional);
+                        noteDroppedReference(ref.baseFormId,StaticDropReason::kIntentional);
+                        continue;
+                    }
+                }
                 if (skyrimTreeNif) {
                     // Skyrim's close trees are real NIF geometry, not SPT
                     // billboards. Give that geometry the same packed wind
@@ -2181,7 +2317,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 }
                 std::vector<NifCollisionTriangle> modelCollision =
                     nifModel.collisionTriangles;
-                if (modelCollision.empty()) {
+                if (modelCollision.empty() && !isEffectOnlyModelPath(staticModelPath)) {
                     // Per-NIF fallback, not a global mode: one unsupported
                     // Havok wrapper must not disable authored collision for
                     // every other building in the cell.
@@ -2354,6 +2490,13 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     }
                 }
                 for (const auto& shape : nifModel.shapes) {
+                    if (m_tables.skyrim && shape.alphaBlend &&
+                        shape.lightingMaterial.requiresSceneRefraction()) {
+                        ++m_stats.refractionShapesSkipped;
+                        std::cerr << "[materials] unsupported scene refraction; distortion surface omitted: "
+                                  << *placedModelPath << " / " << shape.name << "\n";
+                        continue;
+                    }
                     // Drop baked shadow decals.
                     //
                     // Bethesda models carry a flat quad at the base, spanning the
@@ -2452,20 +2595,20 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             shape.alphaSemantic == NifAlphaSemantic::VertexFade
                             ? opaqueIndexCount
                             : partIndexCount;
-                        part.textureIndex = resolveTextureIndex(shape.diffuseTexturePath);
+                        const auto clampMode = shape.lightingMaterial.parametersValid
+                            ? shape.lightingMaterial.textureClampMode : 3u;
+                        part.textureIndex = resolveTextureIndex(shape.diffuseTexturePath, false, clampMode);
                         const std::uint32_t normalTextureIndex =
-                            resolveTextureIndex(shape.normalTexturePath, /*linearData=*/true);
-                        if (part.textureIndex != kNoTextureIndex &&
-                            normalTextureIndex != kNoTextureIndex) {
-                            m_scene.normalTextureByDiffuseIndex.emplace(
-                                part.textureIndex, normalTextureIndex);
-                        }
+                            resolveTextureIndex(shape.normalTexturePath, /*linearData=*/true, clampMode);
+                        for (std::size_t vertex = baseVertex; vertex < mesh.vertices.size(); ++vertex)
+                            mesh.vertices[vertex].layerTextureIndex[0] = normalTextureIndex;
                         if (part.textureIndex == kNoTextureIndex &&
                             modelDominantTexture != kNoTextureIndex) {
                             part.textureIndex = modelDominantTexture;
                             ++m_stats.untexturedShapesGivenModelTexture;
                         }
                         part.alphaTest = shape.alphaTest;
+                        part.blendMode = shape.blendMode;
                         part.alphaBlend =
                             shape.alphaSemantic == NifAlphaSemantic::VertexFade
                             ? false
@@ -2492,6 +2635,13 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         part.twoSided = shape.twoSided || isDistantLodModelPath(staticModelPath);
                         part.alphaThreshold = shape.alphaThreshold;
                         part.vegetationLod = shape.vegetationLod;
+                        if (grassPlacement) {
+                            part.alphaTest = true;
+                            part.alphaBlend = false;
+                            part.twoSided = true;
+                            part.unlit = true; // existing alpha-tested foliage lighting
+                            part.vegetationReserved[0] |= kImportedSceneMeshPartGrass;
+                        }
                         if (const auto animationIt =
                                 rigidAnimationByNode.find(shape.animationNodeName);
                             animationIt != rigidAnimationByNode.end()) {
@@ -2597,9 +2747,49 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                                     toLowerAsciiCopy(shape.diffuseTexturePath));
                             }
                         }
+                        std::uint32_t lightingIndex = kNoTextureIndex;
+                        if (shape.lightingMaterial.present) {
+                            const auto& source = shape.lightingMaterial;
+                            ImportedNifLightingMaterial material;
+                            material.animations=shape.materialAnimations;
+                            for(auto& track:material.animations) {
+                                for(const auto& path:track.texturePaths)
+                                    track.textures.push_back(resolveTextureIndex(path, track.target == MaterialAnimatedValue::NormalFrame, clampMode));
+                            }
+                            material.shaderType = source.shaderType;
+                            material.flags1 = source.flags1;
+                            material.flags2 = source.flags2;
+                            material.valid = source.parametersValid ? 1u : 0u;
+                            std::copy_n(source.uvOffset, 2, material.uvOffset);
+                            std::copy_n(source.uvScale, 2, material.uvScale);
+                            if (source.parametersValid) {
+                                material.textureClampMode = source.textureClampMode;
+                                material.refractionStrength = source.refractionStrength;
+                                material.environmentScale = source.environmentScale;
+                                std::copy_n(source.emissive, 3, material.emissive);
+                                std::copy_n(source.specular, 3, material.specular);
+                                material.emissiveMultiplier = source.emissiveMultiplier;
+                                material.specularStrength = source.specularStrength;
+                                material.glossiness = source.glossiness;
+                                material.alpha = source.alpha;
+                            }
+                            for (std::size_t slot = 0; slot < std::min(source.textures.size(), std::size_t(9)); ++slot) {
+                                material.texturePaths[slot] = source.textures[slot];
+
+                                material.textures[slot] = resolveTextureIndex(source.textures[slot],
+                                    slot == 1 || slot == 3 || slot == 5 || slot == 7, clampMode, slot == 4);
+                            }
+                            if (material.textures[4] < m_scene.textures.size() &&
+                                m_scene.textures[material.textures[4]].arrayLayers != 6)
+                                material.textures[4] = kNoTextureIndex;
+                            lightingIndex = static_cast<std::uint32_t>(m_scene.lightingMaterials.size());
+                            m_scene.lightingMaterials.push_back(material);
+                        }
                         ++m_stats.totalShapes;
                         if (part.indexCount != 0u) {
                             mesh.parts.push_back(part);
+                            mesh.lightingMaterialIndices.resize(mesh.parts.size(), kNoTextureIndex);
+                            mesh.lightingMaterialIndices.back() = lightingIndex;
                         }
                         if (fadedIndexCount != 0u) {
                             ImportedSceneMeshPart fadedPart = part;
@@ -2607,6 +2797,8 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             fadedPart.indexCount = fadedIndexCount;
                             fadedPart.alphaBlend = true;
                             mesh.parts.push_back(fadedPart);
+                            mesh.lightingMaterialIndices.resize(mesh.parts.size(), kNoTextureIndex);
+                            mesh.lightingMaterialIndices.back() = lightingIndex;
                         }
                     }
                 }
@@ -2630,12 +2822,13 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
 
             ImportedSceneInstance instance;
             instance.meshIndex = meshIt->second;
-            instance.sourceId = "refr_" + formIdHex(ref.formId);
+            instance.sourceId = grassPlacement ? "grass_" + formIdHex(ref.baseFormId) +
+                "_" + std::to_string(m_scene.instances.size()) : "refr_" + formIdHex(ref.formId);
             instance.sourceReferenceFormId = ref.formId;
             instance.initiallyVisible = initiallyVisible;
             const std::uint16_t ownerSlot = static_cast<std::uint16_t>(ref.formId >> 24u);
             const auto owner = m_tables.pluginFileNamesByRegularSlot.find(ownerSlot);
-            if (owner != m_tables.pluginFileNamesByRegularSlot.end()) {
+            if (!grassPlacement && owner != m_tables.pluginFileNamesByRegularSlot.end()) {
                 const std::uint32_t localId = ref.formId & 0x00ffffffu;
                 instance.sourceReferenceIdentity =
                     std::string(m_tables.morrowind ? "frmr:" : "") +
@@ -2649,8 +2842,16 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 instance.modelPath = *modelPath;
             }
             writeBethesdaPlacementTransform(instance, ref, m_tables.morrowind);
+            // GRAS Uniform Scaling controls whether height variation also
+            // changes the footprint. NIF source Z is the vertical axis.
+            if (grassPlacement && (m_tables.grasses.at(ref.baseFormId).flags & 2u) == 0u) {
+                for (int row = 0; row < 3; ++row) {
+                    instance.transform[row * 4] /= ref.scale;
+                    instance.transform[row * 4 + 1] /= ref.scale;
+                }
+            }
             if (const auto collisionIt = m_collisionByStaticFormId.find(ref.baseFormId);
-                collisionIt != m_collisionByStaticFormId.end()) {
+                !grassPlacement && collisionIt != m_collisionByStaticFormId.end()) {
                 for (const NifCollisionTriangle& local : collisionIt->second) {
                     ImportedSceneCollisionTriangle world;
                     world.sourceReferenceFormId = ref.formId;
@@ -2691,6 +2892,58 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 addCellStatics(components);
             }
     }
+    // Generated roots belong to this CELL, but are not gameplay references or
+    // collision objects. Reuse the NIF/material builder with a LAND-less batch
+    // so this call cannot recursively scatter again.
+    auto roots = scatterSkyrimGrass(cell, m_tables);
+    if (!roots.empty()) {
+        // Exclude roots under placed geometry (including roads and foundations).
+        // Bucket collision triangles in CELL-local 128-unit columns so this is
+        // linear in local geometry rather than roots times all triangles.
+        std::array<std::vector<const ImportedSceneCollisionTriangle*>, 32 * 32> columns;
+        const float originX = float(cell.gridX) * kExteriorCellSize;
+        const float originY = float(cell.gridZ) * kExteriorCellSize;
+        for (const auto& triangle : m_scene.collisionTriangles) {
+            float xmin = triangle.vertices[0], xmax = xmin;
+            float ymin = -triangle.vertices[2], ymax = ymin;
+            for (int i = 1; i < 3; ++i) {
+                xmin = std::min(xmin, triangle.vertices[i*3]);
+                xmax = std::max(xmax, triangle.vertices[i*3]);
+                ymin = std::min(ymin, -triangle.vertices[i*3+2]);
+                ymax = std::max(ymax, -triangle.vertices[i*3+2]);
+            }
+            if (xmax < originX || xmin >= originX+kExteriorCellSize ||
+                ymax < originY || ymin >= originY+kExteriorCellSize) continue;
+            const int x0 = std::clamp(int(std::floor((xmin-originX)/128)), 0, 31);
+            const int x1 = std::clamp(int(std::floor((xmax-originX)/128)), 0, 31);
+            const int y0 = std::clamp(int(std::floor((ymin-originY)/128)), 0, 31);
+            const int y1 = std::clamp(int(std::floor((ymax-originY)/128)), 0, 31);
+            for (int y=y0; y<=y1; ++y) for (int x=x0; x<=x1; ++x)
+                columns[y*32+x].push_back(&triangle);
+        }
+        std::erase_if(roots, [&](const auto& root) {
+            const int x = std::clamp(int((root.position[0]-originX)/128), 0, 31);
+            const int y = std::clamp(int((root.position[1]-originY)/128), 0, 31);
+            for (const auto* triangle : columns[y*32+x]) {
+                const auto* v = triangle->vertices;
+                const float ax=v[3]-v[0], ay=v[5]-v[2];
+                const float bx=v[6]-v[0], by=v[8]-v[2];
+                const float px=root.position[0]-v[0], py=-root.position[1]-v[2];
+                const float det=ax*by-ay*bx;
+                if (std::abs(det)<1e-5f) continue;
+                const float u=(px*by-py*bx)/det, w=(ax*py-ay*px)/det;
+                if (u<0 || w<0 || u+w>1) continue;
+                const float height = v[1]+u*(v[4]-v[1])+w*(v[7]-v[1]);
+                if (height >= root.position[2]-2 && height < root.position[2]+512) return true;
+            }
+            return false;
+        });
+        FalloutCellRecord grassCell{};
+        grassCell.references = std::move(roots);
+        const auto before = m_scene.instances.size();
+        addCellStatics(grassCell);
+        m_stats.grassInstances += m_scene.instances.size() - before;
+    }
 }
 
 void CellSceneBuilder::finish(ImportedScene& outScene) {
@@ -2700,6 +2953,10 @@ void CellSceneBuilder::finish(ImportedScene& outScene) {
     // also what lets sparse Oblivion cells get emissive fire without making a
     // light-rich Skyrim interior twice as bright.
     for (const ImportedSceneParticleEmitter& emitter : m_scene.particleEmitters) {
+        // Skyrim illumination is authored by placed LIGH records. A particle
+        // effect is not authorization to invent a light missing from the plugin.
+        if (m_tables.skyrim) break;
+        if(emitter.effect!=ImportedParticleEffect::Fire) continue;
         bool hasNearbyAuthoredLight = false;
         for (const ImportedSceneLight& light : m_scene.lights) {
             const float dx = light.position[0] - emitter.position[0];

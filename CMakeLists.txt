@@ -107,6 +107,8 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/chunk_push_constants.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/fullscreen_triangle.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_vertex_pack.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_grass.slang"
+        "${CMAKE_SOURCE_DIR}/src/render/shaders/imported_material_table.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/noise.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/sh_lighting.slang"
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slang")
@@ -151,7 +153,7 @@ if(SLANGC_EXECUTABLE)
                  ui.vert ui.frag shadow_depth.vert shadow_depth.frag pipe_shadow.vert pipe_shadow.frag
                  imported_static_shadow.vert imported_static_shadow.frag
                  pipe_instanced.vert pipe_instanced.frag imported_static.vert imported_static.frag
-                 imported_fire_particle.vert imported_fire_particle.frag imported_water.vert
+                 imported_fire_particle.vert imported_fire_particle.frag imported_mist_particle.vert imported_mist_particle.frag imported_water.vert
                  imported_water.frag imported_static_normaldepth.frag imported_static_depthonly.frag
                  imported_water_normaldepth.frag pipe_normaldepth.frag skinned_velocity.vert
                  skinned_velocity.frag)
@@ -177,6 +179,12 @@ if(SLANGC_EXECUTABLE)
                  sun_shafts skinning)
         add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/${name}.comp.slang" compute)
     endforeach()
+    add_custom_command(OUTPUT "${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang.spv" APPEND
+        DEPENDS "${CMAKE_SOURCE_DIR}/src/render/taa_depth_policy.h")
+    foreach(waterShader imported_water.frag imported_water_rt.frag)
+        add_custom_command(OUTPUT "${CMAKE_SOURCE_DIR}/src/render/shaders/${waterShader}.slang.spv" APPEND
+            DEPENDS "${CMAKE_SOURCE_DIR}/src/render/water_depth_policy.h")
+    endforeach()
     add_slang_variant("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute
         "${CMAKE_SOURCE_DIR}/src/render/shaders/ssao_hbao.comp.slang.spv" -DODAI_AO_MODE=1)
     add_slang_variant("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute
@@ -184,6 +192,8 @@ if(SLANGC_EXECUTABLE)
     add_slang_variant("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface_rt.comp.slang.spv" -DODAI_GI_RT_SURFACE=1)
     add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
+    add_custom_command(OUTPUT "${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.frag.slang.spv" APPEND
+        DEPENDS "${CMAKE_SOURCE_DIR}/src/render/image_space_contrast.h")
 endif()
 
 add_library(odai_core STATIC src/core/log.cc src/core/job_system.cc)
@@ -209,7 +219,7 @@ add_library(odai_ui STATIC
     src/ui/widgets/selection_inspector_panel.cc)
 odai_source_includes(odai_ui)
 target_include_directories(odai_ui PRIVATE ${Stb_INCLUDE_DIR})
-target_link_libraries(odai_ui PUBLIC odai_core nlohmann_json::nlohmann_json)
+target_link_libraries(odai_ui PUBLIC odai_core nlohmann_json::nlohmann_json ZLIB::ZLIB)
 odai_warnings(odai_ui)
 
 add_library(odai_audio STATIC src/audio/audio.cc src/audio/null_backend.cc
@@ -254,15 +264,16 @@ add_library(odai_bethesda_import STATIC
     src/import/cell_residency_planner.cc
     src/import/fnv/actor_records.cc src/import/fnv/asset_source.cc
     src/import/fnv/async_asset_loader.cc src/import/fnv/bsa_archive.cc
-    src/import/fnv/cell_builder.cc src/import/fnv/character_builder.cc
+    src/import/fnv/cell_builder.cc src/import/fnv/skyrim_grass.cc src/import/fnv/character_builder.cc
     src/import/fnv/content_profile.cc src/import/fnv/content_record_index.cc
     src/import/fnv/decoded_texture_cache.cc src/import/fnv/dialogue_records.cc
     src/import/fnv/esm_reader.cc src/import/fnv/fallout_records.cc
-    src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/lz4_frame.cc
-    src/import/fnv/nif_scene.cc src/import/fnv/plugin_load_order.cc
+    src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/skyrim_lod_handoff.cc src/import/fnv/lz4_frame.cc
+    src/import/fnv/tri_morph.cc src/import/fnv/nif_scene.cc src/import/fnv/nif_particles.cc src/import/fnv/plugin_load_order.cc
     src/import/fnv/spt_scene.cc src/import/fnv/skyrim_tree_lod.cc
     src/import/fnv/skyrim_animation_assets.cc
-    src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc)
+    src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc
+    src/import/fnv/image_space_records.cc)
 odai_source_includes(odai_bethesda_import)
 target_link_libraries(odai_bethesda_import PUBLIC odai_core odai_anim odai_dialogue
     ZLIB::ZLIB Jolt::Jolt nlohmann_json::nlohmann_json)
@@ -276,7 +287,7 @@ add_library(odai_bethesda_runtime STATIC
     src/bethesda/living_world.cc src/bethesda/vmad_reader.cc src/bethesda/skyrim_quest.cc
     src/bethesda/skyrim_dialogue.cc
     src/bethesda/skyrim_runtime_records.cc
-    src/bethesda/skyrim_scenario_content.cc
+    src/bethesda/skyrim_scenario_content.cc src/bethesda/skyrim_persistent_references.cc src/bethesda/skyrim_items.cc
     src/bethesda/pex_reader.cc src/bethesda/papyrus_vm.cc
     src/bethesda/scenario.cc src/bethesda/bethesda_session.cc
     src/bethesda/save_game.cc src/bethesda/bethesda_physics_world.cc)
@@ -351,7 +362,7 @@ if(ODAI_BUILD_RUNTIME)
 endif()
 
 if(ODAI_BUILD_TOOLS)
-    add_executable(odai_bethesda_probe src/tools/newvegas_probe_main.cc)
+    add_executable(odai_bethesda_probe src/tools/tri_probe.cc src/tools/newvegas_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
     target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
     odai_source_includes(odai_bethesda_probe)
     odai_warnings(odai_bethesda_probe)
@@ -372,12 +383,32 @@ if(BUILD_TESTING)
         add_executable(${target} ${source})
         odai_source_includes(${target})
         odai_warnings(${target})
+        # Tests use assert for both setup and verification. Keep assertions in
+        # optimized test executables; production libraries remain optimized.
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${target} PRIVATE -UNDEBUG)
+        endif()
         add_test(NAME ${target} COMMAND ${target})
     endfunction()
 
     odai_plain_test(odai_imported_scene_tests tests/imported_scene_tests.cc)
     target_link_libraries(odai_imported_scene_tests PRIVATE odai_bethesda_import)
 
+    odai_plain_test(odai_asset_coverage_tests tests/asset_coverage_tests.cc)
+    target_sources(odai_asset_coverage_tests PRIVATE src/tools/asset_coverage_report.cc)
+    target_link_libraries(odai_asset_coverage_tests PRIVATE odai_bethesda_import)
+
+    odai_plain_test(odai_tri_morph_tests tests/tri_morph_tests.cc)
+    target_link_libraries(odai_tri_morph_tests PRIVATE odai_bethesda_import)
+
+    odai_plain_test(odai_nif_particle_tests tests/nif_particle_tests.cc)
+    target_link_libraries(odai_nif_particle_tests PRIVATE odai_bethesda_import)
+    odai_plain_test(odai_image_space_tests tests/image_space_tests.cc)
+    target_link_libraries(odai_image_space_tests PRIVATE odai_bethesda_import)
+    odai_plain_test(odai_material_animation_tests tests/material_animation_tests.cc)
+    target_link_libraries(odai_material_animation_tests PRIVATE odai_bethesda_import)
     odai_plain_test(odai_fnv_import_tests tests/fnv_import_tests.cc)
     target_link_libraries(odai_fnv_import_tests PRIVATE odai_bethesda_import)
 
@@ -396,6 +427,7 @@ if(BUILD_TESTING)
     odai_plain_test(odai_animation_tests tests/animation_tests.cc)
     target_link_libraries(odai_animation_tests PRIVATE odai_anim)
 
+    odai_plain_test(odai_taa_depth_tests tests/taa_depth_tests.cc)
     odai_plain_test(odai_dialogue_tests tests/dialogue_tests.cc)
     target_link_libraries(odai_dialogue_tests PRIVATE odai_dialogue)
 
@@ -432,6 +464,10 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_core_types_tests tests/core_types_tests.cc)
 
+    odai_plain_test(odai_skyrim_inventory_tests tests/skyrim_inventory_tests.cc)
+    target_link_libraries(odai_skyrim_inventory_tests PRIVATE odai_bethesda_runtime)
+    odai_plain_test(odai_skyrim_persistent_reference_tests tests/skyrim_persistent_reference_tests.cc)
+    target_link_libraries(odai_skyrim_persistent_reference_tests PRIVATE odai_bethesda_runtime)
     odai_plain_test(odai_bethesda_runtime_tests tests/bethesda_runtime_tests.cc)
     target_link_libraries(odai_bethesda_runtime_tests PRIVATE odai_bethesda_runtime)
 
@@ -475,6 +511,11 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_living_world_tests tests/living_world_tests.cc)
     target_link_libraries(odai_living_world_tests PRIVATE odai_bethesda_runtime)
+
+    odai_plain_test(odai_world_map_cache_tests tests/world_map_cache_tests.cc)
+
+    odai_plain_test(odai_swf_font_tests tests/swf_font_tests.cc)
+    target_link_libraries(odai_swf_font_tests PRIVATE odai_ui)
 
     odai_plain_test(odai_ui_tests tests/ui_tests.cc)
     target_compile_definitions(odai_ui_tests PRIVATE ODAI_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")

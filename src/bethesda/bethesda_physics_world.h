@@ -116,6 +116,15 @@ struct PhysicsHingeConfig {
     float frictionTorqueNewtonMetres = 0.0f;
 };
 
+// Immutable collision acceleration structure. Preparation is independent of a
+// physics world and may run concurrently; publication remains main-thread only.
+class PreparedStaticCollision {
+public:
+    struct Impl;
+    std::shared_ptr<const Impl> impl;
+    [[nodiscard]] bool valid() const { return impl != nullptr; }
+};
+
 class BethesdaPhysicsWorld {
 public:
     BethesdaPhysicsWorld();
@@ -135,6 +144,12 @@ public:
     bool addStreamedStaticCollision(
         std::uint64_t residencyToken, std::span<const odai::math::Vector3> vertices,
         std::span<const std::uint32_t> triangleIndices, std::string& outError);
+    static PreparedStaticCollision prepareStaticCollision(
+        std::span<const odai::math::Vector3> vertices,
+        std::span<const std::uint32_t> triangleIndices, std::string& outError);
+    bool addPreparedStreamedStaticCollision(
+        std::uint64_t residencyToken, const PreparedStaticCollision& prepared,
+        std::string& outError);
     bool removeStreamedStaticCollision(std::uint64_t residencyToken);
     void clearStreamedStaticCollision();
     // Streamed cells are added one at a time, but rebuilding Jolt's broad

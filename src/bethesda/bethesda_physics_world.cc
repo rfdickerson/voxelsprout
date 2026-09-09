@@ -243,17 +243,18 @@ bool BethesdaPhysicsWorld::addStaticCollision(
     return true;
 }
 
-bool BethesdaPhysicsWorld::addStreamedStaticCollision(
-    std::uint64_t residencyToken,
+struct PreparedStaticCollision::Impl {
+    JPH::RefConst<JPH::Shape> shape;
+};
+
+PreparedStaticCollision BethesdaPhysicsWorld::prepareStaticCollision(
     std::span<const odai::math::Vector3> vertices,
-    std::span<const std::uint32_t> triangleIndices,
-    std::string& outError) {
-    if (!initialize(outError)) return false;
+    std::span<const std::uint32_t> triangleIndices, std::string& outError) {
+    ensureJoltRegistered();
     if (triangleIndices.empty() || triangleIndices.size() % 3u != 0u) {
-        outError = "invalid streamed collision token or triangle index count";
-        return false;
+        outError = "invalid streamed collision triangle index count";
+        return {};
     }
-    removeStreamedStaticCollision(residencyToken);
     JPH::TriangleList triangles;
     triangles.reserve(triangleIndices.size() / 3u);
     for (std::size_t offset = 0u; offset < triangleIndices.size(); offset += 3u) {
@@ -262,7 +263,7 @@ bool BethesdaPhysicsWorld::addStreamedStaticCollision(
         const std::uint32_t c = triangleIndices[offset + 2u];
         if (a >= vertices.size() || b >= vertices.size() || c >= vertices.size()) {
             outError = "streamed collision triangle index is out of range";
-            return false;
+            return {};
         }
         triangles.emplace_back(toJoltVector(vertices[a]), toJoltVector(vertices[c]),
             toJoltVector(vertices[b]));
@@ -271,9 +272,30 @@ bool BethesdaPhysicsWorld::addStreamedStaticCollision(
     const auto created = settings.Create();
     if (created.HasError()) {
         outError = "Jolt streamed mesh construction failed: " + created.GetError();
+        return {};
+    }
+    auto impl = std::make_shared<PreparedStaticCollision::Impl>();
+    impl->shape = created.Get();
+    outError.clear();
+    return {std::move(impl)};
+}
+
+bool BethesdaPhysicsWorld::addStreamedStaticCollision(
+    std::uint64_t residencyToken, std::span<const odai::math::Vector3> vertices,
+    std::span<const std::uint32_t> triangleIndices, std::string& outError) {
+    const auto prepared = prepareStaticCollision(vertices, triangleIndices, outError);
+    return prepared.valid() && addPreparedStreamedStaticCollision(residencyToken, prepared, outError);
+}
+
+bool BethesdaPhysicsWorld::addPreparedStreamedStaticCollision(
+    std::uint64_t residencyToken, const PreparedStaticCollision& prepared,
+    std::string& outError) {
+    if (!prepared.valid()) {
+        outError = "missing prepared collision shape";
         return false;
     }
-    JPH::BodyCreationSettings bodySettings(created.Get(), JPH::RVec3::sZero(),
+    if (!initialize(outError)) return false;
+    JPH::BodyCreationSettings bodySettings(prepared.impl->shape, JPH::RVec3::sZero(),
         JPH::Quat::sIdentity(), JPH::EMotionType::Static, kStaticLayer);
     const JPH::BodyID body = m_impl->physics.GetBodyInterface().CreateAndAddBody(
         bodySettings, JPH::EActivation::DontActivate);
@@ -281,6 +303,7 @@ bool BethesdaPhysicsWorld::addStreamedStaticCollision(
         outError = "Jolt rejected streamed collision body";
         return false;
     }
+    removeStreamedStaticCollision(residencyToken);
     m_impl->streamedStaticBodies.emplace(residencyToken, body);
     outError.clear();
     return true;

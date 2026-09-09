@@ -1,6 +1,8 @@
 #include "import/dds.h"
 
 #include <cstring>
+#include <bit>
+#include <algorithm>
 #include <fstream>
 #include <vector>
 
@@ -87,9 +89,24 @@ std::uint32_t ddsBlockBytes(TextureFormat format) {
         case TextureFormat::BC2:
         case TextureFormat::BC3:
         case TextureFormat::BC5:
+        case TextureFormat::BC6HUfloat:
+        case TextureFormat::BC6HSfloat:
         case TextureFormat::BC7: return 16u;
         default:                 return 0u;
     }
+}
+
+std::size_t ddsCubeByteCount(const ImportedSceneTexture& texture) {
+    if (texture.arrayLayers != 6 || texture.width == 0 || texture.width > 32768 ||
+        texture.width != texture.height || texture.mipLevelCount == 0 ||
+        texture.mipLevelCount > std::bit_width(texture.width)) return 0;
+    std::size_t bytes = 0;
+    const auto block = ddsBlockBytes(texture.format);
+    for (std::uint32_t mip = 0; mip < texture.mipLevelCount; ++mip) {
+        const auto size = std::max(1u,texture.width >> mip);
+        bytes += block ? std::size_t((size+3)/4)*((size+3)/4)*block : std::size_t(size)*size*4;
+    }
+    return bytes*6;
 }
 
 bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, ImportedSceneTexture& out) {
@@ -106,6 +123,10 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
     DdsHeader hdr{};
     std::memcpy(&hdr, data + 4u, sizeof(DdsHeader));
     if (hdr.size != 124u || hdr.width == 0u || hdr.height == 0u) return false;
+    if (hdr.width > 32768u || hdr.height > 32768u || hdr.mipMapCount > std::bit_width(std::max(hdr.width,hdr.height)) ||
+        (hdr.caps2 & 0x200000u) != 0u) return false;
+    std::uint32_t layers = (hdr.caps2 & 0x200u) ? 6u : 1u;
+    if (layers == 6 && hdr.ddspf.fourCC != kFourCCDx10 && ((hdr.caps2 & 0xfc00u) != 0xfc00u || hdr.width != hdr.height)) return false;
     TextureFormat  fmt        = TextureFormat::RGBA8;
     std::size_t    dataOffset = 4u + sizeof(DdsHeader);
 
@@ -142,7 +163,9 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
             mw = std::max(1u, mw >> 1u);
             mh = std::max(1u, mh >> 1u);
         }
+        chainBytes *= layers;
         if (fileSize < dataOffset + chainBytes) return false;
+        out.arrayLayers = layers;
         out.width = hdr.width;
         out.height = hdr.height;
         out.mipLevelCount = mipCount;
@@ -174,12 +197,17 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
         DdsHeaderDxt10 dx10{};
         std::memcpy(&dx10, data + dataOffset, sizeof(DdsHeaderDxt10));
         dataOffset += sizeof(DdsHeaderDxt10);
+        if (dx10.resourceDimension != 3u || dx10.arraySize != 1u) return false;
+        layers = (dx10.miscFlag & 4u) ? 6u : 1u;
+        if (layers == 6 && hdr.width != hdr.height) return false;
         switch (dx10.dxgiFormat) {
             case kDxgiBC1Unorm:                     fmt = TextureFormat::BC1; break;
             case kDxgiBC2Unorm:                     fmt = TextureFormat::BC2; break;
             case kDxgiBC3Unorm:                     fmt = TextureFormat::BC3; break;
             case kDxgiBC4Unorm:                     fmt = TextureFormat::BC4; break;
             case kDxgiBC5Unorm:                     fmt = TextureFormat::BC5; break;
+            case 95u: fmt = TextureFormat::BC6HUfloat; break;
+            case 96u: fmt = TextureFormat::BC6HSfloat; break;
             case kDxgiBC7Unorm: case kDxgiBC7Srgb:  fmt = TextureFormat::BC7; break;
             default: return false;
         }
@@ -198,8 +226,10 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
             mh = std::max(1u, mh >> 1u);
         }
     }
+    chainBytes *= layers;
     if (fileSize < dataOffset + chainBytes) return false;
 
+    out.arrayLayers = layers;
     out.width         = hdr.width;
     out.height        = hdr.height;
     out.mipLevelCount = mipCount;
@@ -224,10 +254,12 @@ bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& out) {
 }
 
 void dropDdsMipLevels(ImportedSceneTexture& tex, std::uint32_t maxDimension) {
+    if (tex.arrayLayers != 1 && tex.arrayLayers != 6) return;
     const std::uint32_t bpb = ddsBlockBytes(tex.format);
     if (bpb == 0u || maxDimension == 0u || tex.mipLevelCount <= 1u) {
         return;
     }
+    const auto faceBytes = tex.rgba8.size() / tex.arrayLayers;
     std::size_t dropBytes = 0;
     while (tex.mipLevelCount > 1u && (tex.width > maxDimension || tex.height > maxDimension)) {
         const std::size_t levelBytes = static_cast<std::size_t>(std::max(1u, (tex.width + 3u) / 4u)) *
@@ -241,7 +273,11 @@ void dropDdsMipLevels(ImportedSceneTexture& tex, std::uint32_t maxDimension) {
         --tex.mipLevelCount;
     }
     if (dropBytes != 0u) {
-        tex.rgba8.erase(tex.rgba8.begin(), tex.rgba8.begin() + static_cast<std::ptrdiff_t>(dropBytes));
+        std::vector<std::uint8_t> retained;
+        for (std::uint32_t face = 0; face < tex.arrayLayers; ++face)
+            retained.insert(retained.end(),tex.rgba8.begin()+face*faceBytes+dropBytes,
+                tex.rgba8.begin()+(face+1)*faceBytes);
+        tex.rgba8 = std::move(retained);
     }
 }
 
@@ -252,11 +288,11 @@ bool writeDds(const std::filesystem::path& path,
     const std::uint32_t bpb = ddsBlockBytes(format);
     if (bpb == 0u || mipData == nullptr || mipDataSize == 0u) return false;
 
-    const bool needDx10 = (format == TextureFormat::BC7);
+    const bool needDx10 = format == TextureFormat::BC7 || format == TextureFormat::BC6HUfloat || format == TextureFormat::BC6HSfloat;
     std::uint32_t fourCC = 0, dxgiFmt = 0;
     if (needDx10) {
         fourCC  = kFourCCDx10;
-        dxgiFmt = kDxgiBC7Unorm;
+        dxgiFmt = format == TextureFormat::BC6HUfloat ? 95u : format == TextureFormat::BC6HSfloat ? 96u : kDxgiBC7Unorm;
     } else {
         switch (format) {
             case TextureFormat::BC1: fourCC = kFourCCDxt1; break;

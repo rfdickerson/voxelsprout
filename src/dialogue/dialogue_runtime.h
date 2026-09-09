@@ -17,6 +17,14 @@ public:
     // runtime's use.
     void begin(const DialogueTree& tree, DialogueContext& ctx);
 
+    // After moving the owning tree/context, repair their addresses without
+    // restarting dialogue or replaying effects. Moving the tree's node map
+    // preserves the current node pointer; this is not for replacing content.
+    void rebindMovedOwner(const DialogueTree& tree, DialogueContext& ctx) {
+        tree_ = &tree;
+        ctx_ = &ctx;
+    }
+
     // Null once isFinished() is true.
     [[nodiscard]] const DialogueNode* currentNode() const;
 

@@ -220,12 +220,12 @@ bool RendererBackend::createImportedMaterialResources() {
     }
     // Slot 0 is the reserved sentinel and is never read; the rest default to a
     // fully rough dielectric with a white tint, i.e. the legacy response.
-    m_importedMaterialTable.fill(importer::GpuImportedMaterial{});
+    std::fill_n(m_importedMaterialTable.begin(), importer::kImportedSceneMaterialTableCapacity, importer::GpuImportedMaterial{});
     m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
 
     BufferCreateDesc desc{};
     desc.size = static_cast<VkDeviceSize>(sizeof(importer::GpuImportedMaterial)) *
-                importer::kImportedSceneMaterialTableCapacity * kMaxFramesInFlight;
+                importer::kImportedGpuMaterialCapacity * kMaxFramesInFlight;
     desc.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     desc.memoryProperties =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -277,7 +277,7 @@ void RendererBackend::setImportedMaterial(std::uint32_t index,
 
 void RendererBackend::setImportedMaterialTable(
     const std::vector<importer::ImportedSceneMaterial>& materials) {
-    m_importedMaterialTable.fill(importer::GpuImportedMaterial{});
+    std::fill_n(m_importedMaterialTable.begin(), importer::kImportedSceneMaterialTableCapacity, importer::GpuImportedMaterial{});
     const std::size_t count =
         std::min<std::size_t>(materials.size(), importer::kImportedSceneMaterialTableCapacity);
     if (materials.size() > importer::kImportedSceneMaterialTableCapacity) {
@@ -1086,15 +1086,15 @@ bool RendererBackend::recordWaterReflectionResolve(
         m_waterReflectionResolvePipelineLayout, 0u,
         m_waterReflectionResolveBufferSet, m_currentFrame);
     WaterReflectionResolvePushConstants push{};
-    push.width = m_renderExtent.width;
-    push.height = m_renderExtent.height;
+    push.width = m_waterReflectionExtent.width;
+    push.height = m_waterReflectionExtent.height;
     vkCmdPushConstants(
         commandBuffer, m_waterReflectionResolvePipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
     vkCmdDispatch(
         commandBuffer,
-        (m_renderExtent.width + 7u) / 8u,
-        (m_renderExtent.height + 7u) / 8u,
+        (m_waterReflectionExtent.width + 7u) / 8u,
+        (m_waterReflectionExtent.height + 7u) / 8u,
         1u);
 
     taaTransitionImage(
@@ -1411,6 +1411,7 @@ RendererBackend::TaaPassOutcome RendererBackend::recordTaaPass(
     }
     m_taaImageInitialized[historyImage] = true;
     const bool upscaling = dispatched.resultInOutput;
+    m_taaHistoryHasDepth = !upscaling;
 
     if (upscaling) {
         // No copy-back: the result is larger than hdrResolve and there is
@@ -1437,7 +1438,6 @@ RendererBackend::TaaPassOutcome RendererBackend::recordTaaPass(
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         m_taaImageInitialized[currentImage] = true;
-        endDebugLabel(commandBuffer);
         m_taaHistoryIndex = currentImage;
         // Both of these, not just the index. m_taaHistoryValid is what the
         // uniform's history-valid flag is built from, and leaving it false here
@@ -1484,7 +1484,6 @@ RendererBackend::TaaPassOutcome RendererBackend::recordTaaPass(
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     m_taaImageInitialized[currentImage] = true;
 
-    endDebugLabel(commandBuffer);
 
     m_taaHistoryIndex = currentImage;
     m_taaHistoryValid = true;

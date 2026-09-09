@@ -1,4 +1,5 @@
 #pragma once
+#include "import/blend_mode.h"
 
 // Minimal reader for Gamebryo NIF files as produced for Fallout 3 / Fallout:
 // New Vegas static meshes (header version 20.2.0.7). Extracts only what a
@@ -12,9 +13,9 @@
 // instance refs are read but not resolved" stood here long after it stopped
 // being true.
 //
-// What is still not read: animation. Controllers and interpolators are skipped
-// wherever they appear, because FNV keeps its animation in separate .kf files
-// keyed to the bone names this parser does return.
+// Embedded rigid animation and linked Skyrim material controllers are read.
+// Skeletal clips in separate .kf files remain keyed to the returned bone names;
+// unsupported controller families are not automatically executed.
 //
 // Design note on robustness: NIF 20.x block headers give an explicit byte
 // size per block, so a block whose internal fields this parser doesn't fully
@@ -42,6 +43,7 @@
 #include <vector>
 
 #include "import/fnv/kf_animation.h"
+#include "import/material_animation.h"
 
 namespace odai::importer::fnv {
 
@@ -56,7 +58,44 @@ enum class NifAlphaSemantic : std::uint8_t {
     VertexFade,
 };
 
+// Source material state, independent of diffuse texture identity. Missing
+// optional tails retain neutral values and are reported separately.
+struct NifLightingMaterial {
+    bool present = false;
+    bool parametersValid = false;
+    // UINT32_MAX is an internal animated-effect family tag, not a lighting shader enum.
+    std::uint32_t shaderType = 0, flags1 = 0, flags2 = 0;
+    float uvOffset[2] = {0, 0};
+    float uvScale[2] = {1, 1};
+    float emissive[3] = {0, 0, 0};
+    float emissiveMultiplier = 0;
+    std::uint32_t textureClampMode = 3;
+    float refractionStrength = 0;
+    [[nodiscard]] bool requiresSceneRefraction() const {
+        // SLSF1_Refraction and SLSF1_Fire_Refraction select distortion,
+        // including when an animated strength is currently zero.
+        return present && (flags1 & ((1u << 15u) | (1u << 16u))) != 0;
+    }
+    float environmentScale = 0;
+    float alpha = 1;
+    float glossiness = 1;
+    float specular[3] = {1, 1, 1};
+    float specularStrength = 1;
+    std::vector<std::string> textures;
+};
+
+struct NifSkyMaterial {
+    bool valid = false;
+    std::uint32_t flags1 = 0, flags2 = 0, objectType = 0;
+    float uvOffset[2] = {}, uvScale[2] = {1, 1};
+    std::string texture;
+};
+
 struct NifShape {
+    NifSkyMaterial skyMaterial;
+    std::vector<MaterialAnimationTrack> materialAnimations;
+    std::uint32_t unsupportedMaterialControllers = 0;
+    NifLightingMaterial lightingMaterial;
     std::string name;               // from the NIF string table; may be empty
     std::string sourceBlockType;    // BSTriShape/NiTriShape/etc., diagnostics only
     std::vector<float> positions;   // xyz per vertex, world space (parent transforms applied)
@@ -111,6 +150,7 @@ struct NifShape {
     // it appears as a solid slab -- Goodsprings' window panes and dust effects
     // were floating white rectangles until this was read.
     bool alphaBlend = false;
+    ImportedBlendMode blendMode = ImportedBlendMode::Alpha;
     NifAlphaSemantic alphaSemantic = NifAlphaSemantic::Opaque;
 
     // Nearest ancestor targeted by an embedded rigid transform track. Geometry
@@ -321,6 +361,7 @@ struct NifSkinnedShape {
     bool alphaTest = false;
     std::uint8_t alphaThreshold = 128;
     bool alphaBlend = false;
+    ImportedBlendMode blendMode = ImportedBlendMode::Alpha;
     bool twoSided = false;
     // BSShaderNoLightingProperty -- see NifShape::unlit.
     bool unlit = false;

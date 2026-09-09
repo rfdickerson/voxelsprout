@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -130,6 +131,13 @@ void testImportedSceneSerialization() {
     emitter.particleCount = 64u;
     emitter.seed = 0x12345u;
     scene.particleEmitters.push_back(emitter);
+    ImportedSceneParticleEmitter mistEmitter;
+    mistEmitter.effect=odai::importer::ImportedParticleEffect::Mist;mistEmitter.textureIndex=0;
+    mistEmitter.sourceId="synthetic_mist";mistEmitter.mist.emplace();
+    auto& mist=*mistEmitter.mist;mist.texture="synthetic.dds";mist.nodes.resize(1);
+    mist.emitterNode=mist.gravityNode=0;mist.rate=6;mist.life=10;mist.scales={.5f,2.f};
+    scene.particleEmitters.push_back(mistEmitter);
+
 
     ImportedSceneInstance instance{};
     instance.meshIndex = 0u;
@@ -223,7 +231,7 @@ void testImportedSceneSerialization() {
     expectNear(loaded.lights.front().position[1], light.position[1], 1e-6f, "Imported scene light position round-trips");
     expectNear(loaded.lights.front().color[1], light.color[1], 1e-6f, "Imported scene light color round-trips");
     expectNear(loaded.lights.front().radius, light.radius, 1e-6f, "Imported scene light radius round-trips");
-    expectTrue(loaded.particleEmitters.size() == 1u,
+    expectTrue(loaded.particleEmitters.size() == 2u,
                "Imported scene particle emitter count round-trips");
     expectTrue(loaded.particleEmitters.front().sourceId == emitter.sourceId,
                "Imported scene particle emitter id round-trips");
@@ -247,8 +255,12 @@ void testImportedSceneSerialization() {
                    runtimeLoaded.waterPatches.front().appearance.optics[1] == 80.0f,
                "Authored water material survives scene serialization");
     expectTrue(runtimeLoaded.lights.size() == 1u, "Imported scene runtime loader keeps lights");
-    expectTrue(runtimeLoaded.particleEmitters.size() == 1u,
+    expectTrue(runtimeLoaded.particleEmitters.size() == 2u,
                "Imported scene runtime loader keeps particle emitters");
+    expectTrue(runtimeLoaded.particleEmitters.back().mist.has_value() &&
+        runtimeLoaded.particleEmitters.back().mist->rate==6 &&
+        runtimeLoaded.particleEmitters.back().mist->scales.back()==2,
+        "Authored mist survives the runtime streaming loader");
     expectTrue(!runtimeLoaded.packedVertices.empty(), "Imported scene runtime loader reads packed vertices");
     expectTrue(!runtimeLoaded.packedIndices.empty(), "Imported scene runtime loader reads packed indices");
     expectTrue(!runtimeLoaded.packedDraws.empty(), "Imported scene runtime loader reads packed draws");
@@ -258,6 +270,26 @@ void testImportedSceneSerialization() {
     expectTrue(fs::exists(objPath), "Imported scene OBJ export writes a file");
     expectTrue(fs::file_size(objPath) > 0u, "Imported scene OBJ export file is non-empty");
 
+    // Downgrade only the new emitter extension to prove version-37 fire files
+    // retain neutral mist defaults through both loaders.
+    auto oldScene=scene;oldScene.particleEmitters.resize(1);
+    expectTrue(odai::importer::saveImportedScene(oldScene,scenePath),"legacy fixture saves");
+    std::ifstream legacyInput(scenePath,std::ios::binary);
+    std::vector<std::uint8_t> legacyBytes((std::istreambuf_iterator<char>(legacyInput)),{});
+    legacyInput.close();
+    const std::string marker=emitter.sourceId;
+    const auto markerAt=std::search(legacyBytes.begin(),legacyBytes.end(),marker.begin(),marker.end());
+    expectTrue(markerAt!=legacyBytes.end(),"legacy emitter found");
+    if(markerAt!=legacyBytes.end()) {
+        const auto extension=std::size_t(markerAt-legacyBytes.begin())+marker.size()+56;
+        legacyBytes.erase(legacyBytes.begin()+extension,legacyBytes.begin()+extension+56);
+        const std::uint32_t version=37;std::memcpy(legacyBytes.data()+4,&version,4);
+        std::ofstream legacyOutput(scenePath,std::ios::binary|std::ios::trunc);
+        legacyOutput.write(reinterpret_cast<const char*>(legacyBytes.data()),legacyBytes.size());legacyOutput.close();
+        ImportedScene oldLoaded;
+        expectTrue(odai::importer::loadImportedScene(scenePath,oldLoaded)&&oldLoaded.particleEmitters.size()==1 &&
+            !oldLoaded.particleEmitters.front().mist.has_value(),"version-37 fire loads with neutral mist defaults");
+    }
     fs::remove(scenePath);
     fs::remove(objPath);
 }
@@ -1016,6 +1048,16 @@ void testAlphaThresholdRoundTrip() {
 
     ImportedScene scene;
     scene.sourceTag = "alpha_threshold";
+    static_assert(sizeof(ImportedSceneMeshPart) == 24u);
+    static_assert(sizeof(ImportedScenePackedDraw) == 16u);
+    ImportedScenePackedDraw vegetation{};
+    vegetation.reserved[0] = kImportedSceneVegetationDraw | 2u;
+    vegetation.reserved[1] = 0x34u;
+    vegetation.reserved[2] = 0x12u;
+    vegetation.setBlendMode(ImportedBlendMode::Additive);
+    expectTrue((vegetation.reserved[0] & 0x83u) == (kImportedSceneVegetationDraw | 2u) &&
+               vegetation.reserved[1] == 0x34u && vegetation.reserved[2] == 0x12u,
+               "Blend metadata preserves vegetation LOD and group identity");
 
     // Two parts of one mesh with different thresholds, so a single shared
     // threshold or a dropped one both show up as a failure.
@@ -1042,6 +1084,7 @@ void testAlphaThresholdRoundTrip() {
     highPart.textureIndex = 0xffffffffu;
     highPart.alphaTest = true;
     highPart.alphaThreshold = 200u;
+    highPart.blendMode = ImportedBlendMode::Additive;
     mesh.parts = {lowPart, highPart};
     scene.meshes.push_back(mesh);
 
@@ -1082,6 +1125,19 @@ void testAlphaThresholdRoundTrip() {
         expectTrue(loaded.packedDraws[0].alphaThreshold == 32u, "low threshold survives disk");
         expectTrue(loaded.packedDraws[1].alphaThreshold == 200u, "high threshold survives disk");
     }
+    expectTrue(loaded.meshes.size() == 1u && loaded.meshes[0].parts.size() == 2u &&
+               loaded.meshes[0].parts[1].blendMode == ImportedBlendMode::Additive,
+               "Source part preserves additive blending across cooking");
+    const auto checkBlends = [](const ImportedScene& value) {
+        expectTrue(value.packedDraws.size() == 2u &&
+                   value.packedDraws[0].blendMode() == ImportedBlendMode::Alpha &&
+                   value.packedDraws[1].blendMode() == ImportedBlendMode::Additive,
+                   "Shared-texture surfaces keep distinct blends after packing and reload");
+    };
+    checkBlends(loaded);
+    ImportedScene runtimeLoaded;
+    expectTrue(loadImportedSceneRuntime(scenePath, runtimeLoaded), "Blend runtime reload succeeds");
+    checkBlends(runtimeLoaded);
     fs::remove(scenePath);
 }
 
@@ -1299,6 +1355,19 @@ void testStaticNormalMapSidecarPackingAndRoundTrip() {
                 kImportedSceneMaterialFlagTerrainLayers) == 0u,
                "static normal-map sidecar does not masquerade as terrain layering");
 
+    // The same diffuse texture may belong to two distinct source materials.
+    auto secondMesh=scene.meshes.front();
+    for (auto& vertex : secondMesh.vertices) vertex.layerTextureIndex[0]=2u;
+    scene.meshes.push_back(std::move(secondMesh));
+    auto secondInstance=instance;
+    secondInstance.meshIndex=1u;
+    scene.instances.push_back(secondInstance);
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.packedVertices.size()==6u &&
+               scene.packedVertices[0].layerTextureIndex[0]==1u &&
+               scene.packedVertices[3].layerTextureIndex[0]==2u,
+               "shared diffuse textures preserve distinct per-shape normal maps");
+
     const fs::path path = fs::temp_directory_path() / "odai_static_normal_map_roundtrip.bin";
     expectTrue(saveImportedScene(scene, path), "normal-map sidecar scene saves");
     ImportedScene loaded{};
@@ -1360,7 +1429,196 @@ void testDistantLodTessellationMarkerPacking() {
                "distant mountain remains in the tessellated draw prefix after paging");
 }
 
+void testTerrainNormalBindings() {
+    using namespace odai::importer;
+    ImportedScene scene;
+    scene.textures.resize(4);
+    ImportedSceneMesh mesh;
+    mesh.name = "terrain";
+    mesh.vertices.resize(3);
+    mesh.vertices[1].position[0] = 1.0f;
+    mesh.vertices[2].position[2] = 1.0f;
+    mesh.indices = {0,1,2,0,1,2};
+    mesh.parts = {ImportedSceneMeshPart{0,3,0,false}, ImportedSceneMeshPart{3,3,0,false}};
+    mesh.terrainNormals.resize(2);
+    mesh.terrainNormals[0].textures[0] = 1;
+    mesh.terrainNormals[0].surfaceProperties[0] = 0x8040u;
+    mesh.terrainNormals[1].surfaceProperties[4] = 0x8108u;
+    mesh.terrainNormals[0].textures[4] = 3;
+    mesh.terrainNormals[1].textures[0] = 2;
+    scene.meshes.push_back(mesh);
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.packedTerrainNormals.size() == 6, "terrain normals match packed vertices");
+    expectTrue(scene.packedTerrainNormals[0].textures[0] == 1 &&
+        scene.packedTerrainNormals[3].textures[0] == 2,
+        "shared albedo retains distinct terrain normals");
+    const auto path = std::filesystem::temp_directory_path() / "odai_terrain_normals.bin";
+    expectTrue(saveImportedScene(scene,path), "terrain normal scene saves");
+    ImportedScene full, runtime;
+    expectTrue(loadImportedScene(path,full), "terrain normal source scene reloads");
+    expectTrue(loadImportedSceneRuntime(path,runtime), "terrain normal runtime scene reloads");
+    expectTrue(runtime.packedTerrainNormals.size() == 6 &&
+        runtime.packedTerrainNormals[0].textures[4] == 3,
+        "fourth overlay normal survives runtime reload");
+    buildImportedScenePackedRenderData(full);
+    expectTrue(full.packedTerrainNormals.size() == 6 &&
+        full.packedTerrainNormals[3].textures[0] == 2,
+        "source normal bindings survive repacking");
+    expectTrue(runtime.packedTerrainNormals[0].surfaceProperties[0] == 0x8040u &&
+               full.meshes[0].terrainNormals[1].surfaceProperties[4] == 0x8108u,
+               "Terrain exponent and TXST flags survive packing and both cooked loaders");
+    // v40 appends a surface section; v39 normals retain neutral surface defaults.
+    const auto currentSize = std::filesystem::file_size(path);
+    std::filesystem::resize_file(path, currentSize - (12u + 10u * (6u + 2u)));
+    {
+        std::fstream legacy(path, std::ios::in | std::ios::out | std::ios::binary);
+        const std::uint32_t version = 39u;
+        legacy.seekp(4);
+        legacy.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    }
+    expectTrue(loadImportedScene(path, full) && loadImportedSceneRuntime(path, runtime),
+               "v39 terrain scenes load without the new surface section");
+    expectTrue(runtime.packedTerrainNormals.size() == 6u &&
+               runtime.packedTerrainNormals[0].surfaceProperties[0] == 0u,
+               "v39 terrain gets neutral specular metadata");
+    scene.packedTerrainNormals[0].surfaceProperties[0] = 0x7800u;
+    expectTrue(saveImportedScene(scene, path), "Malformed surface fixture saves");
+    expectTrue(!loadImportedScene(path, full) && !loadImportedSceneRuntime(path, runtime),
+               "Reserved terrain material bits are rejected by both loaders");
+    scene.packedTerrainNormals[0].surfaceProperties[0] = 0x8040u;
+    scene.packedTerrainNormals[0].textures[0] = 99;
+    expectTrue(saveImportedScene(scene,path), "malformed normal fixture saves");
+    expectTrue(!loadImportedScene(path,full) && !loadImportedSceneRuntime(path,runtime),
+        "out of range terrain normal references are rejected");
+    // v35 only appends this section; removing an empty section produces v34.
+    ImportedScene empty;
+    expectTrue(saveImportedScene(empty,path), "legacy neutral fixture saves");
+    const auto size = std::filesystem::file_size(path);
+    std::filesystem::resize_file(path,size-32);
+    {
+        std::fstream file(path,std::ios::in|std::ios::out|std::ios::binary);
+        const std::uint32_t version = 34;
+        file.seekp(4);
+        file.write(reinterpret_cast<const char*>(&version),sizeof(version));
+    }
+    expectTrue(loadImportedScene(path,full) && loadImportedSceneRuntime(path,runtime),
+        "v34 cooked scenes remain readable");
+    expectTrue(full.packedTerrainNormals.empty() && runtime.packedTerrainNormals.empty(),
+        "v34 normals default to absent");
+    std::filesystem::remove(path);
+}
+
+void testNifLightingSerialization() {
+    using namespace odai::importer;
+    ImportedScene scene;
+    scene.textures.resize(2);
+    scene.textures[1].linearData = true;
+    scene.textures[1].clampMode = 1;
+    scene.lightingMaterials.resize(2);
+    auto& material = scene.lightingMaterials[0];
+    material.valid = 1;
+    material.flags1 = 1u | (1u << 22);
+    material.glossiness = 64;
+    material.emissiveMultiplier = 3;
+    material.textures[1] = 1;
+    material.texturePaths[4] = "synthetic/cube.dds";
+    material.textureClampMode = 1;
+    scene.lightingMaterials[1] = material;
+    scene.lightingMaterials[1].glossiness = 128;
+    ImportedSceneMesh mesh;
+    mesh.vertices.resize(3);
+    mesh.vertices[1].position[0] = 1;
+    mesh.vertices[2].position[1] = 1;
+    mesh.indices = {0,1,2,0,1,2};
+    mesh.parts = {ImportedSceneMeshPart{0,3,0,false},ImportedSceneMeshPart{3,3,0,false}};
+    mesh.lightingMaterialIndices = {0,1};
+    scene.meshes.push_back(mesh);
+    ImportedSceneInstance instance;
+    instance.meshIndex = 0;
+    instance.transform[0] = instance.transform[5] = instance.transform[10] = instance.transform[15] = 1;
+    scene.instances.push_back(instance);
+    buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.packedLightingMaterialIndices == std::vector<std::uint32_t>({0,0,0,1,1,1}),
+        "shared albedo preserves distinct authored NIF materials");
+    const auto path = std::filesystem::temp_directory_path() / "odai_nif_lighting.bin";
+    expectTrue(saveImportedScene(scene,path),"NIF material fixture saves");
+    ImportedScene full, runtime;
+    expectTrue(loadImportedScene(path,full) && loadImportedSceneRuntime(path,runtime),"NIF materials survive full and streamed loading");
+    expectTrue(runtime.lightingMaterials.size() == 2 && runtime.lightingMaterials[1].glossiness == 128 &&
+        runtime.lightingMaterials[0].texturePaths[4] == "synthetic/cube.dds",
+        "authored constants and unconsumed texture roles persist");
+    expectTrue(runtime.textures[1].linearData && runtime.textures[1].clampMode == 1,
+        "explicit data color space and sampler policy survive reload");
+    buildImportedScenePackedRenderData(full);
+    expectTrue(full.packedLightingMaterialIndices == scene.packedLightingMaterialIndices,"source part materials survive repacking");
+    scene.packedLightingMaterialIndices[0] = 99;
+    expectTrue(saveImportedScene(scene,path),"invalid material reference fixture saves");
+    expectTrue(!loadImportedScene(path,full) && !loadImportedSceneRuntime(path,runtime),"invalid material references reject cleanly");
+    scene.packedLightingMaterialIndices[0] = 0;
+    scene.lightingMaterials[0].glossiness = std::numeric_limits<float>::quiet_NaN();
+    expectTrue(saveImportedScene(scene,path),"nonfinite material fixture saves");
+    expectTrue(!loadImportedScene(path,full),"nonfinite material coefficients reject cleanly");
+    std::filesystem::remove(path);
+}
+
+void testDdsCubemaps() {
+    using namespace odai::importer;
+    std::vector<std::uint8_t> bytes(128+6*40,0);
+    const auto put = [&](std::size_t offset,std::uint32_t value) { std::memcpy(bytes.data()+offset,&value,4); };
+    put(0,0x20534444); put(4,124); put(12,8); put(16,8); put(28,2);
+    put(76,32); put(80,4); put(84,0x31545844); put(112,0xfe00);
+    for (int face=0;face<6;++face) {
+        std::fill_n(bytes.begin()+128+face*40,32,std::uint8_t(face+1));
+        std::fill_n(bytes.begin()+128+face*40+32,8,std::uint8_t(face+11));
+    }
+    ImportedSceneTexture cube;
+    expectTrue(loadDdsFromMemory(bytes.data(),bytes.size(),cube),"complete six-face DDS decodes");
+    expectTrue(cube.arrayLayers == 6 && cube.rgba8.size() == 240 && cube.rgba8[200] == 6,
+        "DDS preserves face-major axis order and every mip");
+    dropDdsMipLevels(cube,4);
+    expectTrue(cube.width == 4 && cube.mipLevelCount == 1 && cube.rgba8.size() == 48 &&
+        cube.rgba8[0] == 11 && cube.rgba8[40] == 16,"mip reduction trims every cube face independently");
+    expectTrue(!loadDdsFromMemory(bytes.data(),bytes.size()-1,cube),"truncated final cube face rejects");
+    put(112,0xfa00);
+    expectTrue(!loadDdsFromMemory(bytes.data(),bytes.size(),cube),"partial legacy cubes reject instead of pretending to be 2D");
+    put(112,0); put(84,0x30315844);
+    bytes.insert(bytes.begin()+128,20,0);
+    put(128,71); put(132,3); put(136,4); put(140,1);
+    expectTrue(loadDdsFromMemory(bytes.data(),bytes.size(),cube) && cube.arrayLayers == 6,
+        "DX10 cube metadata decodes six faces");
+    put(140,2);
+    expectTrue(!loadDdsFromMemory(bytes.data(),bytes.size(),cube),"unsupported cube arrays reject");
+    // BC6H remains HDR compressed data all the way to the GPU; no RGBA8 conversion.
+    put(140, 1);
+    bytes.resize(148 + 6*80, 0);
+    for (const auto dxgi : {95u, 96u}) {
+        put(128, dxgi);
+        expectTrue(loadDdsFromMemory(bytes.data(), bytes.size(), cube), "BC6H HDR cube decodes");
+        expectTrue(cube.format == (dxgi == 95u ? TextureFormat::BC6HUfloat : TextureFormat::BC6HSfloat) &&
+                   cube.rgba8.size() == 480u && ddsCubeByteCount(cube) == 480u,
+                   "BC6H signedness and six complete mip chains survive");
+        expectTrue(!loadDdsFromMemory(bytes.data(), bytes.size()-1, cube), "Truncated HDR cube rejects");
+    }
+    ImportedScene scene;
+    scene.textures.push_back(cube);
+    scene.lightingMaterials.resize(1);
+    scene.lightingMaterials[0].environmentScale = 0.75f;
+    scene.lightingMaterials[0].textures[4] = 0;
+    const auto path=std::filesystem::temp_directory_path()/"odai_cube_roundtrip.bin";
+    expectTrue(saveImportedScene(scene,path),"cube scene saves");
+    ImportedScene loaded;
+    expectTrue(loadImportedSceneRuntime(path,loaded),"cube scene reloads through streaming reader");
+    expectTrue(loaded.textures[0].arrayLayers == 6 && loaded.textures[0].rgba8 == cube.rgba8 &&
+        loaded.lightingMaterials[0].environmentScale == 0.75f,"cube faces and authored environment strength survive cooking");
+    scene.textures[0].rgba8.pop_back();
+    expectTrue(saveImportedScene(scene,path) && !loadImportedScene(path,loaded),"malformed cooked cube byte count rejects");
+    std::filesystem::remove(path);
+}
+
 int main() {
+    testDdsCubemaps();
+    testNifLightingSerialization();
+    testTerrainNormalBindings();
     testImportedSceneSerialization();
     testPreV19VertexLayoutCompatibility();
     testVertexColorTintFlag();

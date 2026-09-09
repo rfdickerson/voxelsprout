@@ -35,7 +35,7 @@
 //
 // and check the offsets against GpuSkinnedVertexIn / ImportedMeshVertex in
 // skinning_resources.cc and renderer_backend.h. Input stride must be 84,
-// output stride 48.
+// output stride 64.
 //
 // The output struct additionally carries the terrain-layer fields. It is bound
 // as a plain vertex buffer for the main pass, which reads it as
@@ -56,7 +56,7 @@ struct SkinnedVertexIn
     float boneWeight0, boneWeight1, boneWeight2, boneWeight3;
 };
 
-// 48 bytes, matching ImportedMeshVertex exactly -- see renderer_backend.h.
+// 64 bytes, matching ImportedMeshVertex exactly -- see renderer_backend.h.
 //
 // The narrowed fields are declared as uint and packed by hand rather than as
 // int16_t/uint8_t: this is a StructuredBuffer, and sub-32-bit members in one
@@ -78,6 +78,13 @@ struct SkinnedVertexOut
     uint packedLayerTexture01;
     uint packedLayerTexture23;
     uint layerWeights;
+    uint packedTerrainNormal01;
+    uint packedTerrainNormal23;
+    uint packedTerrainNormal45;
+    uint lightingMaterialIndex;
+    uint terrainSurface01;
+    uint terrainSurface23;
+    uint terrainSurface45;
 };
 
 struct SkinningPushConstants
@@ -159,6 +166,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     // 0xffff per 16-bit slot, so both words are all-ones.
     result.packedLayerTexture01 = 0xffffffffu;
     result.packedLayerTexture23 = 0xffffffffu;
+    result.packedTerrainNormal01 = 0xffffffffu;
+    result.packedTerrainNormal23 = 0xffffffffu;
+    result.packedTerrainNormal45 = 0xffffffffu;
+    result.lightingMaterialIndex = 0xffffffffu;
+    result.terrainSurface01 = result.terrainSurface23 = result.terrainSurface45 = 0u;
     result.layerWeights = 0u;
     skinnedVertices[vertexIndex] = result;
 }

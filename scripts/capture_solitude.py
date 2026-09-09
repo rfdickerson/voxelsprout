@@ -47,6 +47,7 @@ def main():
                    if not key.startswith("ODAI_")}
     settings = {
         "XDG_CACHE_HOME": str(ROOT / "captures/solitude-work/cache"),
+        "ODAI_WINDOW_HIDPI": "0",
         "ODAI_WINDOW_SIZE": args.size,
         "ODAI_RENDER_SIZE": args.size,
         "ODAI_RENDER_SCALE": "1.0",

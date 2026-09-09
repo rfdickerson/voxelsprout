@@ -31,6 +31,7 @@ public:
     [[nodiscard]] const std::vector<ContentRecordVersion>* versions(
         std::uint32_t globalFormId) const;
     [[nodiscard]] std::size_t recordCount() const { return m_versions.size(); }
+    [[nodiscard]] const auto& records() const { return m_versions; }
     [[nodiscard]] std::size_t overrideCount() const { return m_overrideCount; }
     [[nodiscard]] std::size_t deletionCount() const { return m_deletionCount; }
 

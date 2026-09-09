@@ -21,6 +21,7 @@
 #include "bethesda/tes3_content.h"
 #include "bethesda/tes3_runtime.h"
 #include "bethesda/vmad_reader.h"
+#include "tools/tri_probe.h"
 #include "import/dds.h"
 #include "import/fnv/asset_source.h"
 #include "import/fnv/bsa_archive.h"
@@ -38,6 +39,7 @@
 #include "import/fnv/strings_table.h"
 #include "bethesda/bethesda_physics_world.h"
 #include "import/imported_scene.h"
+#include "tools/asset_coverage.h"
 
 #include <algorithm>
 #include <array>
@@ -1140,6 +1142,8 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
         case TextureFormat::BC3: formatName = "BC3"; break;
         case TextureFormat::BC5: formatName = "BC5"; break;
         case TextureFormat::BC7: formatName = "BC7"; break;
+        case TextureFormat::BC6HUfloat: formatName = "BC6H unsigned HDR"; break;
+        case TextureFormat::BC6HSfloat: formatName = "BC6H signed HDR"; break;
         default: break;
     }
     std::cout << texturePath << ": " << texture.width << "x" << texture.height
@@ -1509,6 +1513,14 @@ int probeSingleNif(const std::filesystem::path& dataPath, const std::string& vir
                               ? std::string()
                               : (", animated-by=\"" + shape.animationNodeName + "\""))
                       << "\n";
+            std::cout << "      material tracks=" << shape.materialAnimations.size()
+                << " unresolved=" << shape.unsupportedMaterialControllers << "\n";
+            for(const auto& track:shape.materialAnimations)
+                std::cout << "        target=" << std::uint32_t(track.target)
+                    << " keys=" << track.keys.size() << " interpolation=" << track.interpolation
+                    << " start=" << track.start << " stop=" << track.stop
+                    << " sample(0,1)=" << odai::importer::sampleMaterialAnimation(track,0) << ","
+                    << odai::importer::sampleMaterialAnimation(track,1) << "\n";
             if (!shape.animationNodeName.empty()) {
                 std::cout << "      animation parent translation=("
                           << shape.animationParentTransform[3] << ","
@@ -5328,6 +5340,7 @@ int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scen
                         odai::bethesda::makeRecordKey("Skyrim.esm", formId));
                     object.base = object.id.reference;
                     object.kind = odai::bethesda::RuntimeObjectKind::Activator;
+                    if (session.world().find(object.id) != nullptr) { checkError.clear(); return true; }
                     return session.world().addInitialObject(std::move(object), checkError);
                 };
                 const bool farengarLabResident = addQuestReference(0x000d50feu);
@@ -5340,7 +5353,7 @@ int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scen
                     odai::bethesda::makeRecordKey("Skyrim.esm", 0x00013bb8u);
                 irileth.kind = odai::bethesda::RuntimeObjectKind::Actor;
                 irileth.actorValues.emplace();
-                const bool irilethResident =
+                const bool irilethResident = session.world().find(irileth.id) != nullptr ||
                     session.world().addInitialObject(irileth, checkError);
                 if (irilethResident) {
                     (void)session.bindQuestInventoryForActor(
@@ -5893,6 +5906,10 @@ void printUsage() {
               << "  odai_bethesda_probe --tes3-quest-suite <profile> [--quest <journal-id>] [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-virtual-player <profile> [--strict] [--report <json>] [--data <Data>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --archives\n"
+              << "  odai_bethesda_probe <DataFilesPath> --asset-coverage <report.json> [Plugin.esm ...]\n"
+              << "  odai_bethesda_probe --asset-coverage <profile> <report.json> [--data <Data>]\n"
+              << "  odai_bethesda_probe <DataFilesPath> --tri <virtualPath|--all>\n"
+              << "  odai_bethesda_probe --tri-profile <profile> <virtualPath|--all>\n"
               << "  odai_bethesda_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --nif <virtualPath>\n"
               << "  odai_bethesda_probe <DataFilesPath> --nifblocks <virtualPath>\n"
@@ -5969,11 +5986,24 @@ int animationCheck(const std::filesystem::path& dataPath, bool strict) {
     }
     nlohmann::json behaviorGraphs = nlohmann::json::array();
     for (const odai::anim::HkxDecodedBehaviorGraph& graph : report.behaviorGraphs) {
+        nlohmann::json rules = nlohmann::json::array();
+        for (const auto& node : graph.nodes) {
+            for (const auto& rule : node.transitions) {
+                rules.push_back({{"owner", node.name}, {"state_id", node.stateId},
+                    {"wildcard", node.kind == odai::anim::HkxBehaviorNodeKind::StateMachine},
+                    {"event_id", rule.eventId}, {"to_state_id", rule.toStateId},
+                    {"priority", rule.priority}, {"flags", rule.flags},
+                    {"has_condition", rule.hasCondition}, {"condition_class", rule.conditionClass},
+                    {"has_effect", rule.hasEffect}, {"effect_node", rule.effectNode},
+                    {"runtime_consumed", false}});
+            }
+        }
         behaviorGraphs.push_back({{"name", graph.name}, {"nodes", graph.nodes.size()},
             {"clip_generators", graph.clipGeneratorCount},
             {"behavior_references", graph.behaviorReferenceCount},
             {"state_machines", graph.stateMachineCount},
-            {"transition_effects", graph.transitionEffectCount}});
+            {"transition_effects", graph.transitionEffectCount},
+            {"transition_rules", std::move(rules)}});
     }
     odai::bethesda::BethesdaPhysicsWorld physics;
     std::string joltError;
@@ -7457,9 +7487,20 @@ int whyCommand(
         if (archive.find(wanted) != nullptr) providers.emplace_back("archive", item.path);
     }
     if (providers.empty()) { std::cout << key << " has no provider\n"; return 1; }
-    for (std::size_t i = 0; i < providers.size(); ++i) {
-        std::cout << (i + 1u == providers.size() ? "WINNER " : "overridden ")
-                  << providers[i].first << ": " << providers[i].second.string() << '\n';
+    // Provider enumeration order is not resolver precedence: archive entries
+    // are listed after loose mods here. Ask the runtime resolver for the winner.
+    FalloutAssetSource assets;
+    FalloutAssetSource::ResolvedAsset winner;
+    if (!assets.open(profile) || !assets.resolveAssetWithProvider(wanted, winner, error)) {
+        std::cout << "resolution failed: " << error << '\n'; return 1;
+    }
+    const auto winningPath = winner.archiveName.empty() ? winner.physicalPath
+        : winner.providerRoot / winner.archiveName;
+    for (const auto& provider : providers) {
+        std::error_code equivalentError;
+        const bool isWinner = std::filesystem::equivalent(provider.second, winningPath, equivalentError);
+        std::cout << (isWinner && !equivalentError ? "WINNER " : "overridden ")
+                  << provider.first << ": " << provider.second.string() << '\n';
     }
     return 0;
 }
@@ -7510,6 +7551,22 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::strcmp(argv[1], "--conflicts") == 0) {
         return conflictsCommand(argv[2], argc, argv, 3);
     }
+    if (argc >= 4 && std::strcmp(argv[1], "--asset-coverage") == 0) {
+        using namespace odai::importer::fnv;
+        ResolvedContentProfile profile;
+        FalloutLoadOrder order;
+        FalloutAssetSource assets;
+        std::string error;
+        if (!resolveProbeContentProfile(argv[2],argc,argv,4,profile,error) ||
+            !order.open(profile,error) || !assets.open(profile,0xffffffffu) ||
+            !writeAssetCoverage(assets,order,argv[3],error)) {
+            std::cerr << "coverage failed: " << error << '\n'; return 1;
+        }
+        std::cout << "coverage written: " << argv[3] << '\n'; return 0;
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tri-profile") == 0) {
+        return probeTriMorphs(argv[2], argv[3], true);
+    }
     if (argc >= 4 && std::strcmp(argv[1], "--export-profile") == 0) {
         odai::importer::fnv::ResolvedContentProfile profile;
         std::string error;
@@ -7559,6 +7616,20 @@ int main(int argc, char** argv) {
     if (mode == "--archives") {
         return probeArchives(dataPath);
     }
+    if (mode == "--asset-coverage" && argc >= 4) {
+        using namespace odai::importer::fnv;
+        std::vector<std::string> plugins;
+        for (int i=4;i<argc;++i) plugins.emplace_back(argv[i]);
+        if (plugins.empty()) plugins={"Skyrim.esm","Update.esm"};
+        FalloutLoadOrder order;
+        FalloutAssetSource assets;
+        std::string error;
+        if (!order.open(dataPath,plugins,error) || !assets.open(dataPath,0xffffffffu) ||
+            !writeAssetCoverage(assets,order,argv[3],error)) {
+            std::cerr << "coverage failed: " << error << '\n'; return 1;
+        }
+        std::cout << "coverage written: " << argv[3] << '\n'; return 0;
+    }
     if (mode == "--animationcheck" || mode == "--animation-strict") {
         return animationCheck(dataPath, mode == "--animation-strict");
     }
@@ -7578,6 +7649,9 @@ int main(int argc, char** argv) {
     if (mode == "--nifs") {
         const std::size_t limit = argc >= 4 ? static_cast<std::size_t>(std::stoull(argv[3])) : 500u;
         return probeNifs(dataPath, limit);
+    }
+    if (mode == "--tri" && argc >= 4) {
+        return probeTriMorphs(argv[1], argv[3], false);
     }
     if (mode == "--nif" && argc >= 4) {
         return probeSingleNif(dataPath, argv[3]);

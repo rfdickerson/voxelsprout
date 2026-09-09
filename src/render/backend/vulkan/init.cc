@@ -452,10 +452,18 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
 
 
 bool RendererBackend::createInstance() {
+    const char* requestedLayers = std::getenv("VK_INSTANCE_LAYERS");
+    const bool validationRequested = requestedLayers != nullptr &&
+        std::string_view(requestedLayers).find(kValidationLayers[0]) != std::string_view::npos;
+    const bool validationAvailable = isLayerAvailable(kValidationLayers[0]);
+    if (validationRequested && !validationAvailable) {
+        VOX_LOGE("render") << "explicitly requested validation layer is unavailable";
+        return false;
+    }
 #ifndef NDEBUG
-    const bool enableValidationLayers = isLayerAvailable(kValidationLayers[0]);
+    const bool enableValidationLayers = validationAvailable;
 #else
-    const bool enableValidationLayers = false;
+    const bool enableValidationLayers = validationRequested && validationAvailable;
 #endif
     uint32_t glfwExtensionCount = 0;
     const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
@@ -511,7 +519,7 @@ bool RendererBackend::createInstance() {
     // starting, which is what the old unconditional failure did: on any machine
     // without the layer properly installed, the app exited at init with
     // VK_ERROR_LAYER_NOT_PRESENT and no way past it.
-    if (result == VK_ERROR_LAYER_NOT_PRESENT && enableValidationLayers) {
+    if (result == VK_ERROR_LAYER_NOT_PRESENT && enableValidationLayers && !validationRequested) {
         VOX_LOGW("render")
             << "validation layer enumerated but failed to load; continuing WITHOUT validation. "
                "Its manifest is on the layer path but libVkLayer_khronos_validation.so is not on "
@@ -698,6 +706,11 @@ bool RendererBackend::pickPhysicalDevice() {
             VOX_LOGI("render") << "skip GPU: dynamicRendering not supported\n";
             continue;
         }
+        // The compiled temporal/material shaders declare 16-bit arithmetic.
+        if (!features2.features.shaderInt16 || !vulkan12Features.shaderFloat16) {
+            VOX_LOGI("render") << "skip GPU: shaderInt16/shaderFloat16 not supported";
+            continue;
+        }
         if (vulkan12Features.timelineSemaphore != VK_TRUE) {
             VOX_LOGI("render") << "skip GPU: timelineSemaphore not supported\n";
             continue;
@@ -747,7 +760,7 @@ bool RendererBackend::pickPhysicalDevice() {
         } else {
             safeBudget = 0;
         }
-        bindlessTextureCapacity = std::min(kBindlessTargetTextureCapacity, safeBudget);
+        bindlessTextureCapacity = std::min(kBindlessTargetTextureCapacity, safeBudget / 2u);
         if (bindlessTextureCapacity < kBindlessMinTextureCapacity) {
             VOX_LOGI("render") << "skip GPU: bindless descriptor budget too small\n";
             continue;
@@ -1022,6 +1035,7 @@ bool RendererBackend::createLogicalDevice() {
     enabledFeatures2.features.multiDrawIndirect = m_supportsMultiDrawIndirect ? VK_TRUE : VK_FALSE;
     enabledFeatures2.features.drawIndirectFirstInstance = VK_TRUE;
     enabledFeatures2.features.tessellationShader = VK_TRUE;
+    enabledFeatures2.features.shaderInt16 = VK_TRUE;
     // Required to sample the BC1/BC3/BC5/BC7 block-compressed terrain DDS textures.
     // Core in Vulkan 1.0 and universally supported on desktop GPUs; without it,
     // creating a VK_FORMAT_BC*_BLOCK image is undefined and strict drivers fail the
@@ -1036,6 +1050,7 @@ bool RendererBackend::createLogicalDevice() {
     vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vulkan12Features.pNext = &vulkan11Features;
     vulkan12Features.timelineSemaphore = VK_TRUE;
+    vulkan12Features.shaderFloat16 = VK_TRUE;
     vulkan12Features.bufferDeviceAddress = VK_TRUE;
     if (m_supportsBindlessDescriptors) {
         vulkan12Features.descriptorIndexing = VK_TRUE;
@@ -1868,6 +1883,10 @@ bool RendererBackend::createSwapchain() {
     createInfo.imageExtent = extent;
     createInfo.imageArrayLayers = 1;
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    m_captureSupported = (support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+    if (m_captureSupported) {
+        createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
     createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     createInfo.preTransform = support.capabilities.currentTransform;
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -2320,6 +2339,10 @@ void RendererBackend::destroyImportedBuffers() {
         }
     }
     m_importedTextureResources.clear();
+    for (auto& sampler : m_importedClampSamplers) {
+        if (sampler != VK_NULL_HANDLE) vkDestroySampler(m_device,sampler,nullptr);
+        sampler = VK_NULL_HANDLE;
+    }
     if (m_importedTextureSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device, m_importedTextureSampler, nullptr);
         m_importedTextureSampler = VK_NULL_HANDLE;

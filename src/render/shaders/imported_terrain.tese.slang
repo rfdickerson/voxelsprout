@@ -31,6 +31,11 @@ struct ControlPoint
     nointerpolation uint flags : TEXCOORD5;
     nointerpolation uint4 layerTextures : TEXCOORD6;
     float4 layerWeights : TEXCOORD7;
+    nointerpolation uint4 terrainNormals : TEXCOORD8;
+    nointerpolation uint terrainNormal4 : TEXCOORD9;
+    nointerpolation uint lightingMaterial : TEXCOORD10;
+    nointerpolation uint4 terrainSurface : TEXCOORD11;
+    nointerpolation uint terrainSurface4 : TEXCOORD12;
 };
 
 struct PatchConstants
@@ -54,6 +59,11 @@ struct DomainOutput
     nointerpolation uint flags : TEXCOORD5;
     nointerpolation uint4 layerTextures : TEXCOORD6;
     float4 layerWeights : TEXCOORD7;
+    nointerpolation uint4 terrainNormals : TEXCOORD8;
+    nointerpolation uint terrainNormal4 : TEXCOORD9;
+    nointerpolation uint lightingMaterial : TEXCOORD10;
+    nointerpolation uint4 terrainSurface : TEXCOORD11;
+    nointerpolation uint terrainSurface4 : TEXCOORD12;
 };
 
 static const uint kDistantLodTessellation = (1u << 10);
@@ -167,5 +177,10 @@ DomainOutput main(
         (patch[1].layerWeights * bary.y) +
         (patch[2].layerWeights * bary.z);
     output.position = mul(camera.mvp, float4(worldPosition, 1.0));
+    output.terrainNormals = patch[0].terrainNormals;
+    output.terrainNormal4 = patch[0].terrainNormal4;
+    output.lightingMaterial = patch[0].lightingMaterial;
+    output.terrainSurface = patch[0].terrainSurface;
+    output.terrainSurface4 = patch[0].terrainSurface4;
     return output;
 }

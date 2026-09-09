@@ -1,3 +1,4 @@
+#include "import/fnv/nif_material_animation.h"
 #include "import/fnv/nif_scene.h"
 
 #include <algorithm>
@@ -613,6 +614,7 @@ bool readBsShaderTextureSet(ByteCursor& cursor, TextureSetBlock& out) {
 struct AlphaPropertyBlock {
     bool alphaTest = false;
     bool alphaBlend = false;
+    ImportedBlendMode blendMode = ImportedBlendMode::Alpha;
     std::uint8_t alphaThreshold = 128;
     // AlphaFlags bits 10-12. Read for census only: the renderer's discard is
     // hardcoded to GREATER, so a shape declaring anything else is shaded wrong.
@@ -927,6 +929,9 @@ bool readNiAlphaProperty(
     // So: blended means blend WITHOUT test. That leaves 37 truly transparent
     // shapes in the region, which is about how much glass is actually there.
     out.alphaBlend = blendBit && !out.alphaTest;
+    out.blendMode = out.alphaBlend && ((flags >> 1u) & 15u) == 6u &&
+        ((flags >> 5u) & 15u) == 0u
+        ? ImportedBlendMode::Additive : ImportedBlendMode::Alpha;
 
     // The threshold the test compares against, one byte after the flags.
     // Retail Goodsprings runs 0, 16, 32, 50, 60, 63, 64, 70, 80, 90, 92, 100,
@@ -1830,7 +1835,7 @@ bool readNiSkinPartitionGeometry(ByteCursor& cursor, GeometryBlock& outGeometry)
 // BSShaderTextureSet.
 bool readBsLightingShaderTextureSetRef(
     ByteCursor& cursor, std::int32_t& outTextureSetRef, bool& outTwoSided,
-    bool& outTreeAnim, bool& outVertexAlpha) {
+    bool& outTreeAnim, bool& outVertexAlpha, NifLightingMaterial* material = nullptr) {
     std::uint32_t shaderType = 0;
     std::int32_t nameRef = 0;
     std::uint32_t numExtraData = 0;
@@ -1846,8 +1851,9 @@ bool readBsLightingShaderTextureSetRef(
     // branch cards set SLSF2_Double_Sided here and carry no NiStencilProperty;
     // dropping it leaves half the foliage either culled or lit with the wrong
     // face normal, producing black needle streaks across distant views.
+    NifLightingMaterial parsed;
     if (!cursor.skip(4u) || !cursor.read(shaderFlags1) || !cursor.read(shaderFlags2) ||
-        !cursor.skip(8u + 8u)) {
+        !cursor.read(parsed.uvOffset) || !cursor.read(parsed.uvScale)) {
         return false;
     }
     outTwoSided = (shaderFlags2 & 0x10u) != 0u;
@@ -1858,7 +1864,35 @@ bool readBsLightingShaderTextureSetRef(
     // unused payload. Rock/ground transition meshes are the load-bearing case:
     // their opaque texture is feathered into the terrain solely by this flag.
     outVertexAlpha = (shaderFlags1 & 0x8u) != 0u;
-    return cursor.read(outTextureSetRef);
+    if (!cursor.read(outTextureSetRef)) return false;
+    parsed.present = true;
+    parsed.shaderType = shaderType;
+    parsed.flags1 = shaderFlags1;
+    parsed.flags2 = shaderFlags2;
+    for (int axis = 0; axis < 2; ++axis) {
+        if (!std::isfinite(parsed.uvOffset[axis]) || !std::isfinite(parsed.uvScale[axis]))
+            return false;
+    }
+    parsed.parametersValid = cursor.read(parsed.emissive) &&
+        cursor.read(parsed.emissiveMultiplier) && cursor.read(parsed.textureClampMode) &&
+        cursor.read(parsed.alpha) && cursor.read(parsed.refractionStrength) &&
+        cursor.read(parsed.glossiness) && cursor.read(parsed.specular) &&
+        cursor.read(parsed.specularStrength);
+    if (parsed.parametersValid) {
+        for (float value : parsed.emissive) parsed.parametersValid &= std::isfinite(value);
+        for (float value : parsed.specular) parsed.parametersValid &= std::isfinite(value);
+        parsed.parametersValid &= std::isfinite(parsed.emissiveMultiplier) &&
+            std::isfinite(parsed.alpha) && std::isfinite(parsed.glossiness) &&
+            std::isfinite(parsed.specularStrength) && std::isfinite(parsed.refractionStrength) &&
+            parsed.textureClampMode <= 3;
+    }
+    if (parsed.parametersValid && shaderType == 1u) {
+        float effects[2], scale;
+        if (cursor.read(effects) && cursor.read(scale) && std::isfinite(scale) && scale >= 0)
+            parsed.environmentScale = scale;
+    }
+    if (material) *material = std::move(parsed);
+    return true;
 }
 
 // BSEffectShaderProperty does not point at a BSShaderTextureSet. Skyrim stores
@@ -1881,6 +1915,8 @@ struct EffectShaderPropertyBlock {
     float uvScale[2]{1.0f, 1.0f};
     float baseAlpha = 1.0f;
     float baseRed = 1.0f;
+    float baseColor[3]{1,1,1};
+    float baseScale=1;
     std::string paletteTexture;
     std::uint8_t paletteFlags = 0u;
     bool effectLighting = false;
@@ -1910,11 +1946,12 @@ bool readBsEffectShaderProperty(
     }
     // Packed clamp/lighting bytes, four falloff floats, then base RGBA.
     if (userVersion2 <= 100u &&
-        (!cursor.skip(4u + 16u) || !cursor.read(out.baseRed) || !cursor.skip(8u) ||
-         !cursor.read(out.baseAlpha) || !cursor.skip(8u) ||
+        (!cursor.skip(4u + 16u) || !cursor.read(out.baseColor) ||
+         !cursor.read(out.baseAlpha) || !cursor.read(out.baseScale) || !cursor.skip(4u) ||
          !cursor.readSizedString<std::uint32_t>(out.paletteTexture))) {
         return false;
     }
+    out.baseRed=out.baseColor[0];
     out.paletteFlags = static_cast<std::uint8_t>((shaderFlags1 >> 4u) & 3u);
     out.effectLighting = (shaderFlags2 & (1u << 30u)) != 0u;
     out.vertexAlpha = (shaderFlags1 & 8u) != 0u;
@@ -4366,12 +4403,14 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
     std::vector<bool> lightingShaderTreeAnim(numBlocks, false);
     std::vector<bool> lightingShaderVertexAlpha(numBlocks, false);
     std::vector<bool> lightingShaderValid(numBlocks, false);
+    std::vector<NifLightingMaterial> lightingMaterials(numBlocks);
     // Per NiSkinInstance block, the NiSkinPartition holding its geometry.
     std::vector<std::int32_t> skinPartitionRefs(numBlocks, -1);
     // Diffuse paths reached through the older NiTexturingProperty ->
     // NiSourceTexture chain instead of BSShaderTextureSet.
     std::vector<std::string> sourceTexturePaths(numBlocks);
     std::vector<std::string> texturingPropertyPaths(numBlocks);
+    std::vector<NifSkyMaterial> skyMaterials(numBlocks);
     std::vector<std::string> noLightingTexturePaths(numBlocks);
     std::vector<bool> noLightingProperty(numBlocks, false);
     std::vector<EffectShaderPropertyBlock> effectShaderProperties(numBlocks);
@@ -4513,7 +4552,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             bool treeAnim = false;
             bool vertexAlpha = false;
             if (readBsLightingShaderTextureSetRef(
-                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha)) {
+                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha, &lightingMaterials[i])) {
                 shaderTextureSetRefs[i] = textureSetRef;
                 lightingShaderTwoSided[i] = twoSided;
                 lightingShaderTreeAnim[i] = treeAnim;
@@ -4530,6 +4569,23 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             std::string fileName;
             if (readBsShaderNoLightingTexture(blockCursor, fileName)) {
                 noLightingTexturePaths[i] = std::move(fileName);
+            }
+        } else if (typeName == "BSSkyShaderProperty" && header.userVersion2 == 100u) {
+            NifSkyMaterial material;
+            std::int32_t name = -1, controller = -1;
+            std::uint32_t extras = 0;
+            if (blockCursor.read(name) && blockCursor.read(extras) && extras <= 1024 &&
+                blockCursor.skip(extras * 4u) && blockCursor.read(controller) &&
+                blockCursor.read(material.flags1) && blockCursor.read(material.flags2) &&
+                blockCursor.read(material.uvOffset) && blockCursor.read(material.uvScale) &&
+                blockCursor.readSizedString<std::uint32_t>(material.texture) &&
+                blockCursor.read(material.objectType) &&
+                std::isfinite(material.uvOffset[0]) && std::isfinite(material.uvOffset[1]) &&
+                std::isfinite(material.uvScale[0]) && std::isfinite(material.uvScale[1])) {
+                material.valid = true;
+                noLightingProperty[i] = true;
+                noLightingTexturePaths[i] = material.texture;
+                skyMaterials[i] = std::move(material);
             }
         } else if (typeName == "BSEffectShaderProperty") {
             EffectShaderPropertyBlock effect;
@@ -4574,6 +4630,21 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
         // Every other block type is intentionally left unparsed: the next
         // block always starts at blockStart[i+1] regardless of what (if
         // anything) was read here.
+    }
+
+    std::vector<MaterialAnimationBlock> materialBlocks;
+    materialBlocks.reserve(numBlocks);
+    for (std::size_t i=0;i<numBlocks;++i)
+        materialBlocks.push_back({header.blockTypeNames[header.blockTypeIndex[i]],
+            std::span<const std::uint8_t>(bytes.data()+blockStart[i],blockEnd[i]-blockStart[i])});
+    std::vector<std::vector<MaterialAnimationTrack>> materialTracks(numBlocks);
+    std::vector<std::uint32_t> unsupportedMaterialTracks(numBlocks);
+    if (header.userVersion2 == 83u || header.userVersion2 == 100u) {
+        for (std::size_t i=0;i<numBlocks;++i) {
+            if (lightingShaderValid[i] || effectShaderProperties[i].valid)
+                materialTracks[i]=readNifMaterialAnimation(materialBlocks,int(i),sourceTexturePaths,
+                    unsupportedMaterialTracks[i]);
+        }
     }
 
     std::unordered_set<std::string> animatedNodeNames;
@@ -4930,6 +5001,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     return;
                 }
                 const auto propertyIndex = static_cast<std::size_t>(propertyRef);
+                if (!shape.skyMaterial.valid && skyMaterials[propertyIndex].valid)
+                    shape.skyMaterial = skyMaterials[propertyIndex];
                 shape.unlit = shape.unlit || noLightingProperty[propertyIndex];
                 shape.twoSided = shape.twoSided || lightingShaderTwoSided[propertyIndex];
                 // Own properties are visited before inherited ones. The first
@@ -4937,6 +5010,13 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 // it owns the shape's texture; a parent material cannot turn a
                 // deliberately disabled vertex-alpha channel back on.
                 if (!vertexAlphaResolved && lightingShaderValid[propertyIndex]) {
+                    shape.lightingMaterial = lightingMaterials[propertyIndex];
+                    shape.materialAnimations = materialTracks[propertyIndex];
+                    shape.unsupportedMaterialControllers = unsupportedMaterialTracks[propertyIndex];
+                    if(!shape.lightingMaterial.parametersValid) {
+                        shape.unsupportedMaterialControllers+=std::uint32_t(shape.materialAnimations.size());
+                        shape.materialAnimations.clear();
+                    }
                     vertexAlphaEnabled = lightingShaderVertexAlpha[propertyIndex];
                     vertexAlphaResolved = true;
                 }
@@ -4949,6 +5029,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     // Effect_Lighting distinguishes lit foam/water from emitters.
                     // The source texture alone does not imply self illumination.
                     effectMaterial = &effectShaderProperties[propertyIndex];
+                    shape.materialAnimations = materialTracks[propertyIndex];
+                    shape.unsupportedMaterialControllers = unsupportedMaterialTracks[propertyIndex];
                     shape.effectPaletteTexturePath = effectMaterial->paletteTexture;
                     shape.effectPaletteFlags = effectMaterial->paletteFlags;
                     shape.effectPaletteColorRow = effectMaterial->baseRed;
@@ -4978,6 +5060,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     }
                     shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                     shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
+                    shape.blendMode = alphaProperties[propertyIndex].blendMode;
                     if (shape.alphaTest) {
                         shape.alphaSemantic = NifAlphaSemantic::Cutout;
                     } else if (shape.alphaBlend) {
@@ -5008,6 +5091,7 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     const TextureSetBlock& set = textureSets[static_cast<std::size_t>(textureSetRef)];
                     if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
                         shape.diffuseTexturePath = set.textures.front();
+                        shape.lightingMaterial.textures = set.textures;
                         if (set.textures.size() > 1u && !set.textures[1].empty()) {
                             shape.normalTexturePath = set.textures[1];
                         }
@@ -5063,14 +5147,39 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
 
             shape.uvs = src.uvs;
-            if (effectMaterial != nullptr) {
+            if (shape.lightingMaterial.present && effectMaterial == nullptr && shape.materialAnimations.empty()) {
+                for (std::size_t i = 0; i + 1u < shape.uvs.size(); i += 2u) {
+                    for (std::size_t axis = 0; axis < 2; ++axis)
+                        shape.uvs[i+axis] = shape.uvs[i+axis] * shape.lightingMaterial.uvScale[axis] +
+                            shape.lightingMaterial.uvOffset[axis];
+                }
+            }
+            if (effectMaterial != nullptr && shape.materialAnimations.empty()) {
                 for (std::size_t i = 0; i + 1u < shape.uvs.size(); i += 2u) {
                     shape.uvs[i] = shape.uvs[i] * effectMaterial->uvScale[0] + effectMaterial->uvOffset[0];
                     shape.uvs[i + 1u] = shape.uvs[i + 1u] * effectMaterial->uvScale[1] + effectMaterial->uvOffset[1];
                 }
             }
             shape.colors = src.colors;
-            if (effectMaterial != nullptr) {
+            // A stored RGBA stream does not enable its RGB channels. Skyrim's
+            // material controls RGB and opacity independently; keep alpha for
+            // the vertex-alpha/material-opacity policy below. Resolve from the
+            // selected material so inherited properties cannot override it.
+            if (shape.lightingMaterial.present && effectMaterial == nullptr &&
+                (shape.lightingMaterial.flags2 & (1u << 5u)) == 0u) {
+                for (std::size_t i = 0; i + 3u < shape.colors.size(); i += 4u) {
+                    shape.colors[i] = shape.colors[i + 1u] = shape.colors[i + 2u] = 1.0f;
+                }
+            }
+            if (shape.lightingMaterial.parametersValid && effectMaterial == nullptr &&
+                shape.lightingMaterial.alpha != 1.0f && shape.materialAnimations.empty()) {
+                if (shape.colors.empty()) shape.colors.resize(src.positions.size()/3u*4u,1.0f);
+                for (std::size_t i = 3; i < shape.colors.size(); i += 4)
+                    shape.colors[i] = (vertexAlphaEnabled ? shape.colors[i] : 1.0f) *
+                        std::max(shape.lightingMaterial.alpha, 0.0f);
+                vertexAlphaEnabled=true;
+            }
+            if (effectMaterial != nullptr && shape.materialAnimations.empty()) {
                 if (shape.colors.empty()) {
                     shape.colors.resize(src.positions.size() / 3u * 4u, 1.0f);
                 }
@@ -5079,6 +5188,25 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                         std::clamp(effectMaterial->baseAlpha, 0.0f, 1.0f);
                 }
                 vertexAlphaEnabled = true; // Material opacity is independent of vertex-alpha enable.
+            }
+            if (!shape.materialAnimations.empty()) {
+                if (effectMaterial) {
+                    auto& m=shape.lightingMaterial;
+                    m.present=true; m.parametersValid=true; m.shaderType=0xffffffffu;
+                    std::copy_n(effectMaterial->uvOffset,2,m.uvOffset);
+                    std::copy_n(effectMaterial->uvScale,2,m.uvScale);
+                    m.alpha=effectMaterial->baseAlpha;
+                    std::copy_n(effectMaterial->baseColor,3,m.emissive);
+                    m.emissiveMultiplier=effectMaterial->baseScale;
+                }
+                // Animated opacity can fade an initially opaque shape. Preserve
+                // explicit cutout classification; other fades need sorted blending.
+                if (!shape.alphaTest && (shape.lightingMaterial.alpha<1 ||
+                    std::any_of(shape.materialAnimations.begin(),shape.materialAnimations.end(),
+                        [](const auto& t){return t.target==MaterialAnimatedValue::Alpha;}))) {
+                    shape.alphaBlend=true;
+                    shape.alphaSemantic=NifAlphaSemantic::ExplicitBlend;
+                }
             }
             if (vertexAlphaResolved && !vertexAlphaEnabled) {
                 // NifSkope/Bethesda semantics: a stored colour alpha is 1.0
@@ -5935,6 +6063,7 @@ bool parseNifSkinnedMesh(
                 }
                 shape.alphaTest = shape.alphaTest || alphaProperties[propertyIndex].alphaTest;
                 shape.alphaBlend = shape.alphaBlend || alphaProperties[propertyIndex].alphaBlend;
+                shape.blendMode = alphaProperties[propertyIndex].blendMode;
                 return;
             }
             if (stencilProperties[propertyIndex].valid) {

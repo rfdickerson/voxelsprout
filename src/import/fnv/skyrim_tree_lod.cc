@@ -38,7 +38,7 @@ std::string lowerCopy(std::string value) {
 
 void appendCard(
     ImportedSceneMesh& mesh, const SkyrimTreeLodType& type,
-    const SkyrimTreeLodInstance& tree, float angle, float phase) {
+    const SkyrimTreeLodInstance& tree, float angle) {
     const float halfWidth = 0.5f * type.width * tree.scale;
     const float height = type.height * tree.scale;
     const float dx = std::cos(angle) * halfWidth;
@@ -68,9 +68,6 @@ void appendCard(
         vertex.normal[2] = -ny;
         vertex.uv[0] = u[corner];
         vertex.uv[1] = v[corner];
-        vertex.layerTextureIndex[3] = kImportedSceneFoliageWindMarker;
-        vertex.layerWeight[0] = corner >= 2u ? 1.0f : 0.0f;
-        vertex.layerWeight[1] = phase;
         mesh.vertices.push_back(vertex);
     }
     const std::uint32_t indices[6] = {base, base + 1u, base + 2u,
@@ -235,6 +232,9 @@ bool appendSkyrimTreeLod(
         return false;
     }
     atlas.sourcePath = atlasPath;
+    // Legacy RGBA DDS has no color-space tag. This atlas is authored color,
+    // unlike the normal/flow data that shares its on-disk layout.
+    if (atlas.format == TextureFormat::RGBA8) atlas.format = TextureFormat::RGBA8Srgb;
     const std::uint32_t atlasIndex = static_cast<std::uint32_t>(out.textures.size());
     out.textures.push_back(std::move(atlas));
 
@@ -269,6 +269,7 @@ bool appendSkyrimTreeLod(
             tilePart.alphaTest = true;
             tilePart.twoSided = true;
             tilePart.alphaThreshold = 96u;
+            tilePart.vegetationReserved[0] |= kImportedSceneMeshPartTreeLod;
             for (const SkyrimTreeLodInstance& tree : trees) {
                 const std::int32_t treeCellX = static_cast<std::int32_t>(
                     std::floor(tree.position[0] / kExteriorCellSize));
@@ -284,19 +285,12 @@ bool appendSkyrimTreeLod(
                         std::to_string(tree.typeIndex);
                     return false;
                 }
-                const float phase = static_cast<float>(
-                    (tree.referenceId * 1103515245u + 12345u) & 0xffffu) / 65535.0f;
-                // A two-plane cross exposes its construction whenever the
-                // camera approaches either plane edge-on. Three radial planes
-                // give the retail atlas a six-sided crown silhouette; at the
-                // BTT handoff distance it reads as volume without inventing
-                // textures or paying for full NIF branch geometry.
-                constexpr float kThirdTurn = 1.0471975512f;
-                appendCard(mesh, *typeIt->second, tree, tree.rotation, phase);
-                appendCard(mesh, *typeIt->second, tree,
-                           tree.rotation + kThirdTurn, phase);
-                appendCard(mesh, *typeIt->second, tree,
-                           tree.rotation + (2.0f * kThirdTurn), phase);
+                // Standard Skyrim BTT uses two perpendicular double-sided
+                // cards. The atlas already depicts a shaded crown; adding a
+                // third plane makes it denser and changes its silhouette.
+                constexpr float kQuarterTurn = 1.5707963268f;
+                appendCard(mesh, *typeIt->second, tree, tree.rotation);
+                appendCard(mesh, *typeIt->second, tree, tree.rotation + kQuarterTurn);
                 ++outStats.instances;
             }
             tilePart.indexCount = static_cast<std::uint32_t>(mesh.indices.size()) -
@@ -320,7 +314,7 @@ bool appendSkyrimTreeLod(
         instance.transform[15] = 1.0f;
         out.instances.push_back(instance);
     }
-    outStats.triangles = outStats.instances * 6u;
+    outStats.triangles = outStats.instances * 4u;
     outStats.textures = 1u;
     out.alphaFlagsAuthored = true;
     return true;

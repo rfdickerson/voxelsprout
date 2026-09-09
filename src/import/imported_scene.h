@@ -1,6 +1,10 @@
+#include "import/material_animation.h"
 #pragma once
+#include "import/blend_mode.h"
 
 #include <cmath>
+#include <optional>
+#include "import/fnv/nif_particles.h"
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -79,6 +83,25 @@ inline constexpr std::uint32_t kImportedSceneTerrainNormalizedBlendMarker = 0xff
 // otherwise unused for these vertices.
 inline constexpr std::uint32_t kImportedSceneFoliageWindMarker = 0xfffffffdu;
 
+// Authored BSLightingShaderProperty, independent of diffuse texture identity.
+// Static UVs/opacity are baked once; animated materials retain original vertices.
+// shaderType UINT32_MAX tags an animated BSEffect material in the shared table.
+struct ImportedNifLightingMaterial {
+    std::vector<MaterialAnimationTrack> animations;
+    std::string texturePaths[9];
+    std::uint32_t shaderType = 0, flags1 = 0, flags2 = 0;
+    std::uint32_t valid = 0;
+    std::uint32_t textureClampMode = 3;
+    float refractionStrength = 0;
+    float environmentScale = 0;
+    float uvOffset[2] = {0, 0}, uvScale[2] = {1, 1};
+    float emissive[3] = {0, 0, 0}, emissiveMultiplier = 0;
+    float specular[3] = {1, 1, 1}, specularStrength = 1;
+    float glossiness = 1, alpha = 1;
+    std::uint32_t textures[9] = {0xffffffffu,0xffffffffu,0xffffffffu,
+        0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu};
+};
+
 struct ImportedSceneMeshPart {
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;
@@ -99,7 +122,8 @@ struct ImportedSceneMeshPart {
     // Stored in padding that already existed before rigidAnimationIndex, so the
     // raw ImportedSceneMeshPart stride remains unchanged.
     std::uint8_t vegetationLod = 0u;
-    std::uint8_t vegetationReserved[2] = {0u, 0u};
+    std::uint8_t vegetationReserved[1] = {0u};
+    ImportedBlendMode blendMode = ImportedBlendMode::Alpha;
     // Index into ImportedSceneMesh::rigidAnimations, or UINT32_MAX. One source
     // node may own several material parts; they all point at the same track.
     std::uint32_t rigidAnimationIndex = 0xffffffffu;
@@ -146,12 +170,23 @@ bool sampleImportedSceneRigidAnimation(
     float timeSeconds,
     float outDeltaTransform[16]);
 
+struct ImportedTerrainNormalBinding {
+    // Base texture followed by the four ordered LAND overlays. Scene texture
+    // indices, not bindless slots. Missing maps use the geometric normal.
+    std::uint32_t textures[5] = {0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu,0xffffffffu};
+    // Per-layer LTEX/TXST state: exponent bits 0..7, TXST flags 8..10,
+    // authored bit 15. Zero retains legacy terrain shading.
+    std::uint16_t surfaceProperties[5] = {};
+};
+
 struct ImportedSceneMesh {
     std::string name;
     std::vector<ImportedSceneVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::vector<ImportedSceneMeshPart> parts;
     std::vector<ImportedSceneRigidAnimation> rigidAnimations;
+    std::vector<ImportedTerrainNormalBinding> terrainNormals;
+    std::vector<std::uint32_t> lightingMaterialIndices; // per part, UINT32_MAX = absent
 };
 
 // A teleport door: stand near it, look at it, and it takes you to another
@@ -236,13 +271,18 @@ enum class TextureFormat : std::uint8_t {
     // image view. Skyrim's generated-object atlases are uncompressed colour;
     // treating them as linear makes distant cities roughly twice too bright.
     RGBA8Srgb = 8,
+    BC6HUfloat = 9,  // 16-byte RGB HDR block, unsigned half-float
+    BC6HSfloat = 10, // 16-byte RGB HDR block, signed half-float
 };
 
 struct ImportedSceneTexture {
     std::string sourcePath;
+    bool linearData = false; // explicit material role, independent of filename
+    std::uint8_t clampMode = 3; // NIF clamp-S/clamp-T through wrap-S/wrap-T
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t mipLevelCount = 1;
+    std::uint32_t arrayLayers = 1; // 6 = cube, face-major +X,-X,+Y,-Y,+Z,-Z
     TextureFormat format = TextureFormat::RGBA8;
     std::vector<std::uint8_t> rgba8; // pixel or block data, mip chain packed largest-first
 };
@@ -448,12 +488,19 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagDistantLodTessellation 
 // mountain proxy. The fragment shader uses this as a coverage bias, then breaks
 // up the coarse BTO boundary in world space.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagDistantLodSnow = 1u << 11;
+// Conditional on PBR clear, like foliage wind. Generated grass uses the upper
+// half of layerWeights for its world-space height above the root (quarter units).
+inline constexpr std::uint32_t kImportedSceneMaterialFlagGrass = 1u << 12;
+// Non-PBR tree atlas lighting: the baked crown is not a solid planar leaf.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagTreeLod = 1u << 13;
 
 // ImportedSceneMeshPart already carries two reserved vegetation-adjacent bytes
 // in its serialized layout. This semantic uses one bit without changing the
 // raw struct stride or any scene/chunk wire format.
 inline constexpr std::uint8_t kImportedSceneMeshPartDistantLodTessellation = 1u << 0;
 inline constexpr std::uint8_t kImportedSceneMeshPartDistantLodSnow = 1u << 1;
+inline constexpr std::uint8_t kImportedSceneMeshPartGrass = 1u << 2;
+inline constexpr std::uint8_t kImportedSceneMeshPartTreeLod = 1u << 3;
 
 inline constexpr int kImportedSceneMaterialRoughnessShift = 8;
 inline constexpr int kImportedSceneMaterialMetallicShift = 16;
@@ -554,6 +601,13 @@ struct ImportedScenePackedDraw {
     // stream as well as the main one. The renderer forwards it per draw.
     std::uint8_t alphaThreshold = 128;
     std::uint8_t reserved[3] = {0, 0, 0};
+    // Spare metadata bit; zero preserves legacy cooked alpha blending.
+    ImportedBlendMode blendMode() const {
+        return (reserved[0] & 4u) ? ImportedBlendMode::Additive : ImportedBlendMode::Alpha;
+    }
+    void setBlendMode(ImportedBlendMode mode) {
+        reserved[0] = (reserved[0] & ~4u) | (mode == ImportedBlendMode::Additive ? 4u : 0u);
+    }
     // Index into ImportedScene::rigidAnimations, or UINT32_MAX.
     std::uint32_t rigidAnimationIndex = 0xffffffffu;
 };
@@ -628,9 +682,13 @@ struct ImportedSceneLight {
 // path and produce the same emitter record.
 enum class ImportedParticleEffect : std::uint32_t {
     Fire = 1u,
+    Mist = 2u,
 };
 
 struct ImportedSceneParticleEmitter {
+    std::optional<fnv::NifMist> mist;
+    std::uint32_t textureIndex = ~0u;
+    std::array<float,12> mistTransform{1,0,0,0,0,1,0,0,0,0,1,0};
     std::string sourceId;
     ImportedParticleEffect effect = ImportedParticleEffect::Fire;
     float position[3] = {};
@@ -663,6 +721,10 @@ struct ImportedScene {
     std::vector<ImportedSceneCollisionTriangle> collisionTriangles;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
+    // Indexed by packed vertex; trailing non-terrain vertices are omitted.
+    std::vector<ImportedTerrainNormalBinding> packedTerrainNormals;
+    std::vector<ImportedNifLightingMaterial> lightingMaterials;
+    std::vector<std::uint32_t> packedLightingMaterialIndices; // per packed vertex
     std::vector<std::uint32_t> packedIndices;
     std::vector<ImportedScenePackedDraw> packedDraws;
     std::vector<ImportedSceneRigidAnimation> rigidAnimations;

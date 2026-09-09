@@ -12,6 +12,30 @@
 
 namespace odai::importer::fnv {
 
+std::vector<std::string> FalloutAssetSource::virtualPaths() const {
+    std::unordered_set<std::string> paths;
+    for (const auto& archive : m_archives)
+        for (const auto& file : archive.files()) paths.insert(file.virtualPath);
+    for (const auto& mod : m_modDirectories) {
+        for (const auto& [path, physical] : mod.filesByLowerPath) paths.insert(path);
+        for (const auto& archive : mod.archives)
+            for (const auto& file : archive.files()) paths.insert(file.virtualPath);
+    }
+    std::error_code error;
+    for (std::filesystem::recursive_directory_iterator it(m_dataFilesPath,
+             std::filesystem::directory_options::skip_permission_denied, error), end;
+         it != end; it.increment(error)) {
+        if (error) { error.clear(); continue; }
+        if (!it->is_regular_file(error)) continue;
+        auto path = it->path().lexically_relative(m_dataFilesPath).generic_string();
+        for (char& c : path) c = c == '/' ? '\\' : char(std::tolower(static_cast<unsigned char>(c)));
+        if (!path.ends_with(".bsa")) paths.insert(std::move(path));
+    }
+    std::vector<std::string> result(paths.begin(), paths.end());
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 namespace {
 
 std::string toLowerAsciiCopy(std::string text) {
@@ -323,6 +347,7 @@ bool FalloutAssetSource::open(
 bool FalloutAssetSource::openDataFiles(
     const std::filesystem::path& dataFilesPath, std::uint32_t contentMask) {
     m_dataFilesPath = dataFilesPath;
+    m_baseLooseFiles.clear();
     m_archives.clear();
     m_warnings.clear();
     m_contentMask = contentMask;
@@ -331,6 +356,21 @@ bool FalloutAssetSource::openDataFiles(
     std::filesystem::directory_iterator iterator(dataFilesPath, directoryError);
     if (directoryError) {
         return false;
+    }
+
+    std::error_code looseError;
+    for (std::filesystem::recursive_directory_iterator it(dataFilesPath,
+             std::filesystem::directory_options::skip_permission_denied,looseError),end;
+         it!=end; it.increment(looseError)) {
+        if (looseError) { looseError.clear(); continue; }
+        if (!it->is_regular_file(looseError)) continue;
+        const auto key=toLowerAsciiCopy(normalizeModelPath(
+            it->path().lexically_relative(dataFilesPath).generic_string()));
+        if (key.ends_with(".bsa")) continue;
+        const auto found=m_baseLooseFiles.find(key);
+        // Deterministic tie-break for case-colliding Linux paths.
+        if (found==m_baseLooseFiles.end() || it->path()<found->second)
+            m_baseLooseFiles[key]=it->path();
     }
 
     std::vector<std::filesystem::path> archivePaths;
@@ -656,7 +696,9 @@ bool FalloutAssetSource::resolve(
         }
     }
 
-    const std::filesystem::path loosePath = joinBackslashPath(looseRoot, loosePathSuffix);
+    std::filesystem::path loosePath = joinBackslashPath(looseRoot, loosePathSuffix);
+    if (const auto found=m_baseLooseFiles.find(toLowerAsciiCopy(archiveVirtualPath));
+        found!=m_baseLooseFiles.end()) loosePath=found->second;
     std::error_code existsError;
     if (std::filesystem::exists(loosePath, existsError) && !existsError) {
         std::string looseError;

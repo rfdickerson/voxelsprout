@@ -4,12 +4,22 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cmath>
+#include <cstdlib>
+#include <unordered_set>
 
 #include "render/backend/vulkan/frame_graph_runtime.h"
 
 namespace odai::render {
 
 #include "render/renderer_shared.h"
+
+void RendererBackend::pushImportedLodTransition(
+    VkCommandBuffer commandBuffer, const std::array<float, 4>& transition) {
+    vkCmdPushConstants(commandBuffer, m_pipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        offsetof(ChunkPushConstants, lodTransition), sizeof(ChunkPushConstants::lodTransition), transition.data());
+}
 
 void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, const MainPassInputs& inputs) {
     VkCommandBuffer commandBuffer = context.commandBuffer;
@@ -98,8 +108,8 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // imported_static.vert reflects world points across the selected water
     // plane, which is exactly equivalent to mirroring the camera, while the
     // fragment shader clips geometry below the plane. The existing pipelines
-    // are single-sample in the showcase configuration, so the half-resolution
-    // target needs no resolve image of its own.
+    // are single-sample in the showcase configuration, so the reflection
+    // target needs no multisample resolve image of its own.
     const bool canRenderPlanarWaterReflection =
         canDrawImportedWater &&
         m_waterReflectionPlaneValid &&
@@ -116,12 +126,13 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_importedStaticDepthPrewritePipelineTwoSided != VK_NULL_HANDLE &&
         importedVertexBuffer != VK_NULL_HANDLE &&
         importedIndexBuffer != VK_NULL_HANDLE &&
-        !importedMeshDraws.empty();
+        !inputs.reflectionMeshDraws.empty();
     const bool useWaterReflectionTemporalResolve =
         m_waterReflectionTemporalEnabled &&
         m_waterReflectionResolvePipeline != VK_NULL_HANDLE &&
         m_waterReflectionResolveBufferSet.valid();
     if (canRenderPlanarWaterReflection) {
+        const auto reflectionMeshDraws = inputs.reflectionMeshDraws;
         beginDebugLabel(commandBuffer, "Pass: Planar Water Reflection", 0.08f, 0.34f, 0.42f, 1.0f);
         transitionImageLayout(
             commandBuffer,
@@ -227,7 +238,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         reflectionPush.materialParams[2] = m_debugHighlightUntextured ? 1.0f : 0.0f;
         reflectionPush.materialParams[3] = m_waterReflectionPlaneHeight;
         const std::size_t reflectionTerrainCount = std::min<std::size_t>(
-            importedTerrainDrawCount, importedMeshDraws.size());
+            inputs.reflectionTerrainDrawCount, reflectionMeshDraws.size());
         const auto includeReflectionDraw = [&](std::size_t drawIndex) {
             return drawIndex < reflectionTerrainCount
                 ? m_debugShowImportedTerrain
@@ -237,7 +248,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         VkDeviceSize reflectionIndirectBase = 0;
         const bool reflectionUsesIndirect = m_supportsMultiDrawIndirect &&
             buildImportedIndirectBatches(
-                importedMeshDraws, includeReflectionDraw,
+                reflectionMeshDraws, includeReflectionDraw,
                 reflectionIndirectBuffer, reflectionIndirectBase);
         const auto drawReflectionGeometry = [&](VkPipeline pipeline) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -264,6 +275,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                         commandBuffer, m_pipelineLayout,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(reflectionPush), &reflectionPush);
+                    pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, reflectionIndirectBuffer,
@@ -271,13 +283,14 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                         batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
                 }
             }
-            for (std::size_t drawIndex = 0; drawIndex < importedMeshDraws.size(); ++drawIndex) {
-                const ImportedMeshDraw& draw = importedMeshDraws[drawIndex];
+            for (std::size_t drawIndex = 0; drawIndex < reflectionMeshDraws.size(); ++drawIndex) {
+                const ImportedMeshDraw& draw = reflectionMeshDraws[drawIndex];
                 if (draw.blended || !includeReflectionDraw(drawIndex) ||
                     (reflectionUsesIndirect && draw.rigidAnimationIndex == 0xffffffffu)) {
                     continue;
                 }
                 pushReflectionDraw(draw);
+                pushImportedLodTransition(commandBuffer, draw.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, draw.indexCount, 1, draw.firstIndex,
@@ -630,6 +643,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 for (const ImportedIndirectBatch& batch : m_importedIndirectBatches) {
                     pushAlphaThreshold(batch.alphaThreshold);
                     pushRigidAnimation(0xffffffffu);
+                    pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, terrainIndirectBuffer,
@@ -711,6 +725,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     // cutout texel gets depth written for a surface that is meant
                     // to be see-through.
                     pushAlphaThreshold(batch.alphaThreshold);
+                    pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
                     vkCmdDrawIndexedIndirect(
                         commandBuffer,
@@ -735,6 +750,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     }
                     pushAlphaThreshold(draw.alphaThreshold);
                     pushRigidAnimation(draw.rigidAnimationIndex);
+                    pushImportedLodTransition(commandBuffer, draw.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
                     vkCmdDrawIndexed(
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
@@ -760,6 +776,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 }
                 pushAlphaThreshold(batch.alphaThreshold);
                 pushRigidAnimation(0xffffffffu);
+                pushImportedLodTransition(commandBuffer, batch.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexedIndirect(
                     commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
@@ -783,6 +800,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 }
                 pushAlphaThreshold(draw.alphaThreshold);
                 pushRigidAnimation(draw.rigidAnimationIndex);
+                pushImportedLodTransition(commandBuffer, draw.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, draw.indexCount, 1, draw.firstIndex,
@@ -810,6 +828,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 }
                 pushAlphaThreshold(importedDraw.alphaThreshold);
                 pushRigidAnimation(importedDraw.rigidAnimationIndex);
+                pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
@@ -839,10 +858,16 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 const ImportedMeshDraw& importedDraw = importedMeshDraws[drawIndex];
                 pushAlphaThreshold(importedDraw.alphaThreshold);
                 pushRigidAnimation(importedDraw.rigidAnimationIndex);
+                pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                 VkPipeline wantedPipeline =
                     (importedDraw.twoSided && m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE)
                         ? m_importedStaticPipelineBlendedTwoSided
                         : m_importedStaticPipelineBlended;
+                if (importedDraw.blendMode == odai::importer::ImportedBlendMode::Additive) {
+                    const VkPipeline additive = importedDraw.twoSided
+                        ? m_importedStaticPipelineAdditiveTwoSided : m_importedStaticPipelineAdditive;
+                    if (additive != VK_NULL_HANDLE) wantedPipeline = additive;
+                }
                 if (wantedPipeline != VK_NULL_HANDLE && wantedPipeline != boundBlendedPipeline) {
                     vkCmdBindPipeline(
                         commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
@@ -1063,11 +1088,71 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // whole hearth to one draw with no per-frame particle-buffer upload or
     // transfer/graphics barrier. Additive blending is order independent, so
     // emitters from several live Bethesda cells do not need a sort.
-    if (m_importedFireParticlePipeline != VK_NULL_HANDLE &&
-        !m_importedParticleEmitters.empty()) {
-        vkCmdBindPipeline(
-            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_importedFireParticlePipeline);
+    if (m_importedMistParticlePipeline != VK_NULL_HANDLE && m_supportsBindlessDescriptors &&
+        !std::getenv("ODAI_SKYRIM_NO_MIST")) {
+        struct Draw {
+            ChunkPushConstants push;
+            float distance;
+        };
+        std::vector<Draw> mistDraws;
+        std::unordered_set<std::string> live;
+        const float now = m_importedRigidAnimationTimeSeconds;
+        for (const auto &e : m_importedParticleEmitters) {
+            if (!e.mist || e.effect != odai::importer::ImportedParticleEffect::Mist ||
+                e.textureIndex == ~0u)
+                continue;
+            live.insert(e.sourceId);
+            auto [it, added] = m_mistStartTimes.try_emplace(e.sourceId, now);
+            if (now < it->second)
+                it->second = now;
+            auto particles = odai::importer::fnv::sampleNifMist(*e.mist, now - it->second, e.seed);
+            for (const auto &p : particles) {
+                Draw d{};
+                const auto &t = e.mistTransform;
+                for (int r = 0; r < 3; ++r) {
+                    d.push.chunkOffset[r] = t[r * 4 + 3];
+                    for (int c = 0; c < 3; ++c)
+                        d.push.chunkOffset[r] += t[r * 4 + c] * p.position[c];
+                    float delta = d.push.chunkOffset[r] - inputs.cameraPosition[r];
+                    d.distance += delta * delta;
+                }
+                d.push.chunkOffset[3] =
+                    p.radius * std::sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
+                std::copy(p.color.begin(), p.color.end(), d.push.cascadeData);
+                d.push.materialParams[0] = float(e.textureIndex & 0xffffu);
+                d.push.materialParams[1] = p.angle;
+                d.push.materialParams[2] = e.mist->softDepth;
+                if (p.color[3] > 0.001f)
+                    mistDraws.push_back(d);
+            }
+        }
+        std::erase_if(m_mistStartTimes,
+                      [&](const auto &entry) { return !live.contains(entry.first); });
+        std::stable_sort(mistDraws.begin(), mistDraws.end(),
+                         [](const auto &a, const auto &b) { return a.distance > b.distance; });
+        if (!mistDraws.empty()) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              m_importedMistParticlePipeline);
+            if (m_supportsVrs && m_cmdSetFragmentShadingRate) {
+                const VkExtent2D rate{1, 1};
+                const VkFragmentShadingRateCombinerOpKHR ops[2] = {
+                    VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
+                    VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR};
+                m_cmdSetFragmentShadingRate(commandBuffer, &rate, ops);
+            }
+            bindGraphicsDescriptorBuffers(commandBuffer);
+            for (const auto &d : mistDraws) {
+                vkCmdPushConstants(commandBuffer, m_pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                   sizeof(d.push), &d.push);
+                vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+                countDrawCalls(m_debugDrawCallsMain, 1);
+            }
+        }
+    }
+    if (m_importedFireParticlePipeline != VK_NULL_HANDLE && !m_importedParticleEmitters.empty()) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          m_importedFireParticlePipeline);
         bindGraphicsDescriptorBuffers(commandBuffer);
         if (m_supportsVrs && m_cmdSetFragmentShadingRate != nullptr) {
             const VkExtent2D fineRate{1u, 1u};

@@ -1,5 +1,6 @@
 import camera_uniform;
 import chunk_push_constants;
+#include "../water_depth_policy.h"
 
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
@@ -59,6 +60,7 @@ struct SceneWaterSample
     float thickness;
     float contact;
     float depthEdge;
+    float coverage;
     float3 bottomTint;
 };
 
@@ -215,7 +217,7 @@ float3 viewRayFromUv(float2 uv)
     if (abs(projX) < 1e-6) projX = (projX < 0.0) ? -1e-6 : 1e-6;
     if (abs(projY) < 1e-6) projY = (projY < 0.0) ? -1e-6 : 1e-6;
 
-    const float2 ndc = (uv * 2.0) - 1.0;
+    const float2 ndc = (uv * 2.0) - 1.0 - camera.tonemapConfig2.zw;
     return normalize(float3(ndc.x / projX, ndc.y / projY, -1.0));
 }
 
@@ -226,6 +228,7 @@ SceneWaterSample sampleSceneWater(float4 screenPosition, float3 waterWorldPositi
     result.thickness = 280.0;
     result.contact = 0.0;
     result.depthEdge = 0.0;
+    result.coverage = 1.0;
     result.bottomTint = float3(0.22, 0.22, 0.17);
 
     uint texW = 0u;
@@ -247,6 +250,10 @@ SceneWaterSample sampleSceneWater(float4 screenPosition, float3 waterWorldPositi
 
     const float waterViewDepth = max(-mul(camera.view, float4(waterWorldPosition, 1.0)).z, 0.0);
     const float depthBehindWater = sceneViewDepth - waterViewDepth;
+    // Fade across the FP16 depth uncertainty at the actual bank intersection.
+    // Keep unknown/sky depth opaque; only a known opaque surface can define a
+    // shoreline. This is composited against the pre-water HDR copy below.
+    result.coverage = waterShoreCoverage(waterViewDepth, sceneViewDepth);
     if (depthBehindWater <= 0.02)
     {
         return result;
@@ -356,6 +363,20 @@ ScreenRefractionSample sampleAnimatedSceneRefraction(
         // stretched trees. Keep the physically dark deep-water fallback.
         return result;
     }
+
+    // A valid undistorted riverbed is a continuous fallback when the refracted
+    // ray leaves the screen or fails at a bank silhouette. Never replace that
+    // known bottom with an opaque body-color patch on a ray-march miss.
+    const float baseFog = saturate((sceneThickness - authoredOptics.x) /
+        max(authoredOptics.y - authoredOptics.x, 1.0)) * saturate(authoredOptics.z);
+    const float3 baseAttenuation = authored ? float3((1.0 - baseFog) * (1.0 - saturate(authoredDeep.w))) :
+        exp(-kWaterAbsorption * sceneThickness * max(camera.waterConfig.w, 0.01));
+    const float3 baseScatter = authored ? lerp(shallowWater, authoredDeep.rgb, baseFog) :
+        lerp(kWaterDeepTint, shallowWater, shallowFactor);
+    result.color = opaqueSceneColorTexture.SampleLevel(baseUv, 0.0).rgb * baseAttenuation +
+        baseScatter * (1.0 - baseAttenuation) * (authored ? 1.0 : 0.38);
+    result.color = lerp(fallbackColor, result.color, saturate(refractionStrength));
+    result.weight = saturate(refractionStrength);
 
     // Trace Snell's-law transmission in world space and project each sample.
     // World normal XZ is not a screen-space displacement (it rotates with the
@@ -1051,7 +1072,9 @@ float4 main(FragmentInput input) : SV_Target0
     // Shore treatment is tied strictly to a reconstructed contact.  A shallow
     // fallback is useful for colour, but it cannot tell a bank from the middle
     // of a river and previously flooded whole patches with opaque white foam.
-    const float shoreBand = sceneWater.valid * sceneWater.contact;
+    // Authored Skyrim water already supplies absorption and scattering colors.
+    // Keep the legacy green bank wash only for water without WATR appearance.
+    const float shoreBand = sceneWater.valid * sceneWater.contact * (authoredWater ? 0.0 : 1.0);
     const float shoreWashA = stableWaterNoise((input.inWorldPosition.xz * 0.085) + float2(camera.skyConfig1.z * 0.020, 0.0));
     const float shoreWashB = stableWaterNoise((input.inWorldPosition.zx * 0.150) - float2(0.0, camera.skyConfig1.z * 0.014));
     const float3 bankShallows = float3(0.050, 0.105, 0.080);
@@ -1074,16 +1097,19 @@ float4 main(FragmentInput input) : SV_Target0
     const float3 exposureStableRiver =
         (litColor * float3(0.72, 0.74, 0.69)) +
         lerp(float3(0.004, 0.012, 0.013), float3(0.012, 0.028, 0.022), rtShallowFactor);
-    litColor = lerp(litColor, exposureStableRiver, overheadRiverGrade);
+    if (!authoredWater) litColor = lerp(litColor, exposureStableRiver, overheadRiverGrade);
 
     // Keep the remaining HDR range finite before tonemapping. Grazing
     // reflections and sun glints retain a higher ceiling than transmission.
     const float waterLuminance = dot(litColor, float3(0.2126, 0.7152, 0.0722));
     const float waterLuminanceCeiling = lerp(0.34, 1.40, angleReflectionFactor);
-    litColor *= min(1.0, waterLuminanceCeiling / max(waterLuminance, 0.001));
+    if (!authoredWater) litColor *= min(1.0, waterLuminanceCeiling / max(waterLuminance, 0.001));
 
     const float3 cameraWorldPos = camera.shadowVoxelGridSize.xyz;
     const float waterViewDist = length(cameraWorldPos - input.inWorldPosition);
     litColor = applyAtmosphericFog(litColor, input.inWorldPosition, waterViewDist, normalize(camera.sunDirectionIntensity.xyz));
-    return float4(litColor, 1.0);
+    // The copied opaque scene is already lit and fogged. Blend once, after
+    // water fog, to avoid double-fogging the exposed shoreline.
+    const float3 bankColor = opaqueSceneColorTexture.SampleLevel(waterScreenUv(input.inPosition), 0.0).rgb;
+    return float4(lerp(bankColor, litColor, sceneWater.coverage), 1.0);
 }

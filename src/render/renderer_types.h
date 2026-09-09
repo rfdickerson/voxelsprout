@@ -113,7 +113,7 @@ inline constexpr float upscalerQualityScale(UpscalerQuality quality) {
 
 struct UpscalerSettings {
     UpscalerBackend backend = UpscalerBackend::Off;
-    UpscalerQuality quality = UpscalerQuality::Quality;
+    UpscalerQuality quality = UpscalerQuality::Native;
     // 0 = none. Applied by backends that expose it; ignored by those that do not.
     float sharpness = 0.0f;
 };
@@ -260,6 +260,7 @@ struct ShadowStats {
 // use point at "sky\alpha.dds", a fully transparent 1520-byte placeholder, so
 // "four layers" in the record usually means one or two on screen.
 inline constexpr int kWeatherCloudLayerCount = 4;
+inline constexpr int kNightSkyTextureCount = 6;
 
 struct WeatherSkyParams {
     float weight = 0.0f;
@@ -268,10 +269,12 @@ struct WeatherSkyParams {
     float horizon[3] = {0.0f, 0.0f, 0.0f};    // the skyline itself
     float fogColor[3] = {0.0f, 0.0f, 0.0f};
     float fogFarDistance = 0.0f;              // world units; 0 leaves fog alone
-    // Screen-space precipitation strength derived from the active WTHR
-    // classification. Rain uses 0..1; snow remains zero until it has its own
-    // authored particle path rather than masquerading as rain.
+    // WTHR/SPGD rain coverage, 0..1. Snow remains disabled until supported.
     float precipitationIntensity = 0.0f;
+    // SPGD dimensions and falling speed, in Bethesda world units.
+    float rainWidth = 0.35f, rainLength = 2.0f, rainSpeed = 675.0f, rainRange = 1300.0f;
+    bool hasAuthoredWind = false;
+    float windHeadingDegrees = 0, windRangeDegrees = 0, windSpeed = 0;
 
     // Per-layer tint (linear, from PNAM) and coverage, updated per frame
     // because both track time of day. A layer with opacity 0 costs nothing:
@@ -295,6 +298,10 @@ struct WeatherSkyParams {
     float sunlightColor[3] = {0.0f, 0.0f, 0.0f};
     float ambientColor[3] = {0.0f, 0.0f, 0.0f};
     float lightingWeight = 0.0f;
+    // CPU-only Skyrim weather policy; not serialized.
+    bool authoredNightAmbient = false;
+    float starsColor[3] = {};
+    float celestialRotation = 0.0f;
 
     // How much of the sun's HALO and haze bloom this weather lets through, from
     // WTHR's Sun Glare byte. 1 is the default and the unmodified look; the sun
@@ -355,6 +362,7 @@ struct WeatherCloudLayer {
 // move every frame.
 struct WeatherCloudTextures {
     WeatherCloudLayer layers[kWeatherCloudLayerCount];
+    importer::ImportedSceneTexture nightSky[kNightSkyTextureCount];
 };
 
 // Authored sky geometry for weather layers. Skyrim's clouds.nif provides one
@@ -460,6 +468,20 @@ struct ImportedExteriorLighting {
     float bounceStrength = 0.35f;
 };
 
+// Skyrim SE's exterior weather colors are already authored as the scene's sky
+// and sun illumination. A narrow diffuse wrap keeps pine needles and timber
+// shade readable without replacing those colors with a game-independent fill.
+inline constexpr ImportedExteriorLighting skyrimSeExteriorLighting() {
+    ImportedExteriorLighting lighting{};
+    lighting.diffuseWrap = 0.10f;
+    lighting.ambientScale = 0.62f;
+    lighting.sunlightScale = 1.08f;
+    lighting.daytimeLocalLightScale = 0.10f;
+    lighting.screenSpaceGi = true;
+    lighting.bounceStrength = 0.32f;
+    return lighting;
+}
+
 inline constexpr bool shouldUseImportedScreenSpaceGi(
     const ImportedInteriorLighting& lighting,
     const ImportedExteriorLighting& exterior = {}) {
@@ -519,6 +541,26 @@ struct ImportedPbrDefaults {
 // that is what Renderer::setNeutralColorGrading() writes. Anything else is a
 // look, and a look is worth naming and measuring rather than leaving as whatever
 // the debug panel happened to be initialised with.
+// Authored Bethesda image-space policy, independent of explicit user grading.
+// Identity defaults keep non-Skyrim and unresolved records unchanged.
+struct ImageSpacePostSettings {
+    bool enabled = false;
+    bool grading = true;
+    bool adaptation = true;
+    float adaptSpeed = 1.0f;
+    float bloomThreshold = 1.0f;
+    float bloomScale = 0.0f;
+    float bloomRadius = 1.0f;
+    float saturation = 1.0f;
+    float brightness = 1.0f;
+    float contrast = 1.0f;
+    float tint[4] = {}; // RGB, amount
+    float fade[4] = {}; // RGB, alpha
+    float dofDistance = 0.0f;
+    float dofRange = 0.0f;
+    float dofRadius = 0.0f;
+};
+
 struct ColorGradingSettings {
     float whiteBalance[3] = {1.0f, 1.0f, 1.0f};
     float contrast = 1.0f;         // clamped to [0.70, 1.40] in the shader

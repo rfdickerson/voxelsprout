@@ -25,6 +25,11 @@ struct ControlPoint
     nointerpolation uint flags : TEXCOORD5;
     nointerpolation uint4 layerTextures : TEXCOORD6;
     float4 layerWeights : TEXCOORD7;
+    nointerpolation uint4 terrainNormals : TEXCOORD8;
+    nointerpolation uint terrainNormal4 : TEXCOORD9;
+    nointerpolation uint lightingMaterial : TEXCOORD10;
+    nointerpolation uint4 terrainSurface : TEXCOORD11;
+    nointerpolation uint terrainSurface4 : TEXCOORD12;
 };
 
 struct PatchConstants

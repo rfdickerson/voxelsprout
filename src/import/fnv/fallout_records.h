@@ -26,6 +26,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <array>
 #include <vector>
 
 #include "import/fnv/esm_reader.h"
@@ -610,6 +611,22 @@ struct FalloutLandTextureRecord {
     // From that TXST's TX00, or from Oblivion's own ICON with the
     // "landscape\" folder it is relative to already prepended.
     std::string diffuseTexturePath;
+    bool deleted = false;
+    std::vector<std::uint32_t> grassFormIds;
+    std::array<std::string, 8> texturePaths{}; // TX00..TX07, source roles retained
+    std::uint8_t specularExponent = 0;
+    bool hasSpecularExponent = false;
+};
+
+struct FalloutGrassRecord {
+    std::uint32_t formId = 0;
+    std::string modelPath;
+    bool deleted = false;
+    bool valid = false;
+    std::uint8_t density = 0, minSlope = 0, maxSlope = 90, flags = 0;
+    std::uint16_t waterDistance = 0;
+    std::uint32_t waterMode = 0;
+    float positionRange = 0, heightRange = 0, colorRange = 0, wavePeriod = 0;
 };
 
 struct FalloutWaterRecord {
@@ -627,6 +644,7 @@ struct FalloutWaterRecord {
 struct FalloutWorldspaceRecord {
     std::uint32_t formId = 0;
     std::string editorId;
+    bool noGrass = false;
     // DNAM: the height the ground sits at in any cell of this worldspace that
     // carries NO LAND record, and the height its water sits at when a cell
     // states none.
@@ -664,6 +682,8 @@ struct FalloutWorldspaceRecord {
 // as a flat pass over the whole file — the caller is expected to filter down
 // to the cells/worldspace it actually wants to cook.
 struct FalloutSceneData {
+    std::unordered_map<std::uint32_t, std::array<std::string, 8>> textureSets;
+    std::unordered_map<std::uint32_t, std::uint16_t> textureSetFlags;
     std::vector<FalloutWaterRecord> waters;
     std::vector<FalloutStaticRecord> statics;
     std::vector<FalloutRegionRecord> regions;  // REGN, for discovery notification
@@ -672,6 +692,7 @@ struct FalloutSceneData {
     std::vector<FalloutSoundBaseRecord> soundBases;
     std::vector<FalloutLightRecord> lights;  // LIGH base records, placed by REFR like any other base
     std::vector<FalloutLandTextureRecord> landTextures;  // LTEX, already resolved through TXST
+    std::vector<FalloutGrassRecord> grasses;
     // Every placed reference's owning cell, by the reference's own formID. A
     // door's XTEL names its counterpart reference and nothing else -- the cell
     // it stands in is only discoverable by looking it up here.
@@ -853,6 +874,10 @@ bool extractFalloutCellMerged(
 //
 // outCell is fully replaced. Returns false only on a malformed walk; a cell
 // with no contents succeeds and yields an empty cell.
+// Read only LAND, rejecting object and navigation records before decompression.
+bool extractFalloutLandscapeAt(EsmReader& reader, const FalloutCellIndexEntry& entry,
+                              FalloutCellRecord& outCell, std::string& outError);
+
 bool extractFalloutCellAt(
     EsmReader& reader,
     const FalloutCellIndexEntry& entry,

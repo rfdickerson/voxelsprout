@@ -48,3 +48,11 @@ GPU-arena, jobs, frame stats, core math, imported lighting/SSGI policy, frame gr
 PBR packing, and retained RPG UI coverage.
 
 Real-data probes are optional and must never commit or redistribute game data.
+
+## Local Skyrim preview preferences
+
+Use JK’s Skyrim + SMIM for future Skyrim scene runs unless the user explicitly
+requests another profile or a vanilla comparison. The local combined profile is
+`captures/jk-skyrim-showcase/profile.json`. Keep the small 768x432 logical window
+and native-DPI framebuffer rendering (render scale 1; no forced smaller render
+extent). Mod assets and capture evidence remain local.

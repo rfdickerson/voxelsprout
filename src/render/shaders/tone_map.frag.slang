@@ -2,6 +2,7 @@
 // slangc -target spirv -entry main -stage fragment -matrix-layout-column-major src/render/shaders/tone_map.frag.slang -o src/render/shaders/tone_map.frag.slang.spv
 
 import camera_uniform;
+#include "../image_space_contrast.h"
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<float4> exposureStateBuffer;
@@ -344,11 +345,11 @@ float3 sampleMipChainBloom(float2 uv, float exposureScale)
     const float bloomThreshold = max(camera.skyConfig3.x / max(exposureScale, 1e-4), 0.0);
     const float bloomSoftKnee = clamp(camera.skyConfig3.y, 0.0, 1.0);
     const float3 bloomMip0 = extractBloom(bloomSourceColor.SampleLevel(uv, 0.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip1 = extractBloom(bloomSourceColor.SampleLevel(uv, 1.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip2 = extractBloom(bloomSourceColor.SampleLevel(uv, 2.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip3 = extractBloom(bloomSourceColor.SampleLevel(uv, 3.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip4 = extractBloom(bloomSourceColor.SampleLevel(uv, 4.0).xyz, bloomThreshold, bloomSoftKnee);
-    const float3 bloomMip5 = extractBloom(bloomSourceColor.SampleLevel(uv, 5.0).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip1 = extractBloom(bloomSourceColor.SampleLevel(uv, clamp(1.0 + camera.imageSpaceCinematic.w - 1.0, 0.0, 7.0)).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip2 = extractBloom(bloomSourceColor.SampleLevel(uv, clamp(2.0 + camera.imageSpaceCinematic.w - 1.0, 0.0, 7.0)).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip3 = extractBloom(bloomSourceColor.SampleLevel(uv, clamp(3.0 + camera.imageSpaceCinematic.w - 1.0, 0.0, 7.0)).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip4 = extractBloom(bloomSourceColor.SampleLevel(uv, clamp(4.0 + camera.imageSpaceCinematic.w - 1.0, 0.0, 7.0)).xyz, bloomThreshold, bloomSoftKnee);
+    const float3 bloomMip5 = extractBloom(bloomSourceColor.SampleLevel(uv, clamp(5.0 + camera.imageSpaceCinematic.w - 1.0, 0.0, 7.0)).xyz, bloomThreshold, bloomSoftKnee);
 
     float3 bloom =
         (bloomMip0 * 0.20) +
@@ -708,6 +709,24 @@ float3 applyVolumetricHeightFog(
     // ordinary weather fog retains the established six-sample cost and output.
     const int sampleCount = cloudsEnabled ? 12 : 6;
     const float stepLength = travelDistance / float(sampleCount);
+    // Authored weather makes incident radiance independent of sample height.
+    // Sum the same density samples, then integrate constant illumination once:
+    // the previous per-segment scattering terms telescope to (1 - T).
+    if (!cloudsEnabled && camera.weatherSkyUpper.w >= 1.0)
+    {
+        float opticalDepth = 0.0;
+        [unroll]
+        for (int i = 0; i < 6; ++i)
+        {
+            const float height = cameraWorld.y + worldViewDir.y * ((float(i) + 0.5) * stepLength);
+            opticalDepth += fogDensity * heightFogDensityAt(height, fogBaseHeight, heightFalloff)
+                * horizonGather * stepLength;
+        }
+        const float3 transmission = exp(-extinction * opticalDepth);
+        const float3 illumination = volumetricIncidentRadiance(worldViewDir, toSun,
+            fogBaseHeight, fogBaseHeight, sunScatterStrength, sunVisibility);
+        return litColor * transmission + (1.0 - transmission) * scatteringAlbedo * illumination;
+    }
     float3 transmittance = float3(1.0, 1.0, 1.0);
     float3 inscatter = float3(0.0, 0.0, 0.0);
 
@@ -762,35 +781,58 @@ float3 applyVolumetricHeightFog(
     return (litColor * transmittance) + inscatter;
 }
 
-float rainHash(float2 p)
+// A moving, world-anchored particle lattice. Ray/capsule distance gives
+// perspective/parallax without a camera-attached texture or per-drop draw calls.
+float3 rainCellHash(float3 cell)
 {
-    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+    return frac(sin(float3(dot(cell,float3(127.1,311.7,74.7)),
+                           dot(cell,float3(269.5,183.3,246.1)),
+                           dot(cell,float3(113.5,271.9,124.6)))) * 43758.5453);
 }
-
-float rainLayer(float2 uv, float timeSeconds, float scale, float speed, float threshold)
+float worldRain(float3 origin, float3 ray, float sceneDistance, float pixelAngle, float seconds)
 {
-    // Slant in screen space and advect vertically. Each cell owns one narrow,
-    // finite streak; the second layer below changes scale and speed so the rain
-    // has depth without another texture or particle buffer.
-    float2 p = float2(uv.x * scale, uv.y * scale * 0.56);
-    p.x += p.y * 0.17;
-    p.y += timeSeconds * speed;
-    const float2 cell = floor(p);
-    const float2 local = frac(p);
-    const float seed = rainHash(cell);
-    const float centre = frac(seed * 19.19);
-    const float across = smoothstep(0.032, 0.0, abs(local.x - centre));
-    const float along = frac(local.y + seed * 7.31);
-    const float lengthMask =
-        smoothstep(0.02, 0.16, along) * (1.0 - smoothstep(0.62, 0.94, along));
-    return across * lengthMask * step(threshold, rainHash(cell + float2(43.2, 17.7)));
-}
-
-float proceduralRain(float2 uv, float timeSeconds)
-{
-    const float nearRain = rainLayer(uv, timeSeconds, 118.0, 23.0, 0.72);
-    const float farRain = rainLayer(uv + float2(0.13, 0.07), timeSeconds, 176.0, 31.0, 0.82);
-    return saturate(nearRain + farRain * 0.62);
+    const float cellSize = 96.0;
+    const float range = clamp(camera.weatherRain.w, 128.0, 1600.0);
+    const float limit = min(sceneDistance, range);
+    const float speed = max(camera.weatherRain.z, 1.0);
+    // Source rain falls along -Y in engine space. Advect the lookup volume,
+    // never its origin with the camera, so walking crosses existing drops.
+    origin.y += seconds * speed;
+    float3 cell = floor(origin / cellSize);
+    const float3 stepDir = float3(ray.x >= 0 ? 1 : -1, ray.y >= 0 ? 1 : -1, ray.z >= 0 ? 1 : -1);
+    const float3 invRay = stepDir / max(abs(ray), float3(1e-6));
+    float3 next = ((cell + (stepDir * 0.5 + 0.5)) * cellSize - origin) * invRay;
+    const float3 delta = abs(invRay) * cellSize;
+    float travel = 0;
+    float coverage = 0;
+    // Fixed short shutter prevents frame-rate-dependent streak lengths.
+    const float halfLength = min(32.0, max(camera.weatherRain.y, speed / 180.0) * 0.5);
+    for (int iteration = 0; iteration < 32 && travel < limit; ++iteration)
+    {
+        const float3 seed = rainCellHash(cell);
+        const float margin = halfLength + 1.0;
+        const float3 center = cell * cellSize + margin + seed * (cellSize - 2 * margin);
+        const float3 low = center - float3(0,halfLength,0);
+        const float3 w = origin - low;
+        const float segmentLength = 2 * halfLength;
+        const float denominator = max(1 - ray.y * ray.y, 1e-6);
+        float along = clamp((w.y - ray.y * dot(ray,w)) / denominator, 0.0, segmentLength);
+        float t = max(0.0, dot(low + float3(0,along,0) - origin, ray));
+        along = clamp(origin.y + t * ray.y - low.y, 0.0, segmentLength);
+        const float distance = length(origin + ray * t - low - float3(0,along,0));
+        const float radius = max(camera.weatherRain.x * 0.5, 0.025);
+        const float aa = max(t * pixelAngle * 0.6, 0.025);
+        const float mask = 1 - smoothstep(max(0.0,radius-aa), radius+aa, distance);
+        const float fade = smoothstep(48.0,160.0,t) * (1-smoothstep(range*0.7,range,t));
+        if (t < limit)
+            coverage += mask * min(1.0,radius / aa) * fade;
+        const float edge = min(next.x,min(next.y,next.z));
+        const bool3 advance = next <= float3(edge + 0.0001);
+        cell += float3(advance.x ? stepDir.x : 0, advance.y ? stepDir.y : 0, advance.z ? stepDir.z : 0);
+        next += float3(advance.x ? delta.x : 0, advance.y ? delta.y : 0, advance.z ? delta.z : 0);
+        travel = edge;
+    }
+    return saturate(coverage);
 }
 
 struct FragmentInput
@@ -814,7 +856,7 @@ float4 main(FragmentInput input) : SV_Target0
         float3 toneMapped = acesFilmTonemap(hdrColor * exposure);
         toneMapped = applySaturation(toneMapped, 1.0);
         const float3 ldrSrgb = pow(clamp(toneMapped, 0.0, 1.0), float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-        return float4(ldrSrgb, 1.0);
+        return float4(lerp(ldrSrgb, saturate(camera.imageSpaceFade.xyz), saturate(camera.imageSpaceFade.w)), 1.0);
     }
 
     // DebugView in src/render/renderer_types.h. Every mode but LinearDepth is
@@ -910,7 +952,13 @@ float4 main(FragmentInput input) : SV_Target0
     const float precipitation = saturate(camera.weatherSkyLower.w);
     if (precipitation > 0.0)
     {
-        const float rain = proceduralRain(input.inUv, camera.skyConfig1.z) * precipitation;
+        const float2 ndc = input.inUv * 2 - 1;
+        const float3 viewRay = normalize(float3(ndc.x / camera.proj[0][0], ndc.y / camera.proj[1][1], -1));
+        const float3 ray = normalize(mul(invViewRotation, viewRay));
+        const float depthLimit = geometryMask > 0.5 ? viewDepth / max(-viewRay.z, 1e-4) : camera.weatherRain.w;
+        const float pixelAngle = 2.0 / max(abs(camera.proj[1][1]) * camera.contactShadowConfig.y, 1.0);
+        const float rain = worldRain(camera.shadowVoxelGridSize.xyz, ray, depthLimit,
+            pixelAngle, camera.skyConfig1.z) * precipitation;
         // Rain catches the overcast sky rather than emitting white. Apply in
         // scene-linear HDR before exposure/tonemapping so it shares the same
         // daylight balance as the rest of the frame.
@@ -987,6 +1035,22 @@ float4 main(FragmentInput input) : SV_Target0
             camera.hdrHighlightConfig.x,
             camera.hdrHighlightConfig.y);
     }
+    // Skyrim's cinematic controls operate on display-referred color. Tint
+    // blends toward tinted luminance, rather than adding a flat colored veil
+    // or multiplying each already-saturated channel independently.
+    if (any(camera.imageSpaceCinematic.xyz != float3(1.0)) || camera.imageSpaceTint.w > 0.0)
+    {
+        float3 imageColor = pow(max(toneMapped, 0.0), float3(1.0 / 2.2));
+        const float imageLuma = dot(imageColor, float3(0.2126, 0.7152, 0.0722));
+        imageColor = lerp(float3(imageLuma), imageColor, camera.imageSpaceCinematic.x);
+        imageColor = lerp(imageColor, imageLuma * camera.imageSpaceTint.xyz,
+            saturate(camera.imageSpaceTint.w));
+        imageColor *= camera.imageSpaceCinematic.y;
+        imageColor = float3(imageSpaceContrast(imageColor.x, camera.imageSpaceCinematic.z),
+                            imageSpaceContrast(imageColor.y, camera.imageSpaceCinematic.z),
+                            imageSpaceContrast(imageColor.z, camera.imageSpaceCinematic.z));
+        toneMapped = pow(max(imageColor, 0.0), float3(2.2));
+    }
     toneMapped = applyWhiteBalance(
         toneMapped,
         camera.colorGrading0.xyz
@@ -1005,5 +1069,5 @@ float4 main(FragmentInput input) : SV_Target0
     );
     toneMapped = pow(clamp(toneMapped, 0.0, 1.0), float3(1.06, 1.06, 1.06));
     const float3 ldrSrgb = pow(toneMapped, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
-    return float4(ldrSrgb, 1.0);
+    return float4(lerp(ldrSrgb, saturate(camera.imageSpaceFade.xyz), saturate(camera.imageSpaceFade.w)), 1.0);
 }

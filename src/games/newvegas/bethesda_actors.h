@@ -129,6 +129,7 @@ struct SkinnedActor {
     // during actor construction so runtime never exposes a list record as if
     // it were a takeable item.
     std::vector<std::uint32_t> inventoryFormIds;
+    std::vector<std::pair<std::uint32_t, std::int32_t>> inventoryStacks;
     odai::importer::fnv::FalloutCharacter character;
     std::vector<odai::importer::ImportedSceneTexture> textures;
     std::vector<odai::importer::ImportedScenePackedDraw> draws;
