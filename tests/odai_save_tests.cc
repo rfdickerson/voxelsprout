@@ -161,6 +161,7 @@ int main() {
     savedCombat.lastTarget =
         ObjectId::persistent(makeRecordKey("Skyrim.esm", 0xabcdefu));
     player.combatState = savedCombat;
+    player.actorValues->aggression = 2.0f;
     RuntimeAiState ai;
     ai.walking = true;
     ai.projectedToNavigation = true;
@@ -212,6 +213,16 @@ int main() {
         1u, keyword, {PapyrusValue::fromObject(ObjectId::persistent(location)),
                      PapyrusValue::fromInteger(4)}});
     original.setNextStoryEventSequence(2u);
+    const auto sceneKey = makeRecordKey("Skyrim.esm", 0xac133u);
+    original.setScenePlaying(sceneKey, true);
+    auto& sceneProgress = original.sceneProgressForRestore()[sceneKey];
+    sceneProgress.phase = 7; sceneProgress.begun = true; sceneProgress.entered = true;
+    sceneProgress.completed = {9, 12}; sceneProgress.timers.emplace(23, 1.25);
+    SkyrimSceneSpeech line;
+    line.scene = sceneKey; line.info = makeRecordKey("Skyrim.esm", 0x104u);
+    line.responseInfo = line.info; line.speaker = player.id; line.action = 23;
+    line.sequence = 1; line.text = "Save fixture speech"; line.voiceKey = "info_00000104_1";
+    original.sceneSpeechForRestore().push_back(line); original.setSceneSpeechSequence(1);
     original.scriptDebugLogsForRestore().push_back("save-fixture");
     original.advance(5.0 / 60.0);
     assert(original.queueActorAnimationEvent(player.id, {"weaponSwing", "right"}));
@@ -494,6 +505,29 @@ int main() {
     assert(migratedPhysics.has_value() && migratedPlayer != nullptr);
     assert(std::fabs(migratedPhysics->position.x -
         static_cast<float>(migratedPlayer->transform.position[0])) < 1.0e-4f);
+
+    // A committed overwrite retains a loadable prior generation. Malformed
+    // envelope fields are rejected without throwing or mutating the session.
+    assert(saveOdaiGameAtomic(path, original, error));
+    assert(std::filesystem::is_regular_file(path.string() + ".previous"));
+    {
+        BethesdaSession backup;
+        assert(backup.configure(config, error));
+        registerPhysicalFixture(backup, player.id);
+        registerSaveFixture(backup);
+        assert(loadOdaiGame(path.string() + ".previous", backup, {}, report, error));
+        const auto before = backup.deterministicHash();
+        const auto malformed = path.string() + ".malformed";
+        for (const char* missing : {"payload", "checksum"}) {
+            nlohmann::json root;
+            { std::ifstream input(path); input >> root; }
+            root.erase(missing);
+            { std::ofstream output(malformed); output << root; }
+            assert(!loadOdaiGame(malformed, backup, {}, report, error));
+            assert(backup.deterministicHash() == before);
+        }
+        std::filesystem::remove(malformed);
+    }
 
     // Simulate interruption after the old destination was staged but before
     // the new temporary generation was renamed into place.

@@ -21,6 +21,7 @@ enum class ConditionComparison : std::uint8_t {
 struct Condition {
     ConditionComparison comparison = ConditionComparison::Equal;
     bool orWithNext = false;
+    bool useAliases = false;
     float comparisonValue = 0.0f;
     std::uint16_t function = 0u;
     std::uint32_t parameter1 = 0u;

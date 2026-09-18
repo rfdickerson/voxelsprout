@@ -424,6 +424,7 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                     break;
                 }
                 object->outfit = command.outfit;
+                object->equipment.initialized = false;
                 ++object->packageRevision;
                 ++result.applied;
                 break;
@@ -481,7 +482,11 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                     break;
                 }
                 if (command.type == WorldCommandType::EquipMeleeWeapon) {
-                    for (auto& owned : object->inventory) owned.equipped = owned.item == command.item;
+                    const auto slots = command.equipmentSlots != 0u ? command.equipmentSlots : kEquipmentRightHand;
+                    for (auto& owned : object->inventory)
+                        if ((owned.equipmentSlots & slots) != 0u) owned.equipped = false;
+                    entry->equipped = true;
+                    entry->equipmentSlots = slots;
                 } else {
                     auto& values = *object->actorValues;
                     if (!std::isfinite(command.actorValueDelta) || command.actorValueDelta <= 0.f ||
@@ -494,6 +499,10 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 ++result.applied;
                 break;
             }
+            case WorldCommandType::SetEquipmentState:
+                object->equipment = command.equipment;
+                ++result.applied;
+                break;
             case WorldCommandType::SetEquipped: {
                 InventoryEntry* entry = inventoryEntry(*object, command.item);
                 if (entry == nullptr || entry->count <= 0) {
@@ -502,7 +511,22 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                         command.target.toString());
                     break;
                 }
+                const bool blocked = !command.overrideEquipmentLocks && (
+                    (command.equipped ? entry->preventEquip : entry->preventUnequip) ||
+                    (command.equipped && std::any_of(object->inventory.begin(), object->inventory.end(), [&](const auto& owned) {
+                        return owned.item != command.item && owned.equipped && owned.preventUnequip &&
+                            (owned.equipmentSlots & command.equipmentSlots) != 0u;
+                    })));
+                if (blocked) { result.diagnostics.push_back("equipment change blocked by script policy"); break; }
+                if (command.equipped && command.equipmentSlots != 0u)
+                    for (auto& owned : object->inventory)
+                        if ((owned.equipmentSlots & command.equipmentSlots) != 0u) owned.equipped = false;
+                entry->equipmentSlots = command.equipmentSlots;
                 entry->equipped = command.equipped;
+                entry->preventUnequip = command.equipped && command.equipmentPolicy;
+                entry->preventEquip = !command.equipped && command.equipmentPolicy;
+                object->equipment.transitioning = false;
+                object->equipment.requestedDrawn = object->equipment.drawn;
                 ++result.applied;
                 break;
             }
@@ -603,6 +627,11 @@ std::uint64_t BethesdaWorld::deterministicHash() const {
             hashString(hash, faction.toString());
         }
         hashString(hash, object.outfit.toString());
+        hashBytes(hash, &object.equipment.initialized, sizeof(bool));
+        hashBytes(hash, &object.equipment.drawn, sizeof(bool));
+        hashBytes(hash, &object.equipment.requestedDrawn, sizeof(bool));
+        hashBytes(hash, &object.equipment.transitioning, sizeof(bool));
+        hashBytes(hash, &object.equipment.combatDraw, sizeof(bool));
         if (object.navigationRequest.has_value()) {
             hashString(hash, object.navigationRequest->destination.toString());
             hashBytes(hash, &object.navigationRequest->revision,
@@ -618,6 +647,7 @@ std::uint64_t BethesdaWorld::deterministicHash() const {
             hashBytes(hash, &object.actorValues->maxHealth, sizeof(object.actorValues->maxHealth));
             hashBytes(hash, &object.actorValues->maxStamina, sizeof(object.actorValues->maxStamina));
             hashBytes(hash, &object.actorValues->maxMagicka, sizeof(object.actorValues->maxMagicka));
+            hashBytes(hash, &object.actorValues->aggression, sizeof(object.actorValues->aggression));
         }
         const bool hasAiState = object.aiState.has_value();
         hashBytes(hash, &hasAiState, sizeof(hasAiState));
@@ -651,6 +681,11 @@ std::uint64_t BethesdaWorld::deterministicHash() const {
                 sizeof(combat.nextMeleeAttackTick));
             hashBytes(hash, &combat.attacksStarted, sizeof(combat.attacksStarted));
             hashBytes(hash, &combat.hitsLanded, sizeof(combat.hitsLanded));
+            hashBytes(hash, &combat.pendingMelee, sizeof(combat.pendingMelee));
+            hashBytes(hash, &combat.pendingDamage, sizeof(combat.pendingDamage));
+            hashBytes(hash, &combat.pendingRange, sizeof(combat.pendingRange));
+            hashBytes(hash, combat.pendingForward.data(), sizeof(float) * 3);
+            hashString(hash, combat.pendingClip);
             const auto hashObjectId = [&](const ObjectId& object) {
                 const std::uint8_t kind = static_cast<std::uint8_t>(object.kind);
                 hashBytes(hash, &kind, sizeof(kind));
@@ -749,6 +784,9 @@ std::uint64_t BethesdaWorld::deterministicHash() const {
             hashBytes(hash, &entry.item.localFormId, sizeof(entry.item.localFormId));
             hashBytes(hash, &entry.count, sizeof(entry.count));
             hashBytes(hash, &entry.equipped, sizeof(entry.equipped));
+            hashBytes(hash, &entry.equipmentSlots, sizeof(entry.equipmentSlots));
+            hashBytes(hash, &entry.preventUnequip, sizeof(bool));
+            hashBytes(hash, &entry.preventEquip, sizeof(bool));
         }
         std::sort(object.relationships.begin(), object.relationships.end(),
             [](const RelationshipRank& left, const RelationshipRank& right) {

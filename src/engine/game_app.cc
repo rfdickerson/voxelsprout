@@ -1,3 +1,4 @@
+#include "core/resource_path.h"
 #include "engine/game_app.h"
 
 #include "render/upscale/upscale_policy.h"
@@ -19,25 +20,7 @@
 namespace odai::engine {
 
 std::string GameApp::resolveAssetPath(const std::string& rel) {
-    std::vector<std::filesystem::path> bases;
-#if defined(ODAI_PROJECT_SOURCE_DIR)
-    bases.emplace_back(std::filesystem::path{ODAI_PROJECT_SOURCE_DIR});
-#endif
-    std::error_code ec;
-    std::filesystem::path cwd = std::filesystem::current_path(ec);
-    if (!ec) {
-        bases.push_back(cwd);
-        bases.push_back(cwd / "..");
-        bases.push_back(cwd / ".." / "..");
-        bases.push_back(cwd / ".." / ".." / "..");
-    }
-    for (const auto& base : bases) {
-        const auto candidate = base / rel;
-        std::error_code existsEc;
-        if (std::filesystem::exists(candidate, existsEc) && !existsEc)
-            return candidate.string();
-    }
-    return rel;
+    return core::resourcePath(rel).string();
 }
 
 static void glfwErrorCb(int code, const char* msg) {

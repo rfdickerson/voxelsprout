@@ -90,12 +90,11 @@ std::vector<FalloutPlacedReference> scatterSkyrimGrass(
         placement.position[2] = height;
         placement.rotationRadians[2] = unit(seed+4)*6.2831853f;
         if ((grass.flags & 4u) != 0u) { // Fit To Slope, clockwise REFR angles
-            const float yaw = placement.rotationRadians[2];
             const float length = std::sqrt(dx*dx + dy*dy + 1.0f);
-            const float nx = (-dx*std::cos(yaw) + dy*std::sin(yaw)) / length;
-            const float ny = (-dx*std::sin(yaw) - dy*std::cos(yaw)) / length;
-            placement.rotationRadians[0] = std::asin(std::clamp(ny, -1.0f, 1.0f));
-            placement.rotationRadians[1] = -std::atan2(nx, 1.0f / length);
+            // NiMatrix3 XYZ applies local yaw before the slope tilt, so yaw
+            // does not change the transformed local Z axis.
+            placement.rotationRadians[0] = std::atan2(-dy, 1.0f);
+            placement.rotationRadians[1] = std::asin(std::clamp(dx / length, -1.0f, 1.0f));
         }
         placement.scale = std::max(0.1f, 1.0f + (unit(seed+5)*2-1)*
             std::clamp(grass.heightRange, 0.0f, 1.0f));

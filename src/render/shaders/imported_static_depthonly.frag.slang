@@ -18,11 +18,11 @@
 // the surfaces this is supposed to be accelerating. Same vertex shader, same
 // vertex layout, bit-identical depth.
 //
-// The alpha test is the same one imported_static_normaldepth.frag runs and must
-// stay that way: a cutout that discards here but not in the shading pass would
-// pre-write depth for a texel that is meant to be see-through.
+// Match the main pass's cutout coverage, including its MSAA alpha ramp, so the
+// depth prewrite cannot occlude samples the shading pass leaves transparent.
 
 import chunk_push_constants;
+import camera_uniform;
 
 [[vk::binding(0, 1)]]
 Sampler2D<float4> bindlessTextures[];
@@ -41,21 +41,30 @@ struct FragmentInput
     nointerpolation uint inFlags : TEXCOORD5;
 };
 
-// Writes no colour. The pipeline binds the main pass's colour attachment with a
-// zero write mask, so this returning nothing is what keeps the HDR target
-// untouched while depth is written.
-void main(FragmentInput input)
+// The zero colour write mask preserves HDR, but alpha must still be exported:
+// alpha-to-coverage consumes it when producing the depth sample mask.
+float4 main(FragmentInput input) : SV_Target0
 {
     if (chunkPc.cascadeData.x > 0.5 &&
         input.inWorldPosition.y < chunkPc.materialParams.w - 0.25)
     {
         discard;
     }
-    if (input.inTextureIndex != kInvalidImportedTextureIndex &&
-        (input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
-        (bindlessTextures[input.inTextureIndex].Sample(input.inUv).a * input.inColor.a) <=
-            chunkPc.materialParams.x)
+    float coverage = 1.0;
+    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u)
     {
-        discard;
+        float alpha = input.inColor.a;
+        if (input.inTextureIndex != kInvalidImportedTextureIndex)
+            alpha *= bindlessTextures[input.inTextureIndex].Sample(input.inUv).a;
+        if (camera.importedExteriorConfig.w > 1.5)
+        {
+            coverage = saturate((alpha - chunkPc.materialParams.x) /
+                max(fwidth(alpha), 1.0e-4) + 0.5);
+        }
+        else if (alpha <= chunkPc.materialParams.x)
+        {
+            discard;
+        }
     }
+    return float4(0.0, 0.0, 0.0, coverage);
 }

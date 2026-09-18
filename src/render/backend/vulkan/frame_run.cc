@@ -6,7 +6,7 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "world/chunk_mesher.h"
+#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -323,120 +323,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     // -- see setSkinnedActorPose/uploadSkinnedActorPoseForFrame's comments.
     uploadSkinnedActorPoseForFrame();
 
-    if (!m_pendingChunkRemeshKeys.empty()) {
-        std::erase_if(m_pendingChunkRemeshKeys, [&](const ChunkResidentKey& pendingKey) {
-            return std::find_if(
-                       chunkGrid.chunks().begin(),
-                       chunkGrid.chunks().end(),
-                       [&](const odai::world::Chunk& chunk) {
-                           return chunk.chunkX() == pendingKey.chunkX &&
-                                  chunk.chunkY() == pendingKey.chunkY &&
-                                  chunk.chunkZ() == pendingKey.chunkZ;
-                       }) == chunkGrid.chunks().end();
-        });
-    }
-    if (!m_externalChunkMeshResults.empty()) {
-        std::erase_if(m_externalChunkMeshResults, [&](const odai::world::ChunkMeshResult& result) {
-            return std::find_if(
-                       chunkGrid.chunks().begin(),
-                       chunkGrid.chunks().end(),
-                       [&](const odai::world::Chunk& chunk) {
-                           return chunk.chunkX() == result.key.x &&
-                                  chunk.chunkY() == result.key.y &&
-                                  chunk.chunkZ() == result.key.z;
-                       }) == chunkGrid.chunks().end();
-        });
-    }
-    m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
-    m_debugChunkRemeshBatchCount = 0;
-    if (m_chunkMeshRebuildRequested || !m_pendingChunkRemeshKeys.empty()) {
-        // Avoid CPU stalls when every transfer command slot is still in flight.
-        if (hasFreeTransferSlot()) {
-            std::vector<ChunkResidentKey> remeshBatchKeys;
-            std::vector<std::size_t> resolvedRemeshIndices;
-            if (!m_chunkMeshRebuildRequested) {
-                remeshBatchKeys = m_pendingChunkRemeshKeys;
-                const int remeshCameraChunkX = static_cast<int>(std::floor(
-                    camera.x / static_cast<float>(odai::world::Chunk::kSizeX)));
-                const int remeshCameraChunkZ = static_cast<int>(std::floor(
-                    camera.z / static_cast<float>(odai::world::Chunk::kSizeZ)));
-                std::sort(
-                    remeshBatchKeys.begin(),
-                    remeshBatchKeys.end(),
-                    [&](const ChunkResidentKey& a, const ChunkResidentKey& b) {
-                        const auto chunkDistance = [&](const ChunkResidentKey& key) {
-                            const int dx = std::abs(key.chunkX - remeshCameraChunkX);
-                            const int dz = std::abs(key.chunkZ - remeshCameraChunkZ);
-                            return std::max(dx, dz);
-                        };
-                        const int distanceA = chunkDistance(a);
-                        const int distanceB = chunkDistance(b);
-                        if (distanceA != distanceB) {
-                            return distanceA < distanceB;
-                        }
-                        if (a.chunkX != b.chunkX) {
-                            return a.chunkX < b.chunkX;
-                        }
-                        if (a.chunkY != b.chunkY) {
-                            return a.chunkY < b.chunkY;
-                        }
-                        return a.chunkZ < b.chunkZ;
-                    });
-                if (remeshBatchKeys.size() > kChunkRemeshBudgetPerFrame) {
-                    remeshBatchKeys.resize(kChunkRemeshBudgetPerFrame);
-                }
-                resolvedRemeshIndices.reserve(remeshBatchKeys.size());
-                for (const ChunkResidentKey& key : remeshBatchKeys) {
-                    const auto residentIt = std::find_if(
-                        chunkGrid.chunks().begin(),
-                        chunkGrid.chunks().end(),
-                        [&](const odai::world::Chunk& chunk) {
-                            return chunk.chunkX() == key.chunkX &&
-                                   chunk.chunkY() == key.chunkY &&
-                                   chunk.chunkZ() == key.chunkZ;
-                        });
-                    if (residentIt != chunkGrid.chunks().end()) {
-                        resolvedRemeshIndices.push_back(
-                            static_cast<std::size_t>(std::distance(chunkGrid.chunks().begin(), residentIt)));
-                    }
-                }
-            }
-            const std::span<const std::size_t> pendingRemeshIndices =
-                m_chunkMeshRebuildRequested
-                    ? std::span<const std::size_t>{}
-                    : std::span<const std::size_t>(resolvedRemeshIndices.data(), resolvedRemeshIndices.size());
-            m_debugChunkRemeshBatchCount = static_cast<std::uint32_t>(pendingRemeshIndices.size());
-            if (!m_chunkMeshRebuildRequested && remeshBatchKeys.empty()) {
-                m_pendingChunkRemeshKeys.clear();
-                m_debugChunkPendingRemeshCount = 0;
-            } else if (!m_chunkMeshRebuildRequested && pendingRemeshIndices.empty()) {
-                for (const ChunkResidentKey& processedKey : remeshBatchKeys) {
-                    const auto pendingIt =
-                        std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), processedKey);
-                    if (pendingIt != m_pendingChunkRemeshKeys.end()) {
-                        m_pendingChunkRemeshKeys.erase(pendingIt);
-                    }
-                }
-                m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
-            } else if (createChunkBuffers(chunkGrid, pendingRemeshIndices)) {
-                if (m_chunkMeshRebuildRequested) {
-                    m_chunkMeshRebuildRequested = false;
-                    m_pendingChunkRemeshKeys.clear();
-                } else {
-                    for (const ChunkResidentKey& processedKey : remeshBatchKeys) {
-                        const auto pendingIt =
-                            std::find(m_pendingChunkRemeshKeys.begin(), m_pendingChunkRemeshKeys.end(), processedKey);
-                        if (pendingIt != m_pendingChunkRemeshKeys.end()) {
-                            m_pendingChunkRemeshKeys.erase(pendingIt);
-                        }
-                    }
-                }
-                m_debugChunkPendingRemeshCount = static_cast<std::uint32_t>(m_pendingChunkRemeshKeys.size());
-            } else {
-                VOX_LOGE("render") << "failed deferred chunk remesh";
-            }
-        }
-    }
     if (m_rtSceneDirty &&
         !m_chunkMeshRebuildRequested &&
         m_pendingChunkRemeshKeys.empty() &&
@@ -2098,16 +1984,21 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         mvpUniform.interiorPointShadowParams[0] =
             static_cast<float>(interiorPointShadowLightCount);
         mvpUniform.interiorPointShadowParams[1] =
-            static_cast<float>(kInteriorPointShadowFaceSize) /
+            static_cast<float>(interiorPointShadowFaceSize(interiorPointShadowLightCount)) /
             static_cast<float>(kShadowAtlasSize);
         mvpUniform.interiorPointShadowParams[2] =
             1.0f / static_cast<float>(kShadowAtlasSize);
         mvpUniform.interiorPointShadowParams[3] =
             interiorPointShadowLightCount > 0 ? 1.0f : 0.0f;
+        static const bool s_dynamicPointShadows = [] {
+            const char* value = std::getenv("ODAI_DYNAMIC_POINT_SHADOWS");
+            return value != nullptr && value[0] != '0';
+        }();
         renderInteriorPointShadowsThisFrame =
             interiorPointShadowLightCount > 0 &&
             (!m_interiorPointShadowAtlasValid ||
-             m_interiorPointShadowSignature != pointShadowSignature);
+             m_interiorPointShadowSignature != pointShadowSignature ||
+             (s_dynamicPointShadows && !m_skinningMeshDraws.empty()));
         m_interiorPointShadowSignature = pointShadowSignature;
     } else {
         m_interiorPointShadowAtlasValid = false;
@@ -2179,7 +2070,11 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.importedExteriorConfig[0] = m_importedExteriorLighting.diffuseWrap;
     mvpUniform.importedExteriorConfig[1] = m_importedExteriorLighting.ambientScale;
     mvpUniform.importedExteriorConfig[2] = m_importedExteriorLighting.sunlightScale;
-    mvpUniform.importedExteriorConfig[3] = 0.0f;
+    // The imported-static fragment shader uses the active sample count to
+    // switch alpha-tested foliage from a binary cutout to alpha-to-coverage.
+    // Keeping this in the otherwise-unused component avoids changing the
+    // camera-uniform layout shared by every render pass.
+    mvpUniform.importedExteriorConfig[3] = static_cast<float>(m_colorSampleCount);
     mvpUniform.importedPbrConfig[0] = m_importedPbrDefaults.objectRoughness;
     mvpUniform.importedPbrConfig[1] = m_importedPbrDefaults.terrainRoughness;
     mvpUniform.importedPbrConfig[2] = m_importedPbrDefaults.metallic;

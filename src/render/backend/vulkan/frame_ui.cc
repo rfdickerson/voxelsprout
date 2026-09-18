@@ -4,7 +4,7 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "world/chunk_mesher.h"
+#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -1208,40 +1208,6 @@ void RendererBackend::buildMeshingDebugUi() {
     }
 
     ImGui::Checkbox("Use Spatial Queries", &m_debugEnableSpatialQueries);
-    int clipmapLevels = static_cast<int>(m_debugClipmapConfig.levelCount);
-    int clipmapGridResolution = m_debugClipmapConfig.gridResolution;
-    int clipmapBaseVoxelSize = m_debugClipmapConfig.baseVoxelSize;
-    int clipmapBrickResolution = m_debugClipmapConfig.brickResolution;
-    if (ImGui::SliderInt("Clipmap Levels", &clipmapLevels, 1, 8)) {
-        m_debugClipmapConfig.levelCount = static_cast<std::uint32_t>(clipmapLevels);
-    }
-    if (ImGui::SliderInt("Clipmap Grid Res", &clipmapGridResolution, 32, 256)) {
-        m_debugClipmapConfig.gridResolution = clipmapGridResolution;
-    }
-    if (ImGui::SliderInt("Clipmap Base Voxel", &clipmapBaseVoxelSize, 1, 8)) {
-        m_debugClipmapConfig.baseVoxelSize = clipmapBaseVoxelSize;
-    }
-    if (ImGui::SliderInt("Clipmap Brick Res", &clipmapBrickResolution, 2, 32)) {
-        m_debugClipmapConfig.brickResolution = clipmapBrickResolution;
-    }
-
-    int meshingModeSelection = (m_chunkMeshingOptions.mode == odai::world::MeshingMode::Greedy) ? 1 : 0;
-    if (ImGui::Combo("Chunk Meshing", &meshingModeSelection, "Naive\0Greedy\0")) {
-        const odai::world::MeshingMode nextMode =
-            (meshingModeSelection == 1) ? odai::world::MeshingMode::Greedy : odai::world::MeshingMode::Naive;
-        if (nextMode != m_chunkMeshingOptions.mode) {
-            m_chunkMeshingOptions.mode = nextMode;
-            m_chunkLodMeshCacheValid = false;
-            m_chunkMeshRebuildRequested = true;
-            m_pendingChunkRemeshKeys.clear();
-            // Off-thread meshes built with the previous mode are now wrong.
-            m_externalChunkMeshResults.clear();
-            VOX_LOGI("render") << "chunk meshing mode changed to "
-                               << (nextMode == odai::world::MeshingMode::Greedy ? "Greedy" : "Naive")
-                               << ", scheduling full remesh";
-        }
-    }
-
     ImGui::Text(
         "Query N/C/V/R/New/Evict: %u / %u / %u / %u / %u / %u",
         m_debugSpatialQueryStats.visitedNodeCount,

@@ -127,6 +127,10 @@ bool readSkyrimQuest(
             currentStage = nullptr;
             currentObjective = nullptr;
             currentLogEntry = nullptr;
+        } else if (subrecord.type == "ALPC" && currentAlias != nullptr && bytes.size() == 4u) {
+            currentAlias->packages.push_back(u32(bytes.data()));
+        } else if (subrecord.type == "ALFC" && currentAlias != nullptr && bytes.size() == 4u) {
+            currentAlias->factions.push_back(u32(bytes.data()));
         } else if (subrecord.type == "ALID" && currentAlias != nullptr) {
             currentAlias->name = zstring(subrecord);
         } else if (subrecord.type == "FNAM" && currentAlias != nullptr) {

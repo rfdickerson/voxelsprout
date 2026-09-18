@@ -1,1 +1,3 @@
-* text=auto eol=lf
+# Unresolved provenance: exclude from source export archives pending review.
+assets/water.dds export-ignore
+assets/textures/morrowind_water_normal.png export-ignore

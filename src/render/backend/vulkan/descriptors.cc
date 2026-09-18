@@ -7,10 +7,45 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <type_traits>
 #include <vector>
 
 namespace odai::render {
+
+bool RendererBackend::playImportedEffect(std::uint32_t reference, const std::string& sequence, bool startOver) {
+    if (reference == 0 || sequence.empty()) return false;
+    bool found = false;
+    for (auto& [slot, instance] : m_animatedMaterials) {
+        if (instance.source.animationReference != reference) continue;
+        if (!std::any_of(instance.source.animations.begin(), instance.source.animations.end(),
+            [&](const auto& t) { return t.sequence == sequence; })) continue;
+        if (!startOver && instance.sequence == sequence) { found = true; continue; }
+        instance.sequence = sequence;
+        instance.startTime = m_materialAnimationTimeSeconds;
+        found = true;
+    }
+    if (found) VOX_LOGI("effects") << "reference=" << reference << " sequence=" << sequence;
+    return found;
+}
+
+bool RendererBackend::activateImportedEffect(float x, float y, float z, float dx, float dy, float dz) {
+    float nearest = 300.f;
+    std::uint32_t reference = 0;
+    for (const auto& [slot, instance] : m_animatedMaterials) {
+        if (instance.source.animationReference == 0 ||
+            !std::any_of(instance.source.animations.begin(), instance.source.animations.end(),
+                [](const auto& t) { return t.sequence == "AnimPlay"; })) continue;
+        const float vx = instance.position[0] - x, vy = instance.position[1] - y, vz = instance.position[2] - z;
+        const float distance = std::sqrt(vx*vx + vy*vy + vz*vz);
+        if (distance < nearest && distance > 0.001f && (vx*dx + vy*dy + vz*dz) / distance > 0.8f) {
+            nearest = distance;
+            reference = instance.source.animationReference;
+        }
+    }
+    return playImportedEffect(reference, "AnimPlay");
+}
 
 namespace {
 
@@ -492,8 +527,21 @@ void RendererBackend::updateFrameDescriptorSets(
         for(auto& [slot,instance]:m_animatedMaterials) {
             if(instance.startTime<0 || m_materialAnimationTimeSeconds<instance.startTime)
                 instance.startTime=m_materialAnimationTimeSeconds;
+            float elapsed = float(m_materialAnimationTimeSeconds-instance.startTime);
+            std::string_view sequence = instance.sequence;
+            // Deterministic local capture of a single reference's activation.
+            static const auto preview = [] {
+                std::pair<unsigned, float> value{0, -1};
+                if (const char* text = std::getenv("ODAI_EFFECT_PREVIEW"))
+                    if (std::sscanf(text, "%x,%f", &value.first, &value.second) != 2 ||
+                        !std::isfinite(value.second)) value = {0, -1};
+                return value;
+            }();
+            if (preview.first != 0 && preview.first == instance.source.animationReference && preview.second >= 0) {
+                sequence = "AnimPlay"; elapsed = preview.second;
+            }
             m_importedMaterialTable[slot]=importer::sampleImportedMaterial(instance.source,
-                instance.base,float(m_materialAnimationTimeSeconds-instance.startTime));
+                instance.base, elapsed, sequence);
         }
 
         // Material table (binding 13). Each frame in flight gets its own region

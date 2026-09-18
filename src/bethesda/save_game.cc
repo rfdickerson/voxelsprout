@@ -19,7 +19,7 @@
 namespace odai::bethesda {
 namespace {
 
-constexpr std::uint32_t kOdaiSaveVersion = 10u;
+constexpr std::uint32_t kOdaiSaveVersion = 15u;
 
 using Json = nlohmann::json;
 
@@ -149,18 +149,74 @@ Json graphSnapshotJson(const odai::anim::BehaviorGraphSnapshot& snapshot) {
     for (const odai::anim::AnimationEvent& event : snapshot.queuedEvents) {
         events.push_back({{"name", event.name}, {"payload", event.payload}});
     }
-    return {{"state", snapshot.state}, {"state_time", snapshot.stateTime},
+    Json activeStates = Json::array();
+    for (const auto& [node, state] : snapshot.activeStates)
+        activeStates.push_back({{"node", node}, {"state", state}});
+    return {{"execution_mode", snapshot.executionMode == odai::anim::AnimationExecutionMode::Havok ? "havok" : "native"},
+        {"selected_rule", snapshot.selectedRule}, {"selected_provider", snapshot.selectedProvider},
+        {"selected_clip", snapshot.selectedClip}, {"previous_clip", snapshot.previousClip},
+        {"pose_graph_state", snapshot.poseGraphState},
+        {"inertial_state", snapshot.inertialState}, {"foot_plants", snapshot.footPlants},
+        {"warp_translation_used", snapshot.warpTranslationUsed},
+        {"warp_window", snapshot.warpWindow},
+        {"layer_times", snapshot.layerTimes}, {"random_state", snapshot.randomState}, {"action_identity", snapshot.actionIdentity},
+        {"active_states", std::move(activeStates)}, {"variables", snapshot.variables},
+        {"graph_fingerprint", snapshot.graphFingerprint}, {"state", snapshot.state}, {"state_time", snapshot.stateTime},
         {"previous_state", snapshot.previousState},
         {"previous_state_time", snapshot.previousStateTime},
         {"transition_elapsed", snapshot.transitionElapsed},
         {"transition_duration", snapshot.transitionDuration},
         {"fixed_tick", snapshot.fixedTick}, {"was_grounded", snapshot.wasGrounded},
+        {"was_talking", snapshot.wasTalking},
         {"queued_events", std::move(events)}};
 }
 
 bool graphSnapshotFromJson(
     const Json& json, odai::anim::BehaviorGraphSnapshot& out, std::string& error) {
     try {
+        out = {};
+        const auto mode = json.value("execution_mode", std::string("native"));
+        if (mode != "native" && mode != "havok") throw std::runtime_error("invalid animation execution mode");
+        out.executionMode = mode == "havok" ? odai::anim::AnimationExecutionMode::Havok : odai::anim::AnimationExecutionMode::Native;
+        out.selectedRule = json.value("selected_rule", std::string{});
+        out.selectedProvider = json.value("selected_provider", std::string{});
+        out.selectedClip = json.value("selected_clip", std::string{});
+        out.previousClip = json.value("previous_clip", std::string{});
+        out.poseGraphState = json.value("pose_graph_state", std::string{});
+        odai::anim::PoseGraphInstance graphState;
+        if (!graphState.restore(out.poseGraphState, error)) throw std::runtime_error(error);
+        out.inertialState = json.value("inertial_state", std::string{});
+        out.warpTranslationUsed = json.value("warp_translation_used",0.f);
+        out.warpWindow = json.value("warp_window",std::string{});
+        if (!std::isfinite(out.warpTranslationUsed) || out.warpTranslationUsed < 0 || out.warpTranslationUsed > 256)
+            throw std::runtime_error("invalid saved warp budget");
+        odai::anim::PoseInertializer inertial;
+        if (!inertial.restore(out.inertialState, error)) throw std::runtime_error(error);
+        if (json.contains("foot_plants")) out.footPlants = json.at("foot_plants").get<std::map<std::string,std::vector<float>>>();
+        if (out.footPlants.size() > 2) throw std::runtime_error("too many saved foot plants");
+        for (const auto& [name, values] : out.footPlants)
+            if ((name != "left_leg" && name != "right_leg") ||
+                (values.size() != 3 && values.size() != 6) ||
+                std::any_of(values.begin(),values.end(),[](float v){return !std::isfinite(v);}))
+                throw std::runtime_error("invalid saved foot plant");
+        if (json.contains("layer_times")) out.layerTimes = json.at("layer_times").get<std::map<std::string, float>>();
+        if (out.layerTimes.size() > 16) throw std::runtime_error("too many animation layer clocks");
+        for (const auto& [name, time] : out.layerTimes)
+            if (name.empty() || !std::isfinite(time) || time < 0) throw std::runtime_error("invalid layer clock");
+        out.randomState = json.value("random_state", std::uint64_t{0});
+        out.actionIdentity = json.value("action_identity", std::uint64_t{0});
+        out.graphFingerprint = json.value("graph_fingerprint", std::string{});
+        if (json.contains("variables")) out.variables = json.at("variables").get<std::map<std::string, float>>();
+        if (out.variables.size() > 65536u) throw std::runtime_error("too many graph variables");
+        for (const auto& [name, value] : out.variables)
+            if (name.empty() || !std::isfinite(value)) throw std::runtime_error("invalid graph variable");
+        if (json.contains("active_states")) {
+            if (json.at("active_states").size() > 65536u) throw std::runtime_error("too many graph states");
+            for (const auto& entry : json.at("active_states"))
+                if (!out.activeStates.emplace(entry.at("node").get<std::uint32_t>(),
+                        entry.at("state").get<std::int32_t>()).second)
+                    throw std::runtime_error("duplicate graph state");
+        }
         out.state = json.at("state").get<std::string>();
         out.stateTime = json.at("state_time").get<float>();
         out.previousState = json.value("previous_state", std::string{});
@@ -169,6 +225,7 @@ bool graphSnapshotFromJson(
         out.transitionDuration = json.value("transition_duration", 0.0f);
         out.fixedTick = json.at("fixed_tick").get<std::uint64_t>();
         out.wasGrounded = json.at("was_grounded").get<bool>();
+        out.wasTalking = json.value("was_talking", false);
         for (const Json& event : json.at("queued_events")) {
             out.queuedEvents.push_back({event.at("name").get<std::string>(),
                 event.at("payload").get<std::string>()});
@@ -296,9 +353,13 @@ Json objectJson(const RuntimeObject& object) {
     Json inventory = Json::array();
     for (const InventoryEntry& entry : object.inventory) {
         inventory.push_back({{"item", recordKeyJson(entry.item)}, {"count", entry.count},
-                             {"equipped", entry.equipped}});
+                             {"equipped", entry.equipped}, {"equipmentSlots", entry.equipmentSlots},
+            {"preventUnequip", entry.preventUnequip}, {"preventEquip", entry.preventEquip}});
     }
-    Json json{{"id", objectIdJson(object.id)}, {"base", recordKeyJson(object.base)},
+    Json json{{"equipment", {{"initialized", object.equipment.initialized}, {"drawn", object.equipment.drawn},
+        {"requestedDrawn", object.equipment.requestedDrawn}, {"transitioning", object.equipment.transitioning},
+        {"combatDraw", object.equipment.combatDraw}}},
+              {"id", objectIdJson(object.id)}, {"base", recordKeyJson(object.base)},
               {"kind", static_cast<std::uint8_t>(object.kind)},
               {"transform", transformJson(object.transform)}, {"enabled", object.enabled},
               {"persistent", object.persistent}, {"ghost", object.ghost},
@@ -355,7 +416,12 @@ Json objectJson(const RuntimeObject& object) {
         json["combat_state"] = {
             {"next_melee_attack_tick", object.combatState->nextMeleeAttackTick},
             {"attacks_started", object.combatState->attacksStarted},
-            {"hits_landed", object.combatState->hitsLanded}};
+            {"hits_landed", object.combatState->hitsLanded},
+            {"pending_melee", object.combatState->pendingMelee},
+            {"pending_damage", object.combatState->pendingDamage},
+            {"pending_range", object.combatState->pendingRange},
+            {"pending_forward", object.combatState->pendingForward},
+            {"pending_clip", object.combatState->pendingClip}};
         json["combat_state"]["combat_target"] = object.combatState->combatTarget.valid()
             ? objectIdJson(object.combatState->combatTarget) : Json(nullptr);
         json["combat_state"]["last_target"] = object.combatState->lastTarget.valid()
@@ -421,7 +487,7 @@ Json objectJson(const RuntimeObject& object) {
             {"stamina", object.actorValues->stamina}, {"magicka", object.actorValues->magicka},
             {"dead", object.actorValues->dead}, {"max_health", object.actorValues->maxHealth},
             {"max_stamina", object.actorValues->maxStamina},
-            {"max_magicka", object.actorValues->maxMagicka}};
+            {"max_magicka", object.actorValues->maxMagicka}, {"aggression", object.actorValues->aggression}};
     }
     return json;
 }
@@ -560,6 +626,18 @@ bool objectFromJson(const Json& json, RuntimeObject& out, std::string& error) {
             combat.attacksStarted =
                 savedCombat.at("attacks_started").get<std::uint64_t>();
             combat.hitsLanded = savedCombat.at("hits_landed").get<std::uint64_t>();
+            combat.pendingMelee = savedCombat.value("pending_melee", false);
+            combat.pendingDamage = savedCombat.value("pending_damage", 0.0f);
+            combat.pendingRange = savedCombat.value("pending_range", 0.0f);
+            combat.pendingForward = savedCombat.value("pending_forward", std::array<float, 3>{});
+            combat.pendingClip = savedCombat.value("pending_clip", std::string{});
+            if (!std::isfinite(combat.pendingDamage) || !std::isfinite(combat.pendingRange) ||
+                std::any_of(combat.pendingForward.begin(), combat.pendingForward.end(),
+                    [](float value) { return !std::isfinite(value); }) ||
+                (combat.pendingMelee && (combat.pendingDamage <= 0 || combat.pendingRange <= 0 ||
+                    combat.pendingClip.empty()))) {
+                error = "invalid pending melee animation"; return false;
+            }
             if (combat.hitsLanded > combat.attacksStarted) {
                 error = "invalid saved combat counters";
                 return false;
@@ -695,13 +773,26 @@ bool objectFromJson(const Json& json, RuntimeObject& out, std::string& error) {
             values.maxHealth = json.at("actor_values").value("max_health", values.health);
             values.maxStamina = json.at("actor_values").value("max_stamina", values.stamina);
             values.maxMagicka = json.at("actor_values").value("max_magicka", values.magicka);
+            values.aggression = json.at("actor_values").value("aggression", 0.0f);
+            if (!std::isfinite(values.aggression) || values.aggression < 0 || values.aggression > 3) {
+                error = "invalid actor aggression"; return false;
+            }
             out.actorValues = values;
+        }
+        if (json.contains("equipment")) {
+            const auto& equipment = json.at("equipment");
+            out.equipment = {equipment.value("initialized", false), equipment.value("drawn", false),
+                equipment.value("requestedDrawn", false), equipment.value("transitioning", false), equipment.value("combatDraw", false)};
         }
         for (const Json& item : json.at("inventory")) {
             InventoryEntry entry;
             if (!recordKeyFromJson(item.at("item"), entry.item, error)) return false;
             entry.count = item.at("count").get<std::int32_t>();
             entry.equipped = item.at("equipped").get<bool>();
+            entry.equipmentSlots = item.value("equipmentSlots", std::uint64_t{0});
+            entry.preventUnequip = item.value("preventUnequip", false);
+            entry.preventEquip = item.value("preventEquip", false);
+            if ((entry.equipmentSlots >> 35u) != 0u) { error = "invalid saved equipment slot mask"; return false; }
             if (entry.count < 0) { error = "negative saved inventory count"; return false; }
             out.inventory.push_back(std::move(entry));
         }
@@ -1252,6 +1343,23 @@ Json sessionPayload(const BethesdaSession& session) {
     Json scenes = Json::array();
     for (const auto& [scene, playing] : session.scenes()) {
         scenes.push_back({{"record", recordKeyJson(scene)}, {"playing", playing}});
+        const auto found = session.sceneProgress().find(scene);
+        if (found != session.sceneProgress().end()) {
+            const auto& progress = found->second;
+            Json timers = Json::array();
+            for (const auto& [action, remaining] : progress.timers)
+                timers.push_back({action, remaining});
+            scenes.back()["progress"] = {{"phase", progress.phase}, {"entered", progress.entered},
+                {"begun", progress.begun}, {"completed", progress.completed}, {"timers", timers}};
+        }
+        Json speech = Json::array();
+        for (const auto& line : session.sceneSpeech()) if (line.scene == scene)
+            speech.push_back({{"info", recordKeyJson(line.info)}, {"response_info", recordKeyJson(line.responseInfo)},
+                {"speaker", objectIdJson(line.speaker)}, {"action", line.action}, {"response", line.response},
+                {"sequence", line.sequence}, {"text", line.text}, {"voice_key", line.voiceKey},
+                {"presented", line.presented}, {"remaining", line.remainingSeconds}});
+        scenes.back()["speech"] = std::move(speech);
+        scenes.back()["speech_sequence"] = session.sceneSpeechSequence();
     }
     Json locations = Json::array();
     for (const auto& [record, location] : session.locations()) {
@@ -1302,6 +1410,9 @@ Json sessionPayload(const BethesdaSession& session) {
             {"third_person", graphSnapshotJson(animation.thirdPerson)}};
         saved["first_person"] = animation.firstPerson.has_value()
             ? graphSnapshotJson(*animation.firstPerson) : Json(nullptr);
+        saved["body_morph"] = {{"topology_fingerprint",
+            animation.bodyMorph.topologyFingerprint},
+            {"sliders", animation.bodyMorph.sliders}};
         animations.push_back(std::move(saved));
     }
     Json physics = Json::array();
@@ -1311,10 +1422,25 @@ Json sessionPayload(const BethesdaSession& session) {
             {"rotation", quaternionJson(character.rotation)},
             {"velocity", vectorJson(character.velocity)},
             {"ground_normal", vectorJson(character.groundNormal)},
-            {"grounded", character.grounded}};
+            {"grounded", character.grounded},
+            {"movement", {{"coyote", character.movement.coyoteRemaining}, {"buffer", character.movement.bufferRemaining},
+                {"air_x", character.movement.airVelocityX}, {"air_z", character.movement.airVelocityZ},
+                {"jump_held", character.movement.jumpHeld}, {"jump_consumed", character.movement.jumpConsumed}}}};
         saved["supporting_object"] = character.supportingObject.has_value()
             ? objectIdJson(*character.supportingObject) : Json(nullptr);
         physics.push_back(std::move(saved));
+    }
+    Json ragdolls = Json::array();
+    for (const PhysicsRagdollSnapshot& ragdoll : session.ragdollSnapshots()) {
+        Json joints = Json::array();
+        for (const PhysicsRagdollJointPose& joint : ragdoll.joints) {
+            joints.push_back({{"role", joint.role},
+                {"position", vectorJson(joint.position)},
+                {"rotation", quaternionJson(joint.rotation)},
+                {"linear_velocity", vectorJson(joint.linearVelocity)}});
+        }
+        ragdolls.push_back({{"object", objectIdJson(ragdoll.object)},
+            {"active", ragdoll.active}, {"joints", std::move(joints)}});
     }
     return {
         {"game", static_cast<std::uint8_t>(session.config().game)},
@@ -1345,6 +1471,7 @@ Json sessionPayload(const BethesdaSession& session) {
         {"script_debug_logs", session.scriptDebugLogs()},
         {"animations", std::move(animations)},
         {"physics", std::move(physics)},
+        {"ragdolls", std::move(ragdolls)},
         {"papyrus", vmJson(session.papyrus().snapshot())},
         {"tes3", tes3RuntimeJson(session.tes3())},
     };
@@ -1448,10 +1575,10 @@ bool saveOdaiGameAtomic(
             output.close(); std::filesystem::remove(temporary, error); return false;
         }
     }
-    std::filesystem::remove(previous, error);
-    error.clear();
     const bool hadDestination = std::filesystem::is_regular_file(path, error) && !error;
     if (hadDestination) {
+        std::filesystem::remove(previous, error);
+        if (error) { outError = "could not replace previous save: " + error.message(); return false; }
         std::filesystem::rename(path, previous, error);
         if (error) { outError = "could not stage previous save: " + error.message(); return false; }
     }
@@ -1465,7 +1592,7 @@ bool saveOdaiGameAtomic(
         outError = "could not commit save atomically: " + error.message();
         return false;
     }
-    std::filesystem::remove(previous, error);
+    // Retain the last committed generation for explicit recovery.
     outError.clear();
     return true;
 }
@@ -1496,13 +1623,13 @@ bool loadOdaiGame(
             saveVersion == 0u || saveVersion > kOdaiSaveVersion) {
             outError = "unsupported ODAI save format/version"; return false;
         }
+        if (root.at("checksum").get<std::string>() != checksum(root.at("payload").dump())) {
+            outError = "ODAI save checksum mismatch"; return false;
+        }
     } catch (const std::exception& exception) {
         outError = std::string("malformed ODAI save: ") + exception.what(); return false;
     }
     const Json& payload = root.at("payload");
-    if (root.at("checksum").get<std::string>() != checksum(payload.dump())) {
-        outError = "ODAI save checksum mismatch"; return false;
-    }
     const std::map<std::string, QuestRuntimeState> registeredQuests = session.quests();
 
     std::vector<RuntimeObject> objects;
@@ -1511,6 +1638,9 @@ bool loadOdaiGame(
     std::map<std::string, std::int64_t> statistics;
     std::vector<RecordKey> discoveries;
     std::map<RecordKey, bool> scenes;
+    std::map<RecordKey, SkyrimSceneProgress> sceneProgress;
+    std::vector<SkyrimSceneSpeech> sceneSpeech;
+    std::uint64_t sceneSpeechSequence = 0;
     RecordKey forcedWeather;
     std::map<RecordKey, LocationRuntimeState> locations;
     std::map<RecordKey, float> globalVariables;
@@ -1519,6 +1649,7 @@ bool loadOdaiGame(
     std::vector<std::string> scriptDebugLogs;
     std::vector<AnimationActorSnapshot> animationSnapshots;
     std::vector<PhysicsCharacterSnapshot> physicsSnapshots;
+    std::vector<PhysicsRagdollSnapshot> ragdollSnapshots;
     Tes3SavedState tes3State;
     std::uint64_t nextStoryEventSequence = 1u;
     std::uint64_t nextGiftMenuSequence = 1u;
@@ -1630,6 +1761,39 @@ bool loadOdaiGame(
             if (!scenes.emplace(scene, savedScene.at("playing").get<bool>()).second) {
                 outError = "save contains duplicate scene state";
                 return false;
+            }
+            if (savedScene.contains("progress")) {
+                const auto& saved = savedScene.at("progress");
+                SkyrimSceneProgress progress;
+                progress.phase = saved.at("phase").get<std::uint32_t>();
+                progress.entered = saved.at("entered").get<bool>();
+                progress.begun = saved.at("begun").get<bool>();
+                progress.completed = saved.at("completed").get<std::set<std::uint32_t>>();
+                for (const auto& timer : saved.at("timers")) {
+                    const double seconds = timer.at(1).get<double>();
+                    if (!std::isfinite(seconds) || !progress.timers.emplace(timer.at(0).get<std::uint32_t>(), seconds).second) {
+                        outError = "invalid scene timer"; return false;
+                    }
+                }
+                sceneProgress.emplace(scene, std::move(progress));
+            }
+            sceneSpeechSequence = std::max(sceneSpeechSequence, savedScene.value("speech_sequence", std::uint64_t{0}));
+            if (savedScene.contains("speech")) for (const auto& saved : savedScene.at("speech")) {
+                SkyrimSceneSpeech line; line.scene = scene;
+                if (!recordKeyFromJson(saved.at("info"), line.info, outError) ||
+                    !recordKeyFromJson(saved.at("response_info"), line.responseInfo, outError) ||
+                    !objectIdFromJson(saved.at("speaker"), line.speaker, outError)) return false;
+                line.action = saved.at("action").get<std::uint32_t>();
+                line.response = saved.at("response").get<std::uint32_t>();
+                line.sequence = saved.at("sequence").get<std::uint64_t>();
+                line.text = saved.at("text").get<std::string>();
+                line.voiceKey = saved.at("voice_key").get<std::string>();
+                line.presented = saved.at("presented").get<bool>();
+                line.remainingSeconds = saved.at("remaining").get<double>();
+                if (!std::isfinite(line.remainingSeconds) || line.remainingSeconds < 0 || line.sequence > sceneSpeechSequence) {
+                    outError = "invalid scene speech"; return false;
+                }
+                sceneSpeech.push_back(std::move(line));
             }
         }
         if (payload.contains("forced_weather") &&
@@ -1760,6 +1924,19 @@ bool loadOdaiGame(
                             firstPerson, outError)) return false;
                     animation.firstPerson = std::move(firstPerson);
                 }
+                if (saveVersion >= 14u && savedAnimation.contains("body_morph")) {
+                    const Json& morph = savedAnimation.at("body_morph");
+                    animation.bodyMorph.topologyFingerprint =
+                        morph.at("topology_fingerprint").get<std::string>();
+                    animation.bodyMorph.sliders =
+                        morph.at("sliders").get<std::map<std::string, float>>();
+                    for (const auto& [name, value] : animation.bodyMorph.sliders) {
+                        if (name.empty() || !std::isfinite(value) || value < 0.0f || value > 1.0f) {
+                            outError = "invalid saved body morph slider";
+                            return false;
+                        }
+                    }
+                }
                 animationSnapshots.push_back(std::move(animation));
             }
             for (const Json& savedPhysics : payload.at("physics")) {
@@ -1773,6 +1950,15 @@ bool loadOdaiGame(
                 if (!quaternionFromJson(
                         savedPhysics.at("rotation"), character.rotation, outError)) return false;
                 character.grounded = savedPhysics.at("grounded").get<bool>();
+                if (savedPhysics.contains("movement")) {
+                    const auto& movement = savedPhysics.at("movement");
+                    character.movement = {movement.at("coyote").get<float>(), movement.at("buffer").get<float>(),
+                        movement.at("air_x").get<float>(), movement.at("air_z").get<float>(),
+                        movement.at("jump_held").get<bool>(), movement.at("jump_consumed").get<bool>()};
+                    if (!validCharacterMovementState(character.movement)) {
+                        outError = "invalid saved native movement state"; return false;
+                    }
+                }
                 if (!savedPhysics.at("supporting_object").is_null()) {
                     ObjectId support;
                     if (!objectIdFromJson(savedPhysics.at("supporting_object"), support, outError)) {
@@ -1781,6 +1967,24 @@ bool loadOdaiGame(
                     character.supportingObject = std::move(support);
                 }
                 physicsSnapshots.push_back(std::move(character));
+            }
+            if (saveVersion >= 14u) {
+                for (const Json& savedRagdoll : payload.at("ragdolls")) {
+                    PhysicsRagdollSnapshot ragdoll;
+                    if (!objectIdFromJson(savedRagdoll.at("object"), ragdoll.object, outError))
+                        return false;
+                    ragdoll.active = savedRagdoll.at("active").get<bool>();
+                    for (const Json& savedJoint : savedRagdoll.at("joints")) {
+                        PhysicsRagdollJointPose joint;
+                        joint.role = savedJoint.at("role").get<std::string>();
+                        if (!vectorFromJson(savedJoint.at("position"), joint.position, outError) ||
+                            !quaternionFromJson(savedJoint.at("rotation"), joint.rotation, outError) ||
+                            !vectorFromJson(savedJoint.at("linear_velocity"),
+                                joint.linearVelocity, outError)) return false;
+                        ragdoll.joints.push_back(std::move(joint));
+                    }
+                    ragdollSnapshots.push_back(std::move(ragdoll));
+                }
             }
         }
         std::sort(discoveries.begin(), discoveries.end());
@@ -1960,7 +2164,12 @@ bool loadOdaiGame(
                     animation.object.toString();
                 return false;
             }
-            if (!physicalActors.contains(animation.object)) {
+            if (saveVersion >= 11u && std::none_of(objects.begin(), objects.end(), [&](const auto& actor) {
+                    return actor.id == animation.object && actor.kind == RuntimeObjectKind::Actor;
+                })) {
+                outError = "saved animation has no matching runtime actor"; return false;
+            }
+            if (saveVersion < 11u && !physicalActors.contains(animation.object)) {
                 outError = "save animation has no matching physical actor: " +
                     animation.object.toString();
                 return false;
@@ -2070,6 +2279,10 @@ bool loadOdaiGame(
                 keys.insert(character.supportingObject->reference);
             }
         }
+        for (const PhysicsRagdollSnapshot& ragdoll : ragdollSnapshots) {
+            if (ragdoll.object.kind == ObjectIdKind::PersistentReference)
+                keys.insert(ragdoll.object.reference);
+        }
         std::vector<std::string> missing;
         for (const RecordKey& key : keys) if (!options.recordAvailable(key)) missing.push_back(key.toString());
         if (!missing.empty()) {
@@ -2086,6 +2299,7 @@ bool loadOdaiGame(
     PapyrusVmSnapshot oldVm = session.papyrus().snapshot();
     const std::vector<AnimationActorSnapshot> oldAnimations = session.animationSnapshots();
     const std::vector<PhysicsCharacterSnapshot> oldPhysics = session.physicsSnapshots();
+    const std::vector<PhysicsRagdollSnapshot> oldRagdolls = session.ragdollSnapshots();
     std::string restoreError;
     if (!session.papyrus().restore(vm, restoreError)) {
         outError = restoreError; return false;
@@ -2115,10 +2329,12 @@ bool loadOdaiGame(
     std::vector<PhysicsCharacterSnapshot> desiredPhysics = physicsSnapshots;
     if (saveVersion >= 2u) {
         if (!session.restoreAnimationSnapshots(animationSnapshots, restoreError) ||
-            !session.restorePhysicsSnapshots(desiredPhysics, restoreError)) {
+            !session.restorePhysicsSnapshots(desiredPhysics, restoreError) ||
+            !session.restoreRagdollSnapshots(ragdollSnapshots, restoreError)) {
             std::string ignored;
             (void)session.restoreAnimationSnapshots(oldAnimations, ignored);
             (void)session.restorePhysicsSnapshots(oldPhysics, ignored);
+            (void)session.restoreRagdollSnapshots(oldRagdolls, ignored);
             (void)session.papyrus().restore(oldVm, ignored);
             outError = "invalid saved physical/animation state: " + restoreError;
             return false;
@@ -2179,6 +2395,14 @@ bool loadOdaiGame(
         outReport.diagnostics.push_back(
             "pre-version-10 save initialized animation transitions as inactive");
     }
+    if (saveVersion < 12u) {
+        outReport.diagnostics.push_back(
+            "pre-version-12 save initializes Skyrim equipment ownership from resolved outfits and inventory on residency");
+    }
+    if (saveVersion < 14u) {
+        outReport.diagnostics.push_back(
+            "pre-version-14 save initialized native ragdoll state as inactive");
+    }
     if (!tes3State.present && session.config().game == importer::fnv::BethesdaGame::Morrowind) {
         outReport.diagnostics.push_back(
             "save has no TES3 extension; journal, MWScript, topics, and dialogue initialized empty");
@@ -2188,6 +2412,9 @@ bool loadOdaiGame(
     session.statisticsForRestore() = std::move(statistics);
     session.discoveriesForRestore() = std::move(discoveries);
     session.scenesForRestore() = std::move(scenes);
+    session.sceneProgressForRestore() = std::move(sceneProgress);
+    session.sceneSpeechForRestore() = std::move(sceneSpeech);
+    session.setSceneSpeechSequence(sceneSpeechSequence);
     session.forcedWeatherForRestore() = std::move(forcedWeather);
     session.locationsForRestore() = std::move(locations);
     session.globalVariablesForRestore() = std::move(globalVariables);

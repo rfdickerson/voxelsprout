@@ -1,10 +1,11 @@
-﻿#include "render/backend/vulkan/renderer_backend.h"
+#include "core/resource_path.h"
+#include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "world/chunk_mesher.h"
+#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -450,38 +451,7 @@ std::vector<DdsMipInfo> appendRgbaNormalMipChain(
 }
 
 std::filesystem::path resolveRendererAssetPath(const std::filesystem::path& relativePath) {
-    std::vector<std::filesystem::path> baseCandidates;
-    baseCandidates.reserve(6);
-
-#if defined(ODAI_PROJECT_SOURCE_DIR)
-    baseCandidates.emplace_back(std::filesystem::path{ODAI_PROJECT_SOURCE_DIR});
-#endif
-
-    std::error_code cwdError;
-    const std::filesystem::path cwd = std::filesystem::current_path(cwdError);
-    if (!cwdError) {
-        baseCandidates.push_back(cwd);
-        baseCandidates.push_back(cwd / "..");
-        baseCandidates.push_back(cwd / ".." / "..");
-        baseCandidates.push_back(cwd / ".." / ".." / "..");
-    }
-
-    for (const std::filesystem::path& base : baseCandidates) {
-        const std::filesystem::path candidate = base / relativePath;
-        std::error_code existsError;
-        if (!std::filesystem::exists(candidate, existsError) || existsError) {
-            continue;
-        }
-
-        std::error_code canonicalError;
-        const std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(candidate, canonicalError);
-        if (!canonicalError) {
-            return canonicalPath;
-        }
-        return candidate;
-    }
-
-    return relativePath;
+    return core::resourcePath(relativePath);
 }
 
 constexpr uint32_t kGeneratedWaterNormalTextureSize = 128u;

@@ -72,6 +72,7 @@ struct SetupInfo {
     // disocclusion test rather than failing.
     bool invertedDepth = true;
     bool hdrInput = true;
+    bool jitteredNativeResolve = false;
     // The pipeline layout the host's descriptors are written against. The
     // backend creates its pipelines with this rather than one of its own, which
     // is what keeps descriptor provisioning entirely on the host side.

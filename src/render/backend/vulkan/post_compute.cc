@@ -1,3 +1,4 @@
+#include "core/resource_path.h"
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
@@ -98,7 +99,7 @@ std::optional<std::vector<std::uint8_t>> readBinaryFile(const char* filePath) {
         return std::nullopt;
     }
 
-    const std::filesystem::path path(filePath);
+    const auto path = core::resourcePath(filePath);
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         return std::nullopt;
@@ -1248,7 +1249,7 @@ bool RendererBackend::createTaaComputeResources() {
     {
         constexpr const char* kTemporalUpscaleShaderPath =
             "../src/render/shaders/temporal_upscale.comp.slang.spv";
-        if (std::filesystem::exists(kTemporalUpscaleShaderPath)) {
+        if (std::filesystem::exists(core::resourcePath(kTemporalUpscaleShaderPath))) {
             VkShaderModule upscaleModule = VK_NULL_HANDLE;
             if (createShaderModuleFromFile(
                     m_device, kTemporalUpscaleShaderPath, "temporal_upscale.comp", upscaleModule)) {
@@ -1335,6 +1336,7 @@ bool RendererBackend::createUpscalerBackend() {
         return m_upscalerStatus.active == UpscalerBackend::Off;
     }
     upscale::SetupInfo setup{};
+    setup.jitteredNativeResolve = m_taaJitterEnabled;
     setup.renderExtent = {m_renderExtent.width, m_renderExtent.height};
     setup.displayExtent = {m_swapchainExtent.width, m_swapchainExtent.height};
     setup.invertedDepth = true;
@@ -1512,8 +1514,8 @@ bool RendererBackend::createXeGtaoResources() {
     constexpr const char* kDenoiseShaderPath =
         "../src/render/shaders/xegtao_denoise.comp.slang.spv";
 
-    if (!std::filesystem::exists(kPrefilterShaderPath) || !std::filesystem::exists(kMainShaderPath) ||
-        !std::filesystem::exists(kDenoiseShaderPath)) {
+    if (!std::filesystem::exists(core::resourcePath(kPrefilterShaderPath)) || !std::filesystem::exists(core::resourcePath(kMainShaderPath)) ||
+        !std::filesystem::exists(core::resourcePath(kDenoiseShaderPath))) {
         VOX_LOGW("render") << "XeGTAO shaders missing; XeGTAO mode unavailable";
         return false;
     }

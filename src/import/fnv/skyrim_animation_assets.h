@@ -1,6 +1,7 @@
 #pragma once
 
 #include "anim/hkx_packfile.h"
+#include "anim/skyrim_animation.h"
 #include "import/fnv/asset_source.h"
 
 #include <memory>
@@ -26,6 +27,23 @@ struct SkyrimAnimationAssetReport {
 bool inspectSkyrimAnimationBundle(
     const FalloutAssetSource& assets, SkyrimAnimationAssetReport& out,
     bool strict, std::string& outError);
+
+// Resolves references through virtual Data, with bounded graph expansion. The
+// returned program retains explicit admission gaps instead of claiming parity.
+std::shared_ptr<const odai::anim::BehaviorProgram> loadSkyrimBehaviorProgram(
+    const FalloutAssetSource& assets, const std::string& rootPath,
+    std::string& fingerprint, std::string& error);
+
+std::shared_ptr<const odai::anim::AnimationView> loadSkyrimNpcAnimationView(
+    const FalloutAssetSource& assets, const odai::anim::Skeleton& skeleton,
+    const std::vector<odai::math::Matrix4>& inverseBind, bool female,
+    const odai::anim::AnimationClip& idle, const odai::anim::AnimationClip& walk,
+    std::shared_ptr<const odai::anim::BehaviorProgram> behavior,
+    const std::string& graphFingerprint);
+
+// Also used by player views that already own their imported clip catalog.
+void loadSkyrimNativeAnimationPacks(const FalloutAssetSource& assets,
+    odai::anim::AnimationView& view, const odai::anim::HkxDecodedSkeleton* sourceSkeleton = nullptr);
 
 class SkyrimAnimationAssetCache {
 public:

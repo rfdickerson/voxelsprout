@@ -1,5 +1,8 @@
 #pragma once
 
+#include "core/resource_path.h"
+#include "core/grid3.h"
+
 #include "core/ring_buffer.h"
 #include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
@@ -12,9 +15,8 @@
 #include "render/backend/vulkan/pipeline_manager.h"
 #include "render/backend/vulkan/ui_renderer.h"
 #include "render/renderer_types.h"
-#include "world/clipmap_index.h"
 #include "world/chunk_grid.h"
-#include "world/chunk_mesher.h"
+#include "render/packed_vertex.h"
 #include "world/spatial_index.h"
 #include "math/math.h"
 
@@ -481,18 +483,7 @@ public:
     [[nodiscard]] bool hexTerrainReady() const { return m_hexTerrainPipeline != VK_NULL_HANDLE; }
     void setHexTerrainEnabled(bool enabled) { m_hexTerrainEnabled = enabled; }
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
-    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid);
-    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::size_t chunkIndex);
-    bool updateChunkMesh(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> chunkIndices);
-    // Accepts meshes built off-thread (world::ChunkMeshScheduler) and queues
-    // them for upload through the per-frame remesh path, skipping the inline
-    // mesher for those chunks.
-    bool uploadChunkMeshes(const odai::world::ChunkGrid& chunkGrid, std::vector<odai::world::ChunkMeshResult> results);
-    // Meshing mode the renderer's own (full-rebuild) path uses. Callers driving
-    // an off-thread mesher must mirror it so both paths agree.
-    [[nodiscard]] odai::world::MeshingOptions chunkMeshingOptions() const { return m_chunkMeshingOptions; }
     bool useSpatialPartitioningQueries() const;
-    odai::world::ClipmapConfig clipmapQueryConfig() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
     void setGameplayUiState(const GameplayUiState& state);
     void setUiDrawData(const odai::ui::UiDrawData& drawData);
@@ -571,6 +562,8 @@ public:
     }
     // Drives the same DoF state the sky debug panel edits; clamping happens
     // where the values feed the frame uniform.
+    bool playImportedEffect(std::uint32_t reference, const std::string& sequence, bool startOver = true);
+    bool activateImportedEffect(float x, float y, float z, float dx, float dy, float dz);
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
                          float maxRadiusPixels, float nearBlurScale = 0.0f) {
         m_skyDebugSettings.depthOfFieldEnabled = enabled;
@@ -756,6 +749,10 @@ private:
     static uint32_t lightClusterCount(VkExtent2D extent);
     bool createSsaoComputeResources();
     bool createSkinningComputeResources();
+    bool createPoseComputeResources();
+    void destroyPoseComputeResources();
+    void preparePoseCompute(std::uint32_t instanceIndex, VkDeviceAddress paletteAddress, VkDeviceSize paletteBytes);
+    void recordPoseCompute(VkCommandBuffer commandBuffer);
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
     bool createMagicaPipeline();
@@ -788,10 +785,6 @@ private:
         const VkDescriptorBufferInfo* voxelGiChunkMetaBufferInfo = nullptr,
         const VkDescriptorBufferInfo* voxelGiChunkVoxelBufferInfo = nullptr
     );
-    bool createChunkBuffers(const odai::world::ChunkGrid& chunkGrid, std::span<const std::size_t> remeshChunkIndices);
-    // Moves a stored off-thread mesh result into the LOD cache for the given
-    // resident chunk index. Returns false when no result is stored for it.
-    bool consumeExternalChunkMeshResult(std::size_t chunkArrayIndex, odai::world::ChunkMeshingStats& outStats);
     bool createFrameResources();
     bool createGpuTimestampResources();
     bool createImGuiResources();
@@ -1990,14 +1983,13 @@ private:
     // Same descriptor layout and uniform as TAA, selected in its place when the
     // Temporal upscaler is active. See temporal_upscale.comp.slang.
     VkPipeline m_temporalUpscalePipeline = VK_NULL_HANDLE;
-    // True when the Temporal backend is running as a real upscale: the pipeline
-    // exists, the backend resolved to Temporal, and the render extent is
-    // actually smaller than the output. At native resolution there is nothing to
-    // upscale and the plain TAA path is the right one.
+    // Use temporal reconstruction for jittered native-resolution AA as well
+    // as upscaling. Its sample reconstruction filter is needed to resolve the
+    // subpixel coverage without the plain TAA path's repeated box filtering.
     [[nodiscard]] bool temporalUpscaleActive() const {
         return m_temporalUpscalePipeline != VK_NULL_HANDLE &&
                m_upscalerStatus.active == UpscalerBackend::Temporal &&
-               (m_renderExtent.width < m_swapchainExtent.width ||
+               (m_taaJitterEnabled || m_renderExtent.width < m_swapchainExtent.width ||
                 m_renderExtent.height < m_swapchainExtent.height);
     }
     // Extent the TAA/upscale pass writes, and therefore the size of the history
@@ -2184,6 +2176,8 @@ private:
         importer::ImportedNifLightingMaterial source;
         importer::GpuImportedMaterial base;
         double startTime=-1;
+        std::string sequence = "AnimIdle";
+        float position[3] = {};
     };
     std::unordered_map<std::uint32_t,AnimatedMaterialInstance> m_animatedMaterials;
     double m_materialAnimationTimeSeconds=0;
@@ -2266,6 +2260,9 @@ private:
     VkDescriptorSetLayout m_skinningDescriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_poseDescriptorLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_posePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_posePipeline = VK_NULL_HANDLE;
     // One independent skinned actor: its own rest-pose geometry + persistent
     // skinned output (both device-local, uploaded/created once by
     // uploadSkinnedMeshTemplate) and its own descriptor-buffer-set region per
@@ -2273,22 +2270,37 @@ private:
     // changes per frame. Up to kMaxSkinnedInstances slots, enough for a small
     // party (see docs/ROADMAP.md's out-of-scope note on mass-battle crowds).
     struct SkinnedInstanceSlot {
+        DescriptorBufferSet poseBufferSet{};
+        BufferHandle poseResourceBuffer = kInvalidBufferHandle;
+        std::shared_ptr<const odai::anim::AnimationView> poseView;
+        odai::anim::GpuPoseResource poseResource;
+        std::shared_ptr<const odai::anim::PoseEvaluationPacket> pendingEvaluation;
+        odai::math::Matrix4 poseActorWorld = odai::math::Matrix4::identity();
+        bool poseComputeReady = false;
+        BufferHandle poseHistoryBuffer = kInvalidBufferHandle;
+        std::uint32_t poseHistoryBones = 0;
+        bool poseHistoryValid = false, poseHistoryReady = false;
         DescriptorBufferSet bufferSet{};
         // Second set, same per-slot shape, for the velocity pass's two bone
         // matrix buffers. Per slot rather than one shared set because each actor
         // has its own pose and the sets are written per frame, not per draw.
         DescriptorBufferSet velocityBufferSet{};
         BufferHandle restPoseVertexBufferHandle = kInvalidBufferHandle;
+        BufferHandle morphOffsetBufferHandle = kInvalidBufferHandle;
+        BufferHandle morphDeltaBufferHandle = kInvalidBufferHandle;
         BufferHandle indexBufferHandle = kInvalidBufferHandle;
         BufferHandle outputVertexBufferHandle = kInvalidBufferHandle;
         std::uint32_t vertexCount = 0;
         std::uint32_t boneCount = 0;
+        std::uint32_t morphTargetCount = 0;
         bool visible = true;
         std::vector<ImportedMeshDraw> meshDraws;
         // Set by setSkinnedActorPose() (called before renderFrame()); consumed
         // and uploaded by uploadSkinnedActorPoseForFrame() once this frame's
         // FrameArena slot is actually active. See both functions' comments.
         std::vector<odai::math::Matrix4> pendingBoneMatrices;
+        std::vector<float> pendingMorphWeights;
+        std::vector<float> previousMorphWeights;
         // LAST frame's bone matrices, kept on the CPU and re-uploaded each frame
         // beside the current ones so the velocity pass can pose the rest mesh
         // twice. A CPU copy rather than reusing last frame's FrameArena slice:
@@ -2302,6 +2314,9 @@ private:
         VkDeviceAddress currentBoneAddress = 0;
         VkDeviceAddress previousBoneAddress = 0;
         VkDeviceSize boneBufferBytes = 0;
+        VkDeviceAddress currentMorphAddress = 0;
+        VkDeviceAddress previousMorphAddress = 0;
+        VkDeviceSize morphBufferBytes = 0;
         // Bindless slots this slot holds a reference on, from
         // uploadSkinnedActorTextures. Kept per instance so a re-upload (or
         // teardown) releases exactly what it took.
@@ -2560,12 +2575,10 @@ private:
     std::uint32_t m_rtTlasBuildCount = 0;
     std::uint32_t m_rtDirtyChunkCount = 0;
     bool m_chunkLodMeshCacheValid = false;
-    odai::world::MeshingOptions m_chunkMeshingOptions{};
     bool m_chunkMeshRebuildRequested = false;
     std::vector<ChunkResidentKey> m_pendingChunkRemeshKeys;
     // Off-thread mesh results waiting to be consumed by the remesh path;
     // keyed by chunk grid coordinates, replaced on newer arrival.
-    std::vector<odai::world::ChunkMeshResult> m_externalChunkMeshResults;
     uint32_t m_previewIndexCount = 0;
     uint32_t m_pipeIndexCount = 0;
     uint32_t m_transportIndexCount = 0;
@@ -2821,7 +2834,6 @@ private:
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
     bool m_debugEnableSpatialQueries = true;
-    odai::world::ClipmapConfig m_debugClipmapConfig{};
     bool m_debugSpatialQueriesUsed = false;
     odai::world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;

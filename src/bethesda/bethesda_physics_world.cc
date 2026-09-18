@@ -30,7 +30,9 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 #include "core/log.h"
@@ -107,14 +109,23 @@ public:
     struct CharacterEntry {
         JPH::Ref<JPH::CharacterVirtual> character;
         PhysicsCharacterInput input;
+        CharacterMovementSettings movementSettings;
+        CharacterMovementState movement;
         PhysicsCharacterStep last;
         JPH::Vec3 externalVelocity = JPH::Vec3::sZero();
         float stepHeightMetres = 0.25f;
         float centreOffsetMetres = 0.0f;
+        bool suspendedByRagdoll = false;
     };
     struct DynamicEntry {
         JPH::BodyID body;
         PhysicsDynamicBodyConfig config;
+    };
+    struct RagdollEntry {
+        JPH::Ref<JPH::GroupFilterTable> groupFilter;
+        std::vector<std::string> roles;
+        std::vector<JPH::BodyID> bodies;
+        std::vector<JPH::Ref<JPH::Constraint>> constraints;
     };
 
     Impl()
@@ -140,6 +151,8 @@ public:
     JPH::CharacterVsCharacterCollisionSimple characterCollision;
     std::map<ObjectId, CharacterEntry> characters;
     std::map<ObjectId, DynamicEntry> dynamicBodies;
+    std::map<ObjectId, RagdollEntry> ragdolls;
+    JPH::CollisionGroup::GroupID nextRagdollGroup = 1u;
     std::map<ObjectId, JPH::Ref<JPH::Constraint>> constraints;
     std::unordered_map<std::uint64_t, ObjectId> objectsByUserData;
     std::vector<JPH::BodyID> staticBodies;
@@ -171,10 +184,21 @@ void BethesdaPhysicsWorld::clear() {
     if (!m_impl || !m_impl->initialized) return;
     for (auto& [id, entry] : m_impl->characters) {
         (void)id;
-        m_impl->characterCollision.Remove(entry.character);
+        if (!entry.suspendedByRagdoll)
+            m_impl->characterCollision.Remove(entry.character);
     }
     m_impl->characters.clear();
     JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    for (auto& [object, ragdoll] : m_impl->ragdolls) {
+        (void)object;
+        for (const auto& constraint : ragdoll.constraints)
+            m_impl->physics.RemoveConstraint(constraint);
+        for (JPH::BodyID body : ragdoll.bodies) {
+            bodies.RemoveBody(body);
+            bodies.DestroyBody(body);
+        }
+    }
+    m_impl->ragdolls.clear();
     for (const auto& [object, constraint] : m_impl->constraints) {
         (void)object;
         m_impl->physics.RemoveConstraint(constraint);
@@ -348,6 +372,7 @@ bool BethesdaPhysicsWorld::addCharacter(
     JPH::CapsuleShapeSettings capsule(std::max(0.1f, halfHeight - radius), radius);
     const auto shape = capsule.Create();
     if (shape.HasError()) { outError = "Jolt capsule construction failed: " + shape.GetError(); return false; }
+    if (!validCharacterMovementSettings(config.movement)) { outError = "invalid native movement settings"; return false; }
     JPH::CharacterVirtualSettings settings;
     settings.mShape = shape.Get();
     settings.mUp = JPH::Vec3::sAxisY();
@@ -362,6 +387,7 @@ bool BethesdaPhysicsWorld::addCharacter(
     m_impl->characterCollision.Add(character);
     Impl::CharacterEntry entry;
     entry.character = character;
+    entry.movementSettings = config.movement;
     entry.stepHeightMetres = std::clamp(config.stepHeight * kBethesdaUnitsToJoltMetres, 0.05f, 0.6f);
     entry.centreOffsetMetres = halfHeight;
     entry.last.position = config.position;
@@ -374,7 +400,9 @@ bool BethesdaPhysicsWorld::addCharacter(
 bool BethesdaPhysicsWorld::removeCharacter(ObjectId object) {
     const auto found = m_impl->characters.find(object);
     if (found == m_impl->characters.end()) return false;
-    m_impl->characterCollision.Remove(found->second.character);
+    (void)removeRagdoll(object);
+    if (!found->second.suspendedByRagdoll)
+        m_impl->characterCollision.Remove(found->second.character);
     m_impl->objectsByUserData.erase(userDataFor(object));
     m_impl->characters.erase(found);
     return true;
@@ -617,21 +645,265 @@ bool BethesdaPhysicsWorld::restoreDynamicBody(
     return true;
 }
 
+bool BethesdaPhysicsWorld::activateRagdoll(ObjectId object,
+    std::span<const PhysicsRagdollJointConfig> joints,
+    const odai::math::Vector3& linearVelocity, std::string& outError) {
+    outError.clear();
+    const auto character = m_impl->characters.find(object);
+    const auto finite = [](const odai::math::Vector3& value) {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    if (character == m_impl->characters.end() || character->second.suspendedByRagdoll ||
+        m_impl->ragdolls.contains(object) || joints.empty() || joints.size() > 32 ||
+        !finite(linearVelocity)) {
+        outError = "invalid or duplicate ragdoll activation";
+        return false;
+    }
+    std::set<std::string> roles;
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const PhysicsRagdollJointConfig& joint = joints[i];
+        if (joint.role.empty() || !roles.insert(joint.role).second ||
+            joint.parent < -1 || joint.parent >= static_cast<int>(i) ||
+            !finite(joint.position) || !std::isfinite(joint.radius) ||
+            !std::isfinite(joint.halfHeight) || !std::isfinite(joint.massKilograms) ||
+            joint.radius <= 0.0f || joint.halfHeight < joint.radius ||
+            joint.massKilograms <= 0.0f) {
+            outError = "invalid canonical ragdoll joint: " + joint.role;
+            return false;
+        }
+    }
+
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    Impl::RagdollEntry entry;
+    entry.groupFilter = new JPH::GroupFilterTable(
+        static_cast<JPH::uint>(joints.size()));
+    for (std::size_t i = 0; i < joints.size(); ++i)
+        if (joints[i].parent >= 0)
+            entry.groupFilter->DisableCollision(
+                static_cast<JPH::CollisionGroup::SubGroupID>(joints[i].parent),
+                static_cast<JPH::CollisionGroup::SubGroupID>(i));
+    const JPH::CollisionGroup::GroupID group = m_impl->nextRagdollGroup++;
+    if (m_impl->nextRagdollGroup == JPH::CollisionGroup::cInvalidGroup)
+        m_impl->nextRagdollGroup = 1u;
+    std::vector<JPH::Body*> created;
+    created.reserve(joints.size());
+    entry.roles.reserve(joints.size());
+    entry.bodies.reserve(joints.size());
+    for (const PhysicsRagdollJointConfig& joint : joints) {
+        const float radius = std::clamp(
+            joint.radius * kBethesdaUnitsToJoltMetres, 0.025f, 0.45f);
+        const float halfHeight = std::clamp(
+            joint.halfHeight * kBethesdaUnitsToJoltMetres, radius, 0.8f);
+        JPH::CapsuleShapeSettings shapeSettings(
+            std::max(0.01f, halfHeight - radius), radius);
+        const auto shape = shapeSettings.Create();
+        if (shape.HasError()) {
+            outError = "Jolt ragdoll capsule construction failed: " + shape.GetError();
+            break;
+        }
+        JPH::BodyCreationSettings settings(shape.Get(), toJoltPosition(joint.position),
+            toJoltRotation(joint.rotation), JPH::EMotionType::Dynamic, kDynamicLayer);
+        settings.mUserData = userDataFor(object);
+        settings.mCollisionGroup = JPH::CollisionGroup(entry.groupFilter, group,
+            static_cast<JPH::CollisionGroup::SubGroupID>(created.size()));
+        settings.mFriction = 0.7f;
+        settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+        settings.mMassPropertiesOverride.mMass = joint.massKilograms;
+        JPH::Body* body = bodies.CreateBody(settings);
+        if (body == nullptr) {
+            outError = "Jolt ran out of bodies while building ragdoll";
+            break;
+        }
+        created.push_back(body);
+        entry.roles.push_back(joint.role);
+        entry.bodies.push_back(body->GetID());
+    }
+    if (!outError.empty()) {
+        for (JPH::Body* body : created) bodies.DestroyBody(body->GetID());
+        return false;
+    }
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        if (joints[i].parent < 0) continue;
+        JPH::PointConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+        settings.mPoint1 = settings.mPoint2 = toJoltPosition(joints[i].position);
+        JPH::Ref<JPH::Constraint> constraint = settings.Create(
+            *created[static_cast<std::size_t>(joints[i].parent)], *created[i]);
+        if (constraint == nullptr) {
+            outError = "Jolt rejected ragdoll parent constraint";
+            for (JPH::Body* body : created) bodies.DestroyBody(body->GetID());
+            return false;
+        }
+        entry.constraints.push_back(std::move(constraint));
+    }
+    for (JPH::BodyID body : entry.bodies) {
+        bodies.AddBody(body, JPH::EActivation::Activate);
+        bodies.SetLinearVelocity(body, toJoltVector(linearVelocity));
+    }
+    for (const auto& constraint : entry.constraints)
+        m_impl->physics.AddConstraint(constraint);
+    m_impl->characterCollision.Remove(character->second.character);
+    character->second.suspendedByRagdoll = true;
+    m_impl->ragdolls.emplace(object, std::move(entry));
+    return true;
+}
+
+bool BethesdaPhysicsWorld::removeRagdoll(ObjectId object) {
+    const auto found = m_impl->ragdolls.find(object);
+    if (found == m_impl->ragdolls.end()) return false;
+    for (const auto& constraint : found->second.constraints)
+        m_impl->physics.RemoveConstraint(constraint);
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    for (JPH::BodyID body : found->second.bodies) {
+        bodies.RemoveBody(body);
+        bodies.DestroyBody(body);
+    }
+    m_impl->ragdolls.erase(found);
+    if (const auto character = m_impl->characters.find(object);
+        character != m_impl->characters.end() && character->second.suspendedByRagdoll) {
+        character->second.suspendedByRagdoll = false;
+        m_impl->characterCollision.Add(character->second.character);
+    }
+    return true;
+}
+
+bool BethesdaPhysicsWorld::hasActiveRagdoll(ObjectId object) const {
+    return m_impl->ragdolls.contains(object);
+}
+
+std::optional<PhysicsRagdollSnapshot> BethesdaPhysicsWorld::ragdollSnapshot(
+    ObjectId object) const {
+    const auto found = m_impl->ragdolls.find(object);
+    if (found == m_impl->ragdolls.end()) return std::nullopt;
+    PhysicsRagdollSnapshot snapshot;
+    snapshot.object = object;
+    snapshot.active = true;
+    const JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    for (std::size_t i = 0; i < found->second.bodies.size(); ++i) {
+        const JPH::BodyID body = found->second.bodies[i];
+        snapshot.joints.push_back({found->second.roles[i],
+            fromJoltPosition(bodies.GetPosition(body)),
+            fromJoltRotation(bodies.GetRotation(body)),
+            fromJoltVector(bodies.GetLinearVelocity(body))});
+    }
+    return snapshot;
+}
+
+std::vector<PhysicsRagdollSnapshot> BethesdaPhysicsWorld::ragdollSnapshots() const {
+    std::vector<PhysicsRagdollSnapshot> result;
+    result.reserve(m_impl->ragdolls.size());
+    for (const auto& [object, entry] : m_impl->ragdolls) {
+        (void)entry;
+        if (auto snapshot = ragdollSnapshot(object)) result.push_back(std::move(*snapshot));
+    }
+    return result;
+}
+
+bool BethesdaPhysicsWorld::restoreRagdoll(
+    const PhysicsRagdollSnapshot& snapshot, std::string& outError) {
+    if (!snapshot.active || snapshot.joints.empty()) {
+        outError = "saved ragdoll is inactive or empty";
+        return false;
+    }
+    const std::map<std::string, std::string> parents{
+        {"spine", "pelvis"}, {"head", "spine"},
+        {"left_upper_arm", "spine"}, {"left_forearm", "left_upper_arm"},
+        {"left_hand", "left_forearm"}, {"right_upper_arm", "spine"},
+        {"right_forearm", "right_upper_arm"}, {"right_hand", "right_forearm"},
+        {"left_thigh", "pelvis"}, {"left_calf", "left_thigh"},
+        {"left_foot", "left_calf"}, {"right_thigh", "pelvis"},
+        {"right_calf", "right_thigh"}, {"right_foot", "right_calf"}};
+    std::map<std::string, int> indices;
+    std::vector<PhysicsRagdollJointConfig> config;
+    config.reserve(snapshot.joints.size());
+    for (const PhysicsRagdollJointPose& saved : snapshot.joints) {
+        PhysicsRagdollJointConfig joint;
+        joint.role = saved.role;
+        joint.position = saved.position;
+        joint.rotation = saved.rotation;
+        if (const auto parent = parents.find(saved.role); parent != parents.end()) {
+            const auto index = indices.find(parent->second);
+            if (index == indices.end()) {
+                outError = "saved ragdoll joints are not parent-before-child";
+                return false;
+            }
+            joint.parent = index->second;
+        }
+        const bool torso = saved.role == "pelvis" || saved.role == "spine";
+        const bool head = saved.role == "head";
+        joint.radius = torso ? 10.0f : (head ? 9.0f : 5.0f);
+        joint.halfHeight = torso ? 17.0f : (head ? 9.0f : 13.0f);
+        joint.massKilograms = torso ? 11.0f : (head ? 5.0f : 3.0f);
+        indices.emplace(saved.role, static_cast<int>(config.size()));
+        config.push_back(std::move(joint));
+    }
+    if (!activateRagdoll(snapshot.object, config, {}, outError)) return false;
+    const auto found = m_impl->ragdolls.find(snapshot.object);
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    for (std::size_t i = 0; i < snapshot.joints.size(); ++i)
+        bodies.SetLinearVelocity(found->second.bodies[i],
+            toJoltVector(snapshot.joints[i].linearVelocity));
+    return true;
+}
+
+bool BethesdaPhysicsWorld::recoverRagdoll(ObjectId object,
+    float maximumDropBethesdaUnits, odai::math::Vector3& outPlacement,
+    std::string& outError) {
+    outError.clear();
+    const auto ragdoll = ragdollSnapshot(object);
+    const auto character = m_impl->characters.find(object);
+    if (!ragdoll || ragdoll->joints.empty() || character == m_impl->characters.end() ||
+        !std::isfinite(maximumDropBethesdaUnits) || maximumDropBethesdaUnits <= 0.0f) {
+        outError = "ragdoll is unavailable for recovery";
+        return false;
+    }
+    const auto support = castDown(ragdoll->joints.front().position, maximumDropBethesdaUnits);
+    if (!support || support->normal.y < std::cos(JPH::DegreesToRadians(50.0f))) {
+        outError = "no valid get-up support surface";
+        return false;
+    }
+    outPlacement = support->position;
+    if (!removeRagdoll(object)) {
+        outError = "ragdoll disappeared during recovery";
+        return false;
+    }
+    Impl::CharacterEntry& entry = character->second;
+    JPH::RVec3 centre = toJoltPosition(outPlacement) +
+        JPH::RVec3(0.0, static_cast<double>(entry.centreOffsetMetres), 0.0);
+    entry.character->SetPosition(centre);
+    entry.character->SetLinearVelocity(JPH::Vec3::sZero());
+    entry.last.position = outPlacement;
+    entry.last.velocity = {};
+    entry.last.grounded = true;
+    entry.last.landed = false;
+    entry.externalVelocity = JPH::Vec3::sZero();
+    entry.suspendedByRagdoll = false;
+    return true;
+}
+
 std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::step(float fixedDeltaSeconds) {
     std::vector<std::pair<ObjectId, PhysicsCharacterStep>> results;
     if (!m_impl->initialized) return results;
     const float delta = std::clamp(fixedDeltaSeconds, 1.0e-5f, 0.25f);
     const JPH::Vec3 gravity(0.0f, -9.81f, 0.0f);
     for (auto& [id, entry] : m_impl->characters) {
+        if (entry.suspendedByRagdoll) continue;
         const bool wasGrounded = entry.last.grounded;
         JPH::Vec3 desired = toJoltVector(entry.input.desiredVelocity);
         if (entry.input.animationDriven) desired = toJoltVector(entry.input.rootMotion) / delta;
         const JPH::Vec3 oldVelocity = entry.character->GetLinearVelocity();
         const bool wasSupported = entry.character->IsSupported();
+        bool launched = false;
+        if (entry.movementSettings.enabled && !entry.input.animationDriven) {
+            float x = desired.GetX(), z = desired.GetZ();
+            launched = advanceCharacterMovement(entry.movement, entry.movementSettings,
+                wasSupported, entry.last.landed, entry.input.jumpRequested, delta, x, z);
+            desired.SetX(x); desired.SetZ(z); desired.SetY(0);
+        }
         if (wasSupported) {
             // A positive controller Y is a jump request. Move it into the
             // external channel once so holding jump cannot reapply it in air.
-            if (desired.GetY() > 0.0f) {
+            if (!entry.movementSettings.enabled && desired.GetY() > 0.0f) {
                 entry.externalVelocity.SetY(
                     std::max(entry.externalVelocity.GetY(), desired.GetY()));
             } else if (entry.externalVelocity.GetY() < 0.0f) {
@@ -643,6 +915,7 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
             desired.SetY(0.0f);
             entry.externalVelocity.SetY(oldVelocity.GetY() + gravity.GetY() * delta);
         }
+        if (launched) entry.externalVelocity.SetY(std::max(entry.externalVelocity.GetY(), entry.movementSettings.jumpSpeedMetres));
         desired += entry.externalVelocity;
         const JPH::RVec3 before = entry.character->GetPosition();
         entry.character->SetLinearVelocity(desired);
@@ -664,6 +937,13 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
         entry.last.grounded = entry.character->IsSupported();
         entry.last.falling = !entry.last.grounded && entry.last.velocity.y < 0.0f;
         entry.last.landed = !wasGrounded && entry.last.grounded;
+        entry.last.leftLedge = wasGrounded && !entry.last.grounded && !launched;
+        entry.last.landingImpactMetres = entry.last.landed
+            ? std::max(0.f, -(desired - entry.character->GetGroundVelocity()).Dot(entry.character->GetGroundNormal())) : 0.f;
+        entry.last.landingSeverity = classifyLanding(entry.last.landingImpactMetres, entry.movementSettings);
+        entry.last.jumpPhase = launched ? JumpPhase::Takeoff : entry.last.landed ? JumpPhase::Landing :
+            entry.last.grounded ? JumpPhase::Grounded : std::abs(entry.last.velocity.y * kBethesdaUnitsToJoltMetres) < .2f
+                ? JumpPhase::Apex : entry.last.falling ? JumpPhase::Falling : JumpPhase::Ascending;
         const JPH::Vec3 actual = JPH::Vec3(after - before) / delta;
         const float desiredHorizontal = std::sqrt(desired.GetX() * desired.GetX() + desired.GetZ() * desired.GetZ());
         const float actualHorizontal = std::sqrt(actual.GetX() * actual.GetX() + actual.GetZ() * actual.GetZ());
@@ -696,7 +976,7 @@ std::vector<PhysicsCharacterSnapshot> BethesdaPhysicsWorld::snapshot() const {
     result.reserve(m_impl->characters.size());
     for (const auto& [id, entry] : m_impl->characters) {
         result.push_back({id, entry.last.position, entry.last.rotation, entry.last.velocity,
-            entry.last.groundNormal, entry.last.grounded, entry.last.supportingObject});
+            entry.last.groundNormal, entry.last.grounded, entry.last.supportingObject, entry.movement});
     }
     return result;
 }
@@ -714,10 +994,13 @@ bool BethesdaPhysicsWorld::restoreCharacter(
         !std::isfinite(saved.rotation.w) || !std::isfinite(saved.velocity.x) ||
         !std::isfinite(saved.velocity.y) || !std::isfinite(saved.velocity.z) ||
         !std::isfinite(saved.groundNormal.x) || !std::isfinite(saved.groundNormal.y) ||
-        !std::isfinite(saved.groundNormal.z)) {
+        !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement)) {
         outError = "invalid saved Jolt character transform";
         return false;
     }
+    if (!validCharacterMovementState(saved.movement)) { outError = "invalid saved movement state"; return false; }
+    found->second.movement = saved.movement;
+    found->second.externalVelocity = JPH::Vec3(0, saved.velocity.y * kBethesdaUnitsToJoltMetres, 0);
     JPH::RVec3 centre = toJoltPosition(saved.position);
     centre += JPH::RVec3(
         0.0, static_cast<double>(found->second.centreOffsetMetres), 0.0);
@@ -730,6 +1013,10 @@ bool BethesdaPhysicsWorld::restoreCharacter(
     found->second.last.groundNormal = saved.groundNormal;
     found->second.last.grounded = saved.grounded;
     found->second.last.supportingObject = saved.supportingObject;
+    found->second.last.landed = false;
+    found->second.last.leftLedge = false;
+    found->second.last.landingImpactMetres = 0;
+    found->second.last.falling = !saved.grounded && saved.velocity.y < 0;
     outError.clear();
     return true;
 }
@@ -754,27 +1041,43 @@ bool BethesdaPhysicsWorld::restore(
             !std::isfinite(saved.rotation.w) || !std::isfinite(saved.velocity.x) ||
             !std::isfinite(saved.velocity.y) || !std::isfinite(saved.velocity.z) ||
             !std::isfinite(saved.groundNormal.x) || !std::isfinite(saved.groundNormal.y) ||
-            !std::isfinite(saved.groundNormal.z)) {
+            !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement)) {
             outError = "invalid saved Jolt character transform";
             return false;
         }
     }
     for (const PhysicsCharacterSnapshot& saved : snapshots) {
-        const auto found = m_impl->characters.find(saved.object);
-        JPH::RVec3 centre = toJoltPosition(saved.position);
-        centre += JPH::RVec3(
-            0.0, static_cast<double>(found->second.centreOffsetMetres), 0.0);
-        found->second.character->SetPosition(centre);
-        found->second.character->SetRotation(toJoltRotation(saved.rotation));
-        found->second.character->SetLinearVelocity(toJoltVector(saved.velocity));
-        found->second.last.position = saved.position;
-        found->second.last.rotation = saved.rotation;
-        found->second.last.velocity = saved.velocity;
-        found->second.last.groundNormal = saved.groundNormal;
-        found->second.last.grounded = saved.grounded;
-        found->second.last.supportingObject = saved.supportingObject;
+        if (!restoreCharacter(saved, outError)) return false;
     }
     return true;
+}
+
+bool BethesdaPhysicsWorld::isCharacterPlacementClear(const PhysicsCharacterConfig& config,
+    float penetrationToleranceBethesdaUnits) const {
+    if (!m_impl->initialized || !std::isfinite(config.position.x) || !std::isfinite(config.position.y) ||
+        !std::isfinite(config.position.z) || !std::isfinite(penetrationToleranceBethesdaUnits) || penetrationToleranceBethesdaUnits < 0)
+        return false;
+    for (float v : {config.boundsHalfExtents.x, config.boundsHalfExtents.y, config.boundsHalfExtents.z,
+                    config.rotation.x, config.rotation.y, config.rotation.z, config.rotation.w})
+        if (!std::isfinite(v)) return false;
+    if (config.rotation.x*config.rotation.x + config.rotation.y*config.rotation.y +
+        config.rotation.z*config.rotation.z + config.rotation.w*config.rotation.w < 1.e-8f) return false;
+    const float horizontal = std::max(std::fabs(config.boundsHalfExtents.x),std::fabs(config.boundsHalfExtents.z));
+    const float radius = std::clamp(horizontal*kBethesdaUnitsToJoltMetres,.18f,.65f);
+    const float halfHeight = std::clamp(std::fabs(config.boundsHalfExtents.y)*kBethesdaUnitsToJoltMetres,radius+.1f,1.6f);
+    JPH::CapsuleShape shape(std::max(.1f,halfHeight-radius),radius);
+    auto center=toJoltPosition(config.position)+JPH::RVec3(0,halfHeight,0);
+    class SolidFilter final : public JPH::ObjectLayerFilter {
+        bool ShouldCollide(JPH::ObjectLayer layer) const override { return layer==kStaticLayer || layer==kDynamicLayer; }
+    } filter;
+    JPH::CollideShapeSettings settings;
+    JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
+    m_impl->physics.GetNarrowPhaseQuery().CollideShape(&shape,JPH::Vec3::sReplicate(1),
+        JPH::RMat44::sRotationTranslation(toJoltRotation(config.rotation),center),settings,center,collector,
+        m_impl->physics.GetDefaultBroadPhaseLayerFilter(kCharacterLayer),filter);
+    const float tolerance=penetrationToleranceBethesdaUnits*kBethesdaUnitsToJoltMetres;
+    return std::none_of(collector.mHits.begin(),collector.mHits.end(),
+        [&](const auto& hit){return hit.mPenetrationDepth>tolerance;});
 }
 
 std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castDown(

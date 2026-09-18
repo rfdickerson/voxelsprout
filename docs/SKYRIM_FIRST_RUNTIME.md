@@ -1,5 +1,8 @@
 # Skyrim-first runtime status
 
+See [the Bleak Falls route contract and milestones](BLEAK_FALLS_ROUTE.md) for
+the fresh-start check, checkpoint reporting, and ordinary-input acceptance.
+
 ODAI's first gameplay contract is `--scenario skyrim-bleak-falls`. The scenario
 starts at Riverwood, bootstraps MQ101 stage 900, and registers MQ102 before
 replaying its authored stage-10 Riverwood startup fragment after VMAD attachment.
@@ -180,8 +183,8 @@ ODAI never reads or writes retail `.ess` saves.
   injected setup, unverified route segments, unresolved calls, and physical/runtime
   blockers without launching Vulkan. It does not claim the playable gate.
 - Procedural world generation, clipmap implementation, and MagicaVoxel sources
-  are no longer linked into the renderer. A packed legacy chunk helper remains
-  entangled with the Vulkan backend and is tracked below.
+  and the legacy chunk-meshing entry points have been removed. Packed vertex
+  encoding remains for retained renderer helpers; imported-scene formats are unchanged.
 
 The PEX/VMAD readers follow the byte ordering and table structure independently
 implemented by [Champollion](https://github.com/Orvid/Champollion/blob/main/Pex/FileReader.cpp)
@@ -205,7 +208,7 @@ odai_bethesda_probe <Data> --scenario-check skyrim-bleak-falls
 
 | Gate | Status | Evidence / blocker |
 |---|---|---|
-| Foundation | Partial | All retained tests pass and unreachable generators are unlinked. Vulkan backend still exposes a legacy chunk helper/API. |
+| Foundation | Partial | All retained tests pass and unreachable generators are unlinked. Legacy chunk-meshing APIs and unreachable generators are removed; packed renderer helpers remain. |
 | Content/VM | Partial | Synthetic malformed-input, opcode, call-stack, event-order, timer, latent-call, full QUST/INFO VMAD tails, typed DLBR/DIAL/INFO parsing including RNAM, branch-root/TCLT selection, dialogue phase dispatch, auto-property, CTDA log/dialogue selection, LCTN, GLOB, and strict-failure fixtures pass. The installed-data scenario probe loads 4 route quests, 236 stage fragments, 65 alias-script blocks, 25 DLBR branches, 127 DIAL topics, 239 INFO variants, and 49 INFO fragments; follows the reachable PEX/cross-quest closure; registers 81 locations and 91 globals; replays MQ102 stage 10 with objective 10 visible while MQ103 remains at 0; and reports zero unresolved reachable native calls. Physical route behavior remains outside this gate. |
 | Simulation | Partial | Fixed-step replay hashes, actor values, inventory, quest-created actor loot, outfits, activation commands, VMAD-backed puzzle state, location/global/story state, persistent movement requests, authored reference goals, cross-record NAVM stitching, resident teleport actions, per-reference streamed/interior Jolt collision, fixed-tick AI intent, occluded player/AI melee, damage/death state, and deterministic animation graph state exist. Retail faction hostility, death/ragdoll, general container presentation/full leveled loot, authored claw-door HKX motion/audio, cross-space packages, Skyrim preferred links, and full retail HKX binding remain. |
 | Save | Partial | V10 exactly round-trips nested VM, objects, navigation, typed AI walk/door actions, combat targets/cooldowns, activator puzzle state, quest-created spawned-item identity/provenance, outfits, physical characters, and graph events; checksum rejection, interrupted-commit recovery, fingerprint reconciliation, and mandatory v1-v6 migration fixtures pass. The installed-data assertion now save/reloads immediately after MQ103 stage 190 and rechecks the removed Dragonstone plus alias identity. Mid-response dialogue flow and dungeon streaming boundaries remain. |

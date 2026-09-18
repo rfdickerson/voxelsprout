@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Linux setup and launch UI. Game and mod installations are read-only inputs."""
+import datetime
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def resources():
+    if os.environ.get('ODAI_RESOURCE_DIR'):
+        return Path(os.environ['ODAI_RESOURCE_DIR'])
+    installed = Path(__file__).resolve().parent.parent / 'share/odai'
+    return installed if installed.is_dir() else Path(__file__).resolve().parent.parent / 'packaging'
+
+
+def make_profile(manifest, data, smim, jk):
+    roots = {'base-data': Path(data).expanduser().resolve(),
+             manifest['mods'][0]['id']: Path(smim).expanduser().resolve(),
+             manifest['mods'][1]['id']: Path(jk).expanduser().resolve()}
+    missing = []
+    for root in roots.values():
+        if not root.is_dir():
+            missing.append(f'Directory not found: {root}')
+    for plugin in manifest['plugins']:
+        layer = (manifest['mods'][0]['id'] if plugin == 'SMIM-SE-Merged-All.esp' else
+                 manifest['mods'][1]['id'] if plugin == 'JKs Skyrim.esp' else 'base-data')
+        if not (roots[layer] / plugin).is_file():
+            missing.append(f'Missing {plugin} in {roots[layer]}')
+    for asset in manifest['archives']:
+        if not (roots[asset['layer']] / asset['file']).is_file():
+            missing.append(f"Missing {asset['file']} in {roots[asset['layer']]}")
+    for directory in ('meshes', 'textures'):
+        if not (roots[manifest['mods'][0]['id']] / directory).is_dir():
+            missing.append(f'SMIM Everything installation needs its {directory} directory')
+    if missing:
+        raise ValueError('\n'.join(missing))
+    return {'version': 1, 'name': manifest['name'], 'game': manifest['game'],
+            'data_root': str(roots['base-data']),
+            'layers': [dict(mod, path=str(roots[mod['id']])) for mod in manifest['mods']],
+            'plugins': manifest['plugins'],
+            'archives': [{'path': str(roots[a['layer']] / a['file']), 'layer': a['layer'],
+                          'required': True} for a in manifest['archives']]}
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.tmp')
+    with temporary.open('w', encoding='utf-8') as stream:
+        json.dump(value, stream, indent=2)
+        stream.write('\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+def save_slots(directory):
+    slots = set(directory.glob('*.odai.json'))
+    slots.update(Path(str(path)[:-len('.previous')])
+                 for path in directory.glob('*.odai.json.previous'))
+    def modified(path):
+        generations = (path, Path(str(path) + '.previous'))
+        return max((p.stat().st_mtime for p in generations if p.is_file()), default=0)
+    return sorted(slots, key=modified, reverse=True)
+
+
+def main():
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, ttk
+    except ImportError:
+        print('ODAI setup requires Python 3 Tk support (Ubuntu: python3-tk).', file=sys.stderr)
+        return 1
+    manifest = json.loads((resources() / 'skyrim-slice.json').read_text())
+    config = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'odai'
+    state = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'odai'
+    profile_path = config / 'skyrim-slice.json'
+    saves = state / 'saves'
+    binary = Path(__file__).resolve().parent / 'odai'
+    if not binary.is_file():
+        binary = Path(__file__).resolve().parent.parent / 'build-linux/odai'
+    root = tk.Tk()
+    root.title('ODAI — Skyrim setup')
+    root.minsize(680, 390)
+    frame = ttk.Frame(root, padding=20)
+    frame.pack(fill='both', expand=True)
+    frame.columnconfigure(1, weight=1)
+    ttk.Label(frame, text='ODAI · Experimental Skyrim slice', font=('', 17, 'bold')).grid(
+        row=0, column=0, columnspan=3, sticky='w', pady=(0, 12))
+    ttk.Label(frame, text='Playable release gates are still pending. Use your own Skyrim SE content.\n'
+              'Install SMIM SE 2.08 Everything and JK’s Skyrim 1.7 before continuing.').grid(
+        row=1, column=0, columnspan=3, sticky='w', pady=(0, 14))
+    values = [tk.StringVar() for _ in range(3)]
+    try:
+        old = json.loads(profile_path.read_text())
+        values[0].set(old['data_root'])
+        for i, layer in enumerate(old['layers'][:2], 1):
+            values[i].set(layer['path'])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    for row, (label, value) in enumerate(zip(('Skyrim SE Data', 'SMIM Everything root', 'JK’s Skyrim root'), values), 2):
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w', padx=(0, 10), pady=6)
+        ttk.Entry(frame, textvariable=value).grid(row=row, column=1, sticky='ew')
+        def browse(variable=value):
+            path = filedialog.askdirectory(parent=root)
+            if path:
+                variable.set(path)
+        ttk.Button(frame, text='Browse…', command=browse).grid(row=row, column=2, padx=(10, 0))
+    status = tk.StringVar(value='Select extracted Data-style mod roots. No game files will be copied or modified.')
+    ttk.Label(frame, textvariable=status, wraplength=640).grid(row=5, column=0, columnspan=3, sticky='w', pady=12)
+    candidates = save_slots(saves)
+    selected = tk.StringVar(value=candidates[0].name if candidates else '')
+    ttk.Label(frame, text='Saved game').grid(row=6, column=0, sticky='w')
+    ttk.Combobox(frame, textvariable=selected, values=[p.name for p in candidates], state='readonly').grid(
+        row=6, column=1, columnspan=2, sticky='ew')
+
+    def show_error(title, text):
+        dialog = tk.Toplevel(root)
+        dialog.title(title)
+        dialog.transient(root)
+        panel = ttk.Frame(dialog, padding=16)
+        panel.pack(fill='both', expand=True)
+        panel.rowconfigure(0, weight=1)
+        panel.columnconfigure(0, weight=1)
+        body = tk.Text(panel, wrap='word', width=72, height=16, font='TkDefaultFont')
+        scrollbar = ttk.Scrollbar(panel, orient='vertical', command=body.yview)
+        body.configure(yscrollcommand=scrollbar.set)
+        body.insert('1.0', text)
+        body.configure(state='disabled')
+        body.grid(row=0, column=0, sticky='nsew')
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        ttk.Button(panel, text='Close', command=dialog.destroy).grid(row=1, column=0, sticky='e', pady=(12, 0))
+        dialog.bind('<Escape>', lambda event: dialog.destroy())
+        dialog.grab_set()
+
+    def validate():
+        if any(not v.get().strip() for v in values):
+            raise ValueError('Select all three content directories.')
+        profile = make_profile(manifest, *(v.get() for v in values))
+        atomic_json(profile_path, profile)
+        return profile
+
+    def launch(mode):
+        try:
+            validate()
+            if not binary.is_file():
+                raise ValueError('ODAI runtime is missing. Reinstall the engine package.')
+            saves.mkdir(parents=True, exist_ok=True)
+            if mode == 'new':
+                name = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                destination = saves / f'{name}.odai.json'
+                load = None
+            else:
+                if not selected.get():
+                    raise ValueError('No saved game selected.')
+                destination = saves / Path(selected.get()).name
+                load = Path(str(destination) + '.previous') if mode == 'recover' else destination
+                if not load.is_file() and not (mode == 'continue' and Path(str(load) + '.previous').is_file()):
+                    raise ValueError('The selected save generation does not exist.')
+                if mode == 'recover':
+                    # Recovery never overwrites the damaged slot or its backup.
+                    name = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                    destination = saves / f'recovered-{name}.odai.json'
+            command = [str(binary), '--profile', str(profile_path), '--scenario', 'skyrim-bleak-falls',
+                       '--save-game', str(destination), '--no-resume',
+                       '--compat-report', str(state / 'compatibility.json')]
+            if load:
+                command += ['--load-game', str(load)]
+            env = dict(os.environ)
+            env.setdefault('ODAI_WINDOW_SIZE', '768x432')
+            env.setdefault('ODAI_WINDOW_HIDPI', '1')
+            env.setdefault('ODAI_NATIVE_LOGICAL_PRESENT', '1')
+            env.setdefault('ODAI_RENDER_SCALE', '1')
+            log = (state / 'runtime.log').open('w')
+            try:
+                process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
+            finally:
+                log.close()
+            root.withdraw()
+            def poll():
+                code = process.poll()
+                if code is None:
+                    root.after(300, poll)
+                elif code:
+                    root.deiconify()
+                    messagebox.showerror('ODAI stopped', f'Runtime exited with code {code}.\nSee {state / "runtime.log"}', parent=root)
+                else:
+                    root.destroy()
+            poll()
+        except (OSError, ValueError) as error:
+            show_error('Setup needs attention', str(error))
+
+    def check():
+        try:
+            validate()
+            status.set('Required files found. Confirm the mod versions match the versions shown above.')
+        except (OSError, ValueError) as error:
+            show_error('Content check', str(error))
+
+    def report():
+        # Export only known-safe metadata, never raw logs, environment, paths or game data.
+        result = {'format': 'odai-diagnostics-v1', 'platform': sys.platform,
+                  'profile': manifest['name'], 'plugins': manifest['plugins'],
+                  'release_gate_passed': False, 'gpu': 'unavailable', 'content_fingerprint': 'unavailable'}
+        try:
+            result['engine'] = subprocess.check_output([str(binary), '--version'], text=True, timeout=5).strip()
+        except (OSError, subprocess.SubprocessError):
+            result['engine'] = 'unavailable'
+        try:
+            compat = json.loads((state / 'compatibility.json').read_text())
+            result['content_fingerprint'] = compat.get('fingerprint', 'unavailable')
+            result['compatibility_codes'] = [d['code'] for d in compat.get('diagnostics', []) if 'code' in d]
+        except (OSError, ValueError, TypeError):
+            pass
+        try:
+            output = subprocess.check_output(['vulkaninfo', '--summary'], text=True, stderr=subprocess.DEVNULL, timeout=10)
+            keys = ('deviceName', 'driverName', 'driverInfo', 'apiVersion', 'driverVersion')
+            result['gpu'] = [line.strip() for line in output.splitlines() if any(line.strip().startswith(k + ' ') for k in keys)]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        path = filedialog.asksaveasfilename(parent=root, defaultextension='.json', initialfile='odai-diagnostics.json')
+        if path:
+            try:
+                atomic_json(Path(path), result)
+                status.set('Diagnostic report exported without local paths or raw logs.')
+            except OSError as error:
+                messagebox.showerror('Export failed', str(error), parent=root)
+
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=7, column=0, columnspan=3, pady=18, sticky='w')
+    for text, command in [('Check content', check), ('New Game', lambda: launch('new')),
+                          ('Continue', lambda: launch('continue')), ('Recover previous', lambda: launch('recover')),
+                          ('Export diagnostics', report)]:
+        ttk.Button(buttons, text=text, command=command).pack(side='left', padx=(0, 6))
+    root.mainloop()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -30,6 +30,9 @@ struct ControlPoint
     nointerpolation uint lightingMaterial : TEXCOORD10;
     nointerpolation uint4 terrainSurface : TEXCOORD11;
     nointerpolation uint terrainSurface4 : TEXCOORD12;
+    float3 modelBasisX : TEXCOORD13;
+    float3 modelBasisY : TEXCOORD14;
+    float3 modelBasisZ : TEXCOORD15;
 };
 
 struct PatchConstants

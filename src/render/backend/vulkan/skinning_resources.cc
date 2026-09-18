@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -37,8 +39,8 @@ constexpr const char* kSkinningShaderPath = "../src/render/shaders/skinning.comp
 struct SkinningPushConstants {
     std::uint32_t vertexCount;
     std::uint32_t boneCount;
-    float pad0;
-    float pad1;
+    std::uint32_t morphTargetCount;
+    std::uint32_t pad0;
 };
 
 // GPU-side rest-pose vertex layout (mirrors skinning.comp.slang's
@@ -55,7 +57,14 @@ struct GpuSkinnedVertexIn {
     std::uint32_t flags;
     std::uint32_t boneIndices[4];
     float boneWeights[4];
+    std::uint32_t normalTextureIndex;
+    float modelNormalBasis[9];
+    std::uint32_t skinSoftTexture, skinSpecularTexture;
+    float skinSpecularStrength, skinGlossiness, skinSoftRolloff;
+    std::uint32_t skinSpecularColor;
 };
+static_assert(sizeof(GpuSkinnedVertexIn) == 148);
+static_assert(sizeof(ImportedSkinnedMeshTemplate::MorphDelta) == 16);
 
 }  // namespace
 
@@ -82,8 +91,17 @@ bool RendererBackend::createSkinningComputeResources() {
         outputBinding.descriptorCount = 1;
         outputBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        const std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
-            restPoseBinding, boneMatrixBinding, outputBinding
+        const auto storageBinding = [](std::uint32_t binding) {
+            VkDescriptorSetLayoutBinding result{};
+            result.binding = binding;
+            result.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            result.descriptorCount = 1;
+            result.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            return result;
+        };
+        const std::array<VkDescriptorSetLayoutBinding, 6> bindings = {
+            restPoseBinding, boneMatrixBinding, outputBinding,
+            storageBinding(3), storageBinding(4), storageBinding(5)
         };
 
         if (!createDescriptorSetLayout(
@@ -139,10 +157,13 @@ bool RendererBackend::createSkinningComputeResources() {
         destroySkinningComputeResources();
         return false;
     }
+    // Pose compute is optional: a missing shader retains CPU palettes.
+    (void)createPoseComputeResources();
     return true;
 }
 
 void RendererBackend::destroySkinningComputeResources() {
+    destroyPoseComputeResources();
     if (m_skinningPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skinningPipeline, nullptr);
         m_skinningPipeline = VK_NULL_HANDLE;
@@ -159,19 +180,30 @@ void RendererBackend::destroySkinningComputeResources() {
         destroyDescriptorBufferSet(slot.velocityBufferSet);
         m_bufferAllocator.destroyBuffer(slot.restPoseVertexBufferHandle);
         slot.restPoseVertexBufferHandle = kInvalidBufferHandle;
+        m_bufferAllocator.destroyBuffer(slot.morphOffsetBufferHandle);
+        slot.morphOffsetBufferHandle = kInvalidBufferHandle;
+        m_bufferAllocator.destroyBuffer(slot.morphDeltaBufferHandle);
+        slot.morphDeltaBufferHandle = kInvalidBufferHandle;
         m_bufferAllocator.destroyBuffer(slot.indexBufferHandle);
         slot.indexBufferHandle = kInvalidBufferHandle;
         m_bufferAllocator.destroyBuffer(slot.outputVertexBufferHandle);
         slot.outputVertexBufferHandle = kInvalidBufferHandle;
         slot.vertexCount = 0;
         slot.boneCount = 0;
+        slot.morphTargetCount = 0;
         slot.visible = true;
         slot.meshDraws.clear();
         slot.pendingBoneMatrices.clear();
+        slot.pendingMorphWeights.clear();
+        slot.previousMorphWeights.clear();
+        slot.poseHistoryValid = false;
         slot.previousBoneMatrices.clear();
         slot.currentBoneAddress = 0;
         slot.previousBoneAddress = 0;
         slot.boneBufferBytes = 0;
+        slot.currentMorphAddress = 0;
+        slot.previousMorphAddress = 0;
+        slot.morphBufferBytes = 0;
         for (const std::uint32_t textureSlot : slot.textureSlots) {
             releaseImportedTexture(textureSlot);
         }
@@ -196,6 +228,35 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
     if (meshTemplate.vertices.empty() || meshTemplate.indices.empty() || meshTemplate.boneCount == 0) {
         VOX_LOGW("render") << "skinned mesh template upload skipped: empty geometry or zero bones";
         return false;
+    }
+    const bool hasMorphs = meshTemplate.morphTargetCount != 0u;
+    if (hasMorphs &&
+        (meshTemplate.morphVertexOffsets.size() != meshTemplate.vertices.size() + 1u ||
+         meshTemplate.morphVertexOffsets.back() != meshTemplate.morphDeltas.size())) {
+        VOX_LOGW("render") << "skinned mesh template upload skipped: malformed morph CSR data";
+        return false;
+    }
+    if (!hasMorphs && (!meshTemplate.morphVertexOffsets.empty() ||
+                       !meshTemplate.morphDeltas.empty())) {
+        VOX_LOGW("render") << "skinned mesh template upload skipped: morph data has zero targets";
+        return false;
+    }
+    if (hasMorphs) {
+        for (std::size_t vertex = 0; vertex < meshTemplate.vertices.size(); ++vertex) {
+            if (meshTemplate.morphVertexOffsets[vertex] >
+                meshTemplate.morphVertexOffsets[vertex + 1u]) {
+                VOX_LOGW("render") << "skinned mesh template upload skipped: unsorted morph offsets";
+                return false;
+            }
+        }
+        for (const auto& delta : meshTemplate.morphDeltas) {
+            if (delta.targetIndex >= meshTemplate.morphTargetCount ||
+                !std::isfinite(delta.position[0]) || !std::isfinite(delta.position[1]) ||
+                !std::isfinite(delta.position[2])) {
+                VOX_LOGW("render") << "skinned mesh template upload skipped: invalid morph delta";
+                return false;
+            }
+        }
     }
     // Creates the shared pipeline/descriptor-set-layout on first use across
     // any slot; a no-op if already created.
@@ -222,6 +283,14 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         dst.uv[1] = src.uv[1];
         dst.textureIndex = src.textureIndex;
         dst.flags = src.flags;
+        dst.normalTextureIndex = src.normalTextureIndex;
+        std::copy_n(src.modelNormalBasis, 9, dst.modelNormalBasis);
+        dst.skinSoftTexture = src.skinSoftTexture;
+        dst.skinSpecularTexture = src.skinSpecularTexture;
+        dst.skinSpecularStrength = src.skinSpecularStrength;
+        dst.skinGlossiness = src.skinGlossiness;
+        dst.skinSoftRolloff = src.skinSoftRolloff;
+        dst.skinSpecularColor = src.skinSpecularColor;
         for (int b = 0; b < 4; ++b) {
             dst.boneIndices[b] = static_cast<std::uint32_t>(src.boneIndices[b]);
             dst.boneWeights[b] = src.boneWeights[b];
@@ -406,6 +475,39 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         return false;
     }
 
+    // Morph topology and sparse deltas are immutable and device-local. Empty
+    // templates still bind one harmless element at each binding because Vulkan
+    // descriptors must be valid even though morphTargetCount makes the shader
+    // skip every read.
+    std::vector<std::uint32_t> zeroMorphOffsets(gpuVertices.size() + 1u, 0u);
+    const ImportedSkinnedMeshTemplate::MorphDelta zeroMorphDelta{};
+    const std::span<const std::uint32_t> morphOffsets = hasMorphs
+        ? meshTemplate.morphVertexOffsets
+        : std::span<const std::uint32_t>(zeroMorphOffsets);
+    const std::span<const ImportedSkinnedMeshTemplate::MorphDelta> morphDeltas =
+        hasMorphs && !meshTemplate.morphDeltas.empty()
+        ? meshTemplate.morphDeltas
+        : std::span<const ImportedSkinnedMeshTemplate::MorphDelta>(&zeroMorphDelta, 1u);
+    BufferHandle newMorphOffsetHandle = kInvalidBufferHandle;
+    if (!uploadDeviceLocalBuffer(
+            morphOffsets.data(),
+            static_cast<VkDeviceSize>(morphOffsets.size_bytes()),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            "skinned mesh morph offsets", newMorphOffsetHandle)) {
+        scheduleBufferRelease(newRestPoseHandle, latestUploadTimelineValue);
+        return false;
+    }
+    BufferHandle newMorphDeltaHandle = kInvalidBufferHandle;
+    if (!uploadDeviceLocalBuffer(
+            morphDeltas.data(),
+            static_cast<VkDeviceSize>(morphDeltas.size_bytes()),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            "skinned mesh morph deltas", newMorphDeltaHandle)) {
+        scheduleBufferRelease(newRestPoseHandle, latestUploadTimelineValue);
+        scheduleBufferRelease(newMorphOffsetHandle, latestUploadTimelineValue);
+        return false;
+    }
+
     BufferHandle newIndexHandle = kInvalidBufferHandle;
     if (!uploadDeviceLocalBuffer(
             meshTemplate.indices.data(),
@@ -414,6 +516,8 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             "skinned mesh index",
             newIndexHandle)) {
         scheduleBufferRelease(newRestPoseHandle, latestUploadTimelineValue);
+        scheduleBufferRelease(newMorphOffsetHandle, latestUploadTimelineValue);
+        scheduleBufferRelease(newMorphDeltaHandle, latestUploadTimelineValue);
         return false;
     }
 
@@ -448,6 +552,18 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
         dst.uv[1] = src.uv[1];
         dst.textureIndex = src.textureIndex;
         dst.flags = src.flags;
+        dst.packedLayerTexture01 = 0xffff0000u | std::min(src.normalTextureIndex, 0xffffu);
+        dst.terrainSurface01 = odai::importer::packImportedVertexNormal(src.modelNormalBasis);
+        dst.terrainSurface23 = odai::importer::packImportedVertexNormal(src.modelNormalBasis + 3);
+        dst.terrainSurface45 = odai::importer::packImportedVertexNormal(src.modelNormalBasis + 6);
+        if ((src.flags & odai::importer::kImportedSceneMaterialFlagSkinnedModelNormals) != 0u) {
+            dst.packedLayerTexture01 = std::min(src.normalTextureIndex, 0xffffu) | (std::min(src.skinSoftTexture, 0xffffu) << 16);
+            dst.packedLayerTexture23 = 0xffff0000u | std::min(src.skinSpecularTexture, 0xffffu);
+            dst.packedTerrainNormal01 = std::bit_cast<std::uint32_t>(src.skinSpecularStrength);
+            dst.packedTerrainNormal23 = std::bit_cast<std::uint32_t>(src.skinGlossiness);
+            dst.packedTerrainNormal45 = std::bit_cast<std::uint32_t>(src.skinSoftRolloff);
+            dst.layerWeights = src.skinSpecularColor;
+        }
     }
     BufferHandle newOutputHandle = kInvalidBufferHandle;
     if (!uploadDeviceLocalBuffer(
@@ -462,6 +578,8 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             newOutputHandle)) {
         VOX_LOGE("render") << "skinned mesh output buffer allocation failed";
         scheduleBufferRelease(newRestPoseHandle, latestUploadTimelineValue);
+        scheduleBufferRelease(newMorphOffsetHandle, latestUploadTimelineValue);
+        scheduleBufferRelease(newMorphDeltaHandle, latestUploadTimelineValue);
         scheduleBufferRelease(newIndexHandle, latestUploadTimelineValue);
         return false;
     }
@@ -477,20 +595,48 @@ bool RendererBackend::uploadSkinnedMeshTemplate(
             slot.bufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 2),
             m_bufferAllocator.getDeviceAddress(newOutputHandle),
             static_cast<VkDeviceSize>(restOutputVertices.size() * sizeof(ImportedMeshVertex)));
+        writeDescriptorBufferStorage(
+            slot.bufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 3),
+            m_bufferAllocator.getDeviceAddress(newMorphOffsetHandle),
+            static_cast<VkDeviceSize>(morphOffsets.size_bytes()));
+        writeDescriptorBufferStorage(
+            slot.bufferSet, region, descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 4),
+            m_bufferAllocator.getDeviceAddress(newMorphDeltaHandle),
+            static_cast<VkDeviceSize>(morphDeltas.size_bytes()));
+    }
+    if (slot.velocityBufferSet.valid() && m_skinnedVelocityDescriptorSetLayout != VK_NULL_HANDLE) {
+        for (std::uint32_t region = 0; region < slot.velocityBufferSet.regionCount; ++region) {
+            writeDescriptorBufferStorage(
+                slot.velocityBufferSet, region,
+                descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 2),
+                m_bufferAllocator.getDeviceAddress(newMorphOffsetHandle),
+                static_cast<VkDeviceSize>(morphOffsets.size_bytes()));
+            writeDescriptorBufferStorage(
+                slot.velocityBufferSet, region,
+                descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 3),
+                m_bufferAllocator.getDeviceAddress(newMorphDeltaHandle),
+                static_cast<VkDeviceSize>(morphDeltas.size_bytes()));
+        }
     }
 
     // The old template may still be referenced by an in-flight frame. The
     // upload submissions are ordered after that frame on the same graphics
     // queue, so their final timeline signal is also a safe retirement point.
     scheduleBufferRelease(slot.restPoseVertexBufferHandle, latestUploadTimelineValue);
+    scheduleBufferRelease(slot.morphOffsetBufferHandle, latestUploadTimelineValue);
+    scheduleBufferRelease(slot.morphDeltaBufferHandle, latestUploadTimelineValue);
     scheduleBufferRelease(slot.indexBufferHandle, latestUploadTimelineValue);
     scheduleBufferRelease(slot.outputVertexBufferHandle, latestUploadTimelineValue);
 
     slot.restPoseVertexBufferHandle = newRestPoseHandle;
+    slot.morphOffsetBufferHandle = newMorphOffsetHandle;
+    slot.morphDeltaBufferHandle = newMorphDeltaHandle;
     slot.indexBufferHandle = newIndexHandle;
     slot.outputVertexBufferHandle = newOutputHandle;
     slot.vertexCount = static_cast<std::uint32_t>(gpuVertices.size());
     slot.boneCount = meshTemplate.boneCount;
+    slot.morphTargetCount = meshTemplate.morphTargetCount;
+    slot.pendingMorphWeights.assign(slot.morphTargetCount, 0.0f);
 
     slot.meshDraws.clear();
     slot.meshDraws.reserve(meshTemplate.draws.size());
@@ -702,6 +848,7 @@ void RendererBackend::setSkinnedActorVisible(std::uint32_t instanceIndex, bool v
     }
     slot.visible = visible;
     if (!visible) {
+        slot.poseHistoryValid = false;
         slot.currentBoneAddress = 0;
         slot.previousBoneAddress = 0;
         slot.boneBufferBytes = 0;
@@ -724,7 +871,60 @@ void RendererBackend::setSkinnedActorPose(std::uint32_t instanceIndex, const Imp
                             << " -- ignoring";
         return;
     }
+    if (pose.morphWeights.size() != slot.morphTargetCount) {
+        VOX_LOGW("render") << "setSkinnedActorPose: instance " << instanceIndex << " pose has "
+                            << pose.morphWeights.size() << " morph weights, expected "
+                            << slot.morphTargetCount << " -- ignoring";
+        return;
+    }
+    for (const float weight : pose.morphWeights) {
+        if (!std::isfinite(weight) || weight < 0.0f || weight > 1.0f) {
+            VOX_LOGW("render") << "setSkinnedActorPose: instance " << instanceIndex
+                                << " has an invalid morph weight -- ignoring";
+            return;
+        }
+    }
     slot.pendingBoneMatrices.assign(pose.boneMatrices.begin(), pose.boneMatrices.end());
+    slot.pendingMorphWeights.assign(pose.morphWeights.begin(), pose.morphWeights.end());
+    slot.pendingEvaluation.reset();
+    if (pose.resetHistory) {
+        slot.poseHistoryValid = false;
+        slot.previousBoneMatrices.clear();
+        slot.previousMorphWeights.clear();
+    }
+    if (pose.animationView && pose.evaluationPacket && pose.animationView->skeleton) {
+        // Admit only packets whose evaluated palette matches the submitted
+        // authoritative pose while the new execution path is being proven.
+        // This also catches equipment corrections, ragdolls and interpolation.
+        odai::anim::LocalPose local;
+        std::string error;
+        if (odai::anim::evaluatePosePacket(*pose.evaluationPacket, *pose.animationView->skeleton,
+                pose.animationView->clips, local, error)) {
+            auto world = odai::anim::composePoseWorld(*pose.animationView->skeleton, local);
+            bool matches = world.size() == pose.boneMatrices.size() &&
+                world.size() == pose.animationView->inverseBindMatrices.size();
+            for (std::size_t bone = 0; matches && bone < world.size(); ++bone) {
+                const auto expected = pose.actorWorld * world[bone] * pose.animationView->inverseBindMatrices[bone];
+                for (std::size_t e = 0; e < 16; ++e)
+                    if (!std::isfinite(expected.m[e]) || !std::isfinite(pose.boneMatrices[bone].m[e]) ||
+                        std::abs(expected.m[e] - pose.boneMatrices[bone].m[e]) > 1.e-4f)
+                        matches = false;
+            }
+            if (matches) {
+                if (slot.poseView != pose.animationView) {
+                    scheduleBufferRelease(slot.poseResourceBuffer, m_nextTimelineValue - 1);
+                    slot.poseResourceBuffer = kInvalidBufferHandle;
+                    slot.poseResource = {};
+                    slot.poseHistoryValid = false;
+                    slot.poseView = pose.animationView;
+                    slot.previousBoneMatrices.clear();
+                    slot.previousMorphWeights.clear();
+                }
+                slot.pendingEvaluation = pose.evaluationPacket;
+                slot.poseActorWorld = pose.actorWorld;
+            }
+        }
+    }
 }
 
 // Called from frame_run.cc immediately after m_frameArena.beginFrame(), so
@@ -733,10 +933,15 @@ void RendererBackend::setSkinnedActorPose(std::uint32_t instanceIndex, const Imp
 void RendererBackend::uploadSkinnedActorPoseForFrame() {
     for (std::uint32_t i = 0; i < m_skinningActiveInstanceCount; ++i) {
         SkinnedInstanceSlot& slot = m_skinningInstances[i];
+        slot.poseComputeReady = false;
+        slot.poseHistoryReady = false;
         if (!slot.visible) {
             slot.currentBoneAddress = 0;
             slot.previousBoneAddress = 0;
             slot.boneBufferBytes = 0;
+            slot.currentMorphAddress = 0;
+            slot.previousMorphAddress = 0;
+            slot.morphBufferBytes = 0;
             continue;
         }
         if (slot.vertexCount == 0 || slot.pendingBoneMatrices.empty() || !slot.bufferSet.valid()) {
@@ -786,6 +991,31 @@ void RendererBackend::uploadSkinnedActorPoseForFrame() {
             descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 1),
             boneAddress, boneBufferSize);
 
+        // Morph weights change with gameplay sliders while topology and deltas
+        // remain device-local. Bind a single zero for non-morph templates so
+        // every descriptor region is valid even when the shader skips reads.
+        const float zeroMorphWeight = 0.0f;
+        const void* morphSource = slot.pendingMorphWeights.empty()
+            ? static_cast<const void*>(&zeroMorphWeight)
+            : static_cast<const void*>(slot.pendingMorphWeights.data());
+        const VkDeviceSize morphBufferSize = static_cast<VkDeviceSize>(
+            std::max<std::size_t>(slot.pendingMorphWeights.size(), 1u) * sizeof(float));
+        const std::optional<FrameArenaSlice> morphSlice = m_frameArena.allocateUpload(
+            morphBufferSize, 256u, FrameArenaUploadKind::Unknown);
+        if (!morphSlice.has_value() || morphSlice->mapped == nullptr) {
+            VOX_LOGW("render") << "skinning: morph weight upload failed for instance " << i
+                                << ", skipping this frame's pose";
+            continue;
+        }
+        std::memcpy(morphSlice->mapped, morphSource, static_cast<std::size_t>(morphBufferSize));
+        writeDescriptorBufferStorage(
+            slot.bufferSet, m_currentFrame,
+            descriptorBufferBindingOffset(m_skinningDescriptorSetLayout, 5),
+            m_bufferAllocator.getDeviceAddress(morphSlice->buffer) + morphSlice->offset,
+            morphBufferSize);
+        const VkDeviceAddress morphAddress =
+            m_bufferAllocator.getDeviceAddress(morphSlice->buffer) + morphSlice->offset;
+
         // Last frame's pose, uploaded alongside this frame's so the velocity
         // pass can skin the same rest vertex into both. On the very first frame
         // for a slot there is no previous pose, so it reuses the current one --
@@ -806,12 +1036,36 @@ void RendererBackend::uploadSkinnedActorPoseForFrame() {
             slot.previousBoneAddress =
                 m_bufferAllocator.getDeviceAddress(previousSlice->buffer) + previousSlice->offset;
             slot.boneBufferBytes = boneBufferSize;
+            const std::vector<float>& previousMorphSource =
+                (slot.previousMorphWeights.size() == slot.pendingMorphWeights.size())
+                    ? slot.previousMorphWeights : slot.pendingMorphWeights;
+            const void* previousMorphData = previousMorphSource.empty()
+                ? static_cast<const void*>(&zeroMorphWeight)
+                : static_cast<const void*>(previousMorphSource.data());
+            const std::optional<FrameArenaSlice> previousMorphSlice =
+                m_frameArena.allocateUpload(morphBufferSize, 256u,
+                    FrameArenaUploadKind::Unknown);
+            if (previousMorphSlice.has_value() && previousMorphSlice->mapped != nullptr) {
+                std::memcpy(previousMorphSlice->mapped, previousMorphData,
+                    static_cast<std::size_t>(morphBufferSize));
+                slot.currentMorphAddress = morphAddress;
+                slot.previousMorphAddress = m_bufferAllocator.getDeviceAddress(
+                    previousMorphSlice->buffer) + previousMorphSlice->offset;
+                slot.morphBufferBytes = morphBufferSize;
+            } else {
+                slot.currentMorphAddress = 0;
+                slot.previousMorphAddress = 0;
+                slot.morphBufferBytes = 0;
+            }
         } else {
             // No previous upload means no velocity draw this frame; the pixels
             // fall back to depth reprojection rather than reading a stale pose.
             slot.currentBoneAddress = 0;
             slot.previousBoneAddress = 0;
             slot.boneBufferBytes = 0;
+            slot.currentMorphAddress = 0;
+            slot.previousMorphAddress = 0;
+            slot.morphBufferBytes = 0;
         }
         if (slot.velocityBufferSet.valid() && slot.currentBoneAddress != 0 &&
             m_skinnedVelocityDescriptorSetLayout != VK_NULL_HANDLE) {
@@ -823,8 +1077,21 @@ void RendererBackend::uploadSkinnedActorPoseForFrame() {
                 slot.velocityBufferSet, m_currentFrame,
                 descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 1),
                 slot.previousBoneAddress, slot.boneBufferBytes);
+            if (slot.currentMorphAddress != 0) {
+                writeDescriptorBufferStorage(
+                    slot.velocityBufferSet, m_currentFrame,
+                    descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 4),
+                    slot.currentMorphAddress, slot.morphBufferBytes);
+                writeDescriptorBufferStorage(
+                    slot.velocityBufferSet, m_currentFrame,
+                    descriptorBufferBindingOffset(m_skinnedVelocityDescriptorSetLayout, 5),
+                    slot.previousMorphAddress, slot.morphBufferBytes);
+            }
         }
         slot.previousBoneMatrices = slot.pendingBoneMatrices;
+        slot.previousMorphWeights = slot.pendingMorphWeights;
+        if (slot.currentBoneAddress && slot.previousBoneAddress)
+            preparePoseCompute(i,boneAddress,boneBufferSize);
     }
 }
 

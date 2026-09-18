@@ -944,7 +944,8 @@ bool ActorNavigationWorld::buildWanderPath(
 bool ActorNavigationWorld::buildPath(
     const Vector3& start,
     const Vector3& goal,
-    std::vector<ActorNavigationStep>& outWaypoints) const {
+    std::vector<ActorNavigationStep>& outWaypoints,
+    bool allowPartial) const {
     outWaypoints.clear();
     GeneratedLocation generatedStart;
     GeneratedLocation generatedGoal;
@@ -954,10 +955,10 @@ bool ActorNavigationWorld::buildPath(
     }
     Location startLocation;
     Location goalLocation;
-    if (!findNearest(start, 220.0f, 300.0f, startLocation) ||
-        !findNearest(goal, 500.0f, 700.0f, goalLocation)) {
-        return false;
-    }
+    if (!findNearest(start, 220.0f, 300.0f, startLocation)) return false;
+    const bool goalResident = findNearest(goal, 500.0f, 700.0f, goalLocation);
+    if (!goalResident && !allowPartial) return false;
+    if (!goalResident) goalLocation = startLocation;
 
     // Flatten resident meshes in authored identity order. Streaming completion
     // order and unordered-map bucket order must not affect path selection.
@@ -980,7 +981,7 @@ bool ActorNavigationWorld::buildPath(
     const auto goalMesh = meshIndices.find(goalLocation.mesh);
     if (startMesh == meshIndices.end() || goalMesh == meshIndices.end()) return false;
     const std::size_t startNode = offsets[startMesh->second] + startLocation.triangle;
-    const std::size_t goalNode = offsets[goalMesh->second] + goalLocation.triangle;
+    std::size_t goalNode = offsets[goalMesh->second] + goalLocation.triangle;
 
     struct Link {
         std::size_t target = 0u;
@@ -1145,7 +1146,7 @@ bool ActorNavigationWorld::buildPath(
     std::queue<std::size_t> frontier;
     parent[startNode] = -1;
     frontier.push(startNode);
-    while (!frontier.empty() && parent[goalNode] == -2) {
+    while (!frontier.empty() && (!goalResident || parent[goalNode] == -2)) {
         const std::size_t current = frontier.front();
         frontier.pop();
         for (const Link& link : graph[current]) {
@@ -1155,7 +1156,22 @@ bool ActorNavigationWorld::buildPath(
             frontier.push(link.target);
         }
     }
-    if (parent[goalNode] == -2) return false;
+    if (!goalResident || parent[goalNode] == -2) {
+        if (!allowPartial) return false;
+        float closest = distanceSquaredXZ(startLocation.point, goal);
+        bool progressed = false;
+        for (std::size_t mesh = 0; mesh < meshes.size(); ++mesh) {
+            for (std::size_t triangle = 0; triangle < meshes[mesh]->triangles.size(); ++triangle) {
+                const auto node = offsets[mesh] + triangle;
+                if (parent[node] == -2) continue;
+                const auto point = triangleCentroid(*meshes[mesh], meshes[mesh]->triangles[triangle]);
+                const auto distance = distanceSquaredXZ(point, goal);
+                if (distance >= closest || distanceSquaredXZ(point, startLocation.point) < 180.f*180.f) continue;
+                closest = distance; goalNode = node; goalLocation.point = point; progressed = true;
+            }
+        }
+        if (!progressed) return false;
+    }
 
     std::vector<std::size_t> nodes;
     for (std::ptrdiff_t current = static_cast<std::ptrdiff_t>(goalNode); current >= 0;

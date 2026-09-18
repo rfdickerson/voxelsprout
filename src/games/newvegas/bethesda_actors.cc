@@ -1,3 +1,5 @@
+#include "import/fnv/strings_table.h"
+#include "import/fnv/fuz.h"
 #include "games/newvegas/bethesda_actors.h"
 
 #include "import/fnv/skyrim_animation_assets.h"
@@ -251,7 +253,7 @@ std::unordered_map<std::string, std::vector<importer::fnv::BsaArchive>>& voiceAr
 // this went unnoticed: every vanilla actor's voice resolved regardless.
 std::string voiceKeyForNodeId(const std::string& nodeId) {
     constexpr std::size_t kPrefix = 5u;  // "info_"
-    if (nodeId.size() != kPrefix + 8u || nodeId.compare(0, kPrefix, "info_") != 0) {
+    if (nodeId.size() < kPrefix + 8u || nodeId.compare(0, kPrefix, "info_") != 0) {
         return nodeId;
     }
     std::string key = nodeId;
@@ -286,6 +288,11 @@ std::string voiceNodeIdFromLeaf(const std::string& loweredLeaf) {
     std::string nodeId = "info_";
     for (const char c : formIdHex) {
         nodeId.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    if (loweredLeaf.ends_with(".fuz")) {
+        const auto separator = loweredLeaf.find_last_of('_');
+        if (separator != std::string::npos)
+            nodeId += loweredLeaf.substr(separator, loweredLeaf.size() - separator - 4);
     }
     return nodeId;
 }
@@ -339,7 +346,7 @@ void buildVoiceIndexForFolder(
                 lowered.compare(0, folderPrefix.size(), folderPrefix) != 0) {
                 continue;
             }
-            if (lowered.size() < 4u || lowered.compare(lowered.size() - 4u, 4u, ".ogg") != 0) {
+            if (lowered.size() < 4u || (lowered.compare(lowered.size() - 4u, 4u, ".ogg") != 0 && !lowered.ends_with(".fuz"))) {
                 continue;
             }
             std::string nodeId =
@@ -385,7 +392,7 @@ void buildVoiceIndexForFolder(
             if (lowered.compare(0, folderPrefix.size(), folderPrefix) != 0) {
                 continue;
             }
-            if (lowered.size() < 4u || lowered.compare(lowered.size() - 4u, 4u, ".ogg") != 0) {
+            if (lowered.size() < 4u || (lowered.compare(lowered.size() - 4u, 4u, ".ogg") != 0 && !lowered.ends_with(".fuz"))) {
                 continue;
             }
             std::string nodeId =
@@ -426,7 +433,11 @@ bool buildSkinnedActor(
     std::vector<odai::importer::ImportedSceneTexture>& outTextures,
     std::vector<odai::importer::ImportedScenePackedDraw>& outDraws,
     std::string& outWhy,
-    const std::vector<std::string>* rigidAttachmentBones
+    const std::vector<std::string>* rigidAttachmentBones,
+    const std::map<std::string, float>* weightMorphs,
+    std::uint32_t coveredBipedSlots,
+    const std::vector<std::string>* hiddenHeadParts,
+    const std::vector<std::uint8_t>* rigidPartModes
 ) {
     outCharacter = importer::fnv::FalloutCharacter{};
     outTextures.clear();
@@ -449,6 +460,13 @@ bool buildSkinnedActor(
     // wear; drawing them all stacks them on one quad. Keep a named variant when
     // one exists, the way Victor's own screen is chosen.
     bool hasNamedScreen = false;
+    const bool hasExternalHairPart = std::any_of(
+        bodyPartPaths.begin(), bodyPartPaths.end(), [](const std::string& path) {
+            const std::string lowered = toLowerAscii(path);
+            return lowered.find("facegeom") == std::string::npos &&
+                (lowered.find("hair") != std::string::npos ||
+                 lowered.find("ks hairdo") != std::string::npos);
+        });
     for (const std::string& partName : bodyPartPaths) {
         if (toLowerAscii(partName).find("screen") != std::string::npos &&
             toLowerAscii(partName).find("static") == std::string::npos) {
@@ -482,6 +500,34 @@ bool buildSkinnedActor(
         std::string bindError;
         const bool parsedSkinned =
             importer::fnv::parseNifSkinnedMesh(bytes, model, bindError);
+        if (parsedSkinned && lowered.find("facegeom") != std::string::npos) {
+            // Hide authored hair/long-hair/ear partitions under headgear. A
+            // helmet's head slot is not permission to remove the actor's face.
+            constexpr auto headAccessories = (1u << 1) | (1u << 11) | (1u << 13);
+            std::erase_if(model.shapes, [&](const auto& shape) {
+                const std::string loweredShapeName = toLowerAscii(shape.name);
+                const bool bakedHair = hasExternalHairPart &&
+                    loweredShapeName.find("hair") != std::string::npos;
+                const bool namedHair = hiddenHeadParts && std::any_of(hiddenHeadParts->begin(), hiddenHeadParts->end(),
+                    [&](const auto& name) { return toLowerAscii(name) == toLowerAscii(shape.name); });
+                return bakedHair || namedHair || ((shape.bipedSlots & ~headAccessories) == 0u &&
+                    (shape.bipedSlots & coveredBipedSlots & headAccessories) != 0u);
+            });
+        }
+        if (parsedSkinned && weightMorphs) {
+            const auto morph = weightMorphs->find(partPath);
+            if (morph != weightMorphs->end() && morph->second < 1.f) {
+                auto lowPath = partPath;
+                const auto suffix = toLowerAscii(lowPath).rfind("_1.nif");
+                importer::fnv::NifSkinnedModel low;
+                if (suffix != std::string::npos) lowPath[suffix + 1] = '0';
+                if (suffix == std::string::npos || !assets.resolveMesh(lowPath, bytes, error) ||
+                    !importer::fnv::parseNifSkinnedMesh(bytes, low, error) ||
+                    !importer::fnv::interpolateSkinnedWeight(low, model, morph->second, error)) {
+                    VOX_LOGW("equipment") << "weight morph unavailable for " << partPath << ": " << error;
+                }
+            }
+        }
         if (parsedSkinned) {
             // Every human body NIF ships its own DISMEMBERMENT CAPS --
             // "bodycaps", "limbcaps", "meatneck01", "meathead01", the raw
@@ -516,6 +562,14 @@ bool buildSkinnedActor(
         std::string rigidError;
         if (!importer::fnv::parseNifStaticMesh(bytes, staticModel, rigidError)) {
             continue;
+        }
+        if (rigidPartModes && bodyPartIndex < rigidPartModes->size() && (*rigidPartModes)[bodyPartIndex] != 0) {
+            const bool scabbardOnly = (*rigidPartModes)[bodyPartIndex] == 2;
+            std::erase_if(staticModel.shapes, [&](const auto& shape) {
+                const auto name = toLowerAscii(shape.name);
+                const bool scabbard = name == "scb" || name.starts_with("scb:");
+                return scabbardOnly != scabbard;
+            });
         }
         if (authoredAttachment.empty() &&
             (!importer::fnv::parseNifSkeleton(bytes, partNodes, rigidError) ||
@@ -557,26 +611,38 @@ bool buildSkinnedActor(
         if (part.indexCount == 0u) {
             continue;
         }
-        std::uint32_t localTextureIndex = 0xffffffffu;
-        if (!part.diffuseTexturePath.empty()) {
-            const std::string key = toLowerAscii(part.diffuseTexturePath);
-            const auto existing = localTextureIndexByPath.find(key);
-            if (existing != localTextureIndexByPath.end()) {
-                localTextureIndex = existing->second;
-            } else {
-                std::vector<std::uint8_t> ddsBytes;
-                odai::importer::ImportedSceneTexture texture;
-                if (assets.resolveTexture(part.diffuseTexturePath, ddsBytes, error) &&
-                    odai::importer::loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
-                    texture.sourcePath = part.diffuseTexturePath;
-                    localTextureIndex = static_cast<std::uint32_t>(outTextures.size());
-                    localTextureIndexByPath.emplace(key, localTextureIndex);
-                    outTextures.push_back(std::move(texture));
-                }
-            }
-        }
+        const auto loadTexture = [&](const std::string& path, bool linear) -> std::uint32_t {
+            if (path.empty()) return 0xffffffffu;
+            const std::string key = toLowerAscii(path);
+            if (const auto it = localTextureIndexByPath.find(key); it != localTextureIndexByPath.end()) return it->second;
+            std::vector<std::uint8_t> bytes;
+            odai::importer::ImportedSceneTexture texture;
+            if (!assets.resolveTexture(path, bytes, error) ||
+                !odai::importer::loadDdsFromMemory(bytes.data(), bytes.size(), texture)) return 0xffffffffu;
+            texture.sourcePath = path;
+            texture.linearData = linear;
+            const auto index = static_cast<std::uint32_t>(outTextures.size());
+            localTextureIndexByPath.emplace(key, index);
+            outTextures.push_back(std::move(texture));
+            return index;
+        };
+        const auto localTextureIndex = loadTexture(part.diffuseTexturePath, false);
+        const auto normalTextureIndex = loadTexture(part.normalTexturePath, true);
+        const auto& material = part.lightingMaterial;
+        const auto skinTexture = [&](std::size_t slot) {
+            return part.modelSpaceNormals && material.parametersValid && slot < material.textures.size()
+                ? loadTexture(material.textures[slot], true) : 0xffffffffu;
+        };
+        const auto softTexture = (material.flags2 & (1u << 25)) != 0 ? skinTexture(2) : 0xffffffffu;
+        const auto specularTexture = (material.flags1 & 1u) != 0 ? skinTexture(7) : 0xffffffffu;
+
 
         std::uint32_t flags = 0u;
+        if (material.parametersValid &&
+            ((material.flags1 & 1u) == 0u || material.specularStrength <= 0.f)) {
+            flags |= importer::kImportedSceneMaterialFlagNoSpecular;
+        }
+        if (part.modelSpaceNormals) flags |= odai::importer::kImportedSceneMaterialFlagSkinnedModelNormals;
         if (part.alphaTest) { flags |= odai::importer::kImportedSceneMaterialFlagAlphaTest; }
         if (part.alphaBlend) { flags |= odai::importer::kImportedSceneMaterialFlagAlphaBlend; }
         if (part.twoSided) { flags |= odai::importer::kImportedSceneMaterialFlagTwoSided; }
@@ -590,6 +656,17 @@ bool buildSkinnedActor(
                 continue;
             }
             outCharacter.vertices[vertexIndex].textureIndex = localTextureIndex;
+            auto& vertex = outCharacter.vertices[vertexIndex];
+            vertex.normalTextureIndex = normalTextureIndex;
+            vertex.skinSoftTexture = softTexture;
+            vertex.skinSpecularTexture = specularTexture;
+            vertex.skinSoftRolloff = softTexture != 0xffffffffu ? material.softLightingRolloff : 0.f;
+            vertex.skinSpecularStrength = specularTexture != 0xffffffffu ? std::max(material.specularStrength, 0.f) : 0.f;
+            vertex.skinGlossiness = std::max(material.glossiness, 1.f);
+            vertex.skinSpecularColor = 0u;
+            for (int c = 0; c < 3; ++c) vertex.skinSpecularColor |=
+                static_cast<std::uint32_t>(std::clamp(material.specular[c], 0.f, 1.f) * 255.f + .5f) << (c * 8);
+
             outCharacter.vertices[vertexIndex].flags = flags;
         }
 
@@ -602,6 +679,12 @@ bool buildSkinnedActor(
     if (outDraws.empty()) {
         outWhy = "no drawable parts";
         return false;
+    }
+    if (toLowerAscii(skeletonPath).find("actors\\character\\") != std::string::npos) {
+        std::string rigError;
+        if (!importer::fnv::canonicalizeSkyrimCharacter(outCharacter, {}, rigError)) {
+            VOX_LOGW("animation") << "source rig retained: " << rigError;
+        }
     }
     return true;
 }
@@ -1365,8 +1448,14 @@ bool loadGoodspringsActors(
         anim::AnimationClip walkClip;
         float walkSpeed = 0.0f;
         bool hasWalk = false;
+        std::shared_ptr<const anim::AnimationView> animationView;
     };
     std::unordered_map<std::uint32_t, BuiltBase> builtByBase;
+    std::shared_ptr<const anim::BehaviorProgram> npcBehavior;
+    std::string npcBehaviorFingerprint;
+    bool inspectedNpcBehavior = false;
+    std::unordered_map<std::string, std::shared_ptr<const anim::AnimationView>> npcViewsByRig;
+    std::unordered_map<std::string, importer::fnv::FalloutStringTable> nameTables;
     std::uint32_t nextSlot = firstInstanceSlot;
 
     for (const importer::fnv::FalloutActorPlacement& placement : placements) {
@@ -1396,7 +1485,7 @@ bool loadGoodspringsActors(
             std::string skeletonPath = resolved.skeletonPath;
             built.ok = buildSkinnedActor(
                 assets, skeletonPath, resolved.bodyPartPaths, built.character,
-                built.textures, built.draws, why);
+                built.textures, built.draws, why, nullptr, &resolved.weightMorphs, resolved.coveredBipedSlots, &resolved.hiddenHeadParts);
             if (!built.ok) {
                 // A CUSTOM RACE OFTEN DECLARES A SKELETON IT DOES NOT SHIP.
                 // Willow's race names characters\willow race\skeleton.nif and
@@ -1429,6 +1518,43 @@ bool loadGoodspringsActors(
             }
             built.skeletonPath = skeletonPath;
             if (built.ok) {
+                // TES5 keeps an NPC's hair colour on HCLF -> CLFM, separate
+                // from the neutral Hair Tint material in FaceGeom. Carry that
+                // authored colour through the skinned vertex multiplier.
+                if (resolved.base != nullptr) {
+                    const auto color = scan.hairColors.find(resolved.base->hairColorFormId);
+                    if (color != scan.hairColors.end()) {
+                        const auto srgbToLinear = [](float value) {
+                            return value <= 0.04045f
+                                ? value / 12.92f
+                                : std::pow((value + 0.055f) / 1.055f, 2.4f);
+                        };
+                        const std::array<float, 3> linearHairColor{
+                            srgbToLinear(color->second[0]),
+                            srgbToLinear(color->second[1]),
+                            srgbToLinear(color->second[2]),
+                        };
+                        for (const auto& part : built.character.parts) {
+                            const std::string sourcePath = toLowerAscii(part.sourcePath);
+                            const bool externalHairPart =
+                                sourcePath.find("facegeom") == std::string::npos &&
+                                sourcePath.find("hair") != std::string::npos;
+                            const bool authoredHairPart =
+                                part.lightingMaterial.shaderType == 6u || externalHairPart;
+                            if (!authoredHairPart) continue;
+                            for (std::uint32_t i = part.firstIndex;
+                                 i < part.firstIndex + part.indexCount &&
+                                 i < built.character.indices.size(); ++i) {
+                                const std::uint32_t vertexIndex = built.character.indices[i];
+                                if (vertexIndex >= built.character.vertices.size()) continue;
+                                std::copy(linearHairColor.begin(), linearHairColor.end(),
+                                          built.character.vertices[vertexIndex].color);
+                                built.character.vertices[vertexIndex].flags |=
+                                    importer::kImportedSceneMaterialFlagVertexColorTint;
+                            }
+                        }
+                    }
+                }
                 std::string clipWhy;
                 const bool female = resolved.base != nullptr && resolved.base->isFemale;
                 built.hasClip = loadActorIdleClip(
@@ -1438,6 +1564,35 @@ bool loadGoodspringsActors(
                 built.hasWalk = loadActorWalkClip(
                     assets, built.skeletonPath, built.character.skeleton, female,
                     built.walkClip, built.walkSpeed, clipWhy);
+                if (toLowerAscii(built.skeletonPath).find("actors\\character\\") != std::string::npos &&
+                    built.character.skeleton.findBone("NPC Root [Root]") >= 0) {
+                    if (!inspectedNpcBehavior) {
+                        inspectedNpcBehavior = true;
+                        std::string graphError;
+                        npcBehavior = importer::fnv::loadSkyrimBehaviorProgram(assets,
+                            "meshes\\actors\\character\\behaviors\\0_master.hkx",
+                            npcBehaviorFingerprint, graphError);
+                        if (!npcBehavior) { VOX_LOGW("animation") << graphError; }
+                    }
+                    std::string rigKey = built.skeletonPath + (female ? ":female:" : ":male:");
+                    for (const auto& bone : built.character.skeleton.bones) {
+                        rigKey += bone.name + '\0' + std::to_string(bone.parentIndex) + ':';
+                        const auto local = odai::math::Matrix4::translation(bone.localTranslation) *
+                            odai::math::toMatrix(bone.localRotation) * odai::math::Matrix4::scale(bone.localScale);
+                        rigKey.append(reinterpret_cast<const char*>(local.m), sizeof(float) * 16);
+                    }
+                    for (const auto& matrix : built.character.inverseBindMatrices)
+                        rigKey.append(reinterpret_cast<const char*>(matrix.m), sizeof(float) * 16);
+                    if (const auto found = npcViewsByRig.find(rigKey); found != npcViewsByRig.end()) {
+                        built.animationView = found->second;
+                    } else {
+                        built.animationView = importer::fnv::loadSkyrimNpcAnimationView(assets,
+                            built.character.skeleton, built.character.inverseBindMatrices, female,
+                            built.idleClip, built.walkClip, npcBehavior, npcBehaviorFingerprint);
+                        if (!built.idleClip.name.starts_with("procedural") && !built.walkClip.name.starts_with("procedural"))
+                            npcViewsByRig.emplace(std::move(rigKey), built.animationView);
+                    }
+                }
             }
         }
         if (!built.ok) {
@@ -1461,8 +1616,21 @@ bool loadGoodspringsActors(
         }
 
         SkinnedActor actor;
+        actor.initialWornArmor = resolved.wornArmorFormIds;
         actor.name = resolved.base != nullptr ? resolved.base->editorId : std::string("actor");
         actor.fullName = resolved.base != nullptr ? resolved.base->fullName : std::string();
+        if (resolved.base && resolved.base->fullNameStringId != 0u) {
+            const auto& plugin = resolved.base->fullNamePlugin;
+            auto [table, inserted] = nameTables.try_emplace(plugin);
+            if (inserted) {
+                std::string nameError;
+                (void)importer::fnv::loadFalloutStringTable(assets, plugin,
+                    importer::fnv::falloutStringLanguage(), importer::fnv::FalloutStringFileKind::Strings,
+                    table->second, nameError);
+            }
+            if (const auto* name = table->second.find(resolved.base->fullNameStringId))
+                actor.fullName = *name;
+        }
         // Which folder this actor's recorded lines live under. Resolved here
         // because this is where the scan is; the index itself is built later,
         // once per distinct folder, by loadActorVoices.
@@ -1489,6 +1657,7 @@ bool loadGoodspringsActors(
                             actor.headHeightUnits);
         actor.textures = built.textures;
         actor.draws = built.draws;
+        actor.animationView = built.animationView;
         actor.idleClip = built.idleClip;
         actor.walkClip = built.walkClip;
         actor.walkSpeedUnitsPerSecond = built.walkSpeed;
@@ -1680,7 +1849,8 @@ bool loadSkyrimPlayerAvatar(
     std::string_view outfitEditorId,
     std::uint32_t instanceSlot,
     SkinnedActor& outAvatar,
-    std::string& outDetail) {
+    std::string& outDetail,
+    const importer::fnv::FalloutAssetSource* profileAssets) {
     outAvatar = SkinnedActor{};
     outDetail.clear();
     const std::filesystem::path plugin = skyrimDataDirectory / "Skyrim.esm";
@@ -1688,15 +1858,17 @@ bool loadSkyrimPlayerAvatar(
         outDetail = "Skyrim.esm is unavailable under " + skyrimDataDirectory.string();
         return false;
     }
-    importer::fnv::FalloutAssetSource assets;
-    if (!assets.open(skyrimDataDirectory)) {
+    importer::fnv::FalloutAssetSource localAssets;
+    if (!profileAssets && !localAssets.open(skyrimDataDirectory)) {
         outDetail = "could not index Skyrim avatar assets under " +
             skyrimDataDirectory.string();
         return false;
     }
+    const auto& assets = profileAssets ? *profileAssets : localAssets;
     std::string error;
     importer::fnv::SkyrimAnimationAssetReport animationBundle;
-    if (!importer::fnv::inspectSkyrimAnimationBundle(
+    const char* mode = std::getenv("ODAI_SKYRIM_ANIMATION_MODE");
+    if (mode && std::string_view(mode) == "havok" && !importer::fnv::inspectSkyrimAnimationBundle(
             assets, animationBundle, true, error)) {
         outDetail = "Skyrim locomotion bundle is not usable: " + error;
         for (const std::string& diagnostic : animationBundle.diagnostics) {
@@ -1710,12 +1882,16 @@ bool loadSkyrimPlayerAvatar(
         outDetail = "could not scan Skyrim avatar records: " + error;
         return false;
     }
+    const char* requestedActor = std::getenv("ODAI_SKYRIM_PLAYER_ACTOR");
+    const std::string playerEditorId =
+        requestedActor && requestedActor[0] != '\0' ? requestedActor : "Player";
+    const std::string wantedPlayer = toLowerAscii(playerEditorId);
     const auto player = std::find_if(catalog.bases.begin(), catalog.bases.end(),
-        [](const auto& entry) {
-            return toLowerAscii(entry.second.editorId) == "player";
+        [&](const auto& entry) {
+            return toLowerAscii(entry.second.editorId) == wantedPlayer;
         });
     if (player == catalog.bases.end()) {
-        outDetail = "Skyrim.esm has no NPC_ record with EditorID Player";
+        outDetail = "Skyrim.esm has no NPC_ record with EditorID " + playerEditorId;
         return false;
     }
     const std::string wantedOutfit = toLowerAscii(std::string(outfitEditorId));
@@ -1727,6 +1903,7 @@ bool loadSkyrimPlayerAvatar(
             "' was not found in Skyrim.esm";
         return false;
     }
+    const bool useAuthoredActor = wantedPlayer != "player";
     // NPC heads are pre-generated under FaceGeom, but form 0x7 is the
     // customizable Player and intentionally has no baked mesh in the retail
     // archives. Assemble one deterministic stock male Nord face from the
@@ -1750,7 +1927,7 @@ bool loadSkyrimPlayerAvatar(
         }
     }
     std::vector<std::string> requiredStockFaceParts;
-    if (!generatedFaceAvailable) {
+    if (!generatedFaceAvailable && !useAuthoredActor) {
         player->second.faceGeometryPaths.clear();
         requiredStockFaceParts.reserve(kStockMaleNordFaceParts.size());
         for (const std::string_view facePathView : kStockMaleNordFaceParts) {
@@ -1775,8 +1952,18 @@ bool loadSkyrimPlayerAvatar(
     }
     // The mutable copy is an avatar compilation catalog only. It cannot leak
     // into BethesdaSession or alter Morrowind's inventory/quests/scripts.
-    player->second.isFemale = false;
-    player->second.defaultOutfitFormId = outfit->first;
+    if (!useAuthoredActor) {
+        player->second.isFemale = false;
+        // This is an explicit avatar outfit selection, not an addition to the
+        // retail Player inventory. Leaving the starting clothes/armor here
+        // lets those records claim biped slots before the selected OTFT is
+        // visited, producing partial sets (for example Steel Plate without its
+        // cuirass). Compile the preview from the requested outfit as one set;
+        // gameplay inventory is populated from that OTFT below.
+        player->second.inventoryFormIds.clear();
+        player->second.inventoryStacks.clear();
+        player->second.defaultOutfitFormId = outfit->first;
+    }
     catalog.placements.clear();
     importer::fnv::FalloutActorPlacement placement;
     placement.baseFormId = player->first;
@@ -1806,40 +1993,42 @@ bool loadSkyrimPlayerAvatar(
             return false;
         }
     }
-    outAvatar.name = "SkyrimPlayerAvatar";
-    outAvatar.fullName = "Player";
+    outAvatar.name = useAuthoredActor ? playerEditorId : "SkyrimPlayerAvatar";
+    outAvatar.fullName = useAuthoredActor && !player->second.fullName.empty()
+        ? player->second.fullName : useAuthoredActor ? playerEditorId : "Player";
     outAvatar.referenceFormId = 0u;
     outAvatar.runtimeObjectId = {};
     outAvatar.wanders = false;
     outAvatar.walking = false;
     outAvatar.instanceSlot = instanceSlot;
-    if (const auto items = catalog.outfits.find(outfit->first);
+    const std::uint32_t avatarOutfit = useAuthoredActor
+        ? player->second.defaultOutfitFormId : outfit->first;
+    if (const auto items = catalog.outfits.find(avatarOutfit);
         items != catalog.outfits.end()) {
         outAvatar.inventoryFormIds = items->second;
     }
     if (outAvatar.idleClip.name.starts_with("procedural") ||
         outAvatar.walkClip.name.starts_with("procedural")) {
-        outDetail = "Skyrim player avatar requires decodable retail male idle and walk HKX clips";
+        outDetail = "Skyrim player avatar requires decodable retail idle and walk HKX clips";
         outAvatar = SkinnedActor{};
         return false;
     }
-    static constexpr std::array additionalClips{
-        std::pair{"meshes\\actors\\character\\animations\\male\\mt_runforward.hkx",
-                  "Skyrim male run forward"},
-        std::pair{"meshes\\actors\\character\\animations\\male\\mt_sprintforward.hkx",
-                  "Skyrim male sprint forward"},
-        std::pair{"meshes\\actors\\character\\animations\\mt_jump.hkx",
-                  "Skyrim jump"},
-        std::pair{"meshes\\actors\\character\\animations\\mt_jumpfall.hkx",
-                  "Skyrim fall"},
-        std::pair{"meshes\\actors\\character\\animations\\mt_jumpland.hkx",
-                  "Skyrim landing"},
-        std::pair{"meshes\\actors\\character\\animations\\male\\npc_turnleft90.hkx",
-                  "Skyrim turn left"},
-        std::pair{"meshes\\actors\\character\\animations\\male\\npc_turnright90.hkx",
-                  "Skyrim turn right"}};
+    const bool avatarFemale = player->second.isFemale;
+    const std::string sex = avatarFemale ? "female" : "male";
+    const std::vector<std::pair<std::string, std::string>> additionalClips{
+        {"meshes\\actors\\character\\animations\\" + sex + "\\mt_runforward.hkx",
+         "Skyrim " + sex + " run forward"},
+        {"meshes\\actors\\character\\animations\\" + sex + "\\mt_sprintforward.hkx",
+         "Skyrim " + sex + " sprint forward"},
+        {"meshes\\actors\\character\\animations\\mt_jump.hkx", "Skyrim jump"},
+        {"meshes\\actors\\character\\animations\\mt_jumpfall.hkx", "Skyrim fall"},
+        {"meshes\\actors\\character\\animations\\mt_jumpland.hkx", "Skyrim landing"},
+        {"meshes\\actors\\character\\animations\\" + sex + "\\npc_turnleft90.hkx",
+         "Skyrim " + sex + " turn left"},
+        {"meshes\\actors\\character\\animations\\" + sex + "\\npc_turnright90.hkx",
+         "Skyrim " + sex + " turn right"}};
     anim::HkxDecodedSkeleton hkxSkeleton;
-    if (!loadSkyrimHkxSkeleton(assets, false, hkxSkeleton, error)) {
+    if (!loadSkyrimHkxSkeleton(assets, avatarFemale, hkxSkeleton, error)) {
         outDetail = "required Skyrim avatar skeleton HKX could not decode: " + error;
         outAvatar = SkinnedActor{};
         return false;
@@ -1865,8 +2054,11 @@ bool loadSkyrimPlayerAvatar(
         }
         outAvatar.authoredLocomotionClips.push_back(std::move(clip));
     }
-    outDetail = "male Nord Player with complete stock head wearing " +
-        std::string(outfitEditorId) +
+    outAvatar.animationView = importer::fnv::loadSkyrimNpcAnimationView(assets,
+        outAvatar.character.skeleton, outAvatar.character.inverseBindMatrices, avatarFemale,
+        outAvatar.idleClip, outAvatar.walkClip, nullptr, "skyrim-player;");
+    outDetail = (useAuthoredActor ? outAvatar.fullName : "male Nord Player") +
+        " wearing outfit " + std::to_string(avatarOutfit) +
         " (" + std::to_string(outAvatar.character.parts.size()) +
         " body pieces); 9 retail HKX locomotion clips decoded";
     return true;
@@ -1948,7 +2140,7 @@ std::size_t loadActorVoices(
     for (SkinnedActor& actor : actors) {
         // Skip actors with nothing to say: an index nothing will look up is
         // pure cost, and most of a town is in that state.
-        if (!actor.canTalk() || actor.voice.voiceFolder.empty() ||
+        if ((!actor.canTalk() && toLowerAscii(pluginFileName) != "skyrim.esm") || actor.voice.voiceFolder.empty() ||
             !actor.voice.pathByNodeId.empty()) {
             continue;
         }
@@ -1994,20 +2186,21 @@ std::size_t loadActorVoices(
 void speakActorLine(
     SkinnedActor& actor,
     const std::filesystem::path& cacheDirectory,
-    odai::audio::Audio& audioSystem
+    odai::audio::Audio& audioSystem,
+    const dialogue::DialogueNode* sceneLine, double* durationSeconds
 ) {
-    if (!actor.talking || cacheDirectory.empty()) {
+    if ((!sceneLine && !actor.talking) || cacheDirectory.empty()) {
         return;
     }
-    const dialogue::DialogueNode* node = actor.runtime.currentNode();
-    if (node == nullptr || node->id == actor.spokenNodeId) {
+    const dialogue::DialogueNode* node = sceneLine ? sceneLine : actor.runtime.currentNode();
+    if (node == nullptr || (!sceneLine && node->id == actor.spokenNodeId)) {
         return;
     }
-    actor.spokenNodeId = node->id;
+    if (!sceneLine) actor.spokenNodeId = node->id;
 
     // A loose line short-circuits the archive lookup entirely: there is nothing
     // to extract, the bytes are already a file on disk.
-    const std::string voiceKey = voiceKeyForNodeId(node->id);
+    const std::string voiceKey = voiceKeyForNodeId(node->voiceKey.empty() ? node->id : node->voiceKey);
     const auto looseFound = actor.voice.loosePathByNodeId.find(voiceKey);
     const bool haveLoose = looseFound != actor.voice.loosePathByNodeId.end();
     const auto found = actor.voice.pathByNodeId.find(voiceKey);
@@ -2040,14 +2233,16 @@ void speakActorLine(
     if (lastSeparator != std::string::npos) {
         leaf = leaf.substr(lastSeparator + 1u);
     }
-    const std::filesystem::path oggPath = cacheDirectory / leaf;
+    std::filesystem::path oggPath = cacheDirectory / actor.voice.archiveKey / leaf;
+    const bool isFuz = toLowerAscii(leaf).ends_with(".fuz");
+    if (isFuz) oggPath.replace_extension(".xwm");
     std::filesystem::path wavPath = oggPath;
     wavPath.replace_extension(".wav");
 
     std::error_code existsError;
     if (!std::filesystem::exists(wavPath, existsError) || existsError) {
         std::error_code createError;
-        std::filesystem::create_directories(cacheDirectory, createError);
+        std::filesystem::create_directories(oggPath.parent_path(), createError);
         std::vector<std::uint8_t> oggBytes;
         std::string extractError;
         if (haveLoose) {
@@ -2066,16 +2261,24 @@ void speakActorLine(
                                  << ": " << extractError;
             return;
         }
+        std::span<const std::uint8_t> audioBytes = oggBytes;
+        if (isFuz) {
+            audioBytes = importer::fnv::fuzAudio(oggBytes);
+            if (audioBytes.empty()) {
+                VOX_LOGW("dialogue") << "invalid FUZ voice: " << leaf;
+                return;
+            }
+        }
         {
             std::ofstream out(oggPath, std::ios::binary | std::ios::trunc);
             if (!out) {
                 return;
             }
             out.write(
-                reinterpret_cast<const char*>(oggBytes.data()),
-                static_cast<std::streamsize>(oggBytes.size()));
+                reinterpret_cast<const char*>(audioBytes.data()),
+                static_cast<std::streamsize>(audioBytes.size()));
         }
-        if (!decodeOggToWav(oggPath, wavPath)) {
+        if (!(isFuz ? decodeXwmToWav(oggPath, wavPath) : decodeOggToWav(oggPath, wavPath))) {
             VOX_LOGW("newvegas") << actor.displayName() << " voice decode failed for " << node->id;
             return;
         }
@@ -2084,10 +2287,31 @@ void speakActorLine(
     // Ui, not Ambient: there is no Voice bus in SoundCategory, and Ui is the
     // non-spatialized 2D one, which is what a conversation line is here -- the
     // camera is a step away and the line should not duck with distance.
+    if (durationSeconds) {
+        // The decoder writes RIFF/WAVE. Read chunk sizes rather than assuming
+        // a 44-byte header (ffmpeg can also write LIST and fact chunks).
+        std::ifstream wav(wavPath, std::ios::binary);
+        char header[12]; wav.read(header, 12);
+        std::uint32_t byteRate = 0, dataBytes = 0;
+        while (wav) {
+            char tag[4]; std::uint32_t size = 0;
+            wav.read(tag, 4); wav.read(reinterpret_cast<char*>(&size), 4);
+            if (!wav) break;
+            if (std::memcmp(tag, "fmt ", 4) == 0 && size >= 12) {
+                wav.seekg(8, std::ios::cur); wav.read(reinterpret_cast<char*>(&byteRate), 4);
+                wav.seekg(size - 12 + (size & 1), std::ios::cur);
+            } else {
+                if (std::memcmp(tag, "data", 4) == 0) dataBytes = size;
+                wav.seekg(static_cast<std::streamoff>(size) + (size & 1), std::ios::cur);
+            }
+        }
+        if (byteRate) *durationSeconds = double(dataBytes)/byteRate + 0.15;
+    }
     const odai::audio::SoundHandle clip =
-        audioSystem.loadSound(wavPath, odai::audio::SoundCategory::Ui);
+        audioSystem.loadSound(wavPath, sceneLine ? odai::audio::SoundCategory::Ambient : odai::audio::SoundCategory::Ui);
     if (clip.valid()) {
-        audioSystem.playSound(clip);
+        if (sceneLine) audioSystem.playSoundAt(clip, {actor.position[0], actor.position[1], actor.position[2]}, {256.f, 3000.f, 1.f});
+        else audioSystem.playSound(clip);
     }
 }
 
@@ -2104,6 +2328,15 @@ void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds) {
 
     for (SkinnedActor& actor : actors) {
         if (actor.character.skeleton.bones.empty()) {
+            continue;
+        }
+        if (!freezeAtBindPose && actor.runtimeAnimationRegistered && !actor.runtimeAnimationPose.empty()) {
+            actor.localPoseScratch = actor.runtimeAnimationPose;
+            actor.poseScratch = actor.runtimeAnimationPose;
+            const auto world = odai::math::Matrix4::translation({actor.position[0], actor.position[1], actor.position[2]}) *
+                odai::math::Matrix4::rotationY(actor.yawRadians) *
+                odai::math::Matrix4::scale({actor.visualScale, actor.visualScale, actor.visualScale});
+            for (auto& matrix : actor.poseScratch) matrix = world * matrix;
             continue;
         }
         const bool wantsTalkClip = actor.talking && !actor.talkClip.tracks.empty();
@@ -2123,7 +2356,7 @@ void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds) {
         }
         actor.animationSeconds += deltaSeconds;
 
-        if (!actor.renderVisible) {
+        if (!actor.renderVisible && !actor.followsPlayer) {
             continue;
         }
 
@@ -2178,6 +2411,40 @@ void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds) {
     }
 }
 
+void updateActorFollowTarget(SkinnedActor& actor, const ActorNavigationWorld* navigation,
+    const odai::math::Vector3& target, bool targetAvailable, float deltaSeconds) {
+    if (!actor.followsPlayer) return;
+    actor.followRepathSeconds = std::max(0.f, actor.followRepathSeconds - std::max(0.f, deltaSeconds));
+    const odai::math::Vector3 start{actor.position[0], actor.position[1], actor.position[2]};
+    const float distance = odai::math::length(target - start);
+    const auto stop = [&] {
+        actor.wanders = actor.walking = actor.scriptedMoveActive = actor.scriptedMoveArrived = false;
+        actor.runtimeRequestedVelocity = {};
+        actor.wanderPath.clear(); actor.wanderPathIndex = 0;
+        actor.wanderTarget[0] = start.x; actor.wanderTarget[1] = start.y; actor.wanderTarget[2] = start.z;
+        actor.followSpeedMultiplier = 1.f;
+    };
+    if (!targetAvailable || actor.runtimeDead || actor.talking || !navigation ||
+        !navigation->hasNavigation() || distance < (actor.wanders ? 160.f : 230.f)) {
+        stop(); return;
+    }
+    // Separate enter/exit thresholds prevent walk/run oscillation while
+    // the follower and player move at different speeds near the boundary.
+    actor.followSpeedMultiplier = distance > (actor.followSpeedMultiplier > 1.f ? 450.f : 650.f)
+        ? 2.5f : 1.f;
+    if (actor.followRepathSeconds > 0.f && actor.scriptedMoveActive && !actor.runtimeControllerBlocked) return;
+    if (actor.followRepathSeconds > 0.f && !actor.scriptedMoveActive) { actor.wanders = false; return; }
+    actor.followRepathSeconds = .5f;
+    std::vector<ActorNavigationStep> path;
+    if (!navigation->buildPath(start, target, path, true) || path.empty()) { stop(); return; }
+    actor.wanderPath = std::move(path); actor.wanderPathIndex = 1;
+    const auto& waypoint = actor.wanderPath.front().position;
+    actor.wanderTarget[0] = waypoint.x; actor.wanderTarget[1] = waypoint.y; actor.wanderTarget[2] = waypoint.z;
+    actor.wanderPauseSeconds = 0;
+    actor.scriptedMoveActive = actor.wanders = true;
+    actor.scriptedMoveArrived = false;
+}
+
 void updateActorWandering(
     std::vector<SkinnedActor>& actors,
     float deltaSeconds,
@@ -2228,7 +2495,7 @@ void updateActorWandering(
         // its local wander state until it enters the conservative visibility
         // margin. This also prevents off-screen walkers from tunnelling through
         // walls while they are not being simulated.
-        if (!actor.renderVisible) {
+        if (!actor.renderVisible && !actor.followsPlayer) {
             actor.walking = false;
             continue;
         }
@@ -2344,6 +2611,18 @@ void updateActorWandering(
             continue;
         }
 
+        // Consume reached ordinary waypoints before calculating velocity. A
+        // bookkeeping-only tick used to submit zero velocity at each nav edge.
+        while (navigationAvailable && actor.wanderPathIndex > 0u &&
+               actor.wanderPathIndex < actor.wanderPath.size() &&
+               actor.wanderPath[actor.wanderPathIndex - 1u].kind == ActorNavigationStepKind::Walk) {
+            const float dx = actor.wanderTarget[0] - actor.position[0];
+            const float dz = actor.wanderTarget[2] - actor.position[2];
+            if (dx * dx + dz * dz >= kArriveDistance * kArriveDistance) break;
+            const auto& next = actor.wanderPath[actor.wanderPathIndex++].position;
+            actor.wanderTarget[0] = next.x; actor.wanderTarget[1] = next.y; actor.wanderTarget[2] = next.z;
+        }
+
         const float toTargetX = actor.wanderTarget[0] - actor.position[0];
         const float toTargetZ = actor.wanderTarget[2] - actor.position[2];
         const float distance = std::sqrt((toTargetX * toTargetX) + (toTargetZ * toTargetZ));
@@ -2446,7 +2725,7 @@ void updateActorWandering(
 
         const odai::math::Vector3 facing = actorFacing(actor.yawRadians);
         const float step =
-            std::min(actor.walkSpeedUnitsPerSecond * deltaSeconds, kMaxStepUnits);
+            std::min(actor.walkSpeedUnitsPerSecond * actor.followSpeedMultiplier * deltaSeconds, kMaxStepUnits);
         // Ramp naturally from turning in place to a full stride. The old
         // binary 15%/100% choice produced a sevenfold velocity jump on the
         // first sufficiently aligned frame, visible as a positional jerk even
@@ -2463,9 +2742,9 @@ void updateActorWandering(
         const float stride = step * alignment;
         if (actor.runtimeControllerOwned) {
             actor.runtimeRequestedVelocity = {
-                facing.x * actor.walkSpeedUnitsPerSecond * alignment,
+                facing.x * actor.walkSpeedUnitsPerSecond * actor.followSpeedMultiplier * alignment,
                 0.0f,
-                facing.z * actor.walkSpeedUnitsPerSecond * alignment};
+                facing.z * actor.walkSpeedUnitsPerSecond * actor.followSpeedMultiplier * alignment};
         } else {
             actor.position[0] = fromX + (facing.x * stride);
             actor.position[2] = fromZ + (facing.z * stride);
@@ -2509,6 +2788,9 @@ void updateActorWandering(
 
 void remapActorTextureSlots(SkinnedActor& actor, const std::vector<std::uint32_t>& bindlessSlots) {
     for (odai::render::ImportedSkinnedMeshVertex& vertex : actor.character.vertices) {
+        vertex.skinSoftTexture = vertex.skinSoftTexture < bindlessSlots.size() ? bindlessSlots[vertex.skinSoftTexture] : 0xffffffffu;
+        vertex.skinSpecularTexture = vertex.skinSpecularTexture < bindlessSlots.size() ? bindlessSlots[vertex.skinSpecularTexture] : 0xffffffffu;
+        vertex.normalTextureIndex = vertex.normalTextureIndex < bindlessSlots.size() ? bindlessSlots[vertex.normalTextureIndex] : 0xffffffffu;
         vertex.textureIndex = (vertex.textureIndex < bindlessSlots.size())
             ? bindlessSlots[vertex.textureIndex]
             : 0xffffffffu;

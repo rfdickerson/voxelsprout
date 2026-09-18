@@ -144,7 +144,8 @@ PbrSurface resolveImportedMaterialWithDefaults(
 {
     PbrSurface surface = resolveImportedMaterial(flags, baseColorTint, emissive);
     usePbr = importedMaterialHasPbr(flags);
-    if (!usePbr && camera.importedPbrConfig.w > 0.5)
+    const bool authoredNoSpecular = (flags & ((1u << 15u) | 4u)) == (1u << 15u);
+    if (!usePbr && !authoredNoSpecular && camera.importedPbrConfig.w > 0.5)
     {
         const bool terrain = (flags & kImportedMaterialFlagTerrain) != 0u;
         surface.roughness = saturate(terrain
@@ -176,6 +177,9 @@ struct FragmentInput
     nointerpolation uint lightingMaterial : TEXCOORD10;
     nointerpolation uint4 terrainSurface : TEXCOORD11;
     nointerpolation uint terrainSurface4 : TEXCOORD12;
+    float3 modelBasisX : TEXCOORD13;
+    float3 modelBasisY : TEXCOORD14;
+    float3 modelBasisZ : TEXCOORD15;
 };
 
 // Shared by albedo and normal blending so boundaries stay aligned.
@@ -218,6 +222,17 @@ float3 sampleTerrainNormal(uint textureIndex, uint properties, float2 uv,
 
 float3 applyAuthoredStaticNormalMap(FragmentInput input, float3 geometricNormal)
 {
+    if ((input.inFlags & ((1u << 14u) | 4u)) == (1u << 14u) && input.inLayerTextures.x != kInvalidImportedTextureIndex) {
+        // Skyrim MSN uses image axes (X, -Z, Y), not NIF XYZ. Decode into
+        // NIF model space before applying the imported, animated basis.
+        // Treating RGB as XYZ tilted the back/leg normals toward the ground.
+        const float3 n = bindlessTextures[NonUniformResourceIndex(input.inLayerTextures.x)].Sample(input.inUv).rgb * 2.0 - 1.0;
+        const float3 modelNormal = float3(n.x, n.z, -n.y);
+        const float3 world = input.modelBasisX * modelNormal.x +
+            input.modelBasisY * modelNormal.y + input.modelBasisZ * modelNormal.z;
+        return dot(world, world) > 1e-8 ? normalize(world) : geometricNormal;
+    }
+
     if (input.lightingMaterial != kInvalidImportedTextureIndex &&
         (importedMaterials[input.lightingMaterial].sourceFlags.x & (1u << 12u)) != 0u)
         return geometricNormal; // model-space maps require an authored basis path
@@ -438,6 +453,17 @@ float4 sampleImportedAlbedo(FragmentInput input)
     // the others cut lays depth main then fails to shade, which renders as a
     // hole rather than as a disagreement.
     const uint paletteFlags = uint(round(input.inLayerWeights.z * 255.0));
+    float effectOpacity = input.inColor.a;
+    if (input.lightingMaterial != 0xffffffffu) {
+        const GpuImportedMaterial material = importedMaterials[input.lightingMaterial];
+        if (material.sourceFlags.z == 0xffffffffu && (material.sourceFlags.x & 64u) != 0u) {
+            const float facing = abs(dot(normalize(input.inWorldNormal),
+                normalize(camera.shadowVoxelGridSize.xyz - input.inWorldPosition)));
+            const float delta = material.animationPalette.w - material.animationPalette.z;
+            const float t = abs(delta) > 0.00001 ? saturate((facing - material.animationPalette.z) / delta) : 0.0;
+            effectOpacity *= lerp(material.environment.z, material.environment.w, t);
+        }
+    }
     const bool effectPalette = (input.inFlags & kImportedMaterialFlagTerrainLayers) == 0u &&
         input.inLayerTextures.z != kInvalidImportedTextureIndex && paletteFlags > 0u && paletteFlags <= 3u;
     if (effectPalette) {
@@ -445,31 +471,46 @@ float4 sampleImportedAlbedo(FragmentInput input)
         // as independent lookup coordinates; multiplying them first loses the ramp.
         if ((paletteFlags & 2u) != 0u) {
             sampled.a = bindlessTextures[input.inLayerTextures.z].Sample(
-                clamp(float2(sampled.a, input.inColor.a), 0.001, 0.999)).a;
+                clamp(float2(sampled.a, effectOpacity), 0.001, 0.999)).a;
         } else {
-            sampled.a *= input.inColor.a;
+            sampled.a *= effectOpacity;
         }
         if ((paletteFlags & 1u) != 0u) {
             sampled.rgb = bindlessTextures[input.inLayerTextures.z].Sample(
                 clamp(float2(sampled.g, input.inLayerWeights.w), 0.001, 0.999)).rgb;
         }
     } else {
-        sampled.a *= input.inColor.a;
+        sampled.a *= effectOpacity;
     }
     // Fallout's NiAlphaProperty test mode is GREATER: a fragment survives when
     // its alpha is strictly above the authored threshold, so discard on <=.
-    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u &&
-        sampled.a <= chunkPc.materialParams.x)
+    if ((input.inFlags & kImportedMaterialFlagAlphaTest) != 0u)
     {
-        // ODAI_DEBUG_ALPHATEST_HIGHLIGHT paints what would be cut away instead
-        // of cutting it. ODAI_DEBUG_NO_ALPHATEST answers "is alpha test doing
-        // this"; this answers "WHICH surface", which is the harder half when a
-        // scene draws 490 alpha-tested shapes and only one of them is wrong.
-        if (chunkPc.materialParams.y > 0.5)
+        // With multisampling, preserve the filtered alpha ramp and convert it
+        // into sample coverage. A binary discard here aliases the interior
+        // edges of leaf cards because ordinary MSAA only sees the card's outer
+        // triangles. fwidth keeps the transition about one pixel wide as the
+        // foliage recedes; alpha-to-coverage in the pipeline turns this value
+        // into a per-sample mask which the temporal resolve can stabilize.
+        if (camera.importedExteriorConfig.w > 1.5 &&
+            (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u)
         {
-            return float4(1.0, 0.0, 1.0, 1.0);
+            const float alphaWidth = max(fwidth(sampled.a), 1.0e-4);
+            sampled.a = saturate(
+                ((sampled.a - chunkPc.materialParams.x) / alphaWidth) + 0.5);
         }
-        discard;
+        else if (sampled.a <= chunkPc.materialParams.x)
+        {
+            // ODAI_DEBUG_ALPHATEST_HIGHLIGHT paints what would be cut away instead
+            // of cutting it. ODAI_DEBUG_NO_ALPHATEST answers "is alpha test doing
+            // this"; this answers "WHICH surface", which is the harder half when a
+            // scene draws 490 alpha-tested shapes and only one of them is wrong.
+            if (chunkPc.materialParams.y > 0.5)
+            {
+                return float4(1.0, 0.0, 1.0, 1.0);
+            }
+            discard;
+        }
     }
     // Fallout's landscape is a base texture per quadrant with additional layers
     // alpha-blended over it (ATXT/VTXT) -- roads, gravel, and the transitions
@@ -797,7 +838,7 @@ float sampleInteriorPointShadowMap(
         return 1.0;
     }
 
-    const float receiverOffset = max(1.5, lightRadius * 0.0025) * (1.0 + (1.0 - ndotl));
+    const float receiverOffset = 0.12 * (1.0 + (1.0 - ndotl));
     const float3 samplePosition = worldPosition + (normal * receiverOffset);
     const float3 lightToReceiver = samplePosition - lightPosition;
     const int face = interiorPointShadowFace(lightToReceiver);
@@ -834,8 +875,39 @@ float sampleInteriorPointShadowMap(
     const float2 atlasUv = tileOrigin + faceOrigin + (localUv * faceScale);
     // Reverse-Z comparison: increasing the receiver reference moves it toward
     // the light and suppresses self-shadowing acne.
-    const float depthBias = 0.0012 + ((1.0 - ndotl) * 0.0018);
+    // Express the bias as a small world-space distance. A constant NDC bias
+    // grows quadratically with distance in this perspective projection and
+    // erases the lower portion of actor shadows.
+    const float shadowNear = max(2.0, lightRadius * 0.003);
+    const float depthBias = (0.08 * shadowNear * lightRadius) /
+        (max(lightRadius - shadowNear, 1.0) * max(shadowClip.w * shadowClip.w, 1.0));
+    if (slotCount == 1) {
+        // Stable tent PCF for the high-resolution single-light atlas. Clamp
+        // each tap to this face so filtering never reads a neighbouring tile.
+        const float2 lower = tileOrigin + faceOrigin + texel;
+        const float2 upper = tileOrigin + faceOrigin + faceScale - texel;
+        float visibility = 0.0;
+        float weightSum = 0.0;
+        [unroll] for (int y = -3; y <= 3; ++y) {
+            [unroll] for (int x = -3; x <= 3; ++x) {
+                const float weight = float((4 - abs(x)) * (4 - abs(y)));
+                const float2 tap = clamp(atlasUv + float2(x, y) * (1.5 * texel), lower, upper);
+                visibility += weight * shadowMap.SampleCmpLevelZero(tap, shadowNdc.z + depthBias);
+                weightSum += weight;
+            }
+        }
+        return visibility / weightSum;
+    }
     return shadowMap.SampleCmpLevelZero(atlasUv, shadowNdc.z + depthBias);
+}
+
+// Authored soft lighting adds the difference between two smooth diffuse lobes.
+// This is a light-dependent scattering approximation, not ambient or emission.
+float skinSoftLobe(float cosine, float rolloff) {
+    if (rolloff <= 0.0) return 0.0;
+    const float wide = saturate((cosine + rolloff) / (1.0 + rolloff));
+    const float narrow = saturate(cosine);
+    return max(wide * wide * (3.0 - 2.0 * wide) - narrow * narrow * (3.0 - 2.0 * narrow), 0.0);
 }
 
 // Diffuse contribution of the local point lights, and — for surfaces that opted
@@ -850,7 +922,8 @@ float3 evaluateImportedLocalLights(
     bool applySpecular,
     float2 screenPosition,
     float viewDepth,
-    inout float3 outSpecular)
+    inout float3 outSpecular,
+    float3 skinSoftMask, float skinRolloff, float3 skinSpecular, float skinGloss, float3 receiverNormal)
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
     const float globalIntensity = max(camera.importedLightConfig.y, 0.0);
@@ -917,7 +990,7 @@ float3 evaluateImportedLocalLights(
         const float distanceToLight = sqrt(max(distanceSquared, 1e-4));
         const float3 lightDirection = toLight / distanceToLight;
         const float ndotl = saturate(dot(normal, lightDirection));
-        if (ndotl <= 0.0001)
+        if (ndotl <= 0.0001 && skinRolloff <= 0.0)
         {
             continue;
         }
@@ -928,18 +1001,18 @@ float3 evaluateImportedLocalLights(
 #ifdef ODAI_RT_SHADOWS
         visibility = sampleRayTracedPointLightShadow(
             worldPosition,
-            normal,
+            receiverNormal,
             lightDirection,
             distanceToLight,
-            ndotl);
+            max(dot(receiverNormal, lightDirection), 0.0));
 #else
         visibility = sampleInteriorPointShadowMap(
             lightIndex,
             worldPosition,
-            normal,
+            receiverNormal,
             positionRadius.xyz,
             radius,
-            ndotl);
+            max(dot(receiverNormal, lightDirection), 0.0));
 #endif
         const uint contactBit = lightIndex < 32
             ? ((contactMask.x >> uint(lightIndex)) & 1u)
@@ -952,6 +1025,13 @@ float3 evaluateImportedLocalLights(
         // the legacy path for every surface without a material, and a reassociation
         // here would shift existing scenes by an ULP for no reason.
         lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation * visibility);
+        const float3 skinRadiance = colorIntensity.rgb * (colorIntensity.w * globalIntensity * attenuation * visibility);
+        lighting += skinRadiance * skinSoftMask * skinSoftLobe(dot(normal, lightDirection), skinRolloff);
+        if (ndotl > 0.0001 && any(skinSpecular > 0.0)) {
+            const float3 halfVector = lightDirection + viewDirection;
+            const float3 halfDirection = halfVector * rsqrt(max(dot(halfVector, halfVector), 1e-8));
+            outSpecular += skinRadiance * skinSpecular * pow(saturate(dot(normal, halfDirection)), skinGloss);
+        }
         if (applySpecular)
         {
             const float3 radiance =
@@ -1371,12 +1451,18 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
         debugView != kDebugViewScreenSpaceGi)
     {
         const float3 debugNormal =
-            resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace);
+            applyAuthoredStaticNormalMap(input, resolveShadingNormal(input.inWorldNormal, input.inFlags, isFrontFace));
         const float debugViewDepth =
             max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
         return debugViewColor(input, debugView, debugNormal, debugViewDepth);
     }
-    const float4 albedoFull = sampleImportedAlbedo(input);
+    float4 albedoFull = sampleImportedAlbedo(input);
+    // Opaque DDS alpha can contain gloss or unused data. Only authored cutout
+    // and blended materials may reduce coverage in the main MSAA pass.
+    if ((input.inFlags & (kImportedMaterialFlagAlphaTest | kImportedMaterialFlagAlphaBlend)) == 0u)
+    {
+        albedoFull.a = 1.0;
+    }
     if (chunkPc.cascadeData.w > 0.5) {
         return float4(saturate(albedoFull.rgb * 1.25), 1.0);
     }
@@ -1429,9 +1515,11 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     float3 authoredSpecularScale = float3(1.0);
     // LTEX exponent and TXST normal/gloss are blended in the same ordered
     // opacity stack as albedo; missing overlays suppress the underlying gloss.
-    if ((input.terrainSurface.x & 0x8000u) != 0u ||
-        any((input.terrainSurface & uint4(0x8000u)) != uint4(0u)) ||
-        (input.terrainSurface4 & 0x8000u) != 0u) {
+    // Actor vertices reuse these slots for the animated normal basis and skin
+    // parameters. Their changing bits must never select LAND gloss shading.
+    if ((input.inFlags & kImportedMaterialFlagTerrain) != 0u &&
+        (any((input.terrainSurface & uint4(0x8000u)) != uint4(0u)) ||
+         (input.terrainSurface4 & 0x8000u) != 0u)) {
         float roughness = surface.roughness;
         float glossMask = 0.0;
         for (uint layer = 0; layer < 5u; ++layer) {
@@ -1527,7 +1615,11 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float viewDepth = max(-mul(camera.view, float4(input.inWorldPosition, 1.0)).z, 0.0);
     const bool authoredInterior = interiorMode && camera.interiorAmbient.w > 0.5;
     float shadowVisibility = 1.0;
-    if (!authoredInterior && ndotl > 0.0001)
+    // Soft lighting reaches beyond NdotL=0, so it still needs occlusion there.
+    // The shadow diagnostic must not report skipped back-facing queries as white.
+    const bool skinScattering = (input.inFlags & ((1u << 14u) | 4u)) == (1u << 14u) &&
+        asfloat(input.terrainSurface.z) > 0.0;
+    if (!authoredInterior && (ndotl > 0.0001 || skinScattering || debugView == kDebugViewShadow))
     {
 #ifdef ODAI_RT_SHADOWS
         shadowVisibility = sampleRayTracedDirectionalShadow(input.inWorldPosition, geometricNormal, max(dot(geometricNormal, -sunDirection), 0.0));
@@ -1621,6 +1713,18 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     // surface / usePbr are resolved up at the albedo site above, so the library
     // tint can be applied before the terrain slope lerps.
 
+    float3 skinSoftMask = 0.0, skinSpecular = 0.0;
+    float skinRolloff = 0.0, skinGloss = 1.0;
+    if ((input.inFlags & ((1u << 14u) | 4u)) == (1u << 14u)) {
+        if (input.inLayerTextures.y != kInvalidImportedTextureIndex) {
+            skinSoftMask = bindlessTextures[NonUniformResourceIndex(input.inLayerTextures.y)].Sample(input.inUv).rgb;
+            skinRolloff = max(asfloat(input.terrainSurface.z), 0.0);
+        }
+        if (input.inLayerTextures.z != kInvalidImportedTextureIndex)
+            skinSpecular = input.inLayerWeights.rgb * max(asfloat(input.terrainSurface.x), 0.0) *
+                bindlessTextures[NonUniformResourceIndex(input.inLayerTextures.z)].Sample(input.inUv).r;
+        skinGloss = max(asfloat(input.terrainSurface.y), 1.0);
+    }
     float3 specular = float3(0.0, 0.0, 0.0);
     const float3 importedLights =
         evaluateImportedLocalLights(
@@ -1632,7 +1736,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
             usePbr,
             input.inScreenPosition.xy,
             viewDepth,
-            specular) *
+            specular, skinSoftMask, skinRolloff, skinSpecular, skinGloss, geometricNormal) *
         ((interiorMode && !authoredInterior) ? 1.25 : 1.0);
     const float directShadowFactor = lerp(1.0, shadowVisibility, clamp(camera.sunColorShadow.w, 0.0, 1.0));
 
@@ -1642,11 +1746,20 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float directCore = ndotl * (foliageLighting ? 0.45 : (1.0 - diffuseWrap));
     const float directFill = max(wrappedNdotL - directCore, 0.0);
     const float occludedWrap = directCore + (directFill * ambientOcclusion);
-    const float3 direct = authoredInterior
+    float3 direct = authoredInterior
         ? camera.interiorDirectional.xyz * occludedWrap
         : camera.sunColorShadow.xyz *
             (sunIntensity * occludedWrap * directShadowFactor *
              (interiorMode ? 0.24 : 0.95 * camera.importedExteriorConfig.z));
+    const float3 skinSunRadiance = authoredInterior ? camera.interiorDirectional.xyz :
+        camera.sunColorShadow.xyz * sunIntensity * directShadowFactor *
+        (interiorMode ? 0.24 : 0.95 * camera.importedExteriorConfig.z);
+    direct += skinSunRadiance * skinSoftMask * skinSoftLobe(dot(normal, -sunDirection), skinRolloff);
+    if (ndotl > 0.0001 && any(skinSpecular > 0.0)) {
+        const float3 halfVector = viewDir - sunDirection;
+        const float3 halfDirection = halfVector * rsqrt(max(dot(halfVector, halfVector), 1e-8));
+        specular += skinSunRadiance * skinSpecular * pow(saturate(dot(normal, halfDirection)), skinGloss);
+    }
     float3 screenSpaceGi = (
         (input.inFlags & kImportedMaterialFlagAlphaBlend) == 0u &&
         chunkPc.cascadeData.x <= 0.5)
@@ -1735,7 +1848,8 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float rim = pow(1.0 - saturate(dot(normal, viewDir)), 2.0);
     // The rim term is a stand-in Fresnel for surfaces with no real material;
     // PBR surfaces get a physical one from pbrFresnelSchlick instead.
-    const float rimWeight = usePbr ? 0.0 : (interiorMode ? 0.010 : 0.022);
+    const bool authoredNoSpecular = (input.inFlags & ((1u << 15u) | 4u)) == (1u << 15u);
+    const float rimWeight = (usePbr || authoredNoSpecular) ? 0.0 : (interiorMode ? 0.010 : 0.022);
     // Emissive is added after the lighting sum, not folded into albedo: it is
     // radiance the surface produces, so it must not be scaled by incoming light
     // or by pbrDiffuseScale (a fully metallic emitter still glows).

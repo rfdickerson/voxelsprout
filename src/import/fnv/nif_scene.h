@@ -61,6 +61,7 @@ enum class NifAlphaSemantic : std::uint8_t {
 // Source material state, independent of diffuse texture identity. Missing
 // optional tails retain neutral values and are reported separately.
 struct NifLightingMaterial {
+    float effectFalloff[4] = {1, 0, 1, 1};
     bool present = false;
     bool parametersValid = false;
     // UINT32_MAX is an internal animated-effect family tag, not a lighting shader enum.
@@ -79,6 +80,7 @@ struct NifLightingMaterial {
     float environmentScale = 0;
     float alpha = 1;
     float glossiness = 1;
+    float softLightingRolloff = 0;
     float specular[3] = {1, 1, 1};
     float specularStrength = 1;
     std::vector<std::string> textures;
@@ -352,12 +354,16 @@ struct NifSkeleton {
 inline constexpr int kNifMaxBoneInfluences = 4;
 
 struct NifSkinnedShape {
+    std::uint32_t bipedSlots = 0u; // TES5 BSDismemberSkinInstance partitions 30..61
     std::string name;
     std::vector<float> positions;  // xyz per vertex, SKIN space (see below)
     std::vector<float> normals;
     std::vector<float> uvs;
     std::vector<std::uint32_t> triangleIndices;
     std::string diffuseTexturePath;
+    std::string normalTexturePath;
+    bool modelSpaceNormals = false;
+    NifLightingMaterial lightingMaterial;
     bool alphaTest = false;
     std::uint8_t alphaThreshold = 128;
     bool alphaBlend = false;

@@ -53,6 +53,7 @@ public:
         std::vector<std::uint8_t> bytes;
         std::string canonicalVirtualPath;
         std::string providerId;
+        int layerPriority = 0;
         std::string providerName;
         std::filesystem::path providerRoot;
         std::filesystem::path physicalPath;

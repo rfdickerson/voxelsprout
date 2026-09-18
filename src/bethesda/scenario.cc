@@ -38,6 +38,24 @@ const ScenarioDefinition& skyrimBleakFallsScenario() {
     return scenario;
 }
 
+const ScenarioDefinition& skyrimHelgenRalofScenario() {
+    // Keep the versioned Hadvar route intact. This is the Stormcloak branch
+    // at the authored cave-exit marker, before the introductory conversation.
+    static const ScenarioDefinition scenario = [] {
+        auto value = skyrimBleakFallsScenario();
+        value.id = "skyrim-helgen-ralof";
+        value.startMarker.clear();
+        value.startDoorFormId = 0x00091608u; // HelgenKeep01toExteriorExitREF.XTEL
+        value.companionReferenceFormId = 0x0002bf9eu; // RalofRef
+        // Stage 0 is a test-start teleport back inside the keep. Stage 20
+        // belongs to the introductory dialogue, not the departure bootstrap.
+        value.prerequisiteQuests = {{"MQ101", 900, true}, {"MQ102", 10, false},
+                                    {"MQ102B", 5, false}, {"MQ102B", 10, false}, {"MQ102", 15, false}};
+        return value;
+    }();
+    return scenario;
+}
+
 const ScenarioDefinition& skyrimWhiterunShowcaseScenario() {
     // Enter Whiterun after Dragon Rising's prerequisite chain, while leaving
     // the next main-quest beat uncompleted. The city itself, its actors and
@@ -77,6 +95,8 @@ const ScenarioDefinition& skyrimRiftenShowcaseScenario() {
 const ScenarioDefinition* findScenario(const std::string& id) {
     const ScenarioDefinition& bleakFalls = skyrimBleakFallsScenario();
     if (id == bleakFalls.id) return &bleakFalls;
+    const ScenarioDefinition& ralof = skyrimHelgenRalofScenario();
+    if (id == ralof.id) return &ralof;
     const ScenarioDefinition& whiterun = skyrimWhiterunShowcaseScenario();
     if (id == whiterun.id) return &whiterun;
     const ScenarioDefinition& riften = skyrimRiftenShowcaseScenario();

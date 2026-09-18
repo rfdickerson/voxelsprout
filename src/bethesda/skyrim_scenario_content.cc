@@ -5,9 +5,11 @@
 #include "bethesda/skyrim_persistent_references.h"
 #include <memory>
 #include "import/fnv/esm_reader.h"
+#include "import/fnv/actor_records.h"
 #include "import/fnv/strings_table.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <optional>
@@ -208,7 +210,8 @@ bool loadSkyrimScenarioContent(
         for (SkyrimQuestStageDefinition& stage : definition.stages) {
             for (SkyrimQuestLogEntryDefinition& entry : stage.logEntries) {
                 for (Condition& condition : entry.conditions) {
-                    if (condition.function == 47u || condition.function == 67u) {
+                    if (condition.function == 47u || condition.function == 67u ||
+                        condition.function == 58u || condition.function == 59u) {
                         condition.parameter1 = loadOrder.remapFormId(
                             sourcePluginIndex, condition.parameter1);
                     }
@@ -766,6 +769,7 @@ bool loadSkyrimScenarioContent(
     std::map<std::uint32_t, WinningDialogueTopic> winningTopics;
     std::map<std::uint32_t, WinningDialogueBranch> winningBranches;
     std::map<std::uint32_t, WinningDialogueInfo> winningInfos;
+    std::map<std::uint32_t, std::pair<SkyrimSceneDefinition, std::size_t>> winningScenes;
     std::uint64_t authoredInfoOrder = 0u;
     for (std::size_t pluginIndex = 0u; pluginIndex < loadOrder.entries().size(); ++pluginIndex) {
         importer::fnv::EsmReader reader;
@@ -786,7 +790,7 @@ bool loadSkyrimScenarioContent(
         };
         visitor.onRecordHeader = [](const importer::fnv::EsmRecordHeaderView& header) {
             return header.type == "DLBR" || header.type == "DIAL" ||
-                header.type == "INFO";
+                header.type == "INFO" || header.type == "SCEN";
         };
         bool parseFailed = false;
         std::string parseError;
@@ -794,6 +798,7 @@ bool loadSkyrimScenarioContent(
             const std::uint32_t resolvedRecord =
                 loadOrder.remapFormId(pluginIndex, record.formId);
             if ((record.flags & 0x20u) != 0u) {
+                winningScenes.erase(resolvedRecord);
                 if (record.type == "DLBR") winningBranches.erase(resolvedRecord);
                 else if (record.type == "DIAL") {
                     winningTopics.erase(resolvedRecord);
@@ -805,6 +810,16 @@ bool loadSkyrimScenarioContent(
             RecordKey stable;
             if (!stableRecordKey(loadOrder, resolvedRecord, stable, parseError)) {
                 parseFailed = true;
+                return;
+            }
+            if (record.type == "SCEN") {
+                std::uint32_t owner = 0;
+                // The final PNAM owns the scene; earlier PNAMs belong to actions.
+                for (const auto& sub : record.subrecords) if (sub.type == "PNAM" && sub.size == 4) std::memcpy(&owner, sub.data, 4);
+                if (!scenarioQuestFormIds.contains(loadOrder.remapFormId(pluginIndex, owner))) return;
+                SkyrimSceneDefinition scene;
+                if (!readSkyrimScene(record, stable, scene, parseError)) { parseFailed = true; return; }
+                winningScenes.insert_or_assign(resolvedRecord, std::make_pair(std::move(scene), pluginIndex));
                 return;
             }
             if (record.type == "DLBR") {
@@ -1119,6 +1134,245 @@ bool loadSkyrimScenarioContent(
         " INFO variants, and " + std::to_string(outReport.dialogueFragmentsLoaded) +
         " authored INFO fragments");
 
+    std::set<std::uint32_t> scenePackageForms;
+    for (auto& [resolved, winning] : winningScenes) {
+        auto& scene = winning.first;
+        const auto source = winning.second;
+        const auto resolve = [&](std::uint32_t raw, RecordKey& key) {
+            return raw == 0 || stableRecordKey(loadOrder, loadOrder.remapFormId(source, raw), key, outError);
+        };
+        if (!resolve(scene.rawQuest, scene.quest)) return false;
+        for (auto& action : scene.actions) {
+            if (!resolve(action.rawTopic, action.topic)) return false;
+            for (auto raw : action.rawPackages) {
+                RecordKey key; if (!resolve(raw, key)) return false;
+                action.packages.push_back(key); scenePackageForms.insert(loadOrder.remapFormId(source, raw));
+            }
+        }
+        for (auto& phase : scene.phases) for (auto* conditions : {&phase.startConditions, &phase.completionConditions}) {
+            for (auto& condition : *conditions) {
+                if (!condition.useAliases && (condition.function == 1 || condition.function == 58 || condition.function == 59 || condition.function == 550 || condition.function == 629 || condition.function == 214))
+                    condition.parameter1 = loadOrder.remapFormId(source, condition.parameter1);
+                if (condition.runOn == 2) condition.reference = loadOrder.remapFormId(source, condition.reference);
+            }
+        }
+        std::map<std::string, VmadScriptAttachment> attachments;
+        for (const auto& script : scene.scripts.scripts) attachments.emplace(script.className, script);
+        for (const auto& fragment : scene.fragments) {
+            attachments.try_emplace(fragment.scriptClass, VmadScriptAttachment{fragment.scriptClass, 0, {}});
+            dialogueRootFunctions.push_back(lowerAscii(fragment.scriptClass + "." + fragment.function));
+        }
+        for (const auto& [name, script] : attachments) {
+            std::vector<std::uint8_t> bytes; PexScript pex; PexCompatibilityReport compatibility;
+            if (!assets.resolveAsset("scripts\\" + name + ".pex", bytes, outError) ||
+                !readPexScript(bytes, pex, outError)) return false;
+            if (!session.papyrus().hasScriptClass(name) && !session.papyrus().loadPexScript(pex, false, compatibility, outError)) return false;
+            loadedPexScripts.insert_or_assign(lowerAscii(name), pex);
+            std::unordered_map<std::string, PapyrusValue> properties;
+            for (const auto& property : script.properties) {
+                const auto& value = property.value; PapyrusValue converted;
+                if (value.type == VmadValueType::Object && value.object.formId) {
+                    const auto object = referenceResolver(loadOrder.remapFormId(source, value.object.formId));
+                    if (!object) { outError = "unresolved SCEN property " + name + "." + property.name; return false; }
+                    converted = PapyrusValue::fromObject(*object);
+                    if (value.object.alias != 0xffffu) {
+                        const auto* quest = session.findQuest(*object);
+                        if (!quest) { outError = "unresolved SCEN quest alias"; return false; }
+                        for (const auto& alias : quest->aliases) if (alias.id == value.object.alias) converted = PapyrusValue::fromObject(alias.handle);
+                    }
+                } else if (value.type == VmadValueType::Integer) converted = PapyrusValue::fromInteger(value.integer);
+                else if (value.type == VmadValueType::Boolean) converted = PapyrusValue::fromBoolean(value.boolean);
+                else if (value.type == VmadValueType::Float) converted = PapyrusValue::fromFloat(value.real);
+                else if (value.type == VmadValueType::String) converted = PapyrusValue::fromString(value.string);
+                properties.emplace(property.name, std::move(converted));
+            }
+            if (!session.papyrus().attachScript(ObjectId::persistent(scene.record), name, std::move(properties), outError)) return false;
+        }
+        for (const auto& definition : definitions) if (definition.record == scene.quest) {
+            const auto questSource = definitionSourcePluginIndices.at(definition.record);
+            for (const auto& alias : definition.aliases) for (const auto raw : alias.packages) {
+                const auto resolved = loadOrder.remapFormId(questSource, raw);
+                RecordKey key; if (!stableRecordKey(loadOrder, resolved, key, outError)) return false;
+                scene.aliasPackages[alias.id].push_back(key); scenePackageForms.insert(resolved);
+            }
+        }
+        session.registerScene(std::move(scene));
+    }
+    // Scene travel actions reuse the existing NAVM RequestMoveTo path. Resolve
+    // location data from winning PACK records, never a scenario-specific route.
+    importer::fnv::FalloutActorScan actorCatalog;
+    std::unordered_map<std::uint32_t, std::string> voiceOwners;
+    if (!importer::fnv::findAllActorsAcrossOrder(loadOrder, actorCatalog, voiceOwners, outError)) return false;
+    for (const auto& definition : definitions) {
+        const auto source = definitionSourcePluginIndices.at(definition.record);
+        for (const auto& alias : definition.aliases) {
+            const auto ref = loadOrder.remapFormId(source, alias.forcedReferenceFormId);
+            const auto placed = std::find_if(actorCatalog.placements.begin(), actorCatalog.placements.end(), [&](const auto& p) { return p.refFormId == ref; });
+            const auto base = actorCatalog.bases.find(placed == actorCatalog.placements.end()
+                ? loadOrder.remapFormId(source, alias.uniqueActorFormId) : placed->baseFormId);
+            if (base == actorCatalog.bases.end()) continue;
+            const auto race = actorCatalog.races.find(base->second.raceFormId);
+            if (race == actorCatalog.races.end() || !race->second.flies) continue;
+            std::vector<RecordKey> packages;
+            for (const auto raw : alias.packages) {
+                const auto resolved = loadOrder.remapFormId(source, raw);
+                RecordKey key; if (!stableRecordKey(loadOrder, resolved, key, outError)) return false;
+                packages.push_back(key); scenePackageForms.insert(resolved);
+            }
+            session.registerFlyingAliasPackages(definition.record, alias.id, std::move(packages));
+        }
+    }
+    std::set<std::uint32_t> patrolStarts;
+    for (std::size_t source = 0; source < loadOrder.entries().size(); ++source) {
+        importer::fnv::EsmReader reader;
+        if (!reader.open(loadOrder.entries()[source].path)) { outError = reader.lastError(); return false; }
+        importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const auto& record) { return record.type == "PACK" && scenePackageForms.contains(loadOrder.remapFormId(source, record.formId)); };
+        visitor.onRecord = [&](const auto& record) {
+            SkyrimScenePackage package;
+            std::string parameterType;
+            unsigned floatParameter = 0;
+            if (!stableRecordKey(loadOrder, loadOrder.remapFormId(source, record.formId), package.record, outError)) return;
+            if (!(record.flags & 0x20u)) for (const auto& sub : record.subrecords) {
+              if (sub.type == "ANAM") parameterType.assign(reinterpret_cast<const char*>(sub.data), sub.size && !sub.data[sub.size-1] ? sub.size-1 : sub.size);
+              if (sub.type == "CNAM" && parameterType == "Float" && sub.size == 4) {
+                float value; std::memcpy(&value, sub.data, 4);
+                if (++floatParameter == 2 && std::isfinite(value) && value > 0) package.escortWaitDistance = value;
+              }
+              if (sub.type == "QNAM" && sub.size == 4) {
+                std::uint32_t raw; std::memcpy(&raw, sub.data, 4);
+                if (!stableRecordKey(loadOrder, loadOrder.remapFormId(source, raw), package.quest, outError)) return;
+              }
+              if (sub.type == "VMAD") {
+                if (!readVmadInfoAttachments({sub.data, sub.size}, package.scripts, outError)) return;
+                for (const auto& fragment : package.scripts.fragments) {
+                    std::vector<std::uint8_t> bytes; PexScript pex; PexCompatibilityReport compatibility;
+                    if (!assets.resolveAsset("scripts\\"+fragment.scriptClass+".pex", bytes, outError) || !readPexScript(bytes, pex, outError)) return;
+                    if (!session.papyrus().hasScriptClass(fragment.scriptClass) && !session.papyrus().loadPexScript(pex, false, compatibility, outError)) return;
+                    loadedPexScripts.insert_or_assign(lowerAscii(fragment.scriptClass), pex);
+                    if (!session.papyrus().attachScript(ObjectId::persistent(package.record), fragment.scriptClass, {}, outError)) return;
+                    dialogueRootFunctions.push_back(lowerAscii(fragment.scriptClass+"."+fragment.function));
+                }
+              }
+              if (sub.type == "PTDA" && sub.size == 12 && !package.destination.valid()) {
+                std::uint32_t type, target; std::memcpy(&type, sub.data, 4); std::memcpy(&target, sub.data+4, 4);
+                if (type == 0 && target) {
+                    const auto resolved = loadOrder.remapFormId(source, target);
+                    package.destination = referenceResolver(resolved).value_or(ObjectId{});
+                    package.escortTarget = package.destination;
+                    package.patrol = true; patrolStarts.insert(resolved);
+                }
+              }
+              if (sub.type == "CTDA") {
+                Condition condition; if (!readCondition({sub.data, sub.size}, condition, outError)) return;
+                if (condition.function == 58 || condition.function == 59 || condition.function == 1 || condition.function == 629 || condition.function == 74 || condition.function == 71)
+                    condition.parameter1 = loadOrder.remapFormId(source, condition.parameter1);
+                if (condition.function == 74 && !ensureRuntimeRecord(condition.parameter1, "globalvariable", outError)) return;
+                if (condition.runOn == 2) condition.reference = loadOrder.remapFormId(source, condition.reference);
+                package.conditions.push_back(condition);
+              }
+              if (sub.type == "PLDT" && sub.size == 12) {
+                std::uint32_t type, target, radius;
+                std::memcpy(&type, sub.data, 4); std::memcpy(&target, sub.data+4, 4); std::memcpy(&radius, sub.data+8, 4);
+                if (type == 0) {
+                    package.patrol = false;
+                    package.destination = referenceResolver(loadOrder.remapFormId(source, target)).value_or(ObjectId{});
+                    package.radius = static_cast<float>(radius);
+                }
+                if (type == 8) { package.destinationAlias = static_cast<std::int32_t>(target); package.radius = static_cast<float>(radius); }
+              }
+            }
+            session.registerScenePackage(std::move(package));
+        };
+        if (!reader.walk(visitor) || !outError.empty()) { if (outError.empty()) outError = reader.lastError(); return false; }
+    }
+    outReport.diagnostics.push_back("registered " + std::to_string(winningScenes.size()) + " authored SCEN records");
+
+    // Discover script volumes whose base attachment references this scenario's
+    // quests, and merge each placed reference's property overrides.
+    struct TriggerBase { VmadAttachments vmad; std::size_t source = 0; };
+    struct TriggerPlacement { std::uint32_t base = 0; VmadAttachments vmad; std::size_t source = 0; std::array<float, 3> extents{}; };
+    std::map<std::uint32_t, TriggerBase> triggerBases;
+    std::map<std::uint32_t, TriggerPlacement> triggerPlacements;
+    std::map<std::uint32_t, std::uint32_t> patrolLinks;
+    for (std::size_t source = 0; source < loadOrder.entries().size(); ++source) {
+        importer::fnv::EsmReader reader;
+        if (!reader.open(loadOrder.entries()[source].path)) { outError = reader.lastError(); return false; }
+        importer::fnv::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [](const auto& record) { return record.type == "ACTI" || record.type == "REFR"; };
+        visitor.onRecord = [&](const auto& record) {
+            const auto id = loadOrder.remapFormId(source, record.formId);
+            if (record.type == "ACTI") triggerBases.erase(id); else triggerPlacements.erase(id);
+            if (record.flags & 0x20u) return;
+            VmadAttachments vmad; TriggerPlacement placement; placement.source = source;
+            bool box = false;
+            for (const auto& sub : record.subrecords) {
+                if (sub.type == "XLKR" && sub.size == 8) {
+                    std::uint32_t keyword, target; std::memcpy(&keyword, sub.data, 4); std::memcpy(&target, sub.data+4, 4);
+                    if (!keyword) patrolLinks[id] = loadOrder.remapFormId(source, target);
+                }
+                if (sub.type == "VMAD" && !readVmadAttachments({sub.data, sub.size}, vmad, outError)) return;
+                if (sub.type == "NAME" && sub.size == 4) { std::uint32_t base; std::memcpy(&base, sub.data, 4); placement.base = loadOrder.remapFormId(source, base); }
+                if (sub.type == "XPRM" && sub.size == 32) {
+                    std::uint32_t type; std::memcpy(&type, sub.data+28, 4); box = type == 1;
+                    std::memcpy(placement.extents.data(), sub.data, 12);
+                }
+            }
+            if (record.type == "ACTI") {
+                bool relevant = false;
+                for (const auto& script : vmad.scripts) for (const auto& property : script.properties)
+                    if (property.value.type == VmadValueType::Object && scenarioQuestFormIds.contains(loadOrder.remapFormId(source, property.value.object.formId))) relevant = true;
+                if (relevant) triggerBases.emplace(id, TriggerBase{std::move(vmad), source});
+            } else if (box) { placement.vmad = std::move(vmad); triggerPlacements.emplace(id, std::move(placement)); }
+        };
+        if (!reader.walk(visitor) || !outError.empty()) { if (outError.empty()) outError = reader.lastError(); return false; }
+    }
+    for (const auto& [id, placement] : triggerPlacements) {
+        const auto base = triggerBases.find(placement.base);
+        if (base == triggerBases.end()) continue;
+        const auto object = referenceResolver(id);
+        if (!object) continue;
+        SkyrimScriptTrigger trigger; trigger.object = *object; trigger.halfExtents = placement.extents;
+        for (const auto& attachment : base->second.vmad.scripts) {
+            const auto& name = attachment.className;
+            std::vector<std::uint8_t> bytes; PexScript pex; PexCompatibilityReport compatibility;
+            if (!assets.resolveAsset("scripts\\"+name+".pex", bytes, outError) || !readPexScript(bytes, pex, outError)) return false;
+            const auto functions = std::find_if(pex.functions.begin(), pex.functions.end(), [](const auto& f) { return lowerAscii(f.name) == "ontriggerenter"; });
+            if (functions == pex.functions.end()) continue;
+            if (!session.papyrus().hasScriptClass(name) && !session.papyrus().loadPexScript(pex, false, compatibility, outError)) return false;
+            loadedPexScripts.insert_or_assign(lowerAscii(name), pex);
+            std::unordered_map<std::string, PapyrusValue> properties;
+            const auto addProperties = [&](const VmadScriptAttachment& script, std::size_t source) {
+                for (const auto& property : script.properties) {
+                    const auto& value = property.value; PapyrusValue converted;
+                    if (value.type == VmadValueType::Object && value.object.formId) {
+                        const auto target = referenceResolver(loadOrder.remapFormId(source, value.object.formId));
+                        if (target) converted = PapyrusValue::fromObject(*target);
+                    } else if (value.type == VmadValueType::Integer) converted = PapyrusValue::fromInteger(value.integer);
+                    else if (value.type == VmadValueType::Boolean) converted = PapyrusValue::fromBoolean(value.boolean);
+                    else if (value.type == VmadValueType::Float) converted = PapyrusValue::fromFloat(value.real);
+                    else if (value.type == VmadValueType::String) converted = PapyrusValue::fromString(value.string);
+                    properties.insert_or_assign(property.name, converted);
+                }
+            };
+            addProperties(attachment, base->second.source);
+            for (const auto& override : placement.vmad.scripts) if (lowerAscii(override.className) == lowerAscii(name)) addProperties(override, placement.source);
+            if (!session.papyrus().attachScript(*object, name, std::move(properties), outError)) return false;
+            trigger.scripts.push_back(name);
+            dialogueRootFunctions.push_back(lowerAscii(name + ".OnTriggerEnter"));
+        }
+        if (!trigger.scripts.empty()) session.registerScriptTrigger(std::move(trigger));
+    }
+    for (auto current : patrolStarts) {
+        std::set<std::uint32_t> visited;
+        while (patrolLinks.contains(current) && visited.insert(current).second) {
+            const auto next = patrolLinks.at(current);
+            const auto from = referenceResolver(current), to = referenceResolver(next);
+            if (from && to) session.registerPatrolLink(*from, *to);
+            current = next;
+        }
+    }
+
     std::vector<std::string> rootFunctions;
     for (const ScenarioQuestLoadDetail& detail : outReport.quests) {
         for (const std::string& scriptClass : detail.scriptClasses) {
@@ -1367,8 +1621,39 @@ bool loadSkyrimScenarioContent(
             "attached " + std::to_string(outReport.transitiveScriptInstances) +
             " transitive winning-record VMAD script instances");
     }
+    // ALUA names an NPC_ base, not an ACHR. Bind unique actor aliases before
+    // startup fragments call GetActorRef/ForceRefTo, including in headless runs.
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> referencesByBase;
+    for (const auto& placement : actorCatalog.placements)
+        referencesByBase[placement.baseFormId].push_back(placement.refFormId);
+    for (const auto& [name, quest] : session.quests()) {
+        (void)name;
+        for (const auto& alias : quest.aliases) {
+            const auto candidates = referencesByBase.find(alias.sourceFormId);
+            if (candidates == referencesByBase.end() || candidates->second.size() != 1u) continue;
+            const auto target = referenceResolver(candidates->second.front());
+            if (!target || !session.bindQuestAliasTarget(ObjectId::persistent(quest.record),
+                    alias.id, *target, outError)) return false;
+        }
+    }
     if (!materializeSkyrimPersistentReferences(
             loadOrder, *reachedReferences, session.world(), outError)) return false;
+    for (const auto& definition : definitions) {
+        const auto* quest = session.findQuest(ObjectId::persistent(definition.record));
+        if (!quest) continue;
+        const auto source = definitionSourcePluginIndices.at(definition.record);
+        for (const auto& alias : definition.aliases) {
+            const auto bound = std::find_if(quest->aliases.begin(), quest->aliases.end(), [&](const auto& value) { return value.id == alias.id; });
+            if (bound == quest->aliases.end()) continue;
+            auto* actor = session.world().find(bound->target);
+            if (!actor) continue;
+            for (const auto raw : alias.factions) {
+                RecordKey faction;
+                if (!stableRecordKey(loadOrder, loadOrder.remapFormId(source, raw), faction, outError)) return false;
+                if (std::find(actor->factions.begin(), actor->factions.end(), faction) == actor->factions.end()) actor->factions.push_back(faction);
+            }
+        }
+    }
 
     // applyScenario establishes seed identities before retail definitions and
     // VMAD instances exist. Replay only script-backed startup stages now so

@@ -19,7 +19,7 @@
 //
 // The rest pose is bound as a VERTEX BUFFER with explicit attribute offsets, not
 // as a StructuredBuffer. See skinning.comp.slang's header for why that matters:
-// GpuSkinnedVertexIn is 84 tightly packed bytes on the CPU, and std430 would put
+// GpuSkinnedVertexIn is 148 tightly packed bytes on the CPU, and std430 would put
 // a float3-declared member at a 16-byte alignment and read every field after the
 // first from the wrong offset. Vertex attributes carry their offsets explicitly,
 // so the layout cannot drift.
@@ -36,7 +36,7 @@ struct PushConstants
     // jitter pattern into the motion field and TAA would chase its own dither.
     float4 jitterCurrPrev;
     uint boneCount;
-    uint pad0;
+    uint morphTargetCount;
     uint pad1;
     uint pad2;
 };
@@ -52,11 +52,22 @@ StructuredBuffer<float4x4> currentBoneMatrices;
 [[vk::binding(1, 0)]]
 StructuredBuffer<float4x4> previousBoneMatrices;
 
+struct MorphDelta
+{
+    uint targetIndex;
+    float deltaX, deltaY, deltaZ;
+};
+[[vk::binding(2, 0)]] StructuredBuffer<uint> morphVertexOffsets;
+[[vk::binding(3, 0)]] StructuredBuffer<MorphDelta> morphDeltas;
+[[vk::binding(4, 0)]] StructuredBuffer<float> currentMorphWeights;
+[[vk::binding(5, 0)]] StructuredBuffer<float> previousMorphWeights;
+
 struct VertexInput
 {
     float3 position : POSITION;          // offset 0
     uint4 boneIndices : TEXCOORD0;       // offset 52
     float4 boneWeights : TEXCOORD1;      // offset 68
+    uint vertexIndex : SV_VertexID;
 };
 
 struct VertexOutput
@@ -87,17 +98,32 @@ float3 skinPosition(float3 restPosition, uint4 boneIndices, float4 boneWeights,
         weightSum += weight;
     }
     // An unweighted vertex passes through at its authored position, matching
-    // what the skinning compute pass does with it. Renormalizing instead would
-    // put this pass's idea of the surface somewhere the main pass never drew.
+    // the skinning compute pass. Both passes normalize the same positive
+    // influences, including the translation component of each palette matrix.
     return (weightSum > 1e-5) ? (skinned / weightSum) : restPosition;
 }
 
 VertexOutput main(VertexInput input)
 {
+    float3 currentRest = input.position;
+    float3 previousRest = input.position;
+    if (pushConstants.morphTargetCount != 0u)
+    {
+        const uint begin = morphVertexOffsets[input.vertexIndex];
+        const uint end = morphVertexOffsets[input.vertexIndex + 1u];
+        for (uint deltaIndex = begin; deltaIndex < end; ++deltaIndex)
+        {
+            const MorphDelta delta = morphDeltas[deltaIndex];
+            const uint target = min(delta.targetIndex, pushConstants.morphTargetCount - 1u);
+            const float3 amount = float3(delta.deltaX, delta.deltaY, delta.deltaZ);
+            currentRest += currentMorphWeights[target] * amount;
+            previousRest += previousMorphWeights[target] * amount;
+        }
+    }
     const float3 currentWorld =
-        skinPosition(input.position, input.boneIndices, input.boneWeights, currentBoneMatrices);
+        skinPosition(currentRest, input.boneIndices, input.boneWeights, currentBoneMatrices);
     const float3 previousWorld =
-        skinPosition(input.position, input.boneIndices, input.boneWeights, previousBoneMatrices);
+        skinPosition(previousRest, input.boneIndices, input.boneWeights, previousBoneMatrices);
 
     VertexOutput output;
     output.clipPosition = mul(pushConstants.viewProj, float4(currentWorld, 1.0));

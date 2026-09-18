@@ -43,7 +43,7 @@ public:
 
     bool setup(const SetupInfo& info) override {
         m_setup = info;
-        m_upscaling = info.renderExtent.width < info.displayExtent.width ||
+        m_upscaling = info.jitteredNativeResolve || info.renderExtent.width < info.displayExtent.width ||
                       info.renderExtent.height < info.displayExtent.height;
         if (info.pipelineLayout == VK_NULL_HANDLE || !m_host.loadShader) {
             return false;
@@ -55,8 +55,7 @@ public:
         // Optional by design. Without it an upscaling host still gets a correct
         // -- if softer -- frame from the resolve path stretched by the tonemap,
         // which is a better failure than refusing to start.
-        if (m_upscaling && m_upscalePipeline == VK_NULL_HANDLE &&
-            std::filesystem::exists(kUpscaleShaderPath)) {
+        if (m_upscaling && m_upscalePipeline == VK_NULL_HANDLE) {
             createPipeline(kUpscaleShaderPath, "temporal_upscale.comp", m_upscalePipeline);
         }
         return true;

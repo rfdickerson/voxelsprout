@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "vertex_count": 3,
+  "topology_fingerprint": "synthetic-humanoid-v1",
+  "targets": [
+    {
+      "id": "weight",
+      "deltas": [
+        { "vertex": 1, "position": [0.0, 2.0, 0.0] }
+      ]
+    }
+  ],
+  "outfit_mappings": {
+    "synthetic-outfit": ["weight"]
+  }
+}

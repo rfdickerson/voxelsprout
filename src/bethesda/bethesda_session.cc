@@ -90,6 +90,22 @@ void hashBehaviorGraph(
     hashScalar(hash, graph.transitionDuration);
     hashScalar(hash, graph.fixedTick);
     hashScalar(hash, graph.wasGrounded);
+    hashScalar(hash, graph.wasTalking);
+    hashString(hash, graph.graphFingerprint);
+    hashScalar(hash, graph.executionMode);
+    hashString(hash, graph.selectedRule);
+    hashString(hash, graph.selectedProvider);
+    hashString(hash, graph.selectedClip);
+    hashString(hash, graph.previousClip);
+    hashScalar(hash, graph.randomState);
+    hashScalar(hash, graph.actionIdentity);
+    for (const auto& [name, time] : graph.layerTimes) { hashString(hash, name); hashScalar(hash, time); }
+    for (const auto& [node, state] : graph.activeStates) {
+        hashScalar(hash, node); hashScalar(hash, state);
+    }
+    for (const auto& [name, value] : graph.variables) {
+        hashString(hash, name); hashScalar(hash, value);
+    }
     for (const odai::anim::AnimationEvent& event : graph.queuedEvents) {
         hashString(hash, event.name);
         hashString(hash, event.payload);
@@ -125,6 +141,8 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
         m_config.livingWorldEnabled, m_config.gameTimeScale, 8u * 60u,
         72u * 60u, 64u});
     m_actorAnimations.clear();
+    m_actorGuards.clear();
+    m_meleeContacts.clear();
     m_pendingAnimationSnapshots.clear();
     m_pendingPhysicsSnapshots.clear();
     m_papyrus.clearRuntimeState();
@@ -138,9 +156,15 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
     m_statistics.clear();
     m_discoveries.clear();
     m_scenes.clear();
+    m_scriptTriggers.clear();
+    m_flyingAliasPackages.clear(); m_patrolLinks.clear();
+    m_sceneWaitingActors.clear();
+    m_sceneDefinitions.clear(); m_scenePackages.clear(); m_sceneProgress.clear();
+    m_sceneSpeech.clear(); m_sceneSpeechSequence = 0;
     m_skyrimItems.clear();
     m_forcedWeather = {};
     m_imageSpaceCommands.clear();
+    m_effectAnimationPlayer = {};
     m_locations.clear();
     m_globalVariables.clear();
     m_storyEvents.clear();
@@ -262,7 +286,7 @@ bool BethesdaSession::configureTes3Content(
 bool BethesdaSession::registerActorAnimation(
     ObjectId object, std::shared_ptr<const odai::anim::AnimationView> thirdPerson,
     std::shared_ptr<const odai::anim::AnimationView> firstPerson,
-    const PhysicsCharacterConfig& physicsConfig, std::string& outError) {
+    const PhysicsCharacterConfig& physicsConfig, std::string& outError, bool createController) {
     if (!object.valid() || thirdPerson == nullptr) {
         outError = "actor animation registration requires ObjectId and third-person view";
         return false;
@@ -274,7 +298,7 @@ bool BethesdaSession::registerActorAnimation(
     if (runtime.firstPersonView != nullptr &&
         !runtime.firstPerson.bind(*runtime.firstPersonView, outError)) return false;
     const bool hadController = m_physics.hasCharacter(object);
-    if (!hadController && !registerActorController(object, physicsConfig, outError)) return false;
+    if (createController && !hadController && !registerActorController(object, physicsConfig, outError)) return false;
     const auto pending = m_pendingAnimationSnapshots.find(object);
     if (pending != m_pendingAnimationSnapshots.end()) {
         if (pending->second.firstPerson.has_value() != (runtime.firstPersonView != nullptr)) {
@@ -283,7 +307,34 @@ bool BethesdaSession::registerActorAnimation(
             if (!hadController) (void)unregisterActorController(object);
             return false;
         }
-        if (!runtime.thirdPerson.restore(pending->second.thirdPerson, outError) ||
+        const bool changed = (!pending->second.thirdPerson.graphFingerprint.empty() &&
+            pending->second.thirdPerson.graphFingerprint != runtime.thirdPersonView->sourceFingerprint) ||
+            pending->second.thirdPerson.executionMode != runtime.thirdPersonView->executionMode ||
+            (pending->second.firstPerson && runtime.firstPersonView &&
+                ((!pending->second.firstPerson->graphFingerprint.empty() &&
+                  pending->second.firstPerson->graphFingerprint != runtime.firstPersonView->sourceFingerprint) ||
+                 pending->second.firstPerson->executionMode != runtime.firstPersonView->executionMode));
+        if (changed) {
+            m_pendingDiagnostics.push_back("discarded incompatible animation state for " + object.toString() +
+                ": resolved rig/asset fingerprint changed; equipment ownership retained");
+            if (const auto* owner = m_world.find(object)) {
+                WorldCommand cancel;
+                cancel.type = WorldCommandType::SetEquipmentState; cancel.target = object;
+                cancel.equipment = owner->equipment;
+                cancel.equipment.transitioning = false;
+                cancel.equipment.requestedDrawn = cancel.equipment.drawn;
+                (void)m_world.queue(std::move(cancel));
+                if (owner->combatState && owner->combatState->pendingMelee) {
+                    WorldCommand combat;
+                    combat.type = WorldCommandType::SetCombatState; combat.target = object;
+                    combat.combatState = *owner->combatState;
+                    combat.combatState.pendingMelee = false;
+                    combat.combatState.pendingClip.clear();
+                    combat.combatState.pendingDamage = 0;
+                    (void)m_world.queue(std::move(combat));
+                }
+            }
+        } else if (!runtime.thirdPerson.restore(pending->second.thirdPerson, outError) ||
             (pending->second.firstPerson.has_value() && runtime.firstPersonView != nullptr &&
              !runtime.firstPerson.restore(*pending->second.firstPerson, outError))) {
             if (!hadController) (void)unregisterActorController(object);
@@ -302,7 +353,14 @@ bool BethesdaSession::registerActorController(
         outError = "actor controller is already registered: " + object.toString();
         return false;
     }
-    if (!m_physics.addCharacter(object, physicsConfig, outError)) return false;
+    auto configured = physicsConfig;
+    if (m_config.game == importer::fnv::BethesdaGame::SkyrimSpecialEdition) {
+        if (m_config.characterMovement.has_value()) {
+            configured.movement = *m_config.characterMovement;
+        }
+        configured.movement.enabled = true;
+    }
+    if (!m_physics.addCharacter(object, configured, outError)) return false;
     const auto pending = m_pendingPhysicsSnapshots.find(object);
     if (pending != m_pendingPhysicsSnapshots.end()) {
         if (!m_physics.restoreCharacter(pending->second, outError)) {
@@ -329,7 +387,8 @@ bool BethesdaSession::unregisterActorController(ObjectId object) {
 bool BethesdaSession::unregisterActorAnimation(ObjectId object) {
     const auto found = m_actorAnimations.find(object);
     if (found == m_actorAnimations.end()) return false;
-    AnimationActorSnapshot saved{object, found->second.thirdPerson.snapshot(), std::nullopt};
+    AnimationActorSnapshot saved{object, found->second.thirdPerson.snapshot(),
+        std::nullopt, found->second.bodyMorph};
     if (found->second.firstPersonView != nullptr) {
         saved.firstPerson = found->second.firstPerson.snapshot();
     }
@@ -359,17 +418,90 @@ bool BethesdaSession::setActorAnimationInput(
     ObjectId object, odai::anim::AnimationInputState input) {
     const auto found = m_actorAnimations.find(object);
     if (found == m_actorAnimations.end()) return false;
+    input.attacking = input.attacking || found->second.input.attacking;
+    input.equipping = input.equipping || found->second.input.equipping;
+    input.events.insert(input.events.begin(), found->second.input.events.begin(), found->second.input.events.end());
     found->second.input = std::move(input);
+    return true;
+}
+
+bool BethesdaSession::setActorBodyMorphState(
+    ObjectId object, odai::anim::BodyMorphSnapshot state) {
+    const auto found = m_actorAnimations.find(object);
+    if (found == m_actorAnimations.end()) return false;
+    for (const auto& [name, value] : state.sliders) {
+        if (name.empty() || !std::isfinite(value) || value < 0.0f || value > 1.0f)
+            return false;
+    }
+    found->second.bodyMorph = std::move(state);
     return true;
 }
 
 bool BethesdaSession::queueActorAnimationEvent(
     ObjectId object, odai::anim::AnimationEvent event) {
+    if (event.name == "DrawStart" || event.name == "SheatheStart") {
+        std::string error;
+        return requestActorWeaponDraw(object, event.name == "DrawStart", error);
+    }
     const auto found = m_actorAnimations.find(object);
     if (found == m_actorAnimations.end()) return false;
     found->second.thirdPerson.queueEvent(event);
     if (found->second.firstPersonView != nullptr) found->second.firstPerson.queueEvent(std::move(event));
     return true;
+}
+
+bool BethesdaSession::equipActorItem(ObjectId actor, const RecordKey& item,
+    bool equipped, bool leftHand, std::string& error, bool equipmentPolicy, bool scriptOverride) {
+    const auto* owner = m_world.find(actor);
+    const auto* definition = skyrimItem(item);
+    if (!owner || !definition || owner->kind != RuntimeObjectKind::Actor || !owner->enabled ||
+        (owner->actorValues && owner->actorValues->dead) ||
+        std::none_of(owner->inventory.begin(), owner->inventory.end(), [&](const auto& entry) {
+            return entry.item == item && entry.count > 0;
+        })) { error = "Equipment requires a living owner and an owned item"; return false; }
+    std::uint64_t slots = 0;
+    if (definition->recordType == "ARMO") slots = definition->bipedSlots;
+    else if (definition->recordType == "AMMO") slots = kEquipmentAmmo;
+    else if (definition->recordType == "WEAP") {
+        const auto type = definition->weaponAnimationType;
+        slots = (type == 5 || type == 6 || type == 7 || type == 9)
+            ? kEquipmentRightHand | kEquipmentLeftHand
+            : leftHand ? kEquipmentLeftHand : kEquipmentRightHand;
+    }
+    // Skyrim's shield biped slot also owns the left hand.
+    if (definition->recordType == "ARMO" && (definition->bipedSlots & (1u << 9)))
+        slots |= kEquipmentLeftHand;
+    if (slots == 0) { error = "Item has no supported equipment slots"; return false; }
+    WorldCommand command;
+    command.type = WorldCommandType::SetEquipped;
+    command.target = actor; command.item = item; command.equipped = equipped;
+    command.equipmentSlots = slots;
+    command.equipmentPolicy = equipmentPolicy; command.overrideEquipmentLocks = scriptOverride;
+    (void)m_world.queue(std::move(command));
+    error.clear(); return true;
+}
+
+bool BethesdaSession::requestActorWeaponDraw(ObjectId actor, bool drawn, std::string& error, bool combatDraw) {
+    const auto* owner = m_world.find(actor);
+    const auto animation = m_actorAnimations.find(actor);
+    if (!owner || animation == m_actorAnimations.end() ||
+        (owner->actorValues && owner->actorValues->dead)) {
+        error = "Weapon draw requires a living animated actor"; return false;
+    }
+    if (owner->equipment.requestedDrawn == drawn &&
+        (owner->equipment.transitioning || owner->equipment.drawn == drawn)) {
+        error.clear(); return true;
+    }
+    auto state = owner->equipment;
+    state.requestedDrawn = drawn; state.transitioning = true;
+    state.combatDraw = combatDraw && drawn;
+    WorldCommand command;
+    command.type = WorldCommandType::SetEquipmentState; command.target = actor;
+    command.equipment = state; (void)m_world.queue(std::move(command));
+    animation->second.input.equipping = true;
+    animation->second.thirdPerson.queueEvent({drawn ? "DrawStart" : "SheatheStart", {}});
+    if (animation->second.firstPersonView) animation->second.firstPerson.queueEvent({drawn ? "DrawStart" : "SheatheStart", {}});
+    error.clear(); return true;
 }
 
 bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error) {
@@ -383,8 +515,10 @@ bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, st
     WorldCommand command;
     command.target = actor;
     command.item = item;
-    if (definition->meleeDamage > 0 && std::isfinite(definition->meleeDamage)) {
-        command.type = WorldCommandType::EquipMeleeWeapon;
+    if (definition->recordType == "WEAP" || definition->recordType == "ARMO" || definition->recordType == "AMMO") {
+        const auto owned = std::find_if(owner->inventory.begin(), owner->inventory.end(),
+            [&](const auto& entry) { return entry.item == item; });
+        return equipActorItem(actor, item, !owned->equipped, false, error);
     } else if (definition->healing > 0 && std::isfinite(definition->healing)) {
         for (const auto& [name, quest] : m_quests) {
             (void)name;
@@ -402,6 +536,26 @@ bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, st
     } else { error = "This item's effects are not supported yet"; return false; }
     (void)m_world.queue(std::move(command));
     error.clear();return true;
+}
+
+bool BethesdaSession::actorGuarding(ObjectId actor) const {
+    const auto* object = m_world.find(actor);
+    return m_actorGuards.contains(actor) && object && object->enabled && object->equipment.drawn &&
+        (!object->actorValues || (!object->actorValues->dead && object->actorValues->stamina >= 5)) &&
+        std::any_of(object->inventory.begin(), object->inventory.end(), [](const auto& item) {
+            return item.equipped && item.count > 0 && (item.equipmentSlots & (1ull << 9));
+        });
+}
+void BethesdaSession::setActorGuard(ObjectId actor, bool held, const odai::math::Vector3& forward) {
+    const float length = odai::math::length(forward);
+    if (held && std::isfinite(length) && length > 1e-5f)
+        m_actorGuards[actor] = forward * (1.0f / length);
+    else m_actorGuards.erase(actor);
+}
+std::vector<MeleeContactEvent> BethesdaSession::takeMeleeContacts() {
+    std::vector<MeleeContactEvent> result;
+    result.swap(m_meleeContacts);
+    return result;
 }
 
 MeleeAttackResult BethesdaSession::performEquippedMeleeAttack(
@@ -437,9 +591,30 @@ MeleeAttackResult BethesdaSession::performMeleeAttack(
         result.diagnostic = "melee attack has invalid physical input";
         return result;
     }
+    if (source->equipment.initialized && !source->equipment.drawn && m_actorAnimations.contains(attacker) &&
+        std::any_of(source->inventory.begin(), source->inventory.end(), [&](const auto& entry) {
+            const auto* item = skyrimItem(entry.item);
+            return entry.equipped && entry.count > 0 && item && item->recordType == "WEAP";
+        })) {
+        if (!source->equipment.transitioning) {
+            std::string error;
+            (void)requestActorWeaponDraw(attacker, true, error);
+        }
+        result.diagnostic = "equipped weapon must finish drawing before melee contact";
+        return result;
+    }
+    if (actorGuarding(attacker)) {
+        result.diagnostic = "cannot attack while guarding";
+        return result;
+    }
     const std::uint64_t tick = m_clock.tick();
+    if (const auto animated = m_actorAnimations.find(attacker);
+        animated != m_actorAnimations.end() && animated->second.requestedMelee) {
+        result.diagnostic = "melee action already requested this tick";
+        return result;
+    }
     RuntimeCombatState combat = source->combatState.value_or(RuntimeCombatState{});
-    if (tick < combat.nextMeleeAttackTick) {
+    if (combat.pendingMelee || tick < combat.nextMeleeAttackTick) {
         result.diagnostic = "melee attack is on cooldown";
         return result;
     }
@@ -454,6 +629,66 @@ MeleeAttackResult BethesdaSession::performMeleeAttack(
     ++combat.attacksStarted;
     combat.nextMeleeAttackTick = tick + 24u;  // 0.4 s at the fixed 60 Hz clock
     combat.lastTarget = {};
+    const auto animation = m_actorAnimations.find(attacker);
+    const odai::anim::AnimationClip* contactClip = nullptr;
+    if (animation != m_actorAnimations.end()) {
+        const auto& view = *animation->second.thirdPersonView;
+        std::string state = "attack";
+        if (!animation->second.input.weaponStyle.empty() &&
+            view.stateClips.contains(state + "_" + animation->second.input.weaponStyle))
+            state += "_" + animation->second.input.weaponStyle;
+        const auto mapped = view.stateClips.find(state);
+        const std::string name = mapped == view.stateClips.end() ? state : mapped->second;
+        for (const auto& clip : view.clips)
+            if (clip.name == name && !clip.loop &&
+                std::any_of(clip.annotations.begin(), clip.annotations.end(), [](const auto& event) {
+                    return event.name == "HitFrame" || event.name == "hitFrame";
+                })) { contactClip = &clip; break; }
+    }
+    const bool nativeSelection = animation != m_actorAnimations.end() &&
+        animation->second.thirdPersonView->executionMode == odai::anim::AnimationExecutionMode::Native &&
+        animation->second.thirdPersonView->nativeProgram &&
+        !animation->second.thirdPersonView->nativeProgram->rules.empty();
+    if (contactClip || nativeSelection) {
+        result.deferred = true;
+        combat.pendingMelee = true;
+        combat.pendingDamage = damage;
+        combat.pendingRange = rangeBethesdaUnits;
+        combat.pendingForward = {forward.x, forward.y, forward.z};
+        combat.pendingClip = nativeSelection ? "" : contactClip->name;
+        animation->second.requestedMelee = combat;
+    } else {
+        result = resolveMeleeContact(attacker, forward, damage, rangeBethesdaUnits, combat);
+    }
+    WorldCommand saveCombat;
+    saveCombat.type = WorldCommandType::SetCombatState;
+    saveCombat.target = attacker;
+    saveCombat.combatState = combat;
+    (void)m_world.queue(std::move(saveCombat));
+    WorldCommand spendStamina;
+    spendStamina.type = WorldCommandType::AdjustActorValue;
+    spendStamina.target = attacker;
+    spendStamina.actorValue = ActorValue::Stamina;
+    spendStamina.actorValueDelta = -kStaminaCost;
+    (void)m_world.queue(std::move(spendStamina));
+
+    const auto animated = m_actorAnimations.find(attacker);
+    if (animated != m_actorAnimations.end()) {
+        animated->second.input.weaponDrawn = true;
+        animated->second.input.attacking = true;
+        if (!contactClip) animated->second.thirdPerson.queueEvent({"weaponSwing", "right"});
+        if (!contactClip && animated->second.firstPersonView != nullptr) {
+            animated->second.firstPerson.queueEvent({"weaponSwing", "right"});
+        }
+    }
+    return result;
+}
+
+MeleeAttackResult BethesdaSession::resolveMeleeContact(ObjectId attacker,
+    const odai::math::Vector3& forward, float damage, float rangeBethesdaUnits, RuntimeCombatState& combat) {
+    MeleeAttackResult result;
+    result.accepted = true;
+    result.damage = damage;
     for (const PhysicsMeleeCandidate& candidate :
          m_physics.meleeCandidates(attacker, forward, rangeBethesdaUnits)) {
         const RuntimeObject* target = m_world.find(candidate.object);
@@ -462,6 +697,19 @@ MeleeAttackResult BethesdaSession::performMeleeAttack(
             (target->actorValues.has_value() && target->actorValues->dead)) {
             continue;
         }
+        const bool blocked = actorGuarding(candidate.object) &&
+            odai::math::dot(m_actorGuards.at(candidate.object), odai::math::normalize(forward)) < -0.35f;
+        if (blocked) {
+            damage *= 0.3f;
+            WorldCommand stamina;
+            stamina.type = WorldCommandType::AdjustActorValue;
+            stamina.target = candidate.object;
+            stamina.actorValue = ActorValue::Stamina;
+            stamina.actorValueDelta = -5.0f;
+            (void)m_world.queue(std::move(stamina));
+        } else (void)queueActorAnimationEvent(candidate.object, {"staggerStart", {}});
+        result.damage = damage;
+        if (m_meleeContacts.size() < 256) m_meleeContacts.push_back({attacker, true, blocked});
         result.hit = true;
         result.target = candidate.object;
         combat.lastTarget = candidate.object;
@@ -481,7 +729,7 @@ MeleeAttackResult BethesdaSession::performMeleeAttack(
         // fall instead of navigation snapping them back onto the mesh.
         const odai::math::Vector3 strikeDirection = odai::math::normalize(forward);
         const float horizontalKick = std::clamp(160.0f + damage * 8.0f, 200.0f, 520.0f);
-        (void)m_physics.addCharacterImpulse(candidate.object,
+        if (!blocked) (void)m_physics.addCharacterImpulse(candidate.object,
             {strikeDirection.x * horizontalKick, 150.0f,
              strikeDirection.z * horizontalKick});
         if (result.killed) {
@@ -497,25 +745,12 @@ MeleeAttackResult BethesdaSession::performMeleeAttack(
         }
         break;
     }
-    WorldCommand saveCombat;
-    saveCombat.type = WorldCommandType::SetCombatState;
-    saveCombat.target = attacker;
-    saveCombat.combatState = combat;
-    (void)m_world.queue(std::move(saveCombat));
-    WorldCommand spendStamina;
-    spendStamina.type = WorldCommandType::AdjustActorValue;
-    spendStamina.target = attacker;
-    spendStamina.actorValue = ActorValue::Stamina;
-    spendStamina.actorValueDelta = -kStaminaCost;
-    (void)m_world.queue(std::move(spendStamina));
-
-    const auto animated = m_actorAnimations.find(attacker);
-    if (animated != m_actorAnimations.end()) {
-        animated->second.input.weaponDrawn = true;
-        animated->second.input.attacking = true;
-        animated->second.thirdPerson.queueEvent({"weaponSwing", "right"});
-        if (animated->second.firstPersonView != nullptr) {
-            animated->second.firstPerson.queueEvent({"weaponSwing", "right"});
+    if (!result.hit) {
+        if (const auto source = m_physics.characterState(attacker)) {
+            const auto origin = source->position + odai::math::Vector3{0, 64, 0};
+            if (m_physics.castSphere(origin, origin + odai::math::normalize(forward) * rangeBethesdaUnits,
+                    4.0f, attacker) && m_meleeContacts.size() < 256)
+                m_meleeContacts.push_back({attacker, false, false});
         }
     }
     return result;
@@ -901,6 +1136,39 @@ ConditionEvaluation BethesdaSession::evaluateDialogueConditions(
         const ObjectId target = targetForCondition(condition);
         const RuntimeObject* targetObject = liveObject(target);
         switch (condition.function) {
+            case 1u: { // GetDistance
+                auto other = resolveForm(condition.parameter1);
+                if (condition.useAliases) {
+                    other.reset();
+                    if (const auto* quest = findQuest(ObjectId::persistent(info.quest)))
+                        for (const auto& alias : quest->aliases)
+                            if (alias.id == static_cast<std::int32_t>(condition.parameter1)) other = alias.target;
+                }
+                const auto* object = other ? liveObject(*other) : nullptr;
+                if (!object || !targetObject) return std::nullopt;
+                double distance = 0;
+                for (unsigned i = 0; i < 3; ++i) { const double d = object->transform.position[i] - targetObject->transform.position[i]; distance += d*d; }
+                return static_cast<float>(std::sqrt(distance));
+            }
+            case 249u: return targetObject ? (targetObject->inDialogueWithPlayer ? 1.f : 0.f) : 0.f;
+            case 74u: { // GetGlobalValue
+                const auto global = resolveForm(condition.parameter1);
+                if (!global) return std::nullopt;
+                const auto value = m_globalVariables.find(global->reference);
+                return value == m_globalVariables.end() ? std::optional<float>{} : value->second;
+            }
+            case 71u: { // GetInFaction
+                const auto faction = resolveForm(condition.parameter1);
+                if (!faction || !targetObject) return std::nullopt;
+                return std::find(targetObject->factions.begin(), targetObject->factions.end(), faction->reference) != targetObject->factions.end() ? 1.f : 0.f;
+            }
+            case 300u: return targetObject ? (targetObject->interior ? 1.f : 0.f) : std::optional<float>{};
+            case 550u: { // IsSceneActionComplete
+                const auto scene = resolveForm(condition.parameter1);
+                if (!scene) return std::nullopt;
+                const auto progress = m_sceneProgress.find(scene->reference);
+                return progress != m_sceneProgress.end() && progress->second.completed.contains(condition.parameter2) ? 1.f : 0.f;
+            }
             case 46u:  // GetDead
                 if (targetObject == nullptr || !targetObject->actorValues.has_value()) {
                     return 0.0f;
@@ -1023,7 +1291,9 @@ std::vector<SkyrimDialogueChoice> BethesdaSession::availableDialogueChoices(
         const auto topicFound = m_dialogueTopics.find(topicRecord);
         if (topicFound == m_dialogueTopics.end()) continue;
         const SkyrimDialogueTopicDefinition& topic = topicFound->second;
-        if (topic.prompt.empty()) continue;
+        // Explicit TCLT links may be NPC-only continuation topics. They
+        // have no player prompt but still carry authored responses/effects.
+        if (topic.prompt.empty() && eligibleTopics.empty()) continue;
         std::vector<const SkyrimDialogueInfoDefinition*> authoredInfos;
         for (const auto& [infoRecord, info] : m_dialogueInfos) {
             (void)infoRecord;
@@ -1066,7 +1336,7 @@ SkyrimDialogueSelectionResult BethesdaSession::selectDialogueInfo(
     ObjectId speaker,
     ObjectId player,
     std::uint8_t fragmentFlag,
-    bool strict) {
+    bool strict, bool ambient) {
     SkyrimDialogueSelectionResult result;
     result.info = infoRecord;
     const auto found = m_dialogueInfos.find(infoRecord);
@@ -1123,7 +1393,7 @@ SkyrimDialogueSelectionResult BethesdaSession::selectDialogueInfo(
     WorldCommand speakerContext;
     speakerContext.type = WorldCommandType::SetActorContext;
     speakerContext.target = speaker;
-    speakerContext.inDialogueWithPlayer = true;
+    speakerContext.inDialogueWithPlayer = !ambient;
     (void)m_world.queue(std::move(speakerContext));
     result.accepted = result.diagnostics.empty();
     return result;
@@ -1148,7 +1418,39 @@ odai::anim::AnimationStepOutput BethesdaSession::interpolatedActorAnimationOutpu
         firstPerson && found->second.firstPersonView != nullptr
             ? found->second.previousFirstPersonOutput
             : found->second.previousThirdPersonOutput;
-    if (previous.pose.empty()) return current;
+    if (previous.pose.empty() || current.resetHistory) return current;
+    const auto& view = firstPerson && found->second.firstPersonView
+        ? found->second.firstPersonView : found->second.thirdPersonView;
+    if (view && view->skeleton && !previous.localPose.empty() && previous.localPose.size() == current.localPose.size()) {
+        auto result = current;
+        const float weight = std::isfinite(alpha) ? std::clamp(alpha,0.f,1.f) : 1.f;
+        result.localPose = odai::anim::blendLocalPoses(previous.localPose,current.localPose,weight);
+        odai::anim::AnimationSampler sampler;
+        if (view->inverseBindMatrices.empty()) sampler.bindSkeleton(*view->skeleton);
+        else sampler.bindSkeleton(*view->skeleton,view->inverseBindMatrices);
+        sampler.paletteFromLocal(*view->skeleton,result.localPose,result.pose);
+        const auto world = odai::anim::composePoseWorld(*view->skeleton,result.localPose);
+        for (auto& [name,transform] : result.socketTransforms)
+            if (const int bone = view->skeleton->findBone(name); bone >= 0) transform = world[bone];
+        result.evaluationPacket.reset();
+        if (previous.evaluationPacket && current.evaluationPacket &&
+            previous.evaluationPacket->instructions.size()+current.evaluationPacket->instructions.size()+1 <= 256) {
+            auto packet = std::make_shared<odai::anim::PoseEvaluationPacket>(*previous.evaluationPacket);
+            const auto offset = static_cast<std::uint32_t>(packet->instructions.size());
+            for (auto inst : current.evaluationPacket->instructions) {
+                for (auto& index : inst.inputs) index += offset;
+                packet->instructions.push_back(std::move(inst));
+            }
+            odai::anim::PoseGraphInstruction blend;
+            blend.kind = odai::anim::PoseGraphNode::Kind::Blend;
+            blend.inputs = {packet->output,current.evaluationPacket->output+offset};
+            blend.weight = weight;
+            packet->output = static_cast<std::uint32_t>(packet->instructions.size());
+            packet->instructions.push_back(std::move(blend));
+            result.evaluationPacket = std::move(packet);
+        }
+        return result;
+    }
     return odai::anim::BehaviorGraphInstance::interpolate(previous, current, alpha);
 }
 
@@ -1156,7 +1458,8 @@ std::vector<AnimationActorSnapshot> BethesdaSession::animationSnapshots() const 
     std::vector<AnimationActorSnapshot> result;
     result.reserve(m_actorAnimations.size() + m_pendingAnimationSnapshots.size());
     for (const auto& [object, runtime] : m_actorAnimations) {
-        AnimationActorSnapshot saved{object, runtime.thirdPerson.snapshot(), std::nullopt};
+        AnimationActorSnapshot saved{object, runtime.thirdPerson.snapshot(), std::nullopt,
+            runtime.bodyMorph};
         if (runtime.firstPersonView != nullptr) saved.firstPerson = runtime.firstPerson.snapshot();
         result.push_back(std::move(saved));
     }
@@ -1195,10 +1498,34 @@ bool BethesdaSession::restoreAnimationSnapshots(
             remove.push_back(object);
             continue;
         }
+        runtime.requestedMelee.reset();
+        if (!runtime.bodyMorph.topologyFingerprint.empty() &&
+            !saved->second.bodyMorph.topologyFingerprint.empty() &&
+            runtime.bodyMorph.topologyFingerprint !=
+                saved->second.bodyMorph.topologyFingerprint) {
+            saved->second.bodyMorph = runtime.bodyMorph;
+            m_pendingDiagnostics.push_back(
+                "discarded incompatible body morph state for " + object.toString());
+        }
+        const bool changed = (!saved->second.thirdPerson.graphFingerprint.empty() &&
+                saved->second.thirdPerson.graphFingerprint != runtime.thirdPersonView->sourceFingerprint) ||
+            saved->second.thirdPerson.executionMode != runtime.thirdPersonView->executionMode ||
+            (saved->second.firstPerson && runtime.firstPersonView &&
+                ((!saved->second.firstPerson->graphFingerprint.empty() &&
+                  saved->second.firstPerson->graphFingerprint != runtime.firstPersonView->sourceFingerprint) ||
+                 saved->second.firstPerson->executionMode != runtime.firstPersonView->executionMode));
+        if (changed) {
+            if (!runtime.thirdPerson.bind(*runtime.thirdPersonView, outError) ||
+                (runtime.firstPersonView && !runtime.firstPerson.bind(*runtime.firstPersonView, outError))) return false;
+            m_pendingDiagnostics.push_back("discarded incompatible animation state for " + object.toString());
+            m_pendingAnimationSnapshots.erase(saved);
+            continue;
+        }
         if (saved->second.firstPerson.has_value() != (runtime.firstPersonView != nullptr) ||
             !runtime.thirdPerson.restore(saved->second.thirdPerson, outError) ||
             (saved->second.firstPerson.has_value() &&
              !runtime.firstPerson.restore(*saved->second.firstPerson, outError))) return false;
+        runtime.bodyMorph = saved->second.bodyMorph;
         m_pendingAnimationSnapshots.erase(saved);
     }
     for (const ObjectId& object : remove) {
@@ -1232,7 +1559,7 @@ bool BethesdaSession::restorePhysicsSnapshots(
             !std::isfinite(saved.rotation.w) || !std::isfinite(saved.velocity.x) ||
             !std::isfinite(saved.velocity.y) || !std::isfinite(saved.velocity.z) ||
             !std::isfinite(saved.groundNormal.x) || !std::isfinite(saved.groundNormal.y) ||
-            !std::isfinite(saved.groundNormal.z)) {
+            !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement)) {
             outError = "saved physical actor is invalid or duplicated: " +
                 saved.object.toString();
             return false;
@@ -1252,6 +1579,23 @@ bool BethesdaSession::restorePhysicsSnapshots(
         }
         if (!m_physics.restoreCharacter(saved->second, outError)) return false;
         m_pendingPhysicsSnapshots.erase(saved);
+    }
+    outError.clear();
+    return true;
+}
+
+bool BethesdaSession::restoreRagdollSnapshots(
+    std::span<const PhysicsRagdollSnapshot> snapshots, std::string& outError) {
+    for (const PhysicsRagdollSnapshot& current : m_physics.ragdollSnapshots())
+        (void)m_physics.removeRagdoll(current.object);
+    std::set<ObjectId> seen;
+    for (const PhysicsRagdollSnapshot& saved : snapshots) {
+        if (!saved.object.valid() || !seen.insert(saved.object).second ||
+            !m_physics.hasCharacter(saved.object) ||
+            !m_physics.restoreRagdoll(saved, outError)) {
+            if (outError.empty()) outError = "saved ragdoll is invalid or duplicated";
+            return false;
+        }
     }
     outError.clear();
     return true;
@@ -1546,6 +1890,15 @@ void BethesdaSession::setQuestStage(const std::string& editorId, std::int32_t st
     const auto fragments = m_questStageFragments.find(normalizedEditorId(editorId));
     if (fragments == m_questStageFragments.end()) return;
     const auto conditionValue = [&](const Condition& condition) -> std::optional<float> {
+        if (condition.function == 58u || condition.function == 59u) {
+            if (!m_resolvedFormResolver) return std::nullopt;
+            const auto id = m_resolvedFormResolver(condition.parameter1);
+            const auto* target = id ? findQuest(*id) : nullptr;
+            if (!target) return std::nullopt;
+            if (condition.function == 58u) return static_cast<float>(target->stage);
+            return std::find(target->completedStages.begin(), target->completedStages.end(),
+                static_cast<std::int32_t>(condition.parameter2)) != target->completedStages.end() ? 1.f : 0.f;
+        }
         const auto subject = [&]() -> const RuntimeObject* {
             ObjectId object;
             if (condition.runOn == 5u) {  // QuestAlias
@@ -1653,7 +2006,11 @@ std::string BethesdaSession::questJournalSummary(const QuestRuntimeState& quest)
 }
 
 void BethesdaSession::setScenePlaying(const RecordKey& scene, bool playing) {
-    if (scene.valid()) m_scenes.insert_or_assign(scene, playing);
+    if (!scene.valid()) return;
+    const bool wasPlaying = m_scenes.contains(scene) && m_scenes.at(scene);
+    m_scenes.insert_or_assign(scene, playing);
+    if (playing && !wasPlaying) m_sceneProgress[scene] = {};
+    if (!playing) std::erase_if(m_sceneSpeech, [&](const auto& line) { return line.scene == scene; });
 }
 
 bool BethesdaSession::registerLocation(
@@ -2427,7 +2784,28 @@ void BethesdaSession::registerSkyrimNatives() {
         };
     };
     m_papyrus.registerNative("Scene.Start", scenePlayingNative(true));
+    m_papyrus.registerNative("Scene.ForceStart", [this, start = scenePlayingNative(true)](std::span<const PapyrusValue> arguments, std::uint64_t tick, BethesdaWorld& world) {
+        if (arguments.size() == 1 && arguments[0].type == PapyrusValueType::Object)
+            setScenePlaying(arguments[0].object.reference, false);
+        return start(arguments, tick, world);
+    });
+    m_papyrus.registerNative("Scene.GetOwningQuest", [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+        NativeCallResult result;
+        if (!arguments.empty()) {
+            const auto found = m_sceneDefinitions.find(arguments[0].object.reference);
+            if (found != m_sceneDefinitions.end()) result.value = PapyrusValue::fromObject(ObjectId::persistent(found->second.quest));
+        }
+        return result;
+    });
     m_papyrus.registerNative("Scene.Stop", scenePlayingNative(false));
+    m_papyrus.registerNative("Package.GetOwningQuest", [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+        NativeCallResult result;
+        if (!arguments.empty() && arguments[0].type == PapyrusValueType::Object) {
+            const auto found = m_scenePackages.find(arguments[0].object.reference);
+            if (found != m_scenePackages.end() && found->second.quest.valid()) result.value = PapyrusValue::fromObject(ObjectId::persistent(found->second.quest));
+        }
+        return result;
+    });
     m_papyrus.registerNative("Scene.IsPlaying",
         [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
             NativeCallResult result;
@@ -2586,6 +2964,26 @@ void BethesdaSession::registerSkyrimNatives() {
                 return result;
             }
             setQuestStage(arguments[0].string, static_cast<std::int32_t>(arguments[1].integer));
+            return result;
+        });
+    m_papyrus.registerNative("ObjectReference.PlayGamebryoAnimation",
+        [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+            NativeCallResult result;
+            if (arguments.size() < 2 || arguments.size() > 4 || arguments[0].type != PapyrusValueType::Object ||
+                arguments[0].object.kind != ObjectIdKind::PersistentReference ||
+                arguments[1].type != PapyrusValueType::String || arguments[1].string.empty() ||
+                (arguments.size() >= 3 && arguments[2].type != PapyrusValueType::Boolean) ||
+                (arguments.size() == 4 && arguments[3].type != PapyrusValueType::Float)) {
+                result.error = "PlayGamebryoAnimation expects reference, sequence, optional startOver and easeIn";
+                return result;
+            }
+            if (arguments.size() == 4 && arguments[3].real != 0.0) {
+                result.error = "Gamebryo sequence cross-fade is not supported";
+                return result;
+            }
+            result.value = PapyrusValue::fromBoolean(m_effectAnimationPlayer &&
+                m_effectAnimationPlayer({arguments[0].object.reference, arguments[1].string,
+                    arguments.size() >= 3 && arguments[2].boolean}));
             return result;
         });
     m_papyrus.registerNative("ObjectReference.AddItem",
@@ -2896,6 +3294,7 @@ void BethesdaSession::registerSkyrimNatives() {
             if (value == "health") result.value = PapyrusValue::fromFloat(actor->actorValues->health);
             else if (value == "stamina") result.value = PapyrusValue::fromFloat(actor->actorValues->stamina);
             else if (value == "magicka") result.value = PapyrusValue::fromFloat(actor->actorValues->magicka);
+            else if (value == "aggression") result.value = PapyrusValue::fromFloat(actor->actorValues->aggression);
             else if (value == "lightarmor" || value == "heavyarmor") {
                 // Skyrim's new-game skills are equal at the scenario boundary;
                 // their mutable skill progression is not yet in ActorValues.
@@ -3108,6 +3507,85 @@ void BethesdaSession::registerSkyrimNatives() {
             }
             return result;
         });
+    for (const bool equip : {true, false}) {
+        m_papyrus.registerNative(equip ? "Actor.EquipItem" : "Actor.UnequipItem",
+            [this, equip](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+                NativeCallResult result;
+                if (arguments.size() < 2 || arguments[0].type != PapyrusValueType::Object ||
+                    arguments[1].type != PapyrusValueType::Object || !arguments[1].object.reference.valid()) {
+                    result.error = "Equipment call requires actor and item form"; return result;
+                }
+                if (arguments.size() > 4 ||
+                    (arguments.size() > 2 && arguments[2].type != PapyrusValueType::Boolean) ||
+                    (arguments.size() > 3 && arguments[3].type != PapyrusValueType::Boolean)) {
+                    result.error = "Equipment optional arguments must be booleans"; return result;
+                }
+                (void)equipActorItem(arguments[0].object, arguments[1].object.reference, equip, false, result.error,
+                    arguments.size() > 2 && arguments[2].boolean, true);
+                return result;
+            });
+        m_papyrus.registerNative(equip ? "Actor.DrawWeapon" : "Actor.SheatheWeapon",
+            [this, equip](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+                NativeCallResult result;
+                if (arguments.size() != 1 || arguments[0].type != PapyrusValueType::Object) {
+                    result.error = "Weapon draw call requires an actor"; return result;
+                }
+                (void)requestActorWeaponDraw(arguments[0].object, equip, result.error);
+                return result;
+            });
+    }
+    m_papyrus.registerNative("Actor.IsEquipped",
+        [](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld& world) {
+            NativeCallResult result;
+            if (arguments.size() != 2 || arguments[0].type != PapyrusValueType::Object ||
+                arguments[1].type != PapyrusValueType::Object) {
+                result.error = "IsEquipped requires actor and item form"; return result;
+            }
+            const auto* actor = world.find(arguments[0].object);
+            result.value = PapyrusValue::fromBoolean(actor && std::any_of(actor->inventory.begin(), actor->inventory.end(),
+                [&](const auto& item) { return item.item == arguments[1].object.reference && item.equipped && item.count > 0; }));
+            return result;
+        });
+    m_papyrus.registerNative("Actor.IsWeaponDrawn",
+        [](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld& world) {
+            NativeCallResult result;
+            if (arguments.size() != 1 || arguments[0].type != PapyrusValueType::Object) {
+                result.error = "IsWeaponDrawn requires actor"; return result;
+            }
+            const auto* actor = world.find(arguments[0].object);
+            result.value = PapyrusValue::fromBoolean(actor && actor->equipment.drawn);
+            return result;
+        });
+    m_papyrus.registerNative("Actor.GetEquippedWeapon",
+        [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld& world) {
+            NativeCallResult result;
+            if (arguments.empty() || arguments.size() > 2 || arguments[0].type != PapyrusValueType::Object ||
+                (arguments.size() == 2 && arguments[1].type != PapyrusValueType::Boolean)) {
+                result.error = "GetEquippedWeapon requires actor and optional left-hand flag"; return result;
+            }
+            const auto* actor = world.find(arguments[0].object);
+            const auto hand = arguments.size() == 2 && arguments[1].boolean ? kEquipmentLeftHand : kEquipmentRightHand;
+            if (actor) for (const auto& entry : actor->inventory) {
+                const auto* item = skyrimItem(entry.item);
+                if (entry.equipped && entry.count > 0 && (entry.equipmentSlots & hand) && item && item->recordType == "WEAP") {
+                    result.value = PapyrusValue::fromObject(ObjectId::persistent(entry.item)); break;
+                }
+            }
+            return result;
+        });
+    const auto animationRequest = [this](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld&) {
+        NativeCallResult result;
+        if (arguments.size() != 2 || arguments[0].type != PapyrusValueType::Object ||
+            arguments[1].type != PapyrusValueType::String) {
+            result.error = "Animation request requires actor and event name"; return result;
+        }
+        const bool accepted = queueActorAnimationEvent(arguments[0].object, {arguments[1].string, {}});
+        result.value = PapyrusValue::fromBoolean(accepted);
+        if (!accepted) result.error = "Animation request has no resident animation instance";
+        return result;
+    };
+    m_papyrus.registerNative("Debug.SendAnimationEvent", animationRequest);
+    m_papyrus.registerNative("ObjectReference.PlayAnimation", animationRequest);
     m_papyrus.registerNative("Actor.SetOutfit",
         [](std::span<const PapyrusValue> arguments, std::uint64_t, BethesdaWorld& world) {
             NativeCallResult result;
@@ -3140,6 +3618,16 @@ void BethesdaSession::registerSkyrimNatives() {
         command.type = WorldCommandType::SetActorValue;
         command.target = arguments[0].object;
         const std::string value = normalizedEditorId(arguments[1].string);
+        if (value == "aggression") {
+            auto* actor = world.find(command.target);
+            const double aggression = arguments[2].type == PapyrusValueType::Float ? arguments[2].real : double(arguments[2].integer);
+            if (!actor || !std::isfinite(aggression) || aggression < 0 || aggression > 3) {
+                result.error = "Actor.SetActorValue requires a resident actor and aggression in [0,3]"; return result;
+            }
+            if (!actor->actorValues) actor->actorValues.emplace();
+            actor->actorValues->aggression = static_cast<float>(aggression);
+            return result;
+        }
         if (value == "health") command.actorValue = ActorValue::Health;
         else if (value == "stamina") command.actorValue = ActorValue::Stamina;
         else if (value == "magicka") command.actorValue = ActorValue::Magicka;
@@ -4092,7 +4580,11 @@ void BethesdaSession::simulateTick(
         }
     }
     for (auto& [object, runtime] : m_actorAnimations) {
+        auto locomotionVelocity = runtime.input.requestedVelocity;
         if (const auto physical = m_physics.characterState(object)) {
+            runtime.input.teleported = odai::math::length(physical->position - runtime.input.actorPosition) > 64.f;
+            runtime.input.actorPosition = physical->position;
+            locomotionVelocity = physical->velocity - physical->groundVelocity;
             runtime.input.grounded = physical->grounded;
             runtime.input.groundVelocity = physical->groundVelocity;
             runtime.input.groundNormal = physical->groundNormal;
@@ -4100,17 +4592,146 @@ void BethesdaSession::simulateTick(
             runtime.input.falling = physical->falling;
             runtime.input.landed = physical->landed;
             runtime.input.blocked = physical->blocked;
+            static constexpr const char* phases[]{"grounded", "takeoff", "ascending", "apex", "falling", "landing"};
+            static constexpr const char* impacts[]{"light", "hard", "stagger", "severe"};
+            runtime.input.jumpPhase = phases[static_cast<unsigned>(physical->jumpPhase)];
+            runtime.input.landingSeverity = impacts[static_cast<unsigned>(physical->landingSeverity)];
+            runtime.input.landingImpactMetres = physical->landingImpactMetres;
             runtime.input.movementSpeed = odai::math::length(odai::math::Vector3{
-                physical->velocity.x, 0.0f, physical->velocity.z});
+                locomotionVelocity.x, 0.0f, locomotionVelocity.z});
+        }
+        if (const auto* actor = m_world.find(object)) {
+            runtime.input.dead = actor->actorValues && actor->actorValues->dead;
+            runtime.input.selectorContext.values["combat"] = actor->combatState && actor->combatState->combatTarget.valid();
+            runtime.input.selectorContext.values["interior"] = actor->interior;
+            if (actor->actorValues) {
+                const auto& values = *actor->actorValues;
+                runtime.input.selectorContext.values["injury"] = static_cast<double>(
+                    1.f - std::clamp(values.health / std::max(1.f, values.maxHealth), 0.f, 1.f));
+                runtime.input.selectorContext.values["fatigue"] = static_cast<double>(
+                    1.f - std::clamp(values.stamina / std::max(1.f, values.maxStamina), 0.f, 1.f));
+            }
+            runtime.input.weaponStyle.clear();
+            for (const auto& entry : actor->inventory) {
+                if (!entry.equipped) continue;
+                const auto* item = skyrimItem(entry.item);
+                if (!item || item->recordType != "WEAP") continue;
+                const auto type = item->weaponAnimationType;
+                runtime.input.weaponStyle = type >= 1 && type <= 4 ? "1hm" :
+                    type == 5 ? "2hm" : type == 6 ? "2hw" : type == 7 ? "bow" :
+                    type == 8 ? "staff" : type == 9 ? "crossbow" : "h2h";
+                break;
+            }
+            if (actor->combatState && actor->combatState->combatTarget.valid() &&
+                !actor->equipment.drawn && !actor->equipment.transitioning) {
+                std::string drawError;
+                (void)requestActorWeaponDraw(object, true, drawError, true);
+            }
+            if (actor->equipment.combatDraw && actor->equipment.drawn && !actor->equipment.transitioning &&
+                (!actor->combatState || !actor->combatState->combatTarget.valid())) {
+                std::string sheathError;
+                (void)requestActorWeaponDraw(object, false, sheathError);
+            }
+            runtime.input.weaponDrawn = actor->equipment.drawn;
+            runtime.input.variables["bIsWeaponDrawn"] = actor->equipment.drawn ? 1.f : 0.f;
+        }
+        const float yaw = runtime.input.actorYawRadians;
+        const float c = std::cos(yaw), s = std::sin(yaw);
+        const auto velocity = locomotionVelocity;
+        runtime.input.localVelocity = {c * velocity.x - s * velocity.z, velocity.y,
+            s * velocity.x + c * velocity.z};
+        runtime.input.ragdollActive = m_physics.ragdollSnapshot(object).has_value();
+        runtime.input.footContacts = {};
+        if (runtime.thirdPersonView->humanoidRig && runtime.input.grounded && !runtime.input.ragdollActive) {
+            const auto& rig = *runtime.thirdPersonView->humanoidRig;
+            const auto& palette = runtime.thirdPersonOutput.pose;
+            const auto& inverseBind = runtime.thirdPersonView->inverseBindMatrices;
+            const auto world = odai::math::Matrix4::translation(runtime.input.actorPosition) *
+                odai::math::Matrix4::rotationY(yaw);
+            runtime.input.footIkEnabled = true;
+            for (std::size_t foot = 0; foot < 2; ++foot) {
+                const auto chain = rig.limbs.find(foot == 0 ? "left_leg" : "right_leg");
+                if (chain == rig.limbs.end()) continue;
+                const auto bone = static_cast<std::size_t>(chain->second.end);
+                if (bone >= palette.size() || bone >= inverseBind.size()) continue;
+                const auto position = odai::math::transformPoint(world * palette[bone] * odai::math::inverse(inverseBind[bone]), {});
+                if (const auto hit = m_physics.castDown(position + odai::math::Vector3{0,18,0}, 36.f);
+                    hit && hit->normal.y >= .65f)
+                    runtime.input.footContacts[foot] = {true, hit->position, hit->normal};
+            }
         }
         runtime.previousThirdPersonOutput = runtime.thirdPersonOutput;
         runtime.thirdPersonOutput = runtime.thirdPerson.step(runtime.input, fixedDelta);
+        if (const auto* owner = m_world.find(object); owner && owner->equipment.transitioning) {
+            auto state = owner->equipment;
+            const auto& output = runtime.thirdPersonOutput;
+            for (const auto& event : output.clipEvents) {
+                const bool attach = state.requestedDrawn
+                    ? (event.name == "weaponDraw" || event.name == "WeaponDraw")
+                    : (event.name == "weaponSheathe" || event.name == "WeaponSheathe");
+                if (attach && state.transitioning) {
+                    state.drawn = state.requestedDrawn;
+                    state.transitioning = false;
+                }
+            }
+            if (runtime.input.dead || (!output.actionActive && !runtime.input.equipping && state.transitioning)) {
+                result.diagnostics.push_back("equipment attachment event missing or interrupted for " + object.toString());
+                state.transitioning = false;
+                state.requestedDrawn = state.drawn;
+            }
+            if (!(state == owner->equipment)) {
+                WorldCommand command;
+                command.type = WorldCommandType::SetEquipmentState; command.target = object;
+                command.equipment = state; (void)m_world.queue(std::move(command));
+            }
+        }
+        const auto* contactActor = m_world.find(object);
+        if (runtime.requestedMelee || (contactActor && contactActor->combatState && contactActor->combatState->pendingMelee)) {
+            RuntimeCombatState combat = runtime.requestedMelee
+                ? *runtime.requestedMelee : *contactActor->combatState;
+            runtime.requestedMelee.reset();
+            const auto& output = runtime.thirdPersonOutput;
+            // Bind a native request to the actual selected action before consuming
+            // its first marker. Only the third-person authority deals damage.
+            if (combat.pendingClip.empty() && output.activeState.starts_with("attack"))
+                combat.pendingClip = output.activeClip;
+            const bool contact = !runtime.input.dead && output.activeClip == combat.pendingClip &&
+                std::any_of(output.clipEvents.begin(), output.clipEvents.end(), [](const auto& event) {
+                    return event.name == "HitFrame" || event.name == "hitFrame";
+                });
+            const bool interrupted = runtime.input.dead || output.activeClip != combat.pendingClip || !output.actionActive;
+            if (contact || interrupted) {
+                if (contact) (void)resolveMeleeContact(object,
+                    {combat.pendingForward[0], combat.pendingForward[1], combat.pendingForward[2]},
+                    combat.pendingDamage, combat.pendingRange, combat);
+                combat.pendingMelee = false;
+                combat.pendingDamage = combat.pendingRange = 0;
+                combat.pendingForward = {};
+                combat.pendingClip.clear();
+                WorldCommand command;
+                command.type = WorldCommandType::SetCombatState;
+                command.target = object;
+                command.combatState = std::move(combat);
+                (void)m_world.queue(std::move(command));
+            }
+        }
         if (runtime.firstPersonView != nullptr) {
             runtime.previousFirstPersonOutput = runtime.firstPersonOutput;
-            runtime.firstPersonOutput = runtime.firstPerson.step(runtime.input, fixedDelta);
+            auto presentationInput = runtime.input;
+            presentationInput.ownsGameplayEvents = false;
+            presentationInput.selectorContext.values["view"] = std::string("first_person");
+            if (runtime.thirdPersonView->executionMode == odai::anim::AnimationExecutionMode::Native &&
+                runtime.firstPersonView->executionMode == odai::anim::AnimationExecutionMode::Native) {
+                const auto clock = runtime.thirdPerson.snapshot();
+                presentationInput.sharedState = clock.state;
+                presentationInput.sharedStateTime = clock.stateTime;
+                presentationInput.sharedActionIdentity = clock.actionIdentity;
+            }
+            runtime.firstPersonOutput = runtime.firstPerson.step(presentationInput, fixedDelta);
         }
         PhysicsCharacterInput input;
         input.desiredVelocity = runtime.input.requestedVelocity;
+        input.jumpRequested = runtime.input.jumpRequested;
         input.rootMotion = runtime.thirdPersonOutput.desiredRootMotion;
         input.animationDriven = runtime.input.animationDriven;
         (void)m_physics.setCharacterInput(object, input);
@@ -4167,6 +4788,7 @@ void BethesdaSession::simulateTick(
             std::make_move_iterator(tes3Vm.diagnostics.begin()),
             std::make_move_iterator(tes3Vm.diagnostics.end()));
     }
+    advanceScenes(stepSeconds);
     PapyrusAdvanceResult vm = m_papyrus.advance(tick, 4096u, m_world);
     result.vmInstructions += vm.instructions;
     result.diagnostics.insert(result.diagnostics.end(),
@@ -4255,6 +4877,20 @@ std::uint64_t BethesdaSession::deterministicHash() const {
         hashString(hash, scene.toString());
         hashScalar(hash, playing);
     }
+    hashScalar(hash, m_sceneSpeechSequence);
+    for (const auto& [scene, progress] : m_sceneProgress) {
+        hashString(hash, scene.toString()); hashScalar(hash, progress.phase);
+        hashScalar(hash, progress.entered); hashScalar(hash, progress.begun);
+        for (const auto action : progress.completed) hashScalar(hash, action);
+        for (const auto& [action, seconds] : progress.timers) { hashScalar(hash, action); hashScalar(hash, seconds); }
+    }
+    for (const auto& line : m_sceneSpeech) {
+        hashString(hash, line.scene.toString()); hashString(hash, line.info.toString());
+        hashString(hash, line.responseInfo.toString()); hashString(hash, line.speaker.toString());
+        hashScalar(hash, line.action); hashScalar(hash, line.response); hashScalar(hash, line.sequence);
+        hashString(hash, line.text); hashString(hash, line.voiceKey);
+        hashScalar(hash, line.presented); hashScalar(hash, line.remainingSeconds);
+    }
     if (m_forcedWeather.valid()) hashString(hash, m_forcedWeather.toString());
     for (const auto& [record, location] : m_locations) {
         hashString(hash, record.toString());
@@ -4298,6 +4934,11 @@ std::uint64_t BethesdaSession::deterministicHash() const {
         if (animation.firstPerson.has_value()) {
             hashBehaviorGraph(hash, *animation.firstPerson);
         }
+        hashString(hash, animation.bodyMorph.topologyFingerprint);
+        for (const auto& [name, value] : animation.bodyMorph.sliders) {
+            hashString(hash, name);
+            hashScalar(hash, value);
+        }
     }
     for (const PhysicsCharacterSnapshot& character : physicsSnapshots()) {
         hashString(hash, character.object.toString());
@@ -4310,9 +4951,26 @@ std::uint64_t BethesdaSession::deterministicHash() const {
         hashScalar(hash, character.groundNormal.x); hashScalar(hash, character.groundNormal.y);
         hashScalar(hash, character.groundNormal.z);
         hashScalar(hash, character.grounded);
+        hashScalar(hash, character.movement.coyoteRemaining); hashScalar(hash, character.movement.bufferRemaining);
+        hashScalar(hash, character.movement.airVelocityX); hashScalar(hash, character.movement.airVelocityZ);
+        hashScalar(hash, character.movement.jumpHeld); hashScalar(hash, character.movement.jumpConsumed);
         hashScalar(hash, character.supportingObject.has_value());
         if (character.supportingObject.has_value()) {
             hashString(hash, character.supportingObject->toString());
+        }
+    }
+    for (const PhysicsRagdollSnapshot& ragdoll : ragdollSnapshots()) {
+        hashString(hash, ragdoll.object.toString());
+        hashScalar(hash, ragdoll.active);
+        for (const PhysicsRagdollJointPose& joint : ragdoll.joints) {
+            hashString(hash, joint.role);
+            hashScalar(hash, joint.position.x); hashScalar(hash, joint.position.y);
+            hashScalar(hash, joint.position.z);
+            hashScalar(hash, joint.rotation.x); hashScalar(hash, joint.rotation.y);
+            hashScalar(hash, joint.rotation.z); hashScalar(hash, joint.rotation.w);
+            hashScalar(hash, joint.linearVelocity.x);
+            hashScalar(hash, joint.linearVelocity.y);
+            hashScalar(hash, joint.linearVelocity.z);
         }
     }
     const PapyrusVmSnapshot vm = m_papyrus.snapshot();

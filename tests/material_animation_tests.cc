@@ -1,4 +1,5 @@
 #include "import/fnv/nif_material_animation.h"
+#include "import/fnv/nif_effect_sequence.h"
 #include "import/imported_lighting_material.h"
 #include <filesystem>
 #include <fstream>
@@ -190,6 +191,8 @@ int main() {
                     "synthetic/b.dds"};
   material.animations.push_back(t);
   scene.lightingMaterials.push_back(material);
+  scene.lightingMaterials[0].animationReference = 0xe7bdd;
+  scene.lightingMaterials[0].effectFalloff[2] = 0.25f;
   scene.textures.resize(2);
   const auto path = std::filesystem::temp_directory_path() /
                     "odai-material-animation-test.bin";
@@ -204,6 +207,8 @@ int main() {
     if (restored.lightingMaterials.empty())
       continue;
     const auto &m = restored.lightingMaterials[0];
+    check(m.animationReference == 0xe7bdd && m.effectFalloff[2] == 0.25f,
+          "effect ownership and falloff survive both loaders");
     check(m.animations.size() == 3, "tracks survive both loaders");
     auto gpu = sampleImportedMaterial(m, makeImportedNifGpuMaterial(m, {}), 1);
     near(gpu.animationUv[0], .5f, "UV controller reaches GPU material");
@@ -256,6 +261,55 @@ int main() {
   std::filesystem::resize_file(path, std::filesystem::file_size(path) - 1);
   check(!loadImportedSceneRuntime(path, restored),
         "truncated animation appendix rejected");
+  std::filesystem::remove(path);
+  {
+    Fixture managed(false, 5);
+    auto blocks = managed.blocks;
+    std::vector<std::uint8_t> sequence;
+    put(sequence, 0u); put(sequence, 1u); put(sequence, 1u);
+    put(sequence, 2); put(sequence, 1); put(sequence, std::uint8_t(0));
+    for (int i=0;i<5;++i) put(sequence, -1);
+    put(sequence, 1.f); put(sequence, -1); put(sequence, 2u);
+    put(sequence, 1.f); put(sequence, 0.f); put(sequence, 2.f); put(sequence, 4);
+    blocks.push_back({"NiControllerManager", {}});
+    blocks.push_back({"NiControllerSequence", sequence});
+    blocks.push_back({"NiBlendFloatInterpolator", {}});
+    const int blendEndpoint = 6;
+    std::memcpy(managed.bytes[1].data() + 26, &blendEndpoint, 4);
+    std::uint32_t unresolved = 0;
+    check(readNifMaterialAnimation(blocks,0,{},unresolved).empty(),
+          "manager blend endpoint cannot autonomously animate the material");
+    auto resolved = readNifEffectSequences(blocks, {"AnimPlay"});
+    check(resolved[0].size() == 1 && resolved[0][0].sequence == "AnimPlay",
+          "manager binding resolves a named alpha track");
+    if (!resolved[0].empty()) {
+      ImportedNifLightingMaterial effect;
+      effect.alpha = 0;
+      effect.animations = resolved[0];
+      auto base = makeImportedNifGpuMaterial(effect, {});
+      near(sampleImportedMaterial(effect,base,1).animationColor[3],0,
+           "idle does not accidentally play activation tracks");
+      near(sampleImportedMaterial(effect,base,1,"AnimPlay").animationColor[3],0.5,
+           "activation samples its concrete interpolator");
+      MaterialAnimationTrack visibility;
+      visibility.sequence="AnimPlay"; visibility.target=MaterialAnimatedValue::Visibility;
+      visibility.interpolation=5; visibility.cycle=2; visibility.stop=2;
+      visibility.keys={{0,1},{1.8f,0},{2,0}};
+      effect.animations.push_back(visibility);
+      check(sampleImportedMaterial(effect,base,1,"AnimPlay").animationState[2]==0 &&
+            sampleImportedMaterial(effect,base,3,"AnimPlay").animationState[2]==1,
+            "visibility uses step keys and holds the authored hidden endpoint");
+      check(sampleImportedMaterial(effect,base,0,"AnimPlay").animationState[2]==0,
+            "a repeated activation restarts visibility");
+      scene.lightingMaterials={effect};
+      check(saveImportedScene(scene,path) && loadImportedSceneRuntime(path,restored) &&
+            restored.lightingMaterials[0].animations.back().sequence=="AnimPlay",
+            "named visibility tracks survive cooking");
+    }
+    sequence.pop_back(); blocks[5].data=sequence;
+    check(readNifEffectSequences(blocks,{"AnimPlay"})[0].empty(),
+          "truncated manager sequence is rejected");
+  }
   std::filesystem::remove(path);
   return failures ? 1 : 0;
 }

@@ -87,6 +87,8 @@ inline constexpr std::uint32_t kImportedSceneFoliageWindMarker = 0xfffffffdu;
 // Static UVs/opacity are baked once; animated materials retain original vertices.
 // shaderType UINT32_MAX tags an animated BSEffect material in the shared table.
 struct ImportedNifLightingMaterial {
+    std::uint32_t animationReference = 0;
+    float effectFalloff[4] = {1, 0, 1, 1};
     std::vector<MaterialAnimationTrack> animations;
     std::string texturePaths[9];
     std::uint32_t shaderType = 0, flags1 = 0, flags2 = 0;
@@ -493,6 +495,11 @@ inline constexpr std::uint32_t kImportedSceneMaterialFlagDistantLodSnow = 1u << 
 inline constexpr std::uint32_t kImportedSceneMaterialFlagGrass = 1u << 12;
 // Non-PBR tree atlas lighting: the baked crown is not a solid planar leaf.
 inline constexpr std::uint32_t kImportedSceneMaterialFlagTreeLod = 1u << 13;
+// Actor-only animated model-space normal basis in the unused surface payload.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagSkinnedModelNormals = 1u << 14;
+// Actor-only, with PBR clear: authored material disables specular. Prevent the
+// global PBR fallback from inventing highlights on these surfaces.
+inline constexpr std::uint32_t kImportedSceneMaterialFlagNoSpecular = 1u << 15;
 
 // ImportedSceneMeshPart already carries two reserved vegetation-adjacent bytes
 // in its serialized layout. This semantic uses one bit without changing the

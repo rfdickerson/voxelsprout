@@ -52,6 +52,115 @@ std::vector<std::uint8_t> ctda(
 }  // namespace
 
 int main() {
+    {
+        std::string error;
+        std::vector<std::uint8_t> zero(4), parent; put32(parent, 0x100);
+        std::vector<std::uint8_t> timerType; put16(timerType, 2);
+        std::vector<std::uint8_t> duration; put32(duration, std::bit_cast<std::uint32_t>(2.5f));
+        auto condition = ctda(0, false, 1, 59);
+        std::vector<std::uint8_t> vmad; put16(vmad, 5); put16(vmad, 2); put16(vmad, 0);
+        vmad.push_back(2); vmad.push_back(0); putString(vmad, "SceneFixture"); put16(vmad, 1);
+        vmad.push_back(1); put32(vmad, 0); vmad.push_back(1); putString(vmad, "SceneFixture"); putString(vmad, "Fragment_0");
+        odai::importer::fnv::EsmRecordView record; record.type = "SCEN";
+        record.subrecords = {{"VMAD", vmad.data(), static_cast<std::uint32_t>(vmad.size())},
+            {"HNAM", nullptr, 0}, {"NEXT", nullptr, 0}, {"CTDA", condition.data(), static_cast<std::uint32_t>(condition.size())},
+            {"NEXT", nullptr, 0}, {"HNAM", nullptr, 0},
+            {"ANAM", timerType.data(), 2}, {"INAM", zero.data(), 4}, {"SNAM", zero.data(), 4},
+            {"ENAM", zero.data(), 4}, {"SNAM", duration.data(), 4}, {"ANAM", nullptr, 0}, {"PNAM", parent.data(), 4}};
+        SkyrimSceneDefinition parsed;
+        assert(readSkyrimScene(record, makeRecordKey("Skyrim.esm", 0x101), parsed, error));
+        assert(parsed.phases.size() == 1 && parsed.phases[0].startConditions.empty());
+        assert(parsed.phases[0].completionConditions.size() == 1);
+        assert(parsed.actions.size() == 1 && parsed.actions[0].seconds == 2.5f);
+        assert(parsed.fragments.size() == 1 && parsed.fragments[0].phase == 0 && parsed.fragments[0].function == "Fragment_0");
+        vmad.pop_back(); record.subrecords[0].size = static_cast<std::uint32_t>(vmad.size());
+        assert(!readSkyrimScene(record, makeRecordKey("Skyrim.esm", 0x101), parsed, error));
+    }
+    {
+        BethesdaSession sceneSession;
+        std::string error;
+        assert(sceneSession.configure({odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition, "scene-fixture", "", 1u}, error));
+        const auto questKey = makeRecordKey("Skyrim.esm", 0x100u);
+        const auto sceneKey = makeRecordKey("Skyrim.esm", 0x101u);
+        auto& quest = sceneSession.quest("SceneFixture");
+        quest.record = questKey;
+        SkyrimSceneDefinition scene;
+        scene.record = sceneKey; scene.quest = questKey;
+        scene.phases.resize(2);
+        SkyrimSceneAction timer;
+        timer.type = 2; timer.index = 7; timer.seconds = 0.5f;
+        scene.actions.push_back(timer);
+        timer.index = 8; timer.startPhase = timer.endPhase = 1;
+        scene.actions.push_back(timer);
+        sceneSession.registerScene(scene);
+        sceneSession.setScenePlaying(sceneKey, true);
+        sceneSession.advanceScenes(0.25);
+        assert(sceneSession.sceneProgress().at(sceneKey).phase == 0);
+        sceneSession.advanceScenes(0.25);
+        assert(sceneSession.sceneProgress().at(sceneKey).phase == 1);
+        assert(sceneSession.sceneProgress().at(sceneKey).completed.contains(7));
+        sceneSession.setScenePlaying(sceneKey, false);
+        sceneSession.advanceScenes(10);
+        assert(sceneSession.sceneProgress().at(sceneKey).phase == 1);
+        sceneSession.setScenePlaying(sceneKey, true);
+        assert(sceneSession.sceneProgress().at(sceneKey).phase == 0);
+        sceneSession.advanceScenes(0.5);
+        sceneSession.advanceScenes(0.5);
+        sceneSession.advanceScenes(0.01);
+        assert(!sceneSession.scenes().at(sceneKey));
+        RuntimeObject actor;
+        actor.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x102u));
+        actor.base = makeRecordKey("Skyrim.esm", 0x105u);
+        actor.kind = RuntimeObjectKind::Actor;
+        assert(sceneSession.world().addInitialObject(actor, error));
+        QuestAliasRuntimeState alias; alias.id = 0; alias.target = actor.id;
+        quest.aliases.push_back(alias);
+        SkyrimDialogueTopicDefinition topic;
+        topic.record = makeRecordKey("Skyrim.esm", 0x103u); topic.quest = questKey;
+        assert(sceneSession.registerDialogueTopic(topic, error));
+        SkyrimDialogueInfoDefinition info;
+        info.record = makeRecordKey("Skyrim.esm", 0x104u); info.topic = topic.record; info.quest = questKey;
+        info.responses.push_back({1u, "First line.", 0u, 0u});
+        info.responses.push_back({2u, "Second line.", 0u, 0u});
+        assert(sceneSession.registerDialogueInfo(info, error));
+        scene.phases.resize(1); scene.actions.clear();
+        SkyrimSceneAction speech; speech.actorAlias = 0; speech.topic = topic.record; speech.index = 9;
+        scene.actions.push_back(speech);
+        sceneSession.registerScene(scene);
+        sceneSession.setScenePlaying(sceneKey, true);
+        sceneSession.advanceScenes(0.01);
+        assert(sceneSession.sceneSpeech().size() == 1);
+        const auto first = sceneSession.sceneSpeech().front().sequence;
+        sceneSession.advanceScenes(10);
+        assert(sceneSession.sceneSpeech().front().sequence == first); // waits for presentation
+        sceneSession.presentSceneSpeech(first, 0.25);
+        sceneSession.advanceScenes(0.25);
+        assert(sceneSession.sceneSpeech().front().text == "Second line.");
+        sceneSession.presentSceneSpeech(sceneSession.sceneSpeech().front().sequence, 0.25);
+        sceneSession.advanceScenes(0.25);
+        assert(sceneSession.sceneSpeech().empty());
+        assert(sceneSession.sceneProgress().at(sceneKey).completed.contains(9));
+        (void)sceneSession.advance(1.0 / 60.0);
+        assert(!sceneSession.world().find(actor.id)->inDialogueWithPlayer);
+        RuntimeObject firstMarker, lastMarker;
+        firstMarker.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x106u)); firstMarker.base = actor.base;
+        firstMarker.transform.position = {2000, 1000, 0};
+        lastMarker = firstMarker; lastMarker.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x107u));
+        lastMarker.transform.position = {4000, 1000, 0};
+        assert(sceneSession.world().addInitialObject(firstMarker, error));
+        assert(sceneSession.world().addInitialObject(lastMarker, error));
+        SkyrimScenePackage flight; flight.record = makeRecordKey("Skyrim.esm", 0x108u);
+        flight.destination = firstMarker.id; flight.patrol = true; flight.radius = 1;
+        sceneSession.registerScenePackage(flight);
+        sceneSession.registerPatrolLink(firstMarker.id, lastMarker.id);
+        sceneSession.registerFlyingAliasPackages(questKey, 0, {flight.record});
+        quest.running = true;
+        sceneSession.advanceFlyingPackages(0.25);
+        assert(sceneSession.world().find(actor.id)->transform.position[1] > 0);
+        for (int i = 0; i < 12; ++i) sceneSession.advanceFlyingPackages(0.25);
+        assert(sceneSession.world().find(actor.id)->navigationRequest->status == NavigationRequestStatus::Arrived);
+        assert(sceneSession.world().find(actor.id)->navigationRequest->destination == lastMarker.id);
+    }
     // Mesh BVHs can be prepared simultaneously without a live physics world.
     // Publication/removal are explicit, and bad replacements keep the floor.
     {
@@ -545,6 +654,43 @@ int main() {
         assert(!malformed.accepted && !malformed.diagnostic.empty());
     }
 
+    // Held shield guard protects the front only, spends stamina, and cannot
+    // be used after unequipping the shield. Contact events drain exactly once.
+    for (bool front : {true, false}) {
+        BethesdaSession combat;
+        assert(combat.configure({odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+            "guard-fixture", "skyrim-bleak-falls", 31u}, error));
+        RuntimeObject attacker = player, target = player;
+        attacker.transform.position = {0, 0, 0};
+        target.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x200u));
+        target.transform.position = {100, 0, 0};
+        target.actorValues = ActorValues{100, 100, 100, false};
+        target.equipment.drawn = true;
+        target.inventory = {{makeRecordKey("Skyrim.esm", 0x12eb6u), 1, true, 1ull << 9}};
+        assert(combat.world().addInitialObject(attacker, error));
+        assert(combat.world().addInitialObject(target, error));
+        PhysicsCharacterConfig controller;
+        assert(combat.registerActorController(attacker.id, controller, error));
+        controller.position = {100, 0, 0};
+        assert(combat.registerActorController(target.id, controller, error));
+        combat.setActorGuard(target.id, true, {front ? -1.0f : 1.0f, 0, 0});
+        assert(combat.actorGuarding(target.id));
+        assert(!combat.performMeleeAttack(target.id, {-1, 0, 0}).accepted);
+        MeleeAttackResult hit;
+        (void)combat.advance(1.0 / 60, [&](std::uint64_t, double) {
+            hit = combat.performMeleeAttack(attacker.id, {1, 0, 0}, 20);
+        });
+        assert(hit.hit && hit.damage == (front ? 6.0f : 20.0f));
+        assert(combat.world().find(target.id)->actorValues->stamina == (front ? 95.0f : 100.0f));
+        const auto events = combat.takeMeleeContacts();
+        assert(events.size() == 1 && events[0].flesh && events[0].blocked == front);
+        assert(combat.takeMeleeContacts().empty());
+        combat.world().find(target.id)->inventory.clear();
+        assert(!combat.actorGuarding(target.id));
+        combat.setActorGuard(target.id, false, {});
+        assert(!combat.actorGuarding(target.id));
+    }
+
     // Authored static collision blocks the hit query even though both virtual
     // characters are within nominal range.
     {
@@ -574,6 +720,9 @@ int main() {
                     attacker.id, {1.0f, 0.0f, 0.0f});
             });
         assert(blocked.accepted && !blocked.hit);
+        const auto impacts = occluded.takeMeleeContacts();
+        assert(impacts.size() == 1 && !impacts[0].flesh);
+        assert(occluded.takeMeleeContacts().empty());
     }
 
     // A combat package target drives the same melee resolver without any
@@ -1140,6 +1289,14 @@ int main() {
         session.availableDialogueChoices(
             dialogueSpeaker.id, player.id, true, linkedEligibility);
     assert(linkedChoices.size() == 1u && linkedChoices[0].info == linkedInfo.record);
+    linkedTopic.prompt.clear();
+    assert(session.registerDialogueTopic(linkedTopic, error));
+    const auto npcContinuation = session.availableDialogueChoices(
+        dialogueSpeaker.id, player.id, true, linkedEligibility);
+    assert(npcContinuation.size() == 1 && npcContinuation.front().prompt.empty());
+    assert(npcContinuation.front().responses == std::vector<std::string>{"Linked response."});
+    assert(session.availableDialogueChoices(dialogueSpeaker.id, player.id, true).size() == 1);
+
     // Bit 1 is absent: selecting the begin phase must not run an authored end
     // fragment. Finishing the response (bit 2) dispatches it on the next tick.
     assert(session.selectDialogueInfo(
@@ -1384,6 +1541,38 @@ int main() {
         std::abs(imageCommands[0].strength-0.4f)<1e-6f);
     assert(session.takeImageSpaceCommands().empty());
 
+    PapyrusFunction effectFunction;
+    std::vector<BethesdaSession::EffectAnimationCommand> effects;
+    session.setEffectAnimationPlayer([&](const auto& command) {
+        effects.push_back(command);
+        return true;
+    });
+    effectFunction.name = "Fixture.EffectAnimation";
+    PapyrusInstruction playEffect;
+    playEffect.opcode = PapyrusOpcode::CallMethod;
+    playEffect.targetType = "ObjectReference";
+    playEffect.name = "PlayGamebryoAnimation";
+    playEffect.operands = {PapyrusOperand::fromLiteral(PapyrusValue::fromObject(imageModifier)),
+        PapyrusOperand::fromLiteral(PapyrusValue::fromString("AnimPlay"))};
+    effectFunction.instructions = {playEffect, finishQuest};
+    assert(session.papyrus().registerFunction(std::move(effectFunction), error));
+    assert(session.papyrus().startFunction("Fixture.EffectAnimation", {}, error) != 0u);
+    assert(session.advance(1.0/60.0).diagnostics.empty());
+    assert(effects.size() == 1 && effects[0].reference == imageModifier.reference && effects[0].sequence == "AnimPlay");
+    assert(!effects[0].startOver);
+    session.setEffectAnimationPlayer({});
+
+    const auto* ralofStart = findScenario("skyrim-helgen-ralof");
+    assert(ralofStart && ralofStart->startDoorFormId == 0x91608u);
+    assert(ralofStart->startMarker.empty());
+    bool ralofSeeded = false;
+    for (const auto& seed : ralofStart->prerequisiteQuests) {
+        assert(seed.editorId != "MQ102A");
+        if (seed.editorId == "MQ102B") assert(seed.stage == 5 || seed.stage == 10);
+        ralofSeeded |= seed.editorId == "MQ102B" && seed.stage == 10;
+    }
+    assert(ralofSeeded);
+    assert(skyrimBleakFallsScenario().prerequisiteQuests.back().editorId == "MQ102A");
     std::cout << "bethesda runtime tests passed\n";
     return 0;
 }

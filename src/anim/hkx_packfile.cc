@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -232,6 +233,10 @@ bool inspectHkxPackfile(std::span<const std::uint8_t> bytes, HkxPackfileSummary&
     }
 
     std::set<std::string> uniqueNames;
+    // Virtual fixups already identify exact class-name starts. Signature bytes
+    // preceding names in retail class tables can look alphabetic and cause the
+    // heuristic string scan below to skip an otherwise valid class name.
+    for (const auto& object : out.objects) uniqueNames.insert(object.className);
     for (const HkxSectionView& section : out.sections) {
         for (std::size_t cursor = section.dataStart; cursor < section.end;) {
             if (bytes[cursor] == 0u || bytes[cursor] == 0xffu ||
@@ -828,6 +833,7 @@ bool decodeHkxAnimationSkeleton(std::span<const std::uint8_t> bytes,
     constexpr std::size_t boneStride = 16u;
     outSkeleton.boneNames.resize(boneCount);
     outSkeleton.translationLocked.resize(boneCount);
+    std::set<std::string> boneNames;
     for (std::size_t index = 0; index < boneCount; ++index) {
         const std::size_t bone = bones->offset + index * boneStride;
         std::uint8_t locked = 0u;
@@ -837,6 +843,13 @@ bool decodeHkxAnimationSkeleton(std::span<const std::uint8_t> bytes,
             outError = "invalid hkaSkeleton bone entry " + std::to_string(index);
             return false;
         }
+        auto folded = outSkeleton.boneNames[index];
+        std::transform(folded.begin(), folded.end(), folded.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (folded.empty() || !boneNames.insert(folded).second) {
+            outError = "empty or duplicate skeleton bone name"; return false;
+        }
         const int parent = outSkeleton.parentIndices[index];
         if (parent >= static_cast<int>(index) || parent < -1) {
             outError = "hkaSkeleton parents are not stored parent-before-child";
@@ -844,6 +857,68 @@ bool decodeHkxAnimationSkeleton(std::span<const std::uint8_t> bytes,
         }
         outSkeleton.translationLocked[index] = locked != 0u;
     }
+    // hkaSkeleton::referencePose is an hkArray<hkQsTransform> at 0x38 in
+    // admitted x64 packfiles. Each transform contains three aligned float4s.
+    std::uint32_t referenceCount = 0;
+    if (reader.read(selected->section, selected->offset + 0x40u, referenceCount) && referenceCount != 0) {
+        const auto reference = reader.resolve(selected->section, selected->offset + 0x38u);
+        if (referenceCount != boneCount || !reference) { outError = "invalid skeleton reference pose"; return false; }
+        for (std::size_t index = 0; index < boneCount; ++index) {
+            std::array<float,12> values{};
+            if (!reader.read(reference->section, reference->offset + index*48, values) ||
+                std::any_of(values.begin(),values.end(),[](float v){return !std::isfinite(v);})) {
+                outError = "invalid skeleton reference transform"; return false;
+            }
+            const odai::math::Quaternion rotation{values[4],values[5],values[6],values[7]};
+            if (odai::math::length(rotation) < 1.e-6f || values[8] == 0 || values[9] == 0 || values[10] == 0) {
+                outError = "singular skeleton reference transform"; return false;
+            }
+            outSkeleton.referenceSkeleton.bones.push_back({outSkeleton.boneNames[index],outSkeleton.parentIndices[index],
+                rebaseTranslation({values[0],values[1],values[2]}),rebaseRotation(rotation),rebaseScale({values[8],values[9],values[10]})});
+        }
+    }
+    return true;
+}
+
+bool decodeHkxCharacterAssets(std::span<const std::uint8_t> bytes,
+    HkxCharacterAssets& out, std::string& error, const HkxReadLimits& limits) {
+    out = {};
+    HkxPackfileSummary summary;
+    if (!inspectHkxPackfile(bytes, summary, error, limits)) return false;
+    if (summary.pointerSize != 8) { error = "character assets require x64 HKX"; return false; }
+    TypedPackfileReader reader(bytes, summary);
+    const HkxObjectRecord* strings = nullptr;
+    for (const auto& object : summary.objects) {
+        if (object.className != "hkbCharacterStringData") continue;
+        if (strings) { error = "ambiguous character string data"; return false; }
+        strings = &object;
+    }
+    if (!strings) { error = "missing character string data"; return false; }
+    HkxCharacterAssets result;
+    const auto readOptional = [&](std::size_t field, std::string& value) {
+        return !reader.resolve(strings->section, strings->offset + field) ||
+            reader.stringAtPointer(strings->section, strings->offset + field, limits.maxStringBytes, value);
+    };
+    if (!readOptional(0xa0u, result.name) || !readOptional(0xa8u, result.skeletonPath) ||
+        !readOptional(0xb8u, result.behaviorPath)) {
+        error = "invalid character asset reference"; return false;
+    }
+    std::vector<ResolvedOffset> paths;
+    if (!reader.pointerArray(strings->section, strings->offset + 0x40u, 8u,
+            limits.maxBehaviorEdges, paths)) { error = "invalid character animation catalog"; return false; }
+    // Read strings through their original pointer slots, retaining array order.
+    const auto array = reader.resolve(strings->section, strings->offset + 0x40u);
+    std::uint32_t count = 0;
+    if (!reader.read(strings->section, strings->offset + 0x48u, count) || count != paths.size()) {
+        error = "null character animation catalog entry"; return false;
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::string path;
+        if (!array || !reader.stringAtPointer(array->section, array->offset + i * 8u,
+                limits.maxStringBytes, path)) { error = "invalid character animation path"; return false; }
+        result.animationPaths.push_back(std::move(path));
+    }
+    out = std::move(result);
     return true;
 }
 
@@ -914,7 +989,7 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
     std::size_t edgeCount = 0u;
     const auto appendChild = [&](HkxBehaviorNode& node, const ResolvedOffset& target) {
         const auto found = nodeByObject.find(referenceKey(target.section, target.offset));
-        if (found == nodeByObject.end()) return;
+        if (found == nodeByObject.end()) { node.hasUndecodedChildren = true; return; }
         node.children.push_back(found->second);
         ++edgeCount;
     };
@@ -940,6 +1015,8 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
     };
 
     std::size_t transitionCount = 0;
+    std::size_t triggerCount = 0;
+    std::size_t bindingCount = 0;
     const auto readTransitions = [&](const HkxObjectRecord& object, std::size_t offset,
                                      HkxBehaviorNode& node) {
         const auto arrayObject = reader.resolve(object.section, object.offset + offset);
@@ -990,6 +1067,9 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                 for (const auto& candidate : summary.objects)
                     if (candidate.section == condition->section && candidate.offset == condition->offset)
                         rule.conditionClass = candidate.className;
+                if (rule.conditionClass == "hkbExpressionCondition" &&
+                    !reader.stringAtPointer(condition->section, condition->offset + 0x10u,
+                        limits.maxStringBytes, rule.conditionExpression)) return false;
             }
             node.transitions.push_back(std::move(rule));
         }
@@ -1000,6 +1080,33 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
     for (std::size_t index = 0; index < objects.size(); ++index) {
         const HkxObjectRecord& object = *objects[index];
         HkxBehaviorNode& node = outGraph.nodes[index];
+        node.hasBindings = reader.resolve(object.section, object.offset + 0x10u).has_value();
+        if (const auto bindingSet = reader.resolve(object.section, object.offset + 0x10u)) {
+            std::uint32_t count = 0;
+            if (!reader.read(bindingSet->section, bindingSet->offset + 0x18u, count) ||
+                count > limits.maxBehaviorEdges - bindingCount ||
+                !reader.read(bindingSet->section, bindingSet->offset + 0x20u, node.enableBindingIndex)) {
+                outError = "invalid variable binding set"; return false;
+            }
+            bindingCount += count;
+            const auto bindings = reader.resolve(bindingSet->section, bindingSet->offset + 0x10u);
+            std::span<const std::uint8_t> raw;
+            if (count && (!bindings || !reader.bytes(bindings->section, bindings->offset,
+                    static_cast<std::size_t>(count) * 0x28u, raw))) {
+                outError = "invalid variable binding array"; return false;
+            }
+            for (std::uint32_t bindingIndex = 0; bindingIndex < count; ++bindingIndex) {
+                HkxVariableBinding binding;
+                const auto offset = bindings->offset + bindingIndex * 0x28u;
+                if (!reader.stringAtPointer(bindings->section, offset, limits.maxStringBytes, binding.memberPath) ||
+                    !reader.read(bindings->section, offset + 0x1cu, binding.variableIndex) ||
+                    !reader.read(bindings->section, offset + 0x20u, binding.bitIndex) ||
+                    !reader.read(bindings->section, offset + 0x21u, binding.bindingType)) {
+                    outError = "invalid variable binding"; return false;
+                }
+                node.bindings.push_back(std::move(binding));
+            }
+        }
         switch (node.kind) {
             case HkxBehaviorNodeKind::Graph:
                 if (!readName(object, 0x38u, node.name)) {
@@ -1007,6 +1114,67 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                     return false;
                 }
                 readChild(object, 0x80u, node);
+                if (const auto data = reader.resolve(object.section, object.offset + 0x88u)) {
+                    const auto strings = reader.resolve(data->section, data->offset + 0x78u);
+                    const auto readStrings = [&](std::size_t field, std::vector<std::string>& values) {
+                        std::uint32_t count = 0;
+                        if (!strings || !reader.read(strings->section, strings->offset + field + 8u, count) ||
+                            count > limits.maxBehaviorNodes) return false;
+                        if (!count) return true;
+                        const auto array = reader.resolve(strings->section, strings->offset + field);
+                        if (!array) return false;
+                        values.resize(count);
+                        for (std::uint32_t i = 0; i < count; ++i)
+                            if (!reader.stringAtPointer(array->section, array->offset + i * 8u,
+                                    limits.maxStringBytes, values[i])) return false;
+                        return true;
+                    };
+                    if (!readStrings(0x10u, outGraph.eventNames) ||
+                        !readStrings(0x30u, outGraph.variableNames)) {
+                        outError = "invalid behavior event/variable string table";
+                        return false;
+                    }
+                    if (!outGraph.variableNames.empty()) {
+                        std::uint32_t count = 0;
+                        const auto infos = reader.resolve(data->section, data->offset + 0x20u);
+                        const auto initial = reader.resolve(data->section, data->offset + 0x70u);
+                        std::vector<std::uint32_t> words;
+                        if (!reader.read(data->section, data->offset + 0x28u, count) ||
+                            count != outGraph.variableNames.size() || !infos || !initial ||
+                            !reader.array(initial->section, initial->offset + 0x10u, 8u,
+                                limits.maxBehaviorNodes, words) || words.size() != count) {
+                            outError = "invalid behavior variable initial value table"; return false;
+                        }
+                        for (std::uint32_t variable = 0; variable < count; ++variable) {
+                            std::uint8_t type = 0;
+                            if (!reader.read(infos->section, infos->offset + variable * 6u + 4u, type)) {
+                                outError = "invalid behavior variable info"; return false;
+                            }
+                            const auto& name = outGraph.variableNames[variable];
+                            float value = 0;
+                            const auto word = words[variable];
+                            if (type == 0) value = word != 0 ? 1.f : 0.f;
+                            else if (type == 1) value = static_cast<float>(static_cast<std::int8_t>(word));
+                            else if (type == 2) value = static_cast<float>(static_cast<std::int16_t>(word));
+                            else if (type == 3) {
+                                const auto integer = std::bit_cast<std::int32_t>(word);
+                                value = static_cast<float>(integer);
+                                if (static_cast<double>(value) != static_cast<double>(integer)) {
+                                    outGraph.unsupportedVariables.push_back(name + ": integer exceeds scalar precision");
+                                    continue;
+                                }
+                            } else if (type == 4) value = std::bit_cast<float>(word);
+                            else {
+                                outGraph.unsupportedVariables.push_back(name + ": non-scalar variable type " + std::to_string(type));
+                                continue;
+                            }
+                            if (!std::isfinite(value)) { outError = "non-finite behavior variable default"; return false; }
+                            if (!outGraph.variableDefaults.emplace(name, value).second) {
+                                outError = "duplicate behavior variable name"; return false;
+                            }
+                        }
+                    }
+                }
                 if (!foundGraph) {
                     foundGraph = true;
                     outGraph.name = node.name;
@@ -1015,6 +1183,15 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                 break;
             case HkxBehaviorNodeKind::StateMachine:
                 (void)readName(object, 0x38u, node.name);
+                {
+                    std::uint8_t startMode = 0, selfMode = 0;
+                    if (!reader.read(object.section, object.offset + 0x86u, startMode) ||
+                        !reader.read(object.section, object.offset + 0x87u, selfMode)) {
+                        outError = "invalid state machine modes"; return false;
+                    }
+                    node.hasUnsupportedSettings = startMode != 0 || selfMode != 0 ||
+                        reader.resolve(object.section, object.offset + 0x60u).has_value();
+                }
                 if (!reader.read(object.section, object.offset + 0x68u, node.startStateId) ||
                     !readChildren(object, 0x90u, node) ||
                     !readTransitions(object, 0xa0u, node)) {
@@ -1024,6 +1201,8 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                 ++outGraph.stateMachineCount;
                 break;
             case HkxBehaviorNodeKind::State:
+                node.hasUnsupportedSettings = reader.resolve(object.section, object.offset + 0x40u).has_value() ||
+                    reader.resolve(object.section, object.offset + 0x48u).has_value();
                 if (!readName(object, 0x60u, node.name) ||
                     !reader.read(object.section, object.offset + 0x68u, node.stateId) ||
                     !readTransitions(object, 0x50u, node)) {
@@ -1035,10 +1214,48 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
             case HkxBehaviorNodeKind::Clip:
                 if (!readName(object, 0x38u, node.name) ||
                     !readName(object, 0x48u, node.assetPath) ||
-                    !reader.read(object.section, object.offset + 0x60u, node.playbackSpeed) ||
-                    !std::isfinite(node.playbackSpeed)) {
+                    !reader.read(object.section, object.offset + 0x58u, node.cropStart) ||
+                    !reader.read(object.section, object.offset + 0x5cu, node.cropEnd) ||
+                    !reader.read(object.section, object.offset + 0x60u, node.startTime) ||
+                    !reader.read(object.section, object.offset + 0x64u, node.playbackSpeed) ||
+                    !reader.read(object.section, object.offset + 0x68u, node.enforcedDuration) ||
+                    !reader.read(object.section, object.offset + 0x72u, node.playbackMode) ||
+                    !reader.read(object.section, object.offset + 0x73u, node.clipFlags) ||
+                    !std::isfinite(node.playbackSpeed) || !std::isfinite(node.startTime) ||
+                    !std::isfinite(node.cropStart) || !std::isfinite(node.cropEnd) ||
+                    !std::isfinite(node.enforcedDuration)) {
                     outError = "invalid hkbClipGenerator";
                     return false;
+                }
+                if (const auto triggerObject = reader.resolve(object.section, object.offset + 0x50u)) {
+                    std::uint32_t count = 0;
+                    if (!reader.read(triggerObject->section, triggerObject->offset + 0x18u, count) ||
+                        count > limits.maxBehaviorEdges - triggerCount) {
+                        outError = "invalid clip trigger count"; return false;
+                    }
+                    triggerCount += count;
+                    const auto data = reader.resolve(triggerObject->section, triggerObject->offset + 0x10u);
+                    std::span<const std::uint8_t> raw;
+                    if (count && (!data || !reader.bytes(data->section, data->offset, count * 0x20u, raw))) {
+                        outError = "invalid clip trigger array"; return false;
+                    }
+                    for (std::uint32_t i = 0; i < count; ++i) {
+                        HkxClipTrigger trigger;
+                        const auto offset = data->offset + i * 0x20u;
+                        std::uint8_t relative = 0, acyclic = 0, annotation = 0;
+                        if (!reader.read(data->section, offset, trigger.time) || !std::isfinite(trigger.time) ||
+                            !reader.read(data->section, offset + 8u, trigger.eventId) ||
+                            !reader.read(data->section, offset + 0x18u, relative) || relative > 1 ||
+                            !reader.read(data->section, offset + 0x19u, acyclic) || acyclic > 1 ||
+                            !reader.read(data->section, offset + 0x1au, annotation) || annotation > 1) {
+                            outError = "invalid clip trigger"; return false;
+                        }
+                        trigger.relativeToEnd = relative;
+                        trigger.acyclic = acyclic;
+                        trigger.annotation = annotation;
+                        trigger.hasPayload = reader.resolve(data->section, offset + 0x10u).has_value();
+                        node.triggers.push_back(trigger);
+                    }
                 }
                 ++outGraph.clipGeneratorCount;
                 break;
@@ -1067,7 +1284,8 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                 break;
             case HkxBehaviorNodeKind::ManualSelector:
                 (void)readName(object, 0x38u, node.name);
-                if (!readChildren(object, 0x48u, node)) {
+                if (!readChildren(object, 0x48u, node) ||
+                    !reader.read(object.section, object.offset + 0x58u, node.selectedGeneratorIndex)) {
                     outError = "invalid hkbManualSelectorGenerator child array";
                     return false;
                 }
@@ -1078,6 +1296,18 @@ bool decodeHkxBehaviorGraph(std::span<const std::uint8_t> bytes,
                 break;
             case HkxBehaviorNodeKind::TransitionEffect:
                 (void)readName(object, 0x38u, node.name);
+                {
+                    float startFraction = 0;
+                    std::uint16_t flags = 0;
+                    std::uint8_t endMode = 0, curve = 0;
+                    if (!reader.read(object.section, object.offset + 0x54u, startFraction) ||
+                        !reader.read(object.section, object.offset + 0x58u, flags) ||
+                        !reader.read(object.section, object.offset + 0x5au, endMode) ||
+                        !reader.read(object.section, object.offset + 0x5bu, curve)) {
+                        outError = "invalid transition effect settings"; return false;
+                    }
+                    node.hasUnsupportedSettings = startFraction != 0 || flags != 0 || endMode != 0 || curve != 0;
+                }
                 if (!reader.read(object.section, object.offset + 0x50u,
                         node.transitionDuration) ||
                     !std::isfinite(node.transitionDuration) || node.transitionDuration < 0.0f) {
@@ -1292,7 +1522,7 @@ bool decodeHkxAnimationClip(std::span<const std::uint8_t> bytes,
                 return false;
             }
             sourceBoneForTrack[track] = sourceBone;
-            if (outMetadata.trackNames[track].empty()) {
+            { // Binding indices, not annotation labels, identify source bones.
                 outMetadata.trackNames[track] =
                     sourceSkeleton->boneNames[static_cast<std::size_t>(sourceBone)];
             }
@@ -1373,6 +1603,7 @@ bool decodeHkxAnimationClip(std::span<const std::uint8_t> bytes,
         });
         foldedBones.emplace(std::move(folded), static_cast<int>(index));
     }
+    outClip.additive = outMetadata.blendHint == 1u;
     outClip.name = clipName.empty() ? "retail Skyrim HKX clip" : std::move(clipName);
     outClip.duration = duration;
     outClip.loop = true;
@@ -1398,13 +1629,13 @@ bool decodeHkxAnimationClip(std::span<const std::uint8_t> bytes,
                 }
             }
         }
-        if (boneIndex < 0 && trackIndex < outMetadata.transformTrackToBoneIndices.size()) {
+        if (sourceSkeleton == nullptr && boneIndex < 0 && trackIndex < outMetadata.transformTrackToBoneIndices.size()) {
             const int mapped = outMetadata.transformTrackToBoneIndices[trackIndex];
             if (mapped >= 0 && static_cast<std::size_t>(mapped) < targetSkeleton.bones.size()) {
                 boneIndex = mapped;
             }
         }
-        if (boneIndex < 0 && outMetadata.trackNames[trackIndex].empty() &&
+        if (sourceSkeleton == nullptr && boneIndex < 0 && outMetadata.trackNames[trackIndex].empty() &&
             trackIndex < targetSkeleton.bones.size()) {
             boneIndex = static_cast<int>(trackIndex);
         }
@@ -1421,7 +1652,7 @@ bool decodeHkxAnimationClip(std::span<const std::uint8_t> bytes,
             const int sourceBone = sourceBoneForTrack[trackIndex];
             if (sourceBone >= 0 && sourceSkeleton->translationLocked[
                     static_cast<std::size_t>(sourceBone)]) {
-                translation = targetSkeleton.bones[
+                translation = outClip.additive ? odai::math::Vector3{} : targetSkeleton.bones[
                     static_cast<std::size_t>(boneIndex)].localTranslation;
             }
             track.translationKeys.push_back({time, translation});

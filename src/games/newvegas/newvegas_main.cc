@@ -1,3 +1,4 @@
+#include "import/fnv/mod_check.h"
 #include "games/newvegas/bethesda_app.h"
 
 #include "render/upscale/upscale_policy.h"
@@ -8,8 +9,29 @@
 #include <vector>
 #include <iostream>
 #include <limits>
+#include <filesystem>
+#include <unistd.h>
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "mod-check")
+        return odai::importer::fnv::runModCheckCommand(argc - 2, argv + 2, std::cout, std::cerr);
+    if (argc == 2 && std::strcmp(argv[1], "--version") == 0) {
+        std::cout << "odai " << ODAI_VERSION << " (experimental Skyrim slice)\n";
+        return 0;
+    }
+    const bool setupRequested = argc == 2 && std::strcmp(argv[1], "--setup") == 0;
+    if (setupRequested || (argc == 1 && !std::getenv("ODAI_FNV_STREAM_DIR") &&
+                          !std::getenv("ODAI_FNV_SCENE") && !std::getenv("ODAI_FNV_PROFILE"))) {
+        std::error_code error;
+        const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+        if (!error) {
+            const auto launcher = executable.parent_path() / "odai-launcher";
+            execl(launcher.c_str(), launcher.c_str(), static_cast<char*>(nullptr));
+        }
+        std::cerr << "Could not start ODAI setup. Install odai-launcher and Python 3 Tk, "
+                     "or use --profile <path> with --scenario skyrim-bleak-falls.\n";
+        return 1;
+    }
     const bool renderResolutionExplicit =
         std::getenv("ODAI_RENDER_SIZE") != nullptr ||
         std::getenv("ODAI_RENDER_SCALE") != nullptr;
@@ -120,6 +142,8 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--scenario") == 0 && i + 1 < argc) {
             app.setScenario(argv[++i]);
             conflictingShowcaseOption = true;
+        } else if (std::strcmp(argv[i], "--scenario-report") == 0 && i + 1 < argc) {
+            app.setScenarioReportPath(argv[++i]);
         } else if (std::strcmp(argv[i], "--save-game") == 0 && i + 1 < argc) {
             app.setGameplaySavePath(argv[++i]);
         } else if (std::strcmp(argv[i], "--load-game") == 0 && i + 1 < argc) {
@@ -321,6 +345,8 @@ int main(int argc, char** argv) {
             }
             app.setCaptureSeed(static_cast<std::uint32_t>(value));
         } else if (std::strcmp(argv[i], "--help") == 0) {
+            std::cout << "ODAI " << ODAI_VERSION << "\n  --setup: open content setup\n  --version: print build version\n";
+            std::cout << "  --scenario-report <file.jsonl>: append observed checkpoints; F8 marks a checkpoint\n";
             std::cout << "odai [--scene <path.bin>]\n"
                       << "  Falls back to $ODAI_FNV_SCENE when --scene is absent.\n"
                       << "odai --screenshot <out.ppm> [frames]\n"
@@ -394,6 +420,8 @@ int main(int argc, char** argv) {
                       << "  --weather <EditorID> forces one weather by name.\n"
                       << "  --tes3-start-quest <journal-id> <index> seeds an authored TES3 journal entry;\n"
                       << "  press J for the journal and E while facing an actor to talk.\n"
+                      << "  odai mod-check --profile <path> [--json] [--export-profile <new.json>]\n"
+                      << "  checks Skyrim mods without initializing graphics.\n"
                       << "  --profile <path> loads an ODAI JSON, MO2 profile directory,\n"
                       << "  or OpenMW openmw.cfg as one authoritative content graph.\n"
                       << "  --mods-root <dir> resolves nonstandard MO2 instances; --mod and\n"
@@ -414,9 +442,11 @@ int main(int argc, char** argv) {
         whiterunReferenceShowcase || skyrimForestReferenceShowcase ||
         riftenThirdPersonShowcase || oblivionImperialMarketShowcase ||
         oblivionAnvilHarborShowcase || oblivionGreatForestShowcase) {
-        if (conflictingShowcaseOption || profileSpecified || loadOrderSpecified) {
+        const bool nativeSkyrimProfile = whiterunThirdPersonShowcase || riftenThirdPersonShowcase;
+        if (conflictingShowcaseOption || (profileSpecified && !nativeSkyrimProfile) || loadOrderSpecified) {
             std::cout << "the selected --showcase conflicts with scene, scenario, "
-                         "interior, spawn, plugin, worldspace, profile, and load-order options\n";
+                         "interior, spawn, plugin, worldspace, or load-order options; "
+                         "profiles are supported by Skyrim city third-person showcases\n";
             return 1;
         }
         if (oblivionImperialMarketShowcase || oblivionAnvilHarborShowcase ||
@@ -575,7 +605,7 @@ int main(int argc, char** argv) {
         }
         app.setContentProfilePath(profiles.front().string());
     }
-    if (!app.init("New Vegas")) {
+    if (!app.init("ODAI")) {
         return 1;
     }
     app.run();

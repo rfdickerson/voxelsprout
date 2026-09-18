@@ -11,22 +11,22 @@ fallback archives are preserved. See [`MOD_PROFILES.md`](MOD_PROFILES.md).
 ## One-time extraction
 
 ```bash
-MODS=/home/rfdickerson/.local/share/odai/morrowind
+MODS=${HOME}/.local/share/odai/morrowind
 mkdir -p "$MODS/Tamriel_Data_25.05" "$MODS/Tamriel_Rebuilt_25.08.12"
 
-7z x "/home/rfdickerson/Downloads/Tamriel_Data_25.05_HD.7z" \
+7z x "${HOME}/Downloads/Tamriel_Data_25.05_HD.7z" \
   -o"$MODS/Tamriel_Data_25.05"
-7z x "/home/rfdickerson/Downloads/Tamriel Rebuilt 25.08.12-42145-25-08-12-1755040619.7z" \
+7z x "${HOME}/Downloads/Tamriel Rebuilt 25.08.12-42145-25-08-12-1755040619.7z" \
   -o"$MODS/Tamriel_Rebuilt_25.08.12"
 ```
 
 Keep the BAIN directory names. The runtime uses these three roots:
 
 ```bash
-MW="/home/rfdickerson/.local/share/Steam/steamapps/common/Morrowind/Data Files"
-TD="/home/rfdickerson/.local/share/odai/morrowind/Tamriel_Data_25.05/00 Data Files"
-TR="/home/rfdickerson/.local/share/odai/morrowind/Tamriel_Rebuilt_25.08.12"
-VURT="/home/rfdickerson/.local/share/odai/morrowind/mods/vurt-animated-bc-trees-0.99a/Data Files"
+MW="${HOME}/.local/share/Steam/steamapps/common/Morrowind/Data Files"
+TD="${HOME}/.local/share/odai/morrowind/Tamriel_Data_25.05/00 Data Files"
+TR="${HOME}/.local/share/odai/morrowind/Tamriel_Rebuilt_25.08.12"
+VURT="${HOME}/.local/share/odai/morrowind/mods/vurt-animated-bc-trees-0.99a/Data Files"
 ```
 
 ## Vurt's Animated Bitter Coast trees
@@ -35,9 +35,9 @@ The pack is a loose-asset replacer, so it needs no plugin. Extract it once,
 preserving the archive's `Data Files` directory:
 
 ```bash
-VURT_ROOT=/home/rfdickerson/.local/share/odai/morrowind/mods/vurt-animated-bc-trees-0.99a
+VURT_ROOT=${HOME}/.local/share/odai/morrowind/mods/vurt-animated-bc-trees-0.99a
 mkdir -p "$VURT_ROOT"
-unzip -q "/home/rfdickerson/Downloads/Animated BC Trees-56332-0-99a-1746709573.zip" \
+unzip -q "${HOME}/Downloads/Animated BC Trees-56332-0-99a-1746709573.zip" \
   -d "$VURT_ROOT"
 ```
 
@@ -49,7 +49,7 @@ other tree and shelf-fungus replacements remain static as authored.
 For the Seyda Neen-to-Balmora tour:
 
 ```bash
-cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
+cd /path/to/odai/build-linux-release
 ODAI_FNV_TEX_SIZE=1024 ./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$VURT" \
@@ -69,7 +69,7 @@ pre-animation cache.
 Run the viewer from its build directory so its compiled shader paths resolve:
 
 ```bash
-cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
+cd /path/to/odai/build-linux-release
 ./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
@@ -104,12 +104,12 @@ packs' reusable intent onto native features instead:
 Extract both user-provided archives once:
 
 ```bash
-PACKS=/home/rfdickerson/.local/share/odai/morrowind/shader-packs
+PACKS=${HOME}/.local/share/odai/morrowind/shader-packs
 mkdir -p "$PACKS/rafael-2.0e" "$PACKS/enhanced-pbr-2.0e"
 
-7z x "/home/rfdickerson/Downloads/Rafael's Shader Pack 2.0e 53667 2.0e 2026-08-12T12-13Z M4op4PJH.7z" \
+7z x "${HOME}/Downloads/Rafael's Shader Pack 2.0e 53667 2.0e 2026-08-12T12-13Z M4op4PJH.7z" \
   -o"$PACKS/rafael-2.0e"
-7z x "/home/rfdickerson/Downloads/Enhanced PBR Lighting for OpenMW 0.49-0.52 53667 2.0e 2026-08-12T12-14Z p6TN64HF.7z" \
+7z x "${HOME}/Downloads/Enhanced PBR Lighting for OpenMW 0.49-0.52 53667 2.0e 2026-08-12T12-14Z p6TN64HF.7z" \
   -o"$PACKS/enhanced-pbr-2.0e"
 ```
 
@@ -135,7 +135,7 @@ The city spans exterior cells `(5,-28)` and `(6,-28)`. Start directly inside a
 representative interior with:
 
 ```bash
-cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
+cd /path/to/odai/build-linux-release
 ./odai \
   --stream "$MW" --plugin Morrowind.esm --worldspace Vvardenfell \
   --mod "$TD" --mod "$TR/00 Core" --mod "$TR/01 Faction Integration" \
@@ -145,7 +145,7 @@ cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
 For a clean river-approach still:
 
 ```bash
-cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
+cd /path/to/odai/build-linux-release
 ODAI_WINDOW_SIZE=1920x1080 ODAI_FNV_HOUR=17.5 ODAI_FNV_NOHUD=1 \
 ODAI_FNV_COLOR_LOOK=cinematic ODAI_FNV_LOAD_RADIUS=2 \
 ODAI_FNV_SPAWN_POS=50500,220,243000 ODAI_FNV_YAW=-90.6 ODAI_FNV_PITCH=4.4 \
@@ -159,7 +159,7 @@ ODAI_FNV_SPAWN_POS=50500,220,243000 ODAI_FNV_YAW=-90.6 ODAI_FNV_PITCH=4.4 \
 ## 30-second showcase capture
 
 ```bash
-cd /home/rfdickerson/projects/voxelsprout/cmake-build-release
+cd /path/to/odai/build-linux-release
 ODAI_WINDOW_SIZE=1920x1080 ODAI_FNV_HOUR=17.5 ODAI_FNV_NOHUD=1 \
 ODAI_FNV_COLOR_LOOK=cinematic ODAI_FNV_LOAD_RADIUS=2 \
 ODAI_FNV_SPAWN_POS=50500,220,243000 ODAI_CAPTURE_ENCODER=libopenh264 \

@@ -1,3 +1,4 @@
+#include "core/resource_path.h"
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include "render/upscale/upscale_policy.h"
@@ -6,7 +7,7 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "world/chunk_mesher.h"
+#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -45,7 +46,7 @@ struct RuntimeAssetSpec {
 };
 
 bool runtimeAssetExists(const char* path) {
-    return path != nullptr && path[0] != '\0' && std::filesystem::exists(std::filesystem::path(path));
+    return path != nullptr && path[0] != '\0' && std::filesystem::exists(core::resourcePath(path));
 }
 
 } // namespace
@@ -2089,6 +2090,8 @@ bool RendererBackend::createImGuiResources() {
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGuiIO& io = ImGui::GetIO();
+    // Debug overlay layout is transient; never write into the launch directory.
+    io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     // The GLFW backend's NewFrame() (called every frame in frame_run.cc, even
     // when the debug panel is hidden) otherwise re-asserts GLFW_CURSOR_NORMAL
@@ -2661,7 +2664,6 @@ void RendererBackend::shutdown() {
     m_shadowSettings = {};
     m_shadowStats = {};
     m_rtShaderVariantFileAvailable = false;
-    m_chunkMeshingOptions = odai::world::MeshingOptions{};
     m_chunkMeshRebuildRequested = false;
     m_pendingChunkRemeshKeys.clear();
     m_gpuTimestampsSupported = false;
@@ -2727,7 +2729,6 @@ void RendererBackend::shutdown() {
     m_debugChunkLastRemeshMs = 0.0f;
     m_debugChunkLastFullRemeshMs = 0.0f;
     m_debugEnableSpatialQueries = true;
-    m_debugClipmapConfig = odai::world::ClipmapConfig{};
     m_debugSpatialQueriesUsed = false;
     m_debugSpatialQueryStats = {};
     m_debugSpatialVisibleChunkCount = 0;

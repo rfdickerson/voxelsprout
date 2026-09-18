@@ -342,6 +342,12 @@ void Renderer::setImportedPbrDefaults(const ImportedPbrDefaults& defaults) {
     m_backend->setImportedPbrDefaults(defaults);
 }
 
+bool Renderer::playImportedEffect(std::uint32_t reference, const std::string& sequence, bool startOver) {
+    return m_backend->playImportedEffect(reference, sequence, startOver);
+}
+bool Renderer::activateImportedEffect(float x, float y, float z, float dx, float dy, float dz) {
+    return m_backend->activateImportedEffect(x, y, z, dx, dy, dz);
+}
 void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRange,
                                float maxRadiusPixels, float nearBlurScale) {
     m_backend->setDepthOfField(enabled, focusDistance, focusRange, maxRadiusPixels, nearBlurScale);

@@ -1,3 +1,4 @@
+#include "import/fnv/fuz.h"
 #include "import/fnv/skyrim_lod_handoff.h"
 #include <algorithm>
 #include <array>
@@ -2460,7 +2461,7 @@ void testSkyrimLightingShaderVertexAlpha() {
             if (lit) {
                 for (float value : {0.1f,0.2f,0.3f,2.0f}) appendPod(shaderBlock,value);
                 appendPod(shaderBlock,std::uint32_t(3)); // clamp mode
-                for (float value : {0.75f,0.0f,64.0f,0.4f,0.5f,0.6f,1.5f}) appendPod(shaderBlock,value);
+                for (float value : {0.75f,0.0f,64.0f,0.4f,0.5f,0.6f,1.5f,0.4f,10.f}) appendPod(shaderBlock,value);
             }
         }
 
@@ -2613,6 +2614,8 @@ void testSkyrimLightingShaderVertexAlpha() {
                            "authored wrap mode survives material parsing");
                 expectNear(lighting.shapes.front().lightingMaterial.glossiness,64.0f,1e-5f,
                            "glossiness follows refraction strength without skipping a field");
+                expectNear(lighting.shapes.front().lightingMaterial.softLightingRolloff, .4f, 1e-5f,
+                           "soft lighting rolloff follows specular strength");
                 expectNear(lighting.shapes.front().lightingMaterial.specularStrength,1.5f,1e-5f,
                            "authored specular strength survives decoding");
                 expectNear(lighting.shapes.front().uvs[0],0.25f,1e-5f,
@@ -5192,7 +5195,9 @@ void testSkinnedInfluenceWeightsAreNormalized() {
     // exist, and they must already be normalized.
     shape.boneIndices.assign(kNifMaxBoneInfluences, 0u);
     shape.boneWeights.assign(kNifMaxBoneInfluences, 0.0f);
-    const float kept[kNifMaxBoneInfluences] = {0.4f, 0.3f, 0.2f, 0.1f};
+    // Deliberately non-unit input catches accidental reliance on parser-side
+    // normalization (and represents quantized or reduced source influences).
+    const float kept[kNifMaxBoneInfluences] = {0.399f, 0.299f, 0.199f, 0.099f};
     for (int k = 0; k < kNifMaxBoneInfluences; ++k) {
         shape.boneIndices[static_cast<std::size_t>(k)] = static_cast<std::uint16_t>(k);
         shape.boneWeights[static_cast<std::size_t>(k)] = kept[k];
@@ -5222,6 +5227,49 @@ void testSkinnedInfluenceWeightsAreNormalized() {
         character.indices.size() == indicesBefore &&
             character.droppedUnresolvedBoneTriangleCount == 1u,
         "a triangle with an unresolved positive-weight bone cannot stretch to world origin");
+
+    NifSkinnedShape normalShape = shape;
+    normalShape.positions = {0, 0, 0, 0, 1, 0, 0, 0, 1};
+    normalShape.triangleIndices = {0, 1, 2};
+    normalShape.normals.clear();
+    normalShape.normalTexturePath = "skin_msn.dds";
+    normalShape.modelSpaceNormals = true;
+    normalShape.lightingMaterial.softLightingRolloff = .4f;
+    normalShape.lightingMaterial.specularStrength = 2.69f;
+    normalShape.lightingMaterial.textures = {"skin.dds", "skin_msn.dds", "skin_sk.dds"};
+    normalShape.boneIndices.assign(3 * kNifMaxBoneInfluences, 0);
+    normalShape.boneWeights.assign(3 * kNifMaxBoneInfluences, 0.f);
+    for (int v = 0; v < 3; ++v) normalShape.boneWeights[v * kNifMaxBoneInfluences] = 1.f;
+    NifSkinnedModel noNormals;
+    noNormals.shapes = {normalShape};
+    auto firstNormalVertex = character.vertices.size();
+    expectTrue(appendFalloutCharacterMesh(noNormals, character, error), "normal-less skin binds");
+    for (std::size_t v = firstNormalVertex; v < character.vertices.size(); ++v) {
+        expectTrue(std::fabs(character.vertices[v].normal[0] - 1.f) < 1e-5f,
+            "missing normals follow triangle surface rather than world up");
+        expectTrue(std::fabs(character.vertices[v].normal[1]) < 1e-5f, "vertical surface is not lit as horizontal");
+    }
+    expectTrue(character.parts.back().modelSpaceNormals && character.parts.back().normalTexturePath == "skin_msn.dds",
+        "skin model-space material survives assembly");
+    expectNear(character.parts.back().lightingMaterial.softLightingRolloff, .4f, 1e-5f, "skin scattering survives assembly");
+    expectTrue(character.parts.back().lightingMaterial.textures.size() == 3, "skin lighting texture catalog survives assembly");
+    const auto& basis = character.vertices[firstNormalVertex].modelNormalBasis;
+    expectTrue(std::fabs(basis[0]-1.f) < 1e-5f && std::fabs(basis[5]+1.f) < 1e-5f && std::fabs(basis[7]-1.f) < 1e-5f,
+        "model-space basis converts all signed axes from Bethesda Z-up to engine Y-up");
+    auto lowWeight = noNormals;
+    auto highWeight = noNormals;
+    highWeight.shapes[0].positions[0] = 4.f;
+    expectTrue(interpolateSkinnedWeight(lowWeight, highWeight, .25f, error), "compatible weight pair interpolates");
+    expectTrue(std::fabs(highWeight.shapes[0].positions[0] - 1.f) < 1e-5f, "weight uses fractional actor size");
+    lowWeight.shapes[0].triangleIndices = {2, 1, 0};
+    expectTrue(!interpolateSkinnedWeight(lowWeight, highWeight, .5f, error), "mismatched weight topology rejected");
+    expectTrue(std::fabs(highWeight.shapes[0].positions[0] - 1.f) < 1e-5f, "failed morph is transactional");
+    noNormals.shapes[0].normals = {0, 0, -1, 0, 0, -1, 0, 0, -1};
+    firstNormalVertex = character.vertices.size();
+    expectTrue(appendFalloutCharacterMesh(noNormals, character, error), "authored-normal skin binds");
+    expectTrue(character.vertices[firstNormalVertex].normal[1] < -.99f,
+        "authored normals are preserved instead of regenerated");
+
 }
 
 }  // namespace
@@ -6249,7 +6297,7 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
         return buildSubrecord("LVLO", out);
     };
 
-    std::vector<std::uint8_t> content;
+    std::vector<std::uint8_t> content = buildRecord("TES4", 0, 0x80, {});
     const auto appendGroup = [&](const char* type, const std::vector<std::uint8_t>& record) {
         const auto group = buildGroup(type, 0, record);
         content.insert(content.end(), group.begin(), group.end());
@@ -6273,7 +6321,7 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
     appendGroup("ARMO", buildRecord("ARMO", kSkin, 0u, skinSubs));
     for (const auto& [addonId, slot, model] : {
              std::tuple{kSkinHandsAddon, 1u << 5, "Actors\\Character\\MaleHands_1.nif"},
-             std::tuple{kSkinCoveredTorsoAddon, 1u << 2, "Actors\\Character\\MaleBody_1.nif"}}) {
+             std::tuple{kSkinCoveredTorsoAddon, (1u << 2) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 8), "Actors\\Character\\MaleBody_1.nif"}}) {
         std::vector<std::uint8_t> addonSubs;
         append(addonSubs, buildSubrecord("EDID", stringPayload("SkinAddonTest")));
         append(addonSubs, buildSubrecord("BODT", u32Payload(slot)));
@@ -6291,7 +6339,11 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
 
         std::vector<std::uint8_t> addonSubs;
         append(addonSubs, buildSubrecord("EDID", stringPayload("GuardArmorAddon")));
-        append(addonSubs, buildSubrecord("BODT", u32Payload(1u << i)));
+        // Retail armor addons can share mesh partitions even when their ARMO
+        // equip slots are distinct (Steel Plate boots/cuirass share calves).
+        // The overlap must hide default skin without rejecting either item.
+        const std::uint32_t addonSlots = (1u << i) | (i < 2u ? (1u << 8) : 0u);
+        append(addonSubs, buildSubrecord("BODT", u32Payload(addonSlots)));
         append(addonSubs, buildSubrecord("RNAM", u32Payload(kRace)));
         append(addonSubs, buildSubrecord("MOD2", stringPayload(models[i])));
         appendGroup("ARMA", buildRecord("ARMA", addonIds[i], 0u, addonSubs));
@@ -6318,7 +6370,22 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
     appendGroup("OTFT", buildRecord("OTFT", kOutfit, 0u, outfitSubs));
 
     std::vector<std::uint8_t> npcSubs;
+    for (const auto& [id, name] : {std::pair{0x710u, "HairFixture"}, std::pair{0x711u, "HairExtraFixture"}}) {
+        std::vector<std::uint8_t> head;
+        append(head, buildSubrecord("EDID", stringPayload(name)));
+        append(head, buildSubrecord(
+            "MODL", stringPayload(id == 0x710u ? "hair\\fixture.nif" : "hair\\extra.nif")));
+        append(head, buildSubrecord("PNAM", u32Payload(3u)));
+        if (id == 0x710u) append(head, buildSubrecord("HNAM", u32Payload(0x711u)));
+        appendGroup("HDPT", buildRecord("HDPT", id, 0u, head));
+    }
+    std::vector<std::uint8_t> hairColorSubs;
+    append(hairColorSubs, buildSubrecord("CNAM", std::vector<std::uint8_t>{64u, 32u, 16u, 0u}));
+    appendGroup("CLFM", buildRecord("CLFM", 0x712u, 0u, hairColorSubs));
+    append(npcSubs, buildSubrecord("HCLF", u32Payload(0x712u)));
+    append(npcSubs, buildSubrecord("PNAM", u32Payload(0x710u)));
     append(npcSubs, buildSubrecord("EDID", stringPayload("GuardWhiterunTest")));
+    append(npcSubs, buildSubrecord("FULL", u32Payload(0x251u)));
     append(npcSubs, buildSubrecord("ACBS", std::vector<std::uint8_t>(24u, 0u)));
     append(npcSubs, buildSubrecord("RNAM", u32Payload(kRace)));
     append(npcSubs, buildSubrecord("DOFT", u32Payload(kOutfit)));
@@ -6345,7 +6412,20 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
     expectTrue(
         findActorsNear(esmPath, 100.0f, 200.0f, 1000.0f, scan, error),
         ("Skyrim actor scan succeeds: " + error).c_str());
+    expectTrue(scan.bases.at(kNpc).fullName.empty() &&
+               scan.bases.at(kNpc).fullNameStringId == 0x251u &&
+               scan.bases.at(kNpc).fullNamePlugin == "odai_skyrim_actor_test.esm",
+               "localized NPC name retains string ID and source instead of displaying raw bytes");
+    expectTrue(scan.bases.at(kNpc).hairColorFormId == 0x712u &&
+               scan.hairColors.contains(0x712u) &&
+               scan.hairColors.at(0x712u) == std::array<float, 3>{64.0f / 255.0f, 32.0f / 255.0f, 16.0f / 255.0f},
+               "actor scan retains the NPC hair color reference and CLFM RGB record");
+    expectTrue(scan.headParts.at(0x710u).modelPath == "hair\\fixture.nif" &&
+               scan.headParts.at(0x711u).modelPath == "hair\\extra.nif",
+               "Skyrim HDPT records retain primary and additive hair model paths");
     const ResolvedActorBase resolved = scan.resolve(kNpc);
+    expectTrue(resolved.hiddenHeadParts == std::vector<std::string>{"HairFixture", "HairExtraFixture"},
+        "headgear hides authored HDPT hair and recursively referenced extra parts");
     const std::string faceGeometry =
         "actors\\character\\facegendata\\facegeom\\odai_skyrim_actor_test.esm\\00000600.nif";
     expectTrue(
@@ -6372,6 +6452,41 @@ void testSkyrimActorSkeletonAndOutfitAssembly() {
     expectTrue(
         resolved.wornArmorFormIds.size() == 4u,
         "the outer leveled list chooses one set while the inner use-all list wears every piece");
+
+    const std::vector<std::uint32_t> emptyEquipment;
+    const auto naked = scan.resolve(kNpc, &emptyEquipment);
+    expectTrue(naked.wornArmorFormIds.empty(), "explicit empty equipment does not restore default outfit");
+    expectTrue(naked.hiddenHeadParts.empty(), "removing headgear restores hair");
+    expectTrue(std::find(naked.bodyPartPaths.begin(), naked.bodyPartPaths.end(),
+        "Actors\\Character\\MaleBody_1.nif") != naked.bodyPartPaths.end(),
+        "unequipped torso restores default skin geometry");
+
+    // An explicitly carried replacement wins this importer's first-claim
+    // policy; the default outfit must not add a second mesh in its slot.
+    constexpr std::uint32_t replacementArmor = 0x700u;
+    constexpr std::uint32_t replacementAddon = 0x701u;
+    scan.armors[replacementArmor] = scan.armors.at(armorIds[2]);
+    scan.armors[replacementArmor].armatureFormIds = {replacementAddon};
+    scan.armorAddons[replacementAddon] = scan.armorAddons.at(addonIds[2]);
+    scan.armorAddons[replacementAddon].maleModel = "armor\\replacement.nif";
+    scan.bases.at(kNpc).inventoryFormIds = {replacementArmor, replacementArmor};
+    const auto replaced = scan.resolve(kNpc);
+    expectTrue(std::count(replaced.bodyPartPaths.begin(), replaced.bodyPartPaths.end(),
+                         "armor\\replacement.nif") == 1,
+               "duplicate inventory entries do not duplicate worn armor");
+    expectTrue(std::find(replaced.bodyPartPaths.begin(), replaced.bodyPartPaths.end(),
+                         models[2]) == replaced.bodyPartPaths.end(),
+               "conflicting outfit armor does not stack over replacement");
+    expectTrue(replaced.wornArmorFormIds.size() == 4u,
+               "conflicting items do not count as worn");
+    scan.armorAddons[replacementAddon].maleModel.clear();
+    const auto missingModel = scan.resolve(kNpc);
+    expectTrue(std::find(missingModel.wornArmorFormIds.begin(), missingModel.wornArmorFormIds.end(),
+                         replacementArmor) == missingModel.wornArmorFormIds.end(),
+               "empty addon model does not claim an equipment slot");
+    expectTrue(std::find(missingModel.bodyPartPaths.begin(), missingModel.bodyPartPaths.end(),
+                         models[2]) != missingModel.bodyPartPaths.end(),
+               "valid outfit remains visible when replacement has no model");
 
     fs::remove(esmPath);
 }
@@ -6965,6 +7080,75 @@ void testMorrowindDirectKeyframeAndStencilSizing() {
         "Morrowind stencil sizing includes its draw-mode field");
 }
 
+void testSparseTerrainLayerOverflow() {
+    using namespace odai::importer::fnv;
+    const auto root = std::filesystem::temp_directory_path() / "odai_sparse_land_layers";
+    std::filesystem::create_directories(root / "textures/terrain");
+    std::vector<std::uint8_t> dds(132, 0);
+    const auto word = [&](std::size_t at, std::uint32_t value) { std::memcpy(dds.data()+at, &value, 4); };
+    word(0, 0x20534444u); word(4, 124); word(8, 0x100f); word(12, 1); word(16, 1);
+    word(20, 4); word(28, 1); word(76, 32); word(80, 0x41); word(88, 32);
+    word(92, 0xff0000); word(96, 0xff00); word(100, 0xff); word(104, 0xff000000); word(108, 0x1000);
+    word(128, 0xffffffff);
+    FalloutWorldTables tables;
+    tables.skyrim = true;
+    FalloutCellRecord cell;
+    cell.hasGridCoords = true;
+    cell.land = std::make_unique<FalloutLandRecord>();
+    cell.land->hasHeights = true;
+    cell.land->heights.assign(kLandVertexCount, 100.0f);
+    for (int layer = 0; layer < 6; ++layer) {
+        const auto name = "terrain/layer" + std::to_string(layer) + ".dds";
+        std::ofstream file(root / "textures" / name, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(dds.data()), dds.size());
+        tables.landTexturePaths[100 + layer] = name;
+        FalloutLandTextureLayer paint;
+        paint.layerIndex = layer;
+        paint.textureFormId = 100 + layer;
+        const int row = 2 + (layer / 3) * 10, col = 2 + (layer % 3) * 5;
+        paint.opacity[row * kLandQuadrantGridSize + col] = 1;
+        cell.land->textureLayers.push_back(paint);
+    }
+    FalloutAssetSource assets;
+    expectTrue(assets.open(root), "open synthetic terrain asset root");
+    CellSceneBuilder builder(assets, tables);
+    builder.addCellTerrain(cell);
+    expectTrue(builder.stats().droppedTerrainLayers == 0, "sparse six-layer quadrant loses no paint");
+    const auto& scene = builder.scene();
+    expectTrue(!scene.meshes.empty(), "synthetic LAND emits terrain");
+    if (!scene.meshes.empty()) {
+        const auto& mesh = scene.meshes.front();
+        expectTrue(mesh.indices.size() == 4u * 32u * 32u * 6u, "partition retains every terrain quad");
+        expectTrue(mesh.parts.size() > 4 && mesh.parts.size() < 32, "subdivision stays local and bounded");
+        std::vector<bool> seen(scene.textures.size(), false);
+        for (const auto& vertex : mesh.vertices)
+            for (int slot = 0; slot < odai::importer::kImportedSceneMaxTerrainLayers; ++slot)
+                if (vertex.layerWeight[slot] > 0 && vertex.layerTextureIndex[slot] < seen.size())
+                    seen[vertex.layerTextureIndex[slot]] = true;
+        expectTrue(std::count(seen.begin(), seen.end(), true) == 6, "all six painted materials survive");
+        for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+            const auto& a = mesh.vertices[mesh.indices[i]];
+            for (int corner = 1; corner < 3; ++corner) {
+                const auto& b = mesh.vertices[mesh.indices[i+corner]];
+                expectTrue(std::equal(std::begin(a.layerTextureIndex), std::end(a.layerTextureIndex),
+                                      std::begin(b.layerTextureIndex)), "flat layer IDs agree within every triangle");
+            }
+        }
+    }
+    std::filesystem::remove_all(root);
+}
+
+void testFuzAudioBounds() {
+    using odai::importer::fnv::fuzAudio;
+    std::vector<std::uint8_t> bytes{'F','U','Z','E',1,0,0,0,2,0,0,0,0,0,
+        'R','I','F','F',4,0,0,0,'X','W','M','A'};
+    expectTrue(fuzAudio(bytes).size() == 12, "FUZ skips header and LIP payload");
+    bytes[8] = 255;
+    expectTrue(fuzAudio(bytes).empty(), "FUZ rejects out-of-bounds LIP length");
+    bytes.resize(8);
+    expectTrue(fuzAudio(bytes).empty(), "FUZ rejects truncated headers");
+}
+
 void testLandLayerOpacityReconstruction() {
     using namespace odai::importer::fnv;
 
@@ -6983,13 +7167,22 @@ void testLandLayerOpacityReconstruction() {
     const float centre = sampleLandLayerOpacity(spot, 8.0f, 8.0f);
     const float left = sampleLandLayerOpacity(spot, 8.0f, 7.0f);
     const float right = sampleLandLayerOpacity(spot, 8.0f, 9.0f);
-    expectNear(centre, 0.7375f, 1e-6f,
+    expectNear(centre, 1.0f, 1e-6f,
                "reconstruction keeps an isolated authored post dominant");
-    expectTrue(left > 0.0f && left < centre && std::fabs(left - right) < 1e-6f,
-               "reconstruction feathers an isolated post symmetrically");
+    expectTrue(left == 0.0f && left < centre && std::fabs(left - right) < 1e-6f,
+               "reconstruction preserves neighbouring transparent posts");
     const float halfway = sampleLandLayerOpacity(spot, 8.0f, 8.5f);
     expectTrue(halfway > right && halfway < centre,
                "fractional reconstruction smoothly bridges adjacent posts");
+    FalloutLandTextureLayer west, east;
+    for (int r = 0; r < kLandQuadrantGridSize; ++r) {
+        west.opacity[r * kLandQuadrantGridSize + 16] = 0.5f;
+        east.opacity[r * kLandQuadrantGridSize] = 0.5f;
+        west.opacity[r * kLandQuadrantGridSize + 15] = 1.0f;
+    }
+    expectNear(sampleLandLayerOpacity(west, 7.25f, 16.0f),
+               sampleLandLayerOpacity(east, 7.25f, 0.0f), 1e-6f,
+               "shared edge weights agree despite different interior paint");
     const float clamped = sampleLandLayerOpacity(spot, -100.0f, 100.0f);
     expectTrue(clamped >= 0.0f && clamped <= 1.0f,
                "out-of-range reconstruction coordinates clamp to a valid opacity");
@@ -7100,6 +7293,23 @@ void testBethesdaPlacementRotationConventions() {
                "compound REFR rotation negates each authored angle without transposing");
     expectNear(laterGeneration.transform[10], -1.0f, 1e-5f,
                "compound REFR rotation retains the expected handedness");
+
+    // Guardian Stones MountainTrimSlab REFR 0xA0086. Expected basis from
+    // Skyrim NiMatrix3::SetEulerAnglesXYZ, followed by (x,z,-y) conversion.
+    reference.rotationRadians[0] = -0.2726625f;
+    reference.rotationRadians[1] = -0.506658f;
+    reference.rotationRadians[2] = 5.8981943f;
+    reference.scale = 0.74f;
+    ImportedSceneInstance skyrim;
+    writeBethesdaPlacementTransform(skyrim, reference, false, true);
+    const float expected[9] = {
+        0.599672865f, -0.242994374f, 0.359090782f,
+        -0.245671688f, 0.314567394f, 0.623131428f,
+        -0.357264436f, -0.624180334f, 0.174244179f};
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            expectNear(skyrim.transform[row * 4 + col], expected[row * 3 + col],
+                       1e-5f, "Skyrim tilted rock matches authored NiMatrix3 basis");
 }
 
 void testOblivionSptImportIsBoundedAndDeterministic() {
@@ -7202,6 +7412,12 @@ void testSkyrimObjectLodHandoff() {
     expectTrue(partial.instances.size() == 2 && partial.meshes[0].indices.size() == 3 &&
         partial.meshes[1].indices.size() == 3 && partial.meshes[0].parts[0].textureIndex == 7,
         "partial city clips only resident cell footprints including large references");
+    auto crossing = source;
+    crossing.meshes[0].indices.insert(crossing.meshes[0].indices.end(), {0, 1, 3});
+    crossing.meshes[0].parts[0].indexCount += 3;
+    fnv::applySkyrimLodHandoff(crossing, h);
+    expectTrue(crossing.meshes[0].indices.size() == 9,
+        "connected rock crossing a residency boundary retains its whole silhouette");
     h.residentMask = 0;
     auto evicted = source;
     fnv::applySkyrimLodHandoff(evicted,h);
@@ -7511,7 +7727,7 @@ void testSkyrimGrassPipeline() {
     expectTrue(sloped.size()==4096, "gentle slope remains eligible");
     for (const auto& root : sloped) {
         odai::importer::ImportedSceneInstance instance;
-        writeBethesdaPlacementTransform(instance,root,false);
+        writeBethesdaPlacementTransform(instance,root,false,true);
         const float length=std::sqrt(1.0f+0.25f*0.25f);
         expectTrue(std::abs(instance.transform[2]+0.25f/length)<1e-5f &&
                    std::abs(instance.transform[6]-1.0f/length)<1e-5f &&
@@ -7605,6 +7821,8 @@ int main() {
     testInitialEnableParentState();
     testSkyrimRegionAndSoundRecords();
     testLandLayerOpacityReconstruction();
+    testFuzAudioBounds();
+    testSparseTerrainLayerOverflow();
     testVertexFadeTrianglePartitioning();
     testNifShapeWindingRepairUsesAuthoredNormals();
     testBethesdaPlacementRotationConventions();

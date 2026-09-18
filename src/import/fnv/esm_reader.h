@@ -147,6 +147,7 @@ public:
     // walk skips. Falls back to a plain read if the mapping fails.
     bool open(const std::filesystem::path& path);
     const std::string& lastError() const { return m_lastError; }
+    std::uint64_t lastErrorOffset() const { return m_lastErrorOffset; }
 
     // Sniffed by open() from the plugin's own TES4 record. An empty or
     // unopened reader reports kFallout3.
@@ -211,6 +212,7 @@ private:
     std::uint64_t m_mappingHandles[2] = {0, 0};
 
     std::string m_lastError;
+    std::uint64_t m_lastErrorOffset = 0;
     std::uint32_t m_toleratedChecksumFailures = 0;
     // Sniffed once in open(), never re-derived per record: the two container
     // header sizes are a property of the file, and a per-record guess would be

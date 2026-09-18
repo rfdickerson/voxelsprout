@@ -1,4 +1,5 @@
 #include "bethesda/vmad_reader.h"
+#include "bethesda/skyrim_scene.h"
 
 #include <bit>
 #include <limits>
@@ -274,4 +275,35 @@ bool readVmadInfoAttachments(
     return true;
 }
 
+bool readVmadSceneFragments(std::span<const std::uint8_t> bytes,
+    VmadAttachments& common, std::vector<SkyrimSceneFragment>& fragments,
+    std::string& error) {
+    if (!readVmadAttachments(bytes, common, error)) return false;
+    if (common.trailingOffset == bytes.size()) return true;
+    Reader reader(bytes, common.trailingOffset);
+    std::uint8_t version = 0, flags = 0, unknown = 0;
+    std::string file;
+    if (!reader.u8(version) || !reader.u8(flags) || (flags & ~3u) || !reader.string16(file)) {
+        error = "invalid SCEN VMAD fragment header"; return false;
+    }
+    for (std::uint8_t bit : {1u, 2u}) if (flags & bit) {
+        SkyrimSceneFragment fragment; fragment.flags = bit;
+        if (!reader.u8(unknown) || !reader.string16(fragment.scriptClass) || !reader.string16(fragment.function)) {
+            error = "truncated SCEN fragment"; return false;
+        }
+        fragments.push_back(std::move(fragment));
+    }
+    std::uint16_t count = 0;
+    if (!reader.u16(count)) { error = "missing SCEN phase fragment count"; return false; }
+    for (unsigned i = 0; i < count; ++i) {
+        SkyrimSceneFragment fragment;
+        if (!reader.u8(fragment.flags) || !reader.u32(fragment.phase) || !reader.u8(unknown) ||
+            !reader.string16(fragment.scriptClass) || !reader.string16(fragment.function)) {
+            error = "truncated SCEN phase fragment"; return false;
+        }
+        fragments.push_back(std::move(fragment));
+    }
+    if (reader.at() != bytes.size()) { error = "unknown SCEN VMAD tail"; return false; }
+    return true;
+}
 }  // namespace odai::bethesda

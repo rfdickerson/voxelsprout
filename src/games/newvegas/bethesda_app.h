@@ -1,4 +1,7 @@
 #pragma once
+
+#include "anim/character_dynamics.h"
+#include "games/newvegas/npc_demo_locomotion.h"
 #include "import/fnv/image_space_records.h"
 
 #include "import/fnv/nif_scene.h"
@@ -296,8 +299,9 @@ public:
         m_explicitStart = true;
     }
     void setScenario(std::string id);
+    void setScenarioReportPath(std::filesystem::path path) { m_scenarioReportPath = std::move(path); }
     void setGameplaySavePath(std::string path) { m_gameplaySavePath = std::move(path); }
-    void setGameplayLoadPath(std::string path) { m_gameplayLoadPath = std::move(path); }
+    void setGameplayLoadPath(std::string path) { m_scenarioReportLoadRequested = !path.empty(); m_gameplayLoadPath = std::move(path); }
     void setTes3StartQuest(std::string id, std::int32_t index) {
         m_tes3StartQuest = std::move(id);
         m_tes3StartQuestIndex = index;
@@ -370,6 +374,9 @@ protected:
     }
     void reconstructPlayerCamera(float deltaSeconds, bool snapInward = false);
     bool initSkyrimPlayerAvatar();
+    void updateSkyrimFirstPersonWeapon(float deltaSeconds);
+    void initFirstPersonCombatAudio();
+    void playFirstPersonCombatSound(unsigned kind);
     void updateSkyrimPlayerAvatar(float deltaSeconds);
     void unregisterBethesdaActorControllers();
     void pullBethesdaActorControllerStates();
@@ -378,6 +385,7 @@ protected:
     [[nodiscard]] std::optional<bethesda::ObjectId> runtimeObjectIdForActor(
         const SkinnedActor& actor) const;
     void syncBethesdaPlayerState(bool applyNow);
+    void syncSkyrimActorEquipment(SkinnedActor& actor, const bethesda::ObjectId& id);
     void syncBethesdaActors(bool addMissing, bool applyNow);
     void restoreBethesdaActorsFromSession();
     bool ensureSkyrimActorCatalog();
@@ -806,10 +814,30 @@ private:
     // dialogue, be activated, or inherit NPC residency. It is only a visual
     // view of the Morrowind-authoritative player controller.
     std::optional<SkinnedActor> m_skyrimPlayerAvatar;
+    std::optional<SkinnedActor> m_skyrimFirstPersonWeapon;
+    std::string m_firstPersonWeaponPath;
+    float m_firstPersonAttackTime = -1.0f;
+    bool m_firstPersonWasVisible = false;
+    anim::AnimationClip m_firstPersonBlockClip;
+    anim::LocalPose m_firstPersonBlendFrom, m_firstPersonLocalPose;
+    int m_firstPersonPoseState = -1;
+    float m_firstPersonBlendTime = 0;
+    bool m_firstPersonGuardHeld = false;
+    bool m_combatAudioReady = false;
+    std::array<std::vector<audio::SoundHandle>, 4> m_combatSounds;
+    std::array<unsigned, 4> m_combatSoundNext{};
+    static constexpr std::uint32_t kFirstPersonWeaponInstance = kPlayerAvatarSkinnedInstance - 1u;
     std::string m_skyrimAvatarDataDirectory;
     std::string m_skyrimPlayerOutfitEditorId = "ArmorIronBandedNoHelmetOutfit";
     std::uint64_t m_skyrimPlayerEquippedSignature = 0u;
     bool m_skyrimPlayerAvatarUploadPending = false;
+    std::optional<anim::BodyMorphProgram> m_skyrimPlayerMorphProgram;
+    anim::BodyMorphSnapshot m_skyrimPlayerMorphState;
+    std::vector<std::uint32_t> m_skyrimPlayerMorphOffsets;
+    std::vector<render::ImportedSkinnedMeshTemplate::MorphDelta> m_skyrimPlayerMorphDeltas;
+    std::vector<float> m_skyrimPlayerMorphWeights;
+    std::optional<anim::HairChainSimulator> m_skyrimPlayerHair;
+    bool m_ragdollToggleLatch = false;
     bool m_balmoraSkyrimPlayerShowcase = false;
     bool m_whiterunThirdPersonShowcase = false;
     bool m_riftenThirdPersonShowcase = false;
@@ -960,6 +988,18 @@ private:
     bool m_bracketRightLatch = false;
     bool m_pauseLatch = false;
     bool m_quitKeyLatch = false;
+    bool m_npcDemoKeyLatch[3] = {};
+    bool m_npcDemoPhysicsReady = false;
+    odai::newvegas::NpcDemoLocomotion m_npcDemoLocomotion;
+    bethesda::ObjectId m_npcDemoActorId{};
+    bool m_npcDemoJumpRequested = false;
+    bool m_npcDemoJumpPending = false;
+    odai::math::Vector3 m_npcDemoMove{};
+    float m_npcDemoProbeSeconds = 0.0f;
+    bool m_npcDemoDropStarted = false;
+    bool m_npcDemoManualControl = false;
+    bool m_npcDemoDropJumped = false;
+    std::string m_npcDemoLastClip;
     bool m_escapeLatch = false;
     bool m_tabLatch = false;
     // Ground-clamped FPS movement; F drops back to the old free-fly camera.
@@ -1111,6 +1151,10 @@ private:
     // using the older height field built from the whole scene.
     CollisionWorld m_collision;
     ActorNavigationWorld m_actorNavigation;
+    std::vector<ActorNavigationStep> m_captureFollowPath;
+    std::size_t m_captureFollowStep = 0;
+    std::size_t m_captureWalkRouteStep = 0;
+    float m_captureFollowRepathSeconds = 0.0f;
     struct BethesdaCollisionMesh : importer::fnv::CellStreamer::PreparedCellData {
         std::vector<odai::math::Vector3> vertices;
         std::vector<std::uint32_t> indices;
@@ -1147,6 +1191,12 @@ private:
     std::string m_scenarioStartMarker;
     std::filesystem::path m_gameplaySavePath;
     std::filesystem::path m_gameplayLoadPath;
+    std::filesystem::path m_scenarioReportPath;
+    std::string m_lastScenarioCheckpoint;
+    double m_scenarioReportElapsed = 1.0;
+    bool m_scenarioReportKeyLatch = false;
+    bool m_scenarioReportStarted = false;
+    bool m_scenarioReportLoadRequested = false;
     bool m_gameplaySaveKeyLatch = false;
     bool m_gameplayLoadKeyLatch = false;
     bool m_meleeAttackPending = false;

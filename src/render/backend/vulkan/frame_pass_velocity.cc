@@ -1,3 +1,4 @@
+#include "core/resource_path.h"
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
@@ -19,7 +20,7 @@ struct SkinnedVelocityPushConstants {
     float viewProj[16] = {};
     float jitterCurrPrev[4] = {};
     std::uint32_t boneCount = 0;
-    std::uint32_t pad0 = 0;
+    std::uint32_t morphTargetCount = 0;
     std::uint32_t pad1 = 0;
     std::uint32_t pad2 = 0;
 };
@@ -38,7 +39,7 @@ bool RendererBackend::createSkinnedVelocityResources() {
         "../src/render/shaders/skinned_velocity.vert.slang.spv";
     constexpr const char* kFragmentShaderPath =
         "../src/render/shaders/skinned_velocity.frag.slang.spv";
-    if (!std::filesystem::exists(kVertexShaderPath) || !std::filesystem::exists(kFragmentShaderPath)) {
+    if (!std::filesystem::exists(core::resourcePath(kVertexShaderPath)) || !std::filesystem::exists(core::resourcePath(kFragmentShaderPath))) {
         VOX_LOGW("render") << "skinned velocity shaders missing; motion vectors disabled";
         return false;
     }
@@ -52,9 +53,13 @@ bool RendererBackend::createSkinnedVelocityResources() {
             layoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
             return layoutBinding;
         };
-        const std::array<VkDescriptorSetLayoutBinding, 2> bindings = {
+        const std::array<VkDescriptorSetLayoutBinding, 6> bindings = {
             storageBinding(0),  // this frame's bone matrices
             storageBinding(1),  // last frame's
+            storageBinding(2),  // per-vertex morph CSR offsets
+            storageBinding(3),  // sparse morph deltas
+            storageBinding(4),  // this frame's morph weights
+            storageBinding(5),  // last frame's morph weights
         };
         if (!createDescriptorSetLayout(
                 bindings, m_skinnedVelocityDescriptorSetLayout,
@@ -106,11 +111,11 @@ bool RendererBackend::createSkinnedVelocityResources() {
     stages[1].pName = "main";
 
     // The rest pose bound as a vertex buffer. Offsets are GpuSkinnedVertexIn's,
-    // which is 84 tightly packed bytes -- see the shader header for why this is
+    // which is 148 tightly packed bytes -- see the shader header for why this is
     // a vertex binding rather than a StructuredBuffer.
     VkVertexInputBindingDescription binding{};
     binding.binding = 0;
-    binding.stride = 84u;
+    binding.stride = 148u;
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
     std::array<VkVertexInputAttributeDescription, 3> attributes{};
     attributes[0].location = 0;
@@ -161,7 +166,10 @@ bool RendererBackend::createSkinnedVelocityResources() {
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = VK_FALSE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    // Only the opaque surface that actually wrote depth may publish velocity.
+    // GREATER_OR_EQUAL also admitted the transparent holes in hair cards,
+    // since those triangles sit in front of the background depth.
+    depthStencil.depthCompareOp = VK_COMPARE_OP_EQUAL;
 
     VkPipelineColorBlendAttachmentState blendAttachment{};
     blendAttachment.colorWriteMask =
@@ -317,12 +325,14 @@ void RendererBackend::recordSkinnedVelocityPass(const FrameExecutionContext& con
         const SkinnedInstanceSlot& slot = m_skinningInstances[i];
         if (!slot.visible || slot.vertexCount == 0 || slot.boneCount == 0 ||
             slot.currentBoneAddress == 0 ||
+            slot.currentMorphAddress == 0 ||
             !slot.velocityBufferSet.valid() ||
             slot.restPoseVertexBufferHandle == kInvalidBufferHandle ||
             slot.indexBufferHandle == kInvalidBufferHandle) {
             continue;
         }
         pushConstants.boneCount = slot.boneCount;
+        pushConstants.morphTargetCount = slot.morphTargetCount;
         vkCmdPushConstants(
             commandBuffer, m_skinnedVelocityPipelineLayout,
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -339,7 +349,9 @@ void RendererBackend::recordSkinnedVelocityPass(const FrameExecutionContext& con
             commandBuffer, m_bufferAllocator.getBuffer(slot.indexBufferHandle), 0,
             VK_INDEX_TYPE_UINT32);
         for (const ImportedMeshDraw& draw : slot.meshDraws) {
-            if (draw.indexCount == 0) {
+            // Blended cards have no single opaque depth/motion. Keep the
+            // underlying surface's velocity rather than overwriting whole cards.
+            if (draw.indexCount == 0 || draw.blended) {
                 continue;
             }
             vkCmdDrawIndexed(commandBuffer, draw.indexCount, 1, draw.firstIndex, 0, 0);

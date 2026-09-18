@@ -1,4 +1,5 @@
 #include "import/fnv/nif_material_animation.h"
+#include "import/fnv/nif_effect_sequence.h"
 #include "import/fnv/nif_scene.h"
 
 #include <algorithm>
@@ -1886,10 +1887,15 @@ bool readBsLightingShaderTextureSetRef(
             std::isfinite(parsed.specularStrength) && std::isfinite(parsed.refractionStrength) &&
             parsed.textureClampMode <= 3;
     }
-    if (parsed.parametersValid && shaderType == 1u) {
-        float effects[2], scale;
-        if (cursor.read(effects) && cursor.read(scale) && std::isfinite(scale) && scale >= 0)
-            parsed.environmentScale = scale;
+    if (parsed.parametersValid) {
+        float effects[2];
+        if (cursor.read(effects)) {
+            if (std::isfinite(effects[0]) && effects[0] >= 0) parsed.softLightingRolloff = effects[0];
+            if (shaderType == 1u) {
+                float scale;
+                if (cursor.read(scale) && std::isfinite(scale) && scale >= 0) parsed.environmentScale = scale;
+            }
+        }
     }
     if (material) *material = std::move(parsed);
     return true;
@@ -1910,6 +1916,8 @@ bool readBsLightingShaderTextureSetRef(
 // are irrelevant here. Older FO3/FNV effect properties use another layout and
 // deliberately remain on their existing paths.
 struct EffectShaderPropertyBlock {
+    float falloff[4] = {1, 0, 1, 1};
+    std::uint32_t flags1 = 0, flags2 = 0;
     std::string sourceTexture;
     float uvOffset[2]{};
     float uvScale[2]{1.0f, 1.0f};
@@ -1946,12 +1954,13 @@ bool readBsEffectShaderProperty(
     }
     // Packed clamp/lighting bytes, four falloff floats, then base RGBA.
     if (userVersion2 <= 100u &&
-        (!cursor.skip(4u + 16u) || !cursor.read(out.baseColor) ||
+        (!cursor.skip(4u) || !cursor.read(out.falloff) || !cursor.read(out.baseColor) ||
          !cursor.read(out.baseAlpha) || !cursor.read(out.baseScale) || !cursor.skip(4u) ||
          !cursor.readSizedString<std::uint32_t>(out.paletteTexture))) {
         return false;
     }
     out.baseRed=out.baseColor[0];
+    out.flags1 = shaderFlags1; out.flags2 = shaderFlags2;
     out.paletteFlags = static_cast<std::uint8_t>((shaderFlags1 >> 4u) & 3u);
     out.effectLighting = (shaderFlags2 & (1u << 30u)) != 0u;
     out.vertexAlpha = (shaderFlags1 & 8u) != 0u;
@@ -4639,11 +4648,19 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             std::span<const std::uint8_t>(bytes.data()+blockStart[i],blockEnd[i]-blockStart[i])});
     std::vector<std::vector<MaterialAnimationTrack>> materialTracks(numBlocks);
     std::vector<std::uint32_t> unsupportedMaterialTracks(numBlocks);
+    const auto sequenceTracks = (header.userVersion2 == 83u || header.userVersion2 == 100u)
+        ? readNifEffectSequences(materialBlocks, header.strings)
+        : std::vector<std::vector<MaterialAnimationTrack>>(numBlocks);
+    std::vector<std::int32_t> effectParents(numBlocks, -1);
+    for (std::size_t i = 0; i < numBlocks; ++i)
+        for (auto child : nodeFields[i].children)
+            if (child >= 0 && std::size_t(child) < numBlocks) effectParents[child] = int(i);
     if (header.userVersion2 == 83u || header.userVersion2 == 100u) {
         for (std::size_t i=0;i<numBlocks;++i) {
             if (lightingShaderValid[i] || effectShaderProperties[i].valid)
                 materialTracks[i]=readNifMaterialAnimation(materialBlocks,int(i),sourceTexturePaths,
                     unsupportedMaterialTracks[i]);
+            materialTracks[i].insert(materialTracks[i].end(), sequenceTracks[i].begin(), sequenceTracks[i].end());
         }
     }
 
@@ -5147,6 +5164,14 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
             }
 
             shape.uvs = src.uvs;
+            // Visibility of every ancestor gates this shape independently.
+            // Keep the mesh resident so a later sequence can reveal it.
+            for (int ancestor = int(blockIndex), depth = 0;
+                 ancestor >= 0 && depth++ < int(numBlocks); ancestor = effectParents[ancestor]) {
+                for (const auto& track : sequenceTracks[ancestor])
+                    if (track.target == MaterialAnimatedValue::Visibility)
+                        shape.materialAnimations.push_back(track);
+            }
             if (shape.lightingMaterial.present && effectMaterial == nullptr && shape.materialAnimations.empty()) {
                 for (std::size_t i = 0; i + 1u < shape.uvs.size(); i += 2u) {
                     for (std::size_t axis = 0; axis < 2; ++axis)
@@ -5193,6 +5218,8 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 if (effectMaterial) {
                     auto& m=shape.lightingMaterial;
                     m.present=true; m.parametersValid=true; m.shaderType=0xffffffffu;
+                    m.flags1=effectMaterial->flags1; m.flags2=effectMaterial->flags2;
+                    std::copy_n(effectMaterial->falloff,4,m.effectFalloff);
                     std::copy_n(effectMaterial->uvOffset,2,m.uvOffset);
                     std::copy_n(effectMaterial->uvScale,2,m.uvScale);
                     m.alpha=effectMaterial->baseAlpha;
@@ -5559,10 +5586,10 @@ namespace {
 // the count and the complete bone pointer array by four bytes.
 //
 // BSDismemberSkinInstance appends numPartitions + a partition array AFTER all
-// of that, so the prefix above decodes identically and the dismemberment data
-// -- which body part each triangle belongs to, for gore and armour swapping --
-// is simply not read. That is why one reader serves both.
+// of that. The caller additionally reads Skyrim body-part slots for headgear
+// visibility; the shared prefix remains identical across games.
 struct SkinInstanceBlock {
+    std::uint32_t bipedSlots = 0u;
     std::int32_t dataRef = -1;
     std::int32_t partitionRef = -1;
     std::vector<std::int32_t> boneNodeRefs;
@@ -5785,6 +5812,7 @@ bool parseNifSkinnedMesh(
     std::vector<TextureSetBlock> textureSets(numBlocks);
     std::vector<bool> noLightingProperty(numBlocks, false);
     std::vector<std::int32_t> shaderTextureSetRefs(numBlocks, -1);
+    std::vector<NifLightingMaterial> skinMaterials(numBlocks);
     std::vector<bool> lightingShaderTwoSided(numBlocks, false);
     std::vector<bool> lightingShaderTreeAnim(numBlocks, false);
     std::vector<AlphaPropertyBlock> alphaProperties(numBlocks);
@@ -5849,6 +5877,15 @@ bool parseNifSkinnedMesh(
         } else if (typeName == "NiSkinInstance" || typeName == "BSDismemberSkinInstance") {
             SkinInstanceBlock instance;
             if (readSkinInstance(blockCursor, header.version, instance)) {
+                if (typeName == "BSDismemberSkinInstance" && header.userVersion2 >= 83u) {
+                    std::uint32_t count = 0;
+                    if (!blockCursor.read(count) || count > 512u) instance.valid = false;
+                    for (std::uint32_t partition = 0; instance.valid && partition < count; ++partition) {
+                        std::uint16_t flags = 0, body = 0;
+                        if (!blockCursor.read(flags) || !blockCursor.read(body)) { instance.valid = false; break; }
+                        if (body >= 30 && body <= 61) instance.bipedSlots |= 1u << (body - 30);
+                    }
+                }
                 skinInstances[i] = std::move(instance);
             }
         } else if (typeName == "NiSkinData") {
@@ -5867,7 +5904,7 @@ bool parseNifSkinnedMesh(
             bool treeAnim = false;
             bool vertexAlpha = false;
             if (readBsLightingShaderTextureSetRef(
-                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha)) {
+                    blockCursor, textureSetRef, twoSided, treeAnim, vertexAlpha, &skinMaterials[i])) {
                 shaderTextureSetRefs[i] = textureSetRef;
                 lightingShaderTwoSided[i] = twoSided;
                 lightingShaderTreeAnim[i] = treeAnim;
@@ -6013,6 +6050,7 @@ bool parseNifSkinnedMesh(
         }
 
         NifSkinnedShape shape;
+        shape.bipedSlots = instance.bipedSlots;
         const std::int32_t nameRef = nodeFields[blockIndex].nameRef;
         shape.name = nodeFields[blockIndex].name;
         if (shape.name.empty() && nameRef >= 0 &&
@@ -6082,6 +6120,10 @@ bool parseNifSkinnedMesh(
                 const TextureSetBlock& set = textureSets[static_cast<std::size_t>(textureSetRef)];
                 if (set.valid && !set.textures.empty() && !set.textures.front().empty()) {
                     shape.diffuseTexturePath = set.textures.front();
+                    if (set.textures.size() > 1) shape.normalTexturePath = set.textures[1];
+                    shape.lightingMaterial = skinMaterials[propertyIndex];
+                    shape.lightingMaterial.textures = set.textures;
+                    shape.modelSpaceNormals = (shape.lightingMaterial.flags1 & (1u << 12)) != 0;
                 }
             }
         };

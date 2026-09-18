@@ -1,3 +1,5 @@
+#include "import/fnv/mod_check.h"
+#include "bethesda/route_checkpoint.h"
 // Real-data harness for the Fallout: New Vegas readers.
 //
 // odai_fnv_import_tests is pinned to synthetic fixtures only (see CLAUDE.md),
@@ -40,6 +42,7 @@
 #include "bethesda/bethesda_physics_world.h"
 #include "import/imported_scene.h"
 #include "tools/asset_coverage.h"
+#include "tools/character_coverage.h"
 
 #include <algorithm>
 #include <array>
@@ -816,6 +819,23 @@ int probeSkinnedNif(const std::filesystem::path& dataPath, const std::string& vi
                     rawMax[a2] = std::max(rawMax[a2], shape.positions[v + static_cast<std::size_t>(a2)]);
                 }
             }
+            std::cout << "      biped slot mask: " << shape.bipedSlots << "\n";
+            std::cout << "      normal texture: " << shape.normalTexturePath << " modelSpace=" << shape.modelSpaceNormals << "\n";
+            if (shape.lightingMaterial.present) {
+                const auto& m = shape.lightingMaterial;
+                std::cout << "      lighting shader: type=" << m.shaderType
+                          << " emissive=(" << m.emissive[0] << ", " << m.emissive[1]
+                          << ", " << m.emissive[2] << ") multiplier="
+                          << m.emissiveMultiplier << "\n";
+            }
+            if (shape.modelSpaceNormals) {
+                const auto& m = shape.lightingMaterial;
+                std::cout << "      skin lighting: flags2=" << m.flags2 << " rolloff=" << m.softLightingRolloff
+                    << " gloss=" << m.glossiness << " specular=" << m.specularStrength << "\n";
+                for (std::size_t slot = 0; slot < m.textures.size(); ++slot)
+                    std::cout << "        texture[" << slot << "] " << m.textures[slot] << "\n";
+            }
+            std::cout << "      authored normal vertices: " << shape.normals.size() / 3u << "\n";
             std::cout << "      skin-space bounds (" << rawMin[0] << ".." << rawMax[0] << ", "
                       << rawMin[1] << ".." << rawMax[1] << ", " << rawMin[2] << ".." << rawMax[2]
                       << ")  skinTransform t(" << shape.skinTransform[3] << ", "
@@ -3417,6 +3437,18 @@ int probeActorsNear(
         }
         if (placement.initiallyDisabled) { std::cout << "  INITIALLY-DISABLED"; }
         std::cout << "\n";
+        if (resolved.base) {
+            std::cout << "        covered slots=" << resolved.coveredBipedSlots << "\n";
+            const auto race = scan.races.find(resolved.base->raceFormId);
+            if (race != scan.races.end()) {
+                const auto skin = scan.armors.find(race->second.defaultSkinFormId);
+                if (skin != scan.armors.end()) for (const auto id : skin->second.armatureFormIds) {
+                    const auto addon = scan.armorAddons.find(id);
+                    if (addon != scan.armorAddons.end()) std::cout << "        skin slots=" << addon->second.bipedFlags
+                        << " model=" << addon->second.maleModel << "\n";
+                }
+            }
+        }
         // The assembled part list, which is the whole answer for an NPC_ and
         // the only place a wrong slot (a hat where the head should be, an
         // outfit that never resolved) is visible before it reaches a screen.
@@ -5236,7 +5268,8 @@ int skyrimDialogueTrace(
     return 0;
 }
 
-int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scenarioId) {
+int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scenarioId,
+                  const std::filesystem::path& profilePath = {}, bool startOnly = false) {
     const odai::bethesda::ScenarioDefinition* scenario =
         odai::bethesda::findScenario(scenarioId);
     if (scenario == nullptr) {
@@ -5246,13 +5279,35 @@ int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scen
     }
     odai::importer::fnv::FalloutLoadOrder loadOrder;
     std::string error;
-    if (!loadOrder.open(dataPath, {scenario->basePlugin, "Update.esm"}, error)) {
+    std::optional<odai::importer::fnv::ResolvedContentProfile> profile;
+    if (!profilePath.empty()) {
+        profile.emplace();
+        odai::importer::fnv::ContentProfileResolveOptions options;
+        options.dataRootOverride = dataPath;
+        if (!odai::importer::fnv::resolveContentProfile(profilePath, options, *profile, error) ||
+            profile->hasErrors()) {
+            if (error.empty()) {
+                for (const auto& diagnostic : profile->diagnostics) {
+                    if (diagnostic.severity == odai::importer::fnv::ContentDiagnosticSeverity::Error) {
+                        if (!error.empty()) error += "; ";
+                        error += diagnostic.code + ": " + diagnostic.message;
+                    }
+                }
+            }
+            std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
+                {"release_gate_passed", false}, {"compatibility_errors", {error}}}).dump(2) << '\n';
+            return 1;
+        }
+    }
+    if (!(profile ? loadOrder.open(*profile, error)
+                  : loadOrder.open(dataPath, {scenario->basePlugin, "Update.esm"}, error))) {
         std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
             {"compatibility_errors", {error}}}).dump(2) << '\n';
         return 1;
     }
     odai::importer::fnv::FalloutAssetSource assets;
-    if (!assets.open(dataPath, odai::importer::fnv::kBsaContentMisc)) {
+    if (!(profile ? assets.open(*profile, odai::importer::fnv::kBsaContentMisc)
+                  : assets.open(dataPath, odai::importer::fnv::kBsaContentMisc))) {
         std::cout << nlohmann::json({{"ok", false}, {"scenario", scenarioId},
             {"compatibility_errors", {"could not index Skyrim script archives"}}}).dump(2) << '\n';
         return 1;
@@ -5297,6 +5352,19 @@ int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scen
         {"objective_10_displayed", mq102ObjectiveDisplayed},
         {"mq103_stage", mq103BeforeRoute == nullptr ? 0 : mq103BeforeRoute->stage},
         {"diagnostics", bootstrapDiagnostics}};
+    if (startOnly) {
+        const auto assessment = odai::bethesda::assessScenarioStart(session);
+        const bool ok = assessment["ok"].get<bool>() && bootstrapDiagnostics.empty();
+        std::cout << nlohmann::json({{"ok",ok}, {"contract",odai::bethesda::scenarioStartContract(scenarioId)},
+            {"assessment",assessment}, {"checkpoint",odai::bethesda::routeCheckpoint(session)},
+            {"content_fingerprint",loadOrder.fingerprint()},
+            {"profile",profile ? odai::bethesda::routeProfileMetadata(*profile) : nlohmann::json(nullptr)},
+            {"session_hash",session.deterministicHash()}, {"tick",session.clock().tick()},
+            {"diagnostics",bootstrapDiagnostics}, {"runtime_blockers",report.runtimeBlockers},
+            {"evidence_kind","headless bootstrap only; no player or streamed residency"},
+            {"release_gate_passed",false}}).dump(2) << '\n';
+        return ok ? 0 : 1;
+    }
     nlohmann::json goldenClawAliasCheck = {
         {"ok", false}, {"materialized_items", 0u}, {"transferred_items", 0u},
         {"ms13_stage", 0}, {"diagnostics", nlohmann::json::array()}};
@@ -5868,6 +5936,8 @@ int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scen
         "save/reload during retail dialogue and dungeon traversal"};
     std::cout << nlohmann::json({{"ok", fixtureAssertionsOk}, {"scenario", scenarioId},
         {"content_loaded", true},
+        {"content_fingerprint", profile ? profile->fingerprint : loadOrder.fingerprint()},
+        {"profile_configured", profile.has_value()},
         {"gate_kind", "fixture-assisted retail content/fragment assertions"},
         {"fixture_assisted", true},
         {"fixture_assertions_ok", fixtureAssertionsOk},
@@ -5895,6 +5965,7 @@ int scenarioCheck(const std::filesystem::path& dataPath, const std::string& scen
 
 void printUsage() {
     std::cout << "Usage:\n"
+              << "  odai_bethesda_probe --mod-check --profile <profile> [--json] [--export-profile <new.json>]\n"
               << "  odai_bethesda_probe --profilecheck <profile> [--data <Data>] [--mods-root <dir>]\n"
               << "  odai_bethesda_probe --why <profile> <virtualPath|formID> [--data <Data>]\n"
               << "  odai_bethesda_probe --conflicts <profile> [--data <Data>]\n"
@@ -5909,6 +5980,7 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --asset-coverage <report.json> [Plugin.esm ...]\n"
               << "  odai_bethesda_probe --asset-coverage <profile> <report.json> [--data <Data>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --tri <virtualPath|--all>\n"
+              << "  odai_bethesda_probe --character-coverage <profile> <report.json> [--data <Data>]\n"
               << "  odai_bethesda_probe --tri-profile <profile> <virtualPath|--all>\n"
               << "  odai_bethesda_probe <DataFilesPath> --nifs [limit]\n"
               << "  odai_bethesda_probe <DataFilesPath> --nif <virtualPath>\n"
@@ -5930,6 +6002,7 @@ void printUsage() {
               << "  odai_bethesda_probe <DataFilesPath> --animation-strict\n"
               << "  odai_bethesda_probe <DataFilesPath> --quest-trace <Plugin.esm> <QuestEditorID>\n"
               << "  odai_bethesda_probe <DataFilesPath> --skyrim-dialogue-trace <Plugin.esm> <QuestEditorID>\n"
+              << "  odai_bethesda_probe <DataFilesPath> --scenario-start-check <scenario> [--profile <path>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --scenario-check <scenario>\n"
               // Modes that existed but were never listed here.
               << "  odai_bethesda_probe <DataFilesPath> --find <substring> [limit]\n"
@@ -5994,6 +6067,7 @@ int animationCheck(const std::filesystem::path& dataPath, bool strict) {
                     {"event_id", rule.eventId}, {"to_state_id", rule.toStateId},
                     {"priority", rule.priority}, {"flags", rule.flags},
                     {"has_condition", rule.hasCondition}, {"condition_class", rule.conditionClass},
+                    {"condition_expression", rule.conditionExpression},
                     {"has_effect", rule.hasEffect}, {"effect_node", rule.effectNode},
                     {"runtime_consumed", false}});
             }
@@ -6005,6 +6079,25 @@ int animationCheck(const std::filesystem::path& dataPath, bool strict) {
             {"transition_effects", graph.transitionEffectCount},
             {"transition_rules", std::move(rules)}});
     }
+    std::string graphFingerprint, graphError;
+    const auto program = loadSkyrimBehaviorProgram(assets,
+        "meshes\\actors\\character\\behaviors\\0_master.hkx", graphFingerprint, graphError);
+    const bool runtimeReady = report.strictCompatible && program && program->executable();
+    nlohmann::json graphCoverage{{"decoded", program != nullptr},
+        {"runtime_executable", program && program->executable()}, {"error", graphError}};
+    if (program) {
+        graphCoverage["unsupported"] = program->unsupported;
+        graphCoverage["compiled_conditions"] = program->conditions.size();
+        graphCoverage["scalar_variable_defaults"] = program->graph.variableDefaults.size();
+        std::map<std::string, std::size_t> bindings;
+        for (const auto& node : program->graph.nodes)
+            for (const auto& binding : node.bindings) ++bindings[binding.memberPath];
+        graphCoverage["decoded_binding_members"] = std::move(bindings);
+    }
+    nlohmann::json clipPaths = nlohmann::json::array();
+    for (const auto& path : assets.virtualPaths())
+        if (path.starts_with("meshes\\actors\\character\\animations\\") && path.ends_with(".hkx"))
+            clipPaths.push_back(path);
     odai::bethesda::BethesdaPhysicsWorld physics;
     std::string joltError;
     bool joltCharacter = physics.initialize(joltError);
@@ -6013,18 +6106,19 @@ int animationCheck(const std::filesystem::path& dataPath, bool strict) {
         joltCharacter = physics.addCharacter(
             odai::bethesda::ObjectId::runtime(1u), config, joltError);
     }
-    std::cout << nlohmann::json({{"ok", inspected && (!strict || report.strictCompatible)},
+    std::cout << nlohmann::json({{"ok", inspected && (!strict || runtimeReady)},
         {"strict", strict}, {"coherent", report.coherent},
-        {"strict_ready", report.strictCompatible},
+        {"strict_ready", runtimeReady}, {"bundle_compatible", report.strictCompatible},
         {"generator", odai::anim::hkxGeneratorName(report.generator)},
         {"generator_provider", report.generatorProvider}, {"roots", std::move(roots)},
         {"behavior_graphs", std::move(behaviorGraphs)},
+        {"graph_coverage", std::move(graphCoverage)}, {"available_clips", std::move(clipPaths)},
         {"missing_assets", report.missingAssets},
         {"unsupported_classes", report.unsupportedClasses},
         {"jolt_character_constructed", joltCharacter}, {"jolt_error", joltError},
-        {"fallback", report.strictCompatible ? "none" : "per-actor procedural"},
+        {"fallback", program && program->executable() ? "none" : "per-actor clip catalog/procedural"},
         {"diagnostics", report.diagnostics}, {"error", error}}).dump(2) << '\n';
-    return inspected && (!strict || report.strictCompatible) && joltCharacter ? 0 : 1;
+    return inspected && (!strict || runtimeReady) && joltCharacter ? 0 : 1;
 }
 
 }  // namespace
@@ -7542,6 +7636,8 @@ int conflictsCommand(
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--mod-check")
+        return odai::importer::fnv::runModCheckCommand(argc - 2, argv + 2, std::cout, std::cerr);
     if (argc >= 3 && std::strcmp(argv[1], "--profilecheck") == 0) {
         return profileCheckCommand(argv[2], argc, argv, 3);
     }
@@ -7551,7 +7647,7 @@ int main(int argc, char** argv) {
     if (argc >= 3 && std::strcmp(argv[1], "--conflicts") == 0) {
         return conflictsCommand(argv[2], argc, argv, 3);
     }
-    if (argc >= 4 && std::strcmp(argv[1], "--asset-coverage") == 0) {
+    if (argc >= 4 && (std::strcmp(argv[1], "--asset-coverage") == 0 || std::strcmp(argv[1], "--character-coverage") == 0)) {
         using namespace odai::importer::fnv;
         ResolvedContentProfile profile;
         FalloutLoadOrder order;
@@ -7559,7 +7655,9 @@ int main(int argc, char** argv) {
         std::string error;
         if (!resolveProbeContentProfile(argv[2],argc,argv,4,profile,error) ||
             !order.open(profile,error) || !assets.open(profile,0xffffffffu) ||
-            !writeAssetCoverage(assets,order,argv[3],error)) {
+            !(std::strcmp(argv[1], "--character-coverage") == 0
+                ? writeCharacterCoverage(assets,order,argv[3],error)
+                : writeAssetCoverage(assets,order,argv[3],error))) {
             std::cerr << "coverage failed: " << error << '\n'; return 1;
         }
         std::cout << "coverage written: " << argv[3] << '\n'; return 0;
@@ -7643,8 +7741,13 @@ int main(int argc, char** argv) {
     if (mode == "--skyrim-dialogue-trace" && argc >= 5) {
         return skyrimDialogueTrace(dataPath, argv[3], argv[4]);
     }
-    if (mode == "--scenario-check" && argc >= 4) {
-        return scenarioCheck(dataPath, argv[3]);
+    if ((mode == "--scenario-check" || mode == "--scenario-start-check") && argc >= 4) {
+        const bool startOnly = mode == "--scenario-start-check";
+        if (argc == 4) return scenarioCheck(dataPath, argv[3], {}, startOnly);
+        if (argc == 6 && std::string_view(argv[4]) == "--profile")
+            return scenarioCheck(dataPath, argv[3], argv[5], startOnly);
+        std::cerr << "usage: odai_bethesda_probe <Data> --scenario-check <scenario> [--profile <path>]\n";
+        return 1;
     }
     if (mode == "--nifs") {
         const std::size_t limit = argc >= 4 ? static_cast<std::size_t>(std::stoull(argv[3])) : 500u;

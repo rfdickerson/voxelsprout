@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bethesda/runtime_ids.h"
+#include "bethesda/character_movement.h"
 #include "math/math.h"
 
 #include <cstdint>
@@ -15,6 +16,7 @@ namespace odai::bethesda {
 inline constexpr float kBethesdaUnitsToJoltMetres = 0.0142875f;
 
 struct PhysicsCharacterConfig {
+    CharacterMovementSettings movement;
     // Engine/world space: Y-up, Bethesda units. Position is the authored feet
     // origin; the Jolt capsule-centre offset is private to the adapter.
     odai::math::Vector3 position{};
@@ -25,12 +27,17 @@ struct PhysicsCharacterConfig {
 };
 
 struct PhysicsCharacterInput {
+    bool jumpRequested = false;
     odai::math::Vector3 desiredVelocity{};      // Bethesda units / second
     odai::math::Vector3 rootMotion{};           // Bethesda units this tick
     bool animationDriven = false;
 };
 
 struct PhysicsCharacterStep {
+    JumpPhase jumpPhase = JumpPhase::Grounded;
+    LandingSeverity landingSeverity = LandingSeverity::Light;
+    float landingImpactMetres = 0;
+    bool leftLedge = false;
     odai::math::Vector3 position{};
     odai::math::Quaternion rotation{};
     odai::math::Vector3 velocity{};
@@ -51,6 +58,7 @@ struct PhysicsCharacterSnapshot {
     odai::math::Vector3 groundNormal{0.0f, 1.0f, 0.0f};
     bool grounded = false;
     std::optional<ObjectId> supportingObject;
+    CharacterMovementState movement;
     friend bool operator==(const PhysicsCharacterSnapshot& left,
                            const PhysicsCharacterSnapshot& right) {
         return left.object == right.object &&
@@ -68,7 +76,7 @@ struct PhysicsCharacterSnapshot {
             left.groundNormal.y == right.groundNormal.y &&
             left.groundNormal.z == right.groundNormal.z &&
             left.grounded == right.grounded &&
-            left.supportingObject == right.supportingObject;
+            left.supportingObject == right.supportingObject && left.movement == right.movement;
     }
 };
 
@@ -105,6 +113,31 @@ struct PhysicsDynamicBodySnapshot {
     bool active = false;
     friend bool operator==(const PhysicsDynamicBodySnapshot&,
                            const PhysicsDynamicBodySnapshot&) = default;
+};
+
+struct PhysicsRagdollJointConfig {
+    std::string role;
+    int parent = -1;
+    odai::math::Vector3 position{};
+    odai::math::Quaternion rotation{};
+    float radius = 8.0f;
+    float halfHeight = 12.0f;
+    float massKilograms = 4.0f;
+};
+
+struct PhysicsRagdollJointPose {
+    std::string role;
+    odai::math::Vector3 position{};
+    odai::math::Quaternion rotation{};
+    odai::math::Vector3 linearVelocity{};
+};
+
+struct PhysicsRagdollSnapshot {
+    ObjectId object;
+    bool active = false;
+    std::vector<PhysicsRagdollJointPose> joints;
+    friend bool operator==(const PhysicsRagdollSnapshot&,
+                           const PhysicsRagdollSnapshot&) = default;
 };
 
 struct PhysicsHingeConfig {
@@ -188,6 +221,22 @@ public:
     [[nodiscard]] std::vector<PhysicsDynamicBodySnapshot> dynamicBodySnapshots() const;
     bool restoreDynamicBody(
         const PhysicsDynamicBodySnapshot& snapshot, std::string& outError);
+    // Builds an articulated Jolt body from canonical humanoid roles, transfers
+    // actor velocity, and suspends CharacterVirtual capsule authority.
+    bool activateRagdoll(ObjectId object,
+        std::span<const PhysicsRagdollJointConfig> joints,
+        const odai::math::Vector3& linearVelocity, std::string& outError);
+    bool removeRagdoll(ObjectId object);
+    [[nodiscard]] bool hasActiveRagdoll(ObjectId object) const;
+    [[nodiscard]] std::optional<PhysicsRagdollSnapshot> ragdollSnapshot(
+        ObjectId object) const;
+    [[nodiscard]] std::vector<PhysicsRagdollSnapshot> ragdollSnapshots() const;
+    bool restoreRagdoll(const PhysicsRagdollSnapshot& snapshot,
+        std::string& outError);
+    // Restores capsule authority only when a static support surface is found
+    // within the requested distance. outPlacement is the validated feet point.
+    bool recoverRagdoll(ObjectId object, float maximumDropBethesdaUnits,
+        odai::math::Vector3& outPlacement, std::string& outError);
     // Steps every registered character in stable ObjectId order and then the
     // Jolt world. Results are the only transforms animation/gameplay may apply.
     std::vector<std::pair<ObjectId, PhysicsCharacterStep>> step(float fixedDeltaSeconds);
@@ -197,6 +246,8 @@ public:
     bool restore(std::span<const PhysicsCharacterSnapshot> snapshots, std::string& outError);
     [[nodiscard]] std::optional<PhysicsCastHit> castDown(
         const odai::math::Vector3& origin, float distanceBethesdaUnits) const;
+    [[nodiscard]] bool isCharacterPlacementClear(const PhysicsCharacterConfig& config,
+        float penetrationToleranceBethesdaUnits = 1.0f) const;
     // Sweeps a sphere through the authored/dynamic rigid-body world. This is
     // the camera-boom primitive: CharacterVirtual is not a rigid body, but an
     // optional stable object id is still accepted so future player proxy

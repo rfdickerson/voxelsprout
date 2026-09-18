@@ -117,6 +117,11 @@ constexpr uint32_t kInteriorPointShadowLightCount = 35u;
 constexpr uint32_t kInteriorPointShadowFaceCount = 6u;
 constexpr uint32_t kInteriorPointShadowFaceSize = 256u;
 constexpr uint32_t kInteriorPointShadowCubesPerRow = 5u;
+// A lone light can use the spare atlas area without increasing allocation.
+constexpr uint32_t interiorPointShadowFaceSize(uint32_t lightCount) {
+    return lightCount == 1u ? 1024u : kInteriorPointShadowFaceSize;
+}
+static_assert(3u * interiorPointShadowFaceSize(1u) <= kShadowAtlasSize);
 constexpr uint32_t kInteriorPointShadowMatrixCount =
     kInteriorPointShadowLightCount * kInteriorPointShadowFaceCount;
 static_assert(
@@ -1519,7 +1524,7 @@ std::optional<std::vector<std::uint8_t>> readBinaryFile(const char* filePath) {
         return std::nullopt;
     }
 
-    const std::filesystem::path path(filePath);
+    const auto path = ::odai::core::resourcePath(filePath);
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         return std::nullopt;

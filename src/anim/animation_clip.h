@@ -33,12 +33,16 @@ struct BoneTrack {
 struct AnimationAnnotation {
     float time = 0.0f;
     std::string name;
+    bool firstCycleOnly = false;
 };
 
 struct AnimationClip {
     std::string name;
     float duration = 0.0f;
     bool loop = true;
+    bool additive = false;
+    // Keep authored keys for physics extraction while sampling an in-place pose.
+    int extractedMotionBone = -1;
     std::vector<BoneTrack> tracks;
     // Authored timeline markers (footsteps, sounds, effects). BehaviorGraph
     // consumes crossings at the fixed simulation tick, never render time.

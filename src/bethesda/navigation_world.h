@@ -113,7 +113,8 @@ public:
     [[nodiscard]] bool buildPath(
         const odai::math::Vector3& start,
         const odai::math::Vector3& goal,
-        std::vector<ActorNavigationStep>& outWaypoints) const;
+        std::vector<ActorNavigationStep>& outWaypoints,
+        bool allowPartial = false) const;
 
     [[nodiscard]] std::size_t meshCount() const;
     [[nodiscard]] std::size_t triangleCount() const;

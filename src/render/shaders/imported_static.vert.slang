@@ -53,11 +53,17 @@ struct VertexOutput
     nointerpolation uint lightingMaterial : TEXCOORD10;
     nointerpolation uint4 terrainSurface : TEXCOORD11;
     nointerpolation uint terrainSurface4 : TEXCOORD12;
+    float3 modelBasisX : TEXCOORD13;
+    float3 modelBasisY : TEXCOORD14;
+    float3 modelBasisZ : TEXCOORD15;
 };
 
 VertexOutput main(VertexInput input)
 {
     VertexOutput output;
+    output.modelBasisX = decodeImportedVertexNormal(float2(int(input.inTerrainSurface.x << 16) >> 16, int(input.inTerrainSurface.y << 16) >> 16) / 32767.0);
+    output.modelBasisY = decodeImportedVertexNormal(float2(int(input.inTerrainSurface.z << 16) >> 16, int(input.inTerrainSurface.w << 16) >> 16) / 32767.0);
+    output.modelBasisZ = decodeImportedVertexNormal(float2(int(input.inTerrainSurface4.x << 16) >> 16, int(input.inTerrainSurface4.y << 16) >> 16) / 32767.0);
     float3 worldPosition = fadeImportedGrass(input.inPosition, input.inFlags,
         input.inLayerWeights, camera.shadowVoxelGridSize.xyz);
     float3 worldNormal = decodeImportedVertexNormal(input.inNormalOct);
@@ -115,11 +121,20 @@ VertexOutput main(VertexInput input)
             output.outUv=input.inUv*material.animationUv.zw+material.animationUv.xy;
             output.outColor*=material.animationColor;
             if(material.sourceFlags.z==0xffffffffu)
-                output.outLayerWeights.w=material.animationPalette.x;
+                output.outLayerWeights.w=material.animationPalette.x *
+                    ((material.sourceFlags.y & 32u) != 0u ? decodeImportedVertexColor(input.inColorSrgb).r : 1.0);
             // Animated effect tint is authored even when vertex RGB was absent.
             output.outFlags |= 8u;
             if(material.animationState.x!=0xffffffffu) output.outTextureIndex=material.animationState.x;
         }
+    }
+    if ((input.inFlags & ((1u << 14u) | 4u)) == (1u << 14u)) {
+        // Actor surface slots carry material values after their basis has been decoded.
+        output.terrainSurface = uint4(input.inTerrainNormals.x | (input.inTerrainNormals.y << 16),
+            input.inTerrainNormals.z | (input.inTerrainNormals.w << 16),
+            input.inTerrainNormal4.x | (input.inTerrainNormal4.y << 16), 0u);
+        output.terrainNormals = uint4(0xffffffffu);
+        output.terrainNormal4 = 0xffffffffu;
     }
     float3 rasterPosition = worldPosition;
     // A camera mirrored across y=h is equivalent to reflecting every world
@@ -131,5 +146,8 @@ VertexOutput main(VertexInput input)
         rasterPosition.y = (2.0 * chunkPc.materialParams.w) - rasterPosition.y;
     }
     output.position = mul(camera.mvp, float4(rasterPosition, 1.0));
+    if (input.inLightingMaterial != 0xffffffffu &&
+        importedMaterials[input.inLightingMaterial].animationState.z != 0u)
+        output.position = float4(0, 0, -1, 1);
     return output;
 }

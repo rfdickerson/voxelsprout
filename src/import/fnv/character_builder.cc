@@ -1,4 +1,5 @@
 #include "import/fnv/character_builder.h"
+#include <map>
 
 #include <cctype>
 #include <algorithm>
@@ -7,6 +8,28 @@
 #include <unordered_map>
 
 namespace odai::importer::fnv {
+
+bool canonicalizeSkyrimCharacter(FalloutCharacter& character, std::span<anim::AnimationClip> clips,
+    std::string& error) {
+    auto mapping = std::make_shared<anim::HumanoidRigMapping>();
+    if (!anim::canonicalizeHumanoidRig(character.skeleton, *mapping, error)) return false;
+    for (const auto& vertex : character.vertices) for (int i = 0; i < 4; ++i)
+        if (vertex.boneWeights[i] > 0 && vertex.boneIndices[i] >= mapping->sourceToCanonical.size()) {
+            error = "skin influence is outside source humanoid rig"; return false;
+        }
+    if (!anim::remapHumanoidClips(clips, *mapping, error)) return false;
+    auto inverse = std::vector<odai::math::Matrix4>(mapping->skeleton.bones.size(), odai::math::Matrix4::identity());
+    for (std::size_t i = 0; i < character.inverseBindMatrices.size() && i < mapping->sourceToCanonical.size(); ++i)
+        inverse[mapping->sourceToCanonical[i]] = character.inverseBindMatrices[i];
+    for (auto& vertex : character.vertices) for (int i = 0; i < 4; ++i)
+        vertex.boneIndices[i] = vertex.boneWeights[i] > 0
+            ? static_cast<std::uint16_t>(mapping->sourceToCanonical[vertex.boneIndices[i]]) : 0;
+    character.skeleton = mapping->skeleton;
+    character.inverseBindMatrices = std::move(inverse);
+    character.humanoidRig = std::move(mapping);
+    return true;
+}
+
 
 namespace {
 
@@ -439,6 +462,9 @@ bool appendFalloutCharacterMesh(
         FalloutCharacterPart part;
         part.name = shape.name;
         part.diffuseTexturePath = shape.diffuseTexturePath;
+        part.normalTexturePath = shape.normalTexturePath;
+        part.modelSpaceNormals = shape.modelSpaceNormals;
+        part.lightingMaterial = shape.lightingMaterial;
         part.alphaTest = shape.alphaTest;
         part.alphaThreshold = shape.alphaThreshold;
         part.alphaBlend = shape.alphaBlend;
@@ -446,6 +472,32 @@ bool appendFalloutCharacterMesh(
         part.unlit = shape.unlit;
         part.firstIndex = static_cast<std::uint32_t>(character.indices.size());
         part.indexCount = 0u;
+
+        // Skyrim skin shapes can omit vertex normals (their authored skin
+        // shading uses model-space normal textures). Until that material path
+        // is available, use the actual surface rather than an arbitrary up vector.
+        std::vector<float> surfaceNormals = shape.normals;
+        if (surfaceNormals.size() != shape.positions.size()) {
+            std::vector<Vector3> sums(vertexCount);
+            for (std::size_t triangle = 0; triangle + 2 < shape.triangleIndices.size(); triangle += 3) {
+                const auto a = shape.triangleIndices[triangle];
+                const auto b = shape.triangleIndices[triangle + 1];
+                const auto c = shape.triangleIndices[triangle + 2];
+                if (a >= vertexCount || b >= vertexCount || c >= vertexCount) continue;
+                const auto point = [&](std::size_t v) { return Vector3{shape.positions[v * 3],
+                    shape.positions[v * 3 + 1], shape.positions[v * 3 + 2]}; };
+                const auto normal = cross(point(b) - point(a), point(c) - point(a));
+                if (!std::isfinite(normal.x) || !std::isfinite(normal.y) || !std::isfinite(normal.z)) continue;
+                for (const auto v : {a, b, c}) sums[v] = sums[v] + normal;
+            }
+            surfaceNormals.resize(shape.positions.size());
+            for (std::size_t v = 0; v < vertexCount; ++v) {
+                const auto normal = lengthSquared(sums[v]) > 1e-12f ? normalize(sums[v]) : Vector3{0, 0, 1};
+                surfaceNormals[v * 3] = normal.x;
+                surfaceNormals[v * 3 + 1] = normal.y;
+                surfaceNormals[v * 3 + 2] = normal.z;
+            }
+        }
 
         character.vertices.reserve(character.vertices.size() + vertexCount);
         std::vector<bool> vertexHasUnresolvedInfluence(vertexCount, false);
@@ -482,10 +534,7 @@ bool appendFalloutCharacterMesh(
             vertex.position[0] = position.x;
             vertex.position[1] = position.y;
             vertex.position[2] = position.z;
-            if ((v * 3u) + 2u < shape.normals.size()) {
-                Vector3 normal = changePointBasis(
-                    shape.normals[v * 3u], shape.normals[(v * 3u) + 1u],
-                    shape.normals[(v * 3u) + 2u]);
+            const auto bindDirection = [&](Vector3 normal) {
                 if (moveGeometry) {
                     // A direction, so translation must not apply.
                     normal = normalize(transformDirection(geometryToCharacter, normal));
@@ -510,6 +559,18 @@ bool appendFalloutCharacterMesh(
                         normal = normalize(baked);
                     }
                 }
+                return normal;
+            };
+            for (int axis = 0; axis < 3; ++axis) {
+                const auto basis = bindDirection(changePointBasis(axis == 0 ? 1.f : 0.f,
+                    axis == 1 ? 1.f : 0.f, axis == 2 ? 1.f : 0.f));
+                vertex.modelNormalBasis[axis * 3] = basis.x;
+                vertex.modelNormalBasis[axis * 3 + 1] = basis.y;
+                vertex.modelNormalBasis[axis * 3 + 2] = basis.z;
+            }
+            if ((v * 3u) + 2u < surfaceNormals.size()) {
+                const Vector3 normal = bindDirection(changePointBasis(
+                    surfaceNormals[v * 3u], surfaceNormals[v * 3u + 1u], surfaceNormals[v * 3u + 2u]));
                 vertex.normal[0] = normal.x;
                 vertex.normal[1] = normal.y;
                 vertex.normal[2] = normal.z;
@@ -548,6 +609,10 @@ bool appendFalloutCharacterMesh(
                 vertex.boneIndices[k] = static_cast<std::uint16_t>(resolved);
                 vertex.boneWeights[k] = weight;
             }
+            float influenceTotal = 0.f;
+            for (float weight : vertex.boneWeights) influenceTotal += weight;
+            if (influenceTotal > 0.f)
+                for (float& weight : vertex.boneWeights) weight /= influenceTotal;
             character.vertices.push_back(vertex);
         }
 
@@ -576,6 +641,68 @@ bool appendFalloutCharacterMesh(
     }
 
     return true;
+}
+
+bool interpolateSkinnedWeight(const NifSkinnedModel& low, NifSkinnedModel& high,
+    float weight, std::string& error) {
+    if (!std::isfinite(weight) || weight < 0 || weight > 1 || low.shapes.size() != high.shapes.size()) {
+        error = "incompatible weight morph shape count or weight"; return false;
+    }
+    for (std::size_t i = 0; i < high.shapes.size(); ++i) {
+        const auto& a = low.shapes[i]; const auto& b = high.shapes[i];
+        if (a.positions.size() != b.positions.size() || a.triangleIndices != b.triangleIndices ||
+            a.boneNames != b.boneNames || a.boneIndices.size() != b.boneIndices.size() ||
+            a.boneWeights.size() != b.boneWeights.size() || a.boneWeights.size() != a.boneIndices.size() ||
+            a.boneWeights.size() % kNifMaxBoneInfluences != 0 ||
+            a.inverseBindMatrices != b.inverseBindMatrices ||
+            !std::equal(std::begin(a.skinTransform), std::end(a.skinTransform), std::begin(b.skinTransform))) {
+            error = "incompatible weight morph topology or binding: " + b.name +
+                " positions=" + std::to_string(a.positions.size() == b.positions.size()) +
+                " triangles=" + std::to_string(a.triangleIndices == b.triangleIndices) +
+                " bones=" + std::to_string(a.boneNames == b.boneNames) +
+                " indices=" + std::to_string(a.boneIndices == b.boneIndices) +
+                " bind=" + std::to_string(a.inverseBindMatrices == b.inverseBindMatrices);
+            return false;
+        }
+        for (std::size_t influence = 0; influence < a.boneWeights.size(); ++influence) {
+            if (!std::isfinite(a.boneWeights[influence]) || !std::isfinite(b.boneWeights[influence]) ||
+                a.boneWeights[influence] < 0 || b.boneWeights[influence] < 0 ||
+                (a.boneWeights[influence] > 0 && a.boneIndices[influence] >= a.boneNames.size()) ||
+                (b.boneWeights[influence] > 0 && b.boneIndices[influence] >= b.boneNames.size())) {
+                error = "invalid weight morph influence"; return false;
+            }
+        }
+        for (std::size_t v = 0; v < a.positions.size(); ++v)
+            if (!std::isfinite(a.positions[v]) || !std::isfinite(b.positions[v])) {
+                error = "non-finite weight morph vertex"; return false;
+            }
+    }
+    for (std::size_t i = 0; i < high.shapes.size(); ++i) {
+        const auto& a = low.shapes[i]; auto& b = high.shapes[i];
+        for (std::size_t v = 0; v < b.positions.size(); ++v)
+            b.positions[v] = a.positions[v] + (b.positions[v] - a.positions[v]) * weight;
+        for (std::size_t v = 0; v < b.boneWeights.size(); v += kNifMaxBoneInfluences) {
+            std::map<std::uint16_t, float> influences;
+            for (std::size_t k = 0; k < kNifMaxBoneInfluences; ++k) {
+                influences[a.boneIndices[v + k]] += a.boneWeights[v + k] * (1.f - weight);
+                influences[b.boneIndices[v + k]] += b.boneWeights[v + k] * weight;
+            }
+            std::vector<std::pair<std::uint16_t, float>> sorted(influences.begin(), influences.end());
+            std::stable_sort(sorted.begin(), sorted.end(), [](const auto& l, const auto& r) { return l.second > r.second; });
+            float sum = 0;
+            for (std::size_t k = 0; k < kNifMaxBoneInfluences; ++k) {
+                b.boneIndices[v + k] = k < sorted.size() ? sorted[k].first : 0;
+                b.boneWeights[v + k] = k < sorted.size() ? sorted[k].second : 0.f;
+                sum += b.boneWeights[v + k];
+            }
+            if (sum > 0) for (std::size_t k = 0; k < kNifMaxBoneInfluences; ++k) b.boneWeights[v + k] /= sum;
+        }
+        if (a.normals.size() == b.normals.size())
+            for (std::size_t v = 0; v < b.normals.size(); ++v)
+                b.normals[v] = a.normals[v] + (b.normals[v] - a.normals[v]) * weight;
+        else b.normals.clear();
+    }
+    error.clear(); return true;
 }
 
 bool appendFalloutCharacterRigidMesh(
@@ -630,6 +757,7 @@ bool appendFalloutCharacterRigidMesh(
         FalloutCharacterPart part;
         part.name = shape.name;
         part.diffuseTexturePath = shape.diffuseTexturePath;
+        part.normalTexturePath = shape.normalTexturePath;
         part.alphaTest = shape.alphaTest;
         part.alphaThreshold = shape.alphaThreshold;
         part.alphaBlend = shape.alphaBlend;

@@ -1,6 +1,7 @@
 #include "games/newvegas/bethesda_actors.h"
 #include "bethesda/bethesda_session.h"
 #include "anim/hkx_packfile.h"
+#include "import/fnv/skyrim_animation_assets.h"
 
 #include <algorithm>
 #include <cassert>
@@ -277,6 +278,47 @@ int main() {
     floor.triangles.push_back(triangle);
     ActorNavigationWorld navigation;
     navigation.addCell({0, 0}, {floor});
+    auto followFloor = floor;
+    for (auto& coordinate : followFloor.vertices) coordinate *= 100.f;
+    ActorNavigationWorld followNavigation;
+    followNavigation.addCell({0, 0}, {followFloor});
+    auto follower = walkingActor(true);
+    follower.followsPlayer = true;
+    follower.renderVisible = false; // followers must move behind the camera
+    follower.projectedToNavigation = true;
+    updateActorFollowTarget(follower, &followNavigation, {800.f, 0.f, -20.f}, true, 1.f / 60.f);
+    assert(follower.scriptedMoveActive && follower.wanders && !follower.wanderPath.empty());
+    assert(follower.followSpeedMultiplier == 2.5f);
+    updateActorFollowTarget(follower, &followNavigation, {590.f, 0.f, -20.f}, true, 1.f / 60.f);
+    assert(follower.followSpeedMultiplier == 2.5f);
+    updateActorFollowTarget(follower, &followNavigation, {440.f, 0.f, -20.f}, true, 1.f / 60.f);
+    assert(follower.followSpeedMultiplier == 1.f);
+    updateActorFollowTarget(follower, &followNavigation, {610.f, 0.f, -20.f}, true, 1.f / 60.f);
+    assert(follower.followSpeedMultiplier == 1.f);
+
+    std::vector<SkinnedActor> followers{follower};
+    updateActorWandering(followers, 1.f / 60.f, &followNavigation, noGround, noWalls, -1);
+    followers[0].wanderPath = {
+        {ActorNavigationStepKind::Walk, {0.f, 0.f, 0.f}, {}, 0},
+        {ActorNavigationStepKind::Walk, {800.f, 0.f, -20.f}, {}, 0}};
+    followers[0].wanderPathIndex = 1;
+    followers[0].wanderTarget[0] = followers[0].wanderTarget[1] = followers[0].wanderTarget[2] = 0.f;
+    updateActorWandering(followers, 1.f / 60.f, &followNavigation, noGround, noWalls, -1);
+    assert(followers[0].wanderPathIndex == 2);
+    assert(followers[0].walking);
+    assert(odai::math::length(followers[0].runtimeRequestedVelocity) > 0.f);
+    updateActorFollowTarget(follower, &followNavigation, {100.f, 0.f, 0.f}, true, .5f);
+    assert(!follower.wanders && !follower.scriptedMoveActive && follower.wanderPath.empty());
+    updateActorFollowTarget(follower, &followNavigation, {200.f, 0.f, 0.f}, true, .5f);
+    assert(!follower.wanders); // stopping-distance hysteresis
+    updateActorFollowTarget(follower, &followNavigation, {300.f, 0.f, -20.f}, true, .5f);
+    assert(follower.wanders && follower.followSpeedMultiplier == 1.f);
+    updateActorFollowTarget(follower, nullptr, {800.f, 0.f, 0.f}, true, .5f);
+    assert(!follower.wanders && follower.wanderPath.empty());
+    follower.runtimeDead = true;
+    updateActorFollowTarget(follower, &followNavigation, {800.f, 0.f, -20.f}, true, .5f);
+    assert(!follower.wanders);
+
     std::vector<SkinnedActor> doorActors{walkingActor(true)};
     doorActors[0].projectedToNavigation = true;
     doorActors[0].wanderTarget[0] = 0.0f;
@@ -328,6 +370,28 @@ int main() {
         assert(avatar.authoredLocomotionClips.size() == 7u);
         odai::importer::fnv::FalloutAssetSource retailAssets;
         assert(retailAssets.open(skyrimData));
+        std::string graphFingerprint, graphError;
+        auto graphProgram = odai::importer::fnv::loadSkyrimBehaviorProgram(retailAssets,
+            "meshes\\actors\\character\\behaviors\\0_master.hkx", graphFingerprint, graphError);
+        assert(graphProgram && !graphProgram->graph.eventNames.empty());
+        for (const bool female : {false, true}) {
+            auto view = odai::importer::fnv::loadSkyrimNpcAnimationView(retailAssets,
+                avatar.character.skeleton, avatar.character.inverseBindMatrices, female,
+                avatar.idleClip, avatar.walkClip, graphProgram, graphFingerprint);
+            std::cerr << "retail NPC " << (female ? "female" : "male") << ": " << view->clips.size()
+                      << " clips, graph executable=" << (view->behavior && view->behavior->executable()) << "\n";
+            assert(view->stateClips.contains("run_forward"));
+            assert(view->stateClips.contains("walk_left"));
+            assert(view->stateClips.contains("sneak"));
+            assert(view->stateClips.contains("swim"));
+            assert(view->stateClips.contains("attack_1hm"));
+            odai::anim::BehaviorGraphInstance runtime;
+            assert(runtime.bind(*view, graphError));
+            odai::anim::AnimationInputState input;
+            input.attacking = true; input.weaponStyle = "1hm";
+            const auto attackPose = runtime.step(input, 1.0f / 60.0f);
+            assert(attackPose.activeState == "attack_1hm" && attackPose.actionActive);
+        }
         std::vector<std::uint8_t> retailHkx;
         std::string decodeError;
         std::vector<std::uint8_t> retailMasterGraph;

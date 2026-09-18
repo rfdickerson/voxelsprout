@@ -36,6 +36,9 @@ struct ControlPoint
     nointerpolation uint lightingMaterial : TEXCOORD10;
     nointerpolation uint4 terrainSurface : TEXCOORD11;
     nointerpolation uint terrainSurface4 : TEXCOORD12;
+    float3 modelBasisX : TEXCOORD13;
+    float3 modelBasisY : TEXCOORD14;
+    float3 modelBasisZ : TEXCOORD15;
 };
 
 struct PatchConstants
@@ -64,6 +67,9 @@ struct DomainOutput
     nointerpolation uint lightingMaterial : TEXCOORD10;
     nointerpolation uint4 terrainSurface : TEXCOORD11;
     nointerpolation uint terrainSurface4 : TEXCOORD12;
+    float3 modelBasisX : TEXCOORD13;
+    float3 modelBasisY : TEXCOORD14;
+    float3 modelBasisZ : TEXCOORD15;
 };
 
 static const uint kDistantLodTessellation = (1u << 10);
@@ -96,6 +102,9 @@ DomainOutput main(
     const OutputPatch<ControlPoint, 3> patch)
 {
     DomainOutput output;
+    output.modelBasisX = float3(1,0,0);
+    output.modelBasisY = float3(0,1,0);
+    output.modelBasisZ = float3(0,0,1);
 
     const float3 flatPosition =
         (patch[0].worldPosition * bary.x) +

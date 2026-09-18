@@ -236,7 +236,9 @@ std::string toLowerAscii(std::string value) {
 // 109: preserve emitter initial color and optional particle modifier defaults.
 // 110: never shade scene-refraction normal maps as visible albedo.
 // 111: limit neutral refraction fallback to alpha-blended distortion surfaces.
-constexpr int kCellBuildVersion = 111;
+// 112: authored LAND boundary weights and local overflow layer stacks.
+// 113: Skyrim compound REFR rotations match NiMatrix3::SetEulerAnglesXYZ.
+constexpr int kCellBuildVersion = 114;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.
@@ -755,7 +757,7 @@ std::vector<std::uint32_t> CellStreamer::residentLocationFormIds() const {
 bool CellStreamer::referencePositionEngineSpace(
     std::uint32_t resolvedReferenceFormId,
     float outPosition[3],
-    std::string& outError) const {
+    std::string& outError, bool teleportDestination, float* outYawDegrees) const {
     const auto owner = m_cellIndex.cellIndexByReferenceFormId.find(resolvedReferenceFormId);
     if (owner == m_cellIndex.cellIndexByReferenceFormId.end() ||
         owner->second >= m_cellIndex.cells.size()) {
@@ -784,7 +786,13 @@ bool CellStreamer::referencePositionEngineSpace(
         outError = "reference is indexed but absent after winning-record merge";
         return false;
     }
-    falloutToEngine(found->position, outPosition);
+    if (teleportDestination && (!found->hasTeleport || found->teleportTargetRefFormId == 0u)) {
+        outError = "departure reference has no authored teleport destination";
+        return false;
+    }
+    falloutToEngine(teleportDestination ? found->teleportPosition : found->position, outPosition);
+    if (outYawDegrees) *outYawDegrees = -(teleportDestination
+        ? found->teleportRotationRadians[2] : found->rotationRadians[2]) * (180.0f / 3.14159265358979323846f);
     outError.clear();
     return true;
 }

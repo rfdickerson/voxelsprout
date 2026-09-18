@@ -29,9 +29,12 @@ struct ScenarioDefinition {
     std::string startMarker;
     std::vector<ScenarioQuestRecord> questRecords;
     std::vector<ScenarioQuestSeed> prerequisiteQuests;
+    std::uint32_t startDoorFormId = 0u;
+    std::uint32_t companionReferenceFormId = 0u;
 };
 
 [[nodiscard]] const ScenarioDefinition& skyrimBleakFallsScenario();
+[[nodiscard]] const ScenarioDefinition& skyrimHelgenRalofScenario();
 [[nodiscard]] const ScenarioDefinition& skyrimWhiterunShowcaseScenario();
 [[nodiscard]] const ScenarioDefinition& skyrimRiftenShowcaseScenario();
 [[nodiscard]] const ScenarioDefinition* findScenario(const std::string& id);

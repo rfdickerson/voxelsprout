@@ -8,8 +8,14 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <map>
 
 namespace odai::anim {
+
+struct HkxCharacterAssets {
+    std::string name, skeletonPath, behaviorPath;
+    std::vector<std::string> animationPaths;
+};
 
 struct HkxSectionView {
     std::string name;
@@ -94,6 +100,7 @@ struct HkxDecodedClipMetadata {
 };
 
 struct HkxDecodedSkeleton {
+    Skeleton referenceSkeleton;
     std::string name;
     std::vector<std::string> boneNames;
     std::vector<std::int16_t> parentIndices;
@@ -119,6 +126,10 @@ struct HkxBehaviorTimeInterval {
 };
 
 struct HkxBehaviorTransition {
+    static constexpr std::uint16_t Disabled = 32u;
+    static constexpr std::uint16_t DisableCondition = 256u;
+    static constexpr std::uint16_t AllowWildcardSelfTransition = 512u;
+    static constexpr std::uint16_t LocalWildcard = 2048u;
     HkxBehaviorTimeInterval triggerInterval, initiateInterval;
     std::int32_t eventId = -1, toStateId = -1;
     std::int32_t fromNestedStateId = -1, toNestedStateId = -1;
@@ -128,6 +139,22 @@ struct HkxBehaviorTransition {
     std::int32_t effectNode = -1;
     bool hasEffect = false, hasCondition = false;
     std::string conditionClass;
+    std::string conditionExpression;
+};
+
+struct HkxClipTrigger {
+    float time = 0.0f;
+    std::int32_t eventId = -1;
+    bool relativeToEnd = false;
+    bool acyclic = false;
+    bool annotation = false;
+    bool hasPayload = false;
+};
+
+struct HkxVariableBinding {
+    std::string memberPath;
+    std::int32_t variableIndex = -1;
+    std::int8_t bitIndex = -1, bindingType = 0;
 };
 
 // A fixup-backed, immutable description of the authored generator topology.
@@ -145,12 +172,27 @@ struct HkxBehaviorNode {
     float weight = 1.0f;
     float playbackSpeed = 1.0f;
     float transitionDuration = 0.0f;
+    float startTime = 0.0f;
+    float cropStart = 0.0f, cropEnd = 0.0f, enforcedDuration = 0.0f;
+    std::uint8_t playbackMode = 1;
+    std::uint8_t clipFlags = 0;
+    bool hasBindings = false;
+    std::vector<HkxVariableBinding> bindings;
+    std::int32_t enableBindingIndex = -1;
+    std::int8_t selectedGeneratorIndex = 0;
+    bool hasUndecodedChildren = false;
+    bool hasUnsupportedSettings = false;
+    std::vector<HkxClipTrigger> triggers;
 };
 
 struct HkxDecodedBehaviorGraph {
     std::string name;
     std::uint32_t rootNode = 0;
     std::vector<HkxBehaviorNode> nodes;
+    std::vector<std::string> eventNames;
+    std::vector<std::string> variableNames;
+    std::map<std::string, float> variableDefaults;
+    std::vector<std::string> unsupportedVariables;
     std::size_t clipGeneratorCount = 0;
     std::size_t behaviorReferenceCount = 0;
     std::size_t stateMachineCount = 0;
@@ -192,5 +234,8 @@ bool decodeHkxBehaviorGraph(
     std::string& outError, const HkxReadLimits& limits = {});
 
 const char* hkxGeneratorName(HkxGeneratorIdentity generator);
+
+bool decodeHkxCharacterAssets(std::span<const std::uint8_t> bytes,
+    HkxCharacterAssets& out, std::string& error, const HkxReadLimits& limits = {});
 
 }  // namespace odai::anim

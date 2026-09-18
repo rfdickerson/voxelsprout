@@ -52,6 +52,8 @@ struct SkyrimQuestAliasDefinition {
     std::int32_t createdInAliasId = -1;
     std::int32_t createdLevel = 0;
     std::vector<Condition> conditions;
+    std::vector<std::uint32_t> packages;
+    std::vector<std::uint32_t> factions;
 };
 
 // Compiled TES5 quest semantics used by the session adapter. Raw FormIDs are

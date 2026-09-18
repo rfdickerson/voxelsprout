@@ -233,7 +233,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         // depth reprojection below covers the static world, which is everything
         // else. Preferring velocity is the whole reason it was built.
         float2 previousUv = float2(-1.0, -1.0);
-        const float4 velocity = velocityTexture.SampleLevel(uv, 0.0);
+        // Velocity validity and depth describe one surface; interpolating
+        // across hair cutouts mixes foreground motion with the background.
+        const uint2 velocityPixel = min(uint2(uv * inputExtent), uint2(inputExtent) - 1u);
+        const float4 velocity = velocityTexture.Load(int3(velocityPixel, 0));
         if (upscale.upscaleTuning.w > 0.5 && velocity.z > 0.5)
         {
             // NDC delta -> UV delta. NDC spans 2 across the screen and UV spans

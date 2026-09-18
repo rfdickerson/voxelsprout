@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "name": "Skyrim SE + SMIM + JK Skyrim cities",
+  "game": "skyrim-se",
+  "mods": [
+    {
+      "id": "smim-se-208",
+      "name": "SMIM SE 2.08 Everything",
+      "version": "2.08"
+    },
+    {
+      "id": "jk-skyrim-17",
+      "name": "JK's Skyrim 1.7",
+      "version": "1.7"
+    }
+  ],
+  "plugins": [
+    "Skyrim.esm",
+    "Update.esm",
+    "Dawnguard.esm",
+    "HearthFires.esm",
+    "Dragonborn.esm",
+    "ccBGSSSE001-Fish.esm",
+    "ccQDRSSE001-SurvivalMode.esl",
+    "ccBGSSSE037-Curios.esl",
+    "ccBGSSSE025-AdvDSGS.esm",
+    "_ResourcePack.esl",
+    "SMIM-SE-Merged-All.esp",
+    "JKs Skyrim.esp"
+  ],
+  "archives": [
+    {
+      "file": "Skyrim - Animations.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Interface.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Meshes0.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Meshes1.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Misc.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Shaders.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Sounds.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures0.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures1.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures2.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures3.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures4.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures5.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures6.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures7.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Textures8.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "Skyrim - Voices_en0.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "_ResourcePack.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "ccBGSSSE001-Fish.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "ccBGSSSE025-AdvDSGS.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "ccBGSSSE037-Curios.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "ccQDRSSE001-SurvivalMode.bsa",
+      "layer": "base-data"
+    },
+    {
+      "file": "JKs Skyrim - Textures.bsa",
+      "layer": "jk-skyrim-17"
+    },
+    {
+      "file": "JKs Skyrim.bsa",
+      "layer": "jk-skyrim-17"
+    }
+  ]
+}

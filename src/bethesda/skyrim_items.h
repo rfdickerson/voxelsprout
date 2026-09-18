@@ -13,6 +13,8 @@ struct SkyrimItemDefinition {
     float meleeDamage = 0.0f;
     float healing = 0.0f;
     std::string recordType;
+    std::uint8_t weaponAnimationType = 0; // WEAP DNAM animation family
+    std::uint32_t bipedSlots = 0u;
 };
 // Immutable winning-record metadata; no game text or assets are saved in ODAI saves.
 bool loadSkyrimItems(const importer::fnv::FalloutLoadOrder &order,

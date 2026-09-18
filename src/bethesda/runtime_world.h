@@ -32,6 +32,7 @@ struct ActorValues {
     float maxHealth = 100.0f;
     float maxStamina = 100.0f;
     float maxMagicka = 100.0f;
+    float aggression = 0.0f;
     friend bool operator==(const ActorValues&, const ActorValues&) = default;
 };
 
@@ -39,6 +40,9 @@ struct InventoryEntry {
     RecordKey item;
     std::int32_t count = 0;
     bool equipped = false;
+    std::uint64_t equipmentSlots = 0u;
+    bool preventUnequip = false;
+    bool preventEquip = false;
     friend bool operator==(const InventoryEntry&, const InventoryEntry&) = default;
 };
 
@@ -100,6 +104,11 @@ struct RuntimeCombatState {
     std::uint64_t nextMeleeAttackTick = 0u;
     std::uint64_t attacksStarted = 0u;
     std::uint64_t hitsLanded = 0u;
+    bool pendingMelee = false;
+    float pendingDamage = 0.0f;
+    float pendingRange = 0.0f;
+    std::array<float, 3> pendingForward{};
+    std::string pendingClip;
     ObjectId combatTarget;
     ObjectId lastTarget;
     friend bool operator==(const RuntimeCombatState&, const RuntimeCombatState&) = default;
@@ -221,6 +230,19 @@ struct RuntimeSpaceState {
                            const RuntimeSpaceState&) = default;
 };
 
+struct RuntimeEquipmentState {
+    bool initialized = false;
+    bool drawn = false;
+    bool requestedDrawn = false;
+    bool transitioning = false;
+    bool combatDraw = false;
+    friend bool operator==(const RuntimeEquipmentState&, const RuntimeEquipmentState&) = default;
+};
+
+inline constexpr std::uint64_t kEquipmentRightHand = 1ull << 32;
+inline constexpr std::uint64_t kEquipmentLeftHand = 1ull << 33;
+inline constexpr std::uint64_t kEquipmentAmmo = 1ull << 34;
+
 struct RuntimeObject {
     ObjectId id;
     RecordKey base;
@@ -237,6 +259,7 @@ struct RuntimeObject {
     RecordKey location;
     std::vector<RecordKey> referenceTypes;
     std::vector<RecordKey> factions;
+    RuntimeEquipmentState equipment;
     RecordKey outfit;
     std::optional<RuntimeNavigationRequest> navigationRequest;
     std::optional<RuntimeAiState> aiState;
@@ -277,6 +300,7 @@ enum class WorldCommandType : std::uint8_t {
     SetCurrentSpace,
     SetAiState,
     SetCombatState,
+    SetEquipmentState,
     SetLivingState,
     ReplanSchedule,
     SetPhysicalState,
@@ -332,6 +356,10 @@ struct WorldCommand {
     RecordKey item;
     std::int32_t itemCount = 0;
     bool equipped = false;
+    std::uint64_t equipmentSlots = 0u;
+    RuntimeEquipmentState equipment;
+    bool equipmentPolicy = false;
+    bool overrideEquipmentLocks = false;
 };
 
 struct ItemTransferDelta {

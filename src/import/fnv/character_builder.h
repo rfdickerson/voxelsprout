@@ -15,6 +15,8 @@
 
 #include "anim/animation_clip.h"
 #include "anim/skeleton.h"
+#include "anim/humanoid_rig.h"
+#include <memory>
 #include "import/fnv/kf_animation.h"
 #include "import/fnv/nif_scene.h"
 #include "import/imported_scene.h"
@@ -26,6 +28,10 @@
 #include <vector>
 
 namespace odai::importer::fnv {
+// Transactional interpolation of compatible Skyrim _0/_1 skin geometry.
+bool interpolateSkinnedWeight(const NifSkinnedModel& low, NifSkinnedModel& high,
+    float weight, std::string& error);
+
 
 // One skinned body part, kept separate because each has its own diffuse
 // texture and the renderer draws one texture per packed draw.
@@ -36,6 +42,9 @@ struct FalloutCharacterPart {
     // a time instead of as one anonymous merged vertex buffer.
     std::string sourcePath;
     std::string diffuseTexturePath;
+    std::string normalTexturePath;
+    bool modelSpaceNormals = false;
+    NifLightingMaterial lightingMaterial;
     std::uint32_t firstIndex = 0;
     std::uint32_t indexCount = 0;
     bool alphaTest = false;
@@ -50,6 +59,7 @@ struct FalloutCharacterPart {
 // buffer across all parts, because the skinning compute pass runs over a single
 // contiguous vertex range per instance slot.
 struct FalloutCharacter {
+    std::shared_ptr<const anim::HumanoidRigMapping> humanoidRig;
     anim::Skeleton skeleton;
     std::vector<odai::render::ImportedSkinnedMeshVertex> vertices;
     std::vector<std::uint32_t> indices;
@@ -82,6 +92,10 @@ struct FalloutCharacter {
     // and cannot share one bone-matrix array.
     std::uint32_t conflictingInverseBindCount = 0;
 };
+
+// Transactional canonical index conversion; keeps authored skin-space binds.
+bool canonicalizeSkyrimCharacter(FalloutCharacter& character, std::span<anim::AnimationClip> clips,
+    std::string& error);
 
 // Converts a NIF bone hierarchy into an anim::Skeleton, changing coordinate
 // systems from Bethesda Z-up to engine Y-up.

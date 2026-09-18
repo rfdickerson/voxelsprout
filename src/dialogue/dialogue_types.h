@@ -44,6 +44,8 @@ struct DialogueNode {
     // immediately (a narration beat). Empty choices + empty autoNext is a
     // terminal line — the conversation's last thing said.
     std::string autoNext;
+    // Optional presentation key for authored audio (independent of UI node ID).
+    std::string voiceKey;
 };
 
 struct DialogueTree {

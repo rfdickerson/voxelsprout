@@ -1,5 +1,6 @@
 #include "import/fnv/esm_reader.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <utility>
@@ -78,7 +79,7 @@ bool parseSubrecords(
         // cannot occur in a TES3 plugin, and a four-byte subrecord that happens
         // to be named XXXX there would be misread as one.
         if (!wideSizes && type == "XXXX") {
-            if (declaredSize != 4u || pos + 4u > size) {
+            if (pendingOverrideSize >= 0 || declaredSize != 4u || pos + 4u > size) {
                 return false;
             }
             pendingOverrideSize = static_cast<std::int64_t>(readU32(data + pos));
@@ -101,7 +102,7 @@ bool parseSubrecords(
         out.push_back(subrecord);
         pos += actualSize;
     }
-    return true;
+    return pos == size && pendingOverrideSize < 0;
 }
 
 // Inflates one compressed record body into `out`, sized to `declaredSize`.
@@ -124,31 +125,34 @@ bool inflateRecordBody(
     bool& outTrailerFailed
 ) {
     outTrailerFailed = false;
-    out.assign(declaredSize, 0u);
-    if (declaredSize == 0u) {
-        return true;
-    }
-
+    out.clear();
     z_stream stream{};
-    if (inflateInit(&stream) != Z_OK) {
-        return false;
-    }
+    if (inflateInit(&stream) != Z_OK) return false;
+    struct EndInflate { z_stream& stream; ~EndInflate() { inflateEnd(&stream); } } cleanup{stream};
     stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(source));
     stream.avail_in = static_cast<uInt>(sourceSize);
-    stream.next_out = reinterpret_cast<Bytef*>(out.data());
-    stream.avail_out = static_cast<uInt>(declaredSize);
-
-    const int result = inflate(&stream, Z_FINISH);
-    const uLong produced = stream.total_out;
-    inflateEnd(&stream);
-
-    if (produced != declaredSize) {
-        return false;
-    }
-    // Z_STREAM_END is the clean case. Z_BUF_ERROR means the output buffer
-    // filled exactly as the input ran out, which is fine because `produced`
-    // already matched. Anything else means the trailer did not verify.
-    outTrailerFailed = (result != Z_STREAM_END && result != Z_BUF_ERROR);
+    // Grow from actual output instead of trusting a corrupt multi-gigabyte
+    // prefix. One extra byte detects output exceeding the declared size.
+    const std::uint64_t limit = static_cast<std::uint64_t>(declaredSize) + 1u;
+    int result = Z_OK;
+    do {
+        const std::size_t produced = static_cast<std::size_t>(stream.total_out);
+        const auto nextSize = static_cast<std::size_t>(
+            std::min(limit, static_cast<std::uint64_t>(produced) + 65536u));
+        out.resize(nextSize);
+        stream.next_out = reinterpret_cast<Bytef*>(out.data() + produced);
+        stream.avail_out = static_cast<uInt>(nextSize - produced);
+        result = inflate(&stream, Z_NO_FLUSH);
+        if (stream.total_out > declaredSize) return false;
+        if (result == Z_OK && stream.avail_out != 0u && stream.avail_in == 0u) return false;
+    } while (result == Z_OK);
+    if (stream.total_out != declaredSize || stream.avail_in != 0u) return false;
+    // Preserve the known retail New Vegas checksum exception, but do not
+    // classify truncated streams or other inflate errors as that exception.
+    outTrailerFailed = result == Z_DATA_ERROR && stream.msg != nullptr &&
+        std::strcmp(stream.msg, "incorrect data check") == 0;
+    if (result != Z_STREAM_END && !outTrailerFailed) return false;
+    out.resize(declaredSize);
     return true;
 }
 
@@ -215,6 +219,7 @@ EsmReader& EsmReader::operator=(EsmReader&& other) noexcept {
         ? static_cast<const std::uint8_t*>(m_mappingAddress)
         : m_ownedBytes.data();
     m_lastError = std::move(other.m_lastError);
+    m_lastErrorOffset = other.m_lastErrorOffset;
     m_toleratedChecksumFailures = other.m_toleratedChecksumFailures;
     m_pluginFormat = other.m_pluginFormat;
 
@@ -261,6 +266,7 @@ bool EsmReader::finishOpen() {
 bool EsmReader::open(const std::filesystem::path& path) {
     close();
     m_lastError.clear();
+    m_lastErrorOffset = 0;
 
     std::error_code sizeError;
     const auto fileSize = static_cast<std::size_t>(std::filesystem::file_size(path, sizeError));
@@ -330,6 +336,7 @@ bool EsmReader::open(const std::filesystem::path& path) {
 bool EsmReader::walk(const Visitor& visitor) {
     if (m_data == nullptr || m_size == 0) {
         m_lastError.clear();
+        m_lastErrorOffset = 0;
         m_toleratedChecksumFailures = 0;
         m_lastError = "ESM/ESP reader has no file open";
         return false;
@@ -340,6 +347,7 @@ bool EsmReader::walk(const Visitor& visitor) {
 bool EsmReader::walkRange(
     std::uint64_t beginOffset, std::uint64_t endOffset, const Visitor& visitor) {
     m_lastError.clear();
+    m_lastErrorOffset = 0;
     m_toleratedChecksumFailures = 0;
     if (m_data == nullptr || m_size == 0) {
         m_lastError = "ESM/ESP reader has no file open";
@@ -384,6 +392,7 @@ bool EsmReader::walkRange(
             continue;
         }
         Frame& frame = stack.back();
+        m_lastErrorOffset = frame.pos;
 
         if (frame.pos + 4 > frame.end) {
             m_lastError = "Truncated GRUP/record tag";

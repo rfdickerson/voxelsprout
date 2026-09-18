@@ -104,12 +104,16 @@ bool loadSkyrimItems(const importer::fnv::FalloutLoadOrder &order,
                 if ((sub.type == "MODL" && r.type != "ARMO") ||
                     (sub.type == "MOD2" && r.type == "ARMO"))
                     item.definition.model = text(sub);
+                if ((sub.type == "BOD2" || sub.type == "BODT") && r.type == "ARMO" && sub.size >= 4u)
+                    item.definition.bipedSlots = read<std::uint32_t>(sub.data);
                 if (sub.type == "ENAM")
                     enchanted = true;
                 if (sub.type == "DATA" && r.type == "WEAP" && sub.size >= 10u)
                     damage = read<std::uint16_t>(sub.data + 8u);
-                if (sub.type == "DNAM" && r.type == "WEAP" && sub.size >= 1u)
+                if (sub.type == "DNAM" && r.type == "WEAP" && sub.size >= 1u) {
                     melee = sub.data[0] >= 1u && sub.data[0] <= 6u;
+                    item.definition.weaponAnimationType = sub.data[0];
+                }
                 if (sub.type == "CTDA" || sub.type == "VMAD")
                     item.unsupported = true;
                 if (sub.type == "EFID" && sub.size == 4u)

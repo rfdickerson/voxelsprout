@@ -6,7 +6,7 @@ needs proving, and the staged plan for getting one Tamriel cell's geometry into 
 `ImportedScene`.
 
 Everything below was measured on
-`/home/rfdickerson/.local/share/Steam/steamapps/common/Oblivion` (Steam, Linux) using
+`${HOME}/.local/share/Steam/steamapps/common/Oblivion` (Steam, Linux) using
 `odai_bethesda_probe` plus byte-level dumps of the retail files. Where a claim is an
 inference from layout rather than something a tool printed, it says so.
 

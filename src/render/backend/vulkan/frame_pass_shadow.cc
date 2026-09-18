@@ -138,11 +138,12 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
             -(m_shadowDebugSettings.casterSlopeBiasBase * kImportedShadowSlopeBiasScale));
 
         for (std::uint32_t slot = 0; slot < shadowLightCount; ++slot) {
-            const std::uint32_t faceSize = kInteriorPointShadowFaceSize;
+            const std::uint32_t faceSize = interiorPointShadowFaceSize(shadowLightCount);
+            const std::uint32_t cubesPerRow = kShadowAtlasSize / (3u * faceSize);
             const std::uint32_t cubeX =
-                (slot % kInteriorPointShadowCubesPerRow) * (3u * faceSize);
+                (slot % cubesPerRow) * (3u * faceSize);
             const std::uint32_t cubeY =
-                (slot / kInteriorPointShadowCubesPerRow) * (2u * faceSize);
+                (slot / cubesPerRow) * (2u * faceSize);
             for (std::uint32_t face = 0; face < kInteriorPointShadowFaceCount; ++face) {
                 const std::uint32_t faceX =
                     cubeX + ((face % 3u) * faceSize);
@@ -213,6 +214,14 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0, sizeof(ChunkPushConstants), &pointPush);
                 };
+                // The actor caster below binds its own geometry. Restore the
+                // static stream at the start of every cube face before drawing
+                // the floor and other scene meshes.
+                vkCmdBindVertexBuffers(
+                    commandBuffer, 0, 1,
+                    pointShadowVertexBuffers, pointShadowVertexOffsets);
+                vkCmdBindIndexBuffer(
+                    commandBuffer, importedIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 if (useIndirect) {
                     VkPipeline boundPipeline = oneSidedPipeline;
                     vkCmdBindPipeline(
@@ -257,6 +266,49 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
                         draw.vertexOffset, 0);
                 }
+
+                // GPU-skinned actors share ImportedMeshVertex with the static
+                // shadow pipeline. They used to be omitted from the interior
+                // point-light atlas entirely, leaving actors brightly lit but
+                // unable to cast onto nearby floors and walls.
+                VkBuffer boundSkinnedVertexBuffer = VK_NULL_HANDLE;
+                VkBuffer boundSkinnedIndexBuffer = VK_NULL_HANDLE;
+                for (const ImportedMeshDraw& skinnedDraw : skinnedActorMeshDraws) {
+                    if (skinnedDraw.blended || skinnedDraw.indexCount == 0) {
+                        continue;
+                    }
+                    const VkBuffer drawVertexBuffer =
+                        m_bufferAllocator.getBuffer(skinnedDraw.vertexBufferHandle);
+                    const VkBuffer drawIndexBuffer =
+                        m_bufferAllocator.getBuffer(skinnedDraw.indexBufferHandle);
+                    if (drawVertexBuffer == VK_NULL_HANDLE || drawIndexBuffer == VK_NULL_HANDLE) {
+                        continue;
+                    }
+                    const VkPipeline wantedPipeline =
+                        (skinnedDraw.twoSided && m_importedStaticShadowPipelineTwoSided != VK_NULL_HANDLE)
+                            ? m_importedStaticShadowPipelineTwoSided
+                            : m_importedStaticShadowPipeline;
+                    vkCmdBindPipeline(
+                        commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, wantedPipeline);
+                    if (drawVertexBuffer != boundSkinnedVertexBuffer) {
+                        const VkBuffer vertexBuffers[1] = {drawVertexBuffer};
+                        const VkDeviceSize vertexOffsets[1] = {0};
+                        vkCmdBindVertexBuffers(
+                            commandBuffer, 0, 1, vertexBuffers, vertexOffsets);
+                        boundSkinnedVertexBuffer = drawVertexBuffer;
+                    }
+                    if (drawIndexBuffer != boundSkinnedIndexBuffer) {
+                        vkCmdBindIndexBuffer(
+                            commandBuffer, drawIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                        boundSkinnedIndexBuffer = drawIndexBuffer;
+                    }
+                    pushPointThreshold(skinnedDraw.alphaThreshold);
+                    pushPointAnimation(0xffffffffu);
+                    countDrawCalls(m_debugDrawCallsShadow, 1);
+                    vkCmdDrawIndexed(
+                        commandBuffer, skinnedDraw.indexCount, 1,
+                        skinnedDraw.firstIndex, 0, 0);
+                }
                 vkCmdEndRendering(commandBuffer);
             }
         }
@@ -275,10 +327,13 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
         vkCmdSetDepthBias(commandBuffer, 0.0f, 0.0f, 0.0f);
         m_interiorPointShadowAtlasValid = true;
         m_shadowRenderedValid = {};
-        VOX_LOGI("render") << "interior point shadow atlas rebuilt: lights="
-                           << shadowLightCount << ", faces="
-                           << (shadowLightCount * kInteriorPointShadowFaceCount)
-                           << ", faceSize=" << kInteriorPointShadowFaceSize;
+        static std::uint64_t s_pointShadowRebuildLogCounter = 0u;
+        if ((s_pointShadowRebuildLogCounter++ % 120u) == 0u) {
+            VOX_LOGI("render") << "interior point shadow atlas rebuilt: lights="
+                               << shadowLightCount << ", faces="
+                               << (shadowLightCount * kInteriorPointShadowFaceCount)
+                               << ", faceSize=" << interiorPointShadowFaceSize(shadowLightCount);
+        }
         endDebugLabel(commandBuffer);
         writeGpuTimestampBottom(kGpuTimestampQueryShadowEnd);
         return;

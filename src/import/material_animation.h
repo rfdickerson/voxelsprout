@@ -23,13 +23,16 @@ enum class MaterialAnimatedValue : std::uint32_t {
   EnvironmentScale,
   DiffuseFrame,
   NormalFrame,
-  GlowFrame
+  GlowFrame,
+  Visibility
 };
 struct MaterialAnimationKey {
   float time = 0, value = 0, forward = 0, backward = 0;
   float tension = 0, bias = 0, continuity = 0;
 };
 struct MaterialAnimationTrack {
+  // Empty means an autonomous controller; named tracks belong to a sequence.
+  std::string sequence;
   MaterialAnimatedValue target = MaterialAnimatedValue::UOffset;
   std::uint32_t interpolation = 1, cycle = 0;
   float frequency = 1, phase = 0, start = 0, stop = 0;
@@ -96,7 +99,7 @@ inline float sampleMaterialAnimation(const MaterialAnimationTrack &track,
 }
 inline bool validMaterialAnimationTrack(const MaterialAnimationTrack &t) {
   if (std::uint32_t(t.target) >
-          std::uint32_t(MaterialAnimatedValue::GlowFrame) ||
+          std::uint32_t(MaterialAnimatedValue::Visibility) ||
       (t.interpolation != 1 && t.interpolation != 2 && t.interpolation != 3 &&
        t.interpolation != 5) ||
       t.cycle > 2 || !std::isfinite(t.frequency) || !std::isfinite(t.phase) ||

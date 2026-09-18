@@ -103,6 +103,7 @@ public struct CameraUniform
     public float4 mountainCloudConfig0;
     public float4 mountainCloudConfig1;
     public float4 mountainCloudConfig2;
+    // xyz = exterior lighting controls, w = active main-pass MSAA sample count.
     public float4 importedExteriorConfig;
 };
 

@@ -41,12 +41,12 @@ void appendPartitionedNifShapeIndices(
     std::uint32_t& outFadedIndexCount);
 
 // Writes a placed-reference transform while preserving the rotation convention
-// of its source generation. TES3 stores its Euler angles with the opposite sign
-// to the later TES4/TES5 records even though both use the same axis order.
+// of its source generation. Skyrim uses NiMatrix3::SetEulerAnglesXYZ;
+// the other import paths retain their existing composition convention.
 void writeBethesdaPlacementTransform(
     ImportedSceneInstance& instance,
     const FalloutPlacedReference& reference,
-    bool morrowind);
+    bool morrowind, bool skyrim = false);
 
 // Plugin-wide lookups the per-cell build needs, gathered once. A cell's REFR
 // names a STAT by formID and a LAND quadrant names an LTEX by formID; neither
@@ -235,11 +235,8 @@ void appendResolvedDoors(
     odai::importer::ImportedScene& scene);
 
 // Samples a TES4/TES5 LAND overlay at a fractional quadrant-post coordinate.
-// The source VTXT lattice is only 17x17 (128 world units between posts); a
-// small reconstruction filter plus smooth bilinear interpolation prevents its
-// triangle diagonals from becoming visible as saw teeth along roads. Public so
-// the filter's boundedness and edge behaviour can be pinned with synthetic
-// records rather than judged only from retail screenshots.
+// Bilinear interpolation preserves authored posts and shared quadrant edges.
+// Public for synthetic boundary and boundedness regression coverage.
 float sampleLandLayerOpacity(
     const FalloutLandTextureLayer& layer, float quadrantRow, float quadrantCol);
 

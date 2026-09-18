@@ -1,3 +1,4 @@
+#include "core/resource_path.h"
 #include "render/backend/vulkan/ui_renderer.h"
 
 #include "core/log.h"
@@ -348,7 +349,7 @@ bool UiRenderer::createPipeline() {
 }
 
 VkShaderModule UiRenderer::loadShaderModule(const std::string& fileName) const {
-    const std::string path = m_info.shaderDir + "/" + fileName;
+    const std::string path = core::resourcePath(fileName).string();
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         VOX_LOGE("ui") << "failed to open UI shader " << path;

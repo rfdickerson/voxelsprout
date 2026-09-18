@@ -77,5 +77,8 @@ VertexOutput main(VertexInput input)
             if(material.animationState.x!=0xffffffffu) output.outTextureIndex=material.animationState.x;
         }
     }
+    if (input.inLightingMaterial != 0xffffffffu &&
+        importedMaterials[input.inLightingMaterial].animationState.z != 0u)
+        output.position = float4(0, 0, -1, 1);
     return output;
 }

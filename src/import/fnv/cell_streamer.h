@@ -401,7 +401,8 @@ public:
     [[nodiscard]] bool referencePositionEngineSpace(
         std::uint32_t resolvedReferenceFormId,
         float outPosition[3],
-        std::string& outError) const;
+        std::string& outError,
+        bool teleportDestination = false, float* outYawDegrees = nullptr) const;
     [[nodiscard]] bool referenceGameplayData(
         std::uint32_t resolvedReferenceFormId,
         std::uint32_t& outBaseFormId,

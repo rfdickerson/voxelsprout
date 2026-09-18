@@ -9,6 +9,8 @@
 #include <span>
 #include <string>
 #include <vector>
+#include "anim/skyrim_animation.h"
+#include "anim/gpu_pose.h"
 
 namespace odai::render {
 
@@ -602,6 +604,11 @@ struct ImportedSkinnedMeshVertex {
     float uv[2] = {};
     std::uint32_t textureIndex = 0xffffffffu;
     std::uint32_t flags = 0u;
+    std::uint32_t normalTextureIndex = 0xffffffffu;
+    float modelNormalBasis[9] = {1,0,0, 0,1,0, 0,0,1};
+    std::uint32_t skinSoftTexture = 0xffffffffu, skinSpecularTexture = 0xffffffffu;
+    float skinSpecularStrength = 0, skinGlossiness = 1, skinSoftRolloff = 0;
+    std::uint32_t skinSpecularColor = 0x00ffffffu;
     std::uint16_t boneIndices[4] = {};
     float boneWeights[4] = {};
 };
@@ -614,6 +621,17 @@ struct ImportedSkinnedMeshTemplate {
     std::span<const ImportedSkinnedMeshVertex> vertices;
     std::span<const std::uint32_t> indices;
     std::span<const odai::importer::ImportedScenePackedDraw> draws;
+    // Optional sparse morph data in vertex-major CSR form. offsets must contain
+    // vertices.size() + 1 entries; each referenced delta selects a weight in
+    // ImportedSkinnedActorFrameData::morphWeights. The compute skinning pass
+    // accumulates these deltas before applying the bone palette.
+    struct MorphDelta {
+        std::uint32_t targetIndex = 0;
+        float position[3] = {};
+    };
+    std::span<const std::uint32_t> morphVertexOffsets;
+    std::span<const MorphDelta> morphDeltas;
+    std::uint32_t morphTargetCount = 0;
     std::uint32_t boneCount = 0;
 };
 
@@ -621,7 +639,15 @@ struct ImportedSkinnedMeshTemplate {
 // boneMatrices.size() must equal that instance slot's bound template's
 // boneCount.
 struct ImportedSkinnedActorFrameData {
+    std::shared_ptr<const odai::anim::AnimationView> animationView;
+    std::shared_ptr<const odai::anim::PoseEvaluationPacket> evaluationPacket;
+    odai::math::Matrix4 actorWorld = odai::math::Matrix4::identity();
+    bool resetHistory = false;
     std::span<const odai::math::Matrix4> boneMatrices;
+    // Empty when the template has no morph targets; otherwise one finite
+    // [0,1] weight per template target. Uploaded beside the pose without
+    // touching persistent rest geometry.
+    std::span<const float> morphWeights;
 };
 
 // Skinning supports a fixed number of independent instance slots. Each has its

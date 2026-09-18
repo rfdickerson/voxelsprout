@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <numeric>
 
 namespace odai::importer::fnv {
 void applySkyrimLodHandoff(ImportedScene& scene, const SkyrimLodHandoff& h) {
@@ -12,6 +13,30 @@ void applySkyrimLodHandoff(ImportedScene& scene, const SkyrimLodHandoff& h) {
         if (!h.clipResident) {
             remove[n] = h.dropRegular && !mesh.name.ends_with("_largeref");
             continue;
+        }
+        // Retire connected geometry as a unit. A centroid test cuts a rock
+        // into pieces when it straddles a resident-cell boundary.
+        std::vector<std::uint32_t> parent(mesh.vertices.size());
+        std::iota(parent.begin(), parent.end(), 0u);
+        const auto root = [&](std::uint32_t v) {
+            while (parent[v] != v) {
+                parent[v] = parent[parent[v]];
+                v = parent[v];
+            }
+            return v;
+        };
+        for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            const auto a = mesh.indices[i], b = mesh.indices[i+1], c = mesh.indices[i+2];
+            if (a >= parent.size() || b >= parent.size() || c >= parent.size()) continue;
+            parent[root(b)] = root(a);
+            parent[root(c)] = root(a);
+        }
+        std::vector<bool> covered(mesh.vertices.size(), true);
+        for (std::uint32_t v = 0; v < mesh.vertices.size(); ++v) {
+            const int x = static_cast<int>(std::floor(mesh.vertices[v].position[0] / 4096.0f)) - h.tileX;
+            const int z = static_cast<int>(std::floor(mesh.vertices[v].position[1] / 4096.0f)) - h.tileZ;
+            if (!(x >= 0 && x < 4 && z >= 0 && z < 4 &&
+                  (h.residentMask & (1u << (z * 4 + x))))) covered[root(v)] = false;
         }
         std::vector<std::uint32_t> indices;
         std::vector<ImportedSceneMeshPart> parts;
@@ -24,14 +49,7 @@ void applySkyrimLodHandoff(ImportedScene& scene, const SkyrimLodHandoff& h) {
             for (std::size_t i = source.firstIndex; i + 2 < end; i += 3) {
                 const auto a = mesh.indices[i], b = mesh.indices[i+1], c = mesh.indices[i+2];
                 if (a >= mesh.vertices.size() || b >= mesh.vertices.size() || c >= mesh.vertices.size()) continue;
-                const auto cell = [&](int axis) {
-                    return static_cast<std::int32_t>(std::floor(
-                        (mesh.vertices[a].position[axis] + mesh.vertices[b].position[axis] +
-                         mesh.vertices[c].position[axis]) / (3.0f * 4096.0f)));
-                };
-                const int x = cell(0) - h.tileX, z = cell(1) - h.tileZ;
-                if (x >= 0 && x < 4 && z >= 0 && z < 4 &&
-                    (h.residentMask & (1u << (z * 4 + x)))) continue;
+                if (covered[root(a)]) continue;
                 indices.insert(indices.end(), {a, b, c});
             }
             part.indexCount = static_cast<std::uint32_t>(indices.size()) - part.firstIndex;

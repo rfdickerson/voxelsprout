@@ -8,7 +8,7 @@
 #include <cstring>
 #include <vector>
 
-#include "world/chunk_mesher.h"
+#include "render/packed_vertex.h"
 
 namespace odai::render {
 

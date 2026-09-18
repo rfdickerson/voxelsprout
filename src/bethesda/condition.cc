@@ -42,6 +42,7 @@ bool readCondition(
     Condition parsed;
     parsed.comparison = static_cast<ConditionComparison>(operation);
     parsed.orWithNext = (ctda[0] & 0x1u) != 0u;
+    parsed.useAliases = (ctda[0] & 0x2u) != 0u;
     const std::uint32_t comparisonBits = u32(ctda.data() + 4u);
     parsed.comparisonValue = std::bit_cast<float>(comparisonBits);
     if (!std::isfinite(parsed.comparisonValue)) {

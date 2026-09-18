@@ -209,16 +209,35 @@ bool readFalloutPluginHeader(
 
     const std::size_t subrecordHeaderSize = isTes3 ? 8u : 6u;
     std::size_t offset = 0;
+    bool foundHeader = false;
+    std::optional<std::uint32_t> extendedSize;
     while (offset + subrecordHeaderSize <= body.size()) {
         const char* type = reinterpret_cast<const char*>(body.data() + offset);
-        const std::uint32_t size = isTes3
+        const std::uint32_t declaredSize = isTes3
             ? readU32(body.data() + offset + 4)
             : static_cast<std::uint32_t>(readU16(body.data() + offset + 4));
         const std::size_t dataOffset = offset + subrecordHeaderSize;
+        if (!isTes3 && std::memcmp(type, "XXXX", 4) == 0) {
+            if (extendedSize || declaredSize != 4u || dataOffset + 4u > body.size()) {
+                outError = "malformed-header: invalid XXXX in " + path.string();
+                return false;
+            }
+            extendedSize = readU32(body.data() + dataOffset);
+            offset = dataOffset + 4u;
+            continue;
+        }
+        const std::uint32_t size = extendedSize.value_or(declaredSize);
+        extendedSize.reset();
         if (dataOffset + size > body.size()) {
-            break;
+            outError = "malformed-header: truncated subrecord in " + path.string();
+            return false;
         }
         if (std::memcmp(type, "HEDR", 4) == 0) {
+            if (foundHeader || size < (isTes3 ? 300u : 12u)) {
+                outError = "malformed-header: invalid HEDR in " + path.string();
+                return false;
+            }
+            foundHeader = true;
             if (isTes3 && size >= 300u) {
                 // version, file type, company[32], description[256], records.
                 outHeader.isMaster = readU32(body.data() + dataOffset + 4) == 1u;
@@ -231,6 +250,10 @@ bool readFalloutPluginHeader(
                 reinterpret_cast<const char*>(body.data() + dataOffset), size);
             // Bethesda strings are zero-terminated inside their declared size.
             const std::size_t terminator = master.find('\0');
+            if (terminator == std::string::npos || terminator == 0u) {
+                outError = "malformed-header: invalid MAST in " + path.string();
+                return false;
+            }
             if (terminator != std::string::npos) {
                 master.resize(terminator);
             }
@@ -239,6 +262,10 @@ bool readFalloutPluginHeader(
             }
         }
         offset = dataOffset + size;
+    }
+    if (!foundHeader || extendedSize || offset != body.size()) {
+        outError = "malformed-header: missing HEDR or trailing bytes in " + path.string();
+        return false;
     }
     return true;
 }
@@ -408,6 +435,7 @@ bool FalloutLoadOrder::open(
     const std::vector<std::string>& requestedFileNames,
     std::string& outError) {
     outError.clear();
+    m_errorSource.clear();
     m_entries.clear();
 
     // Data first, then mod roots in load order, so a mod's own copy of a plugin
@@ -433,6 +461,8 @@ bool FalloutLoadOrder::open(
         std::unordered_map<std::string, std::size_t>& placedByLowerName;
         std::unordered_map<std::string, bool>& inProgress;
         std::string error;
+        std::vector<std::string> chain;
+        std::filesystem::path errorSource;
 
         bool place(const std::string& fileName) {
             const std::string key = toLowerAsciiCopy(fileName);
@@ -440,16 +470,23 @@ bool FalloutLoadOrder::open(
                 return true;  // already positioned; never move it
             }
             if (inProgress[key]) {
-                // A master cycle. Treat it as placed to break the recursion --
-                // the formIDs will be wrong, but the alternative is a hang.
-                return true;
+                error = "dependency-cycle: ";
+                for (const auto& name : chain) error += name + " -> ";
+                error += fileName;
+                listing.find(fileName, errorSource);
+                return false;
             }
             inProgress[key] = true;
+            chain.push_back(fileName);
 
             std::filesystem::path path;
             if (!listing.find(fileName, path)) {
                 if (error.empty()) {
-                    error = "plugin not found: " + fileName;
+                    error = "missing-plugin: " + fileName;
+                    if (chain.size() > 1u) {
+                        error += " required by " + chain[chain.size() - 2u];
+                        listing.find(chain[chain.size() - 2u], errorSource);
+                    } else errorSource = fileName;
                 }
                 inProgress[key] = false;
                 return false;
@@ -460,6 +497,7 @@ bool FalloutLoadOrder::open(
             if (!readFalloutPluginHeader(path, header, headerError)) {
                 if (error.empty()) {
                     error = headerError;
+                    errorSource = path;
                 }
                 inProgress[key] = false;
                 return false;
@@ -474,6 +512,7 @@ bool FalloutLoadOrder::open(
             }
 
             inProgress[key] = false;
+            chain.pop_back();
             FalloutLoadOrderEntry entry;
             entry.path = path;
             entry.header = std::move(header);
@@ -483,20 +522,30 @@ bool FalloutLoadOrder::open(
         }
     };
 
-    Placer placer{listing, m_entries, placedByLowerName, inProgress, {}};
+    Placer placer{listing, m_entries, placedByLowerName, inProgress, {}, {}, {}};
     for (const std::string& fileName : requestedFileNames) {
         if (!placer.place(fileName)) {
+            m_errorSource = placer.errorSource;
             outError = placer.error.empty() ? ("cannot place plugin " + fileName) : placer.error;
             m_entries.clear();
             return false;
         }
     }
 
+    for (const auto& entry : m_entries) {
+        if (entry.header.format != m_entries.front().header.format) {
+            m_errorSource = entry.path;
+            outError = "incompatible-layout: " + entry.path.string();
+            m_entries.clear();
+            return false;
+        }
+    }
     std::size_t regularCount = 0u;
     std::size_t lightCount = 0u;
     for (FalloutLoadOrderEntry& entry : m_entries) {
         if (entry.header.isLight) {
             if (lightCount >= 4096u) {
+                m_errorSource = entry.path;
                 outError = "load order has more than 4096 light plugins";
                 m_entries.clear();
                 return false;
@@ -507,6 +556,7 @@ bool FalloutLoadOrder::open(
             // 0xFE is reserved for the light namespace and 0xFF for transient
             // runtime forms, leaving regular slots 0x00..0xFD.
             if (regularCount >= 254u) {
+                m_errorSource = entry.path;
                 outError = "load order has more than 254 regular plugins";
                 m_entries.clear();
                 return false;
@@ -549,7 +599,18 @@ bool FalloutLoadOrder::open(
     for (const ContentLayer& layer : profile.layers) {
         if (layer.enabled) m_searchRoots.push_back(layer.root);
     }
-    return open(profile.dataRoot, profile.plugins, outError);
+    if (!open(profile.dataRoot, profile.plugins, outError)) return false;
+    const auto expected = profile.game == BethesdaGame::Morrowind ? EsmPluginFormat::kMorrowind
+        : profile.game == BethesdaGame::Oblivion ? EsmPluginFormat::kOblivion
+        : EsmPluginFormat::kFallout3;
+    if (profile.game != BethesdaGame::Unknown && !m_entries.empty() &&
+        m_entries.front().header.format != expected) {
+        m_errorSource = m_entries.front().path;
+        outError = "incompatible-layout: " + m_entries.front().path.string();
+        m_entries.clear();
+        return false;
+    }
+    return true;
 }
 
 std::uint32_t FalloutLoadOrder::remapFormId(

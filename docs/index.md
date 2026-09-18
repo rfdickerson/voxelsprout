@@ -3,6 +3,10 @@
 `odai` runs one Vulkan imported-scene pipeline across Bethesda's TES3, TES4,
 Fallout 3/New Vegas, and TES5 data formats.
 
+- [Installation](INSTALLATION.md)
+- [Compatibility](COMPATIBILITY.md)
+- [Release checklist](RELEASE_CHECKLIST.md)
+- [Runtime reference](RUNTIME_REFERENCE.md)
 - [Fallout mod roots and texture packs](FNV_MODS.md)
 - [Scalable MO2, OpenMW, and ODAI mod profiles](MOD_PROFILES.md)
 - [Morrowind mod roots](MORROWIND_MODS.md)
@@ -17,4 +21,4 @@ Fallout 3/New Vegas, and TES5 data formats.
 - [Shadow occluders](shadow_occluder.md)
 - [Roadmap](ROADMAP.md)
 
-The runtime command is always `odai`; older `odai` examples are obsolete.
+The runtime command is `odai`; the graphical setup entry point is `odai-launcher`.

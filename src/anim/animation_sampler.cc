@@ -41,11 +41,22 @@ Vector3 lerpVector3(const Vector3& a, const Vector3& b, float t) {
     return a + ((b - a) * t);
 }
 
-struct LocalTransform {
-    Vector3 translation{};
-    Quaternion rotation{};
-    Vector3 scale{1.0f, 1.0f, 1.0f};
-};
+using LocalTransform = LocalPoseTransform;
+
+Quaternion multiply(const Quaternion& a, const Quaternion& b) {
+    return odai::math::normalize(Quaternion{
+        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z});
+}
+
+LocalTransform addLocal(const LocalTransform& base, const LocalTransform& delta, float weight) {
+    const auto scale = lerpVector3({1, 1, 1}, delta.scale, weight);
+    return {base.translation + delta.translation * weight,
+        multiply(base.rotation, odai::math::slerp(Quaternion{}, delta.rotation, weight)),
+        {base.scale.x * scale.x, base.scale.y * scale.y, base.scale.z * scale.z}};
+}
 
 // Evaluates one channel's keys at time t. Outside the keyed range, either
 // clamps to the nearest key (non-looping) or blends across the loop boundary
@@ -84,7 +95,7 @@ Value evalTrack(const std::vector<Key>& keys, float t, float duration, bool loop
 }
 
 std::vector<LocalTransform> sampleLocalTransforms(
-    const Skeleton& skeleton, const AnimationClip& clip, float timeSeconds) {
+    const Skeleton& skeleton, const AnimationClip& clip, float timeSeconds, bool rawAdditive = false) {
     const float t = wrapTime(timeSeconds, clip.duration, clip.loop);
     std::vector<int> trackForBone(skeleton.bones.size(), -1);
     for (std::size_t index = 0; index < clip.tracks.size(); ++index) {
@@ -96,24 +107,74 @@ std::vector<LocalTransform> sampleLocalTransforms(
     std::vector<LocalTransform> result(skeleton.bones.size());
     for (std::size_t index = 0; index < skeleton.bones.size(); ++index) {
         const Bone& bone = skeleton.bones[index];
-        result[index] = {bone.localTranslation, bone.localRotation, bone.localScale};
+        result[index] = clip.additive ? LocalTransform{} :
+            LocalTransform{bone.localTranslation, bone.localRotation, bone.localScale};
         const int trackIndex = trackForBone[index];
         if (trackIndex < 0) continue;
         const BoneTrack& track = clip.tracks[static_cast<std::size_t>(trackIndex)];
         result[index].translation = evalTrack(
             track.translationKeys, t, clip.duration, clip.loop,
-            bone.localTranslation, lerpVector3);
+            result[index].translation, lerpVector3);
+        if (static_cast<int>(index) == clip.extractedMotionBone && !track.translationKeys.empty())
+            result[index].translation = track.translationKeys.front().value;
         result[index].rotation = evalTrack(
             track.rotationKeys, t, clip.duration, clip.loop,
-            bone.localRotation, odai::math::slerp);
+            result[index].rotation, odai::math::slerp);
         result[index].scale = evalTrack(
             track.scaleKeys, t, clip.duration, clip.loop,
-            bone.localScale, lerpVector3);
+            result[index].scale, lerpVector3);
+    }
+    if (clip.additive && !rawAdditive) {
+        for (std::size_t i = 0; i < result.size(); ++i) {
+            const auto& bone = skeleton.bones[i];
+            result[i] = addLocal({bone.localTranslation, bone.localRotation, bone.localScale}, result[i], 1);
+        }
     }
     return result;
 }
 
 }  // namespace
+
+LocalPose sampleLocalPose(const Skeleton& skeleton, const AnimationClip& clip, float time) {
+    return sampleLocalTransforms(skeleton, clip, time);
+}
+LocalPose blendLocalPoses(const LocalPose& from, const LocalPose& to, float weight, std::span<const float> mask) {
+    if (from.size() != to.size()) return from;
+    LocalPose out = from;
+    for (std::size_t i=0; i<out.size(); ++i) {
+        const float w = weight * (mask.empty() ? 1.f : i < mask.size() ? mask[i] : 0.f);
+        const float a = std::isfinite(w) ? std::clamp(w, 0.f, 1.f) : 0.f;
+        out[i] = {lerpVector3(from[i].translation, to[i].translation, a),
+            odai::math::slerp(from[i].rotation, to[i].rotation, a), lerpVector3(from[i].scale, to[i].scale, a)};
+    }
+    return out;
+}
+LocalPose addLocalPoses(const LocalPose& base, const LocalPose& target, const LocalPose& reference,
+    float weight, std::span<const float> mask) {
+    if (base.size() != target.size() || base.size() != reference.size()) return base;
+    LocalPose out = base;
+    for (std::size_t i=0; i<out.size(); ++i) {
+        const auto& r = reference[i]; const auto& t = target[i];
+        const auto ratio = [](float a, float b) { return std::abs(b)>1.e-6f ? a/b : 1.f; };
+        const LocalTransform delta{t.translation-r.translation,
+            multiply({-r.rotation.x,-r.rotation.y,-r.rotation.z,r.rotation.w},t.rotation),
+            {ratio(t.scale.x,r.scale.x),ratio(t.scale.y,r.scale.y),ratio(t.scale.z,r.scale.z)}};
+        const float w = weight * (mask.empty() ? 1.f : i < mask.size() ? mask[i] : 0.f);
+        out[i] = addLocal(base[i],delta,std::isfinite(w) ? std::clamp(w,0.f,1.f) : 0.f);
+    }
+    return out;
+}
+std::vector<Matrix4> composePoseWorld(const Skeleton& skeleton, const LocalPose& pose) {
+    if (pose.size() != skeleton.bones.size()) return {};
+    std::vector<Matrix4> local; local.reserve(pose.size());
+    for (const auto& value : pose) local.push_back(composeLocal(value.translation,value.rotation,value.scale));
+    return composeWorldMatrices(skeleton,local);
+}
+void AnimationSampler::paletteFromLocal(const Skeleton& skeleton, const LocalPose& pose, std::vector<Matrix4>& out) const {
+    out = composePoseWorld(skeleton,pose);
+    for (std::size_t i=0; i<out.size(); ++i)
+        out[i] = out[i] * (i < inverseBindMatrices_.size() ? inverseBindMatrices_[i] : Matrix4::identity());
+}
 
 void AnimationSampler::bindSkeleton(const Skeleton& skeleton) {
     std::vector<Matrix4> localMatrices(skeleton.bones.size());
@@ -180,6 +241,71 @@ void AnimationSampler::sampleBlended(
             ? inverseBindMatrices_[index] : Matrix4::identity();
         outMatrices[index] = worldMatrices[index] * inverseBind;
     }
+}
+
+void AnimationSampler::sampleLayered(const Skeleton& skeleton, const AnimationClip& base, float baseTime,
+    const AnimationClip& layer, float layerTime, float weight, std::span<const float> boneMask,
+    std::vector<Matrix4>& outMatrices) const {
+    const auto basePose = sampleLocalTransforms(skeleton, base, baseTime);
+    const auto layerPose = sampleLocalTransforms(skeleton, layer, layerTime, true);
+    std::vector<Matrix4> local(skeleton.bones.size());
+    for (std::size_t i = 0; i < local.size(); ++i) {
+        const float mask = boneMask.empty() ? 1.0f : i < boneMask.size() ? boneMask[i] : 0.0f;
+        const float alpha = std::isfinite(weight * mask) ? odai::math::saturate(weight * mask) : 0;
+        const auto value = layer.additive ? addLocal(basePose[i], layerPose[i], alpha) :
+            LocalTransform{lerpVector3(basePose[i].translation, layerPose[i].translation, alpha),
+                odai::math::slerp(basePose[i].rotation, layerPose[i].rotation, alpha),
+                lerpVector3(basePose[i].scale, layerPose[i].scale, alpha)};
+        local[i] = composeLocal(value.translation, value.rotation, value.scale);
+    }
+    const auto world = composeWorldMatrices(skeleton, local);
+    outMatrices.resize(world.size());
+    for (std::size_t i = 0; i < world.size(); ++i)
+        outMatrices[i] = world[i] * (i < inverseBindMatrices_.size() ? inverseBindMatrices_[i] : Matrix4::identity());
+}
+
+void AnimationSampler::sampleComposed(const Skeleton& skeleton, std::span<const WeightedAnimationPose> base,
+    std::span<const AnimationPoseLayer> layers, std::vector<Matrix4>& outMatrices) const {
+    std::vector<LocalTransform> pose;
+    for (const auto& bone : skeleton.bones) pose.push_back({bone.localTranslation, bone.localRotation, bone.localScale});
+    float accumulated = 0;
+    for (const auto& sample : base) {
+        if (!sample.clip || !std::isfinite(sample.weight) || sample.weight <= 0) continue;
+        const auto sampled = sampleLocalTransforms(skeleton, *sample.clip, sample.time);
+        const float alpha = sample.weight / (accumulated + sample.weight);
+        accumulated += sample.weight;
+        for (std::size_t i = 0; i < pose.size(); ++i) {
+            pose[i] = {lerpVector3(pose[i].translation, sampled[i].translation, alpha),
+                odai::math::slerp(pose[i].rotation, sampled[i].rotation, alpha),
+                lerpVector3(pose[i].scale, sampled[i].scale, alpha)};
+        }
+    }
+    for (const auto& layer : layers) {
+        if (!layer.clip || (layer.additive && !layer.reference)) continue;
+        const auto sampled = sampleLocalTransforms(skeleton, *layer.clip, layer.time);
+        const auto reference = layer.additive ? sampleLocalTransforms(skeleton, *layer.reference, 0) : std::vector<LocalTransform>{};
+        for (std::size_t i = 0; i < pose.size(); ++i) {
+            const float weighted = layer.weight * (i < layer.mask.size() ? layer.mask[i] : 0);
+            const float alpha = std::isfinite(weighted) ? std::clamp(weighted, 0.f, 1.f) : 0;
+            if (layer.additive) {
+                const auto& r = reference[i];
+                const auto& target = sampled[i];
+                const auto ratio = [](float a, float b) { return std::abs(b) > 1.e-6f ? a / b : 1.f; };
+                const LocalTransform delta{target.translation - r.translation,
+                    multiply({-r.rotation.x, -r.rotation.y, -r.rotation.z, r.rotation.w}, target.rotation),
+                    {ratio(target.scale.x, r.scale.x), ratio(target.scale.y, r.scale.y), ratio(target.scale.z, r.scale.z)}};
+                pose[i] = addLocal(pose[i], delta, alpha);
+            } else pose[i] = {lerpVector3(pose[i].translation, sampled[i].translation, alpha),
+                odai::math::slerp(pose[i].rotation, sampled[i].rotation, alpha),
+                lerpVector3(pose[i].scale, sampled[i].scale, alpha)};
+        }
+    }
+    std::vector<Matrix4> local;
+    for (const auto& value : pose) local.push_back(composeLocal(value.translation, value.rotation, value.scale));
+    const auto world = composeWorldMatrices(skeleton, local);
+    outMatrices.resize(world.size());
+    for (std::size_t i = 0; i < world.size(); ++i)
+        outMatrices[i] = world[i] * (i < inverseBindMatrices_.size() ? inverseBindMatrices_[i] : Matrix4::identity());
 }
 
 }  // namespace odai::anim

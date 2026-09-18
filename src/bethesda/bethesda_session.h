@@ -10,9 +10,11 @@
 #include "bethesda/skyrim_quest.h"
 #include "bethesda/skyrim_items.h"
 #include "bethesda/skyrim_dialogue.h"
+#include "bethesda/skyrim_scene.h"
 #include "bethesda/tes3_runtime.h"
 #include "import/fnv/content_profile.h"
 #include "anim/skyrim_animation.h"
+#include "anim/character_dynamics.h"
 
 #include <cstdint>
 #include <functional>
@@ -91,6 +93,9 @@ struct BethesdaSessionConfig {
     ObjectId playerObject;
     bool livingWorldEnabled = true;
     double gameTimeScale = 20.0;
+    // Optional profile-owned Skyrim movement policy. When absent, character
+    // controllers retain the native defaults.
+    std::optional<CharacterMovementSettings> characterMovement;
 };
 
 struct BethesdaSessionStep {
@@ -107,6 +112,7 @@ struct AnimationActorSnapshot {
     ObjectId object;
     odai::anim::BehaviorGraphSnapshot thirdPerson;
     std::optional<odai::anim::BehaviorGraphSnapshot> firstPerson;
+    odai::anim::BodyMorphSnapshot bodyMorph;
     friend bool operator==(const AnimationActorSnapshot&,
                            const AnimationActorSnapshot&) = default;
 };
@@ -118,6 +124,13 @@ struct MeleeAttackResult {
     ObjectId target;
     float damage = 0.0f;
     std::string diagnostic;
+    bool deferred = false;
+};
+
+struct MeleeContactEvent {
+    ObjectId attacker;
+    bool flesh = false;
+    bool blocked = false;
 };
 
 struct PuzzleDoorActivationResult {
@@ -188,7 +201,7 @@ public:
     bool registerActorAnimation(
         ObjectId object, std::shared_ptr<const odai::anim::AnimationView> thirdPerson,
         std::shared_ptr<const odai::anim::AnimationView> firstPerson,
-        const PhysicsCharacterConfig& physicsConfig, std::string& outError);
+        const PhysicsCharacterConfig& physicsConfig, std::string& outError, bool createController = true);
     bool registerActorController(
         ObjectId object, const PhysicsCharacterConfig& physicsConfig, std::string& outError);
     bool registerDynamicBody(
@@ -197,7 +210,10 @@ public:
     bool unregisterActorAnimation(ObjectId object);
     bool setActorControllerInput(ObjectId object, const PhysicsCharacterInput& input);
     bool addActorImpulse(ObjectId object, const odai::math::Vector3& velocityChange);
+    [[nodiscard]] bool hasActorAnimation(ObjectId object) const { return m_actorAnimations.contains(object); }
     bool setActorAnimationInput(ObjectId object, odai::anim::AnimationInputState input);
+    bool setActorBodyMorphState(ObjectId object,
+        odai::anim::BodyMorphSnapshot state);
     bool queueActorAnimationEvent(ObjectId object, odai::anim::AnimationEvent event);
     // Must be called from BeforeSimulationTick (or another fixed-tick system).
     // Target selection uses Jolt-owned character positions and authored static
@@ -211,7 +227,14 @@ public:
         return found == m_skyrimItems.end() ? nullptr : &found->second;
     }
     // Validated UI/headless intent; atomic item mutation occurs on the next fixed tick.
+    bool equipActorItem(ObjectId actor, const RecordKey& item, bool equipped,
+        bool leftHand, std::string& error, bool equipmentPolicy = false, bool scriptOverride = false);
+    bool requestActorWeaponDraw(ObjectId actor, bool drawn, std::string& error, bool combatDraw = false);
     bool useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error);
+    // Transient held input and presentation events: never serialized.
+    void setActorGuard(ObjectId actor, bool held, const odai::math::Vector3& forward);
+    bool actorGuarding(ObjectId actor) const;
+    std::vector<MeleeContactEvent> takeMeleeContacts();
     [[nodiscard]] MeleeAttackResult performEquippedMeleeAttack(
         ObjectId actor, const odai::math::Vector3& forward);
     bool rotatePuzzleRing(ObjectId door, std::size_t ringIndex, std::string& outError);
@@ -254,7 +277,7 @@ public:
     // default runs the authored effect associated with choosing the response.
     [[nodiscard]] SkyrimDialogueSelectionResult selectDialogueInfo(
         const RecordKey& info, ObjectId speaker, ObjectId player,
-        std::uint8_t fragmentFlag = 1u, bool strict = true);
+        std::uint8_t fragmentFlag = 1u, bool strict = true, bool ambient = false);
     [[nodiscard]] const std::map<RecordKey, SkyrimDialogueTopicDefinition>&
         dialogueTopics() const { return m_dialogueTopics; }
     [[nodiscard]] const std::map<RecordKey, SkyrimDialogueInfoDefinition>&
@@ -284,6 +307,11 @@ public:
     [[nodiscard]] std::vector<PhysicsCharacterSnapshot> physicsSnapshots() const;
     bool restorePhysicsSnapshots(
         std::span<const PhysicsCharacterSnapshot> snapshots, std::string& outError);
+    [[nodiscard]] std::vector<PhysicsRagdollSnapshot> ragdollSnapshots() const {
+        return m_physics.ragdollSnapshots();
+    }
+    bool restoreRagdollSnapshots(
+        std::span<const PhysicsRagdollSnapshot> snapshots, std::string& outError);
 
     [[nodiscard]] Tes3DialogueResponse startTes3Dialogue(
         Tes3DialogueActorState actor, Tes3DialoguePlayerState player,
@@ -332,6 +360,10 @@ public:
     [[nodiscard]] const std::map<RecordKey, bool>& scenes() const { return m_scenes; }
     [[nodiscard]] std::map<RecordKey, bool>& scenesForRestore() { return m_scenes; }
     struct ImageSpaceCommand { RecordKey record; float strength = 1.0f; bool remove = false; bool crossFade = false; float fadeDuration = 1.0f; };
+    struct EffectAnimationCommand { RecordKey reference; std::string sequence; bool startOver = false; };
+    void setEffectAnimationPlayer(std::function<bool(const EffectAnimationCommand&)> player) {
+        m_effectAnimationPlayer = std::move(player);
+    }
     std::vector<ImageSpaceCommand> takeImageSpaceCommands() {
         auto result = std::move(m_imageSpaceCommands);
         m_imageSpaceCommands.clear();
@@ -370,6 +402,21 @@ public:
         return m_scriptDebugLogs;
     }
     void setScenePlaying(const RecordKey& scene, bool playing);
+    void registerScene(SkyrimSceneDefinition scene);
+    void registerScenePackage(SkyrimScenePackage package);
+    void registerFlyingAliasPackages(RecordKey quest, std::int32_t alias, std::vector<RecordKey> packages) { m_flyingAliasPackages[quest][alias] = std::move(packages); }
+    void registerPatrolLink(ObjectId from, ObjectId to) { m_patrolLinks[from] = to; }
+    void advanceFlyingPackages(double seconds);
+    bool sceneActorWaiting(ObjectId actor) const { return m_sceneWaitingActors.contains(actor); }
+    void registerScriptTrigger(SkyrimScriptTrigger trigger) { m_scriptTriggers.insert_or_assign(trigger.object, std::move(trigger)); }
+    void advanceScenes(double seconds);
+    void presentSceneSpeech(std::uint64_t sequence, double seconds);
+    const std::vector<SkyrimSceneSpeech>& sceneSpeech() const { return m_sceneSpeech; }
+    const std::map<RecordKey, SkyrimSceneProgress>& sceneProgress() const { return m_sceneProgress; }
+    std::map<RecordKey, SkyrimSceneProgress>& sceneProgressForRestore() { return m_sceneProgress; }
+    std::vector<SkyrimSceneSpeech>& sceneSpeechForRestore() { return m_sceneSpeech; }
+    std::uint64_t sceneSpeechSequence() const { return m_sceneSpeechSequence; }
+    void setSceneSpeechSequence(std::uint64_t sequence) { m_sceneSpeechSequence = sequence; }
     void setResolvedFormResolver(ResolvedFormResolver resolver) {
         m_resolvedFormResolver = std::move(resolver);
     }
@@ -400,6 +447,8 @@ public:
     [[nodiscard]] std::uint64_t deterministicHash() const;
 
 private:
+    MeleeAttackResult resolveMeleeContact(ObjectId attacker, const odai::math::Vector3& forward,
+        float damage, float rangeBethesdaUnits, RuntimeCombatState& combat);
     struct QuestStageFragmentRuntime {
         VmadQuestFragment fragment;
         std::vector<Condition> conditions;
@@ -415,6 +464,9 @@ private:
         odai::anim::BehaviorGraphInstance thirdPerson;
         odai::anim::BehaviorGraphInstance firstPerson;
         odai::anim::AnimationInputState input;
+        odai::anim::BodyMorphSnapshot bodyMorph;
+        // Same-tick request mirror until queued WorldCommand state is applied.
+        std::optional<RuntimeCombatState> requestedMelee;
         odai::anim::AnimationStepOutput thirdPersonOutput;
         odai::anim::AnimationStepOutput firstPersonOutput;
         odai::anim::AnimationStepOutput previousThirdPersonOutput;
@@ -451,9 +503,19 @@ private:
     std::map<std::string, std::int64_t> m_statistics;
     std::vector<RecordKey> m_discoveries;
     std::map<RecordKey, bool> m_scenes;
+    std::map<RecordKey, SkyrimSceneDefinition> m_sceneDefinitions;
+    std::map<RecordKey, SkyrimScenePackage> m_scenePackages;
+    std::map<ObjectId, SkyrimScriptTrigger> m_scriptTriggers;
+    std::map<RecordKey, std::map<std::int32_t, std::vector<RecordKey>>> m_flyingAliasPackages;
+    std::map<ObjectId, ObjectId> m_patrolLinks;
+    std::set<ObjectId> m_sceneWaitingActors;
+    std::map<RecordKey, SkyrimSceneProgress> m_sceneProgress;
+    std::vector<SkyrimSceneSpeech> m_sceneSpeech;
+    std::uint64_t m_sceneSpeechSequence = 0;
     std::map<RecordKey, SkyrimItemDefinition> m_skyrimItems;
     RecordKey m_forcedWeather;
     std::vector<ImageSpaceCommand> m_imageSpaceCommands;
+    std::function<bool(const EffectAnimationCommand&)> m_effectAnimationPlayer;
     std::map<RecordKey, LocationRuntimeState> m_locations;
     std::map<RecordKey, float> m_globalVariables;
     std::vector<StoryEventRuntimeState> m_storyEvents;
@@ -462,6 +524,8 @@ private:
     std::vector<std::string> m_pendingDiagnostics;
     std::vector<PendingQuestAliasEvent> m_pendingQuestAliasEvents;
     ResolvedFormResolver m_resolvedFormResolver;
+    std::map<ObjectId, odai::math::Vector3> m_actorGuards;
+    std::vector<MeleeContactEvent> m_meleeContacts;
     std::map<ObjectId, ActorAnimationRuntime> m_actorAnimations;
     std::map<ObjectId, AnimationActorSnapshot> m_pendingAnimationSnapshots;
     std::map<ObjectId, PhysicsCharacterSnapshot> m_pendingPhysicsSnapshots;

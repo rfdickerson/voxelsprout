@@ -1,5 +1,40 @@
 # Skyrim asset coverage
 
+Profile-wide character and animation discovery is documented in
+[character asset coverage](SKYRIM_CHARACTER_ASSETS.md). It extends inspection
+beyond the Riverwood visual closure without claiming full runtime support.
+
+## Ralof skin geometry validation (2026-09-10)
+
+Retail SSE Ralof FaceGen (`0002bf9d.nif`) has 898 `MaleHeadNord`
+vertices with no vertex normals. The Stormcloak cuirass also has 200
+`MaleBodyStormcloakSLEEVES` vertices with no normals. The character builder
+previously assigned an upward normal to these surfaces. It now derives
+area-weighted smooth normals from triangles when the normal array is absent
+or incomplete, retaining authored normals otherwise. These normals follow the
+existing bind-space conversion and skinning path.
+
+The importer and GPU position skinning also normalize retained positive bone
+weights, matching the velocity pass. Retail probes already report unit weight
+sums, so weight normalization is not identified as the cause of this defect.
+
+Local evidence in `captures/ralof-skinning-validation/` includes before/after
+normal views, corrected color and shadow views, and a retail body probe.
+The optimized JK's Skyrim + SMIM run used a 768×432 logical window,
+1536×864 native-DPI framebuffer and render scale 1. Face, arm and hand normals
+now follow their surfaces; shadow visibility is largely unoccluded on Ralof
+in this earlier view. The later skin-shading investigation found that the
+shadow diagnostic returned white for skipped back-facing surfaces, so this
+was not proof of unoccluded skin. That diagnostic is now corrected.
+The color render remained dark. This is a geometric-normal
+fallback correction, not verification of Skyrim SE model-space skin normal
+textures or skin material parity. The subsequent [skin shading fix](SKYRIM_SKIN_SHADING.md)
+adds animated model-space normals, authored soft lighting, and external skin specular maps.
+
+All 45 Debug CTest tests pass, including missing-normal generation,
+authored-normal preservation and non-unit skin-weight regression coverage.
+Debug and RelWithDebInfo builds succeed. No serialized layouts change.
+
 The probe now traces the Riverwood static-asset closure through archive
 resolution, NIF decoding, source-material interpretation, and scene emission.
 GPU consumption is explicitly unmeasured. This is the first implementation
@@ -157,10 +192,10 @@ No new 4K, moving-camera, or memory-delta claim is made.
 
 Standard and glow BSLighting materials now have typed cooked records and GPU
 bindings. Environment-mapped materials now sample authored cubes and masks.
-Specialized skin/model-space
-normal, parallax, multilayer, and other shader families retain source metadata
-and explicit fallback status. The actor skinning path still uses its prior
-material handling. IMGS/IMAD now have readers and a core post-processing runtime
+The actor path supports animated model-space normals and the authored skin
+soft-light/specular inputs; see [skin shading coverage](SKYRIM_SKIN_SHADING.md).
+Parallax, multilayer, and other specialized shader families retain source metadata
+and explicit fallback status. IMGS/IMAD now have readers and a core post-processing runtime
 path; specialized channels remain documented in [image-space coverage](SKYRIM_IMAGE_SPACE.md).
 Authored particle modifiers, material controllers, precipitation, remaining
 vegetation controls, and EFSH/ARTO/impacts remain.
@@ -347,7 +382,7 @@ and [WSI ownership](https://docs.vulkan.org/guide/latest/wsi.html).
 The capture helper now requests `VK_LAYER_VALIDATE_SYNC=1` and fails when the
 validation library did not load or the log contains validation errors. Load the
 installed SDK environment before running it (on this workstation:
-`source /home/rfdickerson/vulkan/1.4.357.0/setup-env.sh --set-dep-ld`).
+`source ${HOME}/vulkan/1.4.357.0/setup-env.sh --set-dep-ld`).
 
 Debug and optimized runtime builds pass; all 35 Debug CTests pass. Corrected
 native-daylight and upscaled-night captures completed with zero Vulkan validation

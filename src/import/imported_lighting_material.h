@@ -21,6 +21,12 @@ inline GpuImportedMaterial makeImportedNifGpuMaterial(
     }
     gpu.specularStrength[3] = (source.flags1 & 1u) != 0 ? std::max(source.specularStrength,0.0f) : 0.0f;
     gpu.environment[0] = source.environmentScale;
+    if (source.shaderType == 0xffffffffu) {
+        gpu.animationPalette[2] = source.effectFalloff[0];
+        gpu.animationPalette[3] = source.effectFalloff[1];
+        gpu.environment[2] = source.effectFalloff[2];
+        gpu.environment[3] = source.effectFalloff[3];
+    }
     const std::uint32_t roles[4] = {1,2,4,5};
     for (int role = 0; role < 4; ++role) {
         const auto texture = source.textures[roles[role]];
@@ -31,15 +37,21 @@ inline GpuImportedMaterial makeImportedNifGpuMaterial(
 // Texture frame indices in these runtime tracks have already been remapped to
 // resident bindless slots. Missing frames retain the static diffuse binding.
 inline GpuImportedMaterial sampleImportedMaterial(const ImportedNifLightingMaterial& source,
-    GpuImportedMaterial gpu, float elapsed) {
+    GpuImportedMaterial gpu, float elapsed, std::string_view sequence = "AnimIdle") {
     if(source.animations.empty()) return gpu;
     float values[16]={source.uvOffset[0],source.uvScale[0],source.uvOffset[1],source.uvScale[1],
         source.alpha,source.emissive[0],source.emissive[1],source.emissive[2],source.emissiveMultiplier,
         source.specular[0],source.specular[1],source.specular[2],source.specularStrength,
         source.glossiness,source.environmentScale,0};
+    bool visible = true;
     for(const auto& track:source.animations) {
+        if (!track.sequence.empty() && track.sequence != sequence) continue;
         const float value=sampleMaterialAnimation(track,elapsed);
         if(!std::isfinite(value)) continue;
+        if (track.target == MaterialAnimatedValue::Visibility) {
+            visible = visible && value >= 0.5f;
+            continue;
+        }
         if (std::uint32_t(track.target) < 16u) values[std::uint32_t(track.target)]=value;
         if(std::uint32_t(track.target) >= std::uint32_t(MaterialAnimatedValue::DiffuseFrame) && !track.textures.empty()) {
             const auto frame=std::size_t(std::clamp(std::floor(double(value)),0.0,double(track.textures.size()-1)));
@@ -52,6 +64,7 @@ inline GpuImportedMaterial sampleImportedMaterial(const ImportedNifLightingMater
     gpu.animationUv[2]=values[1];gpu.animationUv[3]=values[3];
     gpu.animationColor[3]=std::max(values[4],0.f);
     gpu.animationState[1]=1;
+    gpu.animationState[2]=visible ? 0u : 1u;
     gpu.animationPalette[0]=values[5];gpu.animationPalette[1]=std::max(values[8],0.f);
     const bool effect=source.shaderType==0xffffffffu;
     for(int c=0;c<3;++c) {

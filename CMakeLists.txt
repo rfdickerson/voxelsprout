@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
+include(GNUInstallDirs)
+set(ODAI_RESOURCE_DIR "${CMAKE_BINARY_DIR}/share/odai")
+file(MAKE_DIRECTORY "${ODAI_RESOURCE_DIR}/shaders")
+configure_file(packaging/skyrim-slice.json "${ODAI_RESOURCE_DIR}/skyrim-slice.json" COPYONLY)
+configure_file(scripts/odai-launcher "${CMAKE_BINARY_DIR}/odai-launcher" COPYONLY)
+file(COPY "${CMAKE_SOURCE_DIR}/assets/fonts" DESTINATION "${ODAI_RESOURCE_DIR}/assets")
 include(CheckCXXCompilerFlag)
 find_package(Threads REQUIRED)
 
@@ -96,9 +102,7 @@ if(ODAI_ENABLE_XESS)
     endif()
 endif()
 
-# Build Slang directly from the retained source shaders. Outputs remain ignored
-# generated files next to the sources because the runtime's development lookup
-# resolves them there.
+# Build shaders into the relocatable runtime resource tree.
 find_program(SLANGC_EXECUTABLE NAMES slangc
     HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/x86_64/bin")
 if(SLANGC_EXECUTABLE)
@@ -114,7 +118,8 @@ if(SLANGC_EXECUTABLE)
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_decode.slang")
     set(SLANG_SHADER_OUTPUTS "")
     function(add_slang_shader shader stage)
-        set(output "${shader}.spv")
+        get_filename_component(shaderName "${shader}" NAME)
+        set(output "${ODAI_RESOURCE_DIR}/shaders/${shaderName}.spv")
         add_custom_command(OUTPUT "${output}"
             COMMAND "${SLANGC_EXECUTABLE}" -target spirv -entry main -stage "${stage}"
                 -matrix-layout-column-major -I "${CMAKE_SOURCE_DIR}/src/render/shaders"
@@ -125,6 +130,8 @@ if(SLANGC_EXECUTABLE)
         set(SLANG_SHADER_OUTPUTS "${SLANG_SHADER_OUTPUTS}" PARENT_SCOPE)
     endfunction()
     function(add_slang_variant shader stage output)
+        get_filename_component(outputName "${output}" NAME)
+        set(output "${ODAI_RESOURCE_DIR}/shaders/${outputName}")
         add_custom_command(OUTPUT "${output}"
             COMMAND "${SLANGC_EXECUTABLE}" -target spirv -entry main -stage "${stage}"
                 -matrix-layout-column-major -I "${CMAKE_SOURCE_DIR}/src/render/shaders"
@@ -176,13 +183,13 @@ if(SLANGC_EXECUTABLE)
                  voxel_gi_surface voxel_gi_sky_exposure voxel_gi_restir_candidate
                  voxel_gi_restir_temporal voxel_gi_restir_spatial voxel_gi_restir_resolve
                  voxel_gi_inject voxel_gi_propagate auto_exposure_histogram auto_exposure_update
-                 sun_shafts skinning)
+                 sun_shafts skinning pose_evaluate)
         add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/${name}.comp.slang" compute)
     endforeach()
-    add_custom_command(OUTPUT "${CMAKE_SOURCE_DIR}/src/render/shaders/taa.comp.slang.spv" APPEND
+    add_custom_command(OUTPUT "${ODAI_RESOURCE_DIR}/shaders/taa.comp.slang.spv" APPEND
         DEPENDS "${CMAKE_SOURCE_DIR}/src/render/taa_depth_policy.h")
     foreach(waterShader imported_water.frag imported_water_rt.frag)
-        add_custom_command(OUTPUT "${CMAKE_SOURCE_DIR}/src/render/shaders/${waterShader}.slang.spv" APPEND
+        add_custom_command(OUTPUT "${ODAI_RESOURCE_DIR}/shaders/${waterShader}.slang.spv" APPEND
             DEPENDS "${CMAKE_SOURCE_DIR}/src/render/water_depth_policy.h")
     endforeach()
     add_slang_variant("${CMAKE_SOURCE_DIR}/src/render/shaders/ssao.comp.slang" compute
@@ -192,11 +199,13 @@ if(SLANGC_EXECUTABLE)
     add_slang_variant("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface.comp.slang" compute
         "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_gi_surface_rt.comp.slang.spv" -DODAI_GI_RT_SURFACE=1)
     add_custom_target(slang_shaders DEPENDS ${SLANG_SHADER_OUTPUTS})
-    add_custom_command(OUTPUT "${CMAKE_SOURCE_DIR}/src/render/shaders/tone_map.frag.slang.spv" APPEND
+    add_custom_command(OUTPUT "${ODAI_RESOURCE_DIR}/shaders/tone_map.frag.slang.spv" APPEND
         DEPENDS "${CMAKE_SOURCE_DIR}/src/render/image_space_contrast.h")
+elseif(ODAI_BUILD_RUNTIME OR BUILD_TESTING)
+    message(FATAL_ERROR "slangc is required to build ODAI shaders; install Slang or set SLANGC_EXECUTABLE.")
 endif()
 
-add_library(odai_core STATIC src/core/log.cc src/core/job_system.cc)
+add_library(odai_core STATIC src/core/log.cc src/core/job_system.cc src/core/resource_path.cc)
 odai_source_includes(odai_core)
 target_link_libraries(odai_core PUBLIC Threads::Threads)
 odai_warnings(odai_core)
@@ -237,7 +246,8 @@ endif()
 odai_warnings(odai_audio)
 
 add_library(odai_anim STATIC src/anim/animation_sampler.cc src/anim/skeleton_io.cc
-    src/anim/hkx_packfile.cc src/anim/skyrim_animation.cc)
+    src/anim/character_dynamics.cc
+    src/anim/hkx_packfile.cc src/anim/skyrim_animation.cc src/anim/behavior_program.cc src/anim/native_program.cc src/anim/humanoid_rig.cc src/anim/pose_graph.cc src/anim/pose_modifiers.cc src/anim/gpu_pose.cc)
 odai_source_includes(odai_anim)
 target_link_libraries(odai_anim PRIVATE nlohmann_json::nlohmann_json)
 odai_warnings(odai_anim)
@@ -265,13 +275,14 @@ add_library(odai_bethesda_import STATIC
     src/import/fnv/actor_records.cc src/import/fnv/asset_source.cc
     src/import/fnv/async_asset_loader.cc src/import/fnv/bsa_archive.cc
     src/import/fnv/cell_builder.cc src/import/fnv/skyrim_grass.cc src/import/fnv/character_builder.cc
-    src/import/fnv/content_profile.cc src/import/fnv/content_record_index.cc
+    src/import/fnv/content_profile.cc src/import/fnv/content_record_index.cc src/import/fnv/mod_check.cc
     src/import/fnv/decoded_texture_cache.cc src/import/fnv/dialogue_records.cc
     src/import/fnv/esm_reader.cc src/import/fnv/fallout_records.cc
     src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/skyrim_lod_handoff.cc src/import/fnv/lz4_frame.cc
     src/import/fnv/tri_morph.cc src/import/fnv/nif_scene.cc src/import/fnv/nif_particles.cc src/import/fnv/plugin_load_order.cc
     src/import/fnv/spt_scene.cc src/import/fnv/skyrim_tree_lod.cc
     src/import/fnv/skyrim_animation_assets.cc
+    src/import/fnv/character_asset_manifest.cc
     src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc
     src/import/fnv/image_space_records.cc)
 odai_source_includes(odai_bethesda_import)
@@ -286,22 +297,22 @@ add_library(odai_bethesda_runtime STATIC
     src/bethesda/runtime_world.cc src/bethesda/gameplay_catalog.cc
     src/bethesda/living_world.cc src/bethesda/vmad_reader.cc src/bethesda/skyrim_quest.cc
     src/bethesda/skyrim_dialogue.cc
+    src/bethesda/skyrim_scene.cc
+    src/bethesda/skyrim_scene_runtime.cc
     src/bethesda/skyrim_runtime_records.cc
     src/bethesda/skyrim_scenario_content.cc src/bethesda/skyrim_persistent_references.cc src/bethesda/skyrim_items.cc
     src/bethesda/pex_reader.cc src/bethesda/papyrus_vm.cc
-    src/bethesda/scenario.cc src/bethesda/bethesda_session.cc
+    src/bethesda/scenario.cc src/bethesda/route_checkpoint.cc src/bethesda/bethesda_session.cc
     src/bethesda/save_game.cc src/bethesda/bethesda_physics_world.cc)
 odai_source_includes(odai_bethesda_runtime)
 target_link_libraries(odai_bethesda_runtime PUBLIC
     odai_core odai_bethesda_import nlohmann_json::nlohmann_json)
 odai_warnings(odai_bethesda_runtime)
 
-# The Vulkan renderer is compiled once. Until the imported-only API pruning is
-# complete, its old world helper sources remain here rather than being repeated
-# by every executable.
+# The Vulkan renderer is compiled once for the imported-scene path.
 add_library(odai_renderer STATIC
     src/render/frame_graph.cc src/render/renderer.cc src/render/video_writer.cc
-    src/render/stb_image_impl.cc
+    src/render/stb_image_impl.cc src/render/packed_vertex.cc
     src/render/upscale/temporal_upscaler.cc src/render/upscale/vendor_backends.cc
     src/render/backend/vulkan/buffer_helpers.cc
     src/render/backend/vulkan/chunk_upload.cc src/render/backend/vulkan/contact_shadows.cc
@@ -318,14 +329,10 @@ add_library(odai_renderer STATIC
     src/render/backend/vulkan/light_clusters.cc src/render/backend/vulkan/pass_gi.cc
     src/render/backend/vulkan/pass_pipelines.cc src/render/backend/vulkan/post_compute.cc
     src/render/backend/vulkan/screen_space_gi.cc src/render/backend/vulkan/shadow_culling.cc
-    src/render/backend/vulkan/shadow_culling_utils.cc src/render/backend/vulkan/skinning_resources.cc
+    src/render/backend/vulkan/shadow_culling_utils.cc src/render/backend/vulkan/skinning_resources.cc src/render/backend/vulkan/pose_compute.cc
     src/render/backend/vulkan/swapchain_targets.cc src/render/backend/vulkan/ui_panels.cc
     src/render/backend/vulkan/ui_renderer.cc src/render/backend/vulkan/vma_usage.cc
-    # PackedVoxelVertex and the legacy chunk entry points are still referenced
-    # inside the Vulkan backend. The procedural world, clipmap, and MagicaVoxel
-    # implementations are unreachable from Renderer/ImportedScene and are not
-    # part of the Bethesda runtime target.
-    src/world/chunk_mesher.cc)
+)
 odai_source_includes(odai_renderer)
 target_include_directories(odai_renderer PRIVATE ${Stb_INCLUDE_DIR})
 target_compile_definitions(odai_renderer PUBLIC ODAI_HAS_VULKAN=1)
@@ -350,19 +357,20 @@ if(ODAI_BUILD_RUNTIME)
 
     add_executable(odai
         src/games/newvegas/newvegas_main.cc src/games/newvegas/bethesda_app.cc
+        src/games/newvegas/skyrim_first_person.cc
         src/games/newvegas/bethesda_collision.cc src/bethesda/navigation_world.cc
         src/games/newvegas/newvegas_ogg.cc src/games/newvegas/newvegas_victor.cc
         src/games/newvegas/bethesda_actors.cc src/import/fnv/cell_streamer.cc
         src/engine/game_app.cc)
     target_include_directories(odai PRIVATE src ${Stb_INCLUDE_DIR})
     target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
-        ODAI_PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        ODAI_VERSION="${PROJECT_VERSION}")
     target_link_libraries(odai PRIVATE odai_renderer odai_audio odai_traversal odai_bethesda_runtime)
     odai_warnings(odai)
 endif()
 
 if(ODAI_BUILD_TOOLS)
-    add_executable(odai_bethesda_probe src/tools/tri_probe.cc src/tools/newvegas_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
+    add_executable(odai_bethesda_probe src/tools/character_coverage.cc src/tools/tri_probe.cc src/tools/newvegas_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
     target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
     odai_source_includes(odai_bethesda_probe)
     odai_warnings(odai_bethesda_probe)
@@ -396,6 +404,9 @@ if(BUILD_TESTING)
     odai_plain_test(odai_imported_scene_tests tests/imported_scene_tests.cc)
     target_link_libraries(odai_imported_scene_tests PRIVATE odai_bethesda_import)
 
+    odai_plain_test(odai_character_coverage_tests tests/character_coverage_tests.cc)
+    target_sources(odai_character_coverage_tests PRIVATE src/tools/character_coverage.cc)
+    target_link_libraries(odai_character_coverage_tests PRIVATE odai_bethesda_import)
     odai_plain_test(odai_asset_coverage_tests tests/asset_coverage_tests.cc)
     target_sources(odai_asset_coverage_tests PRIVATE src/tools/asset_coverage_report.cc)
     target_link_libraries(odai_asset_coverage_tests PRIVATE odai_bethesda_import)
@@ -416,6 +427,24 @@ if(BUILD_TESTING)
     target_link_libraries(odai_skyrim_animation_tests PRIVATE
         odai_anim odai_bethesda_import odai_bethesda_runtime)
 
+    odai_plain_test(odai_character_dynamics_tests tests/character_dynamics_tests.cc)
+    target_link_libraries(odai_character_dynamics_tests PRIVATE odai_anim)
+
+    odai_plain_test(odai_mod_check_tests tests/mod_check_tests.cc)
+    target_link_libraries(odai_mod_check_tests PRIVATE odai_bethesda_import)
+    foreach(mod_check_target IN ITEMS odai odai_bethesda_probe)
+        if(TARGET ${mod_check_target})
+            set(mod_check_subcommand "--mod-check")
+            if(mod_check_target STREQUAL "odai")
+                set(mod_check_subcommand "mod-check")
+            endif()
+            add_test(NAME ${mod_check_target}_mod_check_headless
+                COMMAND ${CMAKE_COMMAND} -E env DISPLAY= WAYLAND_DISPLAY=
+                    $<TARGET_FILE:${mod_check_target}> ${mod_check_subcommand} --help)
+            set_tests_properties(${mod_check_target}_mod_check_headless PROPERTIES
+                PASS_REGULAR_EXPRESSION "odai mod-check --profile")
+        endif()
+    endforeach()
     odai_plain_test(odai_content_profile_tests tests/content_profile_tests.cc)
     target_link_libraries(odai_content_profile_tests PRIVATE odai_bethesda_import)
 
@@ -423,6 +452,23 @@ if(BUILD_TESTING)
         odai_plain_test(odai_traversal_state_tests tests/traversal_state_tests.cc)
         target_link_libraries(odai_traversal_state_tests PRIVATE odai_traversal)
     endif()
+
+    if(TARGET slang_shaders)
+        odai_plain_test(odai_pose_compute_tests src/render/tests/pose_compute_tests.cc)
+        target_link_libraries(odai_pose_compute_tests PRIVATE odai_anim Vulkan::Vulkan)
+        target_compile_definitions(odai_pose_compute_tests PRIVATE ODAI_POSE_SHADER="${ODAI_RESOURCE_DIR}/shaders/pose_evaluate.comp.slang.spv")
+        add_dependencies(odai_pose_compute_tests slang_shaders)
+        set_tests_properties(odai_pose_compute_tests PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+
+    odai_plain_test(odai_pose_graph_tests tests/pose_graph_tests.cc)
+    target_link_libraries(odai_pose_graph_tests PRIVATE odai_anim nlohmann_json::nlohmann_json)
+
+    odai_plain_test(odai_humanoid_rig_tests tests/humanoid_rig_tests.cc)
+    target_link_libraries(odai_humanoid_rig_tests PRIVATE odai_anim odai_bethesda_import)
+
+    odai_plain_test(odai_native_animation_tests tests/native_animation_tests.cc)
+    target_link_libraries(odai_native_animation_tests PRIVATE odai_anim odai_bethesda_import)
 
     odai_plain_test(odai_animation_tests tests/animation_tests.cc)
     target_link_libraries(odai_animation_tests PRIVATE odai_anim)
@@ -436,6 +482,7 @@ if(BUILD_TESTING)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME odai_launcher_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/launcher_tests.py)
         add_test(
             NAME odai_skyrim_showcase_manifest_tests
             COMMAND ${Python3_EXECUTABLE}
@@ -506,6 +553,8 @@ if(BUILD_TESTING)
     odai_plain_test(odai_papyrus_vm_tests tests/papyrus_vm_tests.cc)
     target_link_libraries(odai_papyrus_vm_tests PRIVATE odai_bethesda_runtime)
 
+    odai_plain_test(odai_route_checkpoint_tests tests/route_checkpoint_tests.cc)
+    target_link_libraries(odai_route_checkpoint_tests PRIVATE odai_bethesda_runtime)
     odai_plain_test(odai_save_tests tests/odai_save_tests.cc)
     target_link_libraries(odai_save_tests PRIVATE odai_bethesda_runtime)
 
@@ -546,8 +595,8 @@ if(BUILD_TESTING)
     endif()
     if(ODAI_VULKAN_SMOKE_REGISTERED)
         set_tests_properties(odai_imported_scene_vulkan_smoke PROPERTIES
-            # Shader development paths are rooted one level above the process CWD.
-            # `tests/` is stable for both in-tree and out-of-tree build directories.
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/tests" TIMEOUT 60)
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 60)
     endif()
 endif()
+
+include(cmake/Packaging.cmake)

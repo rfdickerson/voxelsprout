@@ -15,8 +15,8 @@ namespace {
 struct SkinningPushConstants {
     std::uint32_t vertexCount;
     std::uint32_t boneCount;
-    float pad0;
-    float pad1;
+    std::uint32_t morphTargetCount;
+    std::uint32_t pad0;
 };
 }  // namespace
 
@@ -43,6 +43,24 @@ void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
 
     writeGpuTimestampTop(kGpuTimestampQuerySkinningStart);
     beginDebugLabel(commandBuffer, "Pass: Skinning", 0.30f, 0.22f, 0.36f, 1.0f);
+    recordPoseCompute(commandBuffer);
+
+    // Every frame rewrites the same persistent actor output buffers. Frames
+    // may overlap on the graphics queue, so wait for the preceding frame's
+    // shadow/prepass/main vertex fetches before compute starts writing the
+    // next pose. The post-dispatch barrier below covers the opposite direction
+    // (this frame's compute writes becoming this frame's vertex reads).
+    VkMemoryBarrier2 previousVertexReadBarrier{};
+    previousVertexReadBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    previousVertexReadBarrier.srcStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+    previousVertexReadBarrier.srcAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+    previousVertexReadBarrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    previousVertexReadBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo previousVertexReadDependency{};
+    previousVertexReadDependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    previousVertexReadDependency.memoryBarrierCount = 1;
+    previousVertexReadDependency.pMemoryBarriers = &previousVertexReadBarrier;
+    vkCmdPipelineBarrier2(commandBuffer, &previousVertexReadDependency);
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_skinningPipeline);
 
@@ -66,6 +84,7 @@ void RendererBackend::recordSkinningPass(const FrameExecutionContext& context) {
         SkinningPushConstants pushConstants{};
         pushConstants.vertexCount = slot.vertexCount;
         pushConstants.boneCount = slot.boneCount;
+        pushConstants.morphTargetCount = slot.morphTargetCount;
 
         bindDescriptorBuffer(
             commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_skinningPipelineLayout,

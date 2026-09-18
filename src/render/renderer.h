@@ -257,6 +257,8 @@ public:
     // that.
     void setDepthOfField(bool enabled, float focusDistance, float focusRange,
                          float maxRadiusPixels, float nearBlurScale = 0.0f);
+    bool playImportedEffect(std::uint32_t reference, const std::string& sequence, bool startOver = true);
+    bool activateImportedEffect(float x, float y, float z, float dx, float dy, float dz);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
     void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedExteriorLighting(const ImportedExteriorLighting& lighting);

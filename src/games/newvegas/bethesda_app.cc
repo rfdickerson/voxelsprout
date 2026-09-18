@@ -1,5 +1,7 @@
+#include "bethesda/route_checkpoint.h"
 #include "import/dds.h"
 #include "games/newvegas/bethesda_app.h"
+#include "import/fnv/fuz.h"
 
 #include "import/fnv/strings_table.h"
 
@@ -47,6 +49,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <nlohmann/json.hpp>
 
 namespace odai::games::newvegas {
 
@@ -79,6 +82,43 @@ std::string toLowerAscii(std::string value) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return value;
+}
+
+std::optional<bethesda::CharacterMovementSettings> loadNativeMovementPolicy(
+    const importer::fnv::FalloutAssetSource& assets) {
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    if (!assets.resolveAsset("odai\\movement.json", bytes, error)) return std::nullopt;
+    try {
+        const auto json = nlohmann::json::parse(bytes.begin(), bytes.end());
+        if (!json.is_object() || json.value("version", 0) != 1) {
+            throw std::runtime_error("expected version 1 object");
+        }
+        bethesda::CharacterMovementSettings settings;
+        settings.enabled = true;
+        settings.coyoteSeconds = json.value("coyote_seconds", settings.coyoteSeconds);
+        settings.bufferSeconds = json.value("jump_buffer_seconds", settings.bufferSeconds);
+        settings.jumpSpeedMetres = json.value("jump_speed_metres", settings.jumpSpeedMetres);
+        settings.airAccelerationMetres = json.value(
+            "air_acceleration_metres", settings.airAccelerationMetres);
+        settings.hardLandingMetres = json.value(
+            "hard_landing_metres", settings.hardLandingMetres);
+        settings.staggerLandingMetres = json.value(
+            "stagger_landing_metres", settings.staggerLandingMetres);
+        settings.severeLandingMetres = json.value(
+            "severe_landing_metres", settings.severeLandingMetres);
+        if (!bethesda::validCharacterMovementSettings(settings)) {
+            throw std::runtime_error("values are outside native movement bounds");
+        }
+        VOX_LOGI("animation") << "native movement policy: odai\\movement.json"
+            << " coyote=" << settings.coyoteSeconds
+            << " buffer=" << settings.bufferSeconds
+            << " jump=" << settings.jumpSpeedMetres << "m/s";
+        return settings;
+    } catch (const std::exception& exception) {
+        VOX_LOGW("animation") << "ignored odai\\movement.json: " << exception.what();
+        return std::nullopt;
+    }
 }
 
 const bethesda::Tes3SubrecordData* tes3Subrecord(
@@ -369,6 +409,114 @@ std::string importedReferenceSourceId(std::uint32_t resolvedFormId) {
 
 bool keyDown(GLFWwindow* window, int key) {
     return glfwGetKey(window, key) == GLFW_PRESS;
+}
+
+std::map<std::string, float> parseMorphSliders(const char* encoded) {
+    std::map<std::string, float> result;
+    if (encoded == nullptr) return result;
+    std::istringstream stream(encoded);
+    std::string item;
+    while (std::getline(stream, item, ',')) {
+        const std::size_t equals = item.find('=');
+        if (equals == std::string::npos || equals == 0) continue;
+        try {
+            result[item.substr(0, equals)] = std::stof(item.substr(equals + 1));
+        } catch (const std::exception&) {
+        }
+    }
+    return result;
+}
+
+bool buildGpuMorphData(const anim::BodyMorphProgram& program,
+    const anim::BodyMorphSnapshot& state, std::size_t vertexCount,
+    std::string_view outfit, std::vector<std::uint32_t>& offsets,
+    std::vector<render::ImportedSkinnedMeshTemplate::MorphDelta>& deltas,
+    std::vector<float>& weights, std::string& error) {
+    error.clear();
+    if (vertexCount != program.vertexCount ||
+        (!state.topologyFingerprint.empty() &&
+         state.topologyFingerprint != program.topologyFingerprint)) {
+        error = "body morph topology mismatch";
+        return false;
+    }
+    const auto mapping = program.outfitMappings.find(std::string(outfit));
+    if (mapping == program.outfitMappings.end()) {
+        error = "outfit has no explicit body morph mapping: " + std::string(outfit);
+        return false;
+    }
+    const std::unordered_set<std::string> allowed(
+        mapping->second.begin(), mapping->second.end());
+    weights.assign(program.targets.size(), 0.0f);
+    offsets.assign(vertexCount + 1u, 0u);
+    for (std::size_t targetIndex = 0; targetIndex < program.targets.size(); ++targetIndex) {
+        const auto& target = program.targets[targetIndex];
+        const auto slider = state.sliders.find(target.id);
+        if (slider != state.sliders.end()) {
+            if (!std::isfinite(slider->second) || slider->second < 0.0f ||
+                slider->second > 1.0f) {
+                error = "body morph slider is outside [0, 1]: " + target.id;
+                return false;
+            }
+            if (allowed.contains(target.id)) weights[targetIndex] = slider->second;
+        }
+        if (!allowed.contains(target.id)) continue;
+        for (const auto& delta : target.deltas) ++offsets[delta.vertex + 1u];
+    }
+    for (std::size_t vertex = 1; vertex < offsets.size(); ++vertex)
+        offsets[vertex] += offsets[vertex - 1u];
+    deltas.assign(offsets.back(), {});
+    std::vector<std::uint32_t> cursor = offsets;
+    for (std::size_t targetIndex = 0; targetIndex < program.targets.size(); ++targetIndex) {
+        const auto& target = program.targets[targetIndex];
+        if (!allowed.contains(target.id)) continue;
+        for (const auto& source : target.deltas) {
+            auto& delta = deltas[cursor[source.vertex]++];
+            delta.targetIndex = static_cast<std::uint32_t>(targetIndex);
+            delta.position[0] = source.position.x;
+            delta.position[1] = source.position.y;
+            delta.position[2] = source.position.z;
+        }
+    }
+    return true;
+}
+
+std::optional<anim::HairChainConfig> discoverHairChain(
+    const importer::fnv::FalloutCharacter& character) {
+    std::vector<int> best;
+    const auto isHair = [&](int bone) {
+        const std::string name = toLowerAscii(
+            character.skeleton.bones[static_cast<std::size_t>(bone)].name);
+        return name.find("hair") != std::string::npos ||
+            name.find("ponytail") != std::string::npos ||
+            name.find("braid") != std::string::npos;
+    };
+    for (std::size_t leaf = 0; leaf < character.skeleton.bones.size(); ++leaf) {
+        if (!isHair(static_cast<int>(leaf))) continue;
+        std::vector<int> chain;
+        int bone = static_cast<int>(leaf);
+        while (bone >= 0 && isHair(bone)) {
+            chain.push_back(bone);
+            bone = character.skeleton.bones[static_cast<std::size_t>(bone)].parentIndex;
+        }
+        std::reverse(chain.begin(), chain.end());
+        if (chain.size() > best.size()) best = std::move(chain);
+    }
+    if (best.size() < 2) return std::nullopt;
+    anim::HairChainConfig config;
+    config.bones = std::move(best);
+    config.damping = 0.22f;
+    config.gravity = 520.0f;
+    config.maximumStretch = 1.02f;
+    config.teleportDistance = 256.0f;
+    if (character.humanoidRig) {
+        for (const char* role : {"head", "spine"}) {
+            const auto found = character.humanoidRig->roles.find(role);
+            if (found != character.humanoidRig->roles.end())
+                config.collisions.push_back({found->second,
+                    std::string_view(role) == "head" ? 13.0f : 18.0f});
+        }
+    }
+    return config;
 }
 
 // A demo row should contain complete walking silhouettes, not every partially
@@ -1407,6 +1555,7 @@ void BethesdaApp::rebuildBethesdaConversationTree(
     // controller input and camera framing. This tree is presentation-only;
     // branch eligibility, conditions and effects remain in BethesdaSession.
     actor.tree = {};
+    actor.spokenNodeId.clear();
     actor.tree.id = "skyrim-retail-dialogue";
     actor.tree.startNode = "topics";
     dialogue::DialogueNode topics;
@@ -1519,6 +1668,11 @@ void BethesdaApp::chooseConversationChoice(std::size_t index) {
         actor->runtime.choose(*visibleChoices[index]);
         return;
     }
+    if (m_bethesdaDialoguePendingEndInfo.valid() &&
+        visibleChoices[index]->targetNode != "topics") {
+        actor->runtime.choose(*visibleChoices[index]);
+        return;
+    }
     if (m_bethesdaDialoguePendingEndInfo.valid()) {
         const bethesda::RecordKey completedInfo = m_bethesdaDialoguePendingEndInfo;
         m_bethesdaDialoguePendingEndInfo = {};
@@ -1541,7 +1695,9 @@ void BethesdaApp::chooseConversationChoice(std::size_t index) {
             endConversation();
             return;
         }
+        const bool continuation = choices.size() == 1u && choices.front().prompt.empty();
         rebuildBethesdaConversationTree(*actor, std::move(choices));
+        if (continuation) chooseConversationChoice(0);
         return;
     }
     if (index >= m_bethesdaDialogueChoices.size()) return;
@@ -1551,23 +1707,30 @@ void BethesdaApp::chooseConversationChoice(std::size_t index) {
     for (const std::string& diagnostic : begin.diagnostics) {
         VOX_LOGW("dialogue") << choice.info.toString() << ": " << diagnostic;
     }
-    std::vector<std::string> responses = begin.responses;
-    std::string text;
-    for (const std::string& response : responses) {
-        if (!text.empty()) text += "  ";
-        text += response;
-    }
-    if (text.empty()) {
-        text = "[Compatibility error: the selected INFO has no localized response]";
-    }
     const std::string responseId = "response_" + std::to_string(index);
-    if (auto response = actor->tree.nodes.find(responseId);
-        response != actor->tree.nodes.end()) {
-        response->second.text = std::move(text);
+    const auto& infoKey = begin.responseInfo.valid() ? begin.responseInfo : choice.info;
+    const auto info = m_bethesdaSession.dialogueInfos().find(infoKey);
+    const auto responseCount = std::max<std::size_t>(begin.responses.size(), 1);
+    for (std::size_t line = 0; line < responseCount; ++line) {
+        const auto id = line == 0 ? responseId : responseId + "_line" + std::to_string(line);
+        dialogue::DialogueNode response;
+        response.id = id;
+        response.speaker = actor->displayName();
+        response.text = begin.responses.empty()
+            ? "[Compatibility error: the selected INFO has no localized response]"
+            : begin.responses[line];
         if (begin.accepted) {
-            response->second.choices.push_back(
-                dialogue::DialogueChoice{"Continue", "topics", {}, {}});
+            const auto next = line + 1 < responseCount
+                ? responseId + "_line" + std::to_string(line + 1) : "topics";
+            response.choices.push_back({"Continue", next, {}, {}});
+            if (info != m_bethesdaSession.dialogueInfos().end() && line < info->second.responses.size()) {
+                char key[40];
+                std::snprintf(key, sizeof(key), "info_%08X_%u", infoKey.localFormId,
+                    info->second.responses[line].responseNumber);
+                response.voiceKey = key;
+            }
         }
+        actor->tree.nodes.insert_or_assign(id, std::move(response));
     }
     if (begin.accepted) {
         m_bethesdaDialoguePendingEndInfo = choice.info;
@@ -1905,12 +2068,248 @@ bool BethesdaApp::completeDoorTransition(
 
 void BethesdaApp::arrangeActorParadeIfRequested() {
     const char* parade = std::getenv("ODAI_FNV_ACTORS_PARADE");
-    if (parade == nullptr || m_actors.empty()) {
+    const char* focusedEditorId = std::getenv("ODAI_FNV_FOCUS_ACTOR");
+    if ((parade == nullptr || parade[0] == '\0') &&
+        (focusedEditorId == nullptr || focusedEditorId[0] == '\0')) {
+        return;
+    }
+    if (m_actors.empty()) {
+        return;
+    }
+
+    // Present one named actor on the camera axis without moving the rest of the
+    // resident population. This is an opt-in capture aid for inspecting actor
+    // geometry and materials under a repeatable view.
+    if (focusedEditorId != nullptr && focusedEditorId[0] != '\0') {
+        const std::string wanted = toLowerAscii(focusedEditorId);
+        const auto focused = std::find_if(m_actors.begin(), m_actors.end(), [&](const auto& actor) {
+            const auto base = m_skyrimActorCatalog.bases.find(actor.baseFormId);
+            return base != m_skyrimActorCatalog.bases.end() &&
+                   toLowerAscii(base->second.editorId) == wanted;
+        });
+        if (focused == m_actors.end()) {
+            VOX_LOGW("newvegas") << "focus actor: no resident actor with EditorID \""
+                                 << focusedEditorId << "\"";
+            return;
+        }
+
+        constexpr float kDefaultDistance = 430.0f;
+        float distance = kDefaultDistance;
+        if (const char* distanceEnv = std::getenv("ODAI_FNV_FOCUS_ACTOR_DISTANCE")) {
+            const float parsed = static_cast<float>(std::atof(distanceEnv));
+            if (parsed >= 150.0f) distance = parsed;
+        }
+        const float yaw = m_yawDegrees * (kPi / 180.0f);
+        const float forwardX = std::cos(yaw);
+        const float forwardZ = std::sin(yaw);
+        float rightOffset = 0.0f;
+        if (const char* rightEnv = std::getenv("ODAI_FNV_FOCUS_ACTOR_RIGHT")) {
+            rightOffset = static_cast<float>(std::atof(rightEnv));
+        }
+        focused->position[0] = m_cameraX + forwardX * distance - forwardZ * rightOffset;
+        focused->position[2] = m_cameraZ + forwardZ * distance + forwardX * rightOffset;
+        float ground = 0.0f;
+        const bool onGround = m_streamer
+            ? m_collision.terrainHeight(focused->position[0], focused->position[2], ground)
+            : groundHeightAt(focused->position[0], focused->position[2], ground);
+        focused->position[1] = onGround ? ground : (m_cameraY - kEyeHeightUnits);
+        focused->yawRadians = actorYawForDirection(
+            m_cameraX - focused->position[0], m_cameraZ - focused->position[2]);
+        focused->wanders = false;
+        focused->wanderOrigin[0] = focused->wanderTarget[0] = focused->position[0];
+        focused->wanderOrigin[1] = focused->wanderTarget[1] = focused->position[1];
+        focused->wanderOrigin[2] = focused->wanderTarget[2] = focused->position[2];
+        focused->projectedToNavigation = false;
+        focused->wanderPath.clear();
+        focused->wanderPathIndex = 0u;
+        focused->wanderPauseSeconds = 0.0f;
+        if (const char* draw = std::getenv("ODAI_FNV_DRAW");
+            draw != nullptr && std::strcmp(draw, "actor-demo") == 0) {
+            glfwSetWindowTitle(m_window, "NPC Test | 1 Stop | 2 Run circle | 3 Jump | Arrows steer");
+            // Native Skyrim units: 70 units per metre; no actor scale override.
+            focused->position[0] = 0.0f;
+            focused->position[2] = 0.0f;
+            std::vector<odai::math::Matrix4> bindPose;
+            importer::fnv::computeFalloutBindPose(focused->character, bindPose);
+            float lowest = std::numeric_limits<float>::max();
+            float highest = -lowest;
+            for (const auto& vertex : focused->character.vertices) {
+                float height = 0.0f, total = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    const auto bone = vertex.boneIndices[i];
+                    const float weight = vertex.boneWeights[i];
+                    if (weight <= 0 || bone >= bindPose.size()) continue;
+                    const auto& matrix = bindPose[bone];
+                    height += weight * (matrix(1,0)*vertex.position[0] +
+                        matrix(1,1)*vertex.position[1] + matrix(1,2)*vertex.position[2] + matrix(1,3));
+                    total += weight;
+                }
+                if (total > 0) { lowest = std::min(lowest,height/total); highest = std::max(highest,height/total); }
+            }
+            focused->position[1] = -lowest;
+            focused->demoFootOffset = -lowest;
+            const bool dropScene = std::getenv("ODAI_NPC_DROP_SCENE") != nullptr;
+            if (dropScene) {
+                focused->position[1] += 280.0f;
+                if (focused->animationView && focused->animationView->nativeProgram) {
+                    auto view = std::make_shared<anim::AnimationView>(*focused->animationView);
+                    auto program = std::make_shared<anim::NativeAnimationProgram>(*view->nativeProgram);
+                    for (auto& rule : program->rules) rule.holdUntilLanding = false;
+                    view->nativeProgram = std::move(program);
+                    view->sourceFingerprint += ";studio-drop-v1";
+                    focused->animationView = std::move(view);
+                }
+            }
+            focused->runtimeControllerNeedsRelocation = true;
+            // A spawned preview has no ACHR reference. Give it a real session
+            // identity so animation and Jolt registration can own it together.
+            if (m_bethesdaSessionConfigured && !focused->runtimeObjectId.valid()) {
+                auto& world = m_bethesdaSession.world();
+                bethesda::RuntimeObject object;
+                object.id = world.allocateRuntimeId();
+                std::string why;
+                if (bethesda::stableRecordKey(m_streamLoadOrder, focused->baseFormId, object.base, why)) {
+                    object.kind = bethesda::RuntimeObjectKind::Actor;
+                    object.actorValues = bethesda::ActorValues{};
+                    object.transform.position = {focused->position[0], 0.0, focused->position[2]};
+                    if (world.addInitialObject(object, why)) {
+                        focused->runtimeObjectId = object.id;
+                        VOX_LOGI("npc-test") << "registered studio actor " << object.id.toString()
+                            << "; animation view=" << bool(focused->animationView);
+                    } else { VOX_LOGE("npc-test") << why; }
+                } else { VOX_LOGE("npc-test") << why; }
+            }
+            if (focused->animationView) {
+                if (focused->animationView->nativeProgram) {
+                    VOX_LOGI("npc-test") << "native animation rules="
+                        << focused->animationView->nativeProgram->rules.size();
+                }
+                for (const auto& diagnostic : focused->animationView->diagnostics) {
+                    if (diagnostic.code.starts_with("native.")) {
+                        VOX_LOGW("npc-test") << diagnostic.code << ": "
+                            << diagnostic.message;
+                    }
+                }
+                for (const auto& [state, path] : focused->animationView->stateClips) {
+                    if (state != "jump" && state != "fall" && state != "landing") continue;
+                    for (const auto& clip : focused->animationView->clips) {
+                        if (clip.name == path) VOX_LOGI("npc-test") << state << ": " << path
+                            << " duration=" << clip.duration << " tracks=" << clip.tracks.size();
+                    }
+                }
+            }
+            m_npcDemoActorId = focused->runtimeObjectId;
+            focused->yawRadians = actorYawForDirection(-1.0f,0.0f);
+            std::copy_n(focused->position,3,focused->wanderOrigin);
+            std::copy_n(focused->position,3,focused->wanderTarget);
+            m_cameraX = -620.0f; m_cameraY = 300.0f; m_cameraZ = 0.0f;
+            m_yawDegrees = 0.0f; m_pitchDegrees = -20.0f; m_walkMode = false;
+            if (dropScene) {
+                m_cameraX = -650.0f; m_cameraY = 510.0f; m_cameraZ = -850.0f;
+                m_yawDegrees = 45.0f; m_pitchDegrees = -17.0f;
+                glfwSetWindowTitle(m_window, "Lydia | Repeating 4 metre Jolt drop | Arrows steer | Space jump");
+            }
+            VOX_LOGI("npc-test") << "native actor height=" << highest-lowest
+                << " units; checker square=70 units (1 metre); floor y=0";
+            // The demo is a clean studio, not a filtered view of the streamed
+            // city. Drop anything the initial residency warmup published.
+            m_renderer.clearImportedSceneMeshes();
+            importer::ImportedScene demo;
+            demo.sourceTag = "actor_demo_plane";
+            importer::ImportedSceneTexture gray;
+            gray.sourcePath = "generated/actor-demo-gray";
+            gray.width = gray.height = 256u;
+            gray.format = importer::TextureFormat::RGBA8Srgb;
+            gray.rgba8.resize(256u * 256u * 4u);
+            for (std::uint32_t py = 0; py < 256u; ++py) {
+                for (std::uint32_t px = 0; px < 256u; ++px) {
+                    const std::uint8_t value = ((px / 32u) + (py / 32u)) % 2u
+                        ? 140u : 112u;
+                    const std::size_t pixel = (py * 256u + px) * 4u;
+                    gray.rgba8[pixel] = gray.rgba8[pixel+1u] =
+                        gray.rgba8[pixel+2u] = value;
+                    gray.rgba8[pixel+3u] = 255u;
+                }
+            }
+            demo.textures.push_back(std::move(gray));
+            importer::ImportedSceneMesh plane;
+            plane.name = "actor-demo-gray-plane";
+            constexpr float kHalfSize = 700.0f;
+            const float y = 0.0f;
+            const auto vertex = [y](float x, float z, float u, float v) {
+                importer::ImportedSceneVertex out;
+                out.position[0] = x; out.position[1] = y; out.position[2] = z;
+                out.normal[1] = 1.0f;
+                out.uv[0] = u; out.uv[1] = v;
+                return out;
+            };
+            plane.vertices = {
+                vertex(-kHalfSize,-kHalfSize,0,0),
+                vertex(kHalfSize,-kHalfSize,2.5f,0),
+                vertex(kHalfSize,kHalfSize,2.5f,2.5f),
+                vertex(-kHalfSize,kHalfSize,0,2.5f)};
+            plane.indices = {0u,2u,1u,0u,3u,2u};
+            if (dropScene) {
+                const auto face = [&](std::array<odai::math::Vector3, 4> points,
+                                      odai::math::Vector3 normal) {
+                    const auto base = static_cast<std::uint32_t>(plane.vertices.size());
+                    for (int i = 0; i < 4; ++i) {
+                        auto v = vertex(points[i].x, points[i].z, float(i == 1 || i == 2), float(i >= 2));
+                        v.position[1] = points[i].y;
+                        v.normal[0] = normal.x; v.normal[1] = normal.y; v.normal[2] = normal.z;
+                        plane.vertices.push_back(v);
+                    }
+                    plane.indices.insert(plane.indices.end(), {base,base+2,base+1,base,base+3,base+2});
+                };
+                face({{{-100,280,-100},{100,280,-100},{100,280,100},{-100,280,100}}}, {0,1,0});
+                face({{{-100,0,-100},{100,0,-100},{100,280,-100},{-100,280,-100}}}, {0,0,-1});
+                face({{{100,0,100},{-100,0,100},{-100,280,100},{100,280,100}}}, {0,0,1});
+                face({{{100,0,-100},{100,0,100},{100,280,100},{100,280,-100}}}, {1,0,0});
+                face({{{-100,0,100},{-100,0,-100},{-100,280,-100},{-100,280,100}}}, {-1,0,0});
+            }
+            if (m_bethesdaSessionConfigured && !m_npcDemoPhysicsReady) {
+                auto& physics = m_bethesdaSession.physics();
+                physics.clearStreamedStaticCollision();
+                std::vector<odai::math::Vector3> corners;
+                for (const auto& v : plane.vertices) corners.push_back({v.position[0],v.position[1],v.position[2]});
+                // Physics adapter reverses imported triangle winding.
+                auto collisionIndices = plane.indices;
+                for (std::size_t i = 0; i < collisionIndices.size(); i += 3)
+                    std::swap(collisionIndices[i+1], collisionIndices[i+2]);
+                std::string why;
+                m_npcDemoPhysicsReady = physics.addStaticCollision(
+                    bethesda::ObjectId::runtime(0xfffffff0u), corners, collisionIndices, why);
+                if (!m_npcDemoPhysicsReady) { VOX_LOGE("npc-test") << "Jolt studio floor: " << why; }
+                else { VOX_LOGI("npc-test") << "Jolt studio floor ready; 1 stop, 2 run circle, Space/3 jump, arrow keys steer"; }
+            }
+            plane.parts = {importer::ImportedSceneMeshPart{0u,static_cast<std::uint32_t>(plane.indices.size()),0u,false}};
+            plane.parts.front().twoSided = true;
+            demo.meshes.push_back(std::move(plane));
+            importer::ImportedSceneInstance instance;
+            instance.transform[0]=instance.transform[5]=instance.transform[10]=instance.transform[15]=1.0f;
+            demo.instances.push_back(instance);
+            importer::ImportedSceneLight key;
+            key.sourceId = "actor-demo-key";
+            key.position[0] = focused->position[0] - 180.0f;
+            key.position[1] = focused->position[1] + 210.0f;
+            key.position[2] = focused->position[2] - 120.0f;
+            key.color[0] = 1.0f; key.color[1] = 0.95f; key.color[2] = 0.88f;
+            key.radius = 1400.0f; key.intensity = 2.2f;
+            demo.lights.push_back(key);
+            importer::buildImportedScenePackedRenderData(demo);
+            importer::buildImportedScenePageRanges(demo);
+            if (!m_renderer.uploadImportedScene(demo)) {
+                VOX_LOGE("newvegas") << "actor demo studio upload failed";
+            }
+        }
+        VOX_LOGI("newvegas") << "focus actor: placed " << focusedEditorId << " "
+                              << distance << " units ahead, facing the camera";
         return;
     }
 
     const char* drawMode = std::getenv("ODAI_FNV_DRAW");
-    if (drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) {
+    if (drawMode != nullptr &&
+        (std::strcmp(drawMode, "actors") == 0 || std::strcmp(drawMode, "actor-demo") == 0)) {
         const std::size_t before = m_actors.size();
         std::erase_if(m_actors, [](const SkinnedActor& actor) {
             return !hasHumanoidTorsoCoverage(actor);
@@ -2496,7 +2895,7 @@ void BethesdaApp::reloadActorsForCurrentSpace() {
     std::vector<SkinnedActor> retained = std::move(m_actors);
     m_actors.clear();
     const auto slotLimit = thirdPersonPlayerShowcase()
-        ? kPlayerAvatarSkinnedInstance : render::kMaxSkinnedInstances;
+        ? kFirstPersonWeaponInstance : render::kMaxSkinnedInstances;
     const auto isRetained = [&](std::uint32_t reference) {
         return std::any_of(retained.begin(), retained.end(), [&](const auto& actor) {
             return actor.referenceFormId == reference;
@@ -2594,6 +2993,10 @@ void BethesdaApp::realizePendingActorUploads(std::size_t maxActorUploads) {
         meshTemplate.vertices = avatar.character.vertices;
         meshTemplate.indices = avatar.character.indices;
         meshTemplate.draws = avatar.draws;
+        meshTemplate.morphVertexOffsets = m_skyrimPlayerMorphOffsets;
+        meshTemplate.morphDeltas = m_skyrimPlayerMorphDeltas;
+        meshTemplate.morphTargetCount = static_cast<std::uint32_t>(
+            m_skyrimPlayerMorphWeights.size());
         meshTemplate.boneCount =
             static_cast<std::uint32_t>(avatar.character.skeleton.bones.size());
         avatar.uploaded = m_renderer.uploadSkinnedMeshTemplate(
@@ -3647,8 +4050,9 @@ bool BethesdaApp::onInit() {
     if (const char* drawEnv = std::getenv("ODAI_FNV_DRAW")) {
         const std::string requested = drawEnv;
         const bool actorsOnly = requested == "actors";
-        const bool showTerrain = !actorsOnly && requested != "statics";
-        const bool showStatics = !actorsOnly && requested != "terrain";
+        const bool actorDemo = requested == "actor-demo";
+        const bool showTerrain = !actorsOnly && !actorDemo && requested != "statics";
+        const bool showStatics = actorDemo || (!actorsOnly && requested != "terrain");
         m_renderer.setImportedSceneDebugState(
             showTerrain, showStatics, /*showTextures=*/true, /*flatShading=*/false,
             /*waterDebug=*/false);
@@ -3887,7 +4291,7 @@ bool BethesdaApp::onInit() {
             static_cast<float>(std::atof(exposureKey)));
     }
 
-    if ((!m_scenarioId.empty() || m_streamIsMorrowind) && !initBethesdaSession()) {
+    if ((!m_scenarioId.empty() || m_streamIsMorrowind || m_streamIsSkyrim) && !initBethesdaSession()) {
         return false;
     }
     if ((skyrimCityShowcase() || m_skyrimForestReferenceShowcase ||
@@ -4051,6 +4455,25 @@ bool BethesdaApp::onInit() {
         }
     }
 
+    if (const char* draw = std::getenv("ODAI_FNV_DRAW");
+        draw && std::strcmp(draw,"actor-demo") == 0) {
+        arrangeActorParadeIfRequested();
+        render::ImportedInteriorLighting studio;
+        studio.enabled = studio.hasAuthoredLighting = true;
+        studio.localShadowMode =
+            render::ImportedInteriorLighting::LocalShadowMode::ShadowMaps;
+        for (int c=0;c<3;++c) { studio.ambientColor[c]=0.32f; studio.fogColor[c]=0.08f; }
+        studio.fogNear=10000; studio.fogFar=20000;
+        m_renderer.setImportedSceneInteriorMode(true);
+        m_renderer.setImportedInteriorLighting(studio);
+        m_renderer.setNeutralColorGrading();
+        // Actor-scale AO: preserve facial and clothing contacts without the
+        // multi-metre radius used for outdoor architecture. Respect AO-off for A/B.
+        m_renderer.setSsaoEnabled(aoMode != render::AoMode::Off);
+        m_renderer.setAmbientOcclusionTuning(18.0f, 0.15f, 1.25f);
+        m_renderer.setAmbientOcclusionFineScale(0.25f);
+        m_renderer.setAutoExposureRange(1.0f,1.0f);
+    }
     setMouseCaptured(true);
     return true;
 }
@@ -4987,6 +5410,44 @@ std::filesystem::path cacheWeatherSound(
 }
 
 }  // namespace
+
+void BethesdaApp::initFirstPersonCombatAudio() {
+    if (m_combatAudioReady || !m_streamer) return;
+    m_combatAudioReady = true;
+    for (const auto& path : m_streamer->assets().virtualPaths()) {
+        int kind = -1;
+        if (path.find("wpn\\swing\\blade\\medium\\") != std::string::npos) kind = 0;
+        // Explicit generic Attack effort INFOs; the DCETAttack group contains taunts.
+        if (path.find("skyrim.esm\\femaleeventoned\\dialoguegeneric__") != std::string::npos &&
+            (path.ends_with("00013eef_1.fuz") || path.ends_with("00013ef0_1.fuz") ||
+             path.ends_with("00013ef1_1.fuz") || path.ends_with("00013ef4_1.fuz"))) kind = 1;
+        if (path.find("wpn\\impact\\blade\\flesh\\") != std::string::npos) kind = 2;
+        if (path.find("wpn\\impact\\blade\\metal\\") != std::string::npos) kind = 3;
+        if (kind < 0 || m_combatSounds[kind].size() >= 4) continue;
+        std::vector<std::uint8_t> bytes;
+        std::string error, cachePath = path;
+        if (!m_streamer->assets().resolveAsset(path, bytes, error)) continue;
+        if (path.ends_with(".fuz")) {
+            const auto payload = importer::fnv::fuzAudio(bytes);
+            if (payload.empty()) continue;
+            bytes = std::vector<std::uint8_t>(payload.begin(), payload.end());
+            cachePath += ".xwm";
+        }
+        const auto playable = cacheWeatherSound(cachePath, bytes,
+            std::filesystem::path(m_streamCacheDirectory) / "audio");
+        if (playable.empty()) continue;
+        const auto sound = m_audio.loadSound(playable, audio::SoundCategory::Ambient);
+        if (sound.valid()) m_combatSounds[kind].push_back(sound);
+    }
+    VOX_LOGI("first-person") << "combat audio variants: swing=" << m_combatSounds[0].size()
+        << " effort=" << m_combatSounds[1].size() << " flesh=" << m_combatSounds[2].size()
+        << " surface=" << m_combatSounds[3].size();
+}
+void BethesdaApp::playFirstPersonCombatSound(unsigned kind) {
+    if (kind >= m_combatSounds.size() || m_combatSounds[kind].empty()) return;
+    const auto& sounds = m_combatSounds[kind];
+    m_audio.playSound(sounds[m_combatSoundNext[kind]++ % sounds.size()]);
+}
 
 void BethesdaApp::initWeatherAudio() {
     const importer::fnv::FalloutWeatherRecord* weather =
@@ -6256,6 +6717,9 @@ bool BethesdaApp::updateFlythrough(float deltaSeconds) {
 }
 
 void BethesdaApp::updateCamera(float deltaSeconds) {
+    const char* followName = std::getenv("ODAI_CAPTURE_FOLLOW_ACTOR");
+    const bool captureFollow = !m_captureVideoPath.empty() &&
+        followName != nullptr && followName[0] != '\0';
     // The scripted tour owns the camera outright -- no input, no collision, no
     // ground clamp. It flies over rooftops on purpose.
     if (m_flythroughSeconds > 0.0f) {
@@ -6359,7 +6823,8 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     // Stationary screenshots and fixed-clock acceptance sequences must not
     // consume desktop input. Tours and benchmark motion returned above.
     if (!m_screenshotPath.empty() ||
-        (m_captureFixedDt > 0.0f && (!m_captureDirectory.empty() || !m_captureVideoPath.empty()))) return;
+        (m_captureFixedDt > 0.0f && (!m_captureDirectory.empty() || !m_captureVideoPath.empty()) &&
+         (!captureFollow || !m_captureStarted))) return;
 
     // Mouselook from raw cursor deltas; GameApp has put the cursor in
     // GLFW_CURSOR_DISABLED mode so it reports unbounded relative motion.
@@ -6370,7 +6835,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     // left it, so 700 warm-up frames of deltas rotate the camera by an
     // arbitrary amount -- which silently defeats ODAI_FNV_YAW/PITCH and makes
     // two captures of "the same view" incomparable. That cost a bogus A/B.
-    const bool suppressMouseLook = !m_screenshotPath.empty();
+    const bool suppressMouseLook = !m_screenshotPath.empty() || captureFollow;
     // A conversation is MODAL, the way Skyrim's is: while it is up the player
     // neither walks nor looks around, and the camera turns onto the speaker.
     //
@@ -6415,6 +6880,71 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
             m_cameraBoomRequested = std::clamp(
                 m_cameraBoomRequested - m_uiInput.scrollDelta * 24.0f,
                 90.0f, 520.0f);
+        }
+        const bool ragdollDown = keyDown(m_window, GLFW_KEY_K);
+        if (canControlPlayer && ragdollDown && !m_ragdollToggleLatch &&
+            m_skyrimPlayerAvatar && m_skyrimPlayerAvatar->character.humanoidRig) {
+            const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+            std::string ragdollError;
+            if (m_bethesdaSession.physics().hasActiveRagdoll(playerId)) {
+                odai::math::Vector3 placement;
+                if (m_bethesdaSession.physics().recoverRagdoll(
+                        playerId, 320.0f, placement, ragdollError)) {
+                    m_thirdPersonView = true;
+                    VOX_LOGI("ragdoll") << "player recovered at "
+                        << placement.x << "," << placement.y << "," << placement.z;
+                } else {
+                    VOX_LOGW("ragdoll") << ragdollError;
+                }
+            } else {
+                struct RoleJoint { const char* role; int parent; };
+                static constexpr std::array<RoleJoint, 15> kJoints{{
+                    {"pelvis", -1}, {"spine", 0}, {"head", 1},
+                    {"left_upper_arm", 1}, {"left_forearm", 3}, {"left_hand", 4},
+                    {"right_upper_arm", 1}, {"right_forearm", 6}, {"right_hand", 7},
+                    {"left_thigh", 0}, {"left_calf", 9}, {"left_foot", 10},
+                    {"right_thigh", 0}, {"right_calf", 12}, {"right_foot", 13}}};
+                const SkinnedActor& avatar = *m_skyrimPlayerAvatar;
+                std::vector<bethesda::PhysicsRagdollJointConfig> joints;
+                joints.reserve(kJoints.size());
+                for (const RoleJoint& definition : kJoints) {
+                    const auto mapped = avatar.character.humanoidRig->roles.find(definition.role);
+                    if (mapped == avatar.character.humanoidRig->roles.end()) continue;
+                    const std::size_t bone = static_cast<std::size_t>(mapped->second);
+                    if (bone >= avatar.poseScratch.size() ||
+                        bone >= avatar.character.inverseBindMatrices.size()) continue;
+                    const odai::math::Matrix4 boneWorld = avatar.poseScratch[bone] *
+                        odai::math::inverse(avatar.character.inverseBindMatrices[bone]);
+                    bethesda::PhysicsRagdollJointConfig joint;
+                    joint.role = definition.role;
+                    joint.parent = definition.parent;
+                    joint.position = {boneWorld(0, 3), boneWorld(1, 3), boneWorld(2, 3)};
+                    const bool torso = joint.role == "pelvis" || joint.role == "spine";
+                    const bool head = joint.role == "head";
+                    joint.radius = torso ? 10.0f : (head ? 9.0f : 5.0f);
+                    joint.halfHeight = torso ? 17.0f : (head ? 9.0f : 13.0f);
+                    joint.massKilograms = torso ? 11.0f : (head ? 5.0f : 3.0f);
+                    joints.push_back(std::move(joint));
+                }
+                const auto physical = m_bethesdaSession.physics().characterState(playerId);
+                const odai::math::Vector3 velocity = physical
+                    ? physical->velocity : odai::math::Vector3{};
+                if (joints.size() >= 8 && m_bethesdaSession.physics().activateRagdoll(
+                        playerId, joints, velocity, ragdollError)) {
+                    m_thirdPersonView = true;
+                    VOX_LOGI("ragdoll") << "player ragdoll activated; press K to recover";
+                } else {
+                    VOX_LOGW("ragdoll") << "activation failed: " << ragdollError;
+                }
+            }
+        }
+        m_ragdollToggleLatch = ragdollDown;
+        if (m_bethesdaSession.physics().hasActiveRagdoll(
+                m_bethesdaSession.playerObject())) {
+            (void)m_bethesdaSession.setActorControllerInput(
+                m_bethesdaSession.playerObject(), bethesda::PhysicsCharacterInput{});
+            reconstructPlayerCamera(deltaSeconds);
+            return;
         }
     }
 
@@ -6587,6 +7117,13 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
                 true, focusDistance, kFocusRangeUnits,
                 kMaxBlurRadiusPixels * resolutionScale * m_dialogueDofBlend, kNearBlurScale);
             m_dialogueDofActive = true;
+        } else if (const char* walkingDof = std::getenv("ODAI_FNV_WALK_DOF");
+                   walkingDof && std::string_view(walkingDof) == "1") {
+            // Broad outdoor focus keeps the path readable while softening
+            // distant scenery. Dialogue temporarily takes over the lens.
+            m_renderer.setDepthOfField(
+                true, 1500.0f, 1000.0f, 4.0f * resolutionScale, 0.25f);
+            m_dialogueDofActive = false;
         } else if (m_dialogueDofActive) {
             // Hand it back once, flipping only the enable so anything dialled
             // into the debug sliders survives.
@@ -6617,13 +7154,76 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     // still runs: gravity, the terrain pin and the collision push-out all keep
     // working, so a conversation opened while stepping off a kerb still settles
     // the player onto the ground rather than freezing them mid-air.
-    if (canControlPlayer) {
+    if (canControlPlayer && !captureFollow) {
         if (keyDown(m_window, GLFW_KEY_W)) { moveX += forwardX; moveZ += forwardZ; }
         if (keyDown(m_window, GLFW_KEY_S)) { moveX -= forwardX; moveZ -= forwardZ; }
         if (keyDown(m_window, GLFW_KEY_D)) { moveX += rightX;   moveZ += rightZ; }
         if (keyDown(m_window, GLFW_KEY_A)) { moveX -= rightX;   moveZ -= rightZ; }
-        if (keyDown(m_window, GLFW_KEY_SPACE)) { moveY += 1.0f; }
+        if (!m_npcDemoPhysicsReady && keyDown(m_window, GLFW_KEY_SPACE)) { moveY += 1.0f; }
         if (keyDown(m_window, GLFW_KEY_LEFT_CONTROL)) { moveY -= 1.0f; }
+    }
+
+    // Capture follows an authored actor through the ordinary player controller.
+    // Never teleport the camera along a tour or move through a missing navmesh.
+    if (captureFollow && canControlPlayer) {
+        const auto actor = std::find_if(m_actors.begin(), m_actors.end(),
+            [followName](const SkinnedActor& value) {
+                return value.name == followName || value.fullName == followName;
+            });
+        if (actor != m_actors.end()) {
+            const odai::math::Vector3 start{m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+            odai::math::Vector3 goal{actor->position[0], actor->position[1], actor->position[2]};
+            // A supplied route can lead the player onward after the departure
+            // dialogue. It supplies navigation goals, never camera positions.
+            const bool walkingRoute = !g_runtimeTour.empty() &&
+                m_captureWritten >= static_cast<int>(50.0f * m_captureVideoFps);
+            if (walkingRoute) {
+                while (m_captureWalkRouteStep + 1 < g_runtimeTour.size()) {
+                    const auto& point = g_runtimeTour[m_captureWalkRouteStep];
+                    const float x = point.position[0] - start.x, z = point.position[2] - start.z;
+                    if (x*x + z*z > 80.0f * 80.0f) break;
+                    ++m_captureWalkRouteStep;
+                    m_captureFollowRepathSeconds = 0;
+                }
+                const auto& point = g_runtimeTour[m_captureWalkRouteStep];
+                goal = {point.position[0], point.position[1], point.position[2]};
+            }
+            const float dx = goal.x - start.x, dz = goal.z - start.z;
+            const float distance = std::sqrt(dx * dx + dz * dz);
+            const float stoppingDistance = walkingRoute ? 40.0f : 220.0f;
+            m_captureFollowRepathSeconds -= deltaSeconds;
+            if (distance > stoppingDistance && m_captureFollowRepathSeconds <= 0.0f) {
+                m_captureFollowPath.clear();
+                (void)m_actorNavigation.buildPath(start, goal, m_captureFollowPath, true);
+                m_captureFollowStep = 0;
+                m_captureFollowRepathSeconds = 1.0f;
+            }
+            while (m_captureFollowStep < m_captureFollowPath.size()) {
+                const auto& point = m_captureFollowPath[m_captureFollowStep].position;
+                const float px = point.x - start.x, pz = point.z - start.z;
+                if (px * px + pz * pz > 45.0f * 45.0f) break;
+                ++m_captureFollowStep;
+            }
+            if (distance > stoppingDistance && m_captureFollowStep < m_captureFollowPath.size()) {
+                const auto& point = m_captureFollowPath[m_captureFollowStep].position;
+                moveX = point.x - start.x;
+                moveZ = point.z - start.z;
+            }
+            // Recorded player waypoints may traverse walkable collision that
+            // is absent from the NPC navmesh. Replay those headings through
+            // physics; retain navigation for the final, unsampled destination.
+            if (walkingRoute && m_captureWalkRouteStep + 1 < g_runtimeTour.size() && distance > stoppingDistance) {
+                moveX = dx;
+                moveZ = dz;
+            }
+            if (distance > 1.0f) {
+                const float desiredYaw = std::atan2(dz, dx) * (180.0f / kPi);
+                const float turn = std::remainder(desiredYaw - m_yawDegrees, 360.0f);
+                const float blend = 1.0f - std::exp(-deltaSeconds / 0.35f);
+                m_yawDegrees += turn * blend;
+                m_pitchDegrees += (-3.0f - m_pitchDegrees) * blend;
+            }
+        }
     }
 
     const float lengthSquared = (moveX * moveX) + (moveZ * moveZ);
@@ -6634,7 +7234,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     }
 
     float speed = kWalkUnitsPerSecond;
-    const bool sprinting = keyDown(m_window, GLFW_KEY_LEFT_SHIFT);
+    const bool sprinting = !captureFollow && keyDown(m_window, GLFW_KEY_LEFT_SHIFT);
     if (sprinting) {
         speed *= kSprintMultiplier;
     }
@@ -6651,10 +7251,10 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         input.desiredVelocity = {moveX * speed, 0.0f, moveZ * speed};
         const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
         const auto physical = m_bethesdaSession.physics().characterState(playerId);
-        if (canControlPlayer && keyDown(m_window, GLFW_KEY_SPACE) &&
-            physical.has_value() && physical->grounded) {
-            input.desiredVelocity.y = m_streamIsSkyrim ? 320.0f : kJumpUnitsPerSecond;
-        }
+        if (m_streamIsSkyrim) {
+            input.jumpRequested = canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_SPACE);
+        } else if (canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_SPACE) &&
+            physical.has_value() && physical->grounded) input.desiredVelocity.y = kJumpUnitsPerSecond;
         if (thirdPersonPlayerShowcase() && lengthSquared > 1.0e-6f) {
             const float wanted = actorYawForDirection(moveX, moveZ);
             float turn = std::fmod(wanted - m_playerYawRadians + 3.0f * kPi,
@@ -6668,6 +7268,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         if (thirdPersonPlayerShowcase()) {
             anim::AnimationInputState animationInput;
             animationInput.requestedVelocity = input.desiredVelocity;
+            animationInput.jumpRequested = input.jumpRequested;
             animationInput.movementSpeed = std::sqrt(
                 input.desiredVelocity.x * input.desiredVelocity.x +
                 input.desiredVelocity.z * input.desiredVelocity.z);
@@ -6745,9 +7346,13 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
                 m_airborne = true;
             }
         }
+    } else if (m_walkMode) {
+        // Missing streamed ground must not turn Space into a flight control.
+        m_verticalVelocity -= kGravityUnitsPerSecondSq * deltaSeconds;
+        m_cameraY += m_verticalVelocity * deltaSeconds;
+        m_airborne = true;
     } else {
-        // Fly mode (or off the terrain grid): Space/Ctrl move straight up and
-        // down, and there is nothing to fall onto.
+        // Explicit diagnostic flight only.
         m_cameraY += moveY * speed * deltaSeconds;
         m_airborne = false;
         m_verticalVelocity = 0.0f;
@@ -6797,6 +7402,10 @@ bool BethesdaApp::resolveConfiguredContentProfile() {
         for (const importer::fnv::ContentDiagnostic& diagnostic : resolved.diagnostics) {
             VOX_LOGE("mods") << diagnostic.code << ": " << diagnostic.message;
         }
+        return false;
+    }
+    if (skyrimCityThirdPersonShowcase() && resolved.game != importer::fnv::BethesdaGame::SkyrimSpecialEdition) {
+        VOX_LOGE("mods") << "Skyrim city character showcase requires a Skyrim SE profile";
         return false;
     }
     if (resolved.plugins.empty()) {
@@ -7013,6 +7622,18 @@ bool BethesdaApp::initStreaming() {
         const bool loadOrderOpened = m_contentProfile.has_value()
             ? streamOrder.open(*m_contentProfile, orderError)
             : ([&]() {
+                if (m_streamIsSkyrim) {
+                    importer::fnv::ResolvedContentProfile preflight;
+                    preflight.game = importer::fnv::BethesdaGame::SkyrimSpecialEdition;
+                    preflight.dataRoot = m_streamDirectory;
+                    preflight.plugins = requestedPlugins;
+                    for (const auto& directory : m_modDirectories) {
+                        importer::fnv::ContentLayer layer;
+                        layer.root = directory;
+                        preflight.layers.push_back(std::move(layer));
+                    }
+                    return streamOrder.open(preflight, orderError);
+                }
                 for (const std::string& modDirectory : m_modDirectories) {
                     streamOrder.addSearchRoot(std::filesystem::path(modDirectory));
                 }
@@ -7733,6 +8354,23 @@ bool BethesdaApp::initStreaming() {
             m_yawDegrees = gateYawDegrees;
             m_pitchDegrees = -8.0f;
         }
+    } else if (!m_interiorStarted && bethesda::findScenario(m_scenarioId) != nullptr &&
+               bethesda::findScenario(m_scenarioId)->startDoorFormId != 0u) {
+        const auto& scenario = *bethesda::findScenario(m_scenarioId);
+        const auto plugin = std::find_if(m_streamLoadOrder.entries().begin(),
+            m_streamLoadOrder.entries().end(), [&](const auto& entry) {
+                return toLowerAscii(entry.header.fileName) == toLowerAscii(scenario.basePlugin);
+            });
+        std::string error;
+        if (plugin == m_streamLoadOrder.entries().end() ||
+            !m_streamer->referencePositionEngineSpace(m_streamLoadOrder.remapFormId(
+                std::distance(m_streamLoadOrder.entries().begin(), plugin), scenario.startDoorFormId),
+                spawn, error, true, &m_yawDegrees)) {
+            VOX_LOGE("scenario") << "required departure marker is unavailable: " << error;
+            return false;
+        }
+        spawn[1] += kEyeHeightUnits;
+        spawnedAtScenarioMarker = true;
     } else if (!m_interiorStarted && !m_scenarioStartMarker.empty()) {
         const std::string wantedMarker = toLowerAscii(m_scenarioStartMarker);
         const auto marker = std::find_if(
@@ -7948,7 +8586,7 @@ bool BethesdaApp::initStreaming() {
         // F toggles this interactively; these are the same switch for a
         // headless run, which cannot press a key.
         if (std::getenv("ODAI_FNV_SPAWN_POS") != nullptr &&
-            std::getenv("ODAI_FNV_WALK") == nullptr) {
+            std::getenv("ODAI_FNV_WALK") == nullptr && m_scenarioId.empty()) {
             // Placing the camera explicitly implies flying it: walk mode
             // re-snaps Y to the ground every frame, so an authored height
             // survived exactly one frame.
@@ -8097,7 +8735,8 @@ void BethesdaApp::updateSkyrimTerrainLod(const float bethesdaPosition[3]) {
     // parsing and uploading the 49-tile BTR ring merely to hide it again in
     // the renderer; that work dominated both startup and steady-state memory.
     const char* drawMode = std::getenv("ODAI_FNV_DRAW");
-    if (drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) {
+    if (drawMode != nullptr &&
+        (std::strcmp(drawMode, "actors") == 0 || std::strcmp(drawMode, "actor-demo") == 0)) {
         return;
     }
     if (!m_streamIsSkyrim || m_streamer == nullptr) {
@@ -8310,7 +8949,8 @@ void BethesdaApp::clearSkyrimObjectLodTiles() {
 void BethesdaApp::updateSkyrimObjectLod(const float position[3], const float velocity[3], float deltaSeconds) {
     const char* drawMode = std::getenv("ODAI_FNV_DRAW");
     if (!m_streamIsSkyrim || !m_streamer || !m_streamJobs ||
-        (drawMode && std::strcmp(drawMode, "actors") == 0)) return;
+        (drawMode && (std::strcmp(drawMode, "actors") == 0 ||
+                      std::strcmp(drawMode, "actor-demo") == 0))) return;
     const auto worldspace = m_streamer->currentWorldspaceEditorId();
     if (m_objectLodGeneration != worldspace) {
         clearSkyrimObjectLodTiles();
@@ -8488,7 +9128,10 @@ void BethesdaApp::updateSkyrimObjectLod(const float position[3], const float vel
                     const bool inherited = source != worldspace;
                     handoff.clipResident = (request.child || inherited) && (request.near || (!request.fixed && inherited));
                     handoff.dropAll = request.showcase && request.near;
-                    handoff.dropRegular = request.near && !handoff.clipResident;
+                    // A BTO covers sixteen cells. Proximity alone does not mean
+                    // the detail replacing all of its rocks has arrived.
+                    handoff.dropRegular = request.near && !handoff.clipResident &&
+                        handoff.residentMask == 0xffffu;
                     importer::fnv::applySkyrimLodHandoff(scene,handoff);
                     scene.sourceTag = "skyrim_object_lod:"+source;
                     result->scene = std::move(scene); result->sourceWorldspace = source; result->built = true;
@@ -8508,7 +9151,8 @@ void BethesdaApp::updateSkyrimObjectLod(const float position[3], const float vel
 
 void BethesdaApp::updateSkyrimTreeLod(const float bethesdaPosition[3]) {
     const char* drawMode = std::getenv("ODAI_FNV_DRAW");
-    if ((drawMode != nullptr && std::strcmp(drawMode, "actors") == 0) ||
+    if ((drawMode != nullptr && (std::strcmp(drawMode, "actors") == 0 ||
+                                 std::strcmp(drawMode, "actor-demo") == 0)) ||
         !m_streamIsSkyrim || m_streamer == nullptr ||
         !m_streamer->isStreamingIdle()) {
         return;
@@ -8723,6 +9367,10 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
     if (!m_streamer) {
         return;
     }
+    if (const char* draw = std::getenv("ODAI_FNV_DRAW");
+        draw != nullptr && std::strcmp(draw, "actor-demo") == 0) {
+        return;
+    }
     if (m_interiorStarted) {
         if (m_bethesdaCollisionBroadPhaseDirty && m_bethesdaSessionConfigured) {
             const core::Stopwatch broadPhaseTimer;
@@ -8831,6 +9479,44 @@ void BethesdaApp::onTick(float deltaSeconds) {
     if (m_captureFixedDt > 0.0f) {
         deltaSeconds = m_captureFixedDt;
     }
+    if (m_npcDemoPhysicsReady) {
+        bool stop = false, run = false;
+        constexpr int keys[] = {GLFW_KEY_1, GLFW_KEY_2, GLFW_KEY_3};
+        for (int mode = 0; mode < 3; ++mode) {
+            const bool down = keyDown(m_window, keys[mode]) ||
+                (mode == 2 && keyDown(m_window, GLFW_KEY_SPACE));
+            if (down && !m_npcDemoKeyLatch[mode]) {
+                if (mode == 0) stop = true;
+                else if (mode == 1) run = true;
+                else m_npcDemoJumpRequested = true;
+            }
+            m_npcDemoKeyLatch[mode] = down;
+        }
+        // Camera-relative arrows; WASD remains available for the camera.
+        const float forward = float(keyDown(m_window, GLFW_KEY_UP)) - float(keyDown(m_window, GLFW_KEY_DOWN));
+        const float right = float(keyDown(m_window, GLFW_KEY_RIGHT)) - float(keyDown(m_window, GLFW_KEY_LEFT));
+        const float yaw = m_yawDegrees * kPi / 180.0f;
+        m_npcDemoMove = {std::cos(yaw)*forward - std::sin(yaw)*right, 0,
+                        std::sin(yaw)*forward + std::cos(yaw)*right};
+        const float length = odai::math::length(m_npcDemoMove);
+        if (length > 1.0f) m_npcDemoMove = m_npcDemoMove / length;
+        if (std::getenv("ODAI_NPC_DROP_SCENE") && !m_npcDemoManualControl &&
+            (length > 0.0f || stop || run || m_npcDemoJumpRequested)) {
+            m_npcDemoManualControl = true;
+            VOX_LOGI("npc-drop") << "manual control: automatic drop and replay disabled";
+        }
+        if (const char* probe = std::getenv("ODAI_NPC_PREVIEW")) {
+            const float before = m_npcDemoProbeSeconds;
+            m_npcDemoProbeSeconds += deltaSeconds;
+            if (std::strcmp(probe, "run") == 0 || std::strcmp(probe, "run-jump") == 0) {
+                run |= before == 0.0f;
+            }
+            if (std::strcmp(probe, "jump") == 0 || std::strcmp(probe, "run-jump") == 0) {
+                m_npcDemoJumpRequested |= int(before / 2.0f) != int(m_npcDemoProbeSeconds / 2.0f);
+            }
+        }
+        m_npcDemoLocomotion.input(stop, run, m_npcDemoMove);
+    }
     if (m_bethesdaSessionConfigured) {
         if (m_scenarioSpawnPending) (void)settleScenarioSpawn();
         syncBethesdaPlayerState(false);
@@ -8840,7 +9526,8 @@ void BethesdaApp::onTick(float deltaSeconds) {
                 [this](std::uint64_t, double fixedStepSeconds) {
                     stepBethesdaActorControllers(
                         static_cast<float>(fixedStepSeconds));
-                    if (m_meleeAttackPending) {
+                    if (m_meleeAttackPending && !m_firstPersonGuardHeld &&
+                        (m_thirdPersonView || m_firstPersonAttackTime < 0)) {
                         const float yaw = m_yawDegrees * (kPi / 180.0f);
                         const float pitch = m_pitchDegrees * (kPi / 180.0f);
                         const float horizontal = std::cos(pitch);
@@ -8850,14 +9537,12 @@ void BethesdaApp::onTick(float deltaSeconds) {
                                 {std::cos(yaw) * horizontal, std::sin(pitch),
                                     std::sin(yaw) * horizontal});
                         if (attack.accepted) {
-                            m_toasts.push(
-                                attack.hit ? (attack.killed ? "Enemy defeated" : "Hit")
-                                           : "Attack missed",
-                                attack.hit ? attack.target.toString() : std::string{},
-                                "melee-attack");
+                            m_firstPersonAttackTime = 0.0f;
+                            playFirstPersonCombatSound(0);
+                            playFirstPersonCombatSound(1);
                         }
-                        m_meleeAttackPending = false;
                     }
+                    m_meleeAttackPending = false;
                 });
         m_sessionInterpolationAlpha =
             static_cast<float>(sessionStep.clock.interpolationAlpha);
@@ -8881,6 +9566,50 @@ void BethesdaApp::onTick(float deltaSeconds) {
         if (loadDown && !m_gameplayLoadKeyLatch) (void)loadGameplayState();
         m_gameplaySaveKeyLatch = saveDown;
         m_gameplayLoadKeyLatch = loadDown;
+        const bool checkpointDown = keyDown(m_window, GLFW_KEY_F8);
+        const bool manualCheckpoint = checkpointDown && !m_scenarioReportKeyLatch;
+        m_scenarioReportKeyLatch = checkpointDown;
+        m_scenarioReportElapsed += deltaSeconds;
+        if (!m_scenarioReportPath.empty() && (m_scenarioId == "skyrim-bleak-falls" || m_scenarioId == "skyrim-helgen-ralof") &&
+            m_bethesdaSession.clock().tick() >= 4u &&
+            (manualCheckpoint || m_scenarioReportElapsed >= 1.0)) {
+            m_scenarioReportElapsed = 0.0;
+            auto checkpoint = odai::bethesda::routeCheckpoint(m_bethesdaSession);
+            checkpoint["dialogue"] = {{"active",m_bethesdaDialogueActive},
+                {"speaker",m_bethesdaDialogueSpeaker.toString()},
+                {"choice_count",m_bethesdaDialogueChoices.size()}};
+            checkpoint["residency"] = {{"visual_chunks",m_streamer ? m_streamer->stats().residentChunks : 0},
+                {"collision_cells",m_collision.residentCellCount()}};
+            const auto serialized = checkpoint.dump();
+            if (manualCheckpoint || serialized != m_lastScenarioCheckpoint) {
+                std::ofstream output(m_scenarioReportPath, std::ios::app);
+                if (!m_scenarioReportStarted) {
+                    output << nlohmann::json({{"type","session"},
+                        {"launch",m_scenarioReportLoadRequested ? "load-requested" : "fresh"},
+                        {"capture_mode",m_captureFrames > 0 || !m_screenshotPath.empty()},
+                        {"contract",odai::bethesda::scenarioStartContract(m_scenarioId)},
+                        {"profile",m_contentProfile ? odai::bethesda::routeProfileMetadata(*m_contentProfile) : nlohmann::json(nullptr)},
+                        {"content_fingerprint",m_loadOrderFingerprint},
+                        {"evidence_kind","runtime observations; not proof of ordinary-input completion"},
+                        {"initial_assessment",odai::bethesda::assessScenarioStart(m_bethesdaSession)}}).dump() << '\n';
+                }
+                output << nlohmann::json({{"type","checkpoint"},
+                    {"reason",manualCheckpoint ? "F8" : "observed-change"},
+                    {"tick",m_bethesdaSession.clock().tick()},
+                    {"session_hash",m_bethesdaSession.deterministicHash()},
+                    {"state",checkpoint}}).dump() << '\n';
+                output.flush();
+                if (output) {
+                    m_scenarioReportStarted = true;
+                    m_lastScenarioCheckpoint = serialized;
+                    if (manualCheckpoint) m_toasts.push("Checkpoint recorded", "Route report updated", "route-report");
+                } else {
+                    VOX_LOGE("runtime") << "Could not write scenario checkpoint report";
+                    m_toasts.push("Checkpoint failed", "Check report directory and permissions", "route-report");
+                    m_scenarioReportPath.clear();
+                }
+            }
+        }
     }
     // Keep renderer-side water and rigid machinery on the tour's fixed clock.
     // During capture pre-roll, hold phase zero while streaming, TAA, and
@@ -8904,9 +9633,23 @@ void BethesdaApp::onTick(float deltaSeconds) {
     if (meleeDown && !m_meleeAttackButtonLatch && m_bethesdaSessionConfigured &&
         !m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && !giftMenuOpen && m_talkingActor < 0 &&
         m_doorTransitionPhase == DoorTransitionPhase::None) {
-        m_meleeAttackPending = true;
+        m_meleeAttackPending = !m_firstPersonGuardHeld && (m_thirdPersonView || m_firstPersonAttackTime < 0);
     }
     m_meleeAttackButtonLatch = meleeDown;
+    if (m_bethesdaSessionConfigured) {
+        const bool captureGuard = !m_screenshotPath.empty() && std::getenv("ODAI_SKYRIM_CAPTURE_BLOCK");
+        const bool guard = (captureGuard || glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) &&
+            !m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && !giftMenuOpen &&
+            m_talkingActor < 0 && m_doorTransitionPhase == DoorTransitionPhase::None &&
+            m_firstPersonAttackTime < 0;
+        const float yaw = m_yawDegrees * (kPi / 180.0f);
+        m_bethesdaSession.setActorGuard(m_bethesdaSession.playerObject(), guard,
+            {std::cos(yaw), 0, std::sin(yaw)});
+        m_firstPersonGuardHeld = m_bethesdaSession.actorGuarding(m_bethesdaSession.playerObject());
+        for (const auto& contact : m_bethesdaSession.takeMeleeContacts())
+            if (contact.attacker == m_bethesdaSession.playerObject())
+                playFirstPersonCombatSound(contact.flesh && !contact.blocked ? 2 : 3);
+    }
     m_toasts.update(deltaSeconds);
     // The banner is a WORLD event, so it pauses with the world. Letting it run
     // under an open menu means a discovery fades in and out behind a modal
@@ -9011,6 +9754,33 @@ void BethesdaApp::onTick(float deltaSeconds) {
                 m_talkingActor);
         }
 
+        for (SkinnedActor& actor : m_actors) {
+            if (!actor.runtimeAnimationRegistered) continue;
+            if (const auto id = runtimeObjectIdForActor(actor)) {
+                const auto output = m_bethesdaSession.interpolatedActorAnimationOutput(*id, m_sessionInterpolationAlpha);
+                actor.runtimeAnimationPose = output.pose;
+                actor.runtimeEvaluationPacket = output.evaluationPacket;
+                actor.runtimePoseResetHistory = output.resetHistory;
+                if (std::getenv("ODAI_NPC_DROP_SCENE") && output.activeClip != m_npcDemoLastClip) {
+                    m_npcDemoLastClip = output.activeClip;
+                    const auto body = m_bethesdaSession.physics().characterState(*id);
+                    VOX_LOGI("npc-drop") << "state=" << output.activeState
+                        << " clip=" << output.activeClip << " provider=" << output.activeProvider
+                        << " grounded=" << (body && body->grounded)
+                        << " vertical=" << (body ? body->velocity.y : 0.0f)
+                        << " impact_mps=" << (body ? body->landingImpactMetres : 0.0f)
+                        << " fallback=" << output.fallbackReason;
+                }
+                const char* probe = std::getenv("ODAI_ACTOR_WEAPON_DRAW");
+                if (probe && actor.name == probe) for (const auto& event : output.clipEvents) {
+                    VOX_LOGI("equipment") << actor.name << ": clip=" << output.activeClip << " event=" << event.name
+                        << " graphExecuted=" << output.authoredGraphExecuted;
+                }
+                for (std::size_t bone = 0; bone < actor.runtimeAnimationPose.size() &&
+                     bone < actor.equipmentPoseCorrection.size(); ++bone)
+                    actor.runtimeAnimationPose[bone] = actor.runtimeAnimationPose[bone] * actor.equipmentPoseCorrection[bone];
+            }
+        }
         updateActorPoses(m_actors, deltaSeconds);
         for (const SkinnedActor& actor : m_actors) {
             if (!actor.uploaded || !actor.renderVisible) {
@@ -9018,6 +9788,12 @@ void BethesdaApp::onTick(float deltaSeconds) {
             }
             render::ImportedSkinnedActorFrameData pose{};
             pose.boneMatrices = actor.poseScratch;
+            pose.animationView = actor.animationView;
+            pose.evaluationPacket = actor.runtimeEvaluationPacket;
+            pose.resetHistory = actor.runtimePoseResetHistory;
+            pose.actorWorld = odai::math::Matrix4::translation({actor.position[0],actor.position[1],actor.position[2]}) *
+                odai::math::Matrix4::rotationY(actor.yawRadians) *
+                odai::math::Matrix4::scale({actor.visualScale,actor.visualScale,actor.visualScale});
             m_renderer.setSkinnedActorPose(actor.instanceSlot, pose);
         }
     }
@@ -9061,6 +9837,21 @@ void BethesdaApp::onTick(float deltaSeconds) {
         }
     }
 
+    if (!m_scenarioSpawnPending && !m_menuOpen && !m_playerInventoryOpen) {
+        for (const auto& line : m_bethesdaSession.sceneSpeech()) {
+            if (line.presented) continue;
+            for (auto& actor : m_actors) {
+                if (runtimeObjectIdForActor(actor) != line.speaker || !actor.placed) continue;
+                dialogue::DialogueNode node; node.id = "scene_" + std::to_string(line.sequence);
+                node.text = line.text; node.voiceKey = line.voiceKey;
+                double duration = 0;
+                speakActorLine(actor, std::filesystem::path(m_streamCacheDirectory) / "voice", m_audio, &node, &duration);
+                m_bethesdaSession.presentSceneSpeech(line.sequence, duration);
+                VOX_LOGI("scene") << actor.displayName() << " speaks " << line.voiceKey;
+                break;
+            }
+        }
+    }
     SkinnedActor* speaker = talkingActor();
 
     // Talking to Victor. Held keys are edge-detected by keyDown(), so a choice
@@ -9261,6 +10052,12 @@ void BethesdaApp::onTick(float deltaSeconds) {
         const int doorIndex = findUsableDoor();
         if (doorIndex >= 0) {
             useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
+        } else {
+            const float yaw = m_yawDegrees * kPi / 180.f;
+            const float pitch = m_pitchDegrees * kPi / 180.f;
+            m_renderer.activateImportedEffect(m_cameraX, m_cameraY, m_cameraZ,
+                std::cos(yaw) * std::cos(pitch), std::sin(pitch),
+                std::sin(yaw) * std::cos(pitch));
         }
     }
 
@@ -10371,12 +11168,31 @@ bool BethesdaApp::initBethesdaSession() {
     if (fingerprint.empty() && m_contentProfile.has_value()) fingerprint = m_contentProfile->fingerprint;
     if (fingerprint.empty()) fingerprint = "unfingerprinted:" + toLowerAscii(m_streamPlugin);
     std::string error;
+    if (m_streamIsSkyrim && m_scenarioId.empty()) {
+        bethesda::BethesdaSessionConfig config;
+        config.game = importer::fnv::BethesdaGame::SkyrimSpecialEdition;
+        config.contentFingerprint = fingerprint;
+        config.randomSeed = m_captureSeed == 0u ? 1u : m_captureSeed;
+        config.livingWorldEnabled = false;
+        if (m_streamer) {
+            config.characterMovement = loadNativeMovementPolicy(m_streamer->assets());
+        }
+        if (!m_bethesdaSession.configure(config, error)) {
+            VOX_LOGE("animation") << "could not initialize Skyrim preview animation session: " << error;
+            return false;
+        }
+        m_bethesdaSessionConfigured = true;
+        syncBethesdaActors(true, true);
+        submitBethesdaActorControllerIntents();
+        return true;
+    }
     if (m_streamIsMorrowind) {
         useMorrowindUiPalette();
         if (!m_bethesdaSession.configure(
                 bethesda::BethesdaSessionConfig{
                     importer::fnv::BethesdaGame::Morrowind, fingerprint, {},
-                    m_captureSeed == 0u ? 1u : m_captureSeed}, error)) {
+                    m_captureSeed == 0u ? 1u : m_captureSeed, {}, true, 20.0,
+                    std::nullopt}, error)) {
             VOX_LOGE("tes3") << "runtime session failed: " << error;
             return false;
         }
@@ -10610,7 +11426,7 @@ bool BethesdaApp::initBethesdaSession() {
                 }
             }
             const std::uint32_t actorSlotLimit = thirdPersonPlayerShowcase()
-                ? kPlayerAvatarSkinnedInstance : render::kMaxSkinnedInstances;
+                ? kFirstPersonWeaponInstance : render::kMaxSkinnedInstances;
             if (nextSlot >= actorSlotLimit) break;
             const bethesda::Tes3ActorDefinition* definition =
                 content->findActor("NPC_", actor.name);
@@ -10891,13 +11707,23 @@ bool BethesdaApp::initBethesdaSession() {
         return false;
     }
     useSkyrimUiPalette();
-    if (!m_bethesdaSession.configure(
-            bethesda::BethesdaSessionConfig{scenario->game, fingerprint, scenario->id,
-                                            m_captureSeed == 0u ? 1u : m_captureSeed}, error)) {
+    bethesda::BethesdaSessionConfig scenarioConfig{
+        scenario->game, fingerprint, scenario->id,
+        m_captureSeed == 0u ? 1u : m_captureSeed, {}, true, 20.0, std::nullopt};
+    if (m_streamer) {
+        scenarioConfig.characterMovement = loadNativeMovementPolicy(m_streamer->assets());
+    }
+    if (!m_bethesdaSession.configure(scenarioConfig, error)) {
         VOX_LOGE("scenario") << "runtime session failed: " << error;
         return false;
     }
     m_bethesdaSessionConfigured = true;
+    m_bethesdaSession.setEffectAnimationPlayer([this](const auto& command) {
+        std::uint32_t reference = 0;
+        std::string error;
+        return bethesda::resolvedFormId(m_streamLoadOrder, command.reference, reference, error) &&
+            m_renderer.playImportedEffect(reference, command.sequence, command.startOver);
+    });
     if (!loadScenarioQuestDefinitions(*scenario)) {
         m_bethesdaSessionConfigured = false;
         return false;
@@ -11140,6 +11966,24 @@ bool BethesdaApp::settleScenarioSpawn() {
     settled.grounded = true;
     std::string error;
     if (!m_bethesdaSession.physics().restoreCharacter(settled, error)) return false;
+    const auto* scenario = bethesda::findScenario(m_scenarioId);
+    if (scenario && scenario->companionReferenceFormId != 0u) {
+        // MQ101 is already complete in this fresh-start scenario. Establish
+        // its companion's departure placement once, alongside the player.
+        const auto id = bethesda::ObjectId::persistent(bethesda::makeRecordKey(
+            scenario->basePlugin, scenario->companionReferenceFormId));
+        auto* companion = m_bethesdaSession.world().find(id);
+        const auto* playerObject = m_bethesdaSession.world().find(player);
+        if (!companion || !playerObject) return false;
+        float x = settled.position.x + 160.0f, z = settled.position.z;
+        float y = settled.position.y;
+        if (!m_collision.groundHeight(x, z, y, y)) return false;
+        companion->transform.position = {x, y, z};
+        companion->currentSpace = playerObject->currentSpace;
+        companion->interior = false;
+        companion->enabled = true;
+        VOX_LOGI("scenario") << "departure companion placed at " << x << ", " << y << ", " << z;
+    }
     m_scenarioSpawnPending = false;
     m_bethesdaControllerOwnsCamera = true;
     pullBethesdaPlayerControllerState();
@@ -11198,7 +12042,7 @@ bool BethesdaApp::settleSkyrimCityShowcasePlayer() {
             const auto physicsGround = m_bethesdaSession.physics().castDown(
                 {point.x, castOriginY, point.z}, 1024.0f);
             if (!physicsGround.has_value() ||
-                std::fabs(physicsGround->normal.y) < kMinimumWalkableGroundNormalY ||
+                physicsGround->normal.y < kMinimumWalkableGroundNormalY ||
                 std::fabs(physicsGround->position.y - visualGround) >
                     capsule.stepHeight + kGroundAgreementSlack) {
                 return false;
@@ -11216,6 +12060,9 @@ bool BethesdaApp::settleSkyrimCityShowcasePlayer() {
             capsuleRadius, capsule.stepHeight);
         if ((candidate.x != beforeX || candidate.z != beforeZ) &&
             !groundCandidate(candidate)) return false;
+        auto placement = capsule;
+        placement.position = candidate;
+        if (!m_bethesdaSession.physics().isCharacterPlacementClear(placement)) return false;
 
         // Settlement is also the first-frame camera contract. Reject a floor
         // beside a gate wall when the same collision-aware boom sweep used by
@@ -11353,6 +12200,14 @@ void BethesdaApp::pullBethesdaPlayerControllerState() {
 
 odai::math::Vector3 BethesdaApp::bethesdaPlayerFeetPosition() const {
     if (m_bethesdaPlayerControllerRegistered && m_bethesdaSessionConfigured) {
+        if (const auto ragdoll = m_bethesdaSession.physics().ragdollSnapshot(
+                m_bethesdaSession.playerObject()); ragdoll && !ragdoll->joints.empty()) {
+            const auto pelvis = std::find_if(ragdoll->joints.begin(), ragdoll->joints.end(),
+                [](const auto& joint) { return joint.role == "pelvis"; });
+            const odai::math::Vector3 centre = pelvis != ragdoll->joints.end()
+                ? pelvis->position : ragdoll->joints.front().position;
+            return centre - odai::math::Vector3{0.0f, 64.0f, 0.0f};
+        }
         const auto physical = m_bethesdaSession.physics().characterState(
             m_bethesdaSession.playerObject());
         if (physical.has_value()) return physical->position;
@@ -11407,12 +12262,14 @@ void BethesdaApp::reconstructPlayerCamera(float deltaSeconds, bool snapInward) {
 }
 
 bool BethesdaApp::initSkyrimPlayerAvatar() {
+    if (const char* first = std::getenv("ODAI_SKYRIM_FIRST_PERSON"); first && std::strcmp(first, "0") != 0)
+        m_thirdPersonView = false;
     SkinnedActor avatar;
     std::string detail;
     if (!loadSkyrimPlayerAvatar(
-            std::filesystem::path(m_skyrimAvatarDataDirectory),
+            m_streamer ? m_streamer->assets().dataFilesPath() : std::filesystem::path(m_skyrimAvatarDataDirectory),
             m_skyrimPlayerOutfitEditorId, kPlayerAvatarSkinnedInstance,
-            avatar, detail)) {
+            avatar, detail, m_streamer ? &m_streamer->assets() : nullptr)) {
         VOX_LOGE("showcase") << detail;
         return false;
     }
@@ -11427,7 +12284,10 @@ bool BethesdaApp::initSkyrimPlayerAvatar() {
         m_skyrimPlayerEquippedSignature ^= item;
         m_skyrimPlayerEquippedSignature *= 1099511628211ull;
     }
-    auto animationView = std::make_shared<anim::AnimationView>();
+    auto animationView = avatar.animationView
+        ? std::make_shared<anim::AnimationView>(*avatar.animationView)
+        : std::make_shared<anim::AnimationView>();
+    if (!avatar.animationView) {
     animationView->skeleton =
         std::make_shared<const anim::Skeleton>(avatar.character.skeleton);
     animationView->inverseBindMatrices = avatar.character.inverseBindMatrices;
@@ -11447,6 +12307,7 @@ bool BethesdaApp::initSkyrimPlayerAvatar() {
     animationView->supportedBehaviorGraph =
         !avatar.idleClip.name.starts_with("procedural") &&
         !avatar.walkClip.name.starts_with("procedural");
+    }
     bethesda::PhysicsCharacterConfig alreadyRegistered;
     alreadyRegistered.position = feet;
     std::string animationError;
@@ -11458,6 +12319,114 @@ bool BethesdaApp::initSkyrimPlayerAvatar() {
             << animationError;
         return false;
     }
+    if (std::getenv("ODAI_SKYRIM_PLAYER_SWORD") != nullptr) {
+        // Skyrim.esm 0x12EB7 is the stock Iron Sword. Resolve it through the
+        // active load order so the persistent inventory entry remains stable
+        // when profile layers add light or full plugins ahead of it.
+        bethesda::RecordKey sword;
+        std::string equipmentError;
+        if (!bethesda::stableRecordKey(
+                m_streamLoadOrder, 0x00012eb7u, sword, equipmentError)) {
+            VOX_LOGW("equipment") << "could not resolve Lydia's iron sword: "
+                                    << equipmentError;
+        } else {
+            bethesda::WorldCommand add;
+            add.type = bethesda::WorldCommandType::AddItem;
+            add.target = m_bethesdaSession.playerObject();
+            add.item = sword;
+            add.itemCount = 1;
+            (void)m_bethesdaSession.world().queue(std::move(add));
+            (void)m_bethesdaSession.world().applyQueuedCommands();
+            if (!m_bethesdaSession.equipActorItem(
+                    m_bethesdaSession.playerObject(), sword, true, false,
+                    equipmentError)) {
+                VOX_LOGW("equipment") << "could not equip Lydia's iron sword: "
+                                        << equipmentError;
+            } else {
+                (void)m_bethesdaSession.world().applyQueuedCommands();
+                // Materialize armor and the sheathed prop through the same
+                // path as resident Skyrim NPCs, then request the authored draw.
+                syncSkyrimActorEquipment(avatar, m_bethesdaSession.playerObject());
+                (void)m_bethesdaSession.world().applyQueuedCommands();
+                syncSkyrimActorEquipment(avatar, m_bethesdaSession.playerObject());
+                (void)m_bethesdaSession.requestActorWeaponDraw(
+                    m_bethesdaSession.playerObject(), true, equipmentError);
+                VOX_LOGI("equipment") << "Lydia player equipped Iron Sword";
+            }
+        }
+    }
+    if (std::getenv("ODAI_SKYRIM_PLAYER_SWORD")) {
+        bethesda::RecordKey shield;
+        std::string error;
+        if (bethesda::stableRecordKey(m_streamLoadOrder, 0x00012eb6u, shield, error)) {
+            bethesda::WorldCommand add;
+            add.type = bethesda::WorldCommandType::AddItem;
+            add.target = m_bethesdaSession.playerObject(); add.item = shield; add.itemCount = 1;
+            (void)m_bethesdaSession.world().queue(std::move(add));
+            (void)m_bethesdaSession.world().applyQueuedCommands();
+            (void)m_bethesdaSession.equipActorItem(m_bethesdaSession.playerObject(), shield, true, false, error);
+            (void)m_bethesdaSession.world().applyQueuedCommands();
+            // Equipping cancels the old draw request. Start drawing only after
+            // the entire sword/shield loadout has been equipped.
+            (void)m_bethesdaSession.requestActorWeaponDraw(m_bethesdaSession.playerObject(), true, error);
+        }
+    }
+    initFirstPersonCombatAudio();
+    m_skyrimPlayerMorphProgram.reset();
+    m_skyrimPlayerMorphState = {};
+    m_skyrimPlayerMorphOffsets.clear();
+    m_skyrimPlayerMorphDeltas.clear();
+    m_skyrimPlayerMorphWeights.clear();
+    if (const char* morphPath = std::getenv("ODAI_SKYRIM_BODY_MORPH_PACK");
+        morphPath != nullptr && m_streamer) {
+        importer::fnv::FalloutAssetSource::ResolvedAsset asset;
+        std::string morphError;
+        if (!m_streamer->assets().resolveAssetWithProvider(morphPath, asset, morphError)) {
+            VOX_LOGW("morph") << "native body morph pack unavailable: " << morphError;
+        } else {
+            anim::BodyMorphProgram program;
+            const std::string jsonText(asset.bytes.begin(), asset.bytes.end());
+            if (!anim::compileBodyMorphProgram(jsonText, program, morphError)) {
+                VOX_LOGW("morph") << asset.canonicalVirtualPath << ": " << morphError;
+            } else {
+                m_skyrimPlayerMorphState.topologyFingerprint =
+                    program.topologyFingerprint;
+                m_skyrimPlayerMorphState.sliders = parseMorphSliders(
+                    std::getenv("ODAI_SKYRIM_BODY_SLIDERS"));
+                if (!buildGpuMorphData(program, m_skyrimPlayerMorphState,
+                        avatar.character.vertices.size(), m_skyrimPlayerOutfitEditorId,
+                        m_skyrimPlayerMorphOffsets, m_skyrimPlayerMorphDeltas,
+                        m_skyrimPlayerMorphWeights, morphError)) {
+                    VOX_LOGW("morph") << "native body morph rejected: " << morphError;
+                    m_skyrimPlayerMorphOffsets.clear();
+                    m_skyrimPlayerMorphDeltas.clear();
+                    m_skyrimPlayerMorphWeights.clear();
+                } else {
+                    VOX_LOGI("morph") << "native GPU body morphs: provider="
+                        << asset.providerId << " targets=" << program.targets.size()
+                        << " sparse_deltas=" << m_skyrimPlayerMorphDeltas.size();
+                    m_skyrimPlayerMorphProgram = std::move(program);
+                }
+            }
+        }
+    }
+    m_skyrimPlayerHair.reset();
+    if (const auto hairConfig = discoverHairChain(avatar.character)) {
+        anim::HairChainSimulator simulator;
+        std::string hairError;
+        if (simulator.configure(*hairConfig, hairError)) {
+            m_skyrimPlayerHair = std::move(simulator);
+            VOX_LOGI("hair") << "native hair simulation: "
+                              << hairConfig->bones.size() << " bone chain";
+        } else {
+            VOX_LOGW("hair") << hairError;
+        }
+    }
+    if (m_skyrimPlayerMorphProgram &&
+        !m_bethesdaSession.setActorBodyMorphState(
+            m_bethesdaSession.playerObject(), m_skyrimPlayerMorphState)) {
+        VOX_LOGW("morph") << "could not attach persistent player morph state";
+    }
     m_skyrimPlayerAvatar = std::move(avatar);
     m_skyrimPlayerAvatarUploadPending = true;
     m_cameraBoomActual = m_cameraBoomRequested;
@@ -11468,7 +12437,10 @@ bool BethesdaApp::initSkyrimPlayerAvatar() {
 
 void BethesdaApp::updateSkyrimPlayerAvatar(float deltaSeconds) {
     if (!m_skyrimPlayerAvatar.has_value()) return;
+    updateSkyrimFirstPersonWeapon(deltaSeconds);
     SkinnedActor& avatar = *m_skyrimPlayerAvatar;
+    syncSkyrimActorEquipment(avatar, m_bethesdaSession.playerObject());
+    if (!avatar.uploaded) m_skyrimPlayerAvatarUploadPending = true;
     const odai::math::Vector3 feet = bethesdaPlayerFeetPosition();
     avatar.position[0] = feet.x;
     avatar.position[1] = feet.y;
@@ -11498,15 +12470,56 @@ void BethesdaApp::updateSkyrimPlayerAvatar(float deltaSeconds) {
         const odai::math::Matrix4 world =
             odai::math::Matrix4::translation(feet) *
             odai::math::Matrix4::rotationY(avatar.yawRadians);
-        for (odai::math::Matrix4& bone : avatar.poseScratch) bone = world * bone;
+        for (std::size_t bone = 0; bone < avatar.poseScratch.size(); ++bone) {
+            if (bone < avatar.equipmentPoseCorrection.size()) {
+                avatar.poseScratch[bone] = avatar.poseScratch[bone] *
+                    avatar.equipmentPoseCorrection[bone];
+            }
+            avatar.poseScratch[bone] = world * avatar.poseScratch[bone];
+        }
     } else {
         updateActorPoses(std::span<SkinnedActor>(&avatar, 1u), deltaSeconds);
+    }
+    const bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
+    const auto ragdoll = m_bethesdaSession.physics().ragdollSnapshot(playerId);
+    if (ragdoll && avatar.character.humanoidRig) {
+        for (const auto& joint : ragdoll->joints) {
+            const auto mapped = avatar.character.humanoidRig->roles.find(joint.role);
+            if (mapped == avatar.character.humanoidRig->roles.end()) continue;
+            const std::size_t bone = static_cast<std::size_t>(mapped->second);
+            if (bone >= avatar.poseScratch.size() ||
+                bone >= avatar.character.inverseBindMatrices.size()) continue;
+            avatar.poseScratch[bone] =
+                odai::math::Matrix4::translation(joint.position) *
+                odai::math::toMatrix(joint.rotation) *
+                avatar.character.inverseBindMatrices[bone];
+        }
+    } else if (m_skyrimPlayerHair && avatar.renderVisible &&
+               avatar.poseScratch.size() == avatar.character.inverseBindMatrices.size()) {
+        std::vector<odai::math::Matrix4> authoredWorld(avatar.poseScratch.size());
+        for (std::size_t bone = 0; bone < authoredWorld.size(); ++bone)
+            authoredWorld[bone] = avatar.poseScratch[bone] *
+                odai::math::inverse(avatar.character.inverseBindMatrices[bone]);
+        std::vector<odai::math::Matrix4> simulatedWorld;
+        const bool enabled = std::getenv("ODAI_SKYRIM_NO_HAIR_SIM") == nullptr;
+        if (m_skyrimPlayerHair->update(authoredWorld,
+                std::clamp(deltaSeconds, 1.0f / 240.0f, 1.0f / 30.0f),
+                enabled, simulatedWorld)) {
+            for (std::size_t bone = 0; bone < simulatedWorld.size(); ++bone)
+                avatar.poseScratch[bone] = simulatedWorld[bone] *
+                    avatar.character.inverseBindMatrices[bone];
+        }
     }
     if (avatar.uploaded) {
         m_renderer.setSkinnedActorVisible(avatar.instanceSlot, avatar.renderVisible);
         if (avatar.renderVisible) {
             render::ImportedSkinnedActorFrameData pose{};
             pose.boneMatrices = avatar.poseScratch;
+            pose.morphWeights = m_skyrimPlayerMorphWeights;
+            pose.animationView = avatar.animationView;
+            pose.evaluationPacket = graphPose.evaluationPacket;
+            pose.resetHistory = graphPose.resetHistory;
+            pose.actorWorld = odai::math::Matrix4::translation(feet) * odai::math::Matrix4::rotationY(avatar.yawRadians);
             m_renderer.setSkinnedActorPose(avatar.instanceSlot, pose);
         }
     }
@@ -11558,7 +12571,11 @@ void BethesdaApp::unregisterBethesdaActorControllers() {
         const std::optional<bethesda::ObjectId> resolved = runtimeObjectIdForActor(actor);
         if (!resolved.has_value()) continue;
         const bethesda::ObjectId& id = *resolved;
-        if (m_bethesdaSession.physics().hasCharacter(id)) {
+        if (actor.runtimeAnimationRegistered) {
+            (void)m_bethesdaSession.unregisterActorAnimation(id);
+            actor.runtimeAnimationRegistered = false;
+            actor.runtimeAnimationPose.clear();
+        } else if (m_bethesdaSession.physics().hasCharacter(id)) {
             (void)m_bethesdaSession.unregisterActorController(id);
         }
         actor.runtimeControllerOwned = false;
@@ -11580,7 +12597,7 @@ void BethesdaApp::pullBethesdaActorControllerStates() {
         }
         actor.runtimeControllerOwned = true;
         actor.position[0] = physical->position.x;
-        actor.position[1] = physical->position.y;
+        actor.position[1] = physical->position.y + actor.demoFootOffset;
         actor.position[2] = physical->position.z;
         actor.runtimeControllerBlocked = physical->blocked;
     }
@@ -11589,6 +12606,85 @@ void BethesdaApp::pullBethesdaActorControllerStates() {
 void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
     if (!m_bethesdaSessionConfigured) return;
     pullBethesdaActorControllerStates();
+    if (m_npcDemoPhysicsReady) {
+        for (auto& actor : m_actors) {
+            if (actor.runtimeObjectId != m_npcDemoActorId) continue;
+            actor.wanders = actor.followsPlayer = actor.talking = false;
+            const auto physical = m_bethesdaSession.physics().characterState(actor.runtimeObjectId);
+            const bool grounded = physical && physical->grounded;
+            if (std::getenv("ODAI_NPC_DROP_SCENE") && !m_npcDemoManualControl) {
+                const int previousSecond = static_cast<int>(m_npcDemoProbeSeconds);
+                m_npcDemoProbeSeconds += fixedDeltaSeconds;
+                if (m_npcDemoDropJumped && grounded && physical->position.y < 10.0f &&
+                    m_npcDemoProbeSeconds > 8.0f) {
+                    bethesda::PhysicsCharacterSnapshot reset;
+                    reset.object = actor.runtimeObjectId;
+                    reset.position = {0,280,0};
+                    reset.groundNormal = {0,1,0};
+                    std::string error;
+                    if (m_bethesdaSession.physics().restoreCharacter(reset, error)) {
+                        m_npcDemoProbeSeconds = 0;
+                        m_npcDemoDropStarted = m_npcDemoDropJumped = false;
+                        m_npcDemoJumpRequested = m_npcDemoJumpPending = false;
+                        m_npcDemoLocomotion = {};
+                        actor.runtimeRequestedVelocity = {};
+                        actor.position[0] = actor.position[2] = 0;
+                        actor.position[1] = 280 + actor.demoFootOffset;
+                        VOX_LOGI("npc-drop") << "replaying drop from box";
+                        continue;
+                    }
+                    VOX_LOGW("npc-drop") << "could not reset drop: " << error;
+                }
+                if (static_cast<int>(m_npcDemoProbeSeconds) != previousSecond) {
+                    VOX_LOGI("npc-drop") << "time=" << m_npcDemoProbeSeconds << " grounded=" << grounded
+                        << " started=" << m_npcDemoDropStarted << " jumped=" << m_npcDemoDropJumped
+                        << " x=" << (physical ? physical->position.x : 0) << " y=" << (physical ? physical->position.y : 0);
+                }
+                if (!m_npcDemoDropStarted && grounded && m_npcDemoProbeSeconds > 2.0f) {
+                    m_npcDemoDropStarted = true;
+                    m_npcDemoLocomotion.input(false, false, {1,0,0});
+                }
+                if (m_npcDemoDropStarted && !m_npcDemoDropJumped && grounded && physical->position.x > 65.0f) {
+                    m_npcDemoJumpRequested = true;
+                    m_npcDemoDropJumped = true;
+                }
+                if (m_npcDemoDropJumped && grounded && physical->position.y < 10.0f)
+                    m_npcDemoLocomotion.input(true, false, {});
+                if (m_npcDemoDropStarted && !m_npcDemoDropJumped)
+                    m_npcDemoLocomotion.input(false, false, {1,0,0});
+            }
+            m_npcDemoJumpPending = m_npcDemoLocomotion.advanceJump(
+                m_npcDemoJumpRequested, grounded, fixedDeltaSeconds, actor.runtimeRequestedVelocity);
+            m_npcDemoJumpRequested = false;
+            if (!grounded || m_npcDemoJumpPending) {
+                actor.runtimeRequestedVelocity = m_npcDemoLocomotion.airborneVelocity;
+                if (!grounded && !m_npcDemoJumpPending) {
+                    // Steering is a desired velocity; Jolt's bounded air control
+                    // determines the achieved velocity. Release preserves momentum.
+                    if (odai::math::length(m_npcDemoMove) > 0.0f) {
+                        actor.runtimeRequestedVelocity = m_npcDemoMove * odai::newvegas::NpcDemoLocomotion::speed;
+                    } else if (physical) {
+                        actor.runtimeRequestedVelocity = {physical->velocity.x, 0, physical->velocity.z};
+                    }
+                    m_npcDemoLocomotion.airborneVelocity = actor.runtimeRequestedVelocity;
+                }
+            } else {
+                actor.runtimeRequestedVelocity = m_npcDemoLocomotion.step(
+                    {actor.position[0], 0, actor.position[2]}, actor.runtimeRequestedVelocity, fixedDeltaSeconds);
+                m_npcDemoLocomotion.airborneVelocity = actor.runtimeRequestedVelocity;
+            }
+            actor.walking = odai::math::length(actor.runtimeRequestedVelocity) > 1.0f;
+            if (actor.walking) {
+                const float desiredYaw = actorYawForDirection(actor.runtimeRequestedVelocity.x, actor.runtimeRequestedVelocity.z);
+                const float turn = std::remainder(desiredYaw - actor.yawRadians, 2.0f * kPi);
+                actor.yawRadians += std::clamp(turn, -6.0f * fixedDeltaSeconds, 6.0f * fixedDeltaSeconds);
+            }
+        }
+        submitBethesdaActorControllerIntents();
+        m_npcDemoJumpPending = false;
+        syncBethesdaActors(false, false);
+        return;
+    }
     for (SkinnedActor& actor : m_actors) {
         const std::optional<bethesda::ObjectId> id = runtimeObjectIdForActor(actor);
         if (!id.has_value()) continue;
@@ -11602,6 +12698,21 @@ void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
     }
     const ActorNavigationWorld* navigation =
         (m_streamer && m_streamer->isStreamingIdle()) ? &m_actorNavigation : nullptr;
+    const auto* scenario = bethesda::findScenario(m_scenarioId);
+    const auto* player = m_bethesdaSession.world().find(m_bethesdaSession.playerObject());
+    for (auto& actor : m_actors) {
+        actor.followsPlayer = m_scenarioId == "skyrim-helgen-ralof" && scenario &&
+            actor.referenceFormId == scenario->companionReferenceFormId;
+        if (!actor.followsPlayer) continue;
+        const auto id = runtimeObjectIdForActor(actor);
+        const auto* runtime = id ? m_bethesdaSession.world().find(*id) : nullptr;
+        const bool available = player && runtime && player->currentSpace == runtime->currentSpace &&
+            player->interior == runtime->interior;
+        const odai::math::Vector3 target = player ? odai::math::Vector3{
+            static_cast<float>(player->transform.position[0]), static_cast<float>(player->transform.position[1]),
+            static_cast<float>(player->transform.position[2])} : odai::math::Vector3{};
+        updateActorFollowTarget(actor, navigation, target, available, fixedDeltaSeconds);
+    }
     updateActorWandering(
         m_actors, fixedDeltaSeconds, navigation,
         [this](float x, float z, float referenceY, float& outHeight) {
@@ -11618,6 +12729,190 @@ void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
         m_talkingActor);
     submitBethesdaActorControllerIntents();
     syncBethesdaActors(false, false);
+}
+
+void BethesdaApp::syncSkyrimActorEquipment(SkinnedActor& actor, const bethesda::ObjectId& id) {
+    if (!m_streamIsSkyrim || !m_streamer || !actor.humanoid) return;
+    const auto* owner = m_bethesdaSession.world().find(id);
+    if (!owner) return;
+    std::string error;
+    if (!owner->equipment.initialized) {
+        // Backward-compatible first materialization. Once initialized, an
+        // intentionally unequipped outfit must remain unequipped on reload.
+        auto initialArmor = actor.initialWornArmor;
+        if (owner->outfit.valid()) {
+            std::uint32_t outfit = 0;
+            if (bethesda::resolvedFormId(m_streamLoadOrder, owner->outfit, outfit, error))
+                initialArmor = m_skyrimActorCatalog.resolve(actor.baseFormId, nullptr, outfit).wornArmorFormIds;
+            for (const auto& entry : owner->inventory) {
+                const auto* item = m_bethesdaSession.skyrimItem(entry.item);
+                if (entry.equipped && item && item->recordType == "ARMO") {
+                    bethesda::WorldCommand unequip;
+                    unequip.type = bethesda::WorldCommandType::SetEquipped; unequip.target = id;
+                    unequip.item = entry.item; unequip.equipped = false;
+                    (void)m_bethesdaSession.world().queue(std::move(unequip));
+                }
+            }
+        }
+        for (const auto form : initialArmor) {
+            bethesda::RecordKey item;
+            if (!bethesda::stableRecordKey(m_streamLoadOrder, form, item, error)) continue;
+            const auto found = std::find_if(owner->inventory.begin(), owner->inventory.end(),
+                [&](const auto& entry) { return entry.item == item && entry.count > 0; });
+            if (found == owner->inventory.end()) {
+                bethesda::WorldCommand add;
+                add.type = bethesda::WorldCommandType::AddItem; add.target = id;
+                add.item = item; add.itemCount = 1;
+                (void)m_bethesdaSession.world().queue(std::move(add));
+            }
+            const auto* definition = m_bethesdaSession.skyrimItem(item);
+            bethesda::WorldCommand equip;
+            equip.type = bethesda::WorldCommandType::SetEquipped; equip.target = id;
+            equip.item = item; equip.equipped = true;
+            equip.equipmentSlots = definition ? definition->bipedSlots : 0;
+            if (equip.equipmentSlots & (1u << 9)) equip.equipmentSlots |= bethesda::kEquipmentLeftHand;
+            (void)m_bethesdaSession.world().queue(std::move(equip));
+        }
+        bool hasWeapon = false;
+        for (const auto& entry : owner->inventory) {
+            const auto* item = m_bethesdaSession.skyrimItem(entry.item);
+            if (entry.equipped && item && item->recordType == "WEAP") hasWeapon = true;
+        }
+        // Initial NPC weapon choice only. Subsequent changes use persistent
+        // inventory state; presentation never re-equips a removed weapon.
+        for (const auto& entry : owner->inventory) {
+            const auto* item = m_bethesdaSession.skyrimItem(entry.item);
+            if (!item || entry.count <= 0) continue;
+            if ((entry.equipped && (!owner->outfit.valid() || item->recordType != "ARMO")) ||
+                (!hasWeapon && item->recordType == "WEAP")) {
+                (void)m_bethesdaSession.equipActorItem(id, entry.item, true, false, error);
+                if (item->recordType == "WEAP") hasWeapon = true;
+            }
+        }
+        bethesda::WorldCommand initialized;
+        initialized.type = bethesda::WorldCommandType::SetEquipmentState; initialized.target = id;
+        initialized.equipment = owner->equipment; initialized.equipment.initialized = true;
+        (void)m_bethesdaSession.world().queue(std::move(initialized));
+        return;
+    }
+    std::vector<std::uint32_t> worn;
+    struct EquipmentProp { std::string path, bone; std::uint8_t mode = 0; };
+    std::vector<EquipmentProp> props;
+    std::vector<std::string> equipmentDiagnostics;
+    std::string key = owner->equipment.drawn ? "drawn" : "sheathed";
+    for (const auto& entry : owner->inventory) {
+        if (!entry.equipped || entry.count <= 0) continue;
+        key += ":" + entry.item.toString() + ":" + std::to_string(entry.equipmentSlots);
+        const auto* item = m_bethesdaSession.skyrimItem(entry.item);
+        if (!item) continue;
+        std::uint32_t form = 0;
+        if (item->recordType == "ARMO" && bethesda::resolvedFormId(m_streamLoadOrder, entry.item, form, error))
+            worn.push_back(form);
+        if (item->recordType == "WEAP" && !item->model.empty()) {
+            const bool left = entry.equipmentSlots == bethesda::kEquipmentLeftHand;
+            std::string bone;
+            switch (item->weaponAnimationType) {
+                case 1: bone = "WeaponSword"; break;
+                case 2: bone = "WeaponDagger"; break;
+                case 3: bone = "WeaponAxe"; break;
+                case 4: bone = "WeaponMace"; break;
+                case 5: case 6: bone = "WeaponBack"; break;
+                case 7: case 9: bone = "WeaponBow"; break;
+                case 8: bone = "WeaponStaff"; break;
+                default: break;
+            }
+            if (left) bone += "Left";
+            const auto sheathBone = bone;
+            if (owner->equipment.drawn) bone = left ? "SHIELD" : "WEAPON";
+            if (bone.empty() || actor.character.skeleton.findBone(bone) < 0) {
+                equipmentDiagnostics.push_back("missing attachment " + bone + " for " + item->model);
+            } else {
+                props.push_back({item->model, bone, static_cast<std::uint8_t>(owner->equipment.drawn ? 1 : 0)});
+                if (owner->equipment.drawn && (item->weaponAnimationType == 1 || item->weaponAnimationType == 2 || item->weaponAnimationType == 5) &&
+                    !sheathBone.empty() && actor.character.skeleton.findBone(sheathBone) >= 0)
+                    props.push_back({item->model, sheathBone, 2});
+            }
+        } else if (item->recordType == "AMMO" && !item->model.empty()) props.push_back({item->model, "QUIVER", 0});
+    }
+    if (key == actor.equipmentVisualKey) return;
+    actor.equipmentVisualKey = key;
+    for (const auto& diagnostic : equipmentDiagnostics)
+        VOX_LOGW("equipment") << actor.name << ": " << diagnostic;
+    const auto resolved = m_skyrimActorCatalog.resolve(actor.baseFormId, &worn);
+    if (resolved.skeletonPath.empty()) return;
+    auto paths = resolved.bodyPartPaths;
+    std::vector<std::string> bones(paths.size());
+    std::vector<std::uint8_t> modes(paths.size());
+    for (const auto& prop : props) {
+        paths.push_back(prop.path); bones.push_back(prop.bone); modes.push_back(prop.mode);
+        VOX_LOGI("equipment") << actor.name << ": " << prop.path << " -> " << prop.bone << " mode=" << unsigned(prop.mode);
+    }
+    importer::fnv::FalloutCharacter character;
+    std::vector<importer::ImportedSceneTexture> textures;
+    std::vector<importer::ImportedScenePackedDraw> draws;
+    if (!buildSkinnedActor(m_streamer->assets(), resolved.skeletonPath, paths,
+            character, textures, draws, error, &bones, &resolved.weightMorphs, resolved.coveredBipedSlots, &resolved.hiddenHeadParts, &modes)) {
+        VOX_LOGW("equipment") << actor.name << ": rebuild failed: " << error; return;
+    }
+    if (character.skeleton.bones.size() != actor.character.skeleton.bones.size()) {
+        VOX_LOGW("equipment") << actor.name << ": equipment unexpectedly changed rig"; return;
+    }
+    for (std::size_t bone = 0; bone < character.skeleton.bones.size(); ++bone) {
+        if (character.skeleton.bones[bone].name != actor.character.skeleton.bones[bone].name ||
+            character.skeleton.bones[bone].parentIndex != actor.character.skeleton.bones[bone].parentIndex) {
+            VOX_LOGW("equipment") << actor.name << ": equipment rig hierarchy changed"; return;
+        }
+    }
+    // Equipment geometry must retain the same authored NPC hair tint as initial import.
+    if (resolved.base != nullptr) {
+        const auto color = m_skyrimActorCatalog.hairColors.find(resolved.base->hairColorFormId);
+        if (color != m_skyrimActorCatalog.hairColors.end()) {
+            const auto srgbToLinear = [](float value) {
+                return value <= 0.04045f
+                    ? value / 12.92f
+                    : std::pow((value + 0.055f) / 1.055f, 2.4f);
+            };
+            const std::array<float, 3> linearHairColor{
+                srgbToLinear(color->second[0]),
+                srgbToLinear(color->second[1]),
+                srgbToLinear(color->second[2]),
+            };
+            for (const auto& part : character.parts) {
+                const std::string sourcePath = toLowerAscii(part.sourcePath);
+                const bool externalHairPart =
+                    sourcePath.find("facegeom") == std::string::npos &&
+                    sourcePath.find("hair") != std::string::npos;
+                const bool authoredHairPart =
+                    part.lightingMaterial.shaderType == 6u || externalHairPart;
+                if (!authoredHairPart) continue;
+                for (std::uint32_t i = part.firstIndex;
+                     i < part.firstIndex + part.indexCount &&
+                     i < character.indices.size(); ++i) {
+                    const std::uint32_t vertexIndex = character.indices[i];
+                    if (vertexIndex >= character.vertices.size()) continue;
+                    std::copy(linearHairColor.begin(), linearHairColor.end(),
+                              character.vertices[vertexIndex].color);
+                    character.vertices[vertexIndex].flags |=
+                        importer::kImportedSceneMaterialFlagVertexColorTint;
+                }
+            }
+        }
+    }
+    actor.equipmentPoseCorrection.clear();
+    if (actor.animationView) {
+        for (std::size_t i = 0; i < character.inverseBindMatrices.size(); ++i) {
+            const auto& inverseBind = actor.animationView->inverseBindMatrices;
+            actor.equipmentPoseCorrection.push_back(i < inverseBind.size()
+                ? odai::math::inverse(inverseBind[i]) * character.inverseBindMatrices[i]
+                : odai::math::Matrix4::identity());
+        }
+    }
+    actor.character = std::move(character); actor.textures = std::move(textures); actor.draws = std::move(draws);
+    actor.sampler.bindSkeleton(actor.character.skeleton, actor.character.inverseBindMatrices);
+    actor.uploaded = false;
+    m_nextActorUploadIndex = 0; m_actorsUploadPending = true;
+    VOX_LOGI("equipment") << actor.name << ": " << worn.size() << " armor items, " << props.size()
+        << " prop attachment requests, " << (owner->equipment.drawn ? "drawn" : "sheathed");
 }
 
 void BethesdaApp::submitBethesdaActorControllerIntents() {
@@ -11640,7 +12935,49 @@ void BethesdaApp::submitBethesdaActorControllerIntents() {
         if (!resolved.has_value()) continue;
         const bethesda::ObjectId& id = *resolved;
         if (m_bethesdaSession.world().find(id) == nullptr) continue;
+        if (!m_npcDemoPhysicsReady) syncSkyrimActorEquipment(actor, id);
+        actor.runtimeAnimationRegistered = m_bethesdaSession.hasActorAnimation(id);
+        if (actor.animationView && !actor.runtimeAnimationRegistered) {
+            bethesda::PhysicsCharacterConfig config;
+            config.position = {actor.position[0], actor.position[1] - actor.demoFootOffset, actor.position[2]};
+            std::string error;
+            actor.runtimeAnimationRegistered = m_bethesdaSession.registerActorAnimation(
+                id, actor.animationView, nullptr, config, error, false);
+            if (!actor.runtimeAnimationRegistered) { VOX_LOGW("animation") << actor.name << ": " << error; }
+        }
+        const auto* probeOwner = m_bethesdaSession.world().find(id);
+        if (actor.runtimeAnimationRegistered && !actor.equipmentDrawProbeSent &&
+            probeOwner && probeOwner->equipment.initialized) {
+            const char* probe = std::getenv("ODAI_ACTOR_WEAPON_DRAW");
+            if (probe && actor.name == probe) {
+                std::string error;
+                actor.equipmentDrawProbeSent = m_bethesdaSession.requestActorWeaponDraw(id, true, error);
+                VOX_LOGI("equipment") << actor.name << ": draw probe requested=" << actor.equipmentDrawProbeSent << " " << error;
+            }
+        }
+        if (actor.runtimeAnimationRegistered) {
+            anim::AnimationInputState input;
+            input.requestedVelocity = actor.runtimeRequestedVelocity;
+            input.jumpPreparing = m_npcDemoPhysicsReady && actor.runtimeObjectId == m_npcDemoActorId &&
+                (m_npcDemoLocomotion.preparing || m_npcDemoJumpPending);
+            if (m_npcDemoPhysicsReady && actor.runtimeObjectId == m_npcDemoActorId && m_npcDemoJumpPending) {
+                if (const auto state = m_bethesdaSession.physics().characterState(id); state && state->grounded)
+                    input.jumpRequested = true;
+            }
+            input.movementSpeed = odai::math::length(odai::math::Vector3{
+                actor.runtimeRequestedVelocity.x, 0.f, actor.runtimeRequestedVelocity.z});
+            input.actorYawRadians = actor.yawRadians;
+            input.turnRateRadiansPerSecond = std::remainder(actor.yawRadians - actor.previousAnimationYaw,
+                2.0f * kPi) * 60.0f;
+            actor.previousAnimationYaw = actor.yawRadians;
+            input.talking = actor.talking;
+            input.dead = actor.runtimeDead;
+            input.running = actor.followsPlayer ? actor.followSpeedMultiplier > 1.f
+                : input.movementSpeed > actor.walkSpeedUnitsPerSecond * 1.5f;
+            (void)m_bethesdaSession.setActorAnimationInput(id, std::move(input));
+        }
 
+        if (m_streamIsSkyrim && m_scenarioId.empty() && !m_npcDemoPhysicsReady) continue;
         const float dx = actor.position[0] - playerPosition.x;
         const float dz = actor.position[2] - playerPosition.z;
         const float distanceSquared = (dx * dx) + (dz * dz);
@@ -11665,7 +13002,7 @@ void BethesdaApp::submitBethesdaActorControllerIntents() {
                 48.0f, 256.0f);
             const float radius = std::clamp(height * 0.28f, 12.0f, 48.0f);
             bethesda::PhysicsCharacterConfig config;
-            config.position = {actor.position[0], actor.position[1], actor.position[2]};
+            config.position = {actor.position[0], actor.position[1] - actor.demoFootOffset, actor.position[2]};
             config.boundsHalfExtents = {radius, height * 0.5f, radius};
             std::string error;
             if (!m_bethesdaSession.registerActorController(id, config, error)) {
@@ -11677,7 +13014,7 @@ void BethesdaApp::submitBethesdaActorControllerIntents() {
             actor.runtimeControllerOwned = true;
             if (const auto restored = m_bethesdaSession.physics().characterState(id)) {
                 actor.position[0] = restored->position.x;
-                actor.position[1] = restored->position.y;
+                actor.position[1] = restored->position.y + actor.demoFootOffset;
                 actor.position[2] = restored->position.z;
                 actor.runtimeControllerBlocked = restored->blocked;
             }
@@ -11688,7 +13025,7 @@ void BethesdaApp::submitBethesdaActorControllerIntents() {
                 bethesda::PhysicsCharacterSnapshot relocated;
                 relocated.object = id;
                 relocated.position = {
-                    actor.position[0], actor.position[1], actor.position[2]};
+                    actor.position[0], actor.position[1] - actor.demoFootOffset, actor.position[2]};
                 relocated.rotation = physical->rotation;
                 relocated.groundNormal = {0.0f, 1.0f, 0.0f};
                 std::string error;
@@ -11702,6 +13039,12 @@ void BethesdaApp::submitBethesdaActorControllerIntents() {
 
         bethesda::PhysicsCharacterInput input;
         input.desiredVelocity = actor.runtimeRequestedVelocity;
+        if (m_npcDemoPhysicsReady && actor.runtimeObjectId == m_npcDemoActorId && m_npcDemoJumpPending) {
+            if (const auto state = m_bethesdaSession.physics().characterState(id); state && state->grounded) {
+                input.jumpRequested = true;
+                VOX_LOGI("npc-test") << actor.name << ": Jolt jump requested";
+            }
+        }
         (void)m_bethesdaSession.setActorControllerInput(id, input);
     }
 }
@@ -11878,23 +13221,34 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
             (void)m_bethesdaSession.world().queue(std::move(ai));
         }
         actor.renderVisible = existing->enabled;
-        if (actor.scriptedMoveArrived && existing->navigationRequest.has_value() &&
+        if (!actor.followsPlayer && actor.scriptedMoveArrived && existing->navigationRequest.has_value() &&
             existing->navigationRequest->revision == actor.scriptedMoveRevision) {
             bethesda::WorldCommand arrived;
             arrived.type = bethesda::WorldCommandType::SetNavigationStatus;
             arrived.target = id;
             arrived.navigationRevision = actor.scriptedMoveRevision;
             arrived.navigationStatus = bethesda::NavigationRequestStatus::Arrived;
+            if (const auto* destination = m_bethesdaSession.world().find(existing->navigationRequest->destination)) {
+                const auto dx = destination->transform.position[0] - actor.position[0];
+                const auto dz = destination->transform.position[2] - actor.position[2];
+                if (dx*dx + dz*dz > 600.0*600.0) {
+                    arrived.navigationStatus = bethesda::NavigationRequestStatus::Pending;
+                    actor.scriptedMoveRevision = 0;
+                }
+            }
             (void)m_bethesdaSession.world().queue(std::move(arrived));
             actor.scriptedMoveArrived = false;
         }
-        if (existing->navigationRequest.has_value() &&
+        if (m_bethesdaSession.sceneActorWaiting(id)) actor.wanderPauseSeconds = 0.2f;
+        if (!actor.followsPlayer && existing->navigationRequest.has_value() &&
             existing->navigationRequest->status != bethesda::NavigationRequestStatus::Arrived &&
             existing->navigationRequest->status != bethesda::NavigationRequestStatus::Failed &&
             actor.scriptedMoveRevision != existing->navigationRequest->revision &&
+            m_bethesdaSession.clock().tick() >= actor.scriptedMoveRetryTick &&
             existing->navigationRequest->destination.kind ==
                 bethesda::ObjectIdKind::PersistentReference) {
             std::uint32_t destinationFormId = 0u;
+            actor.scriptedMoveRetryTick = m_bethesdaSession.clock().tick() + 30;
             float destination[3] = {};
             std::string navigationError;
             if (bethesda::resolvedFormId(
@@ -11906,7 +13260,7 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
                 if (m_actorNavigation.buildPath(
                         odai::math::Vector3{
                             actor.position[0], actor.position[1], actor.position[2]},
-                        odai::math::Vector3{destination[0], destination[1], destination[2]}, path) &&
+                        odai::math::Vector3{destination[0], destination[1], destination[2]}, path, true) &&
                     !path.empty()) {
                     actor.wanderPath = std::move(path);
                     actor.wanderPathIndex = 1u;
@@ -12009,6 +13363,7 @@ bool BethesdaApp::saveGameplayState() {
     std::string error;
     if (!bethesda::saveOdaiGameAtomic(m_gameplaySavePath, m_bethesdaSession, error)) {
         VOX_LOGE("save") << error;
+        m_toasts.push("Save/load failed", error, "gameplay-save-error");
         return false;
     }
     VOX_LOGI("save") << "saved ODAI gameplay state to " << m_gameplaySavePath.string();
@@ -12032,6 +13387,7 @@ bool BethesdaApp::loadGameplayState() {
     };
     if (!bethesda::loadOdaiGame(path, m_bethesdaSession, options, report, error)) {
         VOX_LOGE("save") << error;
+        m_toasts.push("Save/load failed", error, "gameplay-save-error");
         return false;
     }
     m_scenarioSpawnPending = false; // Loading restores the saved placement, not the fresh-start marker.
@@ -12092,6 +13448,9 @@ bool BethesdaApp::loadGameplayState() {
         ? "Recovered previous save"
         : (report.contentReconciled ? "Game loaded with content changes" : "Game loaded");
     m_toasts.push(loadTitle, path.filename().string(), "gameplay-load");
+    // --load-game chooses the initial generation; F9 subsequently reloads the
+    // active save slot, including after recovering into a new launcher slot.
+    m_gameplayLoadPath.clear();
     return true;
 }
 
@@ -12858,10 +14217,10 @@ void BethesdaApp::drawDialoguePanel(
     const bool compactTes3 = m_streamIsMorrowind;
     // Fall back to the body face when a dialogue bake failed; the layout below
     // measures whatever font it is handed, so it stays correct either way.
-    const ui::Font& lineFont = compactTes3 && m_tes3JournalFont.valid()
+    const ui::Font& lineFont = m_streamIsSkyrim ? m_uiFont : compactTes3 && m_tes3JournalFont.valid()
         ? m_tes3JournalFont
         : (m_dialogueFont.valid() ? m_dialogueFont : m_uiFont);
-    const ui::Font& choiceFont = compactTes3 && m_tes3JournalFont.valid()
+    const ui::Font& choiceFont = m_streamIsSkyrim ? m_uiFont : compactTes3 && m_tes3JournalFont.valid()
         ? m_tes3JournalFont
         : (m_dialogueChoiceFont.valid() ? m_dialogueChoiceFont : m_uiFont);
     const ui::Font& speakerFont = compactTes3 && m_tes3JournalBoldFont.valid()
@@ -13140,6 +14499,25 @@ void BethesdaApp::drawHud() {
         return;
     }
     if (!m_playerInventoryOpen) drawPipBoyHud();
+    if (!m_menuOpen && !m_playerInventoryOpen && m_talkingActor < 0) {
+        for (const auto& line : m_bethesdaSession.sceneSpeech()) {
+            if (!line.presented) continue;
+            const auto actor = std::find_if(m_actors.begin(), m_actors.end(), [&](const auto& value) { return runtimeObjectIdForActor(value) == line.speaker; });
+            if (actor == m_actors.end()) continue;
+            int width = 0, height = 0; framebufferSize(width, height);
+            ensureSkyrimUiFont();
+            const auto& font = m_skyrimInventoryFont.valid() ? m_skyrimInventoryFont : m_uiFont;
+            const auto lines = wrapTextToWidth(font, actor->displayName() + ": " + line.text, width * .72f);
+            float y = height * .84f - lines.size() * font.lineHeightPx();
+            for (const auto& text : lines) {
+                const float x = (width - font.measureText(text)) * .5f;
+                m_uiDrawList.addText(font, text, {x+2, y+2}, {0,0,0,1});
+                m_uiDrawList.addText(font, text, {x,y}, {.96f,.96f,.92f,1});
+                y += font.lineHeightPx();
+            }
+            break;
+        }
+    }
     drawPauseMenu();
     drawGiftMenu();
     drawTes3Journal();

@@ -6,7 +6,11 @@ on:
 
 jobs:
   build-and-test-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, RelWithDebInfo]
 
     steps:
       - name: Checkout
@@ -27,7 +31,7 @@ jobs:
             libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev \
             mesa-vulkan-drivers vulkan-tools libvulkan1 \
             libasound2-dev libpulse-dev \
-            libwayland-dev wayland-protocols libxkbcommon-dev xvfb
+            libwayland-dev wayland-protocols libxkbcommon-dev xvfb python3-tk
 
       - name: Install slangc
         run: |
@@ -40,13 +44,16 @@ jobs:
 
       - name: Verify Vulkan device enumeration
         run: |
-          vulkaninfo --summary
+          xvfb-run -a vulkaninfo --summary
 
       - name: Bootstrap vcpkg
         run: |
           if [ ! -d "${GITHUB_WORKSPACE}/vcpkg/.git" ]; then
             git clone https://github.com/microsoft/vcpkg.git "${GITHUB_WORKSPACE}/vcpkg"
           fi
+          VCPKG_BASELINE=$(python3 -c 'import json; print(json.load(open("vcpkg.json"))["builtin-baseline"])')
+          git -C "${GITHUB_WORKSPACE}/vcpkg" fetch --depth=1 origin "${VCPKG_BASELINE}"
+          git -C "${GITHUB_WORKSPACE}/vcpkg" checkout --detach "${VCPKG_BASELINE}"
           "${GITHUB_WORKSPACE}/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
 
       - name: Cache vcpkg installed artifacts
@@ -72,7 +79,7 @@ jobs:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DBUILD_TESTING=ON \
             -DODAI_BUILD_RUNTIME=ON \
             -DODAI_BUILD_TOOLS=ON \
@@ -87,3 +94,9 @@ jobs:
 
       - name: Run CTest
         run: ctest --test-dir build --output-on-failure
+
+      - name: Verify installed package
+        run: |
+          cmake --install build --prefix "${RUNNER_TEMP}/odai-package"
+          xvfb-run -a python3 scripts/verify_package.py "${RUNNER_TEMP}/odai-package" --smoke build/odai_imported_scene_vulkan_smoke
+          cpack --config build/CPackConfig.cmake -B "${RUNNER_TEMP}/packages"

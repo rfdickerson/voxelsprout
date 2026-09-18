@@ -110,6 +110,21 @@ void testVisibleGapDoesNotStitch() {
     assert(route.empty());
 }
 
+void testPartialRouteStaysOnReachableResidentMesh() {
+    ActorNavigationWorld world;
+    world.addCell({0, 0}, {triangleMesh(0x100,
+        {0, 0, 0, 1000, 0, 0, 1000, 1000, 0})});
+    world.addCell({1, 0}, {triangleMesh(0x200,
+        {4000, 0, 0, 5000, 0, 0, 5000, 1000, 0})});
+    const Vector3 start{10, 0, -5}, goal{8000, 0, -500};
+    std::vector<ActorNavigationStep> route;
+    assert(!world.buildPath(start, goal, route));
+    assert(world.buildPath(start, goal, route, true));
+    assert(route.back().position.x > 180 && route.back().position.x < 1000);
+    const auto frontier = route.back().position;
+    assert(!world.buildPath(frontier, goal, route, true));
+}
+
 void testAuthoredDoorPortalIsTypedOffMeshLink() {
     FalloutNavMeshRecord source = triangleMesh(0x100u,
         {0.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 0.0f, 100.0f, 0.0f});
@@ -232,6 +247,7 @@ void testTes3GeneratedMeshUsesTypedTeleportDoor() {
 int main() {
     testResidentMeshesStitchAtSharedBorder();
     testVisibleGapDoesNotStitch();
+    testPartialRouteStaysOnReachableResidentMesh();
     testAuthoredDoorPortalIsTypedOffMeshLink();
     testTes3GeneratedMeshUsesDoorwayAndRejectsWalls();
     testTes3GeneratedMeshClimbsStairsButNotFloorGap();

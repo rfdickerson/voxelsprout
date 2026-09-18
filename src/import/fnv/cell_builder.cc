@@ -99,35 +99,19 @@ float sampleLandLayerOpacity(
         col = std::clamp(col, 0, kSide - 1);
         return std::clamp(layer.opacity[(row * kSide) + col], 0.0f, 1.0f);
     };
-    // A narrow positive reconstruction kernel gives a painted layer a small
-    // shoulder outside its last non-zero post. Without it, interpolation can
-    // only shrink an authored shape: zero-weight triangles are skipped by the
-    // shader and their grid-aligned support boundary can never move.
-    const auto filteredPost = [&](int row, int col) {
-        static constexpr float kKernel[3] = {1.0f, 2.0f, 1.0f};
-        float blurred = 0.0f;
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                blurred += rawPost(row + dy, col + dx) *
-                    kKernel[dy + 1] * kKernel[dx + 1];
-            }
-        }
-        blurred *= 1.0f / 16.0f;
-        // Keep authored centres dominant while feathering only the boundary.
-        return std::clamp((rawPost(row, col) * 0.65f) + (blurred * 0.35f), 0.0f, 1.0f);
-    };
-
+    // Preserve authored boundary posts. Filtering each quadrant independently
+    // changes a shared edge according to two different interior neighbourhoods.
     const float rowClamped = std::clamp(quadrantRow, 0.0f, static_cast<float>(kSide - 1));
     const float colClamped = std::clamp(quadrantCol, 0.0f, static_cast<float>(kSide - 1));
     const int row0 = std::min(static_cast<int>(std::floor(rowClamped)), kSide - 2);
     const int col0 = std::min(static_cast<int>(std::floor(colClamped)), kSide - 2);
     const float rowFraction = rowClamped - static_cast<float>(row0);
     const float colFraction = colClamped - static_cast<float>(col0);
-    const float rowT = rowFraction * rowFraction * (3.0f - (2.0f * rowFraction));
-    const float colT = colFraction * colFraction * (3.0f - (2.0f * colFraction));
-    const float top = std::lerp(filteredPost(row0, col0), filteredPost(row0, col0 + 1), colT);
+    const float rowT = rowFraction;
+    const float colT = colFraction;
+    const float top = std::lerp(rawPost(row0, col0), rawPost(row0, col0 + 1), colT);
     const float bottom =
-        std::lerp(filteredPost(row0 + 1, col0), filteredPost(row0 + 1, col0 + 1), colT);
+        std::lerp(rawPost(row0 + 1, col0), rawPost(row0 + 1, col0 + 1), colT);
     return std::clamp(std::lerp(top, bottom, rowT), 0.0f, 1.0f);
 }
 
@@ -604,235 +588,235 @@ void appendTerrainCell(
 
     const float cellOriginX = static_cast<float>(cell.gridX) * kExteriorCellSize;
     const float cellOriginZ = static_cast<float>(cell.gridZ) * kExteriorCellSize;
-    // VTXT is only 17x17 per quadrant. Reconstruct it on a 2x denser mesh so
-    // the smooth per-quad opacity field below is not immediately reduced back
-    // to one pair of linear triangles per 128-unit post square. Terrain height
-    // remains on the authored triangle planes; only normals, tint and blend
-    // weights gain intermediate samples.
+    // Refine the authored height triangles while interpolating LAND paint.
+    // Duplicate vertices per patch: flat texture IDs must agree throughout
+    // each triangle even where neighbouring patches use different stacks.
     constexpr int kBlendSubdivision = 2;
-    constexpr int kRefinedQuadrantGridSize =
-        ((kLandQuadrantGridSize - 1) * kBlendSubdivision) + 1;
-
-    // One vertex block per quadrant rather than one shared 33x33 block per cell.
-    //
-    // Layers are declared PER QUADRANT by ATXT, so every post in a quadrant
-    // shares one layer stack and only the opacity varies across it. Choosing the
-    // stack per vertex instead -- picking each post's own strongest three --
-    // broke that: neighbouring posts selected different subsets, and because the
-    // shader carries layer texture indices as `nointerpolation`, each triangle
-    // shaded with its provoking vertex's set while the weights interpolated from
-    // all three. Wherever the selection changed, the blend jumped instead of
-    // ramping, which is what drew hard square patches across the terrain.
-    //
-    // Per-quadrant vertices are deliberately duplicated, and the 2x blend
-    // reconstruction below makes that 4*33*33 = 4356 vertices per cell. The
-    // property it buys is the one that matters: within a quadrant the layer set
-    // is constant, so only the interpolating weights vary.
     for (int quadrant = 0; quadrant < 4; ++quadrant) {
         const int colBegin = ((quadrant & 1) != 0) ? (kLandGridSize - 1) / 2 : 0;
         const int rowBegin = ((quadrant & 2) != 0) ? (kLandGridSize - 1) / 2 : 0;
 
-        // This quadrant's layer stack, chosen once. Skyrim commonly authors five
-        // fully opaque overlays in a quadrant, while the packed terrain vertex
-        // carries four. Peak opacity cannot rank that case: every layer ties at
-        // 1.0, and the old form-ID tie-break happened to reject Whiterun's
-        // DirtPath01 because its unrelated LTEX form ID was largest.
-        //
-        // ATXT is an ordered paint stack. When it overflows, retain the latest
-        // four layers: those are the layers the author painted last and the ones
-        // that would cover an earlier layer wherever they overlap. The selected
-        // subset is restored to ascending order below because the shader's lerp
-        // chain is not commutative.
-        struct QuadrantLayer {
-            const odai::importer::fnv::FalloutLandTextureLayer* layer = nullptr;
-            std::uint32_t textureIndex = kNoTextureIndex;
-            float peakOpacity = 0.0f;
+        // A stack is constant across each draw. Subdivide only overflowing
+        // quadrants so sparse layers elsewhere cannot evict this patch's road.
+        struct Patch { int row, col, posts; };
+        std::vector<Patch> patches;
+        const auto partition = [&](auto&& self, int row, int col, int posts) -> void {
+            std::size_t active = 0;
+            for (const auto& layer : land.textureLayers) {
+                if (layer.quadrant != quadrant || resolveLandTextureExact(layer.textureFormId) == kNoTextureIndex)
+                    continue;
+                bool painted = false;
+                for (int r = row; r <= row + posts && !painted; ++r)
+                    for (int c = col; c <= col + posts; ++c)
+                        if (layer.opacity[r * kLandQuadrantGridSize + c] > 0.0f) { painted = true; break; }
+                active += painted;
+            }
+            if (active <= odai::importer::kImportedSceneMaxTerrainLayers || posts == 1) {
+                patches.push_back({row, col, posts});
+                return;
+            }
+            const int half = posts / 2;
+            self(self, row, col, half);
+            self(self, row, col + half, half);
+            self(self, row + half, col, half);
+            self(self, row + half, col + half, half);
         };
-        std::vector<QuadrantLayer> quadrantLayers;
-        for (const auto& layer : land.textureLayers) {
-            if (layer.quadrant != static_cast<std::uint8_t>(quadrant)) {
-                continue;
+        partition(partition, 0, 0, 16);
+        for (const auto& [patchRow, patchCol, patchPosts] : patches) {
+            const int patchGridSize = patchPosts * kBlendSubdivision + 1;
+            struct QuadrantLayer {
+                const odai::importer::fnv::FalloutLandTextureLayer* layer = nullptr;
+                std::uint32_t textureIndex = kNoTextureIndex;
+                float peakOpacity = 0.0f;
+            };
+            std::vector<QuadrantLayer> quadrantLayers;
+            for (const auto& layer : land.textureLayers) {
+                if (layer.quadrant != static_cast<std::uint8_t>(quadrant)) {
+                    continue;
+                }
+                // Exact, not the dominant-texture fallback: that fallback gives an
+                // untextured BASE something plausible. Substituting it for a layer
+                // would paint the region's commonest ground on top of itself.
+                const std::uint32_t textureIndex = resolveLandTextureExact(layer.textureFormId);
+                if (textureIndex == kNoTextureIndex) {
+                    continue;
+                }
+                float peakOpacity = 0.0f;
+                for (int r = patchRow; r <= patchRow + patchPosts; ++r) {
+                    for (int c = patchCol; c <= patchCol + patchPosts; ++c) {
+                        peakOpacity = std::max(peakOpacity, sampleLandLayerOpacity(layer, float(r), float(c)));
+                    }
+                }
+                if (peakOpacity <= 0.0f) {
+                    continue;
+                }
+                quadrantLayers.push_back(QuadrantLayer{&layer, textureIndex, peakOpacity});
             }
-            // Exact, not the dominant-texture fallback: that fallback gives an
-            // untextured BASE something plausible. Substituting it for a layer
-            // would paint the region's commonest ground on top of itself.
-            const std::uint32_t textureIndex = resolveLandTextureExact(layer.textureFormId);
-            if (textureIndex == kNoTextureIndex) {
-                continue;
+            if (quadrantLayers.size() > static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers)) {
+                std::stable_sort(
+                    quadrantLayers.begin(), quadrantLayers.end(),
+                    [](const QuadrantLayer& a, const QuadrantLayer& b) {
+                        return a.layer->layerIndex != b.layer->layerIndex
+                            ? (a.layer->layerIndex > b.layer->layerIndex)
+                            : (a.peakOpacity > b.peakOpacity);
+                    });
+                outDroppedLayerCount +=
+                    quadrantLayers.size() - static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers);
+                quadrantLayers.resize(static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers));
             }
-            float peakOpacity = 0.0f;
-            for (const float opacity : layer.opacity) {
-                peakOpacity = std::max(peakOpacity, opacity);
-            }
-            if (peakOpacity <= 0.0f) {
-                continue;
-            }
-            quadrantLayers.push_back(QuadrantLayer{&layer, textureIndex, peakOpacity});
-        }
-        if (quadrantLayers.size() > static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers)) {
             std::stable_sort(
                 quadrantLayers.begin(), quadrantLayers.end(),
                 [](const QuadrantLayer& a, const QuadrantLayer& b) {
-                    return a.layer->layerIndex != b.layer->layerIndex
-                        ? (a.layer->layerIndex > b.layer->layerIndex)
-                        : (a.peakOpacity > b.peakOpacity);
+                    return a.layer->layerIndex < b.layer->layerIndex;
                 });
-            outDroppedLayerCount +=
-                quadrantLayers.size() - static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers);
-            quadrantLayers.resize(static_cast<std::size_t>(odai::importer::kImportedSceneMaxTerrainLayers));
-        }
-        std::stable_sort(
-            quadrantLayers.begin(), quadrantLayers.end(),
-            [](const QuadrantLayer& a, const QuadrantLayer& b) {
-                return a.layer->layerIndex < b.layer->layerIndex;
-            });
 
-        const auto sampleAuthoredTriangle = [&](const std::vector<float>& values, int channels,
-                                                int channel, float row, float col,
-                                                float fallback) {
-            if (values.empty()) {
-                return fallback;
-            }
-            int row0 = std::min(static_cast<int>(std::floor(row)), kLandGridSize - 2);
-            int col0 = std::min(static_cast<int>(std::floor(col)), kLandGridSize - 2);
-            row0 = std::clamp(row0, 0, kLandGridSize - 2);
-            col0 = std::clamp(col0, 0, kLandGridSize - 2);
-            const float fy = std::clamp(row - static_cast<float>(row0), 0.0f, 1.0f);
-            const float fx = std::clamp(col - static_cast<float>(col0), 0.0f, 1.0f);
-            const auto at = [&](int r, int c) {
-                const std::size_t index =
-                    (static_cast<std::size_t>((r * kLandGridSize) + c) *
-                     static_cast<std::size_t>(channels)) + static_cast<std::size_t>(channel);
-                return index < values.size() ? values[index] : fallback;
+            const auto sampleAuthoredTriangle = [&](const std::vector<float>& values, int channels,
+                                                    int channel, float row, float col,
+                                                    float fallback) {
+                if (values.empty()) {
+                    return fallback;
+                }
+                int row0 = std::min(static_cast<int>(std::floor(row)), kLandGridSize - 2);
+                int col0 = std::min(static_cast<int>(std::floor(col)), kLandGridSize - 2);
+                row0 = std::clamp(row0, 0, kLandGridSize - 2);
+                col0 = std::clamp(col0, 0, kLandGridSize - 2);
+                const float fy = std::clamp(row - static_cast<float>(row0), 0.0f, 1.0f);
+                const float fx = std::clamp(col - static_cast<float>(col0), 0.0f, 1.0f);
+                const auto at = [&](int r, int c) {
+                    const std::size_t index =
+                        (static_cast<std::size_t>((r * kLandGridSize) + c) *
+                         static_cast<std::size_t>(channels)) + static_cast<std::size_t>(channel);
+                    return index < values.size() ? values[index] : fallback;
+                };
+                const float v00 = at(row0, col0);
+                const float v10 = at(row0, col0 + 1);
+                const float v01 = at(row0 + 1, col0);
+                const float v11 = at(row0 + 1, col0 + 1);
+                // Match the two triangles emitted below: 00-11-01 above the
+                // diagonal and 00-10-11 below it. This makes the refined mesh
+                // geometrically identical to the old one when tessellation is off.
+                return fy >= fx
+                    ? ((1.0f - fy) * v00) + (fx * v11) + ((fy - fx) * v01)
+                    : ((1.0f - fx) * v00) + (fy * v11) + ((fx - fy) * v10);
             };
-            const float v00 = at(row0, col0);
-            const float v10 = at(row0, col0 + 1);
-            const float v01 = at(row0 + 1, col0);
-            const float v11 = at(row0 + 1, col0 + 1);
-            // Match the two triangles emitted below: 00-11-01 above the
-            // diagonal and 00-10-11 below it. This makes the refined mesh
-            // geometrically identical to the old one when tessellation is off.
-            return fy >= fx
-                ? ((1.0f - fy) * v00) + (fx * v11) + ((fy - fx) * v01)
-                : ((1.0f - fx) * v00) + (fy * v11) + ((fx - fy) * v10);
-        };
 
-        const std::uint32_t quadrantBaseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
-        for (int refinedRow = 0; refinedRow < kRefinedQuadrantGridSize; ++refinedRow) {
-            for (int refinedCol = 0; refinedCol < kRefinedQuadrantGridSize; ++refinedCol) {
-                const float quadrantRow =
-                    static_cast<float>(refinedRow) / static_cast<float>(kBlendSubdivision);
-                const float quadrantCol =
-                    static_cast<float>(refinedCol) / static_cast<float>(kBlendSubdivision);
-                const float row = static_cast<float>(rowBegin) + quadrantRow;
-                const float col = static_cast<float>(colBegin) + quadrantCol;
-                const float bethesdaX = cellOriginX + (col * kLandPostSpacing);
-                const float bethesdaY = cellOriginZ + (row * kLandPostSpacing);
-                const float bethesdaZ = land.hasHeights
-                    ? sampleAuthoredTriangle(land.heights, 1, 0, row, col, 0.0f)
-                    : 0.0f;
-                const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+            const std::uint32_t quadrantBaseVertex = static_cast<std::uint32_t>(terrainMesh.vertices.size());
+            for (int refinedRow = 0; refinedRow < patchGridSize; ++refinedRow) {
+                for (int refinedCol = 0; refinedCol < patchGridSize; ++refinedCol) {
+                    const float quadrantRow =
+                        static_cast<float>(patchRow) + static_cast<float>(refinedRow) / static_cast<float>(kBlendSubdivision);
+                    const float quadrantCol =
+                        static_cast<float>(patchCol) + static_cast<float>(refinedCol) / static_cast<float>(kBlendSubdivision);
+                    const float row = static_cast<float>(rowBegin) + quadrantRow;
+                    const float col = static_cast<float>(colBegin) + quadrantCol;
+                    const float bethesdaX = cellOriginX + (col * kLandPostSpacing);
+                    const float bethesdaY = cellOriginZ + (row * kLandPostSpacing);
+                    const float bethesdaZ = land.hasHeights
+                        ? sampleAuthoredTriangle(land.heights, 1, 0, row, col, 0.0f)
+                        : 0.0f;
+                    const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
 
-                ImportedSceneVertex vertex{};
-                vertex.position[0] = world.x;
-                vertex.position[1] = world.y;
-                vertex.position[2] = world.z;
-                // Keep the authored 512-unit landscape-texture scale, but
-                // phase it in WORLD coordinates rather than restarting from
-                // (0,0) in every extracted CELL. The old local coordinate was
-                // continuous inside its four quadrants yet repeated the same
-                // eight-by-eight texture stamp every 4096 units. On Riverwood's
-                // riverbank that turns a natural sequence of Dirt02 / grass
-                // layers into immediately visible square repetitions whenever
-                // the camera sees two cells at once.
-                //
-                // bethesdaX/Y are deliberately used here instead of engine X/Z:
-                // terrain's authored UV orientation lives in the Bethesda grid,
-                // and the engine-space conversion negates its second horizontal
-                // axis. One texture repeat remains four 128-unit LAND quads.
-                constexpr float kTerrainTextureWorldPeriod =
-                    (kLandPostSpacing * static_cast<float>(kLandGridSize - 1)) /
-                    kLandTextureTilesPerCell;
-                vertex.uv[0] = bethesdaX / kTerrainTextureWorldPeriod;
-                vertex.uv[1] = bethesdaY / kTerrainTextureWorldPeriod;
-                if (land.hasNormals) {
-                    Vec3 normal = bethesdaToEngine(
-                        sampleAuthoredTriangle(land.normals, 3, 0, row, col, 0.0f),
-                        sampleAuthoredTriangle(land.normals, 3, 1, row, col, 0.0f),
-                        sampleAuthoredTriangle(land.normals, 3, 2, row, col, 1.0f));
-                    const float length = std::sqrt(
-                        (normal.x * normal.x) + (normal.y * normal.y) + (normal.z * normal.z));
-                    if (length > 1.0e-6f) {
-                        normal.x /= length;
-                        normal.y /= length;
-                        normal.z /= length;
+                    ImportedSceneVertex vertex{};
+                    vertex.position[0] = world.x;
+                    vertex.position[1] = world.y;
+                    vertex.position[2] = world.z;
+                    // Keep the authored 512-unit landscape-texture scale, but
+                    // phase it in WORLD coordinates rather than restarting from
+                    // (0,0) in every extracted CELL. The old local coordinate was
+                    // continuous inside its four quadrants yet repeated the same
+                    // eight-by-eight texture stamp every 4096 units. On Riverwood's
+                    // riverbank that turns a natural sequence of Dirt02 / grass
+                    // layers into immediately visible square repetitions whenever
+                    // the camera sees two cells at once.
+                    //
+                    // bethesdaX/Y are deliberately used here instead of engine X/Z:
+                    // terrain's authored UV orientation lives in the Bethesda grid,
+                    // and the engine-space conversion negates its second horizontal
+                    // axis. One texture repeat remains four 128-unit LAND quads.
+                    constexpr float kTerrainTextureWorldPeriod =
+                        (kLandPostSpacing * static_cast<float>(kLandGridSize - 1)) /
+                        kLandTextureTilesPerCell;
+                    vertex.uv[0] = bethesdaX / kTerrainTextureWorldPeriod;
+                    vertex.uv[1] = bethesdaY / kTerrainTextureWorldPeriod;
+                    if (land.hasNormals) {
+                        Vec3 normal = bethesdaToEngine(
+                            sampleAuthoredTriangle(land.normals, 3, 0, row, col, 0.0f),
+                            sampleAuthoredTriangle(land.normals, 3, 1, row, col, 0.0f),
+                            sampleAuthoredTriangle(land.normals, 3, 2, row, col, 1.0f));
+                        const float length = std::sqrt(
+                            (normal.x * normal.x) + (normal.y * normal.y) + (normal.z * normal.z));
+                        if (length > 1.0e-6f) {
+                            normal.x /= length;
+                            normal.y /= length;
+                            normal.z /= length;
+                        }
+                        vertex.normal[0] = normal.x;
+                        vertex.normal[1] = normal.y;
+                        vertex.normal[2] = normal.z;
+                    } else {
+                        vertex.normal[1] = 1.0f;
                     }
-                    vertex.normal[0] = normal.x;
-                    vertex.normal[1] = normal.y;
-                    vertex.normal[2] = normal.z;
-                } else {
-                    vertex.normal[1] = 1.0f;
-                }
-                // VCLR is a colour, not a direction: no basis change, unlike the
-                // normals above. Cells without it keep the vertex's white
-                // default, which leaves their texture untinted.
-                if (land.hasColors) {
-                    vertex.color[0] = sampleAuthoredTriangle(land.colors, 3, 0, row, col, 1.0f);
-                    vertex.color[1] = sampleAuthoredTriangle(land.colors, 3, 1, row, col, 1.0f);
-                    vertex.color[2] = sampleAuthoredTriangle(land.colors, 3, 2, row, col, 1.0f);
-                }
+                    // VCLR is a colour, not a direction: no basis change, unlike the
+                    // normals above. Cells without it keep the vertex's white
+                    // default, which leaves their texture untinted.
+                    if (land.hasColors) {
+                        vertex.color[0] = sampleAuthoredTriangle(land.colors, 3, 0, row, col, 1.0f);
+                        vertex.color[1] = sampleAuthoredTriangle(land.colors, 3, 1, row, col, 1.0f);
+                        vertex.color[2] = sampleAuthoredTriangle(land.colors, 3, 2, row, col, 1.0f);
+                    }
 
-                for (std::size_t slot = 0; slot < quadrantLayers.size(); ++slot) {
-                    vertex.layerTextureIndex[slot] = quadrantLayers[slot].textureIndex;
-                    vertex.layerWeight[slot] = sampleLandLayerOpacity(
-                        *quadrantLayers[slot].layer, quadrantRow, quadrantCol);
+                    for (std::size_t slot = 0; slot < quadrantLayers.size(); ++slot) {
+                        vertex.layerTextureIndex[slot] = quadrantLayers[slot].textureIndex;
+                        vertex.layerWeight[slot] = sampleLandLayerOpacity(
+                            *quadrantLayers[slot].layer, quadrantRow, quadrantCol);
+                    }
+                    terrainMesh.vertices.push_back(vertex);
                 }
-                terrainMesh.vertices.push_back(vertex);
             }
-        }
 
-        const std::uint32_t quadrantFirstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
-        for (int quadrantRow = 0; quadrantRow < kRefinedQuadrantGridSize - 1; ++quadrantRow) {
-            for (int quadrantCol = 0; quadrantCol < kRefinedQuadrantGridSize - 1; ++quadrantCol) {
-                const std::uint32_t i00 = quadrantBaseVertex +
-                    static_cast<std::uint32_t>((quadrantRow * kRefinedQuadrantGridSize) + quadrantCol);
-                const std::uint32_t i10 = i00 + 1u;
-                const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(kRefinedQuadrantGridSize);
-                const std::uint32_t i11 = i01 + 1u;
-                // Winding note: the grid is laid out so that increasing `col`
-                // moves +X in engine space but increasing `row` moves -Z,
-                // because bethesdaToEngine negates Y. That row reversal flips
-                // the sense of the quad, so the indices are emitted in the order
-                // that leaves the surface normal pointing +Y (up).
-                //
-                // Getting this backwards is not subtle to spot and easy to
-                // misread as a lighting bug: the terrain vanishes when viewed
-                // from above and is solid when viewed from underneath.
-                terrainMesh.indices.push_back(i00);
-                terrainMesh.indices.push_back(i11);
-                terrainMesh.indices.push_back(i01);
-                terrainMesh.indices.push_back(i00);
-                terrainMesh.indices.push_back(i10);
-                terrainMesh.indices.push_back(i11);
+            const std::uint32_t quadrantFirstIndex = static_cast<std::uint32_t>(terrainMesh.indices.size());
+            for (int quadrantRow = 0; quadrantRow < patchGridSize - 1; ++quadrantRow) {
+                for (int quadrantCol = 0; quadrantCol < patchGridSize - 1; ++quadrantCol) {
+                    const std::uint32_t i00 = quadrantBaseVertex +
+                        static_cast<std::uint32_t>((quadrantRow * patchGridSize) + quadrantCol);
+                    const std::uint32_t i10 = i00 + 1u;
+                    const std::uint32_t i01 = i00 + static_cast<std::uint32_t>(patchGridSize);
+                    const std::uint32_t i11 = i01 + 1u;
+                    // Winding note: the grid is laid out so that increasing `col`
+                    // moves +X in engine space but increasing `row` moves -Z,
+                    // because bethesdaToEngine negates Y. That row reversal flips
+                    // the sense of the quad, so the indices are emitted in the order
+                    // that leaves the surface normal pointing +Y (up).
+                    //
+                    // Getting this backwards is not subtle to spot and easy to
+                    // misread as a lighting bug: the terrain vanishes when viewed
+                    // from above and is solid when viewed from underneath.
+                    terrainMesh.indices.push_back(i00);
+                    terrainMesh.indices.push_back(i11);
+                    terrainMesh.indices.push_back(i01);
+                    terrainMesh.indices.push_back(i00);
+                    terrainMesh.indices.push_back(i10);
+                    terrainMesh.indices.push_back(i11);
+                }
             }
+            const std::uint32_t quadrantIndexCount =
+                static_cast<std::uint32_t>(terrainMesh.indices.size()) - quadrantFirstIndex;
+            if (quadrantIndexCount == 0u) {
+                continue;
+            }
+            const std::uint32_t textureIndex = resolveLandTexture(land.quadrantBaseTextureFormId[quadrant]);
+            terrainMesh.parts.push_back(
+                ImportedSceneMeshPart{quadrantFirstIndex, quadrantIndexCount, textureIndex, false});
+            odai::importer::ImportedTerrainNormalBinding normals;
+            normals.textures[0]=resolveLandNormal(land.quadrantBaseTextureFormId[quadrant]);
+            normals.surfaceProperties[0]=resolveLandSurface(land.quadrantBaseTextureFormId[quadrant]);
+            for (std::size_t layer=0;layer<quadrantLayers.size();++layer) {
+                normals.textures[layer+1]=resolveLandNormal(quadrantLayers[layer].layer->textureFormId);
+                normals.surfaceProperties[layer+1]=resolveLandSurface(quadrantLayers[layer].layer->textureFormId);
+            }
+            terrainMesh.terrainNormals.resize(terrainMesh.parts.size());
+            terrainMesh.terrainNormals.back()=normals;
         }
-        const std::uint32_t quadrantIndexCount =
-            static_cast<std::uint32_t>(terrainMesh.indices.size()) - quadrantFirstIndex;
-        if (quadrantIndexCount == 0u) {
-            continue;
-        }
-        const std::uint32_t textureIndex = resolveLandTexture(land.quadrantBaseTextureFormId[quadrant]);
-        terrainMesh.parts.push_back(
-            ImportedSceneMeshPart{quadrantFirstIndex, quadrantIndexCount, textureIndex, false});
-        odai::importer::ImportedTerrainNormalBinding normals;
-        normals.textures[0]=resolveLandNormal(land.quadrantBaseTextureFormId[quadrant]);
-        normals.surfaceProperties[0]=resolveLandSurface(land.quadrantBaseTextureFormId[quadrant]);
-        for (std::size_t layer=0;layer<quadrantLayers.size();++layer) {
-            normals.textures[layer+1]=resolveLandNormal(quadrantLayers[layer].layer->textureFormId);
-            normals.surfaceProperties[layer+1]=resolveLandSurface(quadrantLayers[layer].layer->textureFormId);
-        }
-        terrainMesh.terrainNormals.resize(terrainMesh.parts.size());
-        terrainMesh.terrainNormals.back()=normals;
     }
 }
 
@@ -841,15 +825,18 @@ void appendTerrainCell(
 void writeBethesdaPlacementTransform(
     ImportedSceneInstance& instance,
     const FalloutPlacedReference& reference,
-    bool morrowind) {
+    bool morrowind, bool skyrim) {
     (void)morrowind;  // All supported generations encode clockwise REFR angles.
     const Vec3 worldPos = bethesdaToEngine(
         reference.position[0], reference.position[1], reference.position[2]);
-    // REFR angles are clockwise-positive. Negate each angle while preserving
-    // Bethesda's Z * Y * X composition order. Transposing the composed matrix
-    // happens to work for a single axis but reverses the order of compound
-    // rotations, which displaced rotated modular pieces and clutter.
-    Mat3 bethRotation = eulerToMatrixBethesdaOrder(
+    // Skyrim NiMatrix3::SetEulerAnglesXYZ applies clockwise Z, then Y, then X
+    // to column vectors. Compound rotations must not use the reverse order:
+    // that tilts authored rock surfaces and their collision into the road.
+    Mat3 bethRotation = skyrim
+        ? multiply(rotationX(-reference.rotationRadians[0]),
+                   multiply(rotationY(-reference.rotationRadians[1]),
+                            rotationZ(-reference.rotationRadians[2])))
+        : eulerToMatrixBethesdaOrder(
         -reference.rotationRadians[0],
         -reference.rotationRadians[1],
         -reference.rotationRadians[2]);
@@ -2108,7 +2095,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         emitter.seed = ref.formId;
                         emitter.textureIndex = resolveTextureIndex(found->second.texture);
                         ImportedSceneInstance placement;
-                        writeBethesdaPlacementTransform(placement, ref, false);
+                        writeBethesdaPlacementTransform(placement, ref, false, true);
                         std::copy_n(placement.transform, 12, emitter.mistTransform.begin());
                         emitter.mist = found->second;
                         if (emitter.textureIndex != kNoTextureIndex) {
@@ -2752,6 +2739,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             const auto& source = shape.lightingMaterial;
                             ImportedNifLightingMaterial material;
                             material.animations=shape.materialAnimations;
+                            std::copy_n(source.effectFalloff, 4, material.effectFalloff);
                             for(auto& track:material.animations) {
                                 for(const auto& path:track.texturePaths)
                                     track.textures.push_back(resolveTextureIndex(path, track.target == MaterialAnimatedValue::NormalFrame, clampMode));
@@ -2822,6 +2810,28 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
 
             ImportedSceneInstance instance;
             instance.meshIndex = meshIt->second;
+            // Manager-controlled materials belong to a placed reference, not
+            // its shared base mesh. Give each placement independent slots.
+            const auto& sharedMesh = m_scene.meshes[instance.meshIndex];
+            const bool managed = std::any_of(sharedMesh.lightingMaterialIndices.begin(),
+                sharedMesh.lightingMaterialIndices.end(), [&](auto index) {
+                    return index < m_scene.lightingMaterials.size() &&
+                        std::any_of(m_scene.lightingMaterials[index].animations.begin(),
+                            m_scene.lightingMaterials[index].animations.end(),
+                            [](const auto& t) { return !t.sequence.empty(); });
+                });
+            if (managed) {
+                auto placedMesh = sharedMesh;
+                for (auto& index : placedMesh.lightingMaterialIndices) {
+                    if (index >= m_scene.lightingMaterials.size()) continue;
+                    auto material = m_scene.lightingMaterials[index];
+                    material.animationReference = ref.formId;
+                    index = std::uint32_t(m_scene.lightingMaterials.size());
+                    m_scene.lightingMaterials.push_back(std::move(material));
+                }
+                instance.meshIndex = std::uint32_t(m_scene.meshes.size());
+                m_scene.meshes.push_back(std::move(placedMesh));
+            }
             instance.sourceId = grassPlacement ? "grass_" + formIdHex(ref.baseFormId) +
                 "_" + std::to_string(m_scene.instances.size()) : "refr_" + formIdHex(ref.formId);
             instance.sourceReferenceFormId = ref.formId;
@@ -2841,7 +2851,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
             if (const std::string* modelPath = staticModelPathFor(ref.baseFormId)) {
                 instance.modelPath = *modelPath;
             }
-            writeBethesdaPlacementTransform(instance, ref, m_tables.morrowind);
+            writeBethesdaPlacementTransform(instance, ref, m_tables.morrowind, m_tables.skyrim);
             // GRAS Uniform Scaling controls whether height variation also
             // changes the footprint. NIF source Z is the vertical axis.
             if (grassPlacement && (m_tables.grasses.at(ref.baseFormId).flags & 2u) == 0u) {

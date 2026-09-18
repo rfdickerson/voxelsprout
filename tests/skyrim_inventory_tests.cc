@@ -17,8 +17,8 @@ int main() {
     const auto sword = makeRecordKey("Fixture.esm", 0x100);
     const auto axe = makeRecordKey("Fixture.esm", 0x101);
     const auto potion = makeRecordKey("Fixture.esm", 0x102);
-    session.setSkyrimItems({{sword, {sword, "Sword", {}, {}, 12, 0}},
-                            {axe, {axe, "Axe", {}, {}, 20, 0}},
+    session.setSkyrimItems({{sword, {sword, "Sword", {}, {}, 12, 0, "WEAP", 1}},
+                            {axe, {axe, "Axe", {}, {}, 20, 0, "WEAP", 3}},
                             {potion, {potion, "Healing", {}, {}, 0, 30}}});
     RuntimeObject player;
     player.id = session.playerObject();
@@ -26,7 +26,7 @@ int main() {
     player.kind = RuntimeObjectKind::Actor;
     player.actorValues.emplace();
     player.actorValues->health = 50;
-    player.inventory = {{sword, 1, true}, {axe, 1, false}, {potion, 2, false}};
+    player.inventory = {{sword, 1, true, kEquipmentRightHand}, {axe, 1, false}, {potion, 2, false}};
     assert(session.world().addInitialObject(player, error));
     assert(session.useInventoryItem(player.id, axe, error));
     assert(session.useInventoryItem(player.id, potion, error));
@@ -102,6 +102,42 @@ int main() {
     current = session.world().find(player.id);
     assert(current->inventory[1].count == 5);
     assert(!session.lootObject(player.id, corpse.id, axe, 2).accepted);
+    // Slot changes preserve clothing, displace only conflicting hands, and
+    // persist both biped and hand ownership through save/load.
+    const auto armor = makeRecordKey("Fixture.esm", 0x103);
+    const auto shield = makeRecordKey("Fixture.esm", 0x104);
+    const auto greatsword = makeRecordKey("Fixture.esm", 0x105);
+    session.setSkyrimItems({{axe, {axe, "Axe", {}, {}, 20, 0, "WEAP", 3}},
+        {armor, {armor, "Armor", {}, {}, 0, 0, "ARMO", 0, 1u << 2}},
+        {shield, {shield, "Shield", {}, {}, 0, 0, "ARMO", 0, 1u << 9}},
+        {greatsword, {greatsword, "Greatsword", {}, {}, 30, 0, "WEAP", 5}}});
+    current->inventory = {{armor, 1, true, 1u << 2}, {shield, 1, false},
+        {axe, 1, false}, {greatsword, 1, false}};
+    assert(session.equipActorItem(player.id, shield, true, false, error));
+    assert(session.equipActorItem(player.id, axe, true, false, error));
+    session.advance(1. / 60.);
+    assert(current->inventory[0].equipped && current->inventory[1].equipped && current->inventory[2].equipped);
+    assert(session.equipActorItem(player.id, greatsword, true, false, error));
+    session.advance(1. / 60.);
+    assert(current->inventory[0].equipped && !current->inventory[1].equipped && !current->inventory[2].equipped);
+    assert(current->inventory[3].equipped);
+    assert(saveOdaiGameAtomic(path, session, error));
+    assert(loadOdaiGame(path, session, {}, report, error));
+    current = session.world().find(player.id);
+    assert(current->inventory[3].equipmentSlots == (kEquipmentLeftHand | kEquipmentRightHand));
+    assert(current->inventory[0].equipped);
+    assert(session.equipActorItem(player.id, armor, true, false, error, true, true));
+    session.advance(1. / 60.);
+    assert(session.equipActorItem(player.id, armor, false, false, error));
+    assert(!session.advance(1. / 60.).diagnostics.empty());
+    assert(current->inventory[0].equipped && current->inventory[0].preventUnequip);
+    assert(saveOdaiGameAtomic(path, session, error));
+    assert(loadOdaiGame(path, session, {}, report, error));
+    current = session.world().find(player.id);
+    assert(current->inventory[0].preventUnequip);
+    assert(session.equipActorItem(player.id, armor, false, false, error, false, true));
+    session.advance(1. / 60.);
+    assert(!current->inventory[0].equipped && !current->inventory[0].preventUnequip);
     std::filesystem::remove(path);
     std::cout << "Skyrim inventory tests passed\n";
 }

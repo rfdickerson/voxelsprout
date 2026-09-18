@@ -151,6 +151,7 @@ public:
     [[nodiscard]] const std::vector<FalloutLoadOrderEntry>& entries() const { return m_entries; }
     [[nodiscard]] std::size_t size() const { return m_entries.size(); }
     [[nodiscard]] bool empty() const { return m_entries.empty(); }
+    [[nodiscard]] const std::filesystem::path& lastErrorSource() const { return m_errorSource; }
 
     // Rewrites `localFormId`'s mod index from plugin `pluginIndex`'s local
     // space into the global one. Returns the formID unchanged when the local
@@ -169,6 +170,7 @@ public:
 private:
     std::vector<std::filesystem::path> m_searchRoots;  // ahead of Data; later wins
     std::vector<FalloutLoadOrderEntry> m_entries;
+    std::filesystem::path m_errorSource;
 };
 
 }  // namespace odai::importer::fnv

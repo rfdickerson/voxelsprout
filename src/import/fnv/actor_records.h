@@ -59,6 +59,8 @@ struct FalloutActorBase {
     // FULL -- the name the game shows. An EditorID reads as "GSSettlerAM"; a
     // prompt offering to talk to that is a debug string on screen.
     std::string fullName;
+    std::uint32_t fullNameStringId = 0u;
+    std::string fullNamePlugin;
     std::string recordType;   // "CREA" or "NPC_"
     std::string skeletonPath; // MODL -- the skeleton for a CREA, and for an NPC_ too
     // TES5 stores each NPC's generated head as a separate mesh named by the
@@ -68,6 +70,7 @@ struct FalloutActorBase {
     // FaceGeom asset, so the explicit showcase replaces it with the ordered
     // retail head/eyes/mouth/brows/hair pieces used for its stock appearance.
     std::vector<std::string> faceGeometryPaths;
+    std::vector<std::uint32_t> headPartFormIds;
     std::vector<std::string> bodyPartPaths;  // NIFZ, relative to the skeleton's directory
     std::uint32_t templateFormId = 0;        // TPLT
     std::uint32_t raceFormId = 0;            // RNAM
@@ -79,11 +82,15 @@ struct FalloutActorBase {
     // record; guards usually carry only weapons in CNTO, so ignoring this
     // leaves every otherwise-valid actor undressed.
     std::uint32_t defaultOutfitFormId = 0;
+    float weight = 100.f; // TES5 NAM7, 0..100
     bool isFemale = false;  // ACBS flag bit 0, picks RACE's FNAM parts over MNAM
     // VTCK. Names a VTYP record whose EditorID IS the voice folder under
     // sound\voice\<plugin>\ -- so this, not the actor's name, is what finds a
     // recorded line. Zero means "inherit the race's", which most actors do.
     std::uint32_t voiceTypeFormId = 0;
+    // TES5 HCLF -> CLFM. Hair meshes use a neutral diffuse texture and the
+    // actor's ColorForm supplies the visible RGB tint.
+    std::uint32_t hairColorFormId = 0;
     // ACBS's trailing u16. Which fields the record actually OWNS rather than
     // borrows from its TPLT -- see kActorTemplateUse* below. A record that
     // borrows its traits still stores a race and a sex of its own, and they are
@@ -131,6 +138,7 @@ struct FalloutRaceParts {
     // TES5 WNAM: the race's default skin ARMO. Its ARMA records provide the
     // naked hands/feet/body for slots not covered by the actor's outfit.
     std::uint32_t defaultSkinFormId = 0;
+    bool flies = false;
     // TES5 RACE stores the male/female skeleton directly in ANAM after the
     // corresponding MNAM/FNAM marker. Earlier generations leave these empty.
     std::string maleSkeletonPath;
@@ -181,6 +189,8 @@ struct SkyrimArmorAddon {
     // helmet ARMO (human, Argonian, Khajiit); only the addon naming the actor's
     // race is applicable.
     std::vector<std::uint32_t> raceFormIds;
+    bool maleWeightSlider = false;
+    bool femaleWeightSlider = false;
 };
 
 struct FalloutActorPlacement {
@@ -210,10 +220,24 @@ struct ResolvedActorBase {
     // Race only: which ARMO records supplied a body slot. Empty means the actor
     // is standing there in the race's underwear, which is a truthful render of
     // an actor with no clothes resolvable rather than a failure.
+    std::vector<std::string> hiddenHeadParts;
+    std::uint32_t coveredBipedSlots = 0u;
+    std::map<std::string, float> weightMorphs;
     std::vector<std::uint32_t> wornArmorFormIds;
 };
 
+struct SkyrimHeadPart {
+    std::string editorId;
+    // HDPT MODL. FaceGeom bakes an NPC's original head parts, while a runtime
+    // override can select a different hair mesh that must be assembled with it.
+    std::string modelPath;
+    std::uint32_t type = 0;
+    std::vector<std::uint32_t> extraParts;
+};
+
 struct FalloutActorScan {
+    std::unordered_map<std::uint32_t, SkyrimHeadPart> headParts;
+    std::unordered_map<std::uint32_t, std::array<float, 3>> hairColors;
     std::vector<FalloutActorPlacement> placements;  // sorted nearest-first
     std::unordered_map<std::uint32_t, FalloutActorBase> bases;
     // LVLC/LVLN formID -> the actor formIDs it can spawn, in list order. A
@@ -248,7 +272,9 @@ struct FalloutActorScan {
     // Follows TPLT to whichever base actually carries geometry, and assembles
     // an NPC_'s body from its race and its wardrobe. Returns a source of None
     // when nothing in the chain does.
-    [[nodiscard]] ResolvedActorBase resolve(std::uint32_t baseFormId) const;
+    [[nodiscard]] ResolvedActorBase resolve(std::uint32_t baseFormId,
+        const std::vector<std::uint32_t>* equippedItems = nullptr,
+        std::uint32_t outfitOverride = 0u) const;
 
     // The record an actor's `templateUseFlag`-governed fields actually come
     // from -- itself, when it owns them. Returns null only for an unknown

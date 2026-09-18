@@ -1,3 +1,4 @@
+#include "core/resource_path.h"
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include "core/log.h"
@@ -72,7 +73,7 @@ std::optional<std::vector<std::uint8_t>> readBinaryFile(const char* filePath) {
         return std::nullopt;
     }
 
-    const std::filesystem::path path(filePath);
+    const auto path = core::resourcePath(filePath);
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
         return std::nullopt;
@@ -618,7 +619,7 @@ bool RendererBackend::createPipePipeline() {
               << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
               << "\n";
 
-    const bool hasRtImportedVariant = m_rayTracingRuntimeEnabled && std::filesystem::exists(kImportedStaticRtFragmentShaderPath);
+    const bool hasRtImportedVariant = m_rayTracingRuntimeEnabled && std::filesystem::exists(core::resourcePath(kImportedStaticRtFragmentShaderPath));
     std::array<VkShaderModule, 3> importedShaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -647,7 +648,7 @@ bool RendererBackend::createPipePipeline() {
         {kImportedStaticDepthOnlyFragmentShaderPath, "imported_static_depthonly.frag"},
     }};
     const bool hasImportedDepthOnlyVariant =
-        std::filesystem::exists(kImportedStaticDepthOnlyFragmentShaderPath) &&
+        std::filesystem::exists(core::resourcePath(kImportedStaticDepthOnlyFragmentShaderPath)) &&
         createShaderModulesFromFiles(
             m_device, importedDepthOnlyLoadSpecs, importedDepthOnlyShaderModules);
 
@@ -752,6 +753,16 @@ bool RendererBackend::createPipePipeline() {
     importedPipelineCreateInfo.stageCount = static_cast<uint32_t>(importedShaderStages.size());
     importedPipelineCreateInfo.pStages = importedShaderStages.data();
     importedPipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
+    // Alpha-tested leaf edges live inside their card triangles, so geometric
+    // MSAA alone cannot see them. Let the fragment shader's filtered alpha
+    // control sample coverage when multisampling is active. Opaque materials
+    // output alpha 1 and are unaffected. Blended surfaces restore the ordinary
+    // multisample state below because combining blending and alpha-to-coverage
+    // would attenuate them twice.
+    VkPipelineMultisampleStateCreateInfo importedMultisampling = multisampling;
+    importedMultisampling.alphaToCoverageEnable =
+        m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT ? VK_FALSE : VK_TRUE;
+    importedPipelineCreateInfo.pMultisampleState = &importedMultisampling;
     VkPipelineRasterizationStateCreateInfo importedRasterizer = rasterizer;
     // ODAI_DEBUG_NO_CULL=1 disables back-face culling on imported opaque
     // geometry. Diagnostic, not a setting: rendering a frame with and without
@@ -880,8 +891,8 @@ bool RendererBackend::createPipePipeline() {
         constexpr const char* kImportedTerrainTesePath =
             "../src/render/shaders/imported_terrain.tese.slang.spv";
         if (importedTerrainTessellationEnabled() && useMergedDepthPrepass() &&
-            std::filesystem::exists(kImportedTerrainTescPath) &&
-            std::filesystem::exists(kImportedTerrainTesePath)) {
+            std::filesystem::exists(core::resourcePath(kImportedTerrainTescPath)) &&
+            std::filesystem::exists(core::resourcePath(kImportedTerrainTesePath))) {
             std::array<VkShaderModule, 2> tessModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
             const std::array<ShaderModuleLoadSpec, 2> tessLoadSpecs = {{
                 {kImportedTerrainTescPath, "imported_terrain.tesc"},
@@ -966,6 +977,7 @@ bool RendererBackend::createPipePipeline() {
     importedBlendDepth.depthWriteEnable = VK_FALSE;
 
     VkGraphicsPipelineCreateInfo importedBlendedPipelineCreateInfo = importedPipelineCreateInfo;
+    importedBlendedPipelineCreateInfo.pMultisampleState = &multisampling;
     importedBlendedPipelineCreateInfo.pColorBlendState = &importedBlendState;
     importedBlendedPipelineCreateInfo.pDepthStencilState = &importedBlendDepth;
     VkPipeline importedStaticPipelineBlended = VK_NULL_HANDLE;
@@ -1147,7 +1159,7 @@ bool RendererBackend::createPipePipeline() {
               << ", alphaBlend=1\n";
 
     const bool hasRtImportedWaterVariant =
-        m_rayTracingRuntimeEnabled && std::filesystem::exists(kImportedWaterRtFragmentShaderPath);
+        m_rayTracingRuntimeEnabled && std::filesystem::exists(core::resourcePath(kImportedWaterRtFragmentShaderPath));
     std::array<VkShaderModule, 3> importedWaterShaderModules = {
         VK_NULL_HANDLE,
         VK_NULL_HANDLE,
@@ -1979,8 +1991,8 @@ bool RendererBackend::createAoPipelines() {
         constexpr const char* kImportedTerrainTesePath =
             "../src/render/shaders/imported_terrain.tese.slang.spv";
         if (importedTerrainTessellationEnabled() && useMergedDepthPrepass() &&
-            std::filesystem::exists(kImportedTerrainTescPath) &&
-            std::filesystem::exists(kImportedTerrainTesePath)) {
+            std::filesystem::exists(core::resourcePath(kImportedTerrainTescPath)) &&
+            std::filesystem::exists(core::resourcePath(kImportedTerrainTesePath))) {
             std::array<VkShaderModule, 2> tessModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
             const std::array<ShaderModuleLoadSpec, 2> tessLoadSpecs = {{
                 {kImportedTerrainTescPath, "imported_terrain.tesc"},

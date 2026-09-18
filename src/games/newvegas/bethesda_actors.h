@@ -1,5 +1,7 @@
 #pragma once
 
+#include "anim/skyrim_animation.h"
+
 // The rest of Goodsprings: every actor the plugin places near the player,
 // built into GPU-skinned instances the same way Victor is.
 //
@@ -128,6 +130,10 @@ struct SkinnedActor {
     // Deterministically materialized CNTO inventory. LVLI tokens are expanded
     // during actor construction so runtime never exposes a list record as if
     // it were a takeable item.
+    std::vector<std::uint32_t> initialWornArmor;
+    std::string equipmentVisualKey;
+    bool equipmentDrawProbeSent = false;
+    std::vector<odai::math::Matrix4> equipmentPoseCorrection;
     std::vector<std::uint32_t> inventoryFormIds;
     std::vector<std::pair<std::uint32_t, std::int32_t>> inventoryStacks;
     odai::importer::fnv::FalloutCharacter character;
@@ -142,9 +148,18 @@ struct SkinnedActor {
     // handed to walkSpeedUnitsPerSecond instead -- see loadActorWalkClip. Empty
     // for anything with no locomotion clip beside its skeleton.
     odai::anim::AnimationClip walkClip;
+    // Difference between the model origin and the studio floor contact.
+    float demoFootOffset = 0.0f;
     // Extra authored third-person states used by the opt-in Skyrim avatar.
     // Ordinary town actors continue to sample only idle/walk.
     std::vector<odai::anim::AnimationClip> authoredLocomotionClips;
+    std::shared_ptr<const odai::anim::AnimationView> animationView;
+    bool runtimeAnimationRegistered = false;
+    float previousAnimationYaw = 0.0f;
+    // Session-owned pose, already interpolated for the current render frame.
+    std::vector<odai::math::Matrix4> runtimeAnimationPose;
+    bool runtimePoseResetHistory = false;
+    std::shared_ptr<const odai::anim::PoseEvaluationPacket> runtimeEvaluationPacket;
     float walkSpeedUnitsPerSecond = 0.0f;
     odai::anim::AnimationSampler sampler;
     // GPU-ready local pose before actor world placement. Clip changes blend
@@ -168,6 +183,9 @@ struct SkinnedActor {
     // A townsperson walks between connected authored navmesh triangles near
     // where the plugin placed them. The route stores shared-edge midpoints, so
     // following it cannot take a straight-line shortcut across scenery.
+    bool followsPlayer = false;
+    float followRepathSeconds = 0.f;
+    float followSpeedMultiplier = 1.f;
     bool wanders = false;   // has a locomotion clip, so it can move at all
     bool walking = false;   // moving right now, which picks walkClip over idle
     bool projectedToNavigation = false;
@@ -180,6 +198,7 @@ struct SkinnedActor {
     bool scriptedMoveActive = false;
     bool scriptedMoveArrived = false;
     std::uint64_t scriptedMoveRevision = 0u;
+    std::uint64_t scriptedMoveRetryTick = 0u;
     // Skyrim scenario actors hand translation to BethesdaSession/Jolt after
     // their initial authored-navmesh projection. The legacy actor planner then
     // produces velocity intent only; these fields bridge that intent without
@@ -276,7 +295,12 @@ bool buildSkinnedActor(
     // TES3 BODY records carry the rigid attachment slot outside the NIF. One
     // optional skeleton-node name per bodyPartPaths entry restores that
     // authored pivot; later Bethesda formats keep deriving it from the NIF.
-    const std::vector<std::string>* rigidAttachmentBones = nullptr);
+    const std::vector<std::string>* rigidAttachmentBones = nullptr,
+    const std::map<std::string, float>* weightMorphs = nullptr,
+    std::uint32_t coveredBipedSlots = 0u,
+    const std::vector<std::string>* hiddenHeadParts = nullptr,
+    // 0: complete prop, 1: weapon without Scb, 2: Scb only.
+    const std::vector<std::uint8_t>* rigidPartModes = nullptr);
 
 // Loads a standing idle for an actor, resolved against `skeleton`. Silent
 // failure is fine and expected: not every actor has one, and an actor without a
@@ -400,7 +424,8 @@ bool loadSkyrimPlayerAvatar(
     std::string_view outfitEditorId,
     std::uint32_t instanceSlot,
     SkinnedActor& outAvatar,
-    std::string& outDetail);
+    std::string& outDetail,
+    const importer::fnv::FalloutAssetSource* profileAssets = nullptr);
 
 // Attaches a conversation to every actor that has one, in ONE walk over the
 // plugin. Actors that already carry a tree are left alone, and actors the
@@ -456,11 +481,16 @@ std::size_t loadActorVoices(
 void speakActorLine(
     SkinnedActor& actor,
     const std::filesystem::path& cacheDirectory,
-    odai::audio::Audio& audioSystem);
+    odai::audio::Audio& audioSystem,
+    const dialogue::DialogueNode* sceneLine = nullptr, double* durationSeconds = nullptr);
 
 // Advances every actor's clip and writes this frame's bone matrices, world
 // placement folded in. Hand each actor's poseScratch to setSkinnedActorPose.
 void updateActorPoses(std::span<SkinnedActor> actors, float deltaSeconds);
+
+// Updates a player-follow route; translation remains in the existing controller.
+void updateActorFollowTarget(SkinnedActor& actor, const ActorNavigationWorld* navigation,
+    const odai::math::Vector3& target, bool targetAvailable, float deltaSeconds);
 
 // Walks the ones that can walk: chooses a connected authored-navmesh route near
 // where they were placed, turns toward each shared-edge waypoint, and moves at

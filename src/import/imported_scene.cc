@@ -47,7 +47,7 @@ constexpr std::uint32_t kImportedSceneMagic = 0x4E435356u;  // VSCN
 // vegetation LOD. The raw stride is unchanged, but old caches cannot promise
 // those bytes were initialized by every historical writer.
 // v34 carries authored WATR appearance and layer texture indices on water patches.
-constexpr std::uint32_t kImportedSceneVersion = 40u;
+constexpr std::uint32_t kImportedSceneVersion = 41u;
 // v35 appends typed terrain normal bindings; v34 loads with neutral defaults.
 constexpr std::uint32_t kMinSupportedImportedSceneVersion = 34u;
 constexpr std::uint8_t kImportedSceneMaxTextureFormat =
@@ -1724,6 +1724,25 @@ bool readCubeSection(std::istream& input, ImportedScene& scene) {
     return true;
 }
 // v39: explicit per-material animation tracks, appended after v37 cube data.
+bool readEffectSequences(std::istream& in, ImportedScene& scene) {
+    std::uint32_t count;
+    if (!readValue(in, count) || count != scene.lightingMaterials.size()) return false;
+    for (auto& m : scene.lightingMaterials) {
+        if (!readValue(in, m.animationReference) || !readValue(in, count) || count != m.animations.size()) return false;
+        for (auto& value : m.effectFalloff) if (!readValue(in, value) || !std::isfinite(value)) return false;
+        for (auto& t : m.animations) if (!readString(in, t.sequence) || t.sequence.size() > 1024) return false;
+    }
+    return true;
+}
+void writeEffectSequences(std::ostream& out, const ImportedScene& scene) {
+    writeValue(out, std::uint32_t(scene.lightingMaterials.size()));
+    for (const auto& m : scene.lightingMaterials) {
+        writeValue(out, m.animationReference);
+        writeValue(out, std::uint32_t(m.animations.size()));
+        for (auto value : m.effectFalloff) writeValue(out, value);
+        for (const auto& t : m.animations) writeString(out, t.sequence);
+    }
+}
 void writeMaterialAnimations(std::ostream& out, const ImportedScene& scene) {
     writeValue(out,std::uint32_t(scene.lightingMaterials.size()));
     for(const auto& m:scene.lightingMaterials) {
@@ -2079,6 +2098,7 @@ bool saveImportedScene(const ImportedScene& scene, const std::filesystem::path& 
     for (const auto& material : scene.lightingMaterials) writeValue(output,material.environmentScale);
     writeMaterialAnimations(output,scene);
     writeTerrainSurfaceSection(output,scene);
+    writeEffectSequences(output,scene);
 
     if (!output.good()) {
         setLastImportedSceneError("Failed while writing output file: " + outputPath.string());
@@ -2371,6 +2391,9 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
     if (version >= 40u && !readTerrainSurfaceSection(input, scene, meshCount)) {
         setLastImportedSceneError("Invalid terrain surface section"); return false;
     }
+    if (version >= 41u && !readEffectSequences(input, scene)) {
+        setLastImportedSceneError("Invalid effect sequence section"); return false;
+    }
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
     // authored, this one corrects one that was authored wrong. Exactly one
@@ -2646,6 +2669,9 @@ bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedSc
 
     if (version >= 40u && !readTerrainSurfaceSection(input, scene, meshCount)) {
         setLastImportedSceneError("Invalid terrain surface section"); return false;
+    }
+    if (version >= 41u && !readEffectSequences(input, scene)) {
+        setLastImportedSceneError("Invalid effect sequence section"); return false;
     }
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was

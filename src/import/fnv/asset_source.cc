@@ -656,6 +656,10 @@ bool FalloutAssetSource::resolve(
         outAsset->bytes = outBytes;
         outAsset->canonicalVirtualPath = toLowerAsciiCopy(normalizeModelPath(archiveVirtualPath));
         outAsset->providerId = providerId;
+        outAsset->layerPriority = providerId == "base-loose" ? 1 : 0;
+        for (std::size_t i = 0; i < m_modDirectories.size(); ++i)
+            if (m_modDirectories[i].root == providerRoot)
+                outAsset->layerPriority = static_cast<int>(i) + 2;
         outAsset->providerName = providerName;
         outAsset->providerRoot = providerRoot;
         outAsset->physicalPath = physicalPath;

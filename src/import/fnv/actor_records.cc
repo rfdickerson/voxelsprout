@@ -115,6 +115,9 @@ FalloutRaceParts parseRaceParts(
             race.femaleVoiceTypeFormId = readU32(sub, 4);
             continue;
         }
+        if (sub.type == "DATA" && sub.size >= 128u && pluginFormat == EsmPluginFormat::kFallout3) {
+            race.flies = (readU32(sub, 32) & 0x80u) != 0;
+        }
         if (sub.type == "WNAM" && sub.size >= 4u) {
             race.defaultSkinFormId = readU32(sub);
             continue;
@@ -177,7 +180,8 @@ void appendUnique(std::vector<std::string>& out, const std::string& path) {
 
 }  // namespace
 
-ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
+ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId,
+    const std::vector<std::uint32_t>* equippedItems, std::uint32_t outfitOverride) const {
     ResolvedActorBase resolved;
     const auto found = bases.find(baseFormId);
     if (found == bases.end()) {
@@ -325,6 +329,7 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     // Additive pieces -- a hat sits ON a head rather than replacing it.
     std::vector<std::string> accessories;
     std::uint32_t skyrimCoveredSlots = 0u;
+    std::uint32_t skyrimClaimedItemSlots = 0u;
 
     // Levelled lists expand in place, so a settler's "OutfitSettlerFemale"
     // becomes the outfits it can hand out and the loop below sees armour.
@@ -338,8 +343,11 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
          outfitSource->defaultOutfitFormId == 0u && outfitSource->templateFormId != 0u; ++hop) {
         outfitSource = firstActorFrom(outfitSource->templateFormId, outfitSource->formId);
     }
-    if (outfitSource != nullptr && outfitSource->defaultOutfitFormId != 0u) {
-        const auto outfit = outfits.find(outfitSource->defaultOutfitFormId);
+    const auto outfitId = outfitOverride != 0u ? outfitOverride :
+        outfitSource != nullptr ? outfitSource->defaultOutfitFormId : 0u;
+    if (outfitOverride != 0u) wardrobeItems.clear();
+    if (outfitId != 0u) {
+        const auto outfit = outfits.find(outfitId);
         if (outfit != outfits.end()) {
             wardrobeItems.insert(wardrobeItems.end(), outfit->second.begin(), outfit->second.end());
         }
@@ -360,6 +368,7 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
         }
     }
 
+    if (equippedItems != nullptr) wardrobeItems = *equippedItems;
     for (const std::uint32_t itemFormId : wardrobeItems) {
         const auto armor = armors.find(itemFormId);
         if (armor == armors.end()) {
@@ -375,6 +384,17 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
         // applicable addon: boots, cuirass, gloves and helmet are separate
         // skinned meshes and none can substitute for another.
         if (!armor->second.armatureFormIds.empty()) {
+            // Preserve this resolver's first-claim policy at the item level.
+            // ARMO BOD2 owns equip conflicts. ARMA BODT describes all mesh
+            // partitions present in an addon; compatible retail pieces often
+            // overlap there (Steel Plate boots and cuirass both contain the
+            // calf partition), so those bits only contribute skin coverage.
+            const auto itemSlots = armor->second.bipedFlags;
+            if ((itemSlots & skyrimClaimedItemSlots) != 0u) {
+                continue;
+            }
+            std::vector<std::string> itemModels;
+            std::uint32_t addonSlots = 0u;
             for (const std::uint32_t addonId : armor->second.armatureFormIds) {
                 const auto addon = armorAddons.find(addonId);
                 if (addon == armorAddons.end()) {
@@ -388,9 +408,19 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
                 const std::string& addonModel = female && !addon->second.femaleModel.empty()
                     ? addon->second.femaleModel
                     : addon->second.maleModel;
-                appendUnique(resolved.bodyPartPaths, addonModel);
-                skyrimCoveredSlots |= addon->second.bipedFlags;
+                if (addonModel.empty()) continue;
+                appendUnique(itemModels, addonModel);
+                if (female ? addon->second.femaleWeightSlider : addon->second.maleWeightSlider)
+                    resolved.weightMorphs[addonModel] = traits.weight / 100.f;
+                addonSlots |= addon->second.bipedFlags;
             }
+            // Missing or race-incompatible addons neither hide the default
+            // skin nor report an invisible piece as successfully worn.
+            if (itemModels.empty()) continue;
+            for (const auto& itemModel : itemModels)
+                appendUnique(resolved.bodyPartPaths, itemModel);
+            skyrimClaimedItemSlots |= itemSlots;
+            skyrimCoveredSlots |= itemSlots | addonSlots;
             resolved.wornArmorFormIds.push_back(itemFormId);
             continue;
         }
@@ -440,6 +470,21 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
         }
     }
 
+    resolved.coveredBipedSlots = skyrimCoveredSlots;
+    if ((skyrimCoveredSlots & ((1u << 1) | (1u << 11))) != 0u) {
+        std::vector<std::uint32_t> hidden;
+        for (const auto id : traits.headPartFormIds) {
+            const auto part = headParts.find(id);
+            if (part != headParts.end() && part->second.type == 3u) hidden.push_back(id);
+        }
+        for (std::size_t i = 0; i < hidden.size() && i < 128u; ++i) {
+            const auto part = headParts.find(hidden[i]);
+            if (part == headParts.end()) continue;
+            appendUnique(resolved.hiddenHeadParts, part->second.editorId);
+            for (const auto extra : part->second.extraParts)
+                if (std::find(hidden.begin(), hidden.end(), extra) == hidden.end()) hidden.push_back(extra);
+        }
+    }
     // Skyrim clothing contains only the skin it explicitly covers. The race's
     // WNAM skin ARMO supplies exposed hands, feet and (for sparse outfits) body
     // pieces. Add only ARMA records whose slots remain uncovered so a robe does
@@ -456,14 +501,21 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
                         addon->second.raceFormIds.end()) {
                     continue;
                 }
-                if (addon->second.bipedFlags != 0u &&
-                    (addon->second.bipedFlags & ~skyrimCoveredSlots) == 0u) {
-                    continue;
-                }
+                // Naked body addons also advertise forearm/calf/jewelry
+                // partitions. Those auxiliary slots do not require another
+                // whole torso under a cuirass (retail male skin uses 0x174).
+                // Select the anatomical skin piece by its primary body slot;
+                // boots/cuffs must not remove an otherwise uncovered torso.
+                const auto slots = addon->second.bipedFlags;
+                const auto anatomy = slots & ((1u << 2) | (1u << 3) | (1u << 7) | (1u << 10));
+                const auto skinSlot = anatomy != 0u ? anatomy & (~anatomy + 1u) : slots;
+                if ((skinSlot & skyrimCoveredSlots) != 0u) continue;
                 const std::string& model = female && !addon->second.femaleModel.empty()
                     ? addon->second.femaleModel
                     : addon->second.maleModel;
                 appendUnique(resolved.bodyPartPaths, model);
+                if (female ? addon->second.femaleWeightSlider : addon->second.maleWeightSlider)
+                    resolved.weightMorphs[model] = traits.weight / 100.f;
             }
         }
     }
@@ -491,6 +543,31 @@ ResolvedActorBase FalloutActorScan::resolve(std::uint32_t baseFormId) const {
     // rather than putting a reference on NPC_. Append it only on the TES5
     // assembly branch: Fallout's race head model above remains authoritative.
     if (!skyrimSkeleton.empty()) {
+        // FaceGeom contains the NPC's baked original hair. A later NPC_ override
+        // can select another HDPT, so assemble that hair and its additive HNAM
+        // parts explicitly. Other head-part types remain baked in FaceGeom.
+        std::vector<std::uint32_t> selectedHairParts;
+        const bool hairCovered =
+            (skyrimCoveredSlots & ((1u << 1) | (1u << 11))) != 0u;
+        if (!hairCovered) {
+            for (const std::uint32_t formId : traits.headPartFormIds) {
+                const auto part = headParts.find(formId);
+                if (part != headParts.end() && part->second.type == 3u) {
+                    selectedHairParts.push_back(formId);
+                }
+            }
+        }
+        for (std::size_t index = 0; index < selectedHairParts.size() && index < 128u; ++index) {
+            const auto part = headParts.find(selectedHairParts[index]);
+            if (part == headParts.end()) continue;
+            appendUnique(resolved.bodyPartPaths, part->second.modelPath);
+            for (const std::uint32_t extra : part->second.extraParts) {
+                if (std::find(selectedHairParts.begin(), selectedHairParts.end(), extra) ==
+                    selectedHairParts.end()) {
+                    selectedHairParts.push_back(extra);
+                }
+            }
+        }
         for (const std::string& faceGeometryPath : traits.faceGeometryPaths) {
             appendUnique(resolved.bodyPartPaths, faceGeometryPath);
         }
@@ -692,7 +769,9 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
         base.templateFormId = remap(base.templateFormId);
         base.raceFormId = remap(base.raceFormId);
         base.voiceTypeFormId = remap(base.voiceTypeFormId);
+        base.hairColorFormId = remap(base.hairColorFormId);
         base.defaultOutfitFormId = remap(base.defaultOutfitFormId);
+        for (auto& head : base.headPartFormIds) head = remap(head);
         for (auto& [item, count] : base.inventoryStacks) { (void)count; item = remap(item); }
         for (std::uint32_t& item : base.inventoryFormIds) {
             item = remap(item);
@@ -711,6 +790,7 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
     remapKeyed(scan.leveledItemUseAll, [](bool&) {});
     remapKeyed(scan.races, [&](FalloutRaceParts& race) {
         race.formId = remap(race.formId);
+        race.defaultSkinFormId = remap(race.defaultSkinFormId);
         race.maleVoiceTypeFormId = remap(race.maleVoiceTypeFormId);
         race.femaleVoiceTypeFormId = remap(race.femaleVoiceTypeFormId);
     });
@@ -732,6 +812,10 @@ void remapActorScan(const FalloutLoadOrder& order, std::size_t pluginIndex,
             race = remap(race);
         }
     });
+    remapKeyed(scan.headParts, [&](SkyrimHeadPart& part) {
+        for (auto& extra : part.extraParts) extra = remap(extra);
+    });
+    remapKeyed(scan.hairColors, [](std::array<float, 3>&) {});
     remapKeyed(scan.voiceTypes, [](std::string&) {});
 }
 
@@ -796,6 +880,8 @@ bool findActorsNearAcrossOrder(
         for (auto& [formId, editorId] : scan.outfitEditorIds) {
             outScan.outfitEditorIds[formId] = std::move(editorId);
         }
+        for (auto& [formId, part] : scan.headParts) outScan.headParts[formId] = std::move(part);
+        for (auto& [formId, color] : scan.hairColors) outScan.hairColors[formId] = color;
         for (auto& [formId, addon] : scan.armorAddons) {
             outScan.armorAddons[formId] = std::move(addon);
         }
@@ -857,6 +943,8 @@ bool findActorsNear(
         return false;
     }
 
+    bool localized = false;
+
     // Pass 1: every actor base, plus the races and armour they are assembled
     // from. Collected wholesale rather than on demand because a placement names
     // its base by formID, and resolving those one at a time would be one plugin
@@ -864,13 +952,17 @@ bool findActorsNear(
     {
         EsmReader::Visitor visitor;
         visitor.onRecordHeader = [](const EsmRecordHeaderView& header) {
-            return header.type == "CREA" || header.type == "NPC_" || header.type == "LVLC" ||
+            return header.type == "TES4" || header.type == "CREA" || header.type == "NPC_" || header.type == "LVLC" ||
                 header.type == "LVLN" || header.type == "LVLI" || header.type == "RACE" ||
                 header.type == "ARMO" || header.type == "CLOT" ||
-                header.type == "ARMA" || header.type == "OTFT" ||
-                header.type == "VTYP";
+                header.type == "ARMA" || header.type == "HDPT" || header.type == "OTFT" ||
+                header.type == "VTYP" || header.type == "CLFM";
         };
         visitor.onRecord = [&](const EsmRecordView& record) {
+            if (record.type == "TES4") {
+                localized = (record.flags & 0x80u) != 0u;
+                return;
+            }
             if (record.type == "VTYP") {
                 for (const EsmSubrecordView& sub : record.subrecords) {
                     if (sub.type == "EDID") {
@@ -913,6 +1005,28 @@ bool findActorsNear(
                 }
                 return;
             }
+            if (record.type == "HDPT") {
+                SkyrimHeadPart part;
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "EDID") part.editorId = subrecordText(sub);
+                    else if (sub.type == "MODL") part.modelPath = subrecordText(sub);
+                    else if (sub.type == "PNAM" && sub.size == 4) part.type = readU32(sub);
+                    else if (sub.type == "HNAM" && sub.size == 4) part.extraParts.push_back(readU32(sub));
+                }
+                outScan.headParts[record.formId] = std::move(part);
+                return;
+            }
+            if (record.type == "CLFM") {
+                for (const auto& sub : record.subrecords) {
+                    if (sub.type == "CNAM" && sub.size >= 3u) {
+                        outScan.hairColors[record.formId] = {
+                            sub.data[0] / 255.0f, sub.data[1] / 255.0f,
+                            sub.data[2] / 255.0f};
+                        break;
+                    }
+                }
+                return;
+            }
             if (record.type == "ARMA") {
                 SkyrimArmorAddon addon;
                 addon.formId = record.formId;
@@ -921,6 +1035,9 @@ bool findActorsNear(
                         addon.editorId = subrecordText(sub);
                     } else if ((sub.type == "BODT" || sub.type == "BOD2") && sub.size >= 4u) {
                         addon.bipedFlags = readU32(sub);
+                    } else if (sub.type == "DNAM" && sub.size >= 4u) {
+                        addon.maleWeightSlider = (sub.data[2] & 2u) != 0;
+                        addon.femaleWeightSlider = (sub.data[3] & 2u) != 0;
                     } else if (sub.type == "MOD2") {
                         addon.maleModel = subrecordText(sub);
                     } else if (sub.type == "MOD3") {
@@ -993,7 +1110,12 @@ bool findActorsNear(
                 if (sub.type == "EDID") {
                     base.editorId = subrecordText(sub);
                 } else if (sub.type == "FULL") {
-                    base.fullName = subrecordText(sub);
+                    if (localized && sub.size == 4u) {
+                        base.fullNameStringId = readU32(sub);
+                        base.fullNamePlugin = pluginPath.filename().string();
+                    } else if (!localized) {
+                        base.fullName = subrecordText(sub);
+                    }
                 } else if (sub.type == "MODL") {
                     base.skeletonPath = subrecordText(sub);
                 } else if (sub.type == "NIFZ" && sub.size != 0u) {
@@ -1004,12 +1126,19 @@ bool findActorsNear(
                     base.raceFormId = readU32(sub);
                 } else if (sub.type == "VTCK" && sub.size >= 4u) {
                     base.voiceTypeFormId = readU32(sub);
+                } else if (sub.type == "HCLF" && sub.size >= 4u) {
+                    base.hairColorFormId = readU32(sub);
                 } else if (sub.type == "CNTO" && sub.size >= 4u) {
                     base.inventoryFormIds.push_back(readU32(sub));
                     const auto count = sub.size >= 8u ? static_cast<std::int32_t>(readU32(sub, 4u)) : 1;
                     if (count > 0) base.inventoryStacks.emplace_back(readU32(sub), count);
+                } else if (sub.type == "PNAM" && sub.size == 4u && record.type == "NPC_") {
+                    base.headPartFormIds.push_back(readU32(sub));
                 } else if (sub.type == "DOFT" && sub.size >= 4u) {
                     base.defaultOutfitFormId = readU32(sub);
+                } else if (sub.type == "NAM7" && sub.size == 4u) {
+                    float weight; std::memcpy(&weight, sub.data, sizeof(weight));
+                    if (std::isfinite(weight)) base.weight = std::clamp(weight, 0.f, 100.f);
                 } else if (sub.type == "ACBS" && sub.size >= 4u) {
                     // Flags bit 0 is Female. Which of the RACE's two part sets
                     // an NPC_ uses hangs on it.
