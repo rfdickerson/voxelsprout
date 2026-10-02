@@ -7,11 +7,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
 include(GNUInstallDirs)
+option(ODAI_HEADLESS_ONLY "Configure only the headless simulation runner." OFF)
+option(ODAI_BUILD_HEADLESS "Build the headless simulation runner." ON)
+if(ODAI_HEADLESS_ONLY AND NOT ODAI_BUILD_HEADLESS)
+    message(FATAL_ERROR "ODAI_HEADLESS_ONLY requires ODAI_BUILD_HEADLESS=ON")
+endif()
 set(ODAI_RESOURCE_DIR "${CMAKE_BINARY_DIR}/share/odai")
-file(MAKE_DIRECTORY "${ODAI_RESOURCE_DIR}/shaders")
-configure_file(packaging/skyrim-slice.json "${ODAI_RESOURCE_DIR}/skyrim-slice.json" COPYONLY)
-configure_file(scripts/odai-launcher "${CMAKE_BINARY_DIR}/odai-launcher" COPYONLY)
-file(COPY "${CMAKE_SOURCE_DIR}/assets/fonts" DESTINATION "${ODAI_RESOURCE_DIR}/assets")
+if(NOT ODAI_HEADLESS_ONLY)
+    file(MAKE_DIRECTORY "${ODAI_RESOURCE_DIR}/shaders")
+    configure_file(packaging/skyrim-slice.json "${ODAI_RESOURCE_DIR}/skyrim-slice.json" COPYONLY)
+    configure_file(scripts/odai-launcher "${CMAKE_BINARY_DIR}/odai-launcher" COPYONLY)
+    file(COPY "${CMAKE_SOURCE_DIR}/assets/fonts" DESTINATION "${ODAI_RESOURCE_DIR}/assets")
+endif()
 include(CheckCXXCompilerFlag)
 find_package(Threads REQUIRED)
 
@@ -64,12 +71,16 @@ endif()
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
-find_package(Stb REQUIRED)
-find_package(Vulkan REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
-find_package(glfw3 CONFIG REQUIRED)
-find_package(imgui CONFIG REQUIRED)
-find_path(ODAI_MINIAUDIO_INCLUDE_DIR NAMES miniaudio.h)
+if(NOT ODAI_HEADLESS_ONLY)
+    find_package(Stb REQUIRED)
+    find_package(Vulkan REQUIRED)
+    find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+    find_package(glfw3 CONFIG REQUIRED)
+    find_package(imgui CONFIG REQUIRED)
+endif()
+if(NOT ODAI_HEADLESS_ONLY)
+    find_path(ODAI_MINIAUDIO_INCLUDE_DIR NAMES miniaudio.h)
+endif()
 
 set(ODAI_WARN_FLAGS_MSVC /W4 /permissive-)
 function(odai_warnings target)
@@ -103,6 +114,7 @@ if(ODAI_ENABLE_XESS)
 endif()
 
 # Build shaders into the relocatable runtime resource tree.
+if(NOT ODAI_HEADLESS_ONLY)
 find_program(SLANGC_EXECUTABLE NAMES slangc
     HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/x86_64/bin")
 if(SLANGC_EXECUTABLE)
@@ -189,12 +201,14 @@ if(SLANGC_EXECUTABLE)
 elseif(ODAI_BUILD_RUNTIME OR BUILD_TESTING)
     message(FATAL_ERROR "slangc is required to build ODAI shaders; install Slang or set SLANGC_EXECUTABLE.")
 endif()
+endif()
 
 add_library(odai_core STATIC src/core/log.cc src/core/job_system.cc src/core/resource_path.cc)
 odai_source_includes(odai_core)
 target_link_libraries(odai_core PUBLIC Threads::Threads)
 odai_warnings(odai_core)
 
+if(NOT ODAI_HEADLESS_ONLY)
 add_library(odai_ui STATIC
     src/ui/ui_draw_list.cc src/ui/ui_cursor.cc src/ui/font.cc src/ui/rich_text.cc
     src/ui/cached_rich_text.cc src/ui/ui_context.cc src/ui/icon_atlas.cc
@@ -229,6 +243,7 @@ if(ODAI_MINIAUDIO_INCLUDE_DIR)
     endif()
 endif()
 odai_warnings(odai_audio)
+endif()
 
 add_library(odai_anim STATIC src/anim/animation_sampler.cc src/anim/skeleton_io.cc
     src/anim/character_dynamics.cc
@@ -243,6 +258,7 @@ odai_source_includes(odai_dialogue)
 target_link_libraries(odai_dialogue PRIVATE nlohmann_json::nlohmann_json)
 odai_warnings(odai_dialogue)
 
+if(NOT ODAI_HEADLESS_ONLY)
 add_library(odai_upscale STATIC src/render/upscale/upscale_policy.cc
     src/render/upscale/upscale_contract.cc)
 odai_source_includes(odai_upscale)
@@ -252,6 +268,7 @@ if(ODAI_XESS_FOUND)
     target_link_libraries(odai_upscale PRIVATE ${ODAI_XESS_LIBRARY})
 endif()
 odai_warnings(odai_upscale)
+endif()
 
 add_library(odai_bethesda_import STATIC
     src/bethesda/condition.cc
@@ -294,6 +311,30 @@ odai_source_includes(odai_bethesda_runtime)
 target_link_libraries(odai_bethesda_runtime PUBLIC
     odai_core odai_bethesda_import nlohmann_json::nlohmann_json)
 odai_warnings(odai_bethesda_runtime)
+
+if(ODAI_BUILD_HEADLESS)
+    add_executable(odai_headless src/tools/odai_headless_main.cc)
+    odai_source_includes(odai_headless)
+    odai_warnings(odai_headless)
+    target_link_libraries(odai_headless PRIVATE odai_bethesda_runtime)
+    if(BUILD_TESTING)
+        add_test(NAME odai_headless_actor
+            COMMAND odai_headless
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/one_actor.json)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME odai_headless_actor_replay
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/headless_runner_replay_tests.py
+                    $<TARGET_FILE:odai_headless>
+                    ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/one_actor.json)
+        endif()
+    endif()
+endif()
+
+if(ODAI_HEADLESS_ONLY)
+    return()
+endif()
 
 # The Vulkan renderer is compiled once for the imported-scene path.
 add_library(odai_renderer STATIC

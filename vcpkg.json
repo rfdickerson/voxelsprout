@@ -3,27 +3,24 @@
   "version-string": "0.1.0",
   "builtin-baseline": "b02e341c927f16d991edbd915d8ea43eac52096c",
   "dependencies": [
-    {
-      "name": "glfw3",
-      "features": [
-        "wayland"
-      ]
-    },
-    {
-      "name": "imgui",
-      "features": [
-        "glfw-binding",
-        "vulkan-binding"
-      ]
-    },
     "joltphysics",
-    "miniaudio",
     "nlohmann-json",
-    "stb",
-    "vulkan",
-    "vulkan-memory-allocator",
     "zlib"
   ],
+  "default-features": ["presentation"],
+  "features": {
+    "presentation": {
+      "description": "Window, audio, UI, and Vulkan presentation dependencies",
+      "dependencies": [
+        { "name": "glfw3", "features": ["wayland"] },
+        { "name": "imgui", "features": ["glfw-binding", "vulkan-binding"] },
+        "miniaudio",
+        "stb",
+        "vulkan",
+        "vulkan-memory-allocator"
+      ]
+    }
+  },
   "overrides": [
     {
       "name": "imgui",

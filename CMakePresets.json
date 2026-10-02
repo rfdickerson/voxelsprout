@@ -38,6 +38,17 @@
       }
     },
     {
+      "name": "linux-vcpkg-headless",
+      "displayName": "Linux headless simulation runner (Ninja)",
+      "inherits": "linux-vcpkg",
+      "binaryDir": "${sourceDir}/build-linux-headless",
+      "cacheVariables": {
+        "ODAI_HEADLESS_ONLY": "ON",
+        "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
       "name": "vcpkg-relwithdebinfo",
       "displayName": "vcpkg Optimized + Symbols (Ninja) -- use this to profile",
       "description": "Optimized build that keeps debug symbols. The right preset for reading the F3 CPU overlay, GPU timestamps, or any perf number: a Debug measurement is not a measurement.",
@@ -109,6 +120,10 @@
     {
       "name": "linux-vcpkg",
       "configurePreset": "linux-vcpkg"
+    },
+    {
+      "name": "linux-vcpkg-headless",
+      "configurePreset": "linux-vcpkg-headless"
     },
     {
       "name": "vcpkg-relwithdebinfo",

@@ -1,0 +1,18 @@
+{
+  "name": "one-actor-movement",
+  "seed": 17,
+  "step_seconds": 0.016666666666666666,
+  "steps": 30,
+  "actor": {
+    "id": "harness_actor",
+    "base": "harness_npc",
+    "position": [0, 100, 0],
+    "desired_velocity": [60, 0, 0]
+  },
+  "expect": {
+    "x_min": 29.9,
+    "x_max": 30.1,
+    "y_max": 90,
+    "min_world_commands": 30
+  }
+}
