@@ -1,3 +1,9 @@
+# Rendering
+
+| Capability | Description | Status |
+|---|---|---|
+| RENDER-TERRAIN-001 | Render Morrowind exterior LAND cell | Implemented |
+
 ## Engineering Harness
 
 | Capability | Description | Status |

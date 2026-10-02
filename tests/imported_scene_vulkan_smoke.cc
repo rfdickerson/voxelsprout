@@ -1,3 +1,4 @@
+#include "import/bethesda/cell_builder.h"
 #include "import/imported_scene.h"
 #include "render/renderer.h"
 
@@ -91,6 +92,27 @@ odai::importer::ImportedScene makeSyntheticScene() {
     return scene;
 }
 
+odai::importer::ImportedScene makeMorrowindTerrainScene() {
+    using namespace odai::importer::bethesda;
+    FalloutCellRecord cell;
+    cell.hasGridCoords = true;
+    cell.land = std::make_unique<FalloutLandRecord>();
+    cell.land->gridSize = kMorrowindLandGridSize;
+    cell.land->hasHeights = true;
+    cell.land->heights.resize(65u * 65u);
+    for (int row = 0; row < 65; ++row)
+        for (int col = 0; col < 65; ++col)
+            cell.land->heights[static_cast<std::size_t>(row * 65 + col)] =
+                80.0f + static_cast<float>(row * 2 + col);
+    FalloutAssetSource assets;
+    FalloutWorldTables tables;
+    CellSceneBuilder builder(assets, tables);
+    builder.addCellTerrain(cell);
+    odai::importer::ImportedScene scene;
+    builder.finish(scene);
+    return scene;
+}
+
 }  // namespace
 
 int main() {
@@ -152,6 +174,33 @@ int main() {
                 std::any_of(rgb.begin(), rgb.end(), [](std::uint8_t value) { return value != 0; });
             if (!passed) {
                 std::cerr << "rendered frame capture was empty or invalid\n";
+            }
+            if (passed) {
+                auto terrain = makeMorrowindTerrainScene();
+                if (terrain.packedDraws.empty() || terrain.sourceLandscapeCellCount == 0u ||
+                    !renderer.uploadImportedScene(terrain) ||
+                    !renderer.waitForImportedSceneUploads()) {
+                    std::cerr << "Morrowind LAND terrain draw was not uploaded\n";
+                    passed = false;
+                } else {
+                    camera = {};
+                    camera.x = 4096.0f;
+                    camera.y = 1200.0f;
+                    camera.z = 600.0f;
+                    camera.yawDegrees = -90.0f;
+                    camera.pitchDegrees = -30.0f;
+                    camera.fovDegrees = 60.0f;
+                    for (int frame = 0; frame < 8; ++frame) {
+                        if (frame == 7 && !renderer.prepareFrameCapture()) break;
+                        glfwPollEvents();
+                        renderer.renderFrame(camera);
+                    }
+                    rgb.clear();
+                    passed = renderer.captureFrameRgb(rgb, width, height) &&
+                        rgb.size() == static_cast<std::size_t>(width) * height * 3u &&
+                        std::any_of(rgb.begin(), rgb.end(), [](std::uint8_t value) { return value != 0; });
+                    if (!passed) std::cerr << "Morrowind LAND terrain frame capture failed\n";
+                }
             }
         }
     }

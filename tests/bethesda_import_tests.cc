@@ -4665,6 +4665,11 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
         appendPod(intv, x); appendPod(intv, z);
         appendBytes(body, subrecord("INTV", intv));
         std::vector<std::uint8_t> vhgt(4u + (65u * 65u), 0u);
+        const float baseHeight = 10.0f;
+        std::memcpy(vhgt.data(), &baseHeight, sizeof(baseHeight));
+        vhgt[4u + 1u] = 2u;
+        vhgt[4u + 65u] = 3u;
+        vhgt[4u + 65u + 1u] = 0xffu;
         appendBytes(body, subrecord("VHGT", vhgt));
         std::vector<std::uint8_t> vtex;
         for (int i = 0; i < 16 * 16; ++i) {
@@ -4847,6 +4852,52 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
                    mergedSecondExterior.land->sourcePluginIndex == 0u &&
                    mergedSecondExterior.references.size() == 1u,
                "a later CELL retains terrain contributed earlier without a CELL");
+    if (merged.land && mergedSecondExterior.land) {
+        const auto& heights = merged.land->heights;
+        expectTrue(heights.size() == 65u * 65u && heights[0] == 80.0f &&
+                       heights[1] == 96.0f && heights[65] == 104.0f &&
+                       heights[66] == 96.0f,
+                   "TES3 VHGT offset and row/column deltas decode at known posts");
+        FalloutAssetSource terrainAssets;
+        expectTrue(terrainAssets.open(dataDir), "TES3 terrain fixture assets open");
+        FalloutWorldTables terrainTables;
+        for (const FalloutCellRecord* cell : {&merged, &mergedSecondExterior}) {
+            CellSceneBuilder terrainBuilder(terrainAssets, terrainTables);
+            terrainBuilder.addCellTerrain(*cell);
+            const auto& terrainScene = terrainBuilder.scene();
+            expectTrue(!terrainScene.meshes.empty(), "TES3 LAND creates imported terrain mesh");
+            if (terrainScene.meshes.empty()) continue;
+            const auto& mesh = terrainScene.meshes.front();
+            expectTrue(mesh.indices.size() == 64u * 64u * 6u && !mesh.vertices.empty(),
+                       "TES3 terrain covers a connected 64 by 64 quad cell");
+            const float originX = static_cast<float>(cell->gridX) * 8192.0f;
+            const float originZ = -static_cast<float>(cell->gridZ) * 8192.0f;
+            float minX = std::numeric_limits<float>::max();
+            float maxX = std::numeric_limits<float>::lowest();
+            float minZ = std::numeric_limits<float>::max();
+            float maxZ = std::numeric_limits<float>::lowest();
+            bool samples[4]{};
+            for (const auto& vertex : mesh.vertices) {
+                for (float value : vertex.position) expectTrue(std::isfinite(value), "TES3 terrain vertex is finite");
+                for (float value : vertex.normal) expectTrue(std::isfinite(value), "TES3 terrain normal is finite");
+                minX = std::min(minX, vertex.position[0]);
+                maxX = std::max(maxX, vertex.position[0]);
+                minZ = std::min(minZ, vertex.position[2]);
+                maxZ = std::max(maxZ, vertex.position[2]);
+                const float x = vertex.position[0] - originX;
+                const float z = originZ - vertex.position[2];
+                if (x == 0.0f && z == 0.0f && vertex.position[1] == 80.0f) samples[0] = true;
+                if (x == 128.0f && z == 0.0f && vertex.position[1] == 96.0f) samples[1] = true;
+                if (x == 0.0f && z == 128.0f && vertex.position[1] == 104.0f) samples[2] = true;
+                if (x == 128.0f && z == 128.0f && vertex.position[1] == 96.0f) samples[3] = true;
+            }
+            expectTrue(std::all_of(std::begin(samples), std::end(samples), [](bool present) { return present; }),
+                       "TES3 imported terrain preserves known non-flat elevation samples and axes");
+            expectTrue(minX == originX && maxX == originX + 8192.0f &&
+                           minZ == originZ - 8192.0f && maxZ == originZ,
+                       "TES3 terrain occupies its exterior cell bounds without overlap");
+        }
+    }
 
     FalloutWorldTables tables;
     expectTrue(buildFalloutWorldTables(order, tables, error),
