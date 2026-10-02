@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -18,6 +19,8 @@
 #include "core/job_system.h"
 #include "import/bethesda/asset_source.h"
 #include "import/bethesda/cell_builder.h"
+#include "import/bethesda/morrowind_terrain.h"
+#include "bethesda/bethesda_physics_world.h"
 #include "import/bethesda/lz4_frame.h"
 #include "import/bethesda/plugin_load_order.h"
 #include "import/bethesda/character_builder.h"
@@ -938,15 +941,42 @@ void testCellWaterPatch() {
         }
     }
 
-    // Interiors state a water height too, and have no footprint to fill.
+    // Interior water follows placed content bounds in Bethesda XY -> engine XZ.
     {
         ImportedScene scene;
         FalloutCellRecord cell{};
         cell.isInterior = true;
         cell.hasWater = true;
         cell.waterHeight = 100.0f;
+        cell.references.resize(2);
+        cell.references[0].position[0] = -200.0f;
+        cell.references[0].position[1] = 300.0f;
+        cell.references[1].position[0] = 400.0f;
+        cell.references[1].position[1] = -500.0f;
+        expectTrue(appendCellWaterPatch(scene, cell) && scene.waterPatches.size() == 1u,
+                   "Authored interior water produces a surface");
+        if (scene.waterPatches.size() == 1u) {
+            const auto& patch = scene.waterPatches.front();
+            expectNear(patch.waterLevel, 100.0f, 1e-3f, "Interior water keeps authored height");
+            expectNear(patch.originX, -1224.0f, 1e-3f, "Interior water bounds use world X");
+            expectNear(patch.originZ, -1324.0f, 1e-3f, "Interior water flips Bethesda Y to engine Z");
+            expectNear(patch.sizeX, 2648.0f, 1e-3f, "Interior water covers placed X span");
+            expectNear(patch.sizeZ, 2848.0f, 1e-3f, "Interior water covers placed Z span");
+        }
+        scene.waterPatches.clear();
+        cell.hasWater = false;
         expectTrue(!appendCellWaterPatch(scene, cell) && scene.waterPatches.empty(),
-                   "Interior cells contribute no water patch");
+                   "Dry interiors produce no water");
+        cell.hasWater = true;
+        cell.waterHeight = std::numeric_limits<float>::quiet_NaN();
+        expectTrue(!appendCellWaterPatch(scene, cell) && scene.waterPatches.empty(),
+                   "Non-finite interior water height is rejected");
+        cell.waterHeight = 100.0f;
+        cell.references.clear();
+        expectTrue(appendCellWaterPatch(scene, cell) && scene.waterPatches.size() == 1u &&
+                       scene.waterPatches.front().originX == -1024.0f &&
+                       scene.waterPatches.front().sizeX == 2048.0f,
+                   "Water-only interiors get a bounded origin-centred patch");
     }
 
     // THE IMPLIED HEIGHT IS THE WORLDSPACE'S, NOT ZERO. Skyrim's WhiterunWorld
@@ -4659,7 +4689,7 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
         appendBytes(cell, subrecord("DATA", data));
     };
     const auto landRecord = [&](std::int32_t x, std::int32_t z,
-                                std::uint16_t storedTexture) {
+                                std::uint16_t storedTexture, bool patterned = false) {
         std::vector<std::uint8_t> body;
         std::vector<std::uint8_t> intv;
         appendPod(intv, x); appendPod(intv, z);
@@ -4673,7 +4703,11 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
         appendBytes(body, subrecord("VHGT", vhgt));
         std::vector<std::uint8_t> vtex;
         for (int i = 0; i < 16 * 16; ++i) {
-            appendPod(vtex, storedTexture);
+            // File order is 4x4 tiles of 4x4 entries. Use asymmetric samples
+            // so a row-major read or a transposed grid cannot pass.
+            const std::uint16_t value = patterned && i == 1 ? 2u
+                : patterned && i == 16 ? 0u : storedTexture;
+            appendPod(vtex, value);
         }
         appendBytes(body, subrecord("VTEX", vtex));
         return record("LAND", body);
@@ -4701,10 +4735,11 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
     // later TR CELL must make it streamable without losing this contribution.
     writePlugin("Morrowind.esm", {}, true, {
         ltexRecord("ground", 0u, "base_ground.dds"),
+        ltexRecord("rock", 1u, "rock.dds"),
         statRecord("crate", "base_crate.nif"),
         statRecord("guar", "r\\Guar.NIF", "CREA"),
         record("CELL", baseExterior), landRecord(5, -28, 1u), record("CELL", baseInterior),
-        landRecord(6, -28, 1u)});
+        landRecord(6, -28, 1u, true)});
 
     writePlugin("Tribunal.esm", {"Morrowind.esm"}, true, {});
     writePlugin("Bloodmoon.esm", {"Morrowind.esm", "Tribunal.esm"}, true, {});
@@ -4852,6 +4887,28 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
                    mergedSecondExterior.land->sourcePluginIndex == 0u &&
                    mergedSecondExterior.references.size() == 1u,
                "a later CELL retains terrain contributed earlier without a CELL");
+    if (mergedSecondExterior.land) {
+        const auto& grid = mergedSecondExterior.land->morrowindTextureGrid;
+        expectTrue(grid.size() == 256u && grid[0] == 1u && grid[1] == 2u &&
+                       grid[4] == 0u && grid[16] == 1u,
+                   "TES3 VTEX unswizzles asymmetric rock and default samples without shifting axes");
+        const auto surface = morrowindTerrainSurface(mergedSecondExterior);
+        odai::bethesda::BethesdaPhysicsWorld physics;
+        std::string physicsError;
+        expectTrue(surface.valid() && physics.addTerrainCell(surface, physicsError),
+                   ("decoded TES3 LAND creates headless terrain collision: " + physicsError).c_str());
+        for (const auto [row, col, expectedHeight] : {
+                 std::tuple{0, 0, 80.0f}, std::tuple{0, 1, 96.0f},
+                 std::tuple{1, 0, 104.0f}, std::tuple{1, 1, 96.0f}}) {
+            const auto post = surface.post(row, col);
+            const auto hit = physics.castDown({post.x, post.y + 200.0f, post.z}, 400.0f);
+            expectTrue(hit.has_value() && hit->terrainCell ==
+                           odai::bethesda::TerrainCellCoord{6, -28} &&
+                           std::abs(hit->position.y - expectedHeight) < 0.05f &&
+                           std::abs(hit->distance - 200.0f) < 0.05f,
+                       "physics ray matches decoded VHGT post, cell coordinate and distance");
+        }
+    }
     if (merged.land && mergedSecondExterior.land) {
         const auto& heights = merged.land->heights;
         expectTrue(heights.size() == 65u * 65u && heights[0] == 80.0f &&
@@ -4923,6 +4980,80 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
                "identical LTEX indices in different TES3 plugins resolve through their own palettes");
     expectTrue(tables.morrowindLandTexturePaths.at(1u) == "tr_ground.dds",
                "a later LTEX with the same editor ID overrides the path for earlier LAND too");
+
+    // Distinct one-pixel DDS assets exercise the ordinary loose-file VFS and
+    // material generation without depending on copyrighted game data.
+    fs::create_directories(dataDir / "textures");
+    const auto writeTerrainDds = [&](const std::string& name, std::uint32_t rgba) {
+        std::vector<std::uint8_t> dds(132u, 0u);
+        const auto word = [&](std::size_t at, std::uint32_t value) {
+            std::memcpy(dds.data() + at, &value, 4u);
+        };
+        word(0, 0x20534444u); word(4, 124u); word(8, 0x100fu);
+        word(12, 1u); word(16, 1u); word(20, 4u); word(28, 1u);
+        word(76, 32u); word(80, 0x41u); word(88, 32u);
+        word(92, 0xff0000u); word(96, 0xff00u); word(100, 0xffu);
+        word(104, 0xff000000u); word(108, 0x1000u); word(128, rgba);
+        std::ofstream out(dataDir / "textures" / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
+    };
+    writeTerrainDds("tr_ground.dds", 0xff605040u);
+    writeTerrainDds("rock.dds", 0xff808080u);
+    writeTerrainDds("_land_default.dds", 0xff405060u);
+    FalloutAssetSource paintedAssets;
+    expectTrue(paintedAssets.open(dataDir), "TES3 painted terrain VFS opens");
+    CellSceneBuilder paintedBuilder(paintedAssets, tables);
+    paintedBuilder.addCellTerrain(mergedSecondExterior);
+    const auto& painted = paintedBuilder.scene();
+    expectTrue(painted.textures.size() == 3u,
+               "TES3 ground, rock and default terrain assets all load through VFS");
+    if (!painted.meshes.empty() && painted.textures.size() == 3u) {
+        const auto& mesh = painted.meshes.front();
+        const float originX = 6.0f * 8192.0f;
+        const float originZ = 28.0f * 8192.0f;
+        const auto textureAt = [&](float x, float row) -> std::string {
+            for (const auto& part : mesh.parts) {
+                for (std::uint32_t i = part.firstIndex; i < part.firstIndex + part.indexCount; ++i) {
+                    const auto& v = mesh.vertices[mesh.indices[i]];
+                    if (v.position[0] == originX + x && v.position[2] == originZ - row &&
+                        part.textureIndex < painted.textures.size())
+                        return painted.textures[part.textureIndex].sourcePath;
+                }
+            }
+            return {};
+        };
+        expectTrue(textureAt(256.0f, 256.0f) == "tr_ground.dds" &&
+                       textureAt(768.0f, 256.0f) == "rock.dds" &&
+                       textureAt(2304.0f, 256.0f) == "textures/_land_default.dds",
+                   "known terrain positions select the correct LTEX and default textures");
+        bool blended = false;
+        for (const auto& vertex : mesh.vertices) {
+            if (vertex.position[0] != originX + 512.0f ||
+                vertex.position[2] != originZ - 256.0f) continue;
+            for (int slot = 0; slot < 3; ++slot) {
+                const auto index = vertex.layerTextureIndex[slot];
+                if (index < painted.textures.size() &&
+                    painted.textures[index].sourcePath == "rock.dds" &&
+                    vertex.layerWeight[slot] > 0.0f && vertex.layerWeight[slot] < 1.0f)
+                    blended = true;
+            }
+        }
+        expectTrue(blended, "TES3 texture boundary carries a fractional rock blend weight");
+    }
+    FalloutWorldTables missingTextureTables = tables;
+    missingTextureTables.morrowindLandTexturePaths[2u] = "missing_rock.dds";
+    CellSceneBuilder missingTextureBuilder(paintedAssets, missingTextureTables);
+    missingTextureBuilder.addCellTerrain(mergedSecondExterior);
+    const auto& missingTextureScene = missingTextureBuilder.scene();
+    expectTrue(missingTextureScene.textures.size() == 2u &&
+                   !missingTextureScene.meshes.empty(),
+               "missing TES3 LTEX asset uses a deterministic loaded default texture");
+    if (!missingTextureScene.meshes.empty()) {
+        for (const auto& part : missingTextureScene.meshes.front().parts) {
+            expectTrue(part.textureIndex < missingTextureScene.textures.size(),
+                       "missing TES3 LTEX never leaves an invalid terrain material index");
+        }
+    }
 
     const std::string fingerprintBefore = order.fingerprint();
     {

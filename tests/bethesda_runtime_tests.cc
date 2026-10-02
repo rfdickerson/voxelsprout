@@ -9,6 +9,9 @@
 #include "bethesda/vmad_reader.h"
 #include "bethesda/whiterun_presentation.h"
 #include "bethesda/oblivion_presentation.h"
+#include "import/cell_residency_planner.h"
+#include "import/bethesda/morrowind_terrain.h"
+#include "import/bethesda/cell_builder.h"
 
 #include <bit>
 #include <cassert>
@@ -52,6 +55,56 @@ std::vector<std::uint8_t> ctda(
 }  // namespace
 
 int main() {
+    // CELL-STREAM-001/002: the presentation residency ring follows the player,
+    // while a placed reference's gameplay state outlives that ring.
+    {
+        odai::importer::CellResidencyPlanner planner;
+        odai::importer::CellResidencyConfig config;
+        config.loadRadius = 1;
+        config.unloadRadius = 2;
+        config.maxLoadsInFlight = 16;
+        planner.setConfig(config);
+        BethesdaWorld world;
+        RuntimeObject placed;
+        placed.id = ObjectId::persistent(makeRecordKey("Morrowind.esm", 0x101u));
+        placed.base = makeRecordKey("Morrowind.esm", 0x202u);
+        placed.kind = RuntimeObjectKind::Activator;
+        placed.persistent = true;
+        placed.currentSpace.kind = RuntimeSpaceKind::Exterior;
+        placed.currentSpace.gridX = 0;
+        placed.currentSpace.gridZ = 0;
+        const ObjectId placedId = placed.id;
+        std::string error;
+        assert(world.addInitialObject(std::move(placed), error));
+        const float velocity[3]{};
+        const auto visit = [&](int x) {
+            const float position[3]{(static_cast<float>(x) + 0.5f) * config.cellSize,
+                                    0.5f * config.cellSize, 0.0f};
+            planner.update(position, velocity);
+            for (const auto& cell : planner.cellsToEvict()) planner.markEvicted(cell);
+            const auto loads = planner.cellsToLoad();
+            for (const auto& cell : loads) {
+                planner.markLoadStarted(cell);
+                assert(planner.markLoadFinished(cell));
+            }
+        };
+        visit(0);
+        visit(1);
+        assert(planner.cellAt(1.5f * config.cellSize, 0.5f * config.cellSize) ==
+               (odai::importer::CellCoord{1, 0}));
+        assert(planner.isResident({1, 0}));
+        WorldCommand modify;
+        modify.type = WorldCommandType::SetEnabled;
+        modify.target = placedId;
+        modify.enabled = false;
+        (void)world.queue(modify);
+        assert(world.applyQueuedCommands().applied == 1u);
+        visit(5);
+        assert(!planner.isResident({0, 0}));
+        visit(0);
+        assert(planner.isResident({0, 0}));
+        assert(world.find(placedId) != nullptr && !world.find(placedId)->enabled);
+    }
     {
         std::string error;
         std::vector<std::uint8_t> zero(4), parent; put32(parent, 0x100);
@@ -193,6 +246,123 @@ int main() {
         const std::vector<std::uint32_t> invalid{0, 1, 2};
         assert(!BethesdaPhysicsWorld::prepareStaticCollision(vertices, invalid, error).valid());
         assert(!error.empty());
+    }
+
+    // PHYS-008: the Morrowind walking controller rises about one metre under
+    // Jolt gravity; an airborne request cannot add another launch impulse.
+    {
+        BethesdaPhysicsWorld physics;
+        std::string error;
+        const ObjectId floorId = ObjectId::runtime(8001u);
+        const ObjectId playerId = ObjectId::runtime(8002u);
+        const std::vector<odai::math::Vector3> floor{
+            {-500, 0, -500}, {500, 0, -500}, {500, 0, 500}, {-500, 0, 500}};
+        const std::vector<std::uint32_t> triangles{0, 1, 2, 0, 2, 3};
+        assert(physics.addStaticCollision(floorId, floor, triangles, error));
+        PhysicsCharacterConfig config;
+        config.position = {0, 0.1f, 0};
+        assert(physics.addCharacter(playerId, config, error));
+        for (int tick = 0; tick < 10; ++tick) physics.step(1.0f / 60.0f);
+        const auto start = physics.characterState(playerId);
+        assert(start && start->grounded);
+        float peakRise = 0.0f;
+        float priorVerticalVelocity = start->velocity.y;
+        int launches = 0;
+        bool landed = false;
+        for (int tick = 0; tick < 150; ++tick) {
+            const auto before = physics.characterState(playerId);
+            assert(before);
+            PhysicsCharacterInput input;
+            // Mirror the game path while Space is held: it sends a positive
+            // desired Y only while grounded. Also probe an explicit airborne
+            // request once, which the physics adapter must ignore.
+            if ((tick < 20 && before->grounded) || tick == 8)
+                input.desiredVelocity.y = jumpSpeedForHeightBethesdaUnits(
+                    kMorrowindBaselineJumpHeightUnits);
+            assert(physics.setCharacterInput(playerId, input));
+            physics.step(1.0f / 60.0f);
+            const auto state = physics.characterState(playerId);
+            assert(state);
+            peakRise = std::max(peakRise, state->position.y - start->position.y);
+            if (state->velocity.y > 20.0f && priorVerticalVelocity <= 20.0f) ++launches;
+            priorVerticalVelocity = state->velocity.y;
+            landed |= state->landed;
+        }
+        assert(peakRise >= 60.0f && peakRise <= 80.0f);
+        assert(launches == 1);
+        assert(landed && physics.characterState(playerId)->grounded);
+    }
+
+    // PHYS-002: decoded LAND posts are the shared source for renderer geometry
+    // and independent Jolt terrain bodies, including neighboring cell identity.
+    {
+        using namespace odai::importer::bethesda;
+        FalloutCellRecord west, east;
+        west.gridX = -2; west.gridZ = -9; west.hasGridCoords = true;
+        west.land = std::make_unique<FalloutLandRecord>();
+        west.land->gridSize = kMorrowindLandGridSize;
+        west.land->hasHeights = true;
+        west.land->heights.resize(65u * 65u);
+        for (int row = 0; row < 65; ++row)
+            for (int col = 0; col < 65; ++col)
+                west.land->heights[static_cast<std::size_t>(row * 65 + col)] =
+                    100.0f + row * 2.0f + col * 3.0f;
+        east.gridX = -1; east.gridZ = -9; east.hasGridCoords = true;
+        east.land = std::make_unique<FalloutLandRecord>(*west.land);
+        std::fill(east.land->heights.begin(), east.land->heights.end(), 500.0f);
+        const auto westSurface = morrowindTerrainSurface(west);
+        const auto eastSurface = morrowindTerrainSurface(east);
+        assert(westSurface.valid() && eastSurface.valid());
+        const auto westPost = westSurface.post(8, 8);
+        const auto eastPost = eastSurface.post(8, 8);
+        assert(std::abs(westPost.x - (-2 * 8192 + 8 * 128)) < 0.01f);
+        assert(std::abs(westPost.z - (9 * 8192 - 8 * 128)) < 0.01f);
+        assert(std::abs(eastPost.x - westPost.x - 8192.0f) < 0.01f);
+        assert(westSurface.post(8, 64).x == eastSurface.post(8, 0).x);
+        FalloutAssetSource assets;
+        FalloutWorldTables tables; tables.morrowind = true;
+        CellSceneBuilder builder(assets, tables);
+        builder.addCellTerrain(west);
+        bool rendererUsesSamePost = false;
+        for (const auto& vertex : builder.scene().meshes.front().vertices)
+            if (vertex.position[0] == westPost.x && vertex.position[2] == westPost.z &&
+                vertex.position[1] == westPost.y) rendererUsesSamePost = true;
+        assert(rendererUsesSamePost);
+
+        BethesdaPhysicsWorld physics;
+        std::string error;
+        const TerrainCellCoord westCell{-2, -9};
+        const TerrainCellCoord eastCell{-1, -9};
+        assert(physics.addTerrainCell(westSurface, error) && error.empty());
+        assert(physics.addTerrainCell(eastSurface, error) && error.empty());
+        const auto hit = physics.castDown({westPost.x, westPost.y + 200, westPost.z}, 400);
+        assert(hit && hit->terrainCell == westCell);
+        assert(std::abs(hit->position.y - westPost.y) < 0.05f);
+        assert(std::abs(hit->distance - 200.0f) < 0.05f);
+        assert(std::isfinite(hit->normal.x) && std::isfinite(hit->normal.y) &&
+               std::isfinite(hit->normal.z) && hit->normal.y > 0.9f &&
+               hit->normal.x < -0.01f && hit->normal.z > 0.01f);
+        const auto eastHit = physics.castDown({eastPost.x, 700, eastPost.z}, 400);
+        assert(eastHit && eastHit->terrainCell == eastCell &&
+               std::abs(eastHit->position.y - 500.0f) < 0.05f);
+        assert(!physics.castDown({westPost.x - 8192, 700, westPost.z}, 800));
+        const auto sphere = physics.castSphere(
+            {westPost.x, westPost.y + 200, westPost.z},
+            {westPost.x, westPost.y - 200, westPost.z}, 16.0f);
+        assert(sphere && sphere->terrainCell == westCell &&
+               sphere->distance > 170.0f && sphere->distance < 200.0f);
+        assert(!physics.castSphere(
+            {westPost.x - 8192, 700, westPost.z},
+            {westPost.x - 8192, -100, westPost.z}, 16.0f));
+        const std::vector<odai::math::Vector3> floor{
+            {-100, 0, -100}, {100, 0, -100}, {100, 0, 100}, {-100, 0, 100}};
+        const std::vector<std::uint32_t> floorIndices{0, 1, 2, 0, 2, 3};
+        const auto floorId = ObjectId::runtime(99);
+        assert(physics.addStaticCollision(floorId, floor, floorIndices, error));
+        assert(physics.removeTerrainCell({-2, -9}));
+        assert(!physics.castDown({westPost.x, 700, westPost.z}, 800));
+        assert(physics.castDown({eastPost.x, 700, eastPost.z}, 400));
+        assert(physics.castDown({0, 100, 0}, 200)->object == floorId);
     }
 
     {

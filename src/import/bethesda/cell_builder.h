@@ -1,7 +1,7 @@
 #pragma once
 
-// Builds one exterior cell's geometry -- terrain plus placed statics -- into an
-// ImportedScene.
+// Builds one cell's geometry -- terrain, placed statics, and authored water --
+// into an ImportedScene.
 //
 // Extracted from the cooker so the runtime streamer can produce the same
 // geometry directly from FalloutNV.esm and the BSAs, instead of loading a .bin
@@ -383,6 +383,7 @@ private:
     DecodedTextureCache* m_textureCache = nullptr;
     ImportedScene m_scene;
     CellBuildStats m_stats{};
+    std::vector<std::size_t> m_interiorWaterPatchIndices;
 
     // Index of the single merged terrain mesh in m_scene.meshes, or npos until
     // a cell with LAND is added.

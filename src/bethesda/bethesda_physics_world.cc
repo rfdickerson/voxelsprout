@@ -1,4 +1,6 @@
 #include "bethesda/bethesda_physics_world.h"
+#include "bethesda/runtime_world.h"
+#include "import/bethesda/morrowind_terrain.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -157,6 +159,7 @@ public:
     std::unordered_map<std::uint64_t, ObjectId> objectsByUserData;
     std::vector<JPH::BodyID> staticBodies;
     std::map<std::uint64_t, JPH::BodyID> streamedStaticBodies;
+    std::map<TerrainCellCoord, JPH::BodyID> terrainBodies;
     bool initialized = false;
 };
 
@@ -175,7 +178,8 @@ bool BethesdaPhysicsWorld::initialize(std::string& outError) {
     ensureJoltRegistered();
     m_impl->physics.Init(65536u, 0u, 65536u, 65536u, m_impl->broadPhaseLayers,
         *m_impl->broadPhaseFilter, m_impl->objectPairFilter);
-    m_impl->physics.SetGravity(JPH::Vec3(0.0f, -9.81f, 0.0f));
+    m_impl->physics.SetGravity(JPH::Vec3(0.0f,
+        -kBethesdaPhysicsGravityMetresPerSecondSq, 0.0f));
     m_impl->initialized = true;
     return true;
 }
@@ -221,6 +225,12 @@ void BethesdaPhysicsWorld::clear() {
         bodies.DestroyBody(id);
     }
     m_impl->streamedStaticBodies.clear();
+    for (const auto& [cell, id] : m_impl->terrainBodies) {
+        (void)cell;
+        bodies.RemoveBody(id);
+        bodies.DestroyBody(id);
+    }
+    m_impl->terrainBodies.clear();
     m_impl->objectsByUserData.clear();
 }
 
@@ -265,6 +275,40 @@ bool BethesdaPhysicsWorld::addStaticCollision(
     m_impl->objectsByUserData[userData] = std::move(object);
     m_impl->physics.OptimizeBroadPhase();
     return true;
+}
+
+bool BethesdaPhysicsWorld::addStaticCollision(
+    const RuntimeObject& object, std::span<const odai::math::Vector3> localVertices,
+    std::span<const std::uint32_t> triangleIndices, std::string& outError) {
+    const auto& transform = object.transform;
+    if (!std::isfinite(transform.scale) || transform.scale <= 0.0f ||
+        !std::all_of(transform.position.begin(), transform.position.end(),
+            [](double value) { return std::isfinite(value); }) ||
+        !std::all_of(transform.rotationRadians.begin(), transform.rotationRadians.end(),
+            [](float value) { return std::isfinite(value); })) {
+        outError = "invalid runtime object collision transform";
+        return false;
+    }
+    // Match the imported-scene placement convention: clockwise Bethesda
+    // angles act on raw Z-up model vertices, then (x, y, z) -> (x, z, -y).
+    const auto rotation = odai::math::Matrix4::rotationZ(-transform.rotationRadians[2]) *
+        odai::math::Matrix4::rotationY(-transform.rotationRadians[1]) *
+        odai::math::Matrix4::rotationX(-transform.rotationRadians[0]);
+    std::vector<odai::math::Vector3> worldVertices;
+    worldVertices.reserve(localVertices.size());
+    for (const auto& local : localVertices) {
+        const auto rotated = odai::math::transformPoint(rotation, local * transform.scale);
+        const double x = static_cast<double>(rotated.x) + transform.position[0];
+        const double y = static_cast<double>(rotated.y) + transform.position[1];
+        const double z = static_cast<double>(rotated.z) + transform.position[2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            outError = "non-finite transformed collision vertex";
+            return false;
+        }
+        worldVertices.push_back({static_cast<float>(x), static_cast<float>(z),
+            static_cast<float>(-y)});
+    }
+    return addStaticCollision(object.id, worldVertices, triangleIndices, outError);
 }
 
 struct PreparedStaticCollision::Impl {
@@ -352,6 +396,81 @@ void BethesdaPhysicsWorld::clearStreamedStaticCollision() {
         bodies.DestroyBody(id);
     }
     m_impl->streamedStaticBodies.clear();
+    for (const auto& [cell, id] : m_impl->terrainBodies) {
+        (void)cell;
+        bodies.RemoveBody(id);
+        bodies.DestroyBody(id);
+    }
+    m_impl->terrainBodies.clear();
+}
+
+PreparedStaticCollision BethesdaPhysicsWorld::prepareTerrainCell(
+    const odai::importer::bethesda::MorrowindTerrainSurface& terrain,
+    std::string& outError) {
+    if (!terrain.valid()) {
+        outError = "Morrowind LAND terrain has no finite 65x65 height grid";
+        return {};
+    }
+    constexpr int side = odai::importer::bethesda::kMorrowindLandGridSize;
+    std::vector<odai::math::Vector3> posts;
+    std::vector<std::uint32_t> indices;
+    posts.reserve(side * side);
+    indices.reserve((side - 1) * (side - 1) * 6);
+    for (int row = 0; row < side; ++row)
+        for (int col = 0; col < side; ++col)
+            posts.push_back(terrain.post(row, col));
+    for (int row = 0; row < side - 1; ++row) {
+        for (int col = 0; col < side - 1; ++col) {
+            const auto a = static_cast<std::uint32_t>(row * side + col);
+            const auto b = a + 1u;
+            const auto c = a + static_cast<std::uint32_t>(side);
+            const auto d = c + 1u;
+            // prepareStaticCollision reverses authored winding for Jolt.
+            // Give it the inverse of the terrain renderer's upward triangles.
+            indices.insert(indices.end(), {a, c, d, a, d, b});
+        }
+    }
+    return prepareStaticCollision(posts, indices, outError);
+}
+
+bool BethesdaPhysicsWorld::addTerrainCell(
+    const odai::importer::bethesda::MorrowindTerrainSurface& terrain,
+    std::string& outError) {
+    const auto prepared = prepareTerrainCell(terrain, outError);
+    return prepared.valid() && addPreparedTerrainCell(
+        {terrain.cellX, terrain.cellZ}, prepared, outError);
+}
+
+bool BethesdaPhysicsWorld::addPreparedTerrainCell(
+    TerrainCellCoord cell, const PreparedStaticCollision& prepared,
+    std::string& outError) {
+    if (!prepared.valid()) {
+        outError = "missing prepared Morrowind terrain collision";
+        return false;
+    }
+    if (!initialize(outError)) return false;
+    JPH::BodyCreationSettings settings(prepared.impl->shape, JPH::RVec3::sZero(),
+        JPH::Quat::sIdentity(), JPH::EMotionType::Static, kStaticLayer);
+    const JPH::BodyID body = m_impl->physics.GetBodyInterface().CreateAndAddBody(
+        settings, JPH::EActivation::DontActivate);
+    if (body.IsInvalid()) {
+        outError = "Jolt rejected Morrowind terrain collision body";
+        return false;
+    }
+    removeTerrainCell(cell);
+    m_impl->terrainBodies.emplace(cell, body);
+    outError.clear();
+    return true;
+}
+
+bool BethesdaPhysicsWorld::removeTerrainCell(TerrainCellCoord cell) {
+    const auto found = m_impl->terrainBodies.find(cell);
+    if (found == m_impl->terrainBodies.end()) return false;
+    JPH::BodyInterface& bodies = m_impl->physics.GetBodyInterface();
+    bodies.RemoveBody(found->second);
+    bodies.DestroyBody(found->second);
+    m_impl->terrainBodies.erase(found);
+    return true;
 }
 
 void BethesdaPhysicsWorld::optimizeBroadPhase() {
@@ -599,7 +718,8 @@ bool BethesdaPhysicsWorld::applyBuoyancy(
     const odai::math::Vector3 half = found->second.config.boundsHalfExtents *
         kBethesdaUnitsToJoltMetres;
     const float volume = 8.0f * half.x * half.y * half.z;
-    const float force = fluidDensityKilogramsPerCubicMetre * volume * 9.81f * submerged;
+    const float force = fluidDensityKilogramsPerCubicMetre * volume *
+        kBethesdaPhysicsGravityMetresPerSecondSq * submerged;
     bodies.AddForce(found->second.body, JPH::Vec3(0.0f, force, 0.0f));
     return true;
 }
@@ -885,7 +1005,7 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
     std::vector<std::pair<ObjectId, PhysicsCharacterStep>> results;
     if (!m_impl->initialized) return results;
     const float delta = std::clamp(fixedDeltaSeconds, 1.0e-5f, 0.25f);
-    const JPH::Vec3 gravity(0.0f, -9.81f, 0.0f);
+    const JPH::Vec3 gravity(0.0f, -kBethesdaPhysicsGravityMetresPerSecondSq, 0.0f);
     for (auto& [id, entry] : m_impl->characters) {
         if (entry.suspendedByRagdoll) continue;
         const bool wasGrounded = entry.last.grounded;
@@ -1082,24 +1202,70 @@ bool BethesdaPhysicsWorld::isCharacterPlacementClear(const PhysicsCharacterConfi
 
 std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castDown(
     const odai::math::Vector3& origin, float distanceBethesdaUnits) const {
-    if (!m_impl->initialized || !std::isfinite(distanceBethesdaUnits) ||
-        distanceBethesdaUnits <= 0.0f) return std::nullopt;
+    if (!std::isfinite(distanceBethesdaUnits) || distanceBethesdaUnits <= 0.0f)
+        return std::nullopt;
+    return castRay(origin, {origin.x, origin.y - distanceBethesdaUnits, origin.z});
+}
+
+std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castRay(
+    const odai::math::Vector3& from, const odai::math::Vector3& to) const {
+    const float distance = odai::math::length(to - from);
+    if (!m_impl->initialized || !std::isfinite(from.x) || !std::isfinite(from.y) ||
+        !std::isfinite(from.z) || !std::isfinite(to.x) || !std::isfinite(to.y) ||
+        !std::isfinite(to.z) || !std::isfinite(distance) || distance <= 1.0e-5f)
+        return std::nullopt;
     class StaticLayerFilter final : public JPH::ObjectLayerFilter {
     public:
         bool ShouldCollide(JPH::ObjectLayer layer) const override {
             return layer == kStaticLayer;
         }
     } staticLayerFilter;
-    const JPH::RRayCast ray(toJoltPosition(origin),
-        JPH::Vec3(0.0f, -distanceBethesdaUnits * kBethesdaUnitsToJoltMetres, 0.0f));
+    JPH::RRayCast ray(toJoltPosition(from), toJoltPosition(to) - toJoltPosition(from));
     JPH::RayCastResult hit;
-    if (!m_impl->physics.GetNarrowPhaseQuery().CastRay(
-            ray, hit, m_impl->physics.GetDefaultBroadPhaseLayerFilter(kCharacterLayer),
-            staticLayerFilter)) return std::nullopt;
+    bool usedTerrainInset = false;
+    const auto cast = [&](const JPH::RRayCast& candidate, JPH::RayCastResult& out) {
+        return m_impl->physics.GetNarrowPhaseQuery().CastRay(
+            candidate, out, m_impl->physics.GetDefaultBroadPhaseLayerFilter(kCharacterLayer),
+            staticLayerFilter);
+    };
+    if (!cast(ray, hit)) {
+        // Jolt can reject a ray exactly on the outside edge of a terrain mesh.
+        // Retry a vertical query just inside each side; an interior retry must
+        // hit a terrain body, so this cannot turn a nearby static into support.
+        if (from.x != to.x || from.z != to.z || m_impl->terrainBodies.empty())
+            return std::nullopt;
+        constexpr float inset = 0.1f; // Bethesda units; below a LAND post's height tolerance.
+        bool found = false;
+        for (const auto [dx, dz] : {
+                 std::pair{inset, inset}, std::pair{inset, -inset},
+                 std::pair{-inset, inset}, std::pair{-inset, -inset}}) {
+            const odai::math::Vector3 shiftedFrom{from.x + dx, from.y, from.z + dz};
+            const odai::math::Vector3 shiftedTo{to.x + dx, to.y, to.z + dz};
+            const JPH::RRayCast candidate(
+                toJoltPosition(shiftedFrom), toJoltPosition(shiftedTo) - toJoltPosition(shiftedFrom));
+            JPH::RayCastResult candidateHit;
+            if (!cast(candidate, candidateHit)) continue;
+            const bool terrainHit = std::any_of(m_impl->terrainBodies.begin(),
+                m_impl->terrainBodies.end(), [&](const auto& entry) {
+                    return entry.second == candidateHit.mBodyID;
+                });
+            if (!terrainHit) continue;
+            ray = candidate;
+            hit = candidateHit;
+            usedTerrainInset = true;
+            found = true;
+            break;
+        }
+        if (!found) return std::nullopt;
+    }
     PhysicsCastHit result;
     const JPH::RVec3 hitPosition = ray.GetPointOnRay(hit.mFraction);
     result.position = fromJoltPosition(hitPosition);
-    result.distance = distanceBethesdaUnits * hit.mFraction;
+    if (usedTerrainInset) {
+        result.position.x = from.x;
+        result.position.z = from.z;
+    }
+    result.distance = distance * hit.mFraction;
     JPH::BodyLockRead lock(m_impl->physics.GetBodyLockInterface(), hit.mBodyID);
     if (lock.Succeeded()) {
         const JPH::Body& body = lock.GetBody();
@@ -1108,6 +1274,8 @@ std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castDown(
             kBethesdaUnitsToJoltMetres;
         const auto object = m_impl->objectsByUserData.find(body.GetUserData());
         if (object != m_impl->objectsByUserData.end()) result.object = object->second;
+        for (const auto& [cell, id] : m_impl->terrainBodies)
+            if (id == hit.mBodyID) { result.terrainCell = cell; break; }
     }
     return result;
 }
@@ -1171,6 +1339,8 @@ std::optional<PhysicsCastHit> BethesdaPhysicsWorld::castSphere(
     if (lock.Succeeded()) {
         const auto object = m_impl->objectsByUserData.find(lock.GetBody().GetUserData());
         if (object != m_impl->objectsByUserData.end()) result.object = object->second;
+        for (const auto& [cell, id] : m_impl->terrainBodies)
+            if (id == hit.mBodyID2) { result.terrainCell = cell; break; }
     }
     return result;
 }

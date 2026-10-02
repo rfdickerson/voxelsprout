@@ -918,6 +918,9 @@ bool RendererBackend::pickPhysicalDevice() {
         }
 
         VOX_LOGI("render") << "selected GPU: " << selected.properties.deviceName
+                           << ", vendorId=" << selected.properties.vendorID
+                           << ", deviceId=" << selected.properties.deviceID
+                           << ", driverVersion=" << selected.properties.driverVersion
                            << ", graphicsQueueFamily=" << m_graphicsQueueFamilyIndex
                            << ", graphicsQueueIndex=" << m_graphicsQueueIndex
                            << ", transferQueueFamily=" << m_transferQueueFamilyIndex

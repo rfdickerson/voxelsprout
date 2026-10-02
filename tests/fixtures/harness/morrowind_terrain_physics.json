@@ -1,0 +1,14 @@
+{
+  "kind": "terrain_physics",
+  "name": "morrowind-two-land-cells",
+  "cells": [
+    {"x": -2, "z": -9, "base_height": 100, "row_slope": 2, "col_slope": 3},
+    {"x": -1, "z": -9, "base_height": 500, "row_slope": 0, "col_slope": 0}
+  ],
+  "queries": [
+    {"origin": [-15360, 340, 72704], "distance": 400, "hit": true, "cell": [-2, -9], "height": 140, "hit_distance": 200},
+    {"origin": [-7168, 700, 72704], "distance": 400, "hit": true, "cell": [-1, -9], "height": 500, "hit_distance": 200},
+    {"origin": [-23552, 700, 72704], "distance": 800, "hit": false},
+    {"shape": "sphere", "origin": [-7168, 700, 72704], "distance": 400, "radius": 16, "hit": true, "cell": [-1, -9], "height": 516, "hit_distance": 184}
+  ]
+}

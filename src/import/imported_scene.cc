@@ -1130,7 +1130,18 @@ bool sampleImportedSceneRigidAnimation(
     return true;
 }
 
+void prepareImportedSceneVertexEncodings(ImportedScene& scene) {
+    scene.vertexEncodings.resize(scene.packedVertices.size());
+    for (std::size_t i = 0; i < scene.packedVertices.size(); ++i) {
+        const ImportedScenePackedVertex& vertex = scene.packedVertices[i];
+        scene.vertexEncodings[i] = {
+            packImportedVertexNormal(vertex.normal),
+            packImportedVertexColor(vertex.color, vertex.colorAlpha)};
+    }
+}
+
 void buildImportedScenePackedRenderData(ImportedScene& scene) {
+    scene.vertexEncodings.clear();
     applyTextureAlphaCutoutFlags(scene);
     // Paired with the call above: that one infers a mode where none was
     // authored, this one corrects one that was authored wrong. Exactly one

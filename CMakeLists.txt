@@ -18,6 +18,9 @@ if(NOT ODAI_HEADLESS_ONLY)
     configure_file(packaging/skyrim-slice.json "${ODAI_RESOURCE_DIR}/skyrim-slice.json" COPYONLY)
     configure_file(scripts/odai-launcher "${CMAKE_BINARY_DIR}/odai-launcher" COPYONLY)
     file(COPY "${CMAKE_SOURCE_DIR}/assets/fonts" DESTINATION "${ODAI_RESOURCE_DIR}/assets")
+    configure_file(
+        assets/textures/morrowind_water_normal.png
+        "${ODAI_RESOURCE_DIR}/assets/textures/morrowind_water_normal.png" COPYONLY)
 endif()
 include(CheckCXXCompilerFlag)
 find_package(Threads REQUIRED)
@@ -321,6 +324,15 @@ if(ODAI_BUILD_HEADLESS)
         add_test(NAME odai_headless_actor
             COMMAND odai_headless
                 ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/one_actor.json)
+        add_test(NAME odai_headless_terrain_physics
+            COMMAND odai_headless
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/morrowind_terrain_physics.json)
+        add_test(NAME odai_headless_static_physics
+            COMMAND odai_headless
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/static_world_physics.json)
+        add_test(NAME odai_headless_inventory
+            COMMAND odai_headless
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/player_inventory.json)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
             add_test(NAME odai_headless_actor_replay
@@ -328,6 +340,18 @@ if(ODAI_BUILD_HEADLESS)
                     ${CMAKE_SOURCE_DIR}/tests/headless_runner_replay_tests.py
                     $<TARGET_FILE:odai_headless>
                     ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/one_actor.json)
+            add_test(NAME odai_headless_snapshots
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/headless_snapshot_tests.py
+                    $<TARGET_FILE:odai_headless>
+                    ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/one_actor.json
+                    ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/player_inventory.json)
+            add_test(NAME odai_harness_scenario_visual
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/harness_capability_tests.py
+                    $<TARGET_FILE:odai_headless>
+                    ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/one_actor.json
+                    ${CMAKE_SOURCE_DIR}/scripts/visual_regression.py)
         endif()
     endif()
 endif()
@@ -393,7 +417,14 @@ if(ODAI_BUILD_RUNTIME)
     target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
         ODAI_VERSION="${PROJECT_VERSION}")
     target_link_libraries(odai PRIVATE odai_renderer odai_audio odai_traversal odai_bethesda_runtime)
+    target_link_libraries(odai PRIVATE ${CMAKE_DL_LIBS})
     odai_warnings(odai)
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_library(odai_bench_heap SHARED src/tools/bench_heap_interposer.cc)
+        set_target_properties(odai_bench_heap PROPERTIES OUTPUT_NAME odai_bench_heap)
+        odai_warnings(odai_bench_heap)
+    endif()
 endif()
 
 if(ODAI_BUILD_TOOLS)
@@ -448,7 +479,7 @@ if(BUILD_TESTING)
     odai_plain_test(odai_material_animation_tests tests/material_animation_tests.cc)
     target_link_libraries(odai_material_animation_tests PRIVATE odai_bethesda_import)
     odai_plain_test(odai_bethesda_import_tests tests/bethesda_import_tests.cc)
-    target_link_libraries(odai_bethesda_import_tests PRIVATE odai_bethesda_import)
+    target_link_libraries(odai_bethesda_import_tests PRIVATE odai_bethesda_runtime)
 
     odai_plain_test(odai_skyrim_animation_tests tests/skyrim_animation_tests.cc)
     target_link_libraries(odai_skyrim_animation_tests PRIVATE
@@ -510,6 +541,11 @@ if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME odai_launcher_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/launcher_tests.py)
+        add_test(NAME odai_iridius_bench_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/iridius_bench_tests.py)
+        if(TARGET odai_bench_heap)
+            add_test(NAME odai_bench_heap_tests COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/bench_heap_tests.py $<TARGET_FILE:odai_bench_heap>)
+        endif()
         add_test(
             NAME odai_skyrim_showcase_manifest_tests
             COMMAND ${Python3_EXECUTABLE}

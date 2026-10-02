@@ -414,6 +414,30 @@ void testCellAtHandlesNegativeCoordinates() {
     CHECK(planner.cellAt(-kCellSize - 1.0f, 0.0f) == CellCoord{-2, 0});
 }
 
+// A worker can finish after the player has travelled far from its requested
+// cell. Refreshing the centre before applying the result must reject it, so a
+// stale chunk is never uploaded just to be evicted in the same frame.
+void testCompletionUsesCurrentPlayerCell() {
+    CellResidencyPlanner planner;
+    CellResidencyConfig config = testConfig();
+    config.maxLoadsInFlight = 1;
+    planner.setConfig(config);
+    const auto origin = atCell(0, 0);
+    planner.update(origin.data(), kStill.data());
+    CHECK(!planner.cellsToLoad().empty());
+    const CellCoord requested = planner.cellsToLoad().front();
+    planner.markLoadStarted(requested);
+
+    const auto destination = atCell(20, 0);
+    planner.update(destination.data(), kStill.data());
+    CHECK(!planner.markLoadFinished(requested));
+    CHECK(!planner.isResident(requested));
+    CHECK(planner.stats().wastedLoads == 1u);
+    planner.update(destination.data(), kStill.data());
+    CHECK(!planner.cellsToLoad().empty());
+    CHECK(std::abs(planner.cellsToLoad().front().x - 20) <= config.loadRadius);
+}
+
 // A wild velocity spike must not aim the budget at cells the player will never
 // reach.
 void testLeadDistanceIsClamped() {
@@ -453,6 +477,7 @@ int main() {
     testEvictionIsFarthestFirst();
     testResetForgetsEverything();
     testCellAtHandlesNegativeCoordinates();
+    testCompletionUsesCurrentPlayerCell();
     testLeadDistanceIsClamped();
 
     if (g_failures != 0) {

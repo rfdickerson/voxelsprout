@@ -454,6 +454,19 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    [[nodiscard]] std::uint64_t benchmarkGpuSampleSerial() const { return m_benchmarkGpuSampleSerial; }
+    [[nodiscard]] std::uint64_t benchmarkGpuSubmissionId() const { return m_benchmarkGpuSubmissionId; }
+    [[nodiscard]] float benchmarkGpuFrameMs() const { return m_debugGpuFrameTimeMs; }
+    [[nodiscard]] std::uint32_t benchmarkDrawCalls() const { return m_debugDrawCallsTotal; }
+    [[nodiscard]] std::uint32_t benchmarkWaterDrawCalls() const { return m_debugWaterDrawCalls; }
+    [[nodiscard]] float benchmarkWaterCpuRecordMs() const { return m_debugCpuWaterRecordMs; }
+    [[nodiscard]] float benchmarkWaterGpuMs() const { return m_debugGpuWaterTimeMs; }
+    [[nodiscard]] std::uint64_t benchmarkWaterGeometryBytes() const {
+        return static_cast<std::uint64_t>(m_importedWaterIndexCount / 6u * 4u) *
+            sizeof(ImportedWaterVertex) +
+            static_cast<std::uint64_t>(m_importedWaterIndexCount) * sizeof(std::uint32_t);
+    }
+    [[nodiscard]] std::uint64_t benchmarkTriangles() const { return m_debugTrianglesTotal; }
     [[nodiscard]] UiRenderStats uiRenderStats() const;
     void setVertexAoEnabled(bool enabled);
     [[nodiscard]] bool isVertexAoEnabled() const;
@@ -523,6 +536,12 @@ public:
         m_skyDebugSettings.depthOfFieldNearBlurScale = nearBlurScale;
     }
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    void setWaterRenderingEnabled(bool enabled) { m_waterRenderingEnabled = enabled; }
+    [[nodiscard]] bool waterRenderingEnabled() const { return m_waterRenderingEnabled; }
+    [[nodiscard]] bool waterNormalAssetReady() const {
+        return m_waterNormalTextureFromAsset && m_waterNormalTextureImageView != VK_NULL_HANDLE &&
+            m_waterNormalTextureSampler != VK_NULL_HANDLE;
+    }
     void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);
     void importedSceneDebugState(
@@ -630,7 +649,9 @@ private:
     static constexpr uint32_t kGpuTimestampQueryWaterReflectionResolveEnd = 53;
     static constexpr uint32_t kGpuTimestampQueryReflectionStart = 54;
     static constexpr uint32_t kGpuTimestampQueryReflectionEnd = 55;
-    static constexpr uint32_t kGpuTimestampQueryCount = 56;
+    static constexpr uint32_t kGpuTimestampQueryWaterStart = 56;
+    static constexpr uint32_t kGpuTimestampQueryWaterEnd = 57;
+    static constexpr uint32_t kGpuTimestampQueryCount = 58;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -2418,6 +2439,7 @@ private:
     VmaAllocation m_waterNormalTextureAllocation = VK_NULL_HANDLE;
     VkImageView m_waterNormalTextureImageView = VK_NULL_HANDLE;
     VkSampler m_waterNormalTextureSampler = VK_NULL_HANDLE;
+    bool m_waterNormalTextureFromAsset = false;
     VkImage m_terrainDetailTextureImage = VK_NULL_HANDLE;
     VkDeviceMemory m_terrainDetailTextureMemory = VK_NULL_HANDLE;
     VmaAllocation m_terrainDetailTextureAllocation = VK_NULL_HANDLE;
@@ -2486,6 +2508,7 @@ private:
     float m_importedSceneBoundsRadius = 0.0f;
     bool m_importedSceneBoundsValid = false;
     bool m_debugImportedWaterSolid = false;
+    bool m_waterRenderingEnabled = true;
     bool m_importedSceneInteriorMode = false;
     ImportedInteriorLighting m_importedInteriorLighting{};
     ImportedExteriorLighting m_importedExteriorLighting{};
@@ -2540,6 +2563,9 @@ private:
     double m_lastFrameTimestampSeconds = 0.0;
     float m_debugFrameTimeMs = 0.0f;
     float m_debugGpuFrameTimeMs = 0.0f;
+    std::uint64_t m_benchmarkGpuSampleSerial = 0;
+    std::uint64_t m_benchmarkGpuSubmissionId = 0;
+    std::uint64_t m_renderAttempt = 0;
     float m_debugGpuShadowTimeMs = 0.0f;
     float m_debugGpuContactShadowTraceTimeMs = 0.0f;
     float m_debugGpuContactShadowResolveTimeMs = 0.0f;
@@ -2567,6 +2593,8 @@ private:
     float m_debugGpuVelocityTimeMs = 0.0f;
     float m_debugGpuTaaTimeMs = 0.0f;
     float m_debugGpuWaterReflectionResolveTimeMs = 0.0f;
+    float m_debugGpuWaterTimeMs = 0.0f;
+    float m_debugCpuWaterRecordMs = 0.0f;
     float m_debugGpuReflectionTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
     float m_debugGpuUiTimeMs = 0.0f;
@@ -2638,6 +2666,7 @@ private:
         std::size_t bucket = 0;
         VkDeviceSize bufferOffset = 0;  // byte offset into the frame arena slice
         std::uint32_t drawCount = 0;
+        std::uint64_t triangleCount = 0;
         std::uint8_t alphaThreshold = 128;
         // Two-sidedness is a PIPELINE property, so it splits batches exactly
         // like the alpha threshold (a push constant) does -- both are state
@@ -2674,6 +2703,8 @@ private:
     float m_visualTimeSeconds = -1.0f;
 
     std::uint32_t m_debugDrawCallsTotal = 0;
+    std::uint32_t m_debugWaterDrawCalls = 0;
+    std::uint64_t m_debugTrianglesTotal = 0;
     std::uint32_t m_debugDrawCallsShadow = 0;
     std::uint32_t m_debugDrawCallsPrepass = 0;
     std::uint32_t m_debugDrawCallsMain = 0;

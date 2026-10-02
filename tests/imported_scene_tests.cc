@@ -176,6 +176,9 @@ void testImportedSceneSerialization() {
     collision.sourceReferenceFormId = 0xfe009876u;
     scene.collisionTriangles.push_back(collision);
     odai::importer::buildImportedScenePackedRenderData(scene);
+    odai::importer::prepareImportedSceneVertexEncodings(scene);
+    expectTrue(scene.vertexEncodings.size() == scene.packedVertices.size(),
+               "worker vertex encodings cover the packed stream");
 
     const fs::path scenePath = fs::temp_directory_path() / "odai_imported_scene_roundtrip.bin";
     const fs::path objPath = fs::temp_directory_path() / "odai_imported_scene_roundtrip.obj";
@@ -184,6 +187,8 @@ void testImportedSceneSerialization() {
 
     ImportedScene loaded{};
     expectTrue(odai::importer::loadImportedScene(scenePath, loaded), "Imported scene loads");
+    expectTrue(loaded.vertexEncodings.empty(),
+               "worker vertex encodings do not change cooked-scene serialization");
     expectTrue(loaded.sourceTag == scene.sourceTag, "Imported scene source tag round-trips");
     expectTrue(loaded.textures.size() == 1u, "Imported scene texture count round-trips");
     expectTrue(loaded.meshes.size() == 1u, "Imported scene mesh count round-trips");
@@ -1232,6 +1237,24 @@ void testImportedVertexPacking() {
                "layer slots pack low half first");
     expectTrue(packImportedVertexLayerPair(0xffffffffu, 0x1ffffu) == 0xffffffffu,
                "unrepresentable layer slots become the 0xffff sentinel, not a truncated index");
+
+    odai::importer::ImportedScene scene;
+    odai::importer::ImportedScenePackedVertex vertex{};
+    vertex.normal[0] = 0.4f;
+    vertex.normal[1] = 0.8f;
+    vertex.normal[2] = -0.2f;
+    vertex.color[0] = 0.15f;
+    vertex.color[1] = 0.5f;
+    vertex.color[2] = 0.9f;
+    vertex.colorAlpha = 0.35f;
+    scene.packedVertices.push_back(vertex);
+    odai::importer::prepareImportedSceneVertexEncodings(scene);
+    expectTrue(scene.vertexEncodings.size() == 1u &&
+                   scene.vertexEncodings[0].normal == packImportedVertexNormal(vertex.normal) &&
+                   scene.vertexEncodings[0].color == packImportedVertexColor(vertex.color, vertex.colorAlpha),
+               "worker encoding matches the render-thread fallback exactly");
+    odai::importer::buildImportedScenePackedRenderData(scene);
+    expectTrue(scene.vertexEncodings.empty(), "packed-stream rebuild invalidates worker encoding");
 }
 
 void testRigidAnimationPackingSamplingAndRoundTrip() {

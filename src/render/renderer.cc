@@ -245,6 +245,16 @@ FramePacingStats Renderer::framePacingStats() const {
     return m_backend->framePacingStats();
 }
 
+std::uint64_t Renderer::benchmarkGpuSampleSerial() const { return m_backend->benchmarkGpuSampleSerial(); }
+std::uint64_t Renderer::benchmarkGpuSubmissionId() const { return m_backend->benchmarkGpuSubmissionId(); }
+float Renderer::benchmarkGpuFrameMs() const { return m_backend->benchmarkGpuFrameMs(); }
+std::uint32_t Renderer::benchmarkDrawCalls() const { return m_backend->benchmarkDrawCalls(); }
+std::uint32_t Renderer::benchmarkWaterDrawCalls() const { return m_backend->benchmarkWaterDrawCalls(); }
+float Renderer::benchmarkWaterCpuRecordMs() const { return m_backend->benchmarkWaterCpuRecordMs(); }
+float Renderer::benchmarkWaterGpuMs() const { return m_backend->benchmarkWaterGpuMs(); }
+std::uint64_t Renderer::benchmarkWaterGeometryBytes() const { return m_backend->benchmarkWaterGeometryBytes(); }
+std::uint64_t Renderer::benchmarkTriangles() const { return m_backend->benchmarkTriangles(); }
+
 UiRenderStats Renderer::uiRenderStats() const {
     return m_backend->uiRenderStats();
 }
@@ -355,6 +365,18 @@ void Renderer::setDepthOfField(bool enabled, float focusDistance, float focusRan
 
 void Renderer::setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug) {
     m_backend->setImportedSceneDebugState(showTerrain, showStatics, showTextures, flatShading, waterDebug);
+}
+
+void Renderer::setWaterRenderingEnabled(bool enabled) {
+    m_backend->setWaterRenderingEnabled(enabled);
+}
+
+bool Renderer::waterRenderingEnabled() const {
+    return m_backend->waterRenderingEnabled();
+}
+
+bool Renderer::waterNormalAssetReady() const {
+    return m_backend->waterNormalAssetReady();
 }
 
 void Renderer::setImportedInteriorLighting(const ImportedInteriorLighting& lighting) {

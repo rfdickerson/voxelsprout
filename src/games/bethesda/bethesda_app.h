@@ -427,10 +427,12 @@ protected:
     void updateSkyrimTerrainLod(const float bethesdaPosition[3]);
     void runCollisionSelfTest();
     void onTick(float deltaSeconds) override;
+    engine::TickTiming tickTiming() const override { return m_tickTiming; }
     void onRender(float deltaSeconds) override;
     void onShutdown() override;
 
 private:
+    engine::TickTiming m_tickTiming{};
     void applyTimeOfDay();
     // Reads WTHR/CLMT across the load order and picks the active weather. No-op
     // unless a plugin beyond the base game is loaded or a weather was named.
@@ -1098,6 +1100,7 @@ private:
     bool m_inventoryCategoryFocus = false;
     bool m_inventoryTakeAllLatch = false;
     bool m_playerInventoryKeyLatch = false;
+    bool m_inventoryDropKeyLatch = false;
     int m_giftMenuChoice = 0;
     std::uint64_t m_presentedGiftMenuSequence = 0u;
     // Weather picker, a sub-page of the pause menu. Choices are remapped
@@ -1141,6 +1144,7 @@ private:
     // doorstep, which is what the viewer has always done.
     std::string m_startInsideInterior;
     bool m_interiorStarted = false;
+    bool m_tes3FreshGame = false;
     std::string m_streamCacheDirectory;
     // Asset override roots, in load order. See addModDirectory.
     std::vector<std::string> m_modDirectories;
@@ -1161,12 +1165,17 @@ private:
         // One entry per triangle, parallel to indices in groups of three.
         std::vector<std::uint32_t> triangleSourceReferenceFormIds;
         odai::bethesda::PreparedStaticCollision prepared;
+        odai::bethesda::PreparedStaticCollision terrainPrepared;
+        std::optional<ActorNavigationWorld::GeneratedCell> preparedNavigation;
         bool awaitingPublication = false;
         std::unordered_set<std::uint32_t> preparedDisabledReferences;
     };
-    static BethesdaCollisionMesh buildBethesdaCollisionMesh(const importer::ImportedScene& scene);
+    static BethesdaCollisionMesh buildBethesdaCollisionMesh(
+        const importer::ImportedScene& scene, bool includeTerrain = true);
     static std::shared_ptr<importer::bethesda::CellStreamer::PreparedCellData>
-        prepareBethesdaCollision(const importer::ImportedScene& scene, std::string& error);
+        prepareBethesdaCollision(const importer::ImportedScene& scene,
+            const importer::bethesda::FalloutCellRecord& cell, std::string& error,
+            bool prepareNavigation);
 
     std::unordered_map<importer::CellCoord, BethesdaCollisionMesh,
         importer::CellCoordHash> m_bethesdaCollisionByCell;

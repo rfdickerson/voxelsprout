@@ -95,6 +95,9 @@ jobs:
       - name: Run CTest
         run: ctest --test-dir build --output-on-failure
 
+      - name: Performance gate status
+        run: echo 'PERFORMANCE NOT RUN — shared runner has no fixed GPU or retail game data; reporter and budget tests ran in CTest.'
+
       - name: Verify installed package
         run: |
           cmake --install build --prefix "${RUNNER_TEMP}/odai-package"

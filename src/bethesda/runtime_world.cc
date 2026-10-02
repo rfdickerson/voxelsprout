@@ -473,6 +473,42 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 ++result.applied;
                 break;
             }
+            case WorldCommandType::DropItem: {
+                InventoryEntry* entry = inventoryEntry(*object, command.item);
+                if (object->kind != RuntimeObjectKind::Actor || !object->enabled ||
+                    (object->actorValues && object->actorValues->dead) ||
+                    !entry || entry->count < 1 || !command.item.valid()) {
+                    result.diagnostics.push_back("drop requires a living inventory owner and an owned item");
+                    break;
+                }
+                RuntimeObject dropped;
+                dropped.id = allocateRuntimeId();
+                dropped.base = entry->item;
+                dropped.kind = RuntimeObjectKind::Item;
+                dropped.transform = object->transform;
+                dropped.transform.position[0] += 80.0;
+                dropped.originSpace = object->currentSpace;
+                dropped.currentSpace = object->currentSpace;
+                dropped.interior = object->interior;
+                dropped.location = object->location;
+                const ObjectId droppedId = dropped.id;
+                std::string error;
+                if (!addInitialObject(std::move(dropped), error)) {
+                    result.diagnostics.push_back(std::move(error));
+                    break;
+                }
+                if (--entry->count == 0)
+                    std::erase_if(object->inventory, [&](const InventoryEntry& owned) {
+                        return owned.item == command.item;
+                    });
+                result.residencyChanged = result.residencyChanged ||
+                    object->currentSpace.kind != RuntimeSpaceKind::Unknown;
+                result.renderDeltas.push_back(RuntimeRenderDelta{
+                    droppedId, RuntimeRenderTransform | RuntimeRenderVisibility,
+                    find(droppedId)->transform, true});
+                ++result.applied;
+                break;
+            }
             case WorldCommandType::EquipMeleeWeapon:
             case WorldCommandType::ConsumeHealingItem: {
                 auto* entry = inventoryEntry(*object, command.item);

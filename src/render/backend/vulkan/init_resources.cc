@@ -537,6 +537,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
         m_waterNormalTextureSampler != VK_NULL_HANDLE) {
         return true;
     }
+    m_waterNormalTextureFromAsset = false;
 
     auto destroyWaterTextureResourcesPartial = [&]() {
         if (m_waterNormalTextureSampler != VK_NULL_HANDLE) {
@@ -881,6 +882,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
                 if (m_waterNormalTextureSampler != VK_NULL_HANDLE &&
                     m_waterNormalTextureImageView != VK_NULL_HANDLE &&
                     m_waterNormalTextureImage != VK_NULL_HANDLE) {
+                    m_waterNormalTextureFromAsset = true;
                     return true;
                 }
                 VOX_LOGW("render") << "failed to upload DDS water normal texture " << waterNormalPath.string()
@@ -1218,6 +1220,7 @@ bool RendererBackend::createWaterNormalTextureResources() {
         return false;
     }
     setObjectName(VK_OBJECT_TYPE_SAMPLER, vkHandleToUint64(m_waterNormalTextureSampler), "water.normal.sampler");
+    m_waterNormalTextureFromAsset = loadedRgbaWaterNormal;
     if (!loadedRgbaWaterNormal) {
         VOX_LOGI("render") << "generated subtle water normal texture ready: "
                            << waterNormalWidth << "x" << waterNormalHeight

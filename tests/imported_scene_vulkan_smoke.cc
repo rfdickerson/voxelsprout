@@ -6,7 +6,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <cmath>
 #include <vector>
 
 namespace {
@@ -94,22 +99,53 @@ odai::importer::ImportedScene makeSyntheticScene() {
 
 odai::importer::ImportedScene makeMorrowindTerrainScene() {
     using namespace odai::importer::bethesda;
+    const auto root = std::filesystem::temp_directory_path() / "odai_terrain_texture_smoke";
+    std::filesystem::create_directories(root / "textures");
+    const auto writeDds = [&](const char* name, std::uint32_t rgba) {
+        std::vector<std::uint8_t> dds(132u, 0u);
+        const auto word = [&](std::size_t at, std::uint32_t value) {
+            std::memcpy(dds.data() + at, &value, 4u);
+        };
+        word(0, 0x20534444u); word(4, 124u); word(8, 0x100fu);
+        word(12, 1u); word(16, 1u); word(20, 4u); word(28, 1u);
+        word(76, 32u); word(80, 0x41u); word(88, 32u);
+        word(92, 0xff0000u); word(96, 0xff00u); word(100, 0xffu);
+        word(104, 0xff000000u); word(108, 0x1000u); word(128, rgba);
+        std::ofstream out(root / "textures" / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
+    };
+    writeDds("_land_default.dds", 0xff406080u);
+    writeDds("ground.dds", 0xff208020u);
+    writeDds("rock.dds", 0xff808080u);
     FalloutCellRecord cell;
     cell.hasGridCoords = true;
+    cell.hasWater = true;
+    cell.waterHeight = 200.0f;
     cell.land = std::make_unique<FalloutLandRecord>();
     cell.land->gridSize = kMorrowindLandGridSize;
     cell.land->hasHeights = true;
+    cell.land->morrowindTextureGrid.resize(256u);
+    for (int row = 0; row < 16; ++row)
+        for (int col = 0; col < 16; ++col)
+            cell.land->morrowindTextureGrid[static_cast<std::size_t>(row * 16 + col)] =
+                col < 5 ? 1u : col < 11 ? 2u : 0u;
     cell.land->heights.resize(65u * 65u);
     for (int row = 0; row < 65; ++row)
         for (int col = 0; col < 65; ++col)
             cell.land->heights[static_cast<std::size_t>(row * 65 + col)] =
                 80.0f + static_cast<float>(row * 2 + col);
     FalloutAssetSource assets;
+    if (!assets.open(root)) return {};
     FalloutWorldTables tables;
+    tables.morrowind = true;
+    tables.morrowindLandTexturePaths.emplace(1u, "ground.dds");
+    tables.morrowindLandTexturePaths.emplace(2u, "rock.dds");
     CellSceneBuilder builder(assets, tables);
     builder.addCellTerrain(cell);
     odai::importer::ImportedScene scene;
     builder.finish(scene);
+    std::error_code cleanupError;
+    std::filesystem::remove_all(root, cleanupError);
     return scene;
 }
 
@@ -140,6 +176,8 @@ int main() {
         renderer.setMsaaSamples(1);
         if (!renderer.init(window)) {
             std::cerr << "Vulkan renderer initialization failed\n";
+        } else if (!renderer.waterNormalAssetReady()) {
+            std::cerr << "Packaged water normal asset was not loaded\n";
         } else if (!renderer.uploadImportedScene(makeSyntheticScene())) {
             std::cerr << "synthetic ImportedScene upload failed\n";
         } else {
@@ -149,6 +187,9 @@ int main() {
             camera.fovDegrees = 60.0f;
             bool streamingValid = renderer.waitForImportedSceneUploads() &&
                 renderer.isImportedSceneChunkReady(0);
+            bool timingValid = true;
+            std::vector<std::uint64_t> submissions;
+            std::uint64_t lastAttempt = 0, lastGpuSample = 0;
             for (int frame = 0; frame < 8; ++frame) {
                 renderer.setVisualTimeSeconds(float(frame)*.25f);
                 camera.x=float(frame)*.025f;
@@ -165,11 +206,25 @@ int main() {
                 if(frame==7 && !renderer.prepareFrameCapture())break;
                 glfwPollEvents();
                 renderer.renderFrame(camera);
+                const auto timing = renderer.framePacingStats();
+                timingValid = timingValid && timing.renderAttempt > lastAttempt;
+                lastAttempt = timing.renderAttempt;
+                for (const float wait : {timing.cpuWaitFrameSlotMs, timing.cpuWaitAcquireMs,
+                                        timing.cpuWaitPresentMs, timing.cpuWaitTransferMs}) {
+                    timingValid = timingValid && std::isfinite(wait) && wait >= 0;
+                }
+                if (renderer.benchmarkGpuSampleSerial() != lastGpuSample) {
+                    lastGpuSample = renderer.benchmarkGpuSampleSerial();
+                    timingValid = timingValid && std::find(submissions.begin(), submissions.end(),
+                        renderer.benchmarkGpuSubmissionId()) != submissions.end();
+                }
+                if (timing.submissionId) submissions.push_back(timing.submissionId);
+                timingValid = timingValid && (!timing.presentAccepted || timing.submissionId != 0);
             }
             std::vector<std::uint8_t> rgb;
             std::uint32_t width = 0;
             std::uint32_t height = 0;
-            passed = streamingValid && renderer.captureFrameRgb(rgb, width, height) && width > 0 && height > 0 &&
+            passed = timingValid && streamingValid && renderer.captureFrameRgb(rgb, width, height) && width > 0 && height > 0 &&
                 rgb.size() == static_cast<std::size_t>(width) * height * 3u &&
                 std::any_of(rgb.begin(), rgb.end(), [](std::uint8_t value) { return value != 0; });
             if (!passed) {
@@ -177,7 +232,18 @@ int main() {
             }
             if (passed) {
                 auto terrain = makeMorrowindTerrainScene();
-                if (terrain.packedDraws.empty() || terrain.sourceLandscapeCellCount == 0u ||
+                const bool materialIndicesValid = std::all_of(
+                    terrain.packedVertices.begin(), terrain.packedVertices.end(),
+                    [&](const odai::importer::ImportedScenePackedVertex& vertex) {
+                        if (vertex.textureIndex >= terrain.textures.size()) return false;
+                        for (const std::uint32_t layer : vertex.layerTextureIndex) {
+                            if (layer != odai::importer::kImportedSceneNoTerrainLayer &&
+                                layer >= terrain.textures.size()) return false;
+                        }
+                        return true;
+                    });
+                if (terrain.textures.size() != 3u || terrain.packedDraws.size() < 3u ||
+                    terrain.sourceLandscapeCellCount == 0u || !materialIndicesValid ||
                     !renderer.uploadImportedScene(terrain) ||
                     !renderer.waitForImportedSceneUploads()) {
                     std::cerr << "Morrowind LAND terrain draw was not uploaded\n";
@@ -191,15 +257,118 @@ int main() {
                     camera.pitchDegrees = -30.0f;
                     camera.fovDegrees = 60.0f;
                     for (int frame = 0; frame < 8; ++frame) {
-                        if (frame == 7 && !renderer.prepareFrameCapture()) break;
                         glfwPollEvents();
                         renderer.renderFrame(camera);
                     }
+                    // Timestamp readback trails submission. Drain until the
+                    // measured frame actually contains the water fixture.
+                    for (int frame = 0; frame < 24 &&
+                         renderer.benchmarkWaterGpuMs() <= 0.0f; ++frame) {
+                        renderer.renderFrame(camera);
+                    }
+                    if (!renderer.prepareFrameCapture()) {
+                        passed = false;
+                    }
+                    if (passed) renderer.renderFrame(camera);
                     rgb.clear();
-                    passed = renderer.captureFrameRgb(rgb, width, height) &&
+                    passed = passed && renderer.captureFrameRgb(rgb, width, height) &&
                         rgb.size() == static_cast<std::size_t>(width) * height * 3u &&
                         std::any_of(rgb.begin(), rgb.end(), [](std::uint8_t value) { return value != 0; });
                     if (!passed) std::cerr << "Morrowind LAND terrain frame capture failed\n";
+                    if (passed) {
+                        const auto waterDraws = renderer.benchmarkWaterDrawCalls();
+                        const auto waterCpuMs = renderer.benchmarkWaterCpuRecordMs();
+                        const auto waterGpuMs = renderer.benchmarkWaterGpuMs();
+                        const auto waterBytes = renderer.benchmarkWaterGeometryBytes();
+                        std::cerr << "water baseline: draws=" << waterDraws
+                                  << " cpuRecordMs=" << waterCpuMs
+                                  << " gpuDrawMs=" << waterGpuMs
+                                  << " gpuFrameMs=" << renderer.benchmarkGpuFrameMs()
+                                  << " gpuSample=" << renderer.benchmarkGpuSampleSerial()
+                                  << " geometryBytes=" << waterBytes << '\n';
+                        passed = waterDraws == 1u && waterBytes > 0u &&
+                            std::isfinite(waterCpuMs) && waterCpuMs >= 0.0f &&
+                            std::isfinite(waterGpuMs) && waterGpuMs > 0.0f;
+                    }
+                    if (passed) {
+                        const auto withWater = rgb;
+                        renderer.setVisualTimeSeconds(20.0f);
+                        passed = renderer.prepareFrameCapture();
+                        if (passed) {
+                            renderer.renderFrame(camera);
+                            rgb.clear();
+                            passed = renderer.captureFrameRgb(rgb, width, height) &&
+                                rgb.size() == withWater.size() && rgb != withWater;
+                        }
+                        if (!passed) std::cerr << "Water animation did not change the rendered surface\n";
+                        if (passed) {
+                            const auto animatedWater = rgb;
+                            if (const char* capturePath = std::getenv("ODAI_WATER_SMOKE_CAPTURE")) {
+                                renderer.captureFrameToFile(capturePath);
+                            }
+                            const auto drawsWithWater = renderer.benchmarkDrawCalls();
+                            renderer.setWaterRenderingEnabled(false);
+                            passed = !renderer.waterRenderingEnabled() && renderer.prepareFrameCapture();
+                            if (passed) {
+                                renderer.renderFrame(camera);
+                                rgb.clear();
+                                passed = renderer.captureFrameRgb(rgb, width, height) &&
+                                    renderer.benchmarkDrawCalls() < drawsWithWater &&
+                                    rgb.size() == animatedWater.size() && rgb != animatedWater;
+                                if (passed) {
+                                    const auto pixel = [&](const std::vector<std::uint8_t>& image,
+                                                           std::uint32_t x, std::uint32_t y) {
+                                        return image.data() + (static_cast<std::size_t>(y) * width + x) * 3u;
+                                    };
+                                    // The crest at the upper left is above the
+                                    // authored water plane; the centre is a
+                                    // submerged part of the same LAND fixture.
+                                    const auto* crestOn = pixel(animatedWater, width * 90u / 320u,
+                                                                 height * 22u / 180u);
+                                    const auto* crestOff = pixel(rgb, width * 90u / 320u,
+                                                                  height * 22u / 180u);
+                                    const auto* bottomOn = pixel(animatedWater, width / 2u, height / 2u);
+                                    const auto* bottomOff = pixel(rgb, width / 2u, height / 2u);
+                                    const auto difference = [](const std::uint8_t* a, const std::uint8_t* b) {
+                                        return std::abs(int(a[0]) - int(b[0])) +
+                                            std::abs(int(a[1]) - int(b[1])) +
+                                            std::abs(int(a[2]) - int(b[2]));
+                                    };
+                                    passed = crestOff[1] > crestOff[0] &&
+                                        crestOff[1] > crestOff[2] &&
+                                        difference(crestOn, crestOff) <= 8 &&
+                                        difference(bottomOn, bottomOff) > 20;
+                                }
+                                if (passed) {
+                                    if (const char* capturePath = std::getenv("ODAI_WATER_SMOKE_CAPTURE")) {
+                                        renderer.captureFrameToFile(std::string(capturePath) + ".off.ppm");
+                                    }
+                                }
+                            }
+                            if (!passed) std::cerr << "Water disable did not remove its draw and image contribution\n";
+                            renderer.setWaterRenderingEnabled(true);
+                            if (passed) {
+                                passed = renderer.waterRenderingEnabled() &&
+                                    renderer.prepareFrameCapture();
+                                if (passed) {
+                                    renderer.renderFrame(camera);
+                                    rgb.clear();
+                                    passed = renderer.captureFrameRgb(rgb, width, height);
+                                    if (passed) {
+                                        if (const char* capturePath = std::getenv("ODAI_WATER_SMOKE_CAPTURE")) {
+                                            renderer.captureFrameToFile(std::string(capturePath) + ".repeat.ppm");
+                                        }
+                                        passed = rgb.size() == animatedWater.size() &&
+                                            std::equal(rgb.begin(), rgb.end(), animatedWater.begin(),
+                                                [](std::uint8_t a, std::uint8_t b) {
+                                                    return std::abs(int(a) - int(b)) <= 1;
+                                                });
+                                    }
+                                }
+                                if (!passed) std::cerr << "Repeating water time did not reproduce the image\n";
+                            }
+                        }
+                    }
                 }
             }
         }

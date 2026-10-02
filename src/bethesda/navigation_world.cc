@@ -236,6 +236,12 @@ void ActorNavigationWorld::addGeneratedCell(
     const importer::CellCoord& cell,
     const importer::ImportedScene& scene,
     const GeneratedNavigationConfig& requestedConfig) {
+    installGeneratedCell(cell, prepareGeneratedCell(scene, requestedConfig));
+}
+
+ActorNavigationWorld::GeneratedCell ActorNavigationWorld::prepareGeneratedCell(
+    const importer::ImportedScene& scene,
+    const GeneratedNavigationConfig& requestedConfig) {
     GeneratedNavigationConfig config = requestedConfig;
     config.cellSize = std::clamp(config.cellSize, 16.0f, 256.0f);
     config.agentRadius = std::clamp(config.agentRadius, 1.0f, config.cellSize * 0.49f);
@@ -382,13 +388,30 @@ void ActorNavigationWorld::addGeneratedCell(
             return std::tie(left.gridX, left.gridZ, left.position.y) <
                 std::tie(right.gridX, right.gridZ, right.position.y);
         });
-    if (generated.nodes.empty()) m_generatedCells.erase(cell);
-    else m_generatedCells.insert_or_assign(cell, std::move(generated));
+    return generated;
+}
+
+void ActorNavigationWorld::installGeneratedCell(
+    const importer::CellCoord& cell, GeneratedCell prepared) {
+    if (prepared.nodes.empty()) m_generatedCells.erase(cell);
+    else m_generatedCells.insert_or_assign(cell, std::move(prepared));
 }
 
 void ActorNavigationWorld::removeCell(const importer::CellCoord& cell) {
     m_cells.erase(cell);
     m_generatedCells.erase(cell);
+}
+
+std::shared_ptr<void> ActorNavigationWorld::detachCell(const importer::CellCoord& cell) {
+    auto authored = m_cells.extract(cell);
+    auto generated = m_generatedCells.extract(cell);
+    if (authored.empty() && generated.empty()) return {};
+    struct RetiredCell {
+        decltype(m_cells)::node_type authored;
+        decltype(m_generatedCells)::node_type generated;
+    };
+    return std::make_shared<RetiredCell>(
+        RetiredCell{std::move(authored), std::move(generated)});
 }
 
 void ActorNavigationWorld::clear() {

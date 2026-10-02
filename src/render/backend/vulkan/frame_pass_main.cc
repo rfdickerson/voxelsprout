@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <cstdlib>
@@ -90,6 +91,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         );
     };
     const bool canDrawImportedWater =
+        m_waterRenderingEnabled &&
         m_importedWaterPipeline != VK_NULL_HANDLE &&
         m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
@@ -269,6 +271,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                         0, sizeof(reflectionPush), &reflectionPush);
                     pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
+                    m_debugTrianglesTotal += batch.triangleCount;
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, reflectionIndirectBuffer,
                         reflectionIndirectBase + batch.bufferOffset,
@@ -284,6 +287,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 pushReflectionDraw(draw);
                 pushImportedLodTransition(commandBuffer, draw.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
+                m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(
                     commandBuffer, draw.indexCount, 1, draw.firstIndex,
                     draw.vertexOffset, 0);
@@ -312,6 +316,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(reflectionPush), &reflectionPush);
             countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugTrianglesTotal += ((3) / 3u) * (1);
             vkCmdDraw(commandBuffer, 3, 1, 0, 0);
         }
         vkCmdEndRendering(commandBuffer);
@@ -572,6 +577,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     pushRigidAnimation(0xffffffffu);
                     pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
+                    m_debugTrianglesTotal += batch.triangleCount;
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, terrainIndirectBuffer,
                         terrainIndirectBase + batch.bufferOffset, batch.drawCount,
@@ -654,6 +660,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     pushAlphaThreshold(batch.alphaThreshold);
                     pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
+                    m_debugTrianglesTotal += batch.triangleCount;
                     vkCmdDrawIndexedIndirect(
                         commandBuffer,
                         indirectBuffer,
@@ -679,6 +686,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     pushRigidAnimation(draw.rigidAnimationIndex);
                     pushImportedLodTransition(commandBuffer, draw.lodTransition);
                     countDrawCalls(m_debugDrawCallsMain, 1);
+                    m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
                         draw.vertexOffset, 0);
@@ -705,6 +713,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 pushRigidAnimation(0xffffffffu);
                 pushImportedLodTransition(commandBuffer, batch.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
+                m_debugTrianglesTotal += batch.triangleCount;
                 vkCmdDrawIndexedIndirect(
                     commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                     batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
@@ -729,6 +738,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 pushRigidAnimation(draw.rigidAnimationIndex);
                 pushImportedLodTransition(commandBuffer, draw.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
+                m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(
                     commandBuffer, draw.indexCount, 1, draw.firstIndex,
                     draw.vertexOffset, 0);
@@ -757,6 +767,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 pushRigidAnimation(importedDraw.rigidAnimationIndex);
                 pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                 countDrawCalls(m_debugDrawCallsMain, 1);
+                m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                     importedDraw.vertexOffset, 0);
@@ -801,6 +812,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     boundBlendedPipeline = wantedPipeline;
                 }
                 countDrawCalls(m_debugDrawCallsMain, 1);
+                m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                     importedDraw.vertexOffset, 0);
@@ -867,6 +879,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             }
             pushActorState(importedDraw.alphaThreshold);
             countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
             vkCmdDrawIndexed(
                 commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                 importedDraw.vertexOffset, 0);
@@ -893,6 +906,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             }
             pushActorState(importedDraw.alphaThreshold);
             countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
             vkCmdDrawIndexed(
                 commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                 importedDraw.vertexOffset, 0);
@@ -995,6 +1009,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 }
                 pushSkinnedState(skinnedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsMain, 1);
+                m_debugTrianglesTotal += ((skinnedDraw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }
         };
@@ -1072,6 +1087,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 vkCmdPushConstants(commandBuffer, m_pipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                    sizeof(d.push), &d.push);
+                m_debugTrianglesTotal += ((6) / 3u) * (1);
                 vkCmdDraw(commandBuffer, 6, 1, 0, 0);
                 countDrawCalls(m_debugDrawCallsMain, 1);
             }
@@ -1113,6 +1129,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(push), &push);
             countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugTrianglesTotal += ((6u) / 3u) * (std::clamp(emitter.particleCount, 1u, 256u));
             vkCmdDraw(
                 commandBuffer, 6u,
                 std::clamp(emitter.particleCount, 1u, 256u), 0u, 0u);
@@ -1247,6 +1264,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     }
 
     if (canDrawImportedWater) {
+        const auto waterRecordStart = std::chrono::steady_clock::now();
         const VkBuffer waterVertexBuffer = m_bufferAllocator.getBuffer(m_importedWaterVertexBufferHandle);
         const VkBuffer waterIndexBuffer = m_bufferAllocator.getBuffer(m_importedWaterIndexBufferHandle);
         if (waterVertexBuffer != VK_NULL_HANDLE && waterIndexBuffer != VK_NULL_HANDLE) {
@@ -1290,8 +1308,14 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                 m_cmdSetFragmentShadingRate(commandBuffer, &fragmentSize, combinerOps);
             }
             countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugWaterDrawCalls = 1;
+            m_debugTrianglesTotal += ((m_importedWaterIndexCount) / 3u) * (1);
+            writeGpuTimestampTop(kGpuTimestampQueryWaterStart);
             vkCmdDrawIndexed(commandBuffer, m_importedWaterIndexCount, 1, 0, 0, 0);
+            writeGpuTimestampBottom(kGpuTimestampQueryWaterEnd);
         }
+        m_debugCpuWaterRecordMs = std::chrono::duration<float, std::milli>(
+            std::chrono::steady_clock::now() - waterRecordStart).count();
     }
     // (removed) voxel/pipe placement-preview draws — legacy editor overlays from the
     // prior game (cube/face brush + pipe ghost); the strategy map has no voxel editing.
@@ -1308,6 +1332,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(skyPushConstants), &skyPushConstants);
         countDrawCalls(m_debugDrawCallsMain, 1);
+        m_debugTrianglesTotal += ((3) / 3u) * (1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
     if (renderImportedSky &&
@@ -1325,6 +1350,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, skyCloudVertexBuffers, skyCloudVertexOffsets);
             vkCmdBindIndexBuffer(commandBuffer, skyCloudIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
             countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugTrianglesTotal += ((m_skyCloudIndexCount) / 3u) * (1);
             vkCmdDrawIndexed(commandBuffer, m_skyCloudIndexCount, 1, 0, 0, 0);
         }
     }

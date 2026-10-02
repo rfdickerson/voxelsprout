@@ -2,6 +2,7 @@
 
 #include "audio/audio.h"
 #include "engine/game_frame_stats.h"
+#include "engine/tick_timing.h"
 #include "render/renderer.h"
 #include "render/renderer_types.h"
 #include "ui/font.h"
@@ -40,6 +41,7 @@ public:
     [[nodiscard]] bool isPerfOverlayVisible() const { return m_perfOverlayVisible; }
 
 protected:
+    virtual TickTiming tickTiming() const { return {}; }
     virtual bool onInit() = 0;
     virtual void onTick(float dt) = 0;
     virtual void onRender(float dt) = 0;

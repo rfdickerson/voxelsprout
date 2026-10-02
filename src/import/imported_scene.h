@@ -310,6 +310,13 @@ struct ImportedScenePackedVertex {
     float colorAlpha = 1.0f;
 };
 
+// Runtime-only portion of GPU vertex conversion. Cell workers can encode the
+// expensive normal and sRGB colour before the scene reaches the render thread.
+struct ImportedSceneVertexEncoding {
+    std::uint32_t normal = 0u;
+    std::uint32_t color = 0xffffffffu;
+};
+
 // Quantization for ImportedScenePackedVertex::layerWeights. Byte n holds layer
 // n's weight over [0,1] -- four layers exactly fills the word; mirrored in
 // imported_static.frag.slang.
@@ -728,6 +735,9 @@ struct ImportedScene {
     std::vector<ImportedSceneCollisionTriangle> collisionTriangles;
     std::vector<ImportedSceneCellRef> unresolvedRefs;
     std::vector<ImportedScenePackedVertex> packedVertices;
+    // Transient worker result, deliberately omitted from cooked-scene files.
+    // Rebuilding packedVertices invalidates it.
+    std::vector<ImportedSceneVertexEncoding> vertexEncodings;
     // Indexed by packed vertex; trailing non-terrain vertices are omitted.
     std::vector<ImportedTerrainNormalBinding> packedTerrainNormals;
     std::vector<ImportedNifLightingMaterial> lightingMaterials;
@@ -789,6 +799,7 @@ bool loadImportedScene(const std::filesystem::path& inputPath, ImportedScene& ou
 bool loadImportedSceneRuntime(const std::filesystem::path& inputPath, ImportedScene& outScene);
 const std::string& getImportedSceneLastError();
 void buildImportedScenePackedRenderData(ImportedScene& scene);
+void prepareImportedSceneVertexEncodings(ImportedScene& scene);
 
 // One Morrowind exterior cell (8192 units) — the natural culling granularity
 // for cooked exterior scenes.

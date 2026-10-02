@@ -27,6 +27,11 @@ struct FramePacingSettings {
 };
 
 struct FramePacingStats {
+    // Attempt changes even on an early return. Zero submissionId means no GPU
+    // frame was submitted; presentAccepted is queue acceptance, not scanout.
+    std::uint64_t renderAttempt = 0;
+    std::uint64_t submissionId = 0;
+    bool presentAccepted = false;
     bool displayTimingSupported = false;
     bool displayTimingEnabled = false;
     bool schedulingActive = false;

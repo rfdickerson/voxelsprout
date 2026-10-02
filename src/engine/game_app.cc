@@ -1,5 +1,6 @@
 #include "core/resource_path.h"
 #include "engine/game_app.h"
+#include "engine/frame_timing_csv.h"
 
 #include "render/upscale/upscale_policy.h"
 #include "core/log.h"
@@ -16,6 +17,9 @@
 #include <filesystem>
 #include <fstream>
 #include <string_view>
+#if defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 namespace odai::engine {
 
@@ -178,9 +182,19 @@ bool GameApp::init(const char* title) {
 void GameApp::run() {
     double prevTime = glfwGetTime();
     std::ofstream frameCsv;
+    std::optional<FrameTimingCsv> timingCsv;
+    const bool benchmarkCsv = std::getenv("ODAI_BENCHMARK_CSV") != nullptr;
+    std::uint64_t lastGpuSampleSerial = 0;
+#if defined(__linux__)
+    using HeapMarker = void (*)(std::uint64_t);
+    auto heapBegin = reinterpret_cast<HeapMarker>(dlsym(RTLD_DEFAULT, "odai_bench_frame_begin"));
+    auto heapEnd = reinterpret_cast<HeapMarker>(dlsym(RTLD_DEFAULT, "odai_bench_frame_end"));
+#endif
     if (const char* path = std::getenv("ODAI_FRAME_STATS_CSV")) {
         frameCsv.open(path);
-        if (frameCsv) frameCsv << "frame,interval_ms,cpu_ms,tick_ms,render_ms\n";
+        if (frameCsv) {
+            timingCsv.emplace(frameCsv, benchmarkCsv);
+        }
         else VOX_LOGW("engine") << "cannot open frame statistics CSV: " << path;
     }
     std::uint64_t measuredFrame = 0;
@@ -217,6 +231,7 @@ void GameApp::run() {
 
     while (m_window && glfwWindowShouldClose(m_window) == GLFW_FALSE) {
         const double now = glfwGetTime();
+        if (timingCsv) timingCsv->beginFrame(now);
         // The simulation dt is clamped so one long frame cannot teleport the
         // world; the MEASURED interval must not be, or the clamp silently
         // becomes the reported maximum. A 0.72 s streaming stall showed up as
@@ -227,6 +242,9 @@ void GameApp::run() {
 
         m_frameProfiler.beginFrame();
         frameWatch.restart();
+#if defined(__linux__)
+        if (heapBegin) heapBegin(measuredFrame);
+#endif
 
         {
             core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::Poll));
@@ -306,17 +324,48 @@ void GameApp::run() {
             core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::Audio));
             m_audio.update(dt);
         }
+        const auto previousRenderAttempt = m_renderer.framePacingStats().renderAttempt;
         {
             core::ScopedTimerMs zone(m_frameProfiler.zoneMs(GameZone::Render));
             onRender(dt);
         }
 
         m_frameProfiler.endFrame(frameWatch.elapsedMs());
-        if (frameCsv) {
-            frameCsv << measuredFrame << ',' << frameIntervalSeconds * 1000.0 << ','
-                << m_frameProfiler.channel(GameZone::Frame).lastMs() << ','
-                << m_frameProfiler.channel(GameZone::Tick).lastMs() << ','
-                << m_frameProfiler.channel(GameZone::Render).lastMs() << '\n';
+#if defined(__linux__)
+        if (heapEnd) heapEnd(measuredFrame);
+#endif
+        if (timingCsv) {
+            FrameTimingSample sample;
+            sample.frame = measuredFrame;
+            sample.startSeconds = now;
+            sample.cpuMs = m_frameProfiler.channel(GameZone::Frame).lastMs();
+            sample.tickMs = m_frameProfiler.channel(GameZone::Tick).lastMs();
+            sample.renderMs = m_frameProfiler.channel(GameZone::Render).lastMs();
+            if (benchmarkCsv) {
+                sample.tick = tickTiming();
+                const auto pacing = m_renderer.framePacingStats();
+                sample.renderAttempted = pacing.renderAttempt != previousRenderAttempt;
+                if (sample.renderAttempted) {
+                    sample.submissionId = pacing.submissionId;
+                    sample.presentAccepted = pacing.presentAccepted;
+                    sample.queuedFrames = pacing.queuedFrames;
+                    sample.slotWaitMs = pacing.cpuWaitFrameSlotMs;
+                    sample.acquireWaitMs = pacing.cpuWaitAcquireMs;
+                    sample.presentWaitMs = pacing.cpuWaitPresentMs;
+                    sample.transferWaitMs = pacing.cpuWaitTransferMs;
+                }
+                const std::uint64_t serial = m_renderer.benchmarkGpuSampleSerial();
+                if (serial != lastGpuSampleSerial) {
+                    sample.gpuMs = m_renderer.benchmarkGpuFrameMs();
+                    sample.gpuSubmissionId = m_renderer.benchmarkGpuSubmissionId();
+                    lastGpuSampleSerial = serial;
+                }
+                if (sample.submissionId) {
+                    sample.drawCalls = m_renderer.benchmarkDrawCalls();
+                    sample.triangles = m_renderer.benchmarkTriangles();
+                }
+            }
+            timingCsv->endFrame(sample);
         }
         ++measuredFrame;
 
@@ -339,6 +388,7 @@ void GameApp::run() {
             }
         }
     }
+    if (timingCsv) timingCsv->finish();
     if (m_frameStatsSeconds > 0.0 && !m_frameIntervalsMs.empty()) reportFrameStats();
 
 }

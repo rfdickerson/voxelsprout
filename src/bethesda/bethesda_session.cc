@@ -498,6 +498,25 @@ bool BethesdaSession::requestActorWeaponDraw(ObjectId actor, bool drawn, std::st
     error.clear(); return true;
 }
 
+bool BethesdaSession::dropInventoryItem(ObjectId actor, const RecordKey& item, std::string& error) {
+    const RuntimeObject* owner = m_world.find(actor);
+    if (actor != m_playerObject || !owner || owner->kind != RuntimeObjectKind::Actor ||
+        !owner->enabled || (owner->actorValues && owner->actorValues->dead) || !item.valid() ||
+        std::none_of(owner->inventory.begin(), owner->inventory.end(),
+            [&](const InventoryEntry& entry) { return entry.item == item && entry.count > 0; })) {
+        error = "Player does not own this item";
+        return false;
+    }
+    WorldCommand command;
+    command.type = WorldCommandType::DropItem;
+    command.target = actor;
+    command.item = item;
+    command.itemCount = 1;
+    (void)m_world.queue(std::move(command));
+    error.clear();
+    return true;
+}
+
 bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error) {
     const auto* definition = skyrimItem(item);
     const auto* owner = m_world.find(actor);
@@ -2355,6 +2374,7 @@ void BethesdaSession::advanceScriptsAndApplyCommands(std::uint64_t tick, double 
         std::make_move_iterator(vm.diagnostics.begin()),
         std::make_move_iterator(vm.diagnostics.end()));
     CommandApplyResult commands = m_world.applyQueuedCommands();
+    if (m_tes3.content() != nullptr) syncTes3PlayerInventory();
     result.worldCommands += commands.applied;
     result.residencyChanged = result.residencyChanged || commands.residencyChanged;
     result.renderDeltas.insert(result.renderDeltas.end(),

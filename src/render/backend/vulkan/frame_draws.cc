@@ -257,6 +257,7 @@ bool RendererBackend::buildImportedIndirectBatches(
         for (std::uint32_t k = 0; k < written; ++k) {
             m_importedIndirectScratch[compactCursor + k] =
                 m_importedIndirectScratch[groupStart[bucket] + k];
+            batch.triangleCount += m_importedIndirectScratch[compactCursor + k].indexCount / 3u;
         }
         batch.bufferOffset =
             static_cast<VkDeviceSize>(compactCursor) * sizeof(VkDrawIndexedIndirectCommand);

@@ -2218,15 +2218,22 @@ bool RendererBackend::uploadImportedSceneInternal(
     const float subResizeMs = subTimer.elapsedMs();
     subTimer.restart();
     {
+        const std::size_t vertexCount = uploadScene.packedVertices.size();
         const auto convertRange = [&](std::size_t begin, std::size_t end) {
             for (std::size_t v = begin; v < end; ++v) {
                 const odai::importer::ImportedScenePackedVertex& srcVertex =
                     uploadScene.packedVertices[v];
                 ImportedMeshVertex dstVertex{};
                 std::memcpy(dstVertex.position, srcVertex.position, sizeof(dstVertex.position));
-                dstVertex.packedNormal =
-                    odai::importer::packImportedVertexNormal(srcVertex.normal);
-                dstVertex.packedColor = odai::importer::packImportedVertexColor(srcVertex.color, srcVertex.colorAlpha);
+                if (uploadScene.vertexEncodings.size() == vertexCount) {
+                    dstVertex.packedNormal = uploadScene.vertexEncodings[v].normal;
+                    dstVertex.packedColor = uploadScene.vertexEncodings[v].color;
+                } else {
+                    dstVertex.packedNormal =
+                        odai::importer::packImportedVertexNormal(srcVertex.normal);
+                    dstVertex.packedColor = odai::importer::packImportedVertexColor(
+                        srcVertex.color, srcVertex.colorAlpha);
+                }
                 std::memcpy(dstVertex.uv, srcVertex.uv, sizeof(dstVertex.uv));
                 dstVertex.flags = srcVertex.flags;
                 if (srcVertex.textureIndex < importedTextureSlots.size()) {
@@ -2286,7 +2293,6 @@ bool RendererBackend::uploadImportedSceneInternal(
                 shadowVertices[v] = shadowVertex;
             }
         };
-        const std::size_t vertexCount = uploadScene.packedVertices.size();
         // Fan out only when it can pay for the thread launches: a typical
         // exterior cell is 30-70k vertices and converts in a few ms, and eight
         // thread spawns cost real time on their own. The threshold is where the

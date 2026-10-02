@@ -1,9 +1,14 @@
 #include "engine/game_frame_stats.h"
+#include "engine/frame_timing_csv.h"
 
 #include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -135,6 +140,85 @@ void testFpsDerivesFromTheFrameChannel() {
     expectTrue(zero.fps() == 0.0f, "a zero-length frame reports 0 fps, not infinity");
 }
 
+void testCsvAttribution() {
+    using namespace odai::engine;
+    std::ostringstream output;
+    FrameTimingCsv csv(output, true);
+    csv.beginFrame(1.0);
+    FrameTimingSample tickStall;
+    tickStall.frame = 239;
+    tickStall.startSeconds = 1.0;
+    tickStall.cpuMs = 27;
+    tickStall.tickMs = 25;
+    tickStall.renderMs = 2;
+    tickStall.tick.streamingMs = 25;
+    tickStall.tick.streamerUploadMs = 10;
+    tickStall.tick.gameplayAnchorMs = 5;
+    tickStall.tick.streamerRendererRemoveMs = 3;
+    tickStall.tick.evictionCollisionMs = 2;
+    tickStall.renderAttempted = tickStall.presentAccepted = true;
+    tickStall.submissionId = 41;
+    csv.endFrame(tickStall);
+    csv.beginFrame(1.030); // includes 3 ms of work outside CPU timer
+    FrameTimingSample waitStall;
+    waitStall.frame = 240;
+    waitStall.startSeconds = 1.030;
+    waitStall.cpuMs = 21;
+    waitStall.tickMs = 1;
+    waitStall.renderMs = 20;
+    waitStall.acquireWaitMs = 18;
+    waitStall.renderAttempted = true; // timed-out acquire: no submission
+    waitStall.gpuSubmissionId = 41;
+    waitStall.gpuMs = 4;
+    csv.endFrame(waitStall);
+    csv.beginFrame(1.052);
+    FrameTimingSample last;
+    last.frame = 241;
+    last.startSeconds = 1.052;
+    last.cpuMs = 2;
+    csv.endFrame(last);
+    csv.finish();
+    csv.finish(); // no duplicate terminal record
+
+    std::istringstream lines(output.str());
+    std::string line;
+    std::vector<std::string> columns;
+    std::getline(lines, line);
+    std::istringstream header(line);
+    std::string cell;
+    while (std::getline(header, cell, ',')) columns.push_back(cell);
+    std::vector<std::unordered_map<std::string, std::string>> rows;
+    while (std::getline(lines, line)) {
+        std::istringstream cells(line);
+        auto& row = rows.emplace_back();
+        for (const auto& column : columns) {
+            std::getline(cells, cell, ',');
+            row[column] = cell;
+        }
+    }
+    expectTrue(rows.size() == 3, "one CSV row per completed frame including terminal sample");
+    if (rows.size() != 3) return;
+    expectTrue(rows[0]["frame"] == "239" && rows[0]["interval_ms"] == "30" &&
+               rows[0]["tick_ms"] == "25", "tick stall interval belongs to originating frame");
+    expectTrue(rows[0]["tick_streaming_ms"] == "25" &&
+               rows[0]["streamer_upload_ms"] == "10" &&
+               rows[0]["gameplay_anchor_ms"] == "5" &&
+               rows[0]["streamer_renderer_remove_ms"] == "3" &&
+               rows[0]["eviction_collision_ms"] == "2",
+               "nested game-update stages stay on the same frame");
+    expectTrue(rows[1]["interval_ms"] == "22" && rows[1]["wait_acquire_ms"] == "18",
+               "wait stall and interval belong to the same frame");
+    expectTrue(rows[1]["cpu_work_ms"] == "3" && rows[1]["render_work_ms"] == "2",
+               "known waits are excluded from work times");
+    expectTrue(rows[1]["submission_id"] == "0" && rows[1]["present_accepted"] == "0",
+               "skipped submission cannot inherit previous frame outcome");
+    expectTrue(rows[1]["gpu_submission_id"] == "41" && rows[1]["gpu_ms"] == "4",
+               "delayed GPU sample retains originating submission ID");
+    expectTrue(rows[2]["interval_ms"].empty() && rows[2]["gpu_ms"].empty(),
+               "terminal interval and unavailable GPU timing remain missing");
+    expectTrue(rows[0]["schema_version"] == "3", "CSV attribution is versioned");
+}
+
 }  // namespace
 
 int main() {
@@ -143,6 +227,7 @@ int main() {
     testAccumulateThenCommit();
     testUnattributedExcludesNestedZones();
     testFpsDerivesFromTheFrameChannel();
+    testCsvAttribution();
 
     if (g_failures != 0) {
         std::cerr << "[engine frame stats test] " << g_failures << " failure(s)\n";

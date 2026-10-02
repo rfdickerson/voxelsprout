@@ -4,6 +4,8 @@
 #include "bethesda/character_movement.h"
 #include "math/math.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -11,9 +13,20 @@
 #include <string>
 #include <vector>
 
+namespace odai::importer::bethesda { struct MorrowindTerrainSurface; }
+
 namespace odai::bethesda {
 
+struct RuntimeObject;
+
 inline constexpr float kBethesdaUnitsToJoltMetres = 0.0142875f;
+inline constexpr float kBethesdaPhysicsGravityMetresPerSecondSq = 9.81f;
+inline constexpr float kMorrowindBaselineJumpHeightUnits = 70.0f;
+
+[[nodiscard]] inline float jumpSpeedForHeightBethesdaUnits(float heightUnits) {
+    return std::sqrt(2.0f * kBethesdaPhysicsGravityMetresPerSecondSq *
+        std::max(0.0f, heightUnits) / kBethesdaUnitsToJoltMetres);
+}
 
 struct PhysicsCharacterConfig {
     CharacterMovementSettings movement;
@@ -80,11 +93,21 @@ struct PhysicsCharacterSnapshot {
     }
 };
 
+struct TerrainCellCoord {
+    int x = 0;
+    int z = 0;
+    friend bool operator==(const TerrainCellCoord&, const TerrainCellCoord&) = default;
+    friend bool operator<(const TerrainCellCoord& a, const TerrainCellCoord& b) {
+        return a.x < b.x || (a.x == b.x && a.z < b.z);
+    }
+};
+
 struct PhysicsCastHit {
     odai::math::Vector3 position{};
     odai::math::Vector3 normal{0.0f, 0.0f, 1.0f};
     float distance = 0.0f;
     std::optional<ObjectId> object;
+    std::optional<TerrainCellCoord> terrainCell;
 };
 
 struct PhysicsMeleeCandidate {
@@ -172,6 +195,11 @@ public:
     bool addStaticCollision(
         ObjectId object, std::span<const odai::math::Vector3> vertices,
         std::span<const std::uint32_t> triangleIndices, std::string& outError);
+    // Vertices are in Bethesda model space (Z-up). The runtime object's
+    // authored transform is applied before the mesh enters the Y-up world.
+    bool addStaticCollision(
+        const RuntimeObject& object, std::span<const odai::math::Vector3> localVertices,
+        std::span<const std::uint32_t> triangleIndices, std::string& outError);
     // Stream residency owns these aggregate bodies. The caller-provided token
     // is stable only within the active worldspace and is not save state.
     bool addStreamedStaticCollision(
@@ -185,6 +213,16 @@ public:
         std::string& outError);
     bool removeStreamedStaticCollision(std::uint64_t residencyToken);
     void clearStreamedStaticCollision();
+    static PreparedStaticCollision prepareTerrainCell(
+        const odai::importer::bethesda::MorrowindTerrainSurface& terrain,
+        std::string& outError);
+    bool addTerrainCell(
+        const odai::importer::bethesda::MorrowindTerrainSurface& terrain,
+        std::string& outError);
+    bool addPreparedTerrainCell(
+        TerrainCellCoord cell, const PreparedStaticCollision& prepared,
+        std::string& outError);
+    bool removeTerrainCell(TerrainCellCoord cell);
     // Streamed cells are added one at a time, but rebuilding Jolt's broad
     // phase after every body turns an 81-cell preload into 81 global rebuilds.
     // The residency owner calls this once after a batch/ring settles.
@@ -246,6 +284,8 @@ public:
     bool restore(std::span<const PhysicsCharacterSnapshot> snapshots, std::string& outError);
     [[nodiscard]] std::optional<PhysicsCastHit> castDown(
         const odai::math::Vector3& origin, float distanceBethesdaUnits) const;
+    [[nodiscard]] std::optional<PhysicsCastHit> castRay(
+        const odai::math::Vector3& from, const odai::math::Vector3& to) const;
     [[nodiscard]] bool isCharacterPlacementClear(const PhysicsCharacterConfig& config,
         float penetrationToleranceBethesdaUnits = 1.0f) const;
     // Sweeps a sphere through the authored/dynamic rigid-body world. This is

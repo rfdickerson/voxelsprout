@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +64,27 @@ struct GeneratedNavigationConfig {
 
 class ActorNavigationWorld {
 public:
+    // Cell workers can derive this engine-native data without touching the
+    // live navigation world. Publication only moves it into the resident map.
+    struct GeneratedNode {
+        std::int64_t gridX = 0;
+        std::int64_t gridZ = 0;
+        odai::math::Vector3 position{};
+        float normalY = 1.0f;
+    };
+    struct GeneratedCell {
+        struct Obstacle {
+            odai::math::Vector3 vertex[3]{};
+            float minY = 0.0f;
+            float maxY = 0.0f;
+        };
+        GeneratedNavigationConfig config{};
+        std::vector<GeneratedNode> nodes;
+        std::vector<Obstacle> obstacles;
+        std::map<std::pair<std::int64_t, std::int64_t>,
+            std::vector<std::uint32_t>> obstacleBuckets;
+    };
+
     void addCell(
         const importer::CellCoord& cell,
         const std::vector<importer::bethesda::FalloutNavMeshRecord>& records);
@@ -77,6 +99,13 @@ public:
         const importer::CellCoord& cell,
         const importer::ImportedScene& scene,
         const GeneratedNavigationConfig& config = {});
+    [[nodiscard]] static GeneratedCell prepareGeneratedCell(
+        const importer::ImportedScene& scene,
+        const GeneratedNavigationConfig& config = {});
+    void installGeneratedCell(const importer::CellCoord& cell, GeneratedCell prepared);
+    // Remove both navigation representations without destroying their storage
+    // on the caller's thread. The returned handle may be released on a worker.
+    [[nodiscard]] std::shared_ptr<void> detachCell(const importer::CellCoord& cell);
     void removeCell(const importer::CellCoord& cell);
     void clear();
 
@@ -148,24 +177,6 @@ private:
         float score = 0.0f;
     };
 
-    struct GeneratedNode {
-        std::int64_t gridX = 0;
-        std::int64_t gridZ = 0;
-        odai::math::Vector3 position{};
-        float normalY = 1.0f;
-    };
-    struct GeneratedCell {
-        struct Obstacle {
-            odai::math::Vector3 vertex[3]{};
-            float minY = 0.0f;
-            float maxY = 0.0f;
-        };
-        GeneratedNavigationConfig config{};
-        std::vector<GeneratedNode> nodes;
-        std::vector<Obstacle> obstacles;
-        std::map<std::pair<std::int64_t, std::int64_t>,
-            std::vector<std::uint32_t>> obstacleBuckets;
-    };
     struct GeneratedLocation {
         const GeneratedCell* cell = nullptr;
         importer::CellCoord cellCoord{};

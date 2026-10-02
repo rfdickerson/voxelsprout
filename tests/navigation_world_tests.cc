@@ -94,6 +94,15 @@ void testResidentMeshesStitchAtSharedBorder() {
 
     first.removeCell(CellCoord{1, 0});
     assert(first.meshCount() == 1u);
+
+    // Eviction detaches old storage immediately, even if a worker has not yet
+    // retired it. A revisit can publish the same key without touching it.
+    auto retired = first.detachCell(CellCoord{0, 0});
+    assert(retired);
+    assert(!first.hasNavigation());
+    first.addCell(CellCoord{0, 0}, {lower});
+    retired.reset();
+    assert(first.meshCount() == 1u);
 }
 
 void testVisibleGapDoesNotStitch() {
@@ -173,6 +182,17 @@ void testTes3GeneratedMeshUsesDoorwayAndRejectsWalls() {
     assert(std::any_of(route.begin(), route.end(), [](const ActorNavigationStep& step) {
         return step.position.z >= 150.0f && step.position.z <= 170.0f;
     }));
+
+    // Stream workers prepare the same cell data before the main thread adopts
+    // it. Publication must preserve both node count and route choice.
+    ActorNavigationWorld preparedWorld;
+    preparedWorld.installGeneratedCell(
+        {0, 0}, ActorNavigationWorld::prepareGeneratedCell(scene, config));
+    assert(preparedWorld.generatedNodeCount() == world.generatedNodeCount());
+    std::vector<ActorNavigationStep> preparedRoute;
+    assert(preparedWorld.buildPath(
+        {32.0f, 0.0f, 32.0f}, {608.0f, 0.0f, 32.0f}, preparedRoute));
+    assert(preparedRoute == route);
 
     odai::importer::ImportedScene sealed = scene;
     addWall(sealed, 320.0f, 128.0f, 192.0f, 0.0f, 180.0f);

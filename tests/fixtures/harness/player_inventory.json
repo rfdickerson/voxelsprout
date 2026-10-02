@@ -1,0 +1,25 @@
+{
+  "name": "player-inventory-lifecycle",
+  "seed": 17,
+  "step_seconds": 0.016666666666666666,
+  "steps": 1,
+  "actor": {
+    "id": "inventory_player",
+    "base": "harness_npc",
+    "position": [0, 100, 0],
+    "desired_velocity": [0, 0, 0],
+    "inventory": [
+      {"type": "WEAP", "id": "iron_dagger", "count": 1},
+      {"type": "ALCH", "id": "restore_health", "count": 3}
+    ]
+  },
+  "inventory_actions": [
+    {"type": "ALCH", "id": "restore_health"},
+    {"type": "WEAP", "id": "iron_dagger"}
+  ],
+  "inventory_expect": [
+    {"inventory": {"tes3:ALCH:restore_health": 3, "tes3:WEAP:iron_dagger": 1}, "world_items": []},
+    {"inventory": {"tes3:ALCH:restore_health": 2, "tes3:WEAP:iron_dagger": 1}, "world_items": ["tes3:ALCH:restore_health"]},
+    {"inventory": {"tes3:ALCH:restore_health": 2}, "world_items": ["tes3:ALCH:restore_health", "tes3:WEAP:iron_dagger"]}
+  ]
+}

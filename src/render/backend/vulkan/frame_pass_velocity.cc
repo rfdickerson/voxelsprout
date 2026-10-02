@@ -354,6 +354,7 @@ void RendererBackend::recordSkinnedVelocityPass(const FrameExecutionContext& con
             if (draw.indexCount == 0 || draw.blended) {
                 continue;
             }
+            m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
             vkCmdDrawIndexed(commandBuffer, draw.indexCount, 1, draw.firstIndex, 0, 0);
         }
     }

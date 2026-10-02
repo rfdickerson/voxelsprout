@@ -20,6 +20,8 @@ install(DIRECTORY "${ODAI_RESOURCE_DIR}/shaders/" DESTINATION share/odai/shaders
     FILES_MATCHING PATTERN "*.spv")
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/assets/fonts/" DESTINATION share/odai/assets/fonts
     FILES_MATCHING PATTERN "Inter-*.ttf" PATTERN "LICENSE-Inter.txt")
+install(FILES "${CMAKE_SOURCE_DIR}/assets/textures/morrowind_water_normal.png"
+    DESTINATION share/odai/assets/textures)
 install(PROGRAMS "${CMAKE_SOURCE_DIR}/scripts/odai-launcher" DESTINATION bin)
 install(FILES "${CMAKE_SOURCE_DIR}/packaging/skyrim-slice.json" DESTINATION share/odai)
 install(FILES "${CMAKE_SOURCE_DIR}/packaging/odai.desktop" DESTINATION share/applications)

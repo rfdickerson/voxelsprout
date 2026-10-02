@@ -2,7 +2,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <future>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -74,6 +78,49 @@ void testWaitIdleWithNoWork() {
     expectTrue(true, "waitIdle with an empty queue returns immediately");
 }
 
+void testSlowCaptureDestructionDoesNotBlockEnqueue() {
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool destroying = false;
+        bool release = false;
+    } state;
+    struct Capture {
+        State& state;
+        ~Capture() {
+            std::unique_lock lock(state.mutex);
+            state.destroying = true;
+            state.cv.notify_all();
+            state.cv.wait(lock, [&] { return state.release; });
+        }
+    };
+
+    odai::core::JobSystem jobs(1);
+    jobs.enqueue([capture = std::make_shared<Capture>(state)] {});
+    {
+        std::unique_lock lock(state.mutex);
+        expectTrue(state.cv.wait_for(lock, std::chrono::seconds(2),
+            [&] { return state.destroying; }), "worker entered capture destruction");
+    }
+
+    std::promise<void> submitted;
+    auto finished = submitted.get_future();
+    std::thread producer([&] {
+        jobs.enqueue([] {});
+        submitted.set_value();
+    });
+    const bool queuedDuringCleanup =
+        finished.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    {
+        std::lock_guard lock(state.mutex);
+        state.release = true;
+    }
+    state.cv.notify_all();
+    producer.join();
+    jobs.waitIdle();
+    expectTrue(queuedDuringCleanup, "slow capture destruction does not hold queue mutex");
+}
+
 } // namespace
 
 int main() {
@@ -81,6 +128,7 @@ int main() {
     testThreadedJobsAllRun();
     testDestructorDrainsQueuedJobs();
     testWaitIdleWithNoWork();
+    testSlowCaptureDestructionDoesNotBlockEnqueue();
 
     if (g_failures != 0) {
         std::cerr << "[job system test] " << g_failures << " failures\n";

@@ -233,6 +233,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         pushPointAnimation(0xffffffffu);
                         pushImportedLodTransition(commandBuffer, batch.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
+                        m_debugTrianglesTotal += batch.triangleCount;
                         vkCmdDrawIndexedIndirect(
                             commandBuffer,
                             indirectBuffer,
@@ -255,6 +256,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     pushPointAnimation(draw.rigidAnimationIndex);
                     pushImportedLodTransition(commandBuffer, draw.lodTransition);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
+                    m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
                         draw.vertexOffset, 0);
@@ -298,6 +300,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     pushPointThreshold(skinnedDraw.alphaThreshold);
                     pushPointAnimation(0xffffffffu);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
+                    m_debugTrianglesTotal += ((skinnedDraw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(
                         commandBuffer, skinnedDraw.indexCount, 1,
                         skinnedDraw.firstIndex, 0, 0);
@@ -546,6 +549,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         pushRigidAnimation(0xffffffffu);
                         pushImportedLodTransition(commandBuffer, batch.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
+                        m_debugTrianglesTotal += batch.triangleCount;
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                             batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
@@ -570,6 +574,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         pushRigidAnimation(draw.rigidAnimationIndex);
                         pushImportedLodTransition(commandBuffer, draw.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
+                        m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
                         vkCmdDrawIndexed(
                             commandBuffer, draw.indexCount, 1, draw.firstIndex,
                             draw.vertexOffset, 0);
@@ -591,6 +596,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                         pushRigidAnimation(importedDraw.rigidAnimationIndex);
                         pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                         countDrawCalls(m_debugDrawCallsShadow, 1);
+                        m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
                         vkCmdDrawIndexed(
                             commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                             importedDraw.vertexOffset, 0);
@@ -645,6 +651,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     }
                     pushActorAlphaThreshold(importedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
+                    m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                         importedDraw.vertexOffset, 0);
@@ -709,6 +716,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                     }
                     pushSkinnedAlphaThreshold(skinnedDraw.alphaThreshold);
                     countDrawCalls(m_debugDrawCallsShadow, 1);
+                    m_debugTrianglesTotal += ((skinnedDraw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
                 }
                 vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);

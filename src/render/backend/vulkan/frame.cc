@@ -323,6 +323,10 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     };
 
     m_debugGpuFrameTimeMs = durationMs(kGpuTimestampQueryFrameStart, kGpuTimestampQueryFrameEnd);
+    if (m_debugGpuFrameTimeMs > 0.0f) {
+        ++m_benchmarkGpuSampleSerial;
+        m_benchmarkGpuSubmissionId = m_frameTimelineValues[frameIndex];
+    }
     m_debugGpuShadowTimeMs = durationMs(kGpuTimestampQueryShadowStart, kGpuTimestampQueryShadowEnd);
     m_debugGpuContactShadowTraceTimeMs = durationMs(
         kGpuTimestampQueryContactShadowTraceStart, kGpuTimestampQueryContactShadowTraceEnd);
@@ -364,6 +368,8 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
     m_debugGpuWaterReflectionResolveTimeMs = durationMs(
         kGpuTimestampQueryWaterReflectionResolveStart,
         kGpuTimestampQueryWaterReflectionResolveEnd);
+    m_debugGpuWaterTimeMs = durationMs(
+        kGpuTimestampQueryWaterStart, kGpuTimestampQueryWaterEnd);
     m_debugGpuReflectionTimeMs = durationMs(
         kGpuTimestampQueryReflectionStart, kGpuTimestampQueryReflectionEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
@@ -410,6 +416,7 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
                 << " velocity=" << m_debugGpuVelocityTimeMs
                 << " taa=" << m_debugGpuTaaTimeMs
                 << " waterReflectionResolve=" << m_debugGpuWaterReflectionResolveTimeMs
+                << " water=" << m_debugGpuWaterTimeMs
                 << " post=" << m_debugGpuPostTimeMs
                 << " ui=" << m_debugGpuUiTimeMs
                 << " autoExposure=" << m_debugGpuAutoExposureTimeMs

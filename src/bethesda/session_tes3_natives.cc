@@ -44,6 +44,27 @@ std::string unquote(std::string value) {
 
 }  // namespace
 
+void BethesdaSession::syncTes3PlayerInventory() {
+    const RuntimeObject* player = m_world.find(m_playerObject);
+    if (player == nullptr) return;
+
+    std::map<RecordKey, std::int32_t> inventory;
+    for (const InventoryEntry& entry : player->inventory) {
+        if (entry.item.valid() && entry.count > 0) inventory[entry.item] += entry.count;
+    }
+    m_tes3.playerState().inventory = inventory;
+    if (m_tes3.dialogue().active) {
+        m_tes3.dialogueForRestore().player.inventory = std::move(inventory);
+    }
+}
+
+Tes3DialogueResponse BethesdaSession::startTes3Dialogue(
+    Tes3DialogueActorState actor, Tes3DialoguePlayerState player, bool strict) {
+    syncTes3PlayerInventory();
+    player.inventory = m_tes3.playerState().inventory;
+    return m_tes3.startDialogue(std::move(actor), std::move(player), strict);
+}
+
 Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& call) {
     Tes3NativeResult result;
     const auto resolveObject = [&](std::string authored) -> ObjectId {
@@ -370,7 +391,12 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         return result;
     }
     const auto storeTransform = [&](const RuntimeTransform& transform) {
-        m_tes3.referenceOverridesForRestore()[target].transform = transform;
+        // The player is a session-owned object, not an authored CELL reference.
+        // Its transform is already serialized with the world; an override here
+        // cannot be resolved against the plugin when the save is loaded.
+        if (target != m_playerObject) {
+            m_tes3.referenceOverridesForRestore()[target].transform = transform;
+        }
         if (object != nullptr) {
             WorldCommand world;
             world.type = WorldCommandType::SetTransform;
@@ -444,27 +470,41 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         }
         if (command == "getpos" || command == "getangle") {
             const std::size_t axis = call.arguments.empty() ? 0u : component(call.arguments[0]);
-            result.value = Tes3Value::fromNumber(command == "getpos"
-                ? transform->position[axis] : transform->rotationRadians[axis] *
-                    (180.0 / 3.14159265358979323846));
+            const double position = axis == 0u ? transform->position[0] :
+                axis == 1u ? -transform->position[2] : transform->position[1];
+            const double angle = axis == 0u ? transform->rotationRadians[0] :
+                axis == 1u ? -transform->rotationRadians[2] :
+                -transform->rotationRadians[1];
+            result.value = Tes3Value::fromNumber(command == "getpos" ? position :
+                angle * (180.0 / 3.14159265358979323846));
             return result;
         }
         if (command == "setpos" || command == "setangle") {
             if (call.arguments.size() < 2u) { result.error = command + " requires axis and value"; return result; }
             const std::size_t axis = component(call.arguments[0]);
-            if (command == "setpos") transform->position[axis] = asNumber(call.arguments[1]);
-            else transform->rotationRadians[axis] = static_cast<float>(
-                asNumber(call.arguments[1]) * (3.14159265358979323846 / 180.0));
+            if (command == "setpos") {
+                if (axis == 0u) transform->position[0] = asNumber(call.arguments[1]);
+                else if (axis == 1u) transform->position[2] = -asNumber(call.arguments[1]);
+                else transform->position[1] = asNumber(call.arguments[1]);
+            } else {
+                const float radians = static_cast<float>(
+                    asNumber(call.arguments[1]) * (3.14159265358979323846 / 180.0));
+                if (axis == 0u) transform->rotationRadians[0] = radians;
+                else if (axis == 1u) transform->rotationRadians[2] = -radians;
+                else transform->rotationRadians[1] = -radians;
+            }
         } else if (command == "setscale" || command == "modscale") {
             if (call.arguments.empty()) { result.error = command + " requires a value"; return result; }
             const float value = static_cast<float>(asNumber(call.arguments[0]));
             transform->scale = command == "setscale" ? value : transform->scale + value;
         } else {
             if (call.arguments.size() < 4u) { result.error = command + " requires x y z rotation"; return result; }
-            transform->position = {asNumber(call.arguments[0]), asNumber(call.arguments[1]),
-                asNumber(call.arguments[2])};
-            transform->rotationRadians[2] = static_cast<float>(
-                asNumber(call.arguments[3]) * (3.14159265358979323846 / 180.0));
+            // MWScript uses Bethesda's Z-up space; RuntimeTransform is Y-up
+            // with its horizontal Z axis negated.
+            transform->position = {asNumber(call.arguments[0]), asNumber(call.arguments[2]),
+                -asNumber(call.arguments[1])};
+            transform->rotationRadians[1] = static_cast<float>(
+                -asNumber(call.arguments[3]) * (3.14159265358979323846 / 180.0));
             if (command == "positioncell" && call.arguments.size() >= 5u && object != nullptr) {
                 WorldCommand space;
                 space.type = WorldCommandType::SetCurrentSpace;
@@ -760,6 +800,12 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
             return result;
         }
         if (command == "getitemcount" || command == "getspell") {
+            if (command == "getitemcount" && target == m_playerObject) {
+                const auto found = m_tes3.playerState().inventory.find(item);
+                result.value = Tes3Value::fromNumber(found == m_tes3.playerState().inventory.end()
+                    ? 0.0 : static_cast<double>(found->second));
+                return result;
+            }
             const auto found = std::find_if(object->inventory.begin(), object->inventory.end(),
                 [&](const InventoryEntry& entry) { return entry.item == item; });
             result.value = Tes3Value::fromNumber(
@@ -773,6 +819,18 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         world.item = item;
         world.itemCount = count;
         (void)m_world.queue(std::move(world));
+        if (target == m_playerObject &&
+            (command == "additem" || command == "removeitem")) {
+            auto& inventory = m_tes3.playerState().inventory;
+            const std::int32_t previous = inventory.contains(item) ? inventory.at(item) : 0;
+            const std::int32_t next = command == "additem"
+                ? previous + count : std::max(0, previous - count);
+            if (next > 0) inventory[item] = next;
+            else inventory.erase(item);
+            if (m_tes3.dialogue().active) {
+                m_tes3.dialogueForRestore().player.inventory = inventory;
+            }
+        }
         return result;
     }
     if (command == "equip") {

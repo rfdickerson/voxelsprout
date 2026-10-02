@@ -56,3 +56,63 @@ requests another profile or a vanilla comparison. The local combined profile is
 `captures/jk-skyrim-showcase/profile.json`. Keep the small 768x432 logical window
 and native-DPI framebuffer rendering (render scale 1; no forced smaller render
 extent). Mod assets and capture evidence remain local.
+
+## Capability Status
+
+Capability status is tracked in:
+
+    docs/PARITY.md
+
+When completing work associated with a capability:
+
+1. Read the capability's Definition of Done.
+2. Verify that all required acceptance criteria are satisfied.
+3. Run the required verification.
+4. Only after successful verification, update the capability's status
+   in docs/PARITY.md.
+5. Do not mark a capability Implemented if required tests are failing
+   or acceptance criteria remain incomplete.
+6. If the capability is only partially implemented, record it as Partial
+   and briefly document what remains.
+
+## Capability work
+
+Product capabilities are defined under:
+
+    docs/capabilities/
+
+Capability IDs such as WORLD-003 refer to files in that directory.
+
+Before implementing a capability:
+
+1. Read its capability specification.
+2. Identify its dependencies.
+3. Inspect the relevant existing architecture.
+4. Determine current implementation status.
+5. Add or update verification tests.
+6. Implement the smallest coherent change.
+7. Run verification.
+8. Review the final diff.
+
+Do not weaken capability requirements merely to make tests pass.
+
+## OpenMW
+
+OpenMW is available as a read-only behavioral reference at:
+
+    ../references/openmw/
+
+Use it to understand expected Morrowind-compatible behavior.
+
+Do not modify it.
+
+Do not copy OpenMW architecture into Iridius unless the existing
+Iridius architecture independently warrants that design.
+
+## Architecture
+
+Architecture documentation lives under:
+
+    docs/architecture/
+
+Only read architecture documents relevant to the current task.

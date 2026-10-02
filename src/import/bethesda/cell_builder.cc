@@ -1,4 +1,5 @@
 #include "import/bethesda/cell_builder.h"
+#include "import/bethesda/morrowind_terrain.h"
 
 #include <cstdlib>
 
@@ -352,6 +353,8 @@ void appendMorrowindTerrainCell(
     using odai::importer::bethesda::kMorrowindTextureBlockQuads;
     using odai::importer::bethesda::kMorrowindTextureGridSize;
     const odai::importer::bethesda::FalloutLandRecord& land = *cell.land;
+    const auto terrainSurface = odai::importer::bethesda::morrowindTerrainSurface(cell);
+    const bool hasTerrainSurface = terrainSurface.valid();
     const int gridSize = land.gridSize;
     const float cellWorldSize = land.cellWorldSize();
     const float cellOriginX = static_cast<float>(cell.gridX) * cellWorldSize;
@@ -361,14 +364,20 @@ void appendMorrowindTerrainCell(
     // what its NEIGHBOURS use as well as what it uses itself.
     constexpr int kBlockCount = kMorrowindTextureGridSize * kMorrowindTextureGridSize;
     std::array<std::uint32_t, kBlockCount> blockTexture{};
+    std::unordered_set<std::uint16_t> warnedMissingTexture;
     for (int block = 0; block < kBlockCount; ++block) {
         std::uint32_t textureIndex = kNoTextureIndex;
         if (static_cast<std::size_t>(block) < land.morrowindTextureGrid.size()) {
             const std::uint16_t stored = land.morrowindTextureGrid[static_cast<std::size_t>(block)];
-            // Stored value is the LTEX index PLUS ONE; 0 means the worldspace
-            // default, which this importer serves from the fallback texture.
+            // Stored value is the LTEX index PLUS ONE; 0 selects
+            // textures/_land_default.dds through the ordinary asset source.
             if (stored != 0u) {
                 textureIndex = resolveLandTextureExact(stored);
+                if (textureIndex == kNoTextureIndex && warnedMissingTexture.insert(stored).second) {
+                    std::cerr << "[bethesda] LAND (" << cell.gridX << ',' << cell.gridZ
+                              << ") VTEX index " << stored
+                              << " has no loadable LTEX texture; using _land_default.dds\n";
+                }
             }
         }
         if (textureIndex == kNoTextureIndex) {
@@ -464,7 +473,11 @@ void appendMorrowindTerrainCell(
                                 cellOriginY + (static_cast<float>(postRow) * kLandPostSpacing);
                             const float bethesdaZ = land.hasHeights
                                 ? land.heights[static_cast<std::size_t>(postIndex)] : 0.0f;
-                            const Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+                            Vec3 world = bethesdaToEngine(bethesdaX, bethesdaY, bethesdaZ);
+                            if (hasTerrainSurface) {
+                                const auto post = terrainSurface.post(postRow, postCol);
+                                world = {post.x, post.y, post.z};
+                            }
 
                             ImportedSceneVertex vertex{};
                             vertex.position[0] = world.x;
@@ -1664,7 +1677,51 @@ std::uint32_t CellSceneBuilder::dominantLandTexture(
 bool appendCellWaterPatch(
     ImportedScene& outScene, const FalloutCellRecord& cell,
     const FalloutWorldspaceRecord* worldspace) {
-    if (cell.isInterior || !cell.hasGridCoords) {
+    if (cell.isInterior) {
+        // Interiors have no exterior grid or LAND footprint. Bound their
+        // authored water by the placed content, with room for mesh extents
+        // around the placements. Depth testing clips the surface at walls.
+        if (!cell.hasWater || !std::isfinite(cell.waterHeight)) {
+            return false;
+        }
+        float minX = std::numeric_limits<float>::max();
+        float minZ = std::numeric_limits<float>::max();
+        float maxX = std::numeric_limits<float>::lowest();
+        float maxZ = std::numeric_limits<float>::lowest();
+        for (const auto& ref : cell.references) {
+            if (ref.isDeleted || !std::isfinite(ref.position[0]) ||
+                !std::isfinite(ref.position[1])) {
+                continue;
+            }
+            minX = std::min(minX, ref.position[0]);
+            maxX = std::max(maxX, ref.position[0]);
+            minZ = std::min(minZ, -ref.position[1]);
+            maxZ = std::max(maxZ, -ref.position[1]);
+        }
+        constexpr float kInteriorMargin = 1024.0f;
+        // A water-only interior has no placements to derive a footprint from.
+        // Keep a bounded origin-centred surface so it remains visible headlessly
+        // and through the same streamed-cell rendering path.
+        if (minX > maxX || minZ > maxZ) {
+            minX = maxX = minZ = maxZ = 0.0f;
+        }
+        if (!std::isfinite((maxX - minX) + 2.0f * kInteriorMargin) ||
+            !std::isfinite((maxZ - minZ) + 2.0f * kInteriorMargin)) {
+            return false;
+        }
+        ImportedSceneWaterPatch patch{};
+        patch.originX = minX - kInteriorMargin;
+        patch.originZ = minZ - kInteriorMargin;
+        patch.sizeX = (maxX - minX) + 2.0f * kInteriorMargin;
+        patch.sizeZ = (maxZ - minZ) + 2.0f * kInteriorMargin;
+        patch.waterLevel = cell.waterHeight;
+        if (!std::isfinite(patch.originX) || !std::isfinite(patch.originZ)) {
+            return false;
+        }
+        outScene.waterPatches.push_back(patch);
+        return true;
+    }
+    if (!cell.hasGridCoords) {
         return false;
     }
     // See FalloutCellRecord::hasWater: an absent XCLW is Oblivion's "sea level",
@@ -1695,6 +1752,9 @@ bool appendCellWaterPatch(
     const bool hasImpliedHeight = worldspace != nullptr && worldspace->hasDefaultHeights;
     const float impliedHeight = hasImpliedHeight ? worldspace->defaultWaterHeight : 0.0f;
     const float waterHeight = cell.hasWater ? cell.waterHeight : impliedHeight;
+    if (!std::isfinite(waterHeight)) {
+        return false;
+    }
     // A child city cell with neither LAND nor XCLW is an architecture-covered
     // plaza, not an open-ocean cell inherited from the parent worldspace.
     // Imperial City's market otherwise receives a full 4096-unit sea-level
@@ -1826,6 +1886,9 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
     // sea precisely where there is nothing else to draw.
     const std::size_t firstWaterPatch = m_scene.waterPatches.size();
     if (appendCellWaterPatch(m_scene, cell, m_tables.findWorldspace(cell.worldspaceFormId))) {
+        if (cell.isInterior) {
+            m_interiorWaterPatchIndices.push_back(firstWaterPatch);
+        }
         const auto* authored = m_tables.findWaterForCell(cell);
         const std::string flowPath =
             "textures\\water\\skyrim.esm\\flow." + std::to_string(cell.gridX) +
@@ -1889,7 +1952,17 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
         m_terrainMeshIndex = m_scene.meshes.size();
         m_scene.meshes.push_back(std::move(terrainMesh));
     }
-    const auto resolveInherited = [this](std::uint32_t formId) {
+    bool warnedMissingMorrowindDefault = false;
+    const auto resolveInherited = [this, &warnedMissingMorrowindDefault](std::uint32_t formId) {
+        if (m_tables.morrowind && formId == 0u) {
+            const std::uint32_t texture = resolveTextureIndex("textures/_land_default.dds");
+            if (texture != kNoTextureIndex) return texture;
+            if (!warnedMissingMorrowindDefault) {
+                warnedMissingMorrowindDefault = true;
+                std::cerr << "[bethesda] Morrowind default terrain texture "
+                             "textures/_land_default.dds is missing or invalid\n";
+            }
+        }
         return resolveLandTexture(formId, /*exact=*/false);
     };
     const auto resolveExact = [this, &cell](std::uint32_t formId) {
@@ -3021,6 +3094,21 @@ void CellSceneBuilder::finish(ImportedScene& outScene) {
     // packing: buildImportedScenePackedRenderData is a caller of the guess.
     m_scene.alphaFlagsAuthored = true;
     buildImportedScenePackedRenderData(m_scene);
+    // The reference footprint used before static import is a fallback. Once
+    // placed meshes have been packed, their real world bounds cover large
+    // pieces whose pivot lies well away from the room edge.
+    if (!m_scene.packedVertices.empty()) {
+        constexpr float kWaterEdgeMargin = 32.0f;
+        for (const std::size_t index : m_interiorWaterPatchIndices) {
+            auto& patch = m_scene.waterPatches[index];
+            patch.originX = m_scene.boundsMin[0] - kWaterEdgeMargin;
+            patch.originZ = m_scene.boundsMin[2] - kWaterEdgeMargin;
+            patch.sizeX = (m_scene.boundsMax[0] - m_scene.boundsMin[0]) +
+                2.0f * kWaterEdgeMargin;
+            patch.sizeZ = (m_scene.boundsMax[2] - m_scene.boundsMin[2]) +
+                2.0f * kWaterEdgeMargin;
+        }
+    }
     buildImportedScenePageRanges(m_scene);
     outScene = std::move(m_scene);
     m_scene = ImportedScene{};

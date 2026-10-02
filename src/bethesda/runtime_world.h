@@ -317,6 +317,7 @@ enum class WorldCommandType : std::uint8_t {
     EquipMeleeWeapon,
     ConsumeHealingItem,
     TransferItem,
+    DropItem,
 };
 
 // Commands are the sole cross-system mutation seam. Sequence is assigned by

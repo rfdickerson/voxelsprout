@@ -3,6 +3,7 @@
 #include "bethesda/tes3_runtime.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -122,6 +123,10 @@ void addUnloadedScriptedReference(std::vector<std::uint8_t>& file) {
     sub(blessing, "ENAM", std::move(effect));
     record(file, "SPEL", blessing);
 
+    std::vector<std::uint8_t> package;
+    sub(package, "NAME", "bk_a1_1_caiuspackage");
+    record(file, "MISC", package);
+
     std::vector<std::uint8_t> object;
     sub(object, "NAME", "quest_switch");
     record(file, "ACTI", object);
@@ -154,16 +159,33 @@ void addUnloadedScriptedReference(std::vector<std::uint8_t>& file) {
         "player->ModStrength 2\nCast \"TestBlessing\" Player\n"
         "set fortified to Player->GetStrength\nend");
     record(file, "SCPT", statsScript);
+
+    std::vector<std::uint8_t> openingScript;
+    std::vector<std::uint8_t> openingHeader(52u, 0u);
+    std::memcpy(openingHeader.data(), "CharGen", 7u);
+    sub(openingScript, "SCHD", std::move(openingHeader));
+    sub(openingScript, "SCTX",
+        "begin CharGen\nDisablePlayerControls\n"
+        "Player->PositionCell 61, -135, 24, 340, \"Imperial Prison Ship\"\n"
+        "set CharGenState to 10\nStopScript CharGen\nend");
+    record(file, "SCPT", openingScript);
 }
 
 std::shared_ptr<Tes3ContentStore> makeContent(const fs::path& root) {
     std::vector<std::uint8_t> file;
     header(file);
+    std::vector<std::uint8_t> playerRecord;
+    sub(playerRecord, "NAME", "player");
+    record(file, "NPC_", playerRecord);
     dial(file, "TR_RuntimeQuest", 4u);
     info(file, "q10", "", "q20", 4, 10, "Quest begins", {}, "QSTN");
     info(file, "q20", "q10", "", 4, 20, "Quest ends", {}, "QSTF");
     dial(file, "LegacyQuest", 4u);
     info(file, "legacy10", "", "", 4, 10, "Old journal entry");
+    dial(file, "Greeting 0", 2u);
+    info(file, "package_greeting", "", "", 2, 0,
+         "You have the package.", {}, nullptr,
+         "05IX2bk_a1_1_caiuspackage", 0);
     dial(file, "Greeting 1", 2u);
     info(file, "greet", "", "", 2, 0,
          "Would you ask about the Sanctuary?", "AddTopic \"Sanctuary\"");
@@ -174,6 +196,13 @@ std::shared_ptr<Tes3ContentStore> makeContent(const fs::path& root) {
     info(file, "topic_b", "topic_a", "", 0, 0,
          "Then the work begins.", "Journal \"TR_RuntimeQuest\" 10",
          nullptr, "01500", 1);
+    dial(file, "Package Grant", 0u);
+    info(file, "package_grant", "", "", 0, 0,
+         "Take this package.", "Player->AddItem \"bk_a1_1_caiuspackage\" 1");
+    dial(file, "Package Receipt", 0u);
+    info(file, "package_receipt", "", "", 0, 0,
+         "The package is in your inventory.", {}, nullptr,
+         "05IX2bk_a1_1_caiuspackage", 0);
     addUnloadedScriptedReference(file);
     const fs::path plugin = root / "Morrowind.esm";
     std::ofstream output(plugin, std::ios::binary | std::ios::trunc);
@@ -238,6 +267,57 @@ void testJournalAndDialogue() {
               legacy->classification == Tes3JournalQuestClassification::Legacy &&
               !legacy->hasStatusFlags,
           "pre-Tribunal journals remain chronological instead of guessed complete");
+    fs::remove_all(root, ec);
+}
+
+void testAuthoredOpeningPositionAndSave() {
+    const fs::path root = fs::temp_directory_path() / "odai_tes3_opening_tests";
+    std::error_code ec;
+    fs::create_directories(root);
+    const auto content = makeContent(root);
+    BethesdaSessionConfig config;
+    config.game = BethesdaGame::Morrowind;
+    config.contentFingerprint = "tes3-opening-fixture";
+    BethesdaSession session;
+    std::string error;
+    check(session.configure(config, error), error);
+    check(session.configureTes3Content(content, error), error);
+    RuntimeObject player;
+    player.id = session.playerObject();
+    player.base = makeTes3RecordKey("NPC_", "player");
+    player.kind = RuntimeObjectKind::Actor;
+    player.actorValues.emplace();
+    check(session.world().addInitialObject(std::move(player), error), error);
+    check(session.tes3().scripts().start("CharGen", session.playerObject(), error) != 0u, error);
+    const auto step = session.advance(1.0 / 60.0);
+    check(step.diagnostics.empty(), "authored opening executes without diagnostics");
+    const auto* spawned = session.world().find(session.playerObject());
+    check(spawned != nullptr && spawned->transform.position[0] == 61.0 &&
+              spawned->transform.position[1] == 24.0 &&
+              spawned->transform.position[2] == 135.0,
+          "PositionCell converts TES3 Z-up coordinates into runtime space");
+    check(spawned != nullptr &&
+              std::abs(spawned->transform.rotationRadians[1] +
+                       340.0 * (3.14159265358979323846 / 180.0)) < 0.0001,
+          "PositionCell maps TES3 heading onto the runtime up axis");
+    check(spawned != nullptr && spawned->currentSpace.kind == RuntimeSpaceKind::Interior &&
+              spawned->currentSpace.cell == makeTes3RecordKey("CELL", "Imperial Prison Ship"),
+          "opening places the player in the authored interior");
+    check(session.tes3().scripts().globals().at("chargenstate").number == 10.0 &&
+              session.tes3().playerState().numericFilters.at("control:playercontrols") == 0.0,
+          "opening advances CharGenState and disables controls");
+
+    const fs::path savePath = root / "opening.odai";
+    check(saveOdaiGameAtomic(savePath, session, error), error);
+    BethesdaSession restored;
+    check(restored.configure(config, error), error);
+    check(restored.configureTes3Content(content, error), error);
+    SaveLoadReport report;
+    check(loadOdaiGame(savePath, restored, {}, report, error), error);
+    const auto* restoredPlayer = restored.world().find(restored.playerObject());
+    check(restoredPlayer != nullptr && restoredPlayer->transform.position[2] == 135.0 &&
+              restored.tes3().scripts().globals().at("chargenstate").number == 10.0,
+          "save/load keeps authored opening position and quest gate");
     fs::remove_all(root, ec);
 }
 
@@ -314,11 +394,85 @@ void testSessionSaveReloadMidDialogue() {
     fs::remove_all(root, ec);
 }
 
+void testDialogueUsesCurrentPlayerInventory() {
+    const fs::path root = fs::temp_directory_path() / "odai_tes3_inventory_dialogue_tests";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root);
+    const std::shared_ptr<Tes3ContentStore> content = makeContent(root);
+
+    BethesdaSession session;
+    BethesdaSessionConfig config;
+    config.game = BethesdaGame::Morrowind;
+    config.contentFingerprint = "tes3-inventory-dialogue-fixture";
+    std::string error;
+    check(session.configure(config, error), error);
+    check(session.configureTes3Content(content, error), error);
+    RuntimeObject player;
+    player.id = session.playerObject();
+    player.base = makeTes3RecordKey("NPC_", "player");
+    player.kind = RuntimeObjectKind::Actor;
+    player.actorValues.emplace();
+    check(session.world().addInitialObject(std::move(player), error), error);
+
+    Tes3DialogueActorState actor;
+    actor.object = ObjectId::persistent(makeTes3ReferenceKey("Morrowind.esm", 0x42u));
+    actor.id = "temple priest";
+    Tes3DialoguePlayerState stalePlayer;
+    stalePlayer.object = session.playerObject();
+    const RecordKey package = makeTes3RecordKey("MISC", "bk_a1_1_caiuspackage");
+    WorldCommand add;
+    add.type = WorldCommandType::AddItem;
+    add.target = session.playerObject();
+    add.item = package;
+    add.itemCount = 1;
+    check(session.world().queue(std::move(add)), "queue a package pickup");
+    (void)session.advance(1.0 / 60.0);
+    check(session.startTes3Dialogue(actor, stalePlayer).text == "You have the package.",
+          "TES3 item filter observes the player's current world inventory");
+    check(session.tes3().playerState().inventory.at(package) == 1,
+          "TES3 player state receives the package after world command application");
+    session.tes3().endDialogue();
+
+    WorldCommand remove;
+    remove.type = WorldCommandType::RemoveItem;
+    remove.target = session.playerObject();
+    remove.item = package;
+    remove.itemCount = 1;
+    check(session.world().queue(std::move(remove)), "queue delivery of the package");
+    (void)session.advance(1.0 / 60.0);
+    check(session.startTes3Dialogue(actor, stalePlayer).text != "You have the package.",
+          "TES3 item filter stops matching after the package is delivered");
+    check(!session.tes3().playerState().inventory.contains(package),
+          "TES3 player state removes delivered items");
+
+    session.tes3().endDialogue();
+    check(session.startTes3Dialogue(actor, stalePlayer).accepted,
+          "conversation can restart without the package");
+    check(session.tes3().addTopic("Package Grant") &&
+              session.tes3().addTopic("Package Receipt"),
+          "fixture topics are available for the scripted transfer");
+    check(session.selectTes3Topic("Package Grant").accepted,
+          "authored dialogue result grants the package");
+    check(session.selectTes3Topic("Package Receipt").accepted,
+          "next topic sees an item granted by the preceding result script");
+    check(session.tes3().playerState().inventory.at(package) == 1,
+          "TES3 item mirror updates before the queued world command is applied");
+    (void)session.advance(1.0 / 60.0);
+    const RuntimeObject* worldPlayer = session.world().find(session.playerObject());
+    check(worldPlayer != nullptr && worldPlayer->inventory.size() == 1u &&
+              worldPlayer->inventory.front().item == package,
+          "world inventory receives the scripted item at the next tick");
+    fs::remove_all(root, ec);
+}
+
 }  // namespace
 
 int main() {
     testJournalAndDialogue();
+    testAuthoredOpeningPositionAndSave();
     testSessionSaveReloadMidDialogue();
+    testDialogueUsesCurrentPlayerInventory();
     if (failures == 0) std::cout << "tes3 runtime tests passed\n";
     return failures == 0 ? 0 : 1;
 }

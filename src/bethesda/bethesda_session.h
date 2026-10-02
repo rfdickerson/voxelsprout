@@ -231,6 +231,7 @@ public:
         bool leftHand, std::string& error, bool equipmentPolicy = false, bool scriptOverride = false);
     bool requestActorWeaponDraw(ObjectId actor, bool drawn, std::string& error, bool combatDraw = false);
     bool useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error);
+    bool dropInventoryItem(ObjectId actor, const RecordKey& item, std::string& error);
     // Transient held input and presentation events: never serialized.
     void setActorGuard(ObjectId actor, bool held, const odai::math::Vector3& forward);
     bool actorGuarding(ObjectId actor) const;
@@ -315,9 +316,7 @@ public:
 
     [[nodiscard]] Tes3DialogueResponse startTes3Dialogue(
         Tes3DialogueActorState actor, Tes3DialoguePlayerState player,
-        bool strict = true) {
-        return m_tes3.startDialogue(std::move(actor), std::move(player), strict);
-    }
+        bool strict = true);
     [[nodiscard]] std::vector<std::string> tes3DialogueTopics(bool strict = true) const {
         return m_tes3.availableTopics(strict);
     }
@@ -479,6 +478,7 @@ private:
     void registerObjectReferenceNatives();
     void registerActorNatives();
     [[nodiscard]] Tes3NativeResult executeTes3WorldNative(const Tes3NativeCall& call);
+    void syncTes3PlayerInventory();
     void queueQuestAliasEvent(
         ObjectId alias, std::string event, std::vector<PapyrusValue> arguments);
     void flushQuestAliasEvents();

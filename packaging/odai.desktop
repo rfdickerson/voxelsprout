@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=ODAI
-Comment=Configure and launch the experimental Skyrim slice
-Exec=odai-launcher
-Terminal=false
-Categories=Game;RolePlaying;

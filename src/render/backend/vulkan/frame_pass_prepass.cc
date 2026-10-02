@@ -204,6 +204,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                         pushRigidAnimation(0xffffffffu);
                         pushImportedLodTransition(commandBuffer, batch.lodTransition);
                         countDrawCalls(m_debugDrawCallsPrepass, 1);
+                        m_debugTrianglesTotal += batch.triangleCount;
                         vkCmdDrawIndexedIndirect(
                             commandBuffer, terrainIndirectBuffer,
                             terrainIndirectBase + batch.bufferOffset, batch.drawCount,
@@ -251,6 +252,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     pushRigidAnimation(0xffffffffu);
                     pushImportedLodTransition(commandBuffer, batch.lodTransition);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    m_debugTrianglesTotal += batch.triangleCount;
                     vkCmdDrawIndexedIndirect(
                         commandBuffer, indirectBuffer, indirectBase + batch.bufferOffset,
                         batch.drawCount, sizeof(VkDrawIndexedIndirectCommand));
@@ -273,6 +275,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     pushRigidAnimation(draw.rigidAnimationIndex);
                     pushImportedLodTransition(commandBuffer, draw.lodTransition);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    m_debugTrianglesTotal += ((draw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(
                         commandBuffer, draw.indexCount, 1, draw.firstIndex,
                         draw.vertexOffset, 0);
@@ -298,6 +301,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                     pushRigidAnimation(importedDraw.rigidAnimationIndex);
                     pushImportedLodTransition(commandBuffer, importedDraw.lodTransition);
                     countDrawCalls(m_debugDrawCallsPrepass, 1);
+                    m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
                     vkCmdDrawIndexed(
                         commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                         importedDraw.vertexOffset, 0);
@@ -326,6 +330,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 // the last static draw's, not the actor's.
                 pushAlphaThreshold(importedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
+                m_debugTrianglesTotal += ((importedDraw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(
                     commandBuffer, importedDraw.indexCount, 1, importedDraw.firstIndex,
                     importedDraw.vertexOffset, 0);
@@ -363,6 +368,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
                 }
                 pushAlphaThreshold(skinnedDraw.alphaThreshold);
                 countDrawCalls(m_debugDrawCallsPrepass, 1);
+                m_debugTrianglesTotal += ((skinnedDraw.indexCount) / 3u) * (1);
                 vkCmdDrawIndexed(commandBuffer, skinnedDraw.indexCount, 1, skinnedDraw.firstIndex, 0, 0);
             }
         }

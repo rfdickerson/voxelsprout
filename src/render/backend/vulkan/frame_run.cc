@@ -117,12 +117,26 @@ const char* voxelGiSurfaceFallbackReasonName(
 } // namespace
 
 void RendererBackend::renderFrame(const CameraPose& camera) {
+    m_framePacingStats = {};
+    m_framePacingStats.renderAttempt = ++m_renderAttempt;
     const auto cpuFrameStartTime = std::chrono::steady_clock::now();
     float cpuWaitMs = 0.0f;
     float cpuWaitFrameSlotMs = 0.0f;
     float cpuWaitAcquireMs = 0.0f;
     float cpuWaitPresentMs = 0.0f;
     float cpuWaitTransferMs = 0.0f;
+    // Preserve waits on every exit, including acquire errors and timeouts.
+    struct RecordWaits {
+        FramePacingStats& stats;
+        const float &slot, &acquire, &present, &transfer;
+        ~RecordWaits() {
+            stats.cpuWaitFrameSlotMs = slot;
+            stats.cpuWaitAcquireMs = acquire;
+            stats.cpuWaitPresentMs = present;
+            stats.cpuWaitTransferMs = transfer;
+        }
+    } recordWaits{m_framePacingStats, cpuWaitFrameSlotMs, cpuWaitAcquireMs,
+                  cpuWaitPresentMs, cpuWaitTransferMs};
 
     if (m_device == VK_NULL_HANDLE || m_swapchain == VK_NULL_HANDLE) {
         return;
@@ -139,7 +153,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_debugFps = (deltaSeconds > 0.0) ? static_cast<float>(1.0 / deltaSeconds) : 0.0f;
     }
     m_lastFrameTimestampSeconds = frameNowSeconds;
-    m_framePacingStats = {};
     m_framePacingStats.displayTimingSupported = m_supportsDisplayTiming;
     m_framePacingStats.displayTimingEnabled = m_supportsDisplayTiming && m_enableDisplayTiming;
     m_framePacingStats.schedulingActive =
@@ -401,6 +414,9 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     m_debugDrawnLod1Ranges = 0;
     m_debugDrawnLod2Ranges = 0;
     m_debugDrawCallsTotal = 0;
+    m_debugWaterDrawCalls = 0;
+    m_debugCpuWaterRecordMs = 0.0f;
+    m_debugTrianglesTotal = 0;
     m_debugDrawCallsShadow = 0;
     m_debugDrawCallsPrepass = 0;
     m_debugDrawCallsMain = 0;
@@ -1570,7 +1586,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     }();
     m_waterReflectionPlaneValid = false;
     float nearestWaterDistanceSquared = std::numeric_limits<float>::max();
-    if (s_planarWaterReflections &&
+    if (m_waterRenderingEnabled && s_planarWaterReflections &&
         !m_importedSceneInteriorMode &&
         m_colorSampleCount == VK_SAMPLE_COUNT_1_BIT) {
         for (const ImportedSceneChunk& chunk : m_importedSceneChunks) {
@@ -1620,7 +1636,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_importedWaterPipeline != VK_NULL_HANDLE &&
         m_importedWaterVertexBufferHandle != kInvalidBufferHandle &&
         m_importedWaterIndexBufferHandle != kInvalidBufferHandle &&
-        m_importedWaterIndexCount > 0u &&
+        m_waterRenderingEnabled && m_importedWaterIndexCount > 0u &&
         !m_waterReflectionImages.empty() &&
         !m_waterReflectionImageViews.empty() &&
         !m_waterReflectionImageInitialized.empty() &&
@@ -3228,7 +3244,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_contactShadowActive ||
         m_screenSpaceGiActive ||
         (sunShaftsForFrame && m_sunShaftComputeAvailable) ||
-        m_importedWaterIndexCount > 0u;
+        (m_waterRenderingEnabled && m_importedWaterIndexCount > 0u);
     recordNormalDepthPrepass(frameExecutionContext, prepassInputs);
 
     if (m_debugEnableSsao) {
@@ -3735,6 +3751,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_tonemapPipeline);
         bindGraphicsDescriptorBuffers(commandBuffer);
         countDrawCalls(m_debugDrawCallsPost, 1);
+        m_debugTrianglesTotal += ((3) / 3u) * (1);
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     }
     if (m_imguiInitialized) {
@@ -3851,6 +3868,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_gpuTimestampQuerySubmitted[m_currentFrame] = true;
     }
     m_frameTimelineValues[m_currentFrame] = signalTimelineValue;
+    m_framePacingStats.submissionId = signalTimelineValue;
     m_swapchainImageTimelineValues[imageIndex] = signalTimelineValue;
     m_lastGraphicsTimelineValue = signalTimelineValue;
     m_framePacingStats.queuedFrames = countQueuedFrames(completedTimelineValue());
@@ -3900,6 +3918,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     const auto presentStartTime = std::chrono::steady_clock::now();
     const VkResult presentResult = vkQueuePresentKHR(m_graphicsQueue, &presentInfo);
     if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        m_framePacingStats.presentAccepted = true;
         m_lastPresentedImageIndex = imageIndex;
     }
     const float presentWaitMs = static_cast<float>(

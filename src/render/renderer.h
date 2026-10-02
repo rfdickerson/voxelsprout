@@ -191,6 +191,16 @@ public:
     void setFramePacingSettings(const FramePacingSettings& settings);
     [[nodiscard]] FramePacingSettings framePacingSettings() const;
     [[nodiscard]] FramePacingStats framePacingStats() const;
+    // Sample serial advances only when a Vulkan timestamp pair was read back.
+    [[nodiscard]] std::uint64_t benchmarkGpuSampleSerial() const;
+    [[nodiscard]] std::uint64_t benchmarkGpuSubmissionId() const;
+    [[nodiscard]] float benchmarkGpuFrameMs() const;
+    [[nodiscard]] std::uint32_t benchmarkDrawCalls() const;
+    [[nodiscard]] std::uint32_t benchmarkWaterDrawCalls() const;
+    [[nodiscard]] float benchmarkWaterCpuRecordMs() const;
+    [[nodiscard]] float benchmarkWaterGpuMs() const;
+    [[nodiscard]] std::uint64_t benchmarkWaterGeometryBytes() const;
+    [[nodiscard]] std::uint64_t benchmarkTriangles() const;
     [[nodiscard]] UiRenderStats uiRenderStats() const;
     void setVertexAoEnabled(bool enabled);
     [[nodiscard]] bool isVertexAoEnabled() const;
@@ -260,6 +270,10 @@ public:
     bool playImportedEffect(std::uint32_t reference, const std::string& sequence, bool startOver = true);
     bool activateImportedEffect(float x, float y, float z, float dx, float dy, float dz);
     void setImportedSceneDebugState(bool showTerrain, bool showStatics, bool showTextures, bool flatShading, bool waterDebug);
+    // Controls water passes independently of imported scene residency.
+    void setWaterRenderingEnabled(bool enabled);
+    [[nodiscard]] bool waterRenderingEnabled() const;
+    [[nodiscard]] bool waterNormalAssetReady() const;
     void setImportedInteriorLighting(const ImportedInteriorLighting& lighting);
     void setImportedExteriorLighting(const ImportedExteriorLighting& lighting);
     void setImportedSceneInteriorMode(bool enabled);

@@ -54,6 +54,9 @@ void JobSystem::workerLoop() {
         ++m_activeJobCount;
         lock.unlock();
         job();
+        // The job may own large cell/navigation buffers. Destroy its capture
+        // before taking the queue mutex so producers never wait for cleanup.
+        job = {};
         lock.lock();
         --m_activeJobCount;
         if (m_queue.empty() && m_activeJobCount == 0) {

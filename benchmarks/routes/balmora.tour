@@ -1,0 +1,8 @@
+# Balmora approach and traverse. Engine coordinates: x east, y height, z south.
+# Crosses exterior cells while keeping the camera above terrain.
+-21500 2900 30000 -21000 1500 21000
+-21200 2600 26000 -20480 1000 15000
+-21000 2200 21000 -20480 900 13000
+-20700 1900 17500 -20480 800 11500
+-20500 1700 11000 -20200 800 7000
+-20200 1700 7000 -20000 800 3000

@@ -91,3 +91,5 @@ __pycache__/
 
 # Debug overlay artifacts from older builds
 /imgui.ini
+
+/references/openmw

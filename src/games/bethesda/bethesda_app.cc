@@ -14,6 +14,7 @@
 #include "bethesda/oblivion_presentation.h"
 
 #include "import/bethesda/land_lod.h"
+#include "import/bethesda/morrowind_terrain.h"
 #include "import/bethesda/skyrim_tree_lod.h"
 
 #include "render/upscale/upscale_policy.h"
@@ -63,9 +64,8 @@ constexpr float kSprintMultiplier = 4.0f;
 constexpr float kMouseSensitivity = 0.12f;
 constexpr float kPitchLimitDegrees = 89.0f;
 constexpr float kEyeHeightUnits = 120.0f;
-// Fallout's own jump is about 1 metre at ~70 units/metre. v = sqrt(2*g*h) with a
-// gravity that keeps the arc short enough to feel like a jump rather than a
-// hop on the moon.
+// The camera-only fallback uses its own stronger gravity. The Jolt player
+// controller derives its Morrowind jump speed from the shared physics gravity.
 constexpr float kGravityUnitsPerSecondSq = 2600.0f;
 constexpr float kJumpUnitsPerSecond = 620.0f;
 
@@ -7254,7 +7254,12 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         if (m_streamIsSkyrim) {
             input.jumpRequested = canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_SPACE);
         } else if (canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_SPACE) &&
-            physical.has_value() && physical->grounded) input.desiredVelocity.y = kJumpUnitsPerSecond;
+            physical.has_value() && physical->grounded) {
+            input.desiredVelocity.y = m_streamIsMorrowind
+                ? odai::bethesda::jumpSpeedForHeightBethesdaUnits(
+                    odai::bethesda::kMorrowindBaselineJumpHeightUnits)
+                : kJumpUnitsPerSecond;
+        }
         if (thirdPersonPlayerShowcase() && lengthSquared > 1.0e-6f) {
             const float wanted = actorYawForDirection(moveX, moveZ);
             float turn = std::fmod(wanted - m_playerYawRadians + 3.0f * kPi,
@@ -7472,7 +7477,8 @@ bool BethesdaApp::initStreaming() {
     const unsigned hardwareThreads = std::max(4u, std::thread::hardware_concurrency());
     unsigned streamThreads = std::max(2u, hardwareThreads - 2u);
     if (const char* env = std::getenv("ODAI_FNV_STREAM_THREADS")) {
-        streamThreads = std::max(1u, static_cast<unsigned>(std::atoi(env)));
+        // Zero selects JobSystem's inline mode for deterministic comparisons.
+        streamThreads = static_cast<unsigned>(std::max(0, std::atoi(env)));
     }
     // A spawn interior nobody asked for is a New Vegas default, so do not hunt
     // for it in somebody else's plugin -- Fallout 3 warned about a missing
@@ -7538,6 +7544,9 @@ bool BethesdaApp::initStreaming() {
             // an optional saved-space override.
             if (m_streamIsSkyrim && !m_streamWorldspaceExplicit) {
                 m_streamWorldspace = "Tamriel";
+                requestedWorldspaceBeforeResume = m_streamWorldspace;
+            } else if (m_streamIsMorrowind && !m_streamWorldspaceExplicit) {
+                m_streamWorldspace = "Vvardenfell";
                 requestedWorldspaceBeforeResume = m_streamWorldspace;
             }
         }
@@ -7708,6 +7717,11 @@ bool BethesdaApp::initStreaming() {
             }
         }
     }
+    // A new Morrowind game begins in the prison ship. Explicit preview starts,
+    // traversal resumes, and gameplay-save loads retain their requested space.
+    m_tes3FreshGame = m_streamIsMorrowind && !m_explicitStart &&
+        !m_resumeState.has_value() && m_gameplayLoadPath.empty();
+    if (m_tes3FreshGame) m_startInsideInterior = "Imperial Prison Ship";
     if (!m_streamer->open(
             std::filesystem::path(m_streamDirectory), std::filesystem::path(m_streamPlugin),
             m_streamWorldspace, *m_streamJobs, error)) {
@@ -7845,8 +7859,14 @@ bool BethesdaApp::initStreaming() {
                     << " embedded closed-door part(s), before presentation";
             });
     }
-    if (m_streamIsSkyrim && !m_scenarioId.empty()) {
-        m_streamer->setCellPreparation(prepareBethesdaCollision,
+    if ((m_streamIsSkyrim && !m_scenarioId.empty()) || m_streamIsMorrowind) {
+        m_streamer->setCellPreparation(
+            [prepareNavigation = m_streamIsMorrowind](
+                const importer::ImportedScene& scene,
+                const importer::bethesda::FalloutCellRecord& cell,
+                std::string& error) {
+                return prepareBethesdaCollision(scene, cell, error, prepareNavigation);
+            },
             [this](const importer::CellCoord& cell,
                    std::shared_ptr<importer::bethesda::CellStreamer::PreparedCellData> payload) {
                 auto mesh = std::static_pointer_cast<BethesdaCollisionMesh>(std::move(payload));
@@ -7872,15 +7892,30 @@ bool BethesdaApp::initStreaming() {
             // correctly omitted from the same streamed cell.
             const core::Stopwatch residencyTimer;
             if (!m_scenarioId.empty() || m_streamIsMorrowind) {
+                const core::ScopedTimerMs registrationTimer(m_tickTiming.cellRegistrationMs);
                 cacheBethesdaCollisionCell(cell, scene);
             }
             const float physicsMs = residencyTimer.elapsedMs();
-            m_collision.addCell(cell, scene, m_disabledBethesdaCollisionReferences);
+            {
+                const core::ScopedTimerMs collisionTimer(m_tickTiming.collisionWorldMs);
+                m_collision.addCell(cell, scene, m_disabledBethesdaCollisionReferences);
+            }
             const float collisionMs = residencyTimer.elapsedMs() - physicsMs;
+            const core::Stopwatch navigationTimer;
             m_actorNavigation.addCell(cell, navMeshes);
             if (navMeshes.empty() && (m_streamIsMorrowind || m_streamIsOblivion)) {
-                m_actorNavigation.addGeneratedCell(cell, scene);
+                const auto prepared = m_bethesdaCollisionByCell.find(cell);
+                if (prepared != m_bethesdaCollisionByCell.end() &&
+                    prepared->second.preparedNavigation) {
+                    m_actorNavigation.installGeneratedCell(
+                        cell, std::move(*prepared->second.preparedNavigation));
+                    prepared->second.preparedNavigation.reset();
+                } else {
+                    m_actorNavigation.addGeneratedCell(cell, scene);
+                }
             }
+            m_tickTiming.navigationMs += navigationTimer.elapsedMs();
+            ++m_tickTiming.residentCells;
             if (std::getenv("ODAI_DEBUG_CHUNK_TIMING") != nullptr ||
                 residencyTimer.elapsedMs() > 16.0f) {
                 VOX_LOGI("performance") << "cell residency " << cell.x << "," << cell.z
@@ -7919,11 +7954,31 @@ bool BethesdaApp::initStreaming() {
             m_skyrimObjectLodTileValid = false;
             m_skyrimTreeLodCellValid = false;
             m_bethesdaGameplayResidentCells.erase(cell);
-            m_collision.removeCell(cell);
-            m_actorNavigation.removeCell(cell);
-            removeBethesdaCollisionCell(cell);
+            {
+                const core::ScopedTimerMs timer(m_tickTiming.evictionCollisionMs);
+                m_collision.removeCell(cell);
+                removeBethesdaCollisionCell(cell);
+            }
+            {
+                const core::ScopedTimerMs timer(m_tickTiming.evictionNavigationMs);
+                const core::Stopwatch detachTimer;
+                auto retiredNavigation = m_actorNavigation.detachCell(cell);
+                const float detachMs = detachTimer.elapsedMs();
+                if (retiredNavigation && m_streamJobs) {
+                    const core::Stopwatch enqueueTimer;
+                    m_streamJobs->enqueue([retired = std::move(retiredNavigation)] {});
+                    if (std::getenv("ODAI_DEBUG_NAV_RETIRE") != nullptr) {
+                        VOX_LOGI("performance") << "navigation retire " << cell.x << ","
+                            << cell.z << " detach=" << detachMs
+                            << " ms enqueue=" << enqueueTimer.elapsedMs() << " ms";
+                    }
+                }
+            }
             m_streamDoorsByCell.erase(cell);
-            rebuildStreamDoors();
+            {
+                const core::ScopedTimerMs timer(m_tickTiming.evictionDoorsMs);
+                rebuildStreamDoors();
+            }
             if (m_streamIsSkyrim) m_skyrimActorResidencyDirty = true;
         });
     m_streamAmbientEmittersByCell.clear();
@@ -8452,6 +8507,16 @@ bool BethesdaApp::initStreaming() {
             m_skyrimCitySpawnSettlementPending = true;
         }
         if (spawnedAtScenarioMarker) {
+            m_scenarioSpawnFeet = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
+            const float cellSize = m_streamer->cellWorldSize();
+            m_scenarioSpawnCell = {static_cast<std::int32_t>(std::floor(m_cameraX / cellSize)),
+                                  static_cast<std::int32_t>(std::floor(-m_cameraZ / cellSize))};
+            m_scenarioSpawnPending = true;
+        } else if (spawnedAtExplicitPosition && m_streamIsMorrowind &&
+                   std::getenv("ODAI_FNV_WALK") != nullptr) {
+            // An explicit walking start must wait for its streamed static
+            // collision. Otherwise the player capsule accumulates gravity in
+            // an empty world and can end up underneath the arriving LAND.
             m_scenarioSpawnFeet = {m_cameraX, m_cameraY - kEyeHeightUnits, m_cameraZ};
             const float cellSize = m_streamer->cellWorldSize();
             m_scenarioSpawnCell = {static_cast<std::int32_t>(std::floor(m_cameraX / cellSize)),
@@ -9375,7 +9440,8 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
     if (m_interiorStarted) {
         if (m_bethesdaCollisionBroadPhaseDirty && m_bethesdaSessionConfigured) {
             const core::Stopwatch broadPhaseTimer;
-        m_bethesdaSession.physics().optimizeBroadPhase();
+            m_bethesdaSession.physics().optimizeBroadPhase();
+            m_tickTiming.broadPhaseMs += broadPhaseTimer.elapsedMs();
         if (broadPhaseTimer.elapsedMs() > 16.f) VOX_LOGI("performance") << "collision broad-phase rebuild: " << broadPhaseTimer.elapsedMs() << " ms";
             m_bethesdaCollisionBroadPhaseDirty = false;
         }
@@ -9412,6 +9478,16 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
     importer::bethesda::CellStreamer::engineToFallout(enginePosition, falloutPosition);
     importer::bethesda::CellStreamer::engineToFallout(velocity, falloutVelocity);
     m_streamer->update(m_renderer, falloutPosition, falloutVelocity);
+    {
+        const auto stats = m_streamer->stats();
+        m_tickTiming.streamerUpdateMs += stats.lastUpdateMs;
+        m_tickTiming.streamerApplyMs += stats.lastApplyMs;
+        m_tickTiming.streamerUploadMs += stats.lastUploadMs;
+        m_tickTiming.streamerCallbacksMs += stats.lastCallbacksMs;
+        m_tickTiming.streamerEvictionMs += stats.lastEvictionMs;
+        m_tickTiming.streamerRendererRemoveMs += stats.lastRendererRemoveMs;
+        m_tickTiming.streamerEvictionCallbacksMs += stats.lastEvictionCallbacksMs;
+    }
     // Mesh bodies are usable immediately; the global Jolt broad-phase rebuild
     // is only an acceleration pass. Batch it after the load ring settles so a
     // 25-cell arrival performs one rebuild rather than one per rendered frame.
@@ -9419,6 +9495,7 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
         m_streamer->isStreamingIdle() && m_bethesdaSessionConfigured) {
         const core::Stopwatch broadPhaseTimer;
         m_bethesdaSession.physics().optimizeBroadPhase();
+        m_tickTiming.broadPhaseMs += broadPhaseTimer.elapsedMs();
         if (broadPhaseTimer.elapsedMs() > 16.f) VOX_LOGI("performance") << "collision broad-phase rebuild: " << broadPhaseTimer.elapsedMs() << " ms";
         m_bethesdaCollisionBroadPhaseDirty = false;
     }
@@ -9473,6 +9550,7 @@ void BethesdaApp::updateStreaming(float deltaSeconds) {
 }
 
 void BethesdaApp::onTick(float deltaSeconds) {
+    m_tickTiming = {};
     // A recording runs on its own clock. Everything downstream of here -- the
     // tour, the wander, the animation, the day cycle -- takes this dt, so the
     // world advances one authored frame per rendered frame however long the
@@ -9519,6 +9597,7 @@ void BethesdaApp::onTick(float deltaSeconds) {
         m_npcDemoLocomotion.input(stop, run, m_npcDemoMove);
     }
     if (m_bethesdaSessionConfigured) {
+        const core::ScopedTimerMs sessionTimer(m_tickTiming.sessionMs);
         if (m_scenarioSpawnPending) (void)settleScenarioSpawn();
         syncBethesdaPlayerState(false);
         const odai::bethesda::BethesdaSessionStep sessionStep =
@@ -9684,6 +9763,7 @@ void BethesdaApp::onTick(float deltaSeconds) {
     // idle clip is what makes an actor read as someone standing there rather
     // than a statue of them.
     if (!m_actors.empty()) {
+        const core::ScopedTimerMs actorsTimer(m_tickTiming.actorsMs);
         // The renderer's skinned path was built for a party, so submitting a
         // whole worldspace's actors without culling repeats every body part in
         // the skinning, velocity, depth, main and shadow passes. Keep a wide
@@ -9957,7 +10037,10 @@ void BethesdaApp::onTick(float deltaSeconds) {
         if (!m_whiterunReferenceShowcase) {
             updateCamera(deltaSeconds);
         }
-        updateStreaming(deltaSeconds);
+        {
+            const core::ScopedTimerMs streamingTimer(m_tickTiming.streamingMs);
+            updateStreaming(deltaSeconds);
+        }
     }
     updateSkyrimAmbience(deltaSeconds);
     m_stateSaveSeconds += deltaSeconds;
@@ -10356,6 +10439,16 @@ void BethesdaApp::updateTes3JournalInput() {
 }
 
 std::string BethesdaApp::inventoryItemName(const odai::bethesda::RecordKey& item) {
+    if (m_streamIsMorrowind) {
+        if (const auto& content = m_bethesdaSession.tes3().content()) {
+            const auto found = content->namedRecords().find(item);
+            if (found != content->namedRecords().end()) {
+                const std::string name = tes3SubrecordText(found->second, "FNAM", content->encoding());
+                if (!name.empty()) return name;
+            }
+        }
+        return item.textId.empty() ? item.toString() : item.textId;
+    }
     const auto* definition = m_bethesdaSession.skyrimItem(item);
     return definition && !definition->name.empty() ? definition->name : item.toString();
 }
@@ -10366,6 +10459,7 @@ std::vector<std::size_t> BethesdaApp::visibleInventoryItems() const {
     std::vector<std::size_t> items;
     if (!source) return items;
     for (std::size_t i = 0; i < source->inventory.size(); ++i) {
+        if (m_streamIsMorrowind) { items.push_back(i); continue; }
         const auto* item = m_bethesdaSession.skyrimItem(source->inventory[i].item);
         const std::string type = item ? item->recordType : "";
         const int category = type == "WEAP" || type == "AMMO" ? 1 :
@@ -10387,7 +10481,10 @@ void BethesdaApp::updatePlayerInventory() {
         (hasPad && pad.buttons[GLFW_GAMEPAD_BUTTON_X] == GLFW_PRESS);
     const bool takeAll = takeAllDown && !m_inventoryTakeAllLatch;
     m_inventoryTakeAllLatch = takeAllDown;
-    if (!m_bethesdaSessionConfigured || !m_streamIsSkyrim) return;
+    const bool dropDown = keyDown(m_window, GLFW_KEY_D);
+    const bool dropEdge = dropDown && !m_inventoryDropKeyLatch;
+    m_inventoryDropKeyLatch = dropDown;
+    if (!m_bethesdaSessionConfigured || (!m_streamIsSkyrim && !m_streamIsMorrowind)) return;
     const bool giftOpen = !m_bethesdaSession.giftMenuRequests().empty();
     if (!m_interiorStarted) {
         const auto eye = bethesdaPlayerEyePosition();
@@ -10396,7 +10493,7 @@ void BethesdaApp::updatePlayerInventory() {
     const bool mapDown = keyDown(m_window, GLFW_KEY_M);
     const bool mapEdge = mapDown && !m_mapKeyLatch;
     m_mapKeyLatch = mapDown;
-    if (mapEdge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+    if (m_streamIsSkyrim && mapEdge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
         m_doorTransitionPhase == DoorTransitionPhase::None &&
         (!m_playerInventoryOpen || m_skyrimMapOpen)) {
         m_skyrimMapOpen = !m_skyrimMapOpen;
@@ -10438,7 +10535,7 @@ void BethesdaApp::updatePlayerInventory() {
     const bool journalDown = keyDown(m_window, GLFW_KEY_J);
     const bool journalEdge = journalDown && !m_questLogKeyLatch;
     m_questLogKeyLatch = journalDown;
-    if (journalEdge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+    if (m_streamIsSkyrim && journalEdge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
         m_doorTransitionPhase == DoorTransitionPhase::None &&
         (!m_playerInventoryOpen || m_skyrimQuestLogOpen)) {
         m_skyrimQuestLogOpen = !m_skyrimQuestLogOpen;
@@ -10484,9 +10581,9 @@ void BethesdaApp::updatePlayerInventory() {
     }
     const auto playerId = m_bethesdaSession.playerObject();
     const auto* source = m_bethesdaSession.world().find(m_inventorySource.valid() ? m_inventorySource : playerId);
-    if (m_nav.pressed(ui::UiNavAction::Left)) m_inventoryCategoryFocus = true;
-    if (m_nav.pressed(ui::UiNavAction::Right)) m_inventoryCategoryFocus = false;
-    if (m_inventoryCategoryFocus) {
+    if (m_streamIsSkyrim && m_nav.pressed(ui::UiNavAction::Left)) m_inventoryCategoryFocus = true;
+    if (m_streamIsSkyrim && m_nav.pressed(ui::UiNavAction::Right)) m_inventoryCategoryFocus = false;
+    if (m_streamIsSkyrim && m_inventoryCategoryFocus) {
         if (m_nav.pressed(ui::UiNavAction::Up)) { m_inventoryCategory = (m_inventoryCategory + 6) % 7; m_giftMenuChoice = 0; }
         if (m_nav.pressed(ui::UiNavAction::Down)) { m_inventoryCategory = (m_inventoryCategory + 1) % 7; m_giftMenuChoice = 0; }
         if (m_nav.pressed(ui::UiNavAction::Accept)) m_inventoryCategoryFocus = false;
@@ -10496,9 +10593,21 @@ void BethesdaApp::updatePlayerInventory() {
     const auto visible = visibleInventoryItems();
     const int count = static_cast<int>(visible.size());
     m_giftMenuChoice = std::clamp(m_giftMenuChoice, 0, std::max(0, count - 1));
+    if (!m_inventorySource.valid() && count > 0 &&
+        (dropEdge || (m_streamIsMorrowind && m_nav.pressed(ui::UiNavAction::Accept)))) {
+        const auto item = source->inventory[visible[static_cast<std::size_t>(m_giftMenuChoice)]].item;
+        std::string error;
+        if (m_bethesdaSession.dropInventoryItem(playerId, item, error)) {
+            m_toasts.push("Item dropped", inventoryItemName(item), "inventory-drop");
+            m_playerInventoryOpen = false;
+            setMouseCaptured(true);
+            return;
+        } else m_toasts.push("Cannot drop item", error, "inventory-drop");
+    }
     if (count > 0 && m_nav.pressed(ui::UiNavAction::Up)) m_giftMenuChoice = (m_giftMenuChoice + count - 1) % count;
     if (count > 0 && m_nav.pressed(ui::UiNavAction::Down)) m_giftMenuChoice = (m_giftMenuChoice + 1) % count;
-    if (count > 0 && (m_nav.pressed(ui::UiNavAction::Accept) || (takeAll && m_inventorySource.valid()))) {
+    if (count > 0 && ((m_streamIsSkyrim && m_nav.pressed(ui::UiNavAction::Accept)) ||
+        (takeAll && m_inventorySource.valid()))) {
         const auto item = source->inventory[visible[static_cast<std::size_t>(m_giftMenuChoice)]].item;
         const auto* definition = m_bethesdaSession.skyrimItem(item);
         std::string error;
@@ -10739,7 +10848,7 @@ void BethesdaApp::setScenario(std::string id) {
 }
 
 BethesdaApp::BethesdaCollisionMesh BethesdaApp::buildBethesdaCollisionMesh(
-    const importer::ImportedScene& scene) {
+    const importer::ImportedScene& scene, bool includeTerrain) {
     BethesdaCollisionMesh mesh;
     mesh.vertices.reserve(scene.collisionTriangles.size() * 3u);
     mesh.indices.reserve(scene.collisionTriangles.size() * 3u);
@@ -10761,7 +10870,7 @@ BethesdaApp::BethesdaCollisionMesh BethesdaApp::buildBethesdaCollisionMesh(
          scene.collisionTriangles) {
         appendTriangle(triangle.vertices, triangle.sourceReferenceFormId);
     }
-    if (!scene.meshes.empty() && scene.meshes.front().name == "terrain") {
+    if (includeTerrain && !scene.meshes.empty() && scene.meshes.front().name == "terrain") {
         const importer::ImportedSceneMesh& terrain = scene.meshes.front();
         for (std::size_t offset = 0u; offset + 2u < terrain.indices.size(); offset += 3u) {
             const std::uint32_t a = terrain.indices[offset];
@@ -10780,9 +10889,19 @@ BethesdaApp::BethesdaCollisionMesh BethesdaApp::buildBethesdaCollisionMesh(
 }
 
 std::shared_ptr<importer::bethesda::CellStreamer::PreparedCellData>
-BethesdaApp::prepareBethesdaCollision(const importer::ImportedScene& scene, std::string& error) {
+BethesdaApp::prepareBethesdaCollision(
+    const importer::ImportedScene& scene,
+    const importer::bethesda::FalloutCellRecord& cell, std::string& error,
+    bool prepareNavigation) {
     const core::Stopwatch timer;
-    auto mesh = std::make_shared<BethesdaCollisionMesh>(buildBethesdaCollisionMesh(scene));
+    const auto terrain = importer::bethesda::morrowindTerrainSurface(cell);
+    auto mesh = std::make_shared<BethesdaCollisionMesh>(
+        buildBethesdaCollisionMesh(scene, !terrain.valid()));
+    if (terrain.valid()) {
+        mesh->terrainPrepared =
+            odai::bethesda::BethesdaPhysicsWorld::prepareTerrainCell(terrain, error);
+        if (!mesh->terrainPrepared.valid()) return {};
+    }
     mesh->awaitingPublication = true;
     for (const auto& instance : scene.instances) {
         if (!instance.initiallyVisible && instance.sourceReferenceFormId != 0u) {
@@ -10799,6 +10918,9 @@ BethesdaApp::prepareBethesdaCollision(const importer::ImportedScene& scene, std:
         mesh->prepared = odai::bethesda::BethesdaPhysicsWorld::prepareStaticCollision(mesh->vertices, indices, error);
         if (!mesh->prepared.valid()) return {};
     }
+    if (prepareNavigation) {
+        mesh->preparedNavigation = ActorNavigationWorld::prepareGeneratedCell(scene);
+    }
     if (std::getenv("ODAI_DEBUG_CHUNK_TIMING") != nullptr) {
         VOX_LOGI("performance") << "worker collision preparation: " << timer.elapsedMs() << " ms";
     }
@@ -10808,6 +10930,7 @@ BethesdaApp::prepareBethesdaCollision(const importer::ImportedScene& scene, std:
 void BethesdaApp::cacheBethesdaCollisionCell(
     const importer::CellCoord& cell, const importer::ImportedScene& scene) {
     BethesdaCollisionMesh mesh;
+    const core::Stopwatch runtimeObjectsTimer;
     for (const importer::ImportedSceneInstance& instance : scene.instances) {
         if (!instance.initiallyVisible && instance.sourceReferenceFormId != 0u) {
             m_disabledBethesdaCollisionReferences.insert(instance.sourceReferenceFormId);
@@ -10917,6 +11040,7 @@ void BethesdaApp::cacheBethesdaCollisionCell(
             }
         }
     }
+    m_tickTiming.runtimeObjectsMs += runtimeObjectsTimer.elapsedMs();
     if (m_streamIsMorrowind &&
         m_bethesdaGameplayResidentCells.contains(cell)) {
         upsertMorrowindGameplayCell(cell);
@@ -10930,8 +11054,8 @@ void BethesdaApp::cacheBethesdaCollisionCell(
         registerBethesdaCollisionCell(cell);
         return;
     }
-    mesh = buildBethesdaCollisionMesh(scene);
-    if (mesh.indices.empty()) {
+    mesh = buildBethesdaCollisionMesh(scene, !m_streamIsMorrowind);
+    if (mesh.indices.empty() && !mesh.terrainPrepared.valid()) {
         m_bethesdaCollisionByCell.erase(cell);
         return;
     }
@@ -10945,11 +11069,13 @@ void BethesdaApp::removeBethesdaCollisionCell(const importer::CellCoord& cell) {
     if (m_bethesdaSessionConfigured) {
         (void)m_bethesdaSession.physics().removeStreamedStaticCollision(
             physicsResidencyToken(cell));
+        (void)m_bethesdaSession.physics().removeTerrainCell({cell.x, cell.z});
         refreshBethesdaGameplayResidency();
     }
 }
 
 void BethesdaApp::registerBethesdaCollisionCell(const importer::CellCoord& cell) {
+    const core::ScopedTimerMs physicsTimer(m_tickTiming.physicsInstallMs);
     if (!m_bethesdaSessionConfigured) return;
     const auto found = m_bethesdaCollisionByCell.find(cell);
     if (found == m_bethesdaCollisionByCell.end()) return;
@@ -11004,7 +11130,11 @@ void BethesdaApp::registerBethesdaCollisionCell(const importer::CellCoord& cell)
         return m_bethesdaSession.physics().addStreamedStaticCollision(
             token, filteredVertices, filteredIndices, error);
     };
-    if (!install()) {
+    const bool staticInstalled = install();
+    const bool terrainInstalled = !mesh.terrainPrepared.valid() ||
+        m_bethesdaSession.physics().addPreparedTerrainCell(
+            {cell.x, cell.z}, mesh.terrainPrepared, error);
+    if (!staticInstalled || !terrainInstalled) {
         VOX_LOGW("physics") << "could not restore collision cell " << cell.x << ","
                             << cell.z << ": " << error;
     } else {
@@ -11048,6 +11178,7 @@ void BethesdaApp::registerCachedBethesdaCollision() {
 
 void BethesdaApp::upsertMorrowindGameplayCell(
     const importer::CellCoord& cell) {
+    const core::ScopedTimerMs gameplayTimer(m_tickTiming.gameplayCellMs);
     if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
         m_bethesdaSession.tes3().content() == nullptr) return;
 
@@ -11067,18 +11198,23 @@ void BethesdaApp::upsertMorrowindGameplayCell(
         sidecar = std::filesystem::path(m_streamCacheDirectory) / "gameplay" /
             ("tes3_" + std::to_string(cell.x) + "_" +
              std::to_string(cell.z) + ".json");
+        const core::ScopedTimerMs ioTimer(m_tickTiming.gameplayIoMs);
         loaded = odai::bethesda::loadGameplayCellPayload(
             sidecar, fingerprint, payload, error);
     }
     if (!loaded) {
-        if (!odai::bethesda::compileTes3GameplayExteriorCell(
-                *m_bethesdaSession.tes3().content(), cell.x, cell.z,
-                fingerprint, payload, error)) {
-            VOX_LOGW("tes3") << "gameplay sidecar skipped for " << cell.x << ","
-                               << cell.z << ": " << error;
-            return;
+        {
+            const core::ScopedTimerMs compileTimer(m_tickTiming.gameplayCompileMs);
+            if (!odai::bethesda::compileTes3GameplayExteriorCell(
+                    *m_bethesdaSession.tes3().content(), cell.x, cell.z,
+                    fingerprint, payload, error)) {
+                VOX_LOGW("tes3") << "gameplay sidecar skipped for " << cell.x << ","
+                                   << cell.z << ": " << error;
+                return;
+            }
         }
         if (!sidecar.empty()) {
+            const core::ScopedTimerMs ioTimer(m_tickTiming.gameplayIoMs);
             std::string cacheError;
             if (!odai::bethesda::saveGameplayCellPayloadAtomic(
                     sidecar, payload, cacheError)) {
@@ -11087,11 +11223,13 @@ void BethesdaApp::upsertMorrowindGameplayCell(
             }
         }
     }
+    const core::ScopedTimerMs publicationTimer(m_tickTiming.gameplayPublishMs);
     // Some valid anchors (beds, benches, counters, signs) are rendering-only
     // STAT references and are intentionally excluded from the heavyweight
     // activation catalog. Materialize only the sidecar-selected anchors as
     // lightweight runtime targets so navigation and offscreen reconciliation
     // address the real placed reference instead of inventing city markers.
+    const core::Stopwatch anchorTimer;
     for (const odai::bethesda::ActivityAnchor& anchor : payload.anchors) {
         if (m_bethesdaSession.world().find(anchor.object) != nullptr) continue;
         const auto definition = m_bethesdaSession.tes3().content()->references().find(
@@ -11116,6 +11254,8 @@ void BethesdaApp::upsertMorrowindGameplayCell(
                                << anchor.object.toString() << ": " << targetError;
         }
     }
+    m_tickTiming.gameplayAnchorMs += anchorTimer.elapsedMs();
+    const core::ScopedTimerMs upsertTimer(m_tickTiming.gameplayUpsertMs);
     if (!m_bethesdaSession.upsertGameplayCell(std::move(payload), error)) {
         VOX_LOGW("tes3") << "could not install gameplay sidecar for "
                            << cell.x << "," << cell.z << ": " << error;
@@ -11245,6 +11385,43 @@ bool BethesdaApp::initBethesdaSession() {
             return false;
         }
         m_bethesdaSessionConfigured = true;
+        // Direct interior scenes were built before the session existed. Bind
+        // their placed gameplay references and local scripts now, just as an
+        // interior reached through a door is bound on arrival.
+        if (m_interiorStarted && m_currentInteriorSourceScene.has_value()) {
+            const importer::CellCoord interiorCell{
+                static_cast<std::int32_t>(std::floor(m_cameraX / 4096.0f)),
+                static_cast<std::int32_t>(std::floor(m_cameraZ / 4096.0f))};
+            cacheBethesdaCollisionCell(interiorCell, *m_currentInteriorSourceScene);
+        }
+        if (m_gameplaySavePath.empty() && !m_balmoraSkyrimPlayerShowcase) {
+            if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
+                m_gameplaySavePath = std::filesystem::path(xdg) /
+                    "odai/saves/morrowind.odai.json";
+            } else if (const char* home = std::getenv("HOME")) {
+                m_gameplaySavePath = std::filesystem::path(home) /
+                    ".local/share/odai/saves/morrowind.odai.json";
+            }
+        }
+        if (m_tes3FreshGame) {
+            if (m_bethesdaSession.tes3().scripts().start(
+                    "CharGen", m_bethesdaSession.playerObject(), error) == 0u) {
+                VOX_LOGE("tes3") << "could not start authored new game: " << error;
+                return false;
+            }
+            const auto opening = m_bethesdaSession.advance(1.0 / 60.0);
+            for (const std::string& diagnostic : opening.diagnostics) {
+                VOX_LOGW("tes3") << "new game: " << diagnostic;
+            }
+            if (const auto* spawned = m_bethesdaSession.world().find(
+                    m_bethesdaSession.playerObject())) {
+                m_cameraX = static_cast<float>(spawned->transform.position[0]);
+                m_cameraY = static_cast<float>(spawned->transform.position[1]) + kEyeHeightUnits;
+                m_cameraZ = static_cast<float>(spawned->transform.position[2]);
+                m_yawDegrees = spawned->transform.rotationRadians[1] *
+                    (180.0f / kPi);
+            }
+        }
         if (m_balmoraSkyrimPlayerShowcase && m_gameplaySavePath.empty()) {
             if (const char* xdg = std::getenv("XDG_DATA_HOME")) {
                 m_gameplaySavePath = std::filesystem::path(xdg) /
@@ -11694,8 +11871,7 @@ bool BethesdaApp::initBethesdaSession() {
         registerCachedBethesdaCollision();
         if (!registerBethesdaPlayerController()) return false;
         if (thirdPersonPlayerShowcase() && !initSkyrimPlayerAvatar()) return false;
-        if (thirdPersonPlayerShowcase() && !m_gameplayLoadPath.empty() &&
-            !loadGameplayState()) return false;
+        if (!m_gameplayLoadPath.empty() && !loadGameplayState()) return false;
         return true;
     }
     const odai::bethesda::ScenarioDefinition* scenario = odai::bethesda::findScenario(m_scenarioId);
@@ -11989,7 +12165,7 @@ bool BethesdaApp::settleScenarioSpawn() {
     m_bethesdaControllerOwnsCamera = true;
     pullBethesdaPlayerControllerState();
     syncBethesdaPlayerState(true);
-    VOX_LOGI("physics") << "scenario spawn settled on resident ground at "
+    VOX_LOGI("physics") << "walking spawn settled on resident ground at "
         << settled.position.x << ", " << settled.position.y << ", " << settled.position.z;
     return true;
 }
@@ -15334,7 +15510,9 @@ void BethesdaApp::drawGiftMenu() {
         m_playerInventoryOpen
         ? (m_inventorySource.valid()
             ? "Enter / A  take one   R / X  take all   Esc / B  close"
-            : "Enter / A  equip/use/read   Up/Down  browse   Esc / B  close")
+            : (m_streamIsMorrowind
+                ? "Enter / A / D  drop one   Up/Down  browse   I / Esc  close"
+                : "D  drop one   Enter / A  equip/use/read   Up/Down  browse   Esc / B  close"))
         : "Up/Down  select     Enter  transfer one     Esc  done";
     m_uiDrawList.addText(m_uiFont, footer,
         ui::UiVec2{panel.minX + padding, panel.maxY - padding}, kPipGreenDim);

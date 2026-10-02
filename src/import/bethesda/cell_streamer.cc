@@ -840,33 +840,51 @@ bool CellStreamer::referenceGameplayData(
 
 void CellStreamer::update(
     render::Renderer& renderer, const float position[3], const float velocity[3]) {
+    const core::Stopwatch updateTimer;
+    m_stats.lastUpdateMs = 0.0f;
+    m_stats.lastUploadMs = 0.0f;
+    m_stats.lastCallbacksMs = 0.0f;
+    m_stats.lastEvictionMs = 0.0f;
+    m_stats.lastRendererRemoveMs = 0.0f;
+    m_stats.lastEvictionCallbacksMs = 0.0f;
     if (m_jobs == nullptr) {
+        m_stats.lastApplyMs = 0.0f;
         return;
     }
 
-    // Applied first: a load that finished since the last frame should be counted
-    // as resident before the planner decides what else to ask for, or the
-    // in-flight budget stays occupied by work that is already done.
+    // Update the centre before accepting completed work. A teleport or a fast
+    // boundary crossing can make a result obsolete since the previous frame;
+    // accepting it against the old centre uploads a chunk only to evict it
+    // immediately below, causing an avoidable main-thread stall.
+    m_planner.update(position, velocity);
     applyCompletedLoads(renderer);
 
+    // Completed work has freed in-flight slots. Replan so they can be used in
+    // this frame, and include any newly resident cell in eviction decisions.
     m_planner.update(position, velocity);
 
+    const core::Stopwatch evictionTimer;
     for (const CellCoord& cell : m_planner.cellsToEvict()) {
         const auto resident = m_residentChunks.find(cell);
         if (resident != m_residentChunks.end()) {
+            const core::Stopwatch removeTimer;
             renderer.removeImportedSceneChunk(resident->second);
+            m_stats.lastRendererRemoveMs += removeTimer.elapsedMs();
             m_residentChunks.erase(resident);
         }
         // Empty geometry cells can still own NAVM records and therefore never
         // get a renderer chunk. Eviction must retire their navigation too.
+        const core::Stopwatch callbackTimer;
         if (m_onCellEvicted) {
             m_onCellEvicted(cell);
         }
         if (m_onAmbientEmittersEvicted) {
             m_onAmbientEmittersEvicted(cell);
         }
+        m_stats.lastEvictionCallbacksMs += callbackTimer.elapsedMs();
         m_planner.markEvicted(cell);
     }
+    m_stats.lastEvictionMs = evictionTimer.elapsedMs();
 
     for (const CellCoord& cell : m_planner.cellsToLoad()) {
         const auto available = m_availableCells.find(cell);
@@ -954,10 +972,13 @@ void CellStreamer::update(
                         // demonstrably worked.
                         result.waterPatches = result.scene.waterPatches.size();
                         if (prepareCell) {
-                            result.prepared = prepareCell(result.scene, result.error);
+                            result.prepared = prepareCell(result.scene, record, result.error);
                             result.succeeded = result.prepared != nullptr;
-                            result.buildMs = buildTimer.elapsedMs();
                         }
+                        if (result.succeeded) {
+                            prepareImportedSceneVertexEncodings(result.scene);
+                        }
+                        result.buildMs = buildTimer.elapsedMs();
                         std::lock_guard<std::mutex> lock(pending->mutex);
                         pending->completed.push_back(std::move(result));
                         if (pending->inFlight > 0u) {
@@ -1016,8 +1037,11 @@ void CellStreamer::update(
                     }
             }
             if (result.succeeded && prepareCell) {
-                result.prepared = prepareCell(result.scene, result.error);
+                result.prepared = prepareCell(result.scene, record, result.error);
                 result.succeeded = result.prepared != nullptr;
+            }
+            if (result.succeeded) {
+                prepareImportedSceneVertexEncodings(result.scene);
             }
             result.buildMs = buildTimer.elapsedMs();
 
@@ -1031,6 +1055,7 @@ void CellStreamer::update(
             }
         });
     }
+    m_stats.lastUpdateMs = updateTimer.elapsedMs();
 }
 
 void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
@@ -1125,6 +1150,7 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         const core::Stopwatch chunkTimer;
         const std::size_t chunkIndex = renderer.addImportedSceneChunk(result.scene);
         const float chunkMs = chunkTimer.elapsedMs();
+        m_stats.lastUploadMs += chunkMs;
         // Per-chunk, not just aggregated: a single slow add is what a player
         // feels, and an average hides it.
         //
@@ -1166,8 +1192,10 @@ void CellStreamer::applyCompletedLoads(render::Renderer& renderer) {
         m_stats.localLightsLoaded += result.presentation.localLights;
         m_stats.geometryInstancesLoaded += result.presentation.geometryInstances;
         if (m_onCellResident) {
+            const core::Stopwatch callbackTimer;
             // Before result.scene is destroyed at the end of this loop.
             m_onCellResident(result.cell, result.scene, result.navMeshes);
+            m_stats.lastCallbacksMs += callbackTimer.elapsedMs();
         }
         if (m_onAmbientEmittersResident) {
             m_onAmbientEmittersResident(result.cell, result.soundEmitters);

@@ -1,0 +1,24 @@
+{
+  "scenario": "balmora",
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 258V",
+    "gpu": "Intel(R) Graphics (LNL), vendorId=32902, deviceId=25760, driverVersion=109060099, graphicsQueueFamily=0, graphicsQueueIndex=0, transferQueueFamily=1, transferQueueIndex=0, samplerAnisotropy=yes, drawIndirectFirstInstance=yes, multiDrawIndirect=yes, tessellationShader=yes, bindlessDescriptors=yes, bindlessTextureCapacity=4096, displayTiming=no(ext=no), memoryPriority=no, maxSamplerAnisotropy=16, msaaSamples=1, shadowDepthFormat=126, hdrColorFormat=97, normalDepthFormat=97, ssaoFormat=76",
+    "extent": "768x432",
+    "present_mode": "FIFO"
+  },
+  "route_sha256": "5343c42723490c66ef824b149efca5a75688af442211a6bd6feddbf4db2ee526",
+  "baseline": {
+    "cpu_p95_ms": 8.780537999999998,
+    "gpu_p95_ms": 6.022065,
+    "interval_p95_ms": 8.8001595,
+    "memory_mb": 1216.6328125,
+    "allocations_per_frame": 114.0
+  },
+  "limits": {
+    "cpu_p95_ms": 10.976,
+    "gpu_p95_ms": 7.528,
+    "interval_p95_ms": 11.0,
+    "memory_mb": 1399.128,
+    "allocations_per_frame": 142.5
+  }
+}

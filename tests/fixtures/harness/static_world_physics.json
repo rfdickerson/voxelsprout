@@ -1,0 +1,37 @@
+{
+  "kind": "static_physics",
+  "name": "PHYS-001 synthetic static world",
+  "objects": [
+    {"id": 1, "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": 1,
+     "vertices": [[-100, 100, 0], [100, 100, 0], [100, -100, 0], [-100, -100, 0]],
+     "indices": [0, 1, 2, 0, 2, 3]},
+    {"id": 2, "position": [60, 0, 0], "rotation": [0, 0, 0], "scale": 1,
+     "vertices": [[0, 20, 0], [0, 20, 40], [0, -20, 40], [0, -20, 0]],
+     "indices": [0, 1, 2, 0, 2, 3]},
+    {"id": 3, "position": [0, 0, 40], "rotation": [0, 0, 0], "scale": 1,
+     "vertices": [[-20, 20, 0], [20, 20, 0], [20, -20, 0], [-20, -20, 0]],
+     "indices": [0, 1, 2, 0, 2, 3]},
+    {"id": 4, "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": 1,
+     "vertices": [[130, 20, 0], [170, 20, 20], [170, -20, 20], [130, -20, 0]],
+     "indices": [0, 1, 2, 0, 2, 3]},
+    {"id": 5, "position": [200, 0, 30], "rotation": [0, 0, 1.5707963267948966], "scale": 2,
+     "vertices": [[-10, 20, 0], [10, 20, 0], [10, -20, 0], [-10, -20, 0]],
+     "indices": [0, 1, 2, 0, 2, 3]}
+  ],
+  "queries": [
+    {"name": "floor", "from": [-50, 100, 0], "to": [-50, -100, 0], "hit": true,
+     "object": 1, "position": [-50, 0, 0], "normal": [0, 1, 0], "distance": 100},
+    {"name": "wall", "from": [0, 20, 0], "to": [100, 20, 0], "hit": true,
+     "object": 2, "position": [60, 20, 0], "normal": [-1, 0, 0], "distance": 60},
+    {"name": "empty", "from": [400, 100, 0], "to": [400, -100, 0], "hit": false},
+    {"name": "nearest", "from": [0, 100, 0], "to": [0, -100, 0], "hit": true,
+     "object": 3, "position": [0, 40, 0], "normal": [0, 1, 0], "distance": 60},
+    {"name": "ramp", "from": [150, 100, 0], "to": [150, -100, 0], "hit": true,
+     "object": 4, "position": [150, 10, 0], "normal": [-0.4472136, 0.8944272, 0], "distance": 90},
+    {"name": "transformed", "from": [230, 100, 15], "to": [230, -100, 15], "hit": true,
+     "object": 5, "position": [230, 30, 15], "normal": [0, 1, 0], "distance": 70},
+    {"name": "sphere", "shape": "sphere", "radius": 5, "from": [-50, 20, 0], "to": [-50, -20, 0], "hit": true,
+     "object": 1, "position": [-50, 5, 0], "normal": [0, 1, 0], "distance": 15},
+    {"name": "sphere_empty", "shape": "sphere", "radius": 5, "from": [400, 20, 0], "to": [400, -20, 0], "hit": false}
+  ]
+}

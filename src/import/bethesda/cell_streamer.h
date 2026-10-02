@@ -103,6 +103,13 @@ struct CellStreamerStats {
     // a hitch, so it is measured rather than assumed.
     float worstApplyMs = 0.0f;
     float lastApplyMs = 0.0f;
+    // Main-thread portions of the latest update, reset each call.
+    float lastUpdateMs = 0.0f;
+    float lastUploadMs = 0.0f;
+    float lastCallbacksMs = 0.0f;
+    float lastEvictionMs = 0.0f;
+    float lastRendererRemoveMs = 0.0f;
+    float lastEvictionCallbacksMs = 0.0f;
     std::size_t residentChunks = 0;
     // Effect-only meshes (\effects\, fx*) dropped at build time. These are the
     // dust sheets and glow cards Fallout scatters as ordinary statics.
@@ -275,7 +282,7 @@ public:
 
     struct PreparedCellData { virtual ~PreparedCellData() = default; };
     using CellPreparation = std::function<std::shared_ptr<PreparedCellData>(
-        const ImportedScene&, std::string&)>;
+        const ImportedScene&, const FalloutCellRecord&, std::string&)>;
     using PreparedCellCallback = std::function<void(const CellCoord&, std::shared_ptr<PreparedCellData>)>;
     // Preparation runs on the existing cell workers, before a result can be
     // published. The worker callback must own its inputs, not access live state.
