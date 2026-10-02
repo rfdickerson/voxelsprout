@@ -10,7 +10,7 @@ Everything below was measured on
 `odai_bethesda_probe` plus byte-level dumps of the retail files. Where a claim is an
 inference from layout rather than something a tool printed, it says so.
 
-**Nothing in `src/import/fnv/` was renamed or re-namespaced.** Fallout 3 already runs
+**Nothing in `src/import/bethesda/` was renamed or re-namespaced.** Fallout 3 already runs
 through the same code with no Fallout-3-specific branches (see CLAUDE.md), and Oblivion
 should follow the same rule: additive version branches, never a fork.
 
@@ -57,11 +57,11 @@ the fix: every sampled extraction failed with `incorrect header check` / `incomp
 truncated stream`. Clearing the bit for v103 makes all 40 of 40 sampled files inflate to
 their declared size.
 
-Implemented at `src/import/fnv/bsa_archive.cc:25` (`kBsaVersionOblivion`), `:140`
+Implemented at `src/import/bethesda/bsa_archive.cc:25` (`kBsaVersionOblivion`), `:140`
 (`peekBsaContentFlags`), `:165` (`open`) and `:177` (the flag mask). The mask is applied
 once at open time rather than branching in `extract()`, so `extract()` runs the exact code
 path it always did. Pinned by `testBsaArchiveReadsOblivionV103` in
-`tests/fnv_import_tests.cc` on a synthetic fixture that reproduces the contradiction
+`tests/bethesda_import_tests.cc` on a synthetic fixture that reproduces the contradiction
 (v103 header + `0x100` set + no embedded names).
 
 Result, measured:
@@ -83,7 +83,7 @@ limitation FNV already has, not a new blocker. ~2.7% of Oblivion's textures are 
 
 ### LAND terrain records — byte-identical
 
-`src/import/fnv/fallout_records.cc:444-468` reads Oblivion LAND unchanged. Measured
+`src/import/bethesda/fallout_records.cc:444-468` reads Oblivion LAND unchanged. Measured
 subrecord census over 200 Tamriel LANDs:
 
 | Subrecord | Size | Same as FNV? |
@@ -204,7 +204,7 @@ ICON on an LTEX, so the branch never fires for them. `--buildcell Tamriel 1 7` w
 
 ### Blocker 2 (now the top blocker): NIF is 20.0.0.4, and there is no block-size table
 
-`src/import/fnv/nif_scene.cc:15-16` pins one version:
+`src/import/bethesda/nif_scene.cc:15-16` pins one version:
 
 ```cpp
 constexpr std::uint32_t kSupportedNifVersion = 0x14020007u;  // 20.2.0.7
@@ -481,7 +481,7 @@ gated on a sniffed plugin/NIF version, never on a game identity.
 
 ### Stage 0 — BSA v103 ✅ done
 
-`src/import/fnv/bsa_archive.{h,cc}` + `testBsaArchiveReadsOblivionV103`. Verified:
+`src/import/bethesda/bsa_archive.{h,cc}` + `testBsaArchiveReadsOblivionV103`. Verified:
 `--archives` indexes 147629 Oblivion files with 0 failures, `--find` and `--texture` work,
 FNV still indexes 182177 with 0 failures, `ctest` 49/49 green.
 
@@ -492,7 +492,7 @@ the whole record layer works on Oblivion, and Tamriel's terrain builds textured.
 49/49, and FNV probe output is byte-identical to a same-source baseline.
 
 One thing deliberately NOT done: no `EsmPluginFormat` value is exposed to or consulted by
-any caller above `src/import/fnv/`. The format is a property of the file, sniffed at open,
+any caller above `src/import/bethesda/`. The format is a property of the file, sniffed at open,
 and nothing downstream should ever branch on which game it is.
 
 ### Stage 2 — NIF 20.0.0.4 header + sequential block walk  ← **next**
@@ -517,7 +517,7 @@ Split the version-specific parts of `nif_scene.cc` behind a `NifVersion` carried
 Verify with `--nifs 60000` and `--nifblocks <path>`: target ≥89% of static-family NIFs
 parsed with non-zero shapes, and 0 files that produce geometry after a desync.
 
-Pin the byte layouts with a synthetic-NIF fixture in `fnv_import_tests.cc` — a hand-built
+Pin the byte layouts with a synthetic-NIF fixture in `bethesda_import_tests.cc` — a hand-built
 20.0.0.4 file with a `NiNode` → `NiTriStrips` → `NiTriStripsData` chain plus one Havok block
 between them, so the test fails if a reader's length is wrong rather than only if geometry
 is wrong.

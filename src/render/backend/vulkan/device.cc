@@ -4,7 +4,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>

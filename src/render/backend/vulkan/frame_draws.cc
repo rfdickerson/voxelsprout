@@ -1,9 +1,111 @@
 #include "render/backend/vulkan/renderer_backend.h"
+#include "render/backend/vulkan/frame_math.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
 namespace odai::render {
+
+void RendererBackend::prepareImportedVisibility(
+    const odai::math::Vector3& eye, const CameraPose& camera, float projectionYScale) {
+    // These depend on the main camera, not on the shadow or mirrored clip
+    // matrix. Compute them once before assembling the per-view draw lists.
+    m_importedVegetationLodVisible.resize(m_importedMeshDraws.size());
+    const float halfHeight = 0.5f * static_cast<float>(m_renderExtent.height);
+    for (std::size_t i = 0; i < m_importedMeshDraws.size(); ++i) {
+        const ImportedMeshDraw& draw = m_importedMeshDraws[i];
+        if (draw.vegetationLod == 0u) {
+            m_importedVegetationLodVisible[i] = 1u;
+            continue;
+        }
+        const float dx = draw.center[0] - eye.x;
+        const float dy = draw.center[1] - eye.y;
+        const float dz = draw.center[2] - eye.z;
+        const float distance = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f);
+        const float projectedPixels = camera.orthographic
+            ? draw.vegetationHeight *
+                (static_cast<float>(m_renderExtent.height) /
+                 std::max(camera.orthoHalfHeight * 2.0f, 1.0f))
+            : draw.vegetationHeight * std::abs(projectionYScale) * halfHeight / distance;
+        const std::uint8_t wanted = projectedPixels >= 80.0f * 1.15f
+            ? 1u : (projectedPixels <= 20.0f * 0.85f ? 3u : 2u);
+        m_importedVegetationLodVisible[i] = draw.vegetationLod == wanted ? 1u : 0u;
+    }
+
+    m_importedPageNearTerrain.resize(m_importedPageDrawRanges.size());
+    for (std::size_t i = 0; i < m_importedPageDrawRanges.size(); ++i) {
+        const ImportedScenePageDrawRange& page = m_importedPageDrawRanges[i];
+        const float eyePosition[3] = {eye.x, eye.y, eye.z};
+        float distanceSq = 0.0f;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float clamped = std::clamp(
+                eyePosition[axis], page.boundsMin[axis], page.boundsMax[axis]);
+            const float delta = eyePosition[axis] - clamped;
+            distanceSq += delta * delta;
+        }
+        const float range = page.distantLodTessellation ? 48000.0f : 10500.0f;
+        m_importedPageNearTerrain[i] = distanceSq < range * range ? 1u : 0u;
+    }
+}
+
+RendererBackend::VisibleImportedDrawCounts RendererBackend::buildVisibleImportedDraws(
+    const odai::math::Matrix4& clipMatrix, float clipMargin,
+    std::vector<ImportedMeshDraw>& outDraws, float minimumY) {
+    outDraws.clear();
+    if (outDraws.capacity() < m_importedMeshDraws.size()) {
+        outDraws.reserve(m_importedMeshDraws.size());
+    }
+    m_visibleImportedPageOrder.clear();
+    for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
+        const ImportedScenePageDrawRange& page = m_importedPageDrawRanges[pageIndex];
+        if (page.drawCount == 0u || page.boundsMax[1] < minimumY - 32.0f ||
+            !importedBoundsIntersectClip(page.boundsMin, page.boundsMax, clipMatrix, clipMargin)) {
+            continue;
+        }
+        m_visibleImportedPageOrder.push_back(static_cast<std::uint32_t>(pageIndex));
+    }
+
+    const auto appendDrawRange = [&](std::uint32_t firstDraw, std::uint32_t drawCount) {
+        if (drawCount == 0u || firstDraw >= m_importedMeshDraws.size()) {
+            return std::uint32_t{0};
+        }
+        const std::uint32_t available = static_cast<std::uint32_t>(
+            m_importedMeshDraws.size() - firstDraw);
+        const std::uint32_t end = firstDraw + std::min(drawCount, available);
+        std::uint32_t appended = 0u;
+        for (std::uint32_t i = firstDraw; i < end; ++i) {
+            if (m_importedVegetationLodVisible[i] == 0u) continue;
+            outDraws.push_back(m_importedMeshDraws[i]);
+            ++appended;
+        }
+        return appended;
+    };
+
+    // The terrain prefix is near then far; the passes route those ranges
+    // through tessellated and flat pipelines respectively.
+    VisibleImportedDrawCounts counts{};
+    for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
+        if (m_importedPageNearTerrain[pageIndex] == 0u) continue;
+        const ImportedScenePageDrawRange& page = m_importedPageDrawRanges[pageIndex];
+        counts.nearTerrain += appendDrawRange(
+            page.firstDraw, std::min(page.terrainDrawCount, page.drawCount));
+    }
+    counts.terrain = counts.nearTerrain;
+    for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
+        if (m_importedPageNearTerrain[pageIndex] != 0u) continue;
+        const ImportedScenePageDrawRange& page = m_importedPageDrawRanges[pageIndex];
+        counts.terrain += appendDrawRange(
+            page.firstDraw, std::min(page.terrainDrawCount, page.drawCount));
+    }
+    for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
+        const ImportedScenePageDrawRange& page = m_importedPageDrawRanges[pageIndex];
+        const std::uint32_t terrain = std::min(page.terrainDrawCount, page.drawCount);
+        appendDrawRange(page.firstDraw + terrain, page.drawCount - terrain);
+    }
+    return counts;
+}
 
 bool RendererBackend::sampleImportedRigidAnimationTransform(
     std::uint32_t animationIndex,
@@ -24,83 +126,6 @@ bool RendererBackend::sampleImportedRigidAnimationTransform(
     }
     return true;
 }
-
-void RendererBackend::drawIndirectChunkRanges(
-    VkCommandBuffer commandBuffer,
-    std::uint32_t& passDrawCounter,
-    const FrameChunkDrawData& frameChunkDrawData
-) {
-    if (!frameChunkDrawData.canDrawChunksIndirect) {
-        return;
-    }
-
-    const uint32_t drawCount = frameChunkDrawData.chunkIndirectDrawCount;
-    const std::optional<FrameArenaSlice>& indirectSlice = frameChunkDrawData.chunkIndirectSliceOpt;
-    if (!indirectSlice.has_value()) {
-        return;
-    }
-
-    m_debugDrawCallsTotal += drawCount;
-    passDrawCounter += drawCount;
-
-    if (m_supportsMultiDrawIndirect) {
-        vkCmdDrawIndexedIndirect(
-            commandBuffer,
-            frameChunkDrawData.chunkIndirectBuffer,
-            indirectSlice->offset,
-            drawCount,
-            sizeof(VkDrawIndexedIndirectCommand)
-        );
-        return;
-    }
-
-    const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
-    VkDeviceSize drawOffset = indirectSlice->offset;
-    for (uint32_t drawIndex = 0; drawIndex < drawCount; ++drawIndex) {
-        vkCmdDrawIndexedIndirect(commandBuffer, frameChunkDrawData.chunkIndirectBuffer, drawOffset, 1, static_cast<uint32_t>(stride));
-        drawOffset += stride;
-    }
-}
-
-void RendererBackend::drawIndirectShadowChunkRanges(
-    VkCommandBuffer commandBuffer,
-    std::uint32_t& passDrawCounter,
-    std::uint32_t cascadeIndex,
-    const FrameChunkDrawData& frameChunkDrawData
-) {
-    if (cascadeIndex >= kShadowCascadeCount || !frameChunkDrawData.canDrawShadowChunksIndirectByCascade[cascadeIndex]) {
-        return;
-    }
-
-    const uint32_t drawCount = frameChunkDrawData.shadowCascadeIndirectDrawCounts[cascadeIndex];
-    const VkBuffer indirectBuffer = frameChunkDrawData.shadowCascadeIndirectBuffers[cascadeIndex];
-    const std::optional<FrameArenaSlice>& indirectSlice = frameChunkDrawData.shadowCascadeIndirectSliceOpts[cascadeIndex];
-    if (!indirectSlice.has_value()) {
-        return;
-    }
-
-    m_debugDrawCallsTotal += drawCount;
-    passDrawCounter += drawCount;
-
-    if (m_supportsMultiDrawIndirect) {
-        vkCmdDrawIndexedIndirect(
-            commandBuffer,
-            indirectBuffer,
-            indirectSlice->offset,
-            drawCount,
-            sizeof(VkDrawIndexedIndirectCommand)
-        );
-        return;
-    }
-
-    const VkDeviceSize stride = static_cast<VkDeviceSize>(sizeof(VkDrawIndexedIndirectCommand));
-    VkDeviceSize drawOffset = indirectSlice->offset;
-    for (uint32_t drawIndex = 0; drawIndex < drawCount; ++drawIndex) {
-        vkCmdDrawIndexedIndirect(commandBuffer, indirectBuffer, drawOffset, 1, static_cast<uint32_t>(stride));
-        drawOffset += stride;
-    }
-}
-
 
 // Groups imported draws into indirect commands, one group per distinct
 // alpha-test threshold. See ImportedIndirectBatch in renderer_backend.h for why

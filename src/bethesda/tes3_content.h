@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bethesda/runtime_ids.h"
-#include "import/fnv/plugin_load_order.h"
+#include "import/bethesda/plugin_load_order.h"
 
 #include <cstdint>
 #include <map>
@@ -216,7 +216,7 @@ struct Tes3ContentStats {
 // case-insensitive later-wins overrides and deletions before publishing maps.
 class Tes3ContentStore {
 public:
-    bool load(const importer::fnv::FalloutLoadOrder& order, std::string encoding,
+    bool load(const importer::bethesda::FalloutLoadOrder& order, std::string encoding,
               std::string& outError);
 
     [[nodiscard]] const std::string& encoding() const { return m_encoding; }

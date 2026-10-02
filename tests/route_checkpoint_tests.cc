@@ -6,7 +6,7 @@ void require(bool value, const char* message) { if (!value) throw std::runtime_e
 int main() {
     BethesdaSession session;
     std::string error;
-    require(session.configure({odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+    require(session.configure({odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "synthetic", "skyrim-bleak-falls", 1u}, error), "configure");
     for (const auto& record : skyrimBleakFallsScenario().questRecords) {
         SkyrimQuestDefinition definition{};
@@ -38,7 +38,7 @@ int main() {
     session.setQuestStage("MS13",50);
     require(!assessBleakFallsStart(session)["ok"], "progress accepted as fresh");
     require(snapshot != routeCheckpoint(session), "progress not observed");
-    odai::importer::fnv::ResolvedContentProfile profile;
+    odai::importer::bethesda::ResolvedContentProfile profile;
     profile.sourcePath = "/private/person/profile.json";
     profile.dataRoot = "/private/person/Data";
     profile.layers.push_back({"mod", "mod", "/private/person/mod", true, 1, "1.7", "private source"});

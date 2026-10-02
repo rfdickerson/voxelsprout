@@ -23,7 +23,7 @@ std::int32_t i32(const std::uint8_t* bytes) {
     return value;
 }
 
-std::string zstring(const importer::fnv::EsmSubrecordView& subrecord) {
+std::string zstring(const importer::bethesda::EsmSubrecordView& subrecord) {
     std::string value(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
     while (!value.empty() && value.back() == '\0') value.pop_back();
     return value;
@@ -36,7 +36,7 @@ void addReference(std::vector<std::uint32_t>& references, std::uint32_t formId) 
 }  // namespace
 
 bool readSkyrimQuest(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimQuestDefinition& out,
     std::string& outError) {
@@ -57,7 +57,7 @@ bool readSkyrimQuest(
     SkyrimQuestAliasDefinition* currentAlias = nullptr;
     Condition* currentCondition = nullptr;
     Condition* currentLogCondition = nullptr;
-    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
         const std::span<const std::uint8_t> bytes(subrecord.data, subrecord.size);
         if (subrecord.type == "EDID") {
             parsed.editorId = zstring(subrecord);

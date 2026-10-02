@@ -1,5 +1,5 @@
-#include "import/fnv/asset_source.h"
-#include "import/fnv/content_record_index.h"
+#include "import/bethesda/asset_source.h"
+#include "import/bethesda/content_record_index.h"
 #include "tools/asset_coverage_report.h"
 #include <chrono>
 #include <filesystem>
@@ -148,12 +148,12 @@ int main() {
     std::ofstream(root / "mod/meshes/a.nif") << "override";
     fs::create_directories(root / "base/Textures");
     std::ofstream(root / "base/Textures/Mixed.DDS") << "mixed";
-    odai::importer::fnv::FalloutAssetSource assets;
+    odai::importer::bethesda::FalloutAssetSource assets;
     check(assets.open(root / "base") && assets.addModDirectory(root / "mod"),
           "open synthetic layers");
     const auto paths = assets.virtualPaths();
     check(paths.size() == 2, "inventory deduplicates shadowed asset");
-    odai::importer::fnv::FalloutAssetSource::ResolvedAsset winner;
+    odai::importer::bethesda::FalloutAssetSource::ResolvedAsset winner;
     std::string error;
     check(assets.resolveAssetWithProvider("meshes\\a.nif", winner, error), "winning bytes resolve");
     check(std::string(winner.bytes.begin(), winner.bytes.end()) == "override", "last layer wins");
@@ -201,8 +201,8 @@ int main() {
     };
     plugin(false);
     plugin(true);
-    odai::importer::fnv::FalloutLoadOrder order;
-    odai::importer::fnv::ContentRecordIndex index;
+    odai::importer::bethesda::FalloutLoadOrder order;
+    odai::importer::bethesda::ContentRecordIndex index;
     check(order.open(root, {"Base.esm", "Patch.esp"}, error) && index.build(order, error),
           "synthetic record census");
     const auto *versions = index.versions(0x100);

@@ -1,5 +1,4 @@
 #pragma once
-
-// Compatibility include for downstream code. Shared actor runtime code now
-// has a game-agnostic Bethesda filename.
-#include "games/newvegas/bethesda_actors.h"
+// Compatibility include; shared implementation lives under Bethesda names.
+#include "games/bethesda/newvegas_actors.h"
+#include "games/bethesda/legacy_names.h"

@@ -4,7 +4,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -215,17 +214,10 @@ void RendererBackend::refreshShadowStats() {
     m_shadowStats.rayQuerySupported = m_rayTracingCapabilityProbe.rayQueryExtension;
     m_shadowStats.accelerationStructureSupported = m_rayTracingCapabilityProbe.accelerationStructureExtension;
     m_shadowStats.rayTracingRuntimeEnabled = rayTracingRuntimeReady();
-    const bool hasVoxelRtMainGeometry =
-        m_chunkVertexBufferHandle != kInvalidBufferHandle &&
-        m_chunkIndexBufferHandle != kInvalidBufferHandle &&
-        !m_chunkDrawRanges.empty();
-    const bool hasMagicaRtMainGeometry = !m_magicaMeshDraws.empty();
     const bool hasImportedRtMainGeometry = !m_importedMeshDraws.empty();
     const bool mainPassPipelinesReady =
         m_rtMainPassImplemented &&
-        ((m_pipelineRt != VK_NULL_HANDLE && hasVoxelRtMainGeometry) ||
-         (m_magicaPipelineRt != VK_NULL_HANDLE && hasMagicaRtMainGeometry) ||
-         (m_importedStaticPipelineRt != VK_NULL_HANDLE && hasImportedRtMainGeometry));
+        ((m_importedStaticPipelineRt != VK_NULL_HANDLE && hasImportedRtMainGeometry));
     const bool mainPassSceneReady = m_rtTlas.handle != VK_NULL_HANDLE;
     m_shadowStats.mainPassRayTracingReady =
         rayTracingRuntimeReady() &&
@@ -956,6 +948,7 @@ void RendererBackend::buildFrameStatsUi() {
                 stageRow("Prepass (nrm/depth)", m_debugGpuPrepassTimeMs, 0);
                 stageRow("SSAO", m_debugGpuSsaoTimeMs, 0);
                 stageRow("SSAO Blur", m_debugGpuSsaoBlurTimeMs, 0);
+                stageRow("Planar reflection", m_debugGpuReflectionTimeMs, 0);
                 stageRow("Main", m_debugGpuMainTimeMs, 0);
                 stageRow("Post", m_debugGpuPostTimeMs, 0);
                 stageRow("UI", m_debugGpuUiTimeMs, 0);
@@ -969,7 +962,8 @@ void RendererBackend::buildFrameStatsUi() {
                 m_debugGpuShadowTimeMs + m_debugGpuPrepassTimeMs + m_debugGpuSsaoTimeMs +
                 m_debugGpuContactShadowTraceTimeMs + m_debugGpuContactShadowResolveTimeMs +
                 m_debugGpuScreenDepthTimeMs + m_debugGpuScreenSpaceGiTimeMs +
-                m_debugGpuSsaoBlurTimeMs + m_debugGpuMainTimeMs + m_debugGpuPostTimeMs +
+                m_debugGpuSsaoBlurTimeMs + m_debugGpuReflectionTimeMs +
+                m_debugGpuMainTimeMs + m_debugGpuPostTimeMs +
                 m_debugGpuUiTimeMs;
             const float otherMs = std::max(0.0f, frameGpu - accountedMs);
             ImGui::Text(

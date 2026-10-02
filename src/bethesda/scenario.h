@@ -1,6 +1,6 @@
 #pragma once
 
-#include "import/fnv/content_profile.h"
+#include "import/bethesda/content_profile.h"
 
 #include <optional>
 #include <string>
@@ -23,7 +23,7 @@ struct ScenarioQuestRecord {
 
 struct ScenarioDefinition {
     std::string id;
-    importer::fnv::BethesdaGame game = importer::fnv::BethesdaGame::Unknown;
+    importer::bethesda::BethesdaGame game = importer::bethesda::BethesdaGame::Unknown;
     std::string basePlugin;
     std::string worldspace;
     std::string startMarker;

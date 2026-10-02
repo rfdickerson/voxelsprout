@@ -61,7 +61,7 @@ int main() {
         std::vector<std::uint8_t> vmad; put16(vmad, 5); put16(vmad, 2); put16(vmad, 0);
         vmad.push_back(2); vmad.push_back(0); putString(vmad, "SceneFixture"); put16(vmad, 1);
         vmad.push_back(1); put32(vmad, 0); vmad.push_back(1); putString(vmad, "SceneFixture"); putString(vmad, "Fragment_0");
-        odai::importer::fnv::EsmRecordView record; record.type = "SCEN";
+        odai::importer::bethesda::EsmRecordView record; record.type = "SCEN";
         record.subrecords = {{"VMAD", vmad.data(), static_cast<std::uint32_t>(vmad.size())},
             {"HNAM", nullptr, 0}, {"NEXT", nullptr, 0}, {"CTDA", condition.data(), static_cast<std::uint32_t>(condition.size())},
             {"NEXT", nullptr, 0}, {"HNAM", nullptr, 0},
@@ -79,7 +79,7 @@ int main() {
     {
         BethesdaSession sceneSession;
         std::string error;
-        assert(sceneSession.configure({odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition, "scene-fixture", "", 1u}, error));
+        assert(sceneSession.configure({odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition, "scene-fixture", "", 1u}, error));
         const auto questKey = makeRecordKey("Skyrim.esm", 0x100u);
         const auto sceneKey = makeRecordKey("Skyrim.esm", 0x101u);
         auto& quest = sceneSession.quest("SceneFixture");
@@ -299,7 +299,7 @@ int main() {
     BethesdaSession whiterunSession;
     std::string whiterunError;
     assert(whiterunSession.configure({
-        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "whiterun-fixture", whiterunScenario->id, 17u}, whiterunError));
     const QuestRuntimeState* dragonRising = whiterunSession.findQuest("MQ104");
     const QuestRuntimeState* wayOfTheVoice = whiterunSession.findQuest("MQ105");
@@ -379,7 +379,7 @@ int main() {
     BethesdaSession session;
     std::string error;
     assert(session.configure({
-        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "fixture-content", "skyrim-bleak-falls", 0x12345678u}, error));
     const QuestRuntimeState* unbound = session.findQuest("mq101");
     assert(unbound != nullptr && unbound->stage == 900 && unbound->completed);
@@ -498,7 +498,7 @@ int main() {
     {
         BethesdaSession giftSession;
         assert(giftSession.configure({
-            odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+            odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
             "gift-fixture", "skyrim-bleak-falls", 15u}, error));
         assert(giftSession.world().addInitialObject(player, error));
         RuntimeObject giver;
@@ -528,7 +528,7 @@ int main() {
 
     BethesdaSession puzzle;
     assert(puzzle.configure({
-        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "puzzle-fixture", "skyrim-bleak-falls", 29u}, error));
     RuntimeObject puzzlePlayer = player;
     puzzlePlayer.inventory.push_back({claw, 1, false});
@@ -603,7 +603,7 @@ int main() {
     {
         BethesdaSession combat;
         assert(combat.configure({
-            odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+            odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
             "combat-fixture", "skyrim-bleak-falls", 31u}, error));
         RuntimeObject attacker = player;
         attacker.transform.position = {0.0, 0.0, 0.0};
@@ -658,7 +658,7 @@ int main() {
     // be used after unequipping the shield. Contact events drain exactly once.
     for (bool front : {true, false}) {
         BethesdaSession combat;
-        assert(combat.configure({odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        assert(combat.configure({odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
             "guard-fixture", "skyrim-bleak-falls", 31u}, error));
         RuntimeObject attacker = player, target = player;
         attacker.transform.position = {0, 0, 0};
@@ -696,7 +696,7 @@ int main() {
     {
         BethesdaSession occluded;
         assert(occluded.configure({
-            odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+            odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
             "combat-wall-fixture", "skyrim-bleak-falls", 32u}, error));
         RuntimeObject attacker = player;
         RuntimeObject target = player;
@@ -730,7 +730,7 @@ int main() {
     {
         BethesdaSession hostile;
         assert(hostile.configure({
-            odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+            odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
             "hostile-fixture", "skyrim-bleak-falls", 33u}, error));
         RuntimeObject victim = player;
         victim.transform.position = {100.0, 0.0, 0.0};
@@ -759,7 +759,7 @@ int main() {
 
     BethesdaSession replay;
     assert(replay.configure({
-        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "fixture-content", "skyrim-bleak-falls", 0x12345678u}, error));
     assert(replay.world().addInitialObject(player, error));
     (void)replay.world().queue(add);
@@ -782,7 +782,7 @@ int main() {
     {
         BethesdaSession physicalSession;
         assert(physicalSession.configure({
-            odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+            odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
             "physical-fixture", "skyrim-bleak-falls", 9u}, error));
         RuntimeObject physicalPlayer = player;
         physicalPlayer.transform.position = {0.0, 100.0, 0.0};
@@ -850,7 +850,7 @@ int main() {
         std::vector<std::uint8_t> keywordBytes;
         put32(keywordBytes, 0x200u);
         put32(keywordBytes, 0x201u);
-        odai::importer::fnv::EsmRecordView locationRecord;
+        odai::importer::bethesda::EsmRecordView locationRecord;
         locationRecord.type = "LCTN";
         locationRecord.subrecords = {
             {"EDID", editorId.data(), static_cast<std::uint32_t>(editorId.size())},
@@ -872,7 +872,7 @@ int main() {
         std::vector<std::uint8_t> globalEditorId{'T', 'e', 's', 't', 'G', 'l', 'o', 'b', '\0'};
         std::vector<std::uint8_t> globalValue;
         put32(globalValue, std::bit_cast<std::uint32_t>(3.5f));
-        odai::importer::fnv::EsmRecordView globalRecord;
+        odai::importer::bethesda::EsmRecordView globalRecord;
         globalRecord.type = "GLOB";
         globalRecord.subrecords = {
             {"EDID", globalEditorId.data(), static_cast<std::uint32_t>(globalEditorId.size())},
@@ -926,7 +926,7 @@ int main() {
     std::vector<std::uint8_t> dialQuest; put32(dialQuest, 0x39645u);
     std::vector<std::uint8_t> dialBranch; put32(dialBranch, 0x705u);
     std::vector<std::uint8_t> dialData; put32(dialData, 0u);
-    odai::importer::fnv::EsmRecordView dialRecord;
+    odai::importer::bethesda::EsmRecordView dialRecord;
     dialRecord.type = "DIAL";
     dialRecord.subrecords = {
         {"EDID", dialEdid.data(), static_cast<std::uint32_t>(dialEdid.size())},
@@ -946,7 +946,7 @@ int main() {
     std::vector<std::uint8_t> branchQuest; put32(branchQuest, 0x39645u);
     std::vector<std::uint8_t> branchStart; put32(branchStart, 0x700u);
     std::vector<std::uint8_t> branchFlags; put32(branchFlags, 1u);
-    odai::importer::fnv::EsmRecordView branchRecord;
+    odai::importer::bethesda::EsmRecordView branchRecord;
     branchRecord.type = "DLBR";
     branchRecord.subrecords = {
         {"EDID", branchEdid.data(), static_cast<std::uint32_t>(branchEdid.size())},
@@ -974,7 +974,7 @@ int main() {
     questVariableCondition[14] = 0x03u;
     std::vector<std::uint8_t> questVariableName{
         ':', ':', 'r', 'o', 'u', 't', 'e', 'R', 'e', 'a', 'd', 'y', '_', 'v', 'a', 'r', 0u};
-    odai::importer::fnv::EsmRecordView infoRecord;
+    odai::importer::bethesda::EsmRecordView infoRecord;
     infoRecord.type = "INFO";
     infoRecord.subrecords = {
         {"VMAD", infoVmad.data(), static_cast<std::uint32_t>(infoVmad.size())},
@@ -1003,7 +1003,7 @@ int main() {
     // A QUST definition retains stable identity while exposing stage,
     // objective, alias, condition, VMAD, and transitive FormID closure data.
     std::vector<std::pair<std::string, std::vector<std::uint8_t>>> ownedSubrecords;
-    odai::importer::fnv::EsmRecordView questRecord;
+    odai::importer::bethesda::EsmRecordView questRecord;
     questRecord.type = "QUST";
     questRecord.formId = 0x39645u;
     const auto addSubrecord = [&](std::string type, std::vector<std::uint8_t> bytes) {
@@ -1104,7 +1104,7 @@ int main() {
     // MQ103: a boss reference is found by reference type inside a forced
     // location, then a quest item is created in that boss alias.
     std::vector<std::pair<std::string, std::vector<std::uint8_t>>> dynamicOwned;
-    odai::importer::fnv::EsmRecordView dynamicQuestRecord;
+    odai::importer::bethesda::EsmRecordView dynamicQuestRecord;
     dynamicQuestRecord.type = "QUST";
     dynamicQuestRecord.formId = 0xd0800u;
     const auto addDynamicSubrecord =

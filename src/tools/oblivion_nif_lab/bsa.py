@@ -1,6 +1,6 @@
 """Minimal BSA v103/v104 reader, for iterating on NIF layouts outside the C++ build.
 
-Layout transcribed from src/import/fnv/bsa_archive.cc. The one v103 quirk it has
+Layout transcribed from src/import/bethesda/bsa_archive.cc. The one v103 quirk it has
 to reproduce is the embed-file-names flag: Oblivion sets 0x100 but writes no
 embedded names, so honouring it eats the head of every payload.
 """

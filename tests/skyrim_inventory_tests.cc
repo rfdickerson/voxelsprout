@@ -8,7 +8,7 @@ using namespace odai::bethesda;
 int main() {
     BethesdaSession session;
     std::string error;
-    assert(session.configure({odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+    assert(session.configure({odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
                               "inventory-fixture",
                               "skyrim-bleak-falls",
                               1u,

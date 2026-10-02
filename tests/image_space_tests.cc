@@ -1,11 +1,11 @@
-#include "import/fnv/image_space_records.h"
+#include "import/bethesda/image_space_records.h"
 #include <bit>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 namespace {
 int failures = 0;
 void check(bool ok, const char *message) {

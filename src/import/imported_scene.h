@@ -4,7 +4,7 @@
 
 #include <cmath>
 #include <optional>
-#include "import/fnv/nif_particles.h"
+#include "import/bethesda/nif_particles.h"
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -693,7 +693,7 @@ enum class ImportedParticleEffect : std::uint32_t {
 };
 
 struct ImportedSceneParticleEmitter {
-    std::optional<fnv::NifMist> mist;
+    std::optional<bethesda::NifMist> mist;
     std::uint32_t textureIndex = ~0u;
     std::array<float,12> mistTransform{1,0,0,0,0,1,0,0,0,0,1,0};
     std::string sourceId;

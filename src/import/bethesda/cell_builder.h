@@ -1,0 +1,435 @@
+#pragma once
+
+// Builds one exterior cell's geometry -- terrain plus placed statics -- into an
+// ImportedScene.
+//
+// Extracted from the cooker so the runtime streamer can produce the same
+// geometry directly from FalloutNV.esm and the BSAs, instead of loading a .bin
+// that the cooker produced earlier. Both now go through this one path, so the
+// two cannot drift: the cooker is a batch driver over many cells, the streamer
+// a per-cell driver over one, and the geometry, texture resolution and
+// coordinate conventions are shared.
+//
+// THREADING: a CellSceneBuilder is not thread safe and owns mutable caches
+// (textures, per-static meshes). Give each worker its own, or drive one from a
+// single thread. The FalloutAssetSource underneath IS safe to share.
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "import/bethesda/asset_source.h"
+#include "import/bethesda/plugin_load_order.h"
+#include "import/bethesda/decoded_texture_cache.h"
+#include "import/bethesda/fallout_records.h"
+#include "import/bethesda/nif_scene.h"
+#include "import/imported_scene.h"
+
+namespace odai::importer::bethesda {
+
+// Appends one shape's triangle list in renderer order: opaque triangles first,
+// then its vertex-faded fringe. Counts refer to the newly appended indices.
+void appendPartitionedNifShapeIndices(
+    const NifShape& shape,
+    std::uint32_t baseVertex,
+    std::vector<std::uint32_t>& outIndices,
+    std::uint32_t& outOpaqueIndexCount,
+    std::uint32_t& outFadedIndexCount);
+
+// Writes a placed-reference transform while preserving the rotation convention
+// of its source generation. Skyrim uses NiMatrix3::SetEulerAnglesXYZ;
+// the other import paths retain their existing composition convention.
+void writeBethesdaPlacementTransform(
+    ImportedSceneInstance& instance,
+    const FalloutPlacedReference& reference,
+    bool morrowind, bool skyrim = false);
+
+// Plugin-wide lookups the per-cell build needs, gathered once. A cell's REFR
+// names a STAT by formID and a LAND quadrant names an LTEX by formID; neither
+// record carries the path, so these have to come from a pass over the plugin
+// that is NOT per-cell.
+struct FalloutWorldTables {
+    std::unordered_map<std::uint32_t, FalloutWaterRecord> watersByFormId;
+    // STAT formID -> MODL path, relative to Data\Meshes.
+    std::unordered_map<std::uint32_t, std::string> staticModelPaths;
+    // STAT formID -> editor ID, used only to name meshes readably.
+    std::unordered_map<std::uint32_t, std::string> staticEditorIds;
+    // Base formID -> its record type (STAT, MSTT, ACTI, ...), for attributing
+    // geometry back to the kind of record that placed it.
+    std::unordered_map<std::uint32_t, std::string> staticRecordTypes;
+    // TES4 TREE formID -> procedural SPT metadata.
+    std::unordered_map<std::uint32_t, FalloutStaticRecord> treesByFormId;
+    // LTEX formID -> diffuse texture path, already resolved through TXST.
+    std::unordered_map<std::uint32_t, std::string> landTexturePaths;
+    std::unordered_map<std::uint32_t, std::array<std::string, 8>> textureSets;
+    std::unordered_map<std::uint32_t, std::uint16_t> textureSetFlags;
+    std::unordered_map<std::uint32_t, std::uint32_t> landTextureSetIds;
+    std::unordered_map<std::uint32_t, std::array<std::string, 8>> landTextureSlots;
+    std::unordered_map<std::uint32_t, std::uint16_t> landSurfaceProperties;
+    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> landGrass;
+    std::unordered_map<std::uint32_t, FalloutGrassRecord> grasses;
+    bool skyrim = false;
+    // TES3 VTEX palette entries are scoped to the plugin that authored LAND.
+    // Key: (source plugin index << 32) | stored LTEX index-plus-one.
+    std::unordered_map<std::uint64_t, std::string> morrowindLandTexturePaths;
+    // REGN formID -> the name to show the player (RDMP). Only discoverable
+    // regions are in here: a region with no map name is deliberately absent
+    // rather than present-with-an-empty-string, so a lookup miss means "do not
+    // announce this" without the caller having to re-check.
+    std::unordered_map<std::uint32_t, std::string> regionNamesByFormId;
+    // REGN formID -> its RDMP read as a localized string ID, for the plugins
+    // that store one instead of the text (Skyrim; see strings_table.h). The
+    // names above are the raw bytes in that case and are wrong -- Whiterun's
+    // reads "h" -- so a caller holding an asset source resolves these and
+    // overwrites regionNamesByFormId. Empty for every Fallout/Oblivion plugin,
+    // which makes that resolution a no-op rather than a special case.
+    std::unordered_map<std::uint32_t, std::uint32_t> regionNameStringIdsByFormId;
+    // Full Skyrim audio regions, including their ground-plane polygons and
+    // weather-filtered sound candidates. Kept separate from discoverable names
+    // because most audio regions deliberately have no map label.
+    std::unordered_map<std::uint32_t, FalloutRegionRecord> regionAudioByFormId;
+    std::unordered_map<std::uint32_t, FalloutSoundOutputModelRecord> soundOutputModelsByFormId;
+    std::unordered_map<std::uint32_t, FalloutSoundDescriptorRecord> soundDescriptorsByFormId;
+    // Placed REFR NAME -> SOUN -> SDSC -> SNDR.
+    std::unordered_map<std::uint32_t, std::uint32_t> soundDescriptorByBaseFormId;
+    // Worldspace editor ID -> formID, so a streamer can select one by name.
+    std::unordered_map<std::string, std::uint32_t> worldspaceFormIdsByEditorId;
+    // Every worldspace by formID, with its DNAM default land/water heights
+    // already INHERITED down the WNAM parent chain by
+    // resolveWorldspaceInheritance(). hasDefaultHeights stays false only when
+    // neither the worldspace nor any ancestor declares any, which is every
+    // Oblivion one. See FalloutWorldspaceRecord::hasDefaultHeights for why a
+    // cell with no LAND needs this, and parentWorldspaceFormId for what a
+    // Skyrim city looks like without it.
+    std::unordered_map<std::uint32_t, FalloutWorldspaceRecord> worldspaceDefaultsByFormId;
+
+    [[nodiscard]] const FalloutWorldspaceRecord* findWorldspace(std::uint32_t formId) const {
+        const auto found = worldspaceDefaultsByFormId.find(formId);
+        return found == worldspaceDefaultsByFormId.end() ? nullptr : &found->second;
+    }
+    [[nodiscard]] const FalloutWaterRecord* findWaterForCell(const FalloutCellRecord& cell) const {
+        std::uint32_t waterId = cell.waterFormId;
+        const auto* world = findWorldspace(cell.worldspaceFormId);
+        for (int hop = 0; waterId == 0u && world && hop < 8; ++hop) {
+            if ((world->parentFlags & 0x08u) == 0u) waterId = world->waterFormId;
+            world = findWorldspace(world->parentWorldspaceFormId);
+        }
+        const auto found = watersByFormId.find(waterId);
+        return found != watersByFormId.end() && found->second.hasVisualData ? &found->second : nullptr;
+    }
+    // MORROWIND REFERENCES NAME THEIR BASE BY STRING, so this is how a placed
+    // reference reaches its model. Lowercased id -> the synthetic formID the
+    // scan handed that record. Empty for every later generation, where a
+    // reference carries the formID directly.
+    std::unordered_map<std::string, std::uint32_t> baseFormIdsByEditorId;
+    // Stable source plugin spelling by global regular slot, used to serialize
+    // placed-reference identities into ImportedScene v31.
+    std::unordered_map<std::uint16_t, std::string> pluginFileNamesByRegularSlot;
+    bool morrowind = false;
+    // LIGH formID -> its light parameters. A LIGH also appears in the maps
+    // above when it carries a MODL (29 of 501 do), because the lamp mesh and
+    // the light it casts are both wanted.
+    std::unordered_map<std::uint32_t, FalloutLightRecord> lightsByFormId;
+};
+
+// Stable per-cell scatter in Bethesda coordinates; no runtime object IDs.
+std::vector<FalloutPlacedReference> scatterSkyrimGrass(
+    const FalloutCellRecord& cell, const FalloutWorldTables& tables);
+bool grassWaterAllowed(const FalloutGrassRecord& grass, float heightAboveWater);
+
+// Current worldspace first, followed by its WNAM ancestors. The walk is
+// bounded and cycle-safe because malformed plugin chains must not hang startup.
+[[nodiscard]] std::vector<std::string> worldspaceEditorIdAncestry(
+    const FalloutWorldTables& tables, std::uint32_t worldspaceFormId);
+
+// One pass over the plugin that materializes no cell contents: it rejects every
+// worldspace group and every cell's children, so LAND records are never
+// decompressed. This is what makes it affordable at startup.
+bool buildFalloutWorldTables(
+    const std::filesystem::path& esmPath, FalloutWorldTables& outTables, std::string& outError);
+
+// As above, across a whole load order. Every plugin's records are rewritten from
+// its own local mod-index space into the order's global one, and a later plugin
+// REPLACES an earlier one's record with the same formID -- which is the whole
+// mechanism an override patch works by. A plugin that fails to read is skipped
+// with a warning rather than failing the build: losing a patch's records is a
+// degraded scene, losing the base game's is no scene.
+bool buildFalloutWorldTables(
+    const FalloutLoadOrder& order, FalloutWorldTables& outTables, std::string& outError);
+
+// The authored arrival stored on the parent-world door of a paired exterior
+// teleport. Positions and rotations remain in Bethesda plugin space so this
+// importer-side result is independent of the runtime renderer's coordinates.
+struct FalloutWorldspaceEntrance {
+    float arrivalPosition[3] = {};
+    float arrivalRotationRadians[3] = {};
+    std::uint32_t parentDoorFormId = 0u;
+    std::uint32_t childDoorFormId = 0u;
+};
+
+// Finds an enabled, mutually paired load-door connection from a parent
+// exterior worldspace into a child exterior worldspace. These overloads mirror
+// the cell-index extraction paths used by the runtime and by synthetic tests.
+bool findFalloutWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const std::filesystem::path& esmPath,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError);
+bool findFalloutWorldspaceEntrance(
+    const FalloutCellIndex& index,
+    const FalloutWorldTables& tables,
+    const FalloutLoadOrder& order,
+    const std::string& parentWorldspaceEditorId,
+    const std::string& childWorldspaceEditorId,
+    FalloutWorldspaceEntrance& outEntrance,
+    std::string& outError);
+
+// True for meshes that only make sense alpha-blended or additive: dust, glow
+// billboards, light beams, sand. The imported static path draws opaque, so
+// these render as solid pale sheets standing in the landscape.
+//
+// A path heuristic rather than a flag test because the flag is not reliable
+// here: NiAlphaProperty's blend bit catches FXDustWhirlWind01 but not
+// SandDust02, which signals its transparency some other way. Skipping is a
+// stopgap for whatever the blended pass does not pick up.
+bool isEffectOnlyModelPath(std::string_view modelPath);
+
+// Stationary Bethesda fire effects are authored as placed effect-only NIFs in
+// both TES4 and TES5. They cannot use the opaque static-mesh path, but their
+// REFR position is exactly the emitter origin a procedural renderer needs.
+bool isFireParticleEffectModelPath(std::string_view modelPath);
+
+// True for the game's own sky objects (Skyrim places sky\clouddistant*.nif and
+// friends as ordinary references in Tamriel's persistent cell). See the
+// definition: drawn as scenery they are a white plane over the landscape.
+bool isSkyOnlyModelPath(std::string_view modelPath);
+
+// Appends this cell's water surface to `outScene`, and reports whether it did.
+//
+// Free rather than a CellSceneBuilder member because the offline cooker builds
+// its ImportedScene directly and does not go through the builder -- the terrain
+// append is already duplicated between the two, and duplicating this as well is
+// how the cooked and streamed worlds drift apart.
+//
+// `worldspace` supplies the implied water height for a cell that states none --
+// resolved up the WNAM parent chain by resolveWorldspaceInheritance(). May be
+// null, which means "no default": a cell with neither an XCLW nor terrain then
+// contributes nothing, rather than a quad at height 0.
+bool appendCellWaterPatch(
+    odai::importer::ImportedScene& outScene,
+    const FalloutCellRecord& cell,
+    const FalloutWorldspaceRecord* worldspace = nullptr);
+
+// Resolves XTEL destinations through the load-order-wide cell index and
+// appends runtime-ready door records. Shared by streaming and profile cooking.
+void appendResolvedDoors(
+    const FalloutCellRecord& record,
+    const FalloutCellIndex& index,
+    odai::importer::ImportedScene& scene);
+
+// Samples a TES4/TES5 LAND overlay at a fractional quadrant-post coordinate.
+// Bilinear interpolation preserves authored posts and shared quadrant edges.
+// Public for synthetic boundary and boundedness regression coverage.
+float sampleLandLayerOpacity(
+    const FalloutLandTextureLayer& layer, float quadrantRow, float quadrantCol);
+
+struct CellBuildStats {
+    std::size_t placedInstances = 0;
+    std::size_t totalShapes = 0;
+    std::size_t untexturedShapes = 0;
+    std::size_t shapesWithNoTexturePath = 0;
+    std::size_t shadowDecalShapesSkipped = 0;
+    std::size_t editorMarkerModelsSkipped = 0;
+    std::size_t untexturedShapesGivenModelTexture = 0;
+    std::size_t droppedTerrainLayers = 0;
+    std::uint32_t skippedGeometryShapes = 0;
+    // See NifModel's fields of the same names (import/bethesda/nif_scene.h).
+    std::uint32_t nodeParseFailures = 0;
+    std::uint32_t unhandledNodeTypes = 0;
+    std::size_t terrainPartsEmitted = 0;
+    // Where a cell's build time actually goes. Texture decode and NIF parse are
+    // the two candidates for caching, and they are very differently sized.
+    float nifParseMs = 0.0f;
+    float textureDecodeMs = 0.0f;
+    std::size_t texturesDecoded = 0;
+    std::size_t nifsParsed = 0;
+    std::size_t extremeUvShapes = 0;
+    std::size_t effectMeshesSkipped = 0;
+    std::size_t refractionShapesSkipped = 0;
+    std::size_t particleEmittersPlaced = 0;
+    // Animated banner meshes settled into a deterministic gravity rest pose
+    // with Jolt before their vertices are packed into the scene cache.
+    std::size_t clothMeshesSettled = 0;
+    // REFR header flag 0x800: quest objects hidden until a script enables
+    // them. Skipped, because an unstarted game does not show them -- and some
+    // are worldspace-sized (Skyrim's MG07 blizzard barrier).
+    std::size_t disabledReferencesSkipped = 0;
+    // LIGH references turned into ImportedScene lights, and those rejected for
+    // having a zero radius (exactly one LIGH in FalloutNV.esm does).
+    std::size_t lightsPlaced = 0;
+    std::size_t lightsSkippedZeroRadius = 0;
+    // Cells that contributed a water surface. Zero across most of the Mojave
+    // and nonzero along any coast, lake or river.
+    std::size_t waterPatchesEmitted = 0;
+    std::size_t grassInstances = 0;
+
+    // References that were placed in the cell and then drew nothing.
+    //
+    // Every one of these paths used to `continue` with no counter at all, so
+    // "this town has holes in it" had no way to be asked as a question. They are
+    // split by CAUSE because the causes have opposite fixes: a formID that
+    // resolves to no record is a load-order or remap problem, a record with no
+    // MODL is usually correct (a trigger, a marker, an activator with no mesh),
+    // and a MODL naming a file that is not there is a missing-asset problem.
+    //
+    // Counted per REFERENCE, not per base record, so a hundred placements of one
+    // missing rock read as a hundred holes -- which is what a hole in a town
+    // actually looks like.
+    //
+    // Deliberate skips (effect meshes, editor markers) are NOT counted here;
+    // they have their own counters above and folding them in would bury the
+    // signal in known-good noise.
+    std::size_t referencesDroppedBaseNotFound = 0;
+    std::size_t referencesDroppedBaseHasNoModel = 0;
+    std::size_t referencesDroppedMeshUnresolved = 0;
+    std::size_t referencesDroppedMeshUnreadable = 0;
+    // Base record type -> how many references it dropped, e.g. {"ACTI": 4}.
+    // "<base record not found>" for a formID with no record at all.
+    std::unordered_map<std::string, std::size_t> droppedReferencesByBaseType;
+    bool textureBudgetExceeded = false;
+
+    // Diagnostic name sets the cooker reports. Kept here rather than dropped in
+    // the extraction: "half the rock is grey" being a list of model paths rather
+    // than a guess is the reason they exist.
+    std::unordered_set<std::string> extremeUvModelPaths;
+    std::unordered_set<std::string> untexturedModelPaths;
+    std::unordered_set<std::string> unresolvedTexturePaths;
+};
+
+class CellSceneBuilder {
+public:
+    // Neither reference is owned; both must outlive the builder.
+    // `textureCache` is optional but strongly recommended when several builders
+    // run concurrently: it is the only state they share, and without it each
+    // decodes the same textures independently (~170 ms of a ~270 ms cell build).
+    CellSceneBuilder(
+        const FalloutAssetSource& assets,
+        const FalloutWorldTables& tables,
+        DecodedTextureCache* textureCache = nullptr);
+
+    // Terrain draws must all precede static draws in the finished scene, which
+    // is what the renderer's terrain/static draw split relies on. Call
+    // addCellTerrain for every cell first, then addCellStatics for every cell.
+    void addCellTerrain(const FalloutCellRecord& cell);
+    void addCellStatics(const FalloutCellRecord& cell);
+    // Emits one ImportedScene light for a REFR whose base is a LIGH. Called
+    // from addCellStatics, and additive to the lamp mesh rather than instead
+    // of it.
+    void addCellLight(const FalloutPlacedReference& ref, const FalloutLightRecord& light);
+    void addCellFireEmitter(const FalloutPlacedReference& ref, std::string_view modelPath);
+
+    // Convenience for the single-cell (streaming) case.
+    void addCell(const FalloutCellRecord& cell) {
+        addCellTerrain(cell);
+        addCellStatics(cell);
+    }
+
+    // Finalizes packed render data and page ranges, and hands over the scene.
+    // The builder is left empty and must not be reused.
+    void finish(ImportedScene& outScene);
+
+    [[nodiscard]] const CellBuildStats& stats() const { return m_stats; }
+    [[nodiscard]] const ImportedScene& scene() const { return m_scene; }
+    [[nodiscard]] ImportedScene& scene() { return m_scene; }
+
+    // Resolves a texture path to a scene texture index, decoding and caching on
+    // first use. Public because the LOD cooker needs the same behaviour.
+    std::uint32_t resolveTextureIndex(const std::string& texturePath, bool linearData = false, std::uint32_t clampMode = 3, bool cube = false);
+
+    // Most-used BTXT base texture across `cells`, as a scene texture index, for
+    // feeding back into setFallbackLandTexture(). Resolves (and so caches) the
+    // texture as a side effect.
+    std::uint32_t dominantLandTexture(const std::vector<const FalloutCellRecord*>& cells);
+
+    // Texture a LAND quadrant with no BTXT falls back to. A quadrant without a
+    // BTXT does NOT mean "untextured" -- it means the worldspace default, which
+    // this importer does not parse. The closest honest stand-in is the most-used
+    // land texture in the area being built; treating it as untextured left a
+    // large fraction of terrain vertices shading from vertex colour alone.
+    //
+    // The caller picks it because the right answer differs: the cooker uses the
+    // dominant texture across the whole region it is cooking, a streamer only
+    // has one cell to go on.
+    void setFallbackLandTexture(std::uint32_t sceneTextureIndex) {
+        m_fallbackLandTexture = sceneTextureIndex;
+    }
+
+    void setTextureBudget(std::size_t budget) { m_textureBudget = budget; }
+    void setMaxTextureSize(std::uint32_t maxSize) { m_maxTextureSize = maxSize; }
+
+private:
+    std::uint32_t resolveLandTexture(std::uint32_t landTextureFormId, bool exact);
+    [[nodiscard]] const std::string* staticModelPathFor(std::uint32_t baseFormId) const;
+
+    const FalloutAssetSource& m_assets;
+    const FalloutWorldTables& m_tables;
+    DecodedTextureCache* m_textureCache = nullptr;
+    ImportedScene m_scene;
+    CellBuildStats m_stats{};
+
+    // Index of the single merged terrain mesh in m_scene.meshes, or npos until
+    // a cell with LAND is added.
+    std::size_t m_terrainMeshIndex = static_cast<std::size_t>(-1);
+    std::unordered_map<std::string, std::uint32_t> m_textureIndexByPath;
+    std::unordered_set<std::string> m_failedTexturePaths;
+    std::unordered_map<std::uint32_t, std::uint32_t> m_meshIndexByStaticFormId;
+    // Complete model-space collision soup per placed base. Authored Havok wins;
+    // opaque visible geometry is stored here only as the per-NIF fallback.
+    std::unordered_map<std::uint32_t, std::vector<NifCollisionTriangle>>
+        m_collisionByStaticFormId;
+    // Runtime-only components normally instantiated by Skyrim's lumber-mill
+    // animation graph. They use private high-byte form IDs solely as stable
+    // mesh-cache keys and never escape into plugin resolution.
+    std::unordered_map<std::uint32_t, std::string> m_syntheticStaticModelPaths;
+public:
+    // Why a base record stopped producing geometry, so a REPEAT reference to it
+    // can be attributed to the same cause instead of only the first one being
+    // explained. kIntentional covers the deliberate skips, which are counted
+    // elsewhere and must not be counted again here. Public because
+    // failedStatics() below hands the map to diagnostics.
+    enum class StaticDropReason : std::uint8_t {
+        kIntentional,
+        kBaseNotFound,
+        kBaseHasNoModel,
+        kMeshUnresolved,
+        kMeshUnreadable,
+    };
+
+private:
+    void noteDroppedReference(std::uint32_t baseFormId, StaticDropReason reason);
+    std::unordered_map<std::uint32_t, StaticDropReason> m_failedStatics;
+    std::unordered_set<std::uint32_t> m_checkedParticleModels;
+    std::unordered_map<std::uint32_t, NifMist> m_particleDefinitions;
+
+public:
+    // Which base records produced no geometry, and why -- for diagnostics that
+    // want to name the culprits rather than only count them.
+    [[nodiscard]] const std::unordered_map<std::uint32_t, StaticDropReason>& failedStatics() const {
+        return m_failedStatics;
+    }
+
+private:
+    std::uint32_t m_fallbackLandTexture = 0xFFFFFFFFu;
+    std::size_t m_textureBudget = 1000u;
+    std::uint32_t m_maxTextureSize = 512u;
+    bool m_warnedTextureBudget = false;
+};
+
+}  // namespace odai::importer::bethesda

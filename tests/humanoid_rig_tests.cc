@@ -1,6 +1,6 @@
 #include "anim/humanoid_rig.h"
 #include "anim/animation_sampler.h"
-#include "import/fnv/character_builder.h"
+#include "import/bethesda/character_builder.h"
 #include <cassert>
 #include <cmath>
 #include <iostream>
@@ -9,7 +9,7 @@
 
 int main(int argc, char** argv) {
     using namespace odai::anim;
-    odai::importer::fnv::FalloutCharacter character;
+    odai::importer::bethesda::FalloutCharacter character;
     const std::pair<const char*, int> bones[] = {
         {"NPC Root [Root]", -1}, {"NPC Pelvis [Pelv]", 0}, {"NPC Spine [Spn0]", 0},
         {"NPC Head [Head]", 2},
@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
     sampler.sample(character.skeleton, clip, .5f, before);
     const auto original = character;
     std::string error;
-    assert(odai::importer::fnv::canonicalizeSkyrimCharacter(character, clips, error));
+    assert(odai::importer::bethesda::canonicalizeSkyrimCharacter(character, clips, error));
     const auto& mapping = *character.humanoidRig;
     assert(character.vertices[0].boneIndices[0] == mapping.roles.at("right_hand"));
     assert(clips[0].tracks[0].boneIndex == mapping.roles.at("right_hand"));
@@ -52,11 +52,11 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < second.sourceToCanonical.size(); ++i) assert(second.sourceToCanonical[i] == int(i));
     auto invalid = original;
     invalid.skeleton.bones[6].name = "missing_hand";
-    assert(!odai::importer::fnv::canonicalizeSkyrimCharacter(invalid, {}, error));
+    assert(!odai::importer::bethesda::canonicalizeSkyrimCharacter(invalid, {}, error));
     assert(invalid.vertices[0].boneIndices[0] == 6 && !invalid.humanoidRig);
     invalid = original;
     invalid.vertices[0].boneIndices[0] = 999;
-    assert(!odai::importer::fnv::canonicalizeSkyrimCharacter(invalid, {}, error));
+    assert(!odai::importer::bethesda::canonicalizeSkyrimCharacter(invalid, {}, error));
     assert(invalid.skeleton.bones[4].name == original.skeleton.bones[4].name);
     // Extended rigs must retain optional bones, deterministic identity and
     // every hierarchy level above the old small-biped sizes.
@@ -94,15 +94,15 @@ int main(int argc, char** argv) {
     assert(binding.targetFingerprint==fingerprint);
     invalid = original;
     invalid.skeleton.bones[6].parentIndex = 1;
-    assert(!odai::importer::fnv::canonicalizeSkyrimCharacter(invalid, {}, error));
+    assert(!odai::importer::bethesda::canonicalizeSkyrimCharacter(invalid, {}, error));
     if (argc == 3 && std::string_view(argv[1]) == "--rig-file") {
         std::ifstream input(argv[2], std::ios::binary);
         const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-        odai::importer::fnv::NifSkeleton nif;
+        odai::importer::bethesda::NifSkeleton nif;
         Skeleton imported;
         HumanoidRigMapping mapped;
-        if (!odai::importer::fnv::parseNifSkeleton(bytes, nif, error) ||
-            !odai::importer::fnv::buildFalloutSkeleton(nif, imported) ||
+        if (!odai::importer::bethesda::parseNifSkeleton(bytes, nif, error) ||
+            !odai::importer::bethesda::buildFalloutSkeleton(nif, imported) ||
             !canonicalizeHumanoidRig(imported, mapped, error)) {
             std::cerr << "Local rig probe failed: " << error << '\n'; return 1;
         }

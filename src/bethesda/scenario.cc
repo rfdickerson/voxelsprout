@@ -8,7 +8,7 @@ const ScenarioDefinition& skyrimBleakFallsScenario() {
     // remain untouched and must advance through retail records/scripts.
     static const ScenarioDefinition scenario{
         "skyrim-bleak-falls",
-        importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "Skyrim.esm",
         "Tamriel",
         "Riverwood",
@@ -62,7 +62,7 @@ const ScenarioDefinition& skyrimWhiterunShowcaseScenario() {
     // their packages still come entirely from the resolved retail load order.
     static const ScenarioDefinition scenario{
         "skyrim-whiterun-showcase",
-        importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "Skyrim.esm",
         "WhiterunWorld",
         {},
@@ -82,7 +82,7 @@ const ScenarioDefinition& skyrimRiftenShowcaseScenario() {
     // and its residents remain entirely retail content.
     static const ScenarioDefinition scenario{
         "skyrim-riften-showcase",
-        importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "Skyrim.esm",
         "RiftenWorld",
         {},

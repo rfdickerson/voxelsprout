@@ -6,7 +6,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -118,9 +117,6 @@ const char* voxelGiSurfaceFallbackReasonName(
 } // namespace
 
 void RendererBackend::renderFrame(const CameraPose& camera) {
-    static const odai::world::ChunkGrid chunkGrid;
-    static const VoxelPreview preview;
-    constexpr std::span<const std::size_t> visibleChunkIndices{};
     const auto cpuFrameStartTime = std::chrono::steady_clock::now();
     float cpuWaitMs = 0.0f;
     float cpuWaitFrameSlotMs = 0.0f;
@@ -177,37 +173,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     m_debugCameraFovDegrees = std::clamp(m_debugCameraFovDegrees, 20.0f, 120.0f);
     const float activeFovDegrees = m_debugCameraFovDegrees;
 
-    const std::uint32_t currentChunkCount = static_cast<std::uint32_t>(chunkGrid.chunks().size());
-    if (currentChunkCount != m_debugChunkCount) {
-        m_debugMacroCellStatsDirty = true;
-    }
-    m_debugChunkCount = currentChunkCount;
-    if (m_debugMacroCellStatsDirty) {
-        m_debugMacroCellStatsDirty = false;
-        m_debugMacroCellUniformCount = 0;
-        m_debugMacroCellRefined4Count = 0;
-        m_debugMacroCellRefined1Count = 0;
-        for (const odai::world::Chunk& chunk : chunkGrid.chunks()) {
-            for (int my = 0; my < odai::world::Chunk::kMacroSizeY; ++my) {
-                for (int mz = 0; mz < odai::world::Chunk::kMacroSizeZ; ++mz) {
-                    for (int mx = 0; mx < odai::world::Chunk::kMacroSizeX; ++mx) {
-                        const odai::world::Chunk::MacroCell cell = chunk.macroCellAt(mx, my, mz);
-                        switch (cell.resolution) {
-                        case odai::world::Chunk::CellResolution::Uniform:
-                            ++m_debugMacroCellUniformCount;
-                            break;
-                        case odai::world::Chunk::CellResolution::Refined4:
-                            ++m_debugMacroCellRefined4Count;
-                            break;
-                        case odai::world::Chunk::CellResolution::Refined1:
-                            ++m_debugMacroCellRefined1Count;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
     const std::optional<CoreFrameGraphPlan> coreFrameGraphPlan = buildCoreFrameGraphPlan(&m_frameGraph);
     if (!coreFrameGraphPlan.has_value()) {
         VOX_LOGE("render") << "frame graph has a cycle; refusing to render frame";
@@ -324,8 +289,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     uploadSkinnedActorPoseForFrame();
 
     if (m_rtSceneDirty &&
-        !m_chunkMeshRebuildRequested &&
-        m_pendingChunkRemeshKeys.empty() &&
         !anyTransferSlotInFlight()) {
         if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
             VOX_LOGE("render") << "deferred chunk RT scene rebuild failed";
@@ -437,7 +400,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     m_debugDrawnLod0Ranges = 0;
     m_debugDrawnLod1Ranges = 0;
     m_debugDrawnLod2Ranges = 0;
-    m_debugChunkIndirectCommandCount = 0;
     m_debugDrawCallsTotal = 0;
     m_debugDrawCallsShadow = 0;
     m_debugDrawCallsPrepass = 0;
@@ -480,12 +442,11 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     std::uint32_t interiorPointShadowLightCount = 0;
     const bool sunShaftsForFrame =
         m_sunShaftsRequested && shouldRenderImportedSky(m_importedInteriorLighting);
-    const bool legacyVoxelRenderingEnabled = !renderingImportedScene;
     const bool importedInteriorGiEnabled =
         m_importedSceneInteriorMode &&
         !useAuthoredImportedInteriorLighting(m_importedInteriorLighting) &&
         !m_importedGiTriangles.empty();
-    const bool voxelGiSceneEnabled = legacyVoxelRenderingEnabled || importedInteriorGiEnabled;
+    const bool voxelGiSceneEnabled = importedInteriorGiEnabled;
     const float farPlane = (s_farPlaneOverride > 0.0f)
         ? s_farPlaneOverride
         : (renderingImportedScene ? 50000.0f : 500.0f);
@@ -508,11 +469,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         ? (camera.orthoHalfHeight / farPlane)
         : std::tan(odai::math::radians(activeFovDegrees) * 0.5f);
     const odai::math::Vector3 eye{camera.x, camera.y, camera.z};
-    const CameraFrameDerived cameraFrame = computeCameraFrame(camera);
-    const int cameraChunkX = cameraFrame.chunkX;
-    const int cameraChunkY = cameraFrame.chunkY;
-    const int cameraChunkZ = cameraFrame.chunkZ;
-    const odai::math::Vector3 forward = cameraFrame.forward;
+    const odai::math::Vector3 forward = computeCameraForward(camera.yawDegrees, camera.pitchDegrees);
 
     const odai::math::Matrix4 view = computeCameraView(camera);
     odai::math::Matrix4 projection;
@@ -2156,8 +2113,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_voxelGiWorldDirty = false;
         m_voxelGiOccupancyFullRebuildInProgress = false;
         m_voxelGiOccupancyFullRebuildNeedsClear = false;
-        m_voxelGiOccupancyFullRebuildCursor = 0;
-        m_voxelGiDirtyChunkIndices.clear();
     }
     const bool voxelGiNeedsOccupancyUpload = voxelGiSceneEnabled && voxelGiFlags.needsOccupancyUpload;
     const bool voxelGiRtSurfaceSettingsChanged =
@@ -2290,10 +2245,11 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         int32_t worldMinZ = 0;
         std::vector<uint32_t> voxels;
     };
+    constexpr int kImportedGiChunkSize = 32;
     constexpr uint32_t kVoxelGiChunkVoxelCount =
-        static_cast<uint32_t>(odai::world::Chunk::kSizeX) *
-        static_cast<uint32_t>(odai::world::Chunk::kSizeY) *
-        static_cast<uint32_t>(odai::world::Chunk::kSizeZ);
+        static_cast<uint32_t>(kImportedGiChunkSize) *
+        static_cast<uint32_t>(kImportedGiChunkSize) *
+        static_cast<uint32_t>(kImportedGiChunkSize);
     constexpr uint32_t kVoxelGiOccupancyChunkBudgetPerFrame = 8u;
     constexpr float kVoxelGiOccupancyOriginRebuildThreshold = 0.001f;
     constexpr uint32_t kImportedGiVoxelType = 250u;
@@ -2318,9 +2274,9 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             for (int cy = 0; cy < 2; ++cy) {
                 for (int cx = 0; cx < 2; ++cx) {
                     ImportedGiOccupancyChunk chunk{};
-                    chunk.worldMinX = originX + (cx * odai::world::Chunk::kSizeX);
-                    chunk.worldMinY = originY + (cy * odai::world::Chunk::kSizeY);
-                    chunk.worldMinZ = originZ + (cz * odai::world::Chunk::kSizeZ);
+                    chunk.worldMinX = originX + (cx * kImportedGiChunkSize);
+                    chunk.worldMinY = originY + (cy * kImportedGiChunkSize);
+                    chunk.worldMinZ = originZ + (cz * kImportedGiChunkSize);
                     chunk.voxels.assign(kVoxelGiChunkVoxelCount, 0u);
                     chunks.push_back(std::move(chunk));
                 }
@@ -2339,18 +2295,18 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                 gz >= static_cast<int>(kVoxelGiGridResolution)) {
                 return;
             }
-            const int chunkX = std::clamp(gx / odai::world::Chunk::kSizeX, 0, 1);
-            const int chunkY = std::clamp(gy / odai::world::Chunk::kSizeY, 0, 1);
-            const int chunkZ = std::clamp(gz / odai::world::Chunk::kSizeZ, 0, 1);
-            const int localX = gx - (chunkX * odai::world::Chunk::kSizeX);
-            const int localY = gy - (chunkY * odai::world::Chunk::kSizeY);
-            const int localZ = gz - (chunkZ * odai::world::Chunk::kSizeZ);
+            const int chunkX = std::clamp(gx / kImportedGiChunkSize, 0, 1);
+            const int chunkY = std::clamp(gy / kImportedGiChunkSize, 0, 1);
+            const int chunkZ = std::clamp(gz / kImportedGiChunkSize, 0, 1);
+            const int localX = gx - (chunkX * kImportedGiChunkSize);
+            const int localY = gy - (chunkY * kImportedGiChunkSize);
+            const int localZ = gz - (chunkZ * kImportedGiChunkSize);
             const std::size_t chunkIndex = static_cast<std::size_t>((chunkZ * 4) + (chunkY * 2) + chunkX);
             const std::size_t voxelIndex =
                 static_cast<std::size_t>(localX) +
-                (static_cast<std::size_t>(odai::world::Chunk::kSizeX) *
+                (static_cast<std::size_t>(kImportedGiChunkSize) *
                     (static_cast<std::size_t>(localZ) +
-                     (static_cast<std::size_t>(odai::world::Chunk::kSizeZ) * static_cast<std::size_t>(localY))));
+                     (static_cast<std::size_t>(kImportedGiChunkSize) * static_cast<std::size_t>(localY))));
             if (chunkIndex >= chunks.size() || voxelIndex >= chunks[chunkIndex].voxels.size()) {
                 return;
             }
@@ -2426,50 +2382,16 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             m_voxelGiOccupancyBuildOrigin = voxelGiBuildOrigin;
             m_voxelGiOccupancyFullRebuildInProgress = true;
             m_voxelGiOccupancyFullRebuildNeedsClear = true;
-            m_voxelGiOccupancyFullRebuildCursor = 0;
-            m_voxelGiDirtyChunkIndices.clear();
-        } else if (!m_voxelGiOccupancyFullRebuildInProgress &&
-                   m_voxelGiDirtyChunkIndices.empty() &&
-                   m_voxelGiWorldDirty) {
+        } else if (!m_voxelGiOccupancyFullRebuildInProgress && m_voxelGiWorldDirty) {
             m_voxelGiOccupancyFullRebuildInProgress = true;
             m_voxelGiOccupancyFullRebuildNeedsClear = true;
-            m_voxelGiOccupancyFullRebuildCursor = 0;
         }
 
-        const std::size_t chunkCount = legacyVoxelRenderingEnabled ? chunkGrid.chunkCount() : 0u;
-        if (m_voxelGiOccupancyFullRebuildInProgress && chunkCount == 0u && m_importedGiTriangles.empty()) {
-            m_voxelGiOccupancyFullRebuildInProgress = false;
-            m_voxelGiOccupancyFullRebuildCursor = 0u;
-        }
-
-        std::vector<std::size_t> occupancyChunkBatch;
-        occupancyChunkBatch.reserve(kVoxelGiOccupancyChunkBudgetPerFrame);
-        const bool buildFromFullRebuild = m_voxelGiOccupancyFullRebuildInProgress;
-        const std::size_t fullRebuildBatchBegin = m_voxelGiOccupancyFullRebuildCursor;
-        std::size_t dirtyBatchCount = 0;
-        if (buildFromFullRebuild) {
-            const std::size_t remainingChunks =
-                (chunkCount > fullRebuildBatchBegin) ? (chunkCount - fullRebuildBatchBegin) : 0u;
-            const std::size_t batchCount =
-                std::min<std::size_t>(kVoxelGiOccupancyChunkBudgetPerFrame, remainingChunks);
-            for (std::size_t i = 0; i < batchCount; ++i) {
-                occupancyChunkBatch.push_back(fullRebuildBatchBegin + i);
-            }
-        } else {
-            dirtyBatchCount = std::min<std::size_t>(
-                kVoxelGiOccupancyChunkBudgetPerFrame,
-                m_voxelGiDirtyChunkIndices.size()
-            );
-            const std::size_t dirtyStart = m_voxelGiDirtyChunkIndices.size() - dirtyBatchCount;
-            for (std::size_t i = 0; i < dirtyBatchCount; ++i) {
-                occupancyChunkBatch.push_back(m_voxelGiDirtyChunkIndices[dirtyStart + i]);
-            }
-        }
         std::vector<ImportedGiOccupancyChunk> importedGiChunks;
-        if (buildFromFullRebuild || occupancyBuildOriginChanged || !m_voxelGiOccupancyInitialized) {
+        if (m_voxelGiOccupancyFullRebuildInProgress || occupancyBuildOriginChanged || !m_voxelGiOccupancyInitialized) {
             importedGiChunks = buildImportedGiOccupancyChunks();
         }
-        const std::size_t occupancySourceCount = occupancyChunkBatch.size() + importedGiChunks.size();
+        const std::size_t occupancySourceCount = importedGiChunks.size();
 
         if (occupancySourceCount != 0u) {
             const VkDeviceSize chunkMetaBytes =
@@ -2494,33 +2416,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                 chunkVoxelsSliceOpt->mapped != nullptr) {
                 auto* chunkMeta = static_cast<VoxelGiChunkMetaUpload*>(chunkMetaSliceOpt->mapped);
                 auto* chunkVoxels = static_cast<uint32_t*>(chunkVoxelsSliceOpt->mapped);
-                const std::vector<odai::world::Chunk>& chunks = chunkGrid.chunks();
-                for (std::size_t batchIndex = 0; batchIndex < occupancyChunkBatch.size(); ++batchIndex) {
-                    const std::size_t chunkIndex = occupancyChunkBatch[batchIndex];
-                    if (chunkIndex >= chunks.size()) {
-                        continue;
-                    }
-                    const odai::world::Chunk& chunk = chunks[chunkIndex];
-                    chunkMeta[batchIndex].worldMinX = chunk.chunkX() * odai::world::Chunk::kSizeX;
-                    chunkMeta[batchIndex].worldMinY = chunk.chunkY() * odai::world::Chunk::kSizeY;
-                    chunkMeta[batchIndex].worldMinZ = chunk.chunkZ() * odai::world::Chunk::kSizeZ;
-                    chunkMeta[batchIndex].voxelOffset =
-                        static_cast<uint32_t>(batchIndex * static_cast<std::size_t>(kVoxelGiChunkVoxelCount));
-
-                    const std::vector<odai::world::Voxel>& voxels = chunk.voxels();
-                    const std::size_t voxelWriteOffset = batchIndex * static_cast<std::size_t>(kVoxelGiChunkVoxelCount);
-                    for (std::size_t voxelIndex = 0; voxelIndex < voxels.size(); ++voxelIndex) {
-                        const odai::world::Voxel& voxel = voxels[voxelIndex];
-                        const uint32_t packedVoxel = static_cast<uint32_t>(
-                            static_cast<uint32_t>(static_cast<uint8_t>(voxel.type)) |
-                            static_cast<uint32_t>(static_cast<uint32_t>(voxel.baseColorIndex) << 8u)
-                        );
-                        chunkVoxels[voxelWriteOffset + voxelIndex] = packedVoxel;
-                    }
-                }
-                const std::size_t importedChunkBase = occupancyChunkBatch.size();
                 for (std::size_t importedIndex = 0; importedIndex < importedGiChunks.size(); ++importedIndex) {
-                    const std::size_t batchIndex = importedChunkBase + importedIndex;
+                    const std::size_t batchIndex = importedIndex;
                     const ImportedGiOccupancyChunk& importedChunk = importedGiChunks[importedIndex];
                     chunkMeta[batchIndex].worldMinX = importedChunk.worldMinX;
                     chunkMeta[batchIndex].worldMinY = importedChunk.worldMinY;
@@ -2549,17 +2446,10 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                         chunkVoxelsSliceOpt->size
                     };
                     voxelGiOccupancyDispatchZ = static_cast<uint32_t>(
-                        occupancySourceCount * static_cast<std::size_t>(odai::world::Chunk::kSizeZ)
+                        occupancySourceCount * static_cast<std::size_t>(kImportedGiChunkSize)
                     );
-                    if (buildFromFullRebuild) {
-                        m_voxelGiOccupancyFullRebuildCursor = fullRebuildBatchBegin + occupancyChunkBatch.size();
-                        if (m_voxelGiOccupancyFullRebuildCursor >= chunkCount) {
-                            m_voxelGiOccupancyFullRebuildCursor = 0;
-                            m_voxelGiOccupancyFullRebuildInProgress = false;
-                        }
-                    } else if (dirtyBatchCount > 0u) {
-                        m_voxelGiDirtyChunkIndices.resize(m_voxelGiDirtyChunkIndices.size() - dirtyBatchCount);
-                    }
+                    m_voxelGiOccupancyFullRebuildInProgress = false;
+
                 }
             } else {
                 VOX_LOGW("render") << "voxel GI chunk occupancy upload allocation failed";
@@ -2577,8 +2467,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     } else if (!voxelGiNeedsOccupancyUpload) {
         m_voxelGiOccupancyFullRebuildInProgress = false;
         m_voxelGiOccupancyFullRebuildNeedsClear = false;
-        m_voxelGiOccupancyFullRebuildCursor = 0;
-        m_voxelGiDirtyChunkIndices.clear();
     }
     m_debugCpuGiOccupancyBuildMs = voxelGiOccupancyCpuMs;
 
@@ -2724,35 +2612,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         );
     }
 
-    const bool legacySceneRenderingEnabled = legacyVoxelRenderingEnabled;
-    const FrameInstanceDrawData frameInstanceDrawData{};
-    const uint32_t pipeInstanceCount = frameInstanceDrawData.pipeInstanceCount;
-    const auto& pipeInstanceSliceOpt = frameInstanceDrawData.pipeInstanceSliceOpt;
-    const uint32_t transportInstanceCount = frameInstanceDrawData.transportInstanceCount;
-    const auto& transportInstanceSliceOpt = frameInstanceDrawData.transportInstanceSliceOpt;
-    const uint32_t beltCargoInstanceCount = frameInstanceDrawData.beltCargoInstanceCount;
-    const auto& beltCargoInstanceSliceOpt = frameInstanceDrawData.beltCargoInstanceSliceOpt;
-    const std::vector<ReadyMagicaDraw>& readyMagicaDraws = frameInstanceDrawData.readyMagicaDraws;
-
-    const FrameChunkDrawData frameChunkDrawData = legacySceneRenderingEnabled
-        ? prepareFrameChunkDrawData(
-            chunkGrid.chunks(),
-            visibleChunkIndices,
-            lightViewProjMatrices,
-            cameraChunkX,
-            cameraChunkY,
-            cameraChunkZ)
-        : FrameChunkDrawData{};
-    const auto& chunkInstanceSliceOpt = frameChunkDrawData.chunkInstanceSliceOpt;
-    const auto& shadowChunkInstanceSliceOpt = frameChunkDrawData.shadowChunkInstanceSliceOpt;
-    const VkBuffer chunkInstanceBuffer = frameChunkDrawData.chunkInstanceBuffer;
-    const VkBuffer shadowChunkInstanceBuffer = frameChunkDrawData.shadowChunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = legacySceneRenderingEnabled
-        ? m_bufferAllocator.getBuffer(m_chunkVertexBufferHandle)
-        : VK_NULL_HANDLE;
-    const VkBuffer chunkIndexBuffer = legacySceneRenderingEnabled
-        ? m_bufferAllocator.getBuffer(m_chunkIndexBufferHandle)
-        : VK_NULL_HANDLE;
     const VkBuffer importedVertexBuffer = m_bufferAllocator.getBuffer(m_importedVertexBufferHandle);
     const VkBuffer importedIndexBuffer = m_bufferAllocator.getBuffer(m_importedIndexBufferHandle);
     std::vector<ImportedMeshDraw> importedActorMeshDraws;
@@ -2779,143 +2638,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             s_loggedDisabledImportedPageCulling = true;
         }
     }
-    auto importedPageIntersectsClip = [](
-                                          const ImportedScenePageDrawRange& pageRange,
-                                          const odai::math::Matrix4& clipMatrix,
-                                          float clipMargin
-                                      ) -> bool {
-        if (pageRange.drawCount == 0u) {
-            return false;
-        }
-        return importedBoundsIntersectClip(pageRange.boundsMin, pageRange.boundsMax,
-                                           clipMatrix, clipMargin);
-    };
-    auto buildVisibleImportedDraws = [&](
-                                      const odai::math::Matrix4& clipMatrix,
-                                      float clipMargin,
-                                      std::vector<ImportedMeshDraw>& outDraws,
-                                      float minimumY = -std::numeric_limits<float>::infinity()
-                                  ) -> std::uint32_t {
-        outDraws.clear();
-        if (outDraws.capacity() < m_importedMeshDraws.size()) {
-            outDraws.reserve(m_importedMeshDraws.size());
-        }
-        // Page order is arena order, i.e. the order cells happened to stream in.
-        //
-        // Sorting these front-to-back was tried and REMOVED. It was worth ~2 ms
-        // while the main pass rejected occluded fragments using only its own
-        // progressive depth writes, but the depth prewrite (frame_pass_main.cc)
-        // lays all opaque depth before any shading draw, so submission order no
-        // longer decides what gets rejected. Measured with the prewrite in
-        // place: 11.4 ms unsorted against 11.9 ms sorted, and 0.0019% of pixels
-        // different -- below the 0.048% run-to-run noise floor. It bought
-        // nothing and cost a sort per cull pass per frame.
-        m_visibleImportedPageScratch.assign(m_importedPageDrawRanges.size(), 0u);
-        m_visibleImportedPageOrder.clear();
-        for (std::size_t pageIndex = 0; pageIndex < m_importedPageDrawRanges.size(); ++pageIndex) {
-            // Reflected fragments below the water plane are discarded anyway.
-            // Keep a conservative movement margin around authored page bounds.
-            if (m_importedPageDrawRanges[pageIndex].boundsMax[1] < minimumY - 32.0f) continue;
-            if (!importedPageIntersectsClip(m_importedPageDrawRanges[pageIndex], clipMatrix, clipMargin)) {
-                continue;
-            }
-            m_visibleImportedPageScratch[pageIndex] = 1u;
-            m_visibleImportedPageOrder.push_back(static_cast<std::uint32_t>(pageIndex));
-        }
-
-        const auto vegetationLodVisible = [&](const ImportedMeshDraw& draw) {
-            if (draw.vegetationLod == 0u) return true;
-            const float dx = draw.center[0] - eye.x;
-            const float dy = draw.center[1] - eye.y;
-            const float dz = draw.center[2] - eye.z;
-            const float distance = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f);
-            const float projectedPixels = camera.orthographic
-                ? draw.vegetationHeight *
-                    (static_cast<float>(m_renderExtent.height) /
-                     std::max(camera.orthoHalfHeight * 2.0f, 1.0f))
-                : draw.vegetationHeight * std::abs(projection(1, 1)) *
-                    (0.5f * static_cast<float>(m_renderExtent.height)) / distance;
-            // The 15% dead band is encoded by separating the enter thresholds
-            // from their nominal 80/20 px targets. A fixed-camera capture is
-            // stable, while ordinary motion does not chatter on one pixel.
-            const float highEnter = 80.0f * 1.15f;
-            const float billboardEnter = 20.0f * 0.85f;
-            const std::uint8_t wanted = projectedPixels >= highEnter
-                ? 1u : (projectedPixels <= billboardEnter ? 3u : 2u);
-            return draw.vegetationLod == wanted;
-        };
-
-        auto appendDrawRange = [&](std::uint32_t firstDraw, std::uint32_t drawCount) -> std::uint32_t {
-            if (drawCount == 0u || firstDraw >= m_importedMeshDraws.size()) {
-                return 0u;
-            }
-            const std::size_t availableDrawCount = m_importedMeshDraws.size() - firstDraw;
-            const std::uint32_t clampedDrawCount =
-                std::min<std::uint32_t>(drawCount, static_cast<std::uint32_t>(availableDrawCount));
-            std::uint32_t appended = 0u;
-            for (std::uint32_t offset = 0u; offset < clampedDrawCount; ++offset) {
-                const ImportedMeshDraw& draw = m_importedMeshDraws[firstDraw + offset];
-                if (!vegetationLodVisible(draw)) continue;
-                outDraws.push_back(draw);
-                ++appended;
-            }
-            return appended;
-        };
-
-        // Terrain stays a prefix of the visible list -- callers read
-        // m_visibleImportedTerrainDrawCount as "the first N draws are terrain" --
-        // so the sort applies WITHIN each group rather than across the two.
-        //
-        // The terrain prefix is itself partitioned NEAR-FIRST. The tessellated
-        // terrain pipeline pays hull/domain invocations for every patch it
-        // touches even at factor 1, and routing ALL terrain through it measured
-        // ~3.5 ms on the LNL iGPU while everything past the tessellation ramp
-        // subdivides to nothing anyway. Only pages whose bounds come within the
-        // ramp go in the near prefix; the passes draw [0, near) tessellated and
-        // [near, terrainCount) through the flat pipeline.
-        std::uint32_t visibleTerrainDrawCount = 0;
-        std::uint32_t visibleNearTerrainDrawCount = 0;
-        const auto pageWithinTessRange = [&](const ImportedScenePageDrawRange& pageRange) {
-            // Conservative point-to-AABB distance against the tessellation
-            // ramp's far end (imported_terrain.tesc stops at 10000).
-            const float tessRangeUnits = pageRange.distantLodTessellation
-                ? 48000.0f : 10500.0f;
-            float distanceSq = 0.0f;
-            const float eyePosition[3] = {eye.x, eye.y, eye.z};
-            for (int axis = 0; axis < 3; ++axis) {
-                const float clamped = std::clamp(
-                    eyePosition[axis], pageRange.boundsMin[axis], pageRange.boundsMax[axis]);
-                const float delta = eyePosition[axis] - clamped;
-                distanceSq += delta * delta;
-            }
-            return distanceSq < (tessRangeUnits * tessRangeUnits);
-        };
-        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
-            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
-            if (!pageWithinTessRange(pageRange)) {
-                continue;
-            }
-            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
-            visibleNearTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
-        }
-        visibleTerrainDrawCount = visibleNearTerrainDrawCount;
-        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
-            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
-            if (pageWithinTessRange(pageRange)) {
-                continue;
-            }
-            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
-            visibleTerrainDrawCount += appendDrawRange(pageRange.firstDraw, terrainDrawCount);
-        }
-        m_visibleImportedNearTerrainDrawCount = visibleNearTerrainDrawCount;
-        for (const std::uint32_t pageIndex : m_visibleImportedPageOrder) {
-            const ImportedScenePageDrawRange& pageRange = m_importedPageDrawRanges[pageIndex];
-            const std::uint32_t terrainDrawCount = std::min(pageRange.terrainDrawCount, pageRange.drawCount);
-            appendDrawRange(pageRange.firstDraw + terrainDrawCount, pageRange.drawCount - terrainDrawCount);
-        }
-        return visibleTerrainDrawCount;
-    };
     if (importedPageCullingEnabled) {
+        prepareImportedVisibility(eye, camera, projection(1, 1));
         constexpr float kImportedMainClipMargin = 0.04f;
         // Margin on the page-vs-cascade test, in NDC. Generous because the
         // cost of being wrong is asymmetric: an extra page costs one merged
@@ -2923,8 +2647,10 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         // one costs a shadow that visibly pops as the camera moves.
         static const bool s_legacyShadowMargin = std::getenv("ODAI_SHADOW_LEGACY_NEAR") != nullptr;
         const float kImportedShadowClipMargin = s_legacyShadowMargin ? 0.08f : 0.25f;
-        m_visibleImportedTerrainDrawCount =
-            buildVisibleImportedDraws(mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
+        const VisibleImportedDrawCounts mainCounts = buildVisibleImportedDraws(
+            mvp, kImportedMainClipMargin, m_visibleImportedMeshDraws);
+        m_visibleImportedTerrainDrawCount = mainCounts.terrain;
+        m_visibleImportedNearTerrainDrawCount = mainCounts.nearTerrain;
         if (std::getenv("ODAI_DEBUG_IMPORTED_VIS") != nullptr) {
             static int s_visFrame = 0;
             ++s_visFrame;
@@ -2993,14 +2719,17 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             m_visibleImportedMeshDraws.data(),
             m_visibleImportedMeshDraws.size());
         importedTerrainDrawCountForFrame = m_visibleImportedTerrainDrawCount;
-        const auto mainNearTerrainCount = m_visibleImportedNearTerrainDrawCount;
         for (std::uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
+            // The atlas reuses this tile's depth and matrix when the cascade
+            // is skipped. Its draw list is never consumed on that frame.
+            if ((shadowSkipCascadeMask & (1u << cascadeIndex)) != 0u) {
+                continue;
+            }
             m_visibleImportedShadowTerrainDrawCounts[cascadeIndex] = buildVisibleImportedDraws(
                 lightViewProjMatrices[cascadeIndex],
                 kImportedShadowClipMargin,
-                m_visibleImportedShadowMeshDraws[cascadeIndex]);
+                m_visibleImportedShadowMeshDraws[cascadeIndex]).terrain;
         }
-        m_visibleImportedNearTerrainDrawCount = mainNearTerrainCount;
     }
     // Reflections use the mirrored frustum, not the main-view draw list.
     // Main-view visibility both wastes work below the reflection and misses
@@ -3008,15 +2737,13 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     std::span<const ImportedMeshDraw> reflectionDraws(m_importedMeshDraws);
     std::uint32_t reflectionTerrainCount = m_importedTerrainDrawCount;
     if (importedPageCullingEnabled && m_waterReflectionPlaneValid) {
-        const auto savedNearCount = m_visibleImportedNearTerrainDrawCount;
         auto mirror = odai::math::Matrix4::identity();
         mirror(1, 1) = -1.0f;
         mirror(1, 3) = 2.0f * m_waterReflectionPlaneHeight;
         reflectionTerrainCount = buildVisibleImportedDraws(
             mvp * mirror, 0.04f, m_visibleImportedReflectionMeshDraws,
-            m_waterReflectionPlaneHeight);
+            m_waterReflectionPlaneHeight).terrain;
         reflectionDraws = m_visibleImportedReflectionMeshDraws;
-        m_visibleImportedNearTerrainDrawCount = savedNearCount;
     }
     // Back-to-front order for the blended replay in the main pass.
     //
@@ -3078,8 +2805,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.waterReflectionConfig[1] = reflectionAvailable ? 1.0f : 0.0f;
     std::memcpy(mvpSliceOpt->mapped, &mvpUniform, sizeof(mvpUniform));
 
-    const bool canDrawMagica =
-        legacySceneRenderingEnabled && !readyMagicaDraws.empty() && m_magicaPipeline != VK_NULL_HANDLE;
     auto countDrawCalls = [&](std::uint32_t& passCounter, std::uint32_t drawCount) {
         passCounter += drawCount;
         m_debugDrawCallsTotal += drawCount;
@@ -3100,15 +2825,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         !shouldRenderImportedDirectionalShadows(m_importedInteriorLighting);
     shadowPassInputs.renderInteriorPointShadows = renderInteriorPointShadowsThisFrame;
     shadowPassInputs.interiorPointShadowLightCount = interiorPointShadowLightCount;
-    shadowPassInputs.frameChunkDrawData = &frameChunkDrawData;
-    shadowPassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
-    shadowPassInputs.shadowChunkInstanceSliceOpt = &shadowChunkInstanceSliceOpt;
-    shadowPassInputs.chunkInstanceBuffer = chunkInstanceBuffer;
-    shadowPassInputs.shadowChunkInstanceBuffer = shadowChunkInstanceBuffer;
-    shadowPassInputs.chunkVertexBuffer = chunkVertexBuffer;
-    shadowPassInputs.chunkIndexBuffer = chunkIndexBuffer;
-    shadowPassInputs.canDrawMagica = canDrawMagica;
-    shadowPassInputs.readyMagicaDraws = readyMagicaDraws;
     shadowPassInputs.importedVertexBuffer = importedVertexBuffer;
     // ODAI_FAT_SHADOW_STREAM=1 puts the shadow pass back on the 72-byte main
     // vertex stream instead of the 28-byte compact one.
@@ -3152,12 +2868,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                 m_visibleImportedShadowTerrainDrawCounts[cascadeIndex];
         }
     }
-    shadowPassInputs.pipeInstanceCount = pipeInstanceCount;
-    shadowPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
-    shadowPassInputs.transportInstanceCount = transportInstanceCount;
-    shadowPassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
-    shadowPassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
-    shadowPassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
     recordShadowAtlasPass(frameExecutionContext, shadowPassInputs);
 
     bool wroteVoxelGiTimestamps = false;
@@ -3249,7 +2959,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         if (voxelGiOccupancyDispatchZ > 0u) {
             m_voxelGiOccupancyInitialized = true;
         }
-        if (m_voxelGiOccupancyFullRebuildInProgress || !m_voxelGiDirtyChunkIndices.empty()) {
+        if (m_voxelGiOccupancyFullRebuildInProgress) {
             m_voxelGiWorldDirty = true;
         }
         endDebugLabel(commandBuffer);
@@ -3497,13 +3207,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
 
 
     PrepassInputs prepassInputs{};
-    prepassInputs.frameChunkDrawData = &frameChunkDrawData;
-    prepassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
-    prepassInputs.chunkInstanceBuffer = chunkInstanceBuffer;
-    prepassInputs.chunkVertexBuffer = chunkVertexBuffer;
-    prepassInputs.chunkIndexBuffer = chunkIndexBuffer;
-    prepassInputs.canDrawMagica = canDrawMagica;
-    prepassInputs.readyMagicaDraws = readyMagicaDraws;
     prepassInputs.importedVertexBuffer = importedVertexBuffer;
     prepassInputs.importedIndexBuffer = importedIndexBuffer;
     prepassInputs.importedMeshDraws = importedMeshDrawsForFrame;
@@ -3516,12 +3219,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         importedActorIndexOffset;
     prepassInputs.importedActorMeshDraws = importedActorMeshDraws;
     prepassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
-    prepassInputs.pipeInstanceCount = pipeInstanceCount;
-    prepassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
-    prepassInputs.transportInstanceCount = transportInstanceCount;
-    prepassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
-    prepassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
-    prepassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
     // Exactly the three consumers of the normal-depth buffer. Sun shafts and
     // water are checked against what will actually run, not what is merely
     // compiled in, so a scene with AO off, shafts off and no water skips a full
@@ -3554,13 +3251,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
 
 
     MainPassInputs mainPassInputs{};
-    mainPassInputs.frameChunkDrawData = &frameChunkDrawData;
-    mainPassInputs.chunkInstanceSliceOpt = &chunkInstanceSliceOpt;
-    mainPassInputs.chunkInstanceBuffer = chunkInstanceBuffer;
-    mainPassInputs.chunkVertexBuffer = chunkVertexBuffer;
-    mainPassInputs.chunkIndexBuffer = chunkIndexBuffer;
-    mainPassInputs.canDrawMagica = canDrawMagica;
-    mainPassInputs.readyMagicaDraws = readyMagicaDraws;
     mainPassInputs.importedVertexBuffer = importedVertexBuffer;
     mainPassInputs.importedIndexBuffer = importedIndexBuffer;
     mainPassInputs.importedMeshDraws = importedMeshDrawsForFrame;
@@ -3580,13 +3270,6 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mainPassInputs.importedActorBlendedDrawOrder = std::span<const std::uint32_t>(
         m_importedActorBlendedDrawOrder.data(), m_importedActorBlendedDrawOrder.size());
     mainPassInputs.skinnedActorMeshDraws = m_skinningMeshDraws;
-    mainPassInputs.pipeInstanceCount = pipeInstanceCount;
-    mainPassInputs.pipeInstanceSliceOpt = &pipeInstanceSliceOpt;
-    mainPassInputs.transportInstanceCount = transportInstanceCount;
-    mainPassInputs.transportInstanceSliceOpt = &transportInstanceSliceOpt;
-    mainPassInputs.beltCargoInstanceCount = beltCargoInstanceCount;
-    mainPassInputs.beltCargoInstanceSliceOpt = &beltCargoInstanceSliceOpt;
-    mainPassInputs.preview = &preview;
     recordMainScenePass(frameExecutionContext, mainPassInputs);
     // After the main pass so it can depth-test against what actually ended up
     // visible, and before anything that consumes motion vectors.
@@ -4103,7 +3786,21 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
 
     if (m_pendingTransferTimelineValue > 0) {
         waitSemaphores[waitSemaphoreCount] = m_renderTimelineSemaphore;
-        waitStages[waitSemaphoreCount] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        // Uploads feed vertex/index fetch, indirect commands, sampled textures,
+        // compute work and optional AS builds. Attachment and presentation
+        // stages do not read the uploaded resources, so they need not wait.
+        waitStages[waitSemaphoreCount] =
+            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+            VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+            VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_COPY_BIT;
+        if (m_rayTracingRuntimeEnabled) {
+            waitStages[waitSemaphoreCount] |=
+                VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+        }
         waitSemaphoreValues[waitSemaphoreCount] = m_pendingTransferTimelineValue;
         ++waitSemaphoreCount;
     }

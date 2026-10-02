@@ -1,7 +1,7 @@
 #pragma once
 #include "bethesda/runtime_ids.h"
-#include "import/fnv/asset_source.h"
-#include "import/fnv/plugin_load_order.h"
+#include "import/bethesda/asset_source.h"
+#include "import/bethesda/plugin_load_order.h"
 #include <map>
 
 namespace odai::bethesda {
@@ -17,7 +17,7 @@ struct SkyrimItemDefinition {
     std::uint32_t bipedSlots = 0u;
 };
 // Immutable winning-record metadata; no game text or assets are saved in ODAI saves.
-bool loadSkyrimItems(const importer::fnv::FalloutLoadOrder &order,
-                     const importer::fnv::FalloutAssetSource &assets,
+bool loadSkyrimItems(const importer::bethesda::FalloutLoadOrder &order,
+                     const importer::bethesda::FalloutAssetSource &assets,
                      std::map<RecordKey, SkyrimItemDefinition> &out, std::string &error);
 } // namespace odai::bethesda

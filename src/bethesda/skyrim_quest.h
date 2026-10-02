@@ -3,7 +3,7 @@
 #include "bethesda/condition.h"
 #include "bethesda/runtime_ids.h"
 #include "bethesda/vmad_reader.h"
-#include "import/fnv/esm_reader.h"
+#include "import/bethesda/esm_reader.h"
 
 #include <cstdint>
 #include <string>
@@ -75,7 +75,7 @@ struct SkyrimQuestDefinition {
 };
 
 bool readSkyrimQuest(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimQuestDefinition& out,
     std::string& outError);

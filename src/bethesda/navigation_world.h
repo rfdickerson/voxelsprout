@@ -9,7 +9,7 @@
 // border edges coincide.
 
 #include "import/cell_residency_planner.h"
-#include "import/fnv/fallout_records.h"
+#include "import/bethesda/fallout_records.h"
 #include "import/imported_scene.h"
 #include "math/math.h"
 
@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace odai::games::newvegas {
+namespace odai::games::bethesda {
 
 enum class ActorNavigationStepKind : std::uint8_t {
     Walk,
@@ -65,7 +65,7 @@ class ActorNavigationWorld {
 public:
     void addCell(
         const importer::CellCoord& cell,
-        const std::vector<importer::fnv::FalloutNavMeshRecord>& records);
+        const std::vector<importer::bethesda::FalloutNavMeshRecord>& records);
 
     // Builds navigation from ImportedScene collision for formats without
     // authored navmeshes, notably Morrowind and Tamriel Rebuilt.  Multiple
@@ -130,16 +130,16 @@ private:
     struct Triangle {
         std::uint16_t vertex[3] = {};
         std::uint16_t neighbour[3] = {
-            importer::fnv::kNavMeshNoNeighbour,
-            importer::fnv::kNavMeshNoNeighbour,
-            importer::fnv::kNavMeshNoNeighbour};
+            importer::bethesda::kNavMeshNoNeighbour,
+            importer::bethesda::kNavMeshNoNeighbour,
+            importer::bethesda::kNavMeshNoNeighbour};
     };
     struct Mesh {
         std::uint32_t formId = 0u;
         importer::CellCoord cell;
         std::vector<odai::math::Vector3> vertices;
         std::vector<Triangle> triangles;
-        std::vector<importer::fnv::FalloutNavMeshDoorPortal> doorPortals;
+        std::vector<importer::bethesda::FalloutNavMeshDoorPortal> doorPortals;
     };
     struct Location {
         const Mesh* mesh = nullptr;
@@ -202,4 +202,4 @@ private:
     std::vector<importer::ImportedSceneDoor> m_residentDoors;
 };
 
-}  // namespace odai::games::newvegas
+}  // namespace odai::games::bethesda

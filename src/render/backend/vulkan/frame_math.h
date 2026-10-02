@@ -7,7 +7,6 @@
 
 #include "math/math.h"
 #include "render/renderer_types.h"
-#include "world/chunk.h"
 
 namespace odai::render {
 
@@ -71,13 +70,6 @@ inline float screenSpaceGiClampedLuminance(float indirectLuminance, float direct
                       0.35f * (std::max(directLuminance, 0.0f) + 0.05f));
 }
 
-struct CameraFrameDerived {
-    math::Vector3 forward;
-    int chunkX;
-    int chunkY;
-    int chunkZ;
-};
-
 struct VoxelGiComputeFlags {
     bool gridMoved;
     bool sunDirectionChanged;
@@ -97,15 +89,6 @@ inline math::Vector3 computeCameraForward(float yawDegrees, float pitchDegrees) 
         std::cos(yawRadians) * cosPitch,
         std::sin(pitchRadians),
         std::sin(yawRadians) * cosPitch
-    };
-}
-
-inline CameraFrameDerived computeCameraFrame(const CameraPose& camera) {
-    return CameraFrameDerived{
-        computeCameraForward(camera.yawDegrees, camera.pitchDegrees),
-        static_cast<int>(std::floor(camera.x / static_cast<float>(world::Chunk::kSizeX))),
-        static_cast<int>(std::floor(camera.y / static_cast<float>(world::Chunk::kSizeY))),
-        static_cast<int>(std::floor(camera.z / static_cast<float>(world::Chunk::kSizeZ)))
     };
 }
 

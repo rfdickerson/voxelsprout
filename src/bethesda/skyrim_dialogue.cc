@@ -12,7 +12,7 @@ std::uint32_t u32(const std::uint8_t* bytes) {
     return value;
 }
 
-std::string zstring(const importer::fnv::EsmSubrecordView& subrecord) {
+std::string zstring(const importer::bethesda::EsmSubrecordView& subrecord) {
     std::string value(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
     while (!value.empty() && value.back() == '\0') value.pop_back();
     return value;
@@ -21,7 +21,7 @@ std::string zstring(const importer::fnv::EsmSubrecordView& subrecord) {
 }  // namespace
 
 bool readSkyrimDialogueBranch(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimDialogueBranchDefinition& out,
     std::string& outError) {
@@ -35,7 +35,7 @@ bool readSkyrimDialogueBranch(
     }
     SkyrimDialogueBranchDefinition parsed;
     parsed.record = std::move(stableRecord);
-    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
         if (subrecord.type == "EDID") parsed.editorId = zstring(subrecord);
         else if (subrecord.type == "QNAM" && subrecord.size >= 4u) {
             parsed.rawQuestFormId = u32(subrecord.data);
@@ -55,7 +55,7 @@ bool readSkyrimDialogueBranch(
 }
 
 bool readSkyrimDialogueTopic(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimDialogueTopicDefinition& out,
     std::string& outError) {
@@ -69,7 +69,7 @@ bool readSkyrimDialogueTopic(
     }
     SkyrimDialogueTopicDefinition parsed;
     parsed.record = std::move(stableRecord);
-    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
         if (subrecord.type == "EDID") parsed.editorId = zstring(subrecord);
         else if (subrecord.type == "FULL" && subrecord.size >= 4u) {
             parsed.promptStringId = u32(subrecord.data);
@@ -91,7 +91,7 @@ bool readSkyrimDialogueTopic(
 }
 
 bool readSkyrimDialogueInfo(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     RecordKey stableTopic,
     RecordKey stableQuest,
@@ -111,7 +111,7 @@ bool readSkyrimDialogueInfo(
     parsed.quest = std::move(stableQuest);
     SkyrimDialogueResponseDefinition* currentResponse = nullptr;
     Condition* currentCondition = nullptr;
-    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
         const std::span<const std::uint8_t> bytes(subrecord.data, subrecord.size);
         if (subrecord.type == "EDID") parsed.editorId = zstring(subrecord);
         else if (subrecord.type == "RNAM" && bytes.size() >= 4u) {

@@ -8,7 +8,6 @@
 #include "render/backend/vulkan/frame_math.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -254,55 +253,7 @@ std::array<float, 3> sampleImportedTextureBaseColor(
     };
 }
 
-RtVertex decodePackedVoxelVertexPosition(std::uint32_t packedBits, float offsetX, float offsetY, float offsetZ) {
-    const std::uint32_t x =
-        (packedBits >> odai::world::PackedVoxelVertex::kShiftX) & odai::world::PackedVoxelVertex::kMask5;
-    const std::uint32_t y =
-        (packedBits >> odai::world::PackedVoxelVertex::kShiftY) & odai::world::PackedVoxelVertex::kMask5;
-    const std::uint32_t z =
-        (packedBits >> odai::world::PackedVoxelVertex::kShiftZ) & odai::world::PackedVoxelVertex::kMask5;
-    const std::uint32_t face =
-        (packedBits >> odai::world::PackedVoxelVertex::kShiftFace) & odai::world::PackedVoxelVertex::kMask3;
-    const std::uint32_t corner =
-        (packedBits >> odai::world::PackedVoxelVertex::kShiftCorner) & odai::world::PackedVoxelVertex::kMask2;
 
-    RtVertex vertex{};
-    vertex.position[0] = static_cast<float>(x) + offsetX;
-    vertex.position[1] = static_cast<float>(y) + offsetY;
-    vertex.position[2] = static_cast<float>(z) + offsetZ;
-    if (face == 0u) {
-        vertex.position[0] += 1.0f;
-        vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
-        vertex.position[2] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
-        return vertex;
-    }
-    if (face == 1u) {
-        vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
-        vertex.position[2] += (corner == 0u || corner == 1u) ? 1.0f : 0.0f;
-        return vertex;
-    }
-    if (face == 2u) {
-        vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
-        vertex.position[1] += 1.0f;
-        vertex.position[2] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
-        return vertex;
-    }
-    if (face == 3u) {
-        vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
-        vertex.position[2] += (corner == 0u || corner == 3u) ? 1.0f : 0.0f;
-        return vertex;
-    }
-    if (face == 4u) {
-        vertex.position[0] += (corner == 0u || corner == 1u) ? 1.0f : 0.0f;
-        vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
-        vertex.position[2] += 1.0f;
-        return vertex;
-    }
-
-    vertex.position[0] += (corner == 2u || corner == 3u) ? 1.0f : 0.0f;
-    vertex.position[1] += (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
-    return vertex;
-}
 
 void destroyRtGeometryBuffers(BufferAllocator& allocator, RtGeometryBuffers& geometry) {
     if (geometry.indexBufferHandle != kInvalidBufferHandle) {
@@ -408,25 +359,7 @@ bool createImportedRtGeometryBuffers(
 
 } // namespace
 
-void RendererBackend::clearMagicaVoxelMeshes() {
-    for (MagicaMeshDraw& draw : m_magicaMeshDraws) {
-        if (draw.vertexBufferHandle != kInvalidBufferHandle) {
-            scheduleBufferRelease(draw.vertexBufferHandle, m_lastGraphicsTimelineValue);
-            draw.vertexBufferHandle = kInvalidBufferHandle;
-        }
-        if (draw.indexBufferHandle != kInvalidBufferHandle) {
-            scheduleBufferRelease(draw.indexBufferHandle, m_lastGraphicsTimelineValue);
-            draw.indexBufferHandle = kInvalidBufferHandle;
-        }
-        draw.indexCount = 0;
-    }
-    m_magicaMeshDraws.clear();
-    for (RtGeometryBuffers& geometry : m_rtMagicaGeometries) {
-        destroyRtGeometryBuffers(m_bufferAllocator, geometry);
-    }
-    m_rtMagicaGeometries.clear();
-    markRayTracingSceneDirty();
-}
+
 
 void RendererBackend::clearGpuScene() {
     if ((!m_importedTextureResources.empty() ||
@@ -510,7 +443,8 @@ void RendererBackend::clearGpuScene() {
     for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {
         shadowDraws.clear();
     }
-    m_visibleImportedPageScratch.clear();
+    m_importedVegetationLodVisible.clear();
+    m_importedPageNearTerrain.clear();
     m_visibleImportedTerrainDrawCount = 0;
     m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
@@ -540,102 +474,6 @@ void RendererBackend::clearGpuScene() {
 void RendererBackend::clearImportedSceneMeshes() {
     m_importedSceneBoundsValid = false;
     clearGpuScene();
-}
-
-void RendererBackend::clearHexTerrain() {
-    const auto release = [&](BufferHandle& handle) {
-        if (handle == kInvalidBufferHandle) {
-            return;
-        }
-        if (m_lastGraphicsTimelineValue == 0) {
-            m_bufferAllocator.destroyBuffer(handle);
-        } else {
-            scheduleBufferRelease(handle, m_lastGraphicsTimelineValue);
-        }
-        handle = kInvalidBufferHandle;
-    };
-    release(m_hexBaseVertexBufferHandle);
-    release(m_hexBaseIndexBufferHandle);
-    release(m_hexInstanceBufferHandle);
-    m_hexIndexCount = 0;
-    m_hexInstanceCount = 0;
-}
-
-bool RendererBackend::uploadHexTerrain(const odai::importer::HexTerrainData& data) {
-    if (m_device == VK_NULL_HANDLE) {
-        return false;
-    }
-    clearHexTerrain();
-    if (data.baseVertices.empty() || data.baseIndices.empty() || data.instances.empty()) {
-        return true;  // e.g. an all-water map: nothing to displace, not an error.
-    }
-
-    BufferCreateDesc vertexDesc{};
-    vertexDesc.size = static_cast<VkDeviceSize>(data.baseVertices.size() * sizeof(odai::importer::HexBaseVertex));
-    vertexDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vertexDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vertexDesc.initialData = data.baseVertices.data();
-    const BufferHandle vertexHandle = m_bufferAllocator.createBuffer(vertexDesc);
-
-    BufferCreateDesc indexDesc{};
-    indexDesc.size = static_cast<VkDeviceSize>(data.baseIndices.size() * sizeof(std::uint32_t));
-    indexDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    indexDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    indexDesc.initialData = data.baseIndices.data();
-    const BufferHandle indexHandle = m_bufferAllocator.createBuffer(indexDesc);
-
-    // Remap each instance's packed terrain texture index (a scene index in classFlags
-    // bits 16-31, written by the builder) to its bindless slot, resolved when the
-    // imported-scene textures were uploaded. 0xFFFF keeps the fragment palette fallback.
-    std::vector<odai::importer::HexTileInstance> instances = data.instances;
-    for (odai::importer::HexTileInstance& inst : instances) {
-        const std::uint32_t sceneIdx = (inst.classFlags >> 16u) & 0xFFFFu;
-        std::uint32_t bindlessSlot = 0xFFFFu;
-        if (sceneIdx != 0xFFFFu && sceneIdx < m_importedTextureSlots.size() &&
-            m_importedTextureSlots[sceneIdx] != std::numeric_limits<std::uint32_t>::max()) {
-            bindlessSlot = m_importedTextureSlots[sceneIdx] & 0xFFFFu;
-        }
-        inst.classFlags = (inst.classFlags & 0x0000FFFFu) | (bindlessSlot << 16u);
-    }
-
-    BufferCreateDesc instanceDesc{};
-    instanceDesc.size = static_cast<VkDeviceSize>(instances.size() * sizeof(odai::importer::HexTileInstance));
-    instanceDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    instanceDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    instanceDesc.initialData = instances.data();
-    const BufferHandle instanceHandle = m_bufferAllocator.createBuffer(instanceDesc);
-
-    if (vertexHandle == kInvalidBufferHandle || indexHandle == kInvalidBufferHandle ||
-        instanceHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "hex terrain buffer allocation failed";
-        if (vertexHandle != kInvalidBufferHandle) m_bufferAllocator.destroyBuffer(vertexHandle);
-        if (indexHandle != kInvalidBufferHandle) m_bufferAllocator.destroyBuffer(indexHandle);
-        if (instanceHandle != kInvalidBufferHandle) m_bufferAllocator.destroyBuffer(instanceHandle);
-        return false;
-    }
-
-    m_hexBaseVertexBufferHandle = vertexHandle;
-    m_hexBaseIndexBufferHandle = indexHandle;
-    m_hexInstanceBufferHandle = instanceHandle;
-    m_hexIndexCount = static_cast<uint32_t>(data.baseIndices.size());
-    m_hexInstanceCount = static_cast<uint32_t>(data.instances.size());
-
-    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(vertexHandle);
-    if (vertexBuffer != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "hex.terrain.baseVertex");
-    }
-    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(indexHandle);
-    if (indexBuffer != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "hex.terrain.baseIndex");
-    }
-    const VkBuffer instanceBuffer = m_bufferAllocator.getBuffer(instanceHandle);
-    if (instanceBuffer != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(instanceBuffer), "hex.terrain.instance");
-    }
-
-    VOX_LOGI("render") << "uploaded hex terrain: instances=" << m_hexInstanceCount
-                       << ", baseIndices=" << m_hexIndexCount;
-    return true;
 }
 
 bool RendererBackend::uploadImportedScene(const odai::importer::ImportedScene& scene) {
@@ -3301,8 +3139,6 @@ bool RendererBackend::uploadImportedSceneInternal(
     m_voxelGiWorldDirty = false;
     m_voxelGiOccupancyFullRebuildInProgress = false;
     m_voxelGiOccupancyFullRebuildNeedsClear = false;
-    m_voxelGiOccupancyFullRebuildCursor = 0;
-    m_voxelGiDirtyChunkIndices.clear();
     if (!m_importedGiTriangles.empty()) {
         m_debugImportedGiTriangleCount = static_cast<std::uint32_t>(
             std::min<std::size_t>(
@@ -3386,79 +3222,7 @@ void RendererBackend::setVoxelBaseColorPalette(const std::array<std::uint32_t, 1
 }
 
 
-bool RendererBackend::uploadMagicaVoxelMesh(
-    const odai::world::ChunkMeshData& mesh,
-    float worldOffsetX,
-    float worldOffsetY,
-    float worldOffsetZ
-) {
-    if (m_device == VK_NULL_HANDLE) {
-        return false;
-    }
 
-    if (mesh.vertices.empty() || mesh.indices.empty()) {
-        return false;
-    }
-
-    BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(odai::world::PackedVoxelVertex));
-    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vertexCreateDesc.initialData = mesh.vertices.data();
-    const BufferHandle newVertexHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
-    if (newVertexHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "magica voxel vertex buffer allocation failed";
-        return false;
-    }
-
-    BufferCreateDesc indexCreateDesc{};
-    indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
-    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    indexCreateDesc.initialData = mesh.indices.data();
-    const BufferHandle newIndexHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
-    if (newIndexHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "magica voxel index buffer allocation failed";
-        m_bufferAllocator.destroyBuffer(newVertexHandle);
-        return false;
-    }
-
-    const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(newVertexHandle);
-    if (vertexBuffer != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), "mesh.magicaVoxel.vertex");
-    }
-    const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(newIndexHandle);
-    if (indexBuffer != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), "mesh.magicaVoxel.index");
-    }
-
-    MagicaMeshDraw draw{};
-    draw.vertexBufferHandle = newVertexHandle;
-    draw.indexBufferHandle = newIndexHandle;
-    draw.indexCount = static_cast<uint32_t>(mesh.indices.size());
-    draw.offsetX = worldOffsetX;
-    draw.offsetY = worldOffsetY;
-    draw.offsetZ = worldOffsetZ;
-    m_magicaMeshDraws.push_back(draw);
-    if (m_rayTracingCapabilityProbe.rayTracingCoreReady) {
-        std::vector<RtVertex> rtVertices;
-        rtVertices.reserve(mesh.vertices.size());
-        for (const odai::world::PackedVoxelVertex& vertex : mesh.vertices) {
-            rtVertices.push_back(decodePackedVoxelVertexPosition(vertex.bits, worldOffsetX, worldOffsetY, worldOffsetZ));
-        }
-        RtGeometryBuffers rtGeometry{};
-        if (!createRtGeometryBuffers(m_bufferAllocator, rtVertices, mesh.indices, rtGeometry)) {
-            VOX_LOGE("render") << "magica voxel RT geometry buffer allocation failed";
-        } else {
-            m_rtMagicaGeometries.push_back(rtGeometry);
-            markRayTracingSceneDirty();
-            if (rayTracingRuntimeReady() && !rebuildRayTracingScene()) {
-                VOX_LOGE("render") << "magica voxel RT scene rebuild failed";
-            }
-        }
-    }
-    return true;
-}
 
 
 bool RendererBackend::useSpatialPartitioningQueries() const {
@@ -3486,10 +3250,7 @@ void RendererBackend::markRayTracingSceneDirty() {
 
 void RendererBackend::destroyRayTracingScene() {
     const bool hasExistingScene =
-        m_rtTlas.handle != VK_NULL_HANDLE ||
-        !m_rtChunkSceneRecords.empty() ||
-        !m_rtImportedSceneRecords.empty() ||
-        !m_rtMagicaBlases.empty();
+        m_rtTlas.handle != VK_NULL_HANDLE || !m_rtImportedSceneRecords.empty();
     if (hasExistingScene && m_device != VK_NULL_HANDLE && m_graphicsQueue != VK_NULL_HANDLE) {
         const VkResult waitResult = vkQueueWaitIdle(m_graphicsQueue);
         if (waitResult != VK_SUCCESS) {
@@ -3514,29 +3275,16 @@ void RendererBackend::destroyRayTracingScene() {
         m_bufferAllocator.destroyBuffer(m_rtTlasInstanceBufferHandle);
         m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
     }
-    for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-        destroyAs(chunkRecord.blas);
-        destroyRtGeometryBuffers(m_bufferAllocator, chunkRecord.geometry);
-    }
     for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
         destroyAs(importedRecord.blas);
         destroyRtGeometryBuffers(m_bufferAllocator, importedRecord.geometry);
     }
     m_rtImportedSceneRecords.clear();
-    for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
-        destroyAs(blas);
-    }
-    m_rtMagicaBlases.clear();
-    for (RtGeometryBuffers& geometry : m_rtMagicaGeometries) {
-        destroyRtGeometryBuffers(m_bufferAllocator, geometry);
-    }
-    m_rtMagicaGeometries.clear();
     m_rtSceneDirty = false;
     m_rtSceneBuildCount = 0;
     m_rtBlasBuildCount = 0;
     m_rtTlasBuildCount = 0;
     m_rtDirtyChunkCount = 0;
-    m_rtChunkSceneRecords.clear();
     refreshShadowStats();
 }
 
@@ -3599,13 +3347,6 @@ bool RendererBackend::rebuildRayTracingScene() {
     };
 
     bool needsGraphicsIdle = false;
-    for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-        if (chunkRecord.blas.handle != VK_NULL_HANDLE &&
-            (!chunkRecord.rtEligible || !chunkRecord.geometryResident || chunkRecord.dirty)) {
-            needsGraphicsIdle = true;
-            break;
-        }
-    }
     if (!needsGraphicsIdle) {
         for (const RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
             if (importedRecord.blas.handle != VK_NULL_HANDLE &&
@@ -3628,19 +3369,6 @@ bool RendererBackend::rebuildRayTracingScene() {
     }
 
     std::vector<std::pair<RtGeometryBuffers*, RtAccelerationStructure*>> buildGeometries;
-    for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-        if (!chunkRecord.rtEligible ||
-            !chunkRecord.geometryResident ||
-            chunkRecord.geometry.vertexCount == 0 ||
-            chunkRecord.geometry.indexCount == 0) {
-            destroyAs(chunkRecord.blas);
-            continue;
-        }
-        if (chunkRecord.dirty || chunkRecord.blas.handle == VK_NULL_HANDLE) {
-            destroyAs(chunkRecord.blas);
-            buildGeometries.push_back({&chunkRecord.geometry, &chunkRecord.blas});
-        }
-    }
     for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
         if (!importedRecord.geometryResident ||
             importedRecord.geometry.vertexCount == 0 ||
@@ -3653,22 +3381,6 @@ bool RendererBackend::rebuildRayTracingScene() {
             buildGeometries.push_back({&importedRecord.geometry, &importedRecord.blas});
         }
     }
-    if (m_rtMagicaBlases.size() > m_rtMagicaGeometries.size()) {
-        for (std::size_t i = m_rtMagicaGeometries.size(); i < m_rtMagicaBlases.size(); ++i) {
-            destroyAs(m_rtMagicaBlases[i]);
-        }
-    }
-    m_rtMagicaBlases.resize(m_rtMagicaGeometries.size());
-    for (std::size_t i = 0; i < m_rtMagicaGeometries.size(); ++i) {
-        if (m_rtMagicaGeometries[i].vertexCount == 0 || m_rtMagicaGeometries[i].indexCount == 0) {
-            destroyAs(m_rtMagicaBlases[i]);
-            continue;
-        }
-        if (m_rtMagicaBlases[i].handle == VK_NULL_HANDLE) {
-            buildGeometries.push_back({&m_rtMagicaGeometries[i], &m_rtMagicaBlases[i]});
-        }
-    }
-
     VkCommandPoolCreateInfo commandPoolCreateInfo{};
     commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -3694,12 +3406,7 @@ bool RendererBackend::rebuildRayTracingScene() {
     };
     std::vector<ScratchAllocation> scratchBuffers;
     scratchBuffers.reserve(buildGeometries.size() + 1u);
-    std::size_t estimatedInstanceCount = m_rtMagicaGeometries.size();
-    for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-        if (chunkRecord.rtEligible && chunkRecord.geometryResident && chunkRecord.geometry.indexCount > 0) {
-            ++estimatedInstanceCount;
-        }
-    }
+    std::size_t estimatedInstanceCount = 0;
     for (const RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
         if (importedRecord.geometryResident && importedRecord.geometry.indexCount > 0) {
             ++estimatedInstanceCount;
@@ -3817,20 +3524,11 @@ bool RendererBackend::rebuildRayTracingScene() {
             tlasInstances.push_back(instance);
         };
 
-        for (const RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-            if (!chunkRecord.rtEligible || !chunkRecord.geometryResident) {
-                continue;
-            }
-            appendTlasInstance(chunkRecord.blas);
-        }
         for (const RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
             if (!importedRecord.geometryResident) {
                 continue;
             }
             appendTlasInstance(importedRecord.blas);
-        }
-        for (const RtAccelerationStructure& blas : m_rtMagicaBlases) {
-            appendTlasInstance(blas);
         }
     }
 
@@ -3956,14 +3654,8 @@ bool RendererBackend::rebuildRayTracingScene() {
 
     if (!buildOk) {
         destroyAs(m_rtTlas);
-        for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-            destroyAs(chunkRecord.blas);
-        }
         for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
             destroyAs(importedRecord.blas);
-        }
-        for (RtAccelerationStructure& blas : m_rtMagicaBlases) {
-            destroyAs(blas);
         }
         refreshShadowStats();
         return false;
@@ -3973,9 +3665,6 @@ bool RendererBackend::rebuildRayTracingScene() {
     ++m_rtSceneBuildCount;
     m_rtBlasBuildCount = static_cast<std::uint32_t>(buildGeometries.size());
     m_rtTlasBuildCount = tlasInstances.empty() ? 0u : 1u;
-    for (RtChunkSceneRecord& chunkRecord : m_rtChunkSceneRecords) {
-        chunkRecord.dirty = false;
-    }
     for (RtImportedSceneRecord& importedRecord : m_rtImportedSceneRecords) {
         importedRecord.dirty = false;
     }
@@ -3984,7 +3673,6 @@ bool RendererBackend::rebuildRayTracingScene() {
                        << ", tlas=" << m_rtTlasBuildCount
                        << ", instances=" << tlasInstances.size()
                        << ", importedRecords=" << m_rtImportedSceneRecords.size()
-                       << ", residentChunks=" << m_rtChunkSceneRecords.size()
                        << ", dirtyChunks=" << m_rtDirtyChunkCount
                        << ", sceneBuilds=" << m_rtSceneBuildCount << "\n";
     return true;

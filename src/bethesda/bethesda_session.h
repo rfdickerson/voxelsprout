@@ -12,7 +12,7 @@
 #include "bethesda/skyrim_dialogue.h"
 #include "bethesda/skyrim_scene.h"
 #include "bethesda/tes3_runtime.h"
-#include "import/fnv/content_profile.h"
+#include "import/bethesda/content_profile.h"
 #include "anim/skyrim_animation.h"
 #include "anim/character_dynamics.h"
 
@@ -86,7 +86,7 @@ struct StoryEventRuntimeState {
 };
 
 struct BethesdaSessionConfig {
-    importer::fnv::BethesdaGame game = importer::fnv::BethesdaGame::Unknown;
+    importer::bethesda::BethesdaGame game = importer::bethesda::BethesdaGame::Unknown;
     std::string contentFingerprint;
     std::string scenarioId;
     std::uint32_t randomSeed = 1u;
@@ -473,11 +473,22 @@ private:
         odai::anim::AnimationStepOutput previousFirstPersonOutput;
     };
     void registerSkyrimNatives();
+    void registerCoreNatives();
+    void registerWorldAndLocationNatives();
+    void registerQuestSceneAndAliasNatives();
+    void registerObjectReferenceNatives();
+    void registerActorNatives();
     [[nodiscard]] Tes3NativeResult executeTes3WorldNative(const Tes3NativeCall& call);
     void queueQuestAliasEvent(
         ObjectId alias, std::string event, std::vector<PapyrusValue> arguments);
     void flushQuestAliasEvents();
     void simulateTick(std::uint64_t tick, double stepSeconds, BethesdaSessionStep& result);
+    void advanceLivingWorld(double stepSeconds, BethesdaSessionStep& result);
+    void queueCombatActions();
+    void advanceActorAnimations(float fixedDelta, BethesdaSessionStep& result);
+    void queuePhysicsTransforms(float fixedDelta);
+    void advanceScriptsAndApplyCommands(
+        std::uint64_t tick, double stepSeconds, BethesdaSessionStep& result);
     [[nodiscard]] ConditionEvaluation evaluateDialogueConditions(
         const SkyrimDialogueInfoDefinition& info,
         ObjectId speaker, ObjectId player, bool strict) const;

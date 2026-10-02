@@ -677,7 +677,7 @@ void writeSceneParticleEmitters(
         writeValue(output, emitter.seed);
         writeValue(output, emitter.textureIndex);
         for(float v:emitter.mistTransform) writeValue(output,v);
-        const auto bytes=emitter.mist ? fnv::encodeNifMist(*emitter.mist) : std::vector<std::uint8_t>{};
+        const auto bytes=emitter.mist ? bethesda::encodeNifMist(*emitter.mist) : std::vector<std::uint8_t>{};
         writeValue(output,std::uint32_t(bytes.size()));
         output.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());
     }
@@ -711,7 +711,7 @@ bool readSceneParticleEmitters(
                !readValue(input,count)||count>1024*1024) return false;
             std::vector<std::uint8_t> bytes(count);
             if(!readExact(input,bytes.data(),bytes.size())) return false;
-            if(count) {emitter.mist.emplace();if(!fnv::decodeNifMist(bytes,*emitter.mist))return false;}
+            if(count) {emitter.mist.emplace();if(!bethesda::decodeNifMist(bytes,*emitter.mist))return false;}
             if((effect==2)!=emitter.mist.has_value())return false;
         }
         emitter.effect = static_cast<ImportedParticleEffect>(effect);

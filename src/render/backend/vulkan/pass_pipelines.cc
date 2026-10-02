@@ -182,7 +182,9 @@ static_assert(sizeof(ChunkPushConstants) == 128);
 
 } // namespace
 
-bool RendererBackend::createMagicaPipeline() {
+
+
+bool RendererBackend::createImportedScenePipelines() {
     if (m_pipelineLayout == VK_NULL_HANDLE) {
         return false;
     }
@@ -190,259 +192,6 @@ bool RendererBackend::createMagicaPipeline() {
         return false;
     }
 
-    constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
-    constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
-    constexpr const char* kWorldFragmentRtShaderPath = "../src/render/shaders/voxel_packed_rt.frag.slang.spv";
-
-    std::array<VkShaderModule, 3> shaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    VkShaderModule& magicaVertShaderModule = shaderModules[0];
-    VkShaderModule& magicaFragShaderModule = shaderModules[1];
-    VkShaderModule& magicaFragRtShaderModule = shaderModules[2];
-    const std::array<ShaderModuleLoadSpec, 2> shaderLoadSpecs = {{
-        {kWorldVertexShaderPath, "magica.voxel_packed.vert"},
-        {kWorldFragmentShaderPath, "magica.voxel_packed.frag"},
-    }};
-    if (!createShaderModulesFromFiles(
-            m_device,
-            shaderLoadSpecs,
-            std::span<VkShaderModule>(shaderModules).first(shaderLoadSpecs.size())
-        )) {
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo vertexShaderStage{};
-    vertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    vertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    vertexShaderStage.module = magicaVertShaderModule;
-    vertexShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo fragmentShaderStage{};
-    fragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    fragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fragmentShaderStage.module = magicaFragShaderModule;
-    fragmentShaderStage.pName = "main";
-    struct WorldFragmentSpecializationData {
-        std::int32_t shadowPolicyMode = 2;
-        std::int32_t ambientPolicyMode = 2;
-        std::int32_t forceTintOnly = 1;
-    };
-    const WorldFragmentSpecializationData fragmentSpecializationData{};
-    const std::array<VkSpecializationMapEntry, 3> specializationMapEntries = {{
-        VkSpecializationMapEntry{
-            6u,
-            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
-            sizeof(std::int32_t)
-        },
-        VkSpecializationMapEntry{
-            7u,
-            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
-            sizeof(std::int32_t)
-        },
-        VkSpecializationMapEntry{
-            8u,
-            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
-            sizeof(std::int32_t)
-        }
-    }};
-    const VkSpecializationInfo specializationInfo{
-        static_cast<uint32_t>(specializationMapEntries.size()),
-        specializationMapEntries.data(),
-        sizeof(fragmentSpecializationData),
-        &fragmentSpecializationData
-    };
-    fragmentShaderStage.pSpecializationInfo = &specializationInfo;
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
-        vertexShaderStage,
-        fragmentShaderStage
-    };
-    VkPipelineShaderStageCreateInfo rtFragmentShaderStage = fragmentShaderStage;
-    bool hasRtMagicaVariant = false;
-    if (m_rayTracingRuntimeEnabled && m_rtShaderVariantFileAvailable) {
-        if (!createShaderModuleFromFile(m_device, kWorldFragmentRtShaderPath, "magica.voxel_packed_rt.frag", magicaFragRtShaderModule)) {
-            VOX_LOGW("render") << "magica RT fragment shader unavailable; keeping shadow-map-only magica path\n";
-        } else {
-            rtFragmentShaderStage.module = magicaFragRtShaderModule;
-            hasRtMagicaVariant = true;
-        }
-    }
-    const std::array<VkPipelineShaderStageCreateInfo, 2> rtShaderStages = {
-        vertexShaderStage,
-        rtFragmentShaderStage
-    };
-
-    VkVertexInputBindingDescription bindingDescriptions[2]{};
-    bindingDescriptions[0].binding = 0;
-    bindingDescriptions[0].stride = sizeof(odai::world::PackedVoxelVertex);
-    bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    bindingDescriptions[1].binding = 1;
-    bindingDescriptions[1].stride = sizeof(ChunkInstanceData);
-    bindingDescriptions[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription attributeDescriptions[2]{};
-    attributeDescriptions[0].location = 0;
-    attributeDescriptions[0].binding = 0;
-    attributeDescriptions[0].format = VK_FORMAT_R32_UINT;
-    attributeDescriptions[0].offset = 0;
-    attributeDescriptions[1].location = 1;
-    attributeDescriptions[1].binding = 1;
-    attributeDescriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributeDescriptions[1].offset = 0;
-
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 2;
-    vertexInputInfo.pVertexBindingDescriptions = bindingDescriptions;
-    vertexInputInfo.vertexAttributeDescriptionCount = 2;
-    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
-
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    VkPipelineViewportStateCreateInfo viewportState{};
-    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewportState.viewportCount = 1;
-    viewportState.scissorCount = 1;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.depthClampEnable = VK_FALSE;
-    rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-
-    VkPipelineMultisampleStateCreateInfo multisampling{};
-    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.rasterizationSamples = m_colorSampleCount;
-
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
-    depthStencil.depthBoundsTestEnable = VK_FALSE;
-    depthStencil.stencilTestEnable = VK_FALSE;
-
-    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-    colorBlendAttachment.colorWriteMask =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-    VkPipelineColorBlendStateCreateInfo colorBlending{};
-    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlending.attachmentCount = 1;
-    colorBlending.pAttachments = &colorBlendAttachment;
-
-    std::array<VkDynamicState, 2> dynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
-    };
-    VkPipelineDynamicStateCreateInfo dynamicState{};
-    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-    dynamicState.pDynamicStates = dynamicStates.data();
-
-    VkPipelineRenderingCreateInfo renderingCreateInfo{};
-    renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    renderingCreateInfo.colorAttachmentCount = 1;
-    renderingCreateInfo.pColorAttachmentFormats = &m_hdrColorFormat;
-    renderingCreateInfo.depthAttachmentFormat = m_depthFormat;
-
-    VkGraphicsPipelineCreateInfo pipelineCreateInfo{};
-    pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
-    pipelineCreateInfo.pNext = &renderingCreateInfo;
-    pipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-    pipelineCreateInfo.pStages = shaderStages.data();
-    pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
-    pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
-    pipelineCreateInfo.pViewportState = &viewportState;
-    pipelineCreateInfo.pRasterizationState = &rasterizer;
-    pipelineCreateInfo.pMultisampleState = &multisampling;
-    pipelineCreateInfo.pDepthStencilState = &depthStencil;
-    pipelineCreateInfo.pColorBlendState = &colorBlending;
-    pipelineCreateInfo.pDynamicState = &dynamicState;
-    pipelineCreateInfo.layout = m_pipelineLayout;
-    pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
-    pipelineCreateInfo.subpass = 0;
-
-    VkPipeline magicaPipeline = VK_NULL_HANDLE;
-    const VkResult pipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &magicaPipeline
-    );
-
-    if (pipelineResult != VK_SUCCESS) {
-        destroyShaderModules(m_device, shaderModules);
-        logVkFailure("vkCreateGraphicsPipelines(magica)", pipelineResult);
-        return false;
-    }
-
-    if (m_magicaPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_magicaPipeline, nullptr);
-    }
-    m_magicaPipeline = magicaPipeline;
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_magicaPipeline), "pipeline.magicaVoxel");
-    if (m_magicaPipelineRt != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_magicaPipelineRt, nullptr);
-        m_magicaPipelineRt = VK_NULL_HANDLE;
-    }
-    if (hasRtMagicaVariant) {
-        VkPipeline rtMagicaPipeline = VK_NULL_HANDLE;
-        VkGraphicsPipelineCreateInfo rtPipelineCreateInfo = pipelineCreateInfo;
-        rtPipelineCreateInfo.pStages = rtShaderStages.data();
-        const VkResult rtPipelineResult = vkCreateGraphicsPipelines(
-            m_device,
-            m_pipelineCache,
-            1,
-            &rtPipelineCreateInfo,
-            nullptr,
-            &rtMagicaPipeline
-        );
-        if (rtPipelineResult != VK_SUCCESS) {
-            vkDestroyPipeline(m_device, magicaPipeline, nullptr);
-            destroyShaderModules(m_device, shaderModules);
-            logVkFailure("vkCreateGraphicsPipelines(magica_rt)", rtPipelineResult);
-            return false;
-        }
-        m_magicaPipelineRt = rtMagicaPipeline;
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_magicaPipelineRt), "pipeline.magicaVoxel.rt");
-    }
-    destroyShaderModules(m_device, shaderModules);
-    m_rtMainPassImplemented =
-        m_rayTracingRuntimeEnabled &&
-        (m_pipelineRt != VK_NULL_HANDLE ||
-         m_magicaPipelineRt != VK_NULL_HANDLE ||
-         m_importedStaticPipelineRt != VK_NULL_HANDLE);
-    refreshShadowStats();
-    VOX_LOGI("render") << "pipeline config (magica): samples=" << static_cast<uint32_t>(m_colorSampleCount)
-                       << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
-                       << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
-                       << ", rtVariant=" << (m_magicaPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
-                       << "\n";
-    return true;
-}
-
-bool RendererBackend::createPipePipeline() {
-    if (m_pipelineLayout == VK_NULL_HANDLE) {
-        return false;
-    }
-    if (m_depthFormat == VK_FORMAT_UNDEFINED || m_hdrColorFormat == VK_FORMAT_UNDEFINED) {
-        return false;
-    }
-
-    constexpr const char* kPipeVertexShaderPath = "../src/render/shaders/pipe_instanced.vert.slang.spv";
-    constexpr const char* kPipeFragmentShaderPath = "../src/render/shaders/pipe_instanced.frag.slang.spv";
     constexpr const char* kImportedStaticVertexShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
     constexpr const char* kImportedStaticFragmentShaderPath = "../src/render/shaders/imported_static.frag.slang.spv";
     constexpr const char* kImportedStaticRtFragmentShaderPath = "../src/render/shaders/imported_static_rt.frag.slang.spv";
@@ -453,78 +202,6 @@ bool RendererBackend::createPipePipeline() {
     constexpr const char* kImportedWaterRtFragmentShaderPath = "../src/render/shaders/imported_water_rt.frag.slang.spv";
     constexpr const char* kSkyCloudVertexShaderPath = "../src/render/shaders/sky_cloud.vert.slang.spv";
     constexpr const char* kSkyCloudFragmentShaderPath = "../src/render/shaders/sky_cloud.frag.slang.spv";
-
-    std::array<VkShaderModule, 2> pipeShaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    VkShaderModule& pipeVertShaderModule = pipeShaderModules[0];
-    VkShaderModule& pipeFragShaderModule = pipeShaderModules[1];
-    const std::array<ShaderModuleLoadSpec, 2> pipeShaderLoadSpecs = {{
-        {kPipeVertexShaderPath, "pipe_instanced.vert"},
-        {kPipeFragmentShaderPath, "pipe_instanced.frag"},
-    }};
-    if (!createShaderModulesFromFiles(m_device, pipeShaderLoadSpecs, pipeShaderModules)) {
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo pipeVertexShaderStage{};
-    pipeVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    pipeVertexShaderStage.module = pipeVertShaderModule;
-    pipeVertexShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo pipeFragmentShaderStage{};
-    pipeFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pipeFragmentShaderStage.module = pipeFragShaderModule;
-    pipeFragmentShaderStage.pName = "main";
-
-    const std::array<VkPipelineShaderStageCreateInfo, 2> pipeShaderStages = {
-        pipeVertexShaderStage,
-        pipeFragmentShaderStage
-    };
-
-    VkVertexInputBindingDescription bindings[2]{};
-    bindings[0].binding = 0;
-    bindings[0].stride = sizeof(PipeVertex);
-    bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    bindings[1].binding = 1;
-    bindings[1].stride = sizeof(PipeInstance);
-    bindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription attributes[6]{};
-    attributes[0].location = 0;
-    attributes[0].binding = 0;
-    attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
-    attributes[1].location = 1;
-    attributes[1].binding = 0;
-    attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
-    attributes[2].location = 2;
-    attributes[2].binding = 1;
-    attributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
-    attributes[3].location = 3;
-    attributes[3].binding = 1;
-    attributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
-    attributes[4].location = 4;
-    attributes[4].binding = 1;
-    attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
-    attributes[5].location = 5;
-    attributes[5].binding = 1;
-    attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
-
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 2;
-    vertexInputInfo.pVertexBindingDescriptions = bindings;
-    vertexInputInfo.vertexAttributeDescriptionCount = 6;
-    vertexInputInfo.pVertexAttributeDescriptions = attributes;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -584,9 +261,6 @@ bool RendererBackend::createPipePipeline() {
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     pipelineCreateInfo.pNext = &renderingCreateInfo;
-    pipelineCreateInfo.stageCount = static_cast<uint32_t>(pipeShaderStages.size());
-    pipelineCreateInfo.pStages = pipeShaderStages.data();
-    pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
     pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
     pipelineCreateInfo.pViewportState = &viewportState;
     pipelineCreateInfo.pRasterizationState = &rasterizer;
@@ -597,27 +271,6 @@ bool RendererBackend::createPipePipeline() {
     pipelineCreateInfo.layout = m_pipelineLayout;
     pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
     pipelineCreateInfo.subpass = 0;
-
-    VkPipeline pipePipeline = VK_NULL_HANDLE;
-    const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &pipePipeline
-    );
-
-    destroyShaderModules(m_device, pipeShaderModules);
-
-    if (pipePipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(pipe)", pipePipelineResult);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (pipeLit): samples=" << static_cast<uint32_t>(m_colorSampleCount)
-              << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
-              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
-              << "\n";
 
     const bool hasRtImportedVariant = m_rayTracingRuntimeEnabled && std::filesystem::exists(core::resourcePath(kImportedStaticRtFragmentShaderPath));
     std::array<VkShaderModule, 3> importedShaderModules = {
@@ -635,7 +288,6 @@ bool RendererBackend::createPipePipeline() {
             std::span(importedShaderLoadSpecs).first(hasRtImportedVariant ? 3u : 2u),
             std::span(importedShaderModules).first(hasRtImportedVariant ? 3u : 2u)
         )) {
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
         return false;
     }
 
@@ -870,7 +522,6 @@ bool RendererBackend::createPipePipeline() {
     );
     if (importedPipelineResult != VK_SUCCESS) {
         destroyShaderModules(m_device, importedShaderModules);
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(importedStatic)", importedPipelineResult);
         return false;
     }
@@ -1045,6 +696,21 @@ bool RendererBackend::createPipePipeline() {
         logVkFailure("vkCreateGraphicsPipelines(importedStaticTwoSided)", importedTwoSidedResult);
         importedStaticPipelineTwoSided = VK_NULL_HANDLE;
     }
+    // The reflection depth image starts clear and is not populated by the
+    // merged main-view prepass. Give it a shaded depth-writing variant so the
+    // reflected scene can be submitted once. Keep the two-pass fallback for
+    // drivers or scenes where late depth writes cost more than the replay.
+    VkPipelineDepthStencilStateCreateInfo reflectionDepthStencil = importedDepthStencil;
+    reflectionDepthStencil.depthWriteEnable = VK_TRUE;
+    VkGraphicsPipelineCreateInfo reflectionCreateInfo = importedTwoSidedCreateInfo;
+    reflectionCreateInfo.pDepthStencilState = &reflectionDepthStencil;
+    VkPipeline importedStaticReflectionPipelineTwoSided = VK_NULL_HANDLE;
+    const VkResult reflectionPipelineResult = vkCreateGraphicsPipelines(
+        m_device, m_pipelineCache, 1, &reflectionCreateInfo, nullptr,
+        &importedStaticReflectionPipelineTwoSided);
+    if (reflectionPipelineResult != VK_SUCCESS) {
+        logVkFailure("vkCreateGraphicsPipelines(importedReflection)", reflectionPipelineResult);
+    }
 
     VkPipeline importedStaticPipelineRt = VK_NULL_HANDLE;
     if (hasRtImportedVariant) {
@@ -1061,7 +727,6 @@ bool RendererBackend::createPipePipeline() {
         if (importedRtPipelineResult != VK_SUCCESS) {
             destroyShaderModules(m_device, importedShaderModules);
             vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
-            vkDestroyPipeline(m_device, pipePipeline, nullptr);
             logVkFailure("vkCreateGraphicsPipelines(importedStaticRt)", importedRtPipelineResult);
             return false;
         }
@@ -1085,7 +750,6 @@ bool RendererBackend::createPipePipeline() {
         {kSkyCloudFragmentShaderPath, "sky_cloud.frag"},
     }};
     if (!createShaderModulesFromFiles(m_device, skyCloudShaderLoadSpecs, skyCloudShaderModules)) {
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
         vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
@@ -1145,7 +809,6 @@ bool RendererBackend::createPipePipeline() {
     );
     destroyShaderModules(m_device, skyCloudShaderModules);
     if (skyCloudPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
         vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
@@ -1175,7 +838,6 @@ bool RendererBackend::createPipePipeline() {
             std::span(importedWaterShaderLoadSpecs).first(hasRtImportedWaterVariant ? 3u : 2u),
             std::span(importedWaterShaderModules).first(hasRtImportedWaterVariant ? 3u : 2u)
         )) {
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
         vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
@@ -1298,7 +960,6 @@ bool RendererBackend::createPipePipeline() {
     );
     if (importedWaterPipelineResult != VK_SUCCESS) {
         destroyShaderModules(m_device, importedWaterShaderModules);
-        vkDestroyPipeline(m_device, pipePipeline, nullptr);
         vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
         if (importedStaticPipelineRt != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
@@ -1322,7 +983,6 @@ bool RendererBackend::createPipePipeline() {
         );
         if (importedWaterRtPipelineResult != VK_SUCCESS) {
             destroyShaderModules(m_device, importedWaterShaderModules);
-            vkDestroyPipeline(m_device, pipePipeline, nullptr);
             vkDestroyPipeline(m_device, importedStaticPipeline, nullptr);
             if (importedStaticPipelineRt != VK_NULL_HANDLE) {
                 vkDestroyPipeline(m_device, importedStaticPipelineRt, nullptr);
@@ -1340,55 +1000,11 @@ bool RendererBackend::createPipePipeline() {
               << ", rtVariant=" << (importedWaterPipelineRt != VK_NULL_HANDLE ? "yes" : "no")
               << "\n";
 
-    if (m_strategyMapMode) {
-        // The hex map renders imported-static terrain + animated water + sky cloud and
-        // skips voxel/terrain-tess/magica/grass pipelines it never uses.
-        if (m_pipePipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_pipePipeline, nullptr); }
-        if (m_importedStaticPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr); }
-        if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr); }
-        if (m_importedStaticPipelineBlendedTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineBlendedTwoSided, nullptr); }
-        if (m_importedStaticPipelineTwoSided != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineTwoSided, nullptr); }
-        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedStaticPipelineRt, nullptr); }
-        if (m_skyCloudPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_skyCloudPipeline, nullptr); }
-        if (m_importedWaterPipeline != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipeline, nullptr); }
-        if (m_importedWaterPipelineRt != VK_NULL_HANDLE) { vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr); }
-        m_pipePipeline = pipePipeline;
-        m_importedStaticPipeline = importedStaticPipeline;
-        m_importedStaticPipelineBlended = importedStaticPipelineBlended;
-        if (m_importedStaticPipelineAdditive != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_importedStaticPipelineAdditive, nullptr);
-        m_importedStaticPipelineAdditive = std::exchange(importedStaticPipelineAdditive, VK_NULL_HANDLE);
-        m_importedStaticPipelineBlendedTwoSided = importedStaticPipelineBlendedTwoSided;
-        if (m_importedStaticPipelineAdditiveTwoSided != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_importedStaticPipelineAdditiveTwoSided, nullptr);
-        m_importedStaticPipelineAdditiveTwoSided = std::exchange(importedStaticPipelineAdditiveTwoSided, VK_NULL_HANDLE);
-    m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
-        m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
-        m_importedStaticPipelineRt = importedStaticPipelineRt;
-        m_skyCloudPipeline = skyCloudPipeline;
-        m_importedWaterPipeline = importedWaterPipeline;
-        m_importedWaterPipelineRt = importedWaterPipelineRt;
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
-        if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
-            setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
-        }
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyCloudPipeline), "pipeline.skyCloud");
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipeline), "pipeline.importedWater");
-        if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
-            setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
-        }
-        m_rtMainPassImplemented = m_rayTracingRuntimeEnabled && (m_importedStaticPipelineRt != VK_NULL_HANDLE);
-        refreshShadowStats();
-        return true;
-    }
-
-    // (removed) grass billboard main-pass pipeline — nothing binds it since the
-    // scatter and its draws were removed (see chunk_upload.cc, frame_pass_main.cc).
-
-    if (m_pipePipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
-    }
     if (m_importedStaticPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipeline, nullptr);
+    }
+    if (m_importedStaticReflectionPipelineTwoSided != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_importedStaticReflectionPipelineTwoSided, nullptr);
     }
     if (m_importedStaticPipelineBlended != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticPipelineBlended, nullptr);
@@ -1408,7 +1024,6 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedWaterPipelineRt, nullptr);
     }
-    m_pipePipeline = pipePipeline;
     m_importedStaticPipeline = importedStaticPipeline;
     m_importedStaticPipelineBlended = importedStaticPipelineBlended;
     if (m_importedStaticPipelineAdditive != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_importedStaticPipelineAdditive, nullptr);
@@ -1417,11 +1032,11 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedStaticPipelineAdditiveTwoSided != VK_NULL_HANDLE) vkDestroyPipeline(m_device, m_importedStaticPipelineAdditiveTwoSided, nullptr);
     m_importedStaticPipelineAdditiveTwoSided = std::exchange(importedStaticPipelineAdditiveTwoSided, VK_NULL_HANDLE);
     m_importedStaticPipelineTwoSided = importedStaticPipelineTwoSided;
+    m_importedStaticReflectionPipelineTwoSided = importedStaticReflectionPipelineTwoSided;
     m_importedStaticPipelineRt = importedStaticPipelineRt;
     m_skyCloudPipeline = skyCloudPipeline;
     m_importedWaterPipeline = importedWaterPipeline;
     m_importedWaterPipelineRt = importedWaterPipelineRt;
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipePipeline), "pipeline.pipe.lit");
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipeline), "pipeline.importedStatic");
     if (m_importedStaticPipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedStaticPipelineRt), "pipeline.importedStatic.rt");
@@ -1431,16 +1046,9 @@ bool RendererBackend::createPipePipeline() {
     if (m_importedWaterPipelineRt != VK_NULL_HANDLE) {
         setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_importedWaterPipelineRt), "pipeline.importedWater.rt");
     }
-    // Legacy pipe lit pipeline (prior factory sim) is bound by no render pass anymore.
-    if (m_pipePipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipePipeline, nullptr);
-        m_pipePipeline = VK_NULL_HANDLE;
-    }
     m_rtMainPassImplemented =
         m_rayTracingRuntimeEnabled &&
-        (m_pipelineRt != VK_NULL_HANDLE ||
-         m_magicaPipelineRt != VK_NULL_HANDLE ||
-         m_importedStaticPipelineRt != VK_NULL_HANDLE);
+        (m_importedStaticPipelineRt != VK_NULL_HANDLE);
     refreshShadowStats();
     return true;
 }
@@ -1577,39 +1185,17 @@ bool RendererBackend::createAoPipelines() {
         return false;
     }
 
-    constexpr const char* kVoxelVertShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
-    constexpr const char* kVoxelNormalDepthFragShaderPath = "../src/render/shaders/voxel_normaldepth.frag.slang.spv";
-    constexpr const char* kPipeVertShaderPath = "../src/render/shaders/pipe_instanced.vert.slang.spv";
-    constexpr const char* kPipeNormalDepthFragShaderPath = "../src/render/shaders/pipe_normaldepth.frag.slang.spv";
     constexpr const char* kImportedStaticVertShaderPath = "../src/render/shaders/imported_static.vert.slang.spv";
     constexpr const char* kImportedStaticNormalDepthFragShaderPath = "../src/render/shaders/imported_static_normaldepth.frag.slang.spv";
     constexpr const char* kImportedWaterVertShaderPath = "../src/render/shaders/imported_water.vert.slang.spv";
     constexpr const char* kImportedWaterNormalDepthFragShaderPath = "../src/render/shaders/imported_water_normaldepth.frag.slang.spv";
 
-    std::array<VkShaderModule, 8> shaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    VkShaderModule& voxelVertShaderModule = shaderModules[0];
-    VkShaderModule& voxelNormalDepthFragShaderModule = shaderModules[1];
-    VkShaderModule& pipeVertShaderModule = shaderModules[2];
-    VkShaderModule& pipeNormalDepthFragShaderModule = shaderModules[3];
-    VkShaderModule& importedStaticVertShaderModule = shaderModules[4];
-    VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[5];
-    VkShaderModule& importedWaterVertShaderModule = shaderModules[6];
-    VkShaderModule& importedWaterNormalDepthFragShaderModule = shaderModules[7];
-
-    const std::array<ShaderModuleLoadSpec, 8> shaderLoadSpecs = {{
-        {kVoxelVertShaderPath, "voxel_packed.vert"},
-        {kVoxelNormalDepthFragShaderPath, "voxel_normaldepth.frag"},
-        {kPipeVertShaderPath, "pipe_instanced.vert"},
-        {kPipeNormalDepthFragShaderPath, "pipe_normaldepth.frag"},
+    std::array<VkShaderModule, 4> shaderModules{};
+    VkShaderModule& importedStaticVertShaderModule = shaderModules[0];
+    VkShaderModule& importedStaticNormalDepthFragShaderModule = shaderModules[1];
+    VkShaderModule& importedWaterVertShaderModule = shaderModules[2];
+    VkShaderModule& importedWaterNormalDepthFragShaderModule = shaderModules[3];
+    const std::array<ShaderModuleLoadSpec, 4> shaderLoadSpecs = {{
         {kImportedStaticVertShaderPath, "imported_static.vert"},
         {kImportedStaticNormalDepthFragShaderPath, "imported_static_normaldepth.frag"},
         {kImportedWaterVertShaderPath, "imported_water.vert"},
@@ -1619,16 +1205,10 @@ bool RendererBackend::createAoPipelines() {
         return false;
     }
 
-    VkPipeline voxelNormalDepthPipeline = VK_NULL_HANDLE;
-    VkPipeline pipeNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
     VkPipeline importedStaticNormalDepthPipelineTwoSided = VK_NULL_HANDLE;
     VkPipeline importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
     auto destroyNewPipelines = [&]() {
-        if (pipeNormalDepthPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, pipeNormalDepthPipeline, nullptr);
-            pipeNormalDepthPipeline = VK_NULL_HANDLE;
-        }
         if (importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedStaticNormalDepthPipeline, nullptr);
             importedStaticNormalDepthPipeline = VK_NULL_HANDLE;
@@ -1640,10 +1220,6 @@ bool RendererBackend::createAoPipelines() {
         if (importedWaterNormalDepthPipeline != VK_NULL_HANDLE) {
             vkDestroyPipeline(m_device, importedWaterNormalDepthPipeline, nullptr);
             importedWaterNormalDepthPipeline = VK_NULL_HANDLE;
-        }
-        if (voxelNormalDepthPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, voxelNormalDepthPipeline, nullptr);
-            voxelNormalDepthPipeline = VK_NULL_HANDLE;
         }
     };
 
@@ -1715,133 +1291,6 @@ bool RendererBackend::createAoPipelines() {
     pipelineCreateInfo.layout = m_pipelineLayout;
     pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
     pipelineCreateInfo.subpass = 0;
-
-    // Voxel normal-depth pipeline.
-    VkPipelineShaderStageCreateInfo voxelStageInfos[2]{};
-    voxelStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    voxelStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    voxelStageInfos[0].module = voxelVertShaderModule;
-    voxelStageInfos[0].pName = "main";
-    voxelStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    voxelStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    voxelStageInfos[1].module = voxelNormalDepthFragShaderModule;
-    voxelStageInfos[1].pName = "main";
-
-    VkVertexInputBindingDescription voxelBindings[2]{};
-    voxelBindings[0].binding = 0;
-    voxelBindings[0].stride = sizeof(odai::world::PackedVoxelVertex);
-    voxelBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    voxelBindings[1].binding = 1;
-    voxelBindings[1].stride = sizeof(ChunkInstanceData);
-    voxelBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-    VkVertexInputAttributeDescription voxelAttributes[2]{};
-    voxelAttributes[0].location = 0;
-    voxelAttributes[0].binding = 0;
-    voxelAttributes[0].format = VK_FORMAT_R32_UINT;
-    voxelAttributes[0].offset = 0;
-    voxelAttributes[1].location = 1;
-    voxelAttributes[1].binding = 1;
-    voxelAttributes[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    voxelAttributes[1].offset = 0;
-    VkPipelineVertexInputStateCreateInfo voxelVertexInputInfo{};
-    voxelVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    voxelVertexInputInfo.vertexBindingDescriptionCount = 2;
-    voxelVertexInputInfo.pVertexBindingDescriptions = voxelBindings;
-    voxelVertexInputInfo.vertexAttributeDescriptionCount = 2;
-    voxelVertexInputInfo.pVertexAttributeDescriptions = voxelAttributes;
-
-    pipelineCreateInfo.stageCount = 2;
-    pipelineCreateInfo.pStages = voxelStageInfos;
-    pipelineCreateInfo.pVertexInputState = &voxelVertexInputInfo;
-    const VkResult voxelPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &voxelNormalDepthPipeline
-    );
-    if (voxelPipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(voxelNormalDepth)", voxelPipelineResult);
-        destroyNewPipelines();
-        destroyShaderModules(m_device, shaderModules);
-        return false;
-    }
-
-    // Pipe normal-depth pipeline.
-    VkPipelineShaderStageCreateInfo pipeStageInfos[2]{};
-    pipeStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeStageInfos[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    pipeStageInfos[0].module = pipeVertShaderModule;
-    pipeStageInfos[0].pName = "main";
-    pipeStageInfos[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeStageInfos[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    pipeStageInfos[1].module = pipeNormalDepthFragShaderModule;
-    pipeStageInfos[1].pName = "main";
-
-    VkVertexInputBindingDescription pipeBindings[2]{};
-    pipeBindings[0].binding = 0;
-    pipeBindings[0].stride = sizeof(PipeVertex);
-    pipeBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    pipeBindings[1].binding = 1;
-    pipeBindings[1].stride = sizeof(PipeInstance);
-    pipeBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription pipeAttributes[6]{};
-    pipeAttributes[0].location = 0;
-    pipeAttributes[0].binding = 0;
-    pipeAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    pipeAttributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
-    pipeAttributes[1].location = 1;
-    pipeAttributes[1].binding = 0;
-    pipeAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    pipeAttributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
-    pipeAttributes[2].location = 2;
-    pipeAttributes[2].binding = 1;
-    pipeAttributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeAttributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
-    pipeAttributes[3].location = 3;
-    pipeAttributes[3].binding = 1;
-    pipeAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeAttributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
-    pipeAttributes[4].location = 4;
-    pipeAttributes[4].binding = 1;
-    pipeAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeAttributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
-    pipeAttributes[5].location = 5;
-    pipeAttributes[5].binding = 1;
-    pipeAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeAttributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
-
-    VkPipelineVertexInputStateCreateInfo pipeVertexInputInfo{};
-    pipeVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    pipeVertexInputInfo.vertexBindingDescriptionCount = 2;
-    pipeVertexInputInfo.pVertexBindingDescriptions = pipeBindings;
-    pipeVertexInputInfo.vertexAttributeDescriptionCount = 6;
-    pipeVertexInputInfo.pVertexAttributeDescriptions = pipeAttributes;
-
-    VkPipelineRasterizationStateCreateInfo pipeRasterizer = rasterizer;
-    pipeRasterizer.cullMode = VK_CULL_MODE_NONE;
-
-    pipelineCreateInfo.pStages = pipeStageInfos;
-    pipelineCreateInfo.pVertexInputState = &pipeVertexInputInfo;
-    pipelineCreateInfo.pRasterizationState = &pipeRasterizer;
-    const VkResult pipePipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &pipeNormalDepthPipeline
-    );
-    if (pipePipelineResult != VK_SUCCESS) {
-        logVkFailure("vkCreateGraphicsPipelines(pipeNormalDepth)", pipePipelineResult);
-        destroyNewPipelines();
-        destroyShaderModules(m_device, shaderModules);
-        return false;
-    }
-
-    // (removed) grass billboard normal-depth prepass pipeline.
 
     VkPipelineShaderStageCreateInfo importedNormalDepthStageInfos[2]{};
     importedNormalDepthStageInfos[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1927,6 +1376,7 @@ bool RendererBackend::createAoPipelines() {
     importedVertexInputInfo.vertexAttributeDescriptionCount = 13;
     importedVertexInputInfo.pVertexAttributeDescriptions = importedAttributes;
 
+    pipelineCreateInfo.stageCount = 2;
     pipelineCreateInfo.pStages = importedNormalDepthStageInfos;
     pipelineCreateInfo.pVertexInputState = &importedVertexInputInfo;
     // Keep this diagnostic in lockstep with the lit imported-static pipeline.
@@ -2126,12 +1576,6 @@ bool RendererBackend::createAoPipelines() {
 
     destroyShaderModules(m_device, shaderModules);
 
-    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_voxelNormalDepthPipeline, nullptr);
-    }
-    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
-    }
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticNormalDepthPipeline, nullptr);
     }
@@ -2142,21 +1586,9 @@ bool RendererBackend::createAoPipelines() {
         vkDestroyPipeline(m_device, m_importedWaterNormalDepthPipeline, nullptr);
     }
 
-    m_voxelNormalDepthPipeline = voxelNormalDepthPipeline;
-    m_pipeNormalDepthPipeline = pipeNormalDepthPipeline;
     m_importedStaticNormalDepthPipeline = importedStaticNormalDepthPipeline;
     m_importedStaticNormalDepthPipelineTwoSided = importedStaticNormalDepthPipelineTwoSided;
     m_importedWaterNormalDepthPipeline = importedWaterNormalDepthPipeline;
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_voxelNormalDepthPipeline),
-        "pipeline.prepass.voxelNormalDepth"
-    );
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_pipeNormalDepthPipeline),
-        "pipeline.prepass.pipeNormalDepth"
-    );
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_importedStaticNormalDepthPipeline),
@@ -2167,16 +1599,6 @@ bool RendererBackend::createAoPipelines() {
         vkHandleToUint64(m_importedWaterNormalDepthPipeline),
         "pipeline.prepass.importedWaterNormalDepth"
     );
-    // The voxel normal-depth pipeline is live again: it is what puts VoxelCraft's
-    // chunks into the AO input buffer. Without it the prepass only ever saw imported
-    // statics and skinned actors, so ambient occlusion had nothing to occlude against
-    // anywhere the world is made of voxels.
-    //
-    // The pipe normal-depth pipeline stays dead -- legacy factory sim, no caller.
-    if (m_pipeNormalDepthPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipeNormalDepthPipeline, nullptr);
-        m_pipeNormalDepthPipeline = VK_NULL_HANDLE;
-    }
     return true;
 }
 
@@ -2229,47 +1651,18 @@ bool RendererBackend::createGraphicsPipeline() {
         );
     }
 
-    constexpr const char* kWorldVertexShaderPath = "../src/render/shaders/voxel_packed.vert.slang.spv";
-    constexpr const char* kWorldFragmentShaderPath = "../src/render/shaders/voxel_packed.frag.slang.spv";
-    constexpr const char* kWorldFragmentRtShaderPath = "../src/render/shaders/voxel_packed_rt.frag.slang.spv";
-    constexpr const char* kTerrainVertexShaderPath = "../src/render/shaders/terrain_heightmap.vert.slang.spv";
-    constexpr const char* kTerrainTessControlShaderPath = "../src/render/shaders/terrain_heightmap.tesc.slang.spv";
-    constexpr const char* kTerrainTessEvalShaderPath = "../src/render/shaders/terrain_heightmap.tese.slang.spv";
-    constexpr const char* kTerrainFragmentShaderPath = "../src/render/shaders/terrain_heightmap.frag.slang.spv";
-    constexpr const char* kHexTerrainVertexShaderPath = "../src/render/shaders/hex_terrain.vert.slang.spv";
-    constexpr const char* kHexTerrainTessControlShaderPath = "../src/render/shaders/hex_terrain.tesc.slang.spv";
-    constexpr const char* kHexTerrainTessEvalShaderPath = "../src/render/shaders/hex_terrain.tese.slang.spv";
-    constexpr const char* kHexTerrainFragmentShaderPath = "../src/render/shaders/hex_terrain.frag.slang.spv";
     constexpr const char* kSkyboxVertexShaderPath = "../src/render/shaders/skybox.vert.slang.spv";
     constexpr const char* kSkyboxFragmentShaderPath = "../src/render/shaders/skybox.frag.slang.spv";
     constexpr const char* kToneMapVertexShaderPath = "../src/render/shaders/tone_map.vert.slang.spv";
     constexpr const char* kToneMapFragmentShaderPath = "../src/render/shaders/tone_map.frag.slang.spv";
-    constexpr const char* kShadowVertexShaderPath = "../src/render/shaders/shadow_depth.vert.slang.spv";
-    constexpr const char* kPipeShadowVertexShaderPath = "../src/render/shaders/pipe_shadow.vert.slang.spv";
     constexpr const char* kImportedStaticShadowVertexShaderPath = "../src/render/shaders/imported_static_shadow.vert.slang.spv";
 
-    std::array<VkShaderModule, 8> sceneShaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    VkShaderModule& worldVertShaderModule = sceneShaderModules[0];
-    VkShaderModule& worldFragShaderModule = sceneShaderModules[1];
-    VkShaderModule& skyboxVertShaderModule = sceneShaderModules[2];
-    VkShaderModule& skyboxFragShaderModule = sceneShaderModules[3];
-    VkShaderModule& toneMapVertShaderModule = sceneShaderModules[4];
-    VkShaderModule& toneMapFragShaderModule = sceneShaderModules[5];
-    VkShaderModule& worldFragRtShaderModule = sceneShaderModules[6];
-    VkShaderModule& shadowVertShaderModule = sceneShaderModules[7];
-
-    const std::array<ShaderModuleLoadSpec, 6> sceneShaderLoadSpecs = {{
-        {kWorldVertexShaderPath, "voxel_packed.vert"},
-        {kWorldFragmentShaderPath, "voxel_packed.frag"},
+    std::array<VkShaderModule, 4> sceneShaderModules{};
+    VkShaderModule& skyboxVertShaderModule = sceneShaderModules[0];
+    VkShaderModule& skyboxFragShaderModule = sceneShaderModules[1];
+    VkShaderModule& toneMapVertShaderModule = sceneShaderModules[2];
+    VkShaderModule& toneMapFragShaderModule = sceneShaderModules[3];
+    const std::array<ShaderModuleLoadSpec, 4> sceneShaderLoadSpecs = {{
         {kSkyboxVertexShaderPath, "skybox.vert"},
         {kSkyboxFragmentShaderPath, "skybox.frag"},
         {kToneMapVertexShaderPath, "tone_map.vert"},
@@ -2285,86 +1678,6 @@ bool RendererBackend::createGraphicsPipeline() {
     auto destroySceneShaderModules = [&]() {
         destroyShaderModules(m_device, sceneShaderModules);
     };
-
-    VkPipelineShaderStageCreateInfo worldVertexShaderStage{};
-    worldVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    worldVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    worldVertexShaderStage.module = worldVertShaderModule;
-    worldVertexShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo worldFragmentShaderStage{};
-    worldFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    worldFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    worldFragmentShaderStage.module = worldFragShaderModule;
-    worldFragmentShaderStage.pName = "main";
-    struct WorldFragmentSpecializationData {
-        std::int32_t shadowPolicyMode = 2;  // 0=no shadows, 1=single-cascade PCF, 2=cascade-blended PCF
-        std::int32_t ambientPolicyMode = 2; // 0=SH only, 1=SH hemisphere, 2=SH hemisphere + vertex AO
-        std::int32_t forceTintOnly = 0;     // 0=atlas sampling enabled, 1=tint-only shading
-    };
-    const WorldFragmentSpecializationData worldFragmentSpecializationData{};
-    const std::array<VkSpecializationMapEntry, 3> worldFragmentSpecializationMapEntries = {{
-        VkSpecializationMapEntry{
-            6u,
-            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, shadowPolicyMode)),
-            sizeof(std::int32_t)
-        },
-        VkSpecializationMapEntry{
-            7u,
-            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, ambientPolicyMode)),
-            sizeof(std::int32_t)
-        },
-        VkSpecializationMapEntry{
-            8u,
-            static_cast<uint32_t>(offsetof(WorldFragmentSpecializationData, forceTintOnly)),
-            sizeof(std::int32_t)
-        }
-    }};
-    const VkSpecializationInfo worldFragmentSpecializationInfo{
-        static_cast<uint32_t>(worldFragmentSpecializationMapEntries.size()),
-        worldFragmentSpecializationMapEntries.data(),
-        sizeof(worldFragmentSpecializationData),
-        &worldFragmentSpecializationData
-    };
-    worldFragmentShaderStage.pSpecializationInfo = &worldFragmentSpecializationInfo;
-
-    std::array<VkPipelineShaderStageCreateInfo, 2> worldShaderStages = {worldVertexShaderStage, worldFragmentShaderStage};
-    std::array<VkPipelineShaderStageCreateInfo, 2> worldRtShaderStages = worldShaderStages;
-    bool hasRtWorldVariant = false;
-    if (m_rayTracingRuntimeEnabled && m_rtShaderVariantFileAvailable) {
-        if (!createShaderModuleFromFile(m_device, kWorldFragmentRtShaderPath, "voxel_packed_rt.frag", worldFragRtShaderModule)) {
-            VOX_LOGW("render") << "world RT fragment shader unavailable; keeping shadow-map-only world path\n";
-        } else {
-            worldRtShaderStages[1].module = worldFragRtShaderModule;
-            hasRtWorldVariant = true;
-        }
-    }
-
-    // Binding 0: packed voxel vertices. Binding 1: per-draw chunk origin.
-    VkVertexInputBindingDescription bindingDescriptions[2]{};
-    bindingDescriptions[0].binding = 0;
-    bindingDescriptions[0].stride = sizeof(odai::world::PackedVoxelVertex);
-    bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    bindingDescriptions[1].binding = 1;
-    bindingDescriptions[1].stride = sizeof(ChunkInstanceData);
-    bindingDescriptions[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription attributeDescriptions[2]{};
-    attributeDescriptions[0].location = 0;
-    attributeDescriptions[0].binding = 0;
-    attributeDescriptions[0].format = VK_FORMAT_R32_UINT;
-    attributeDescriptions[0].offset = 0;
-    attributeDescriptions[1].location = 1;
-    attributeDescriptions[1].binding = 1;
-    attributeDescriptions[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attributeDescriptions[1].offset = 0;
-
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 2;
-    vertexInputInfo.pVertexBindingDescriptions = bindingDescriptions;
-    vertexInputInfo.vertexAttributeDescriptionCount = 2;
-    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -2424,9 +1737,6 @@ bool RendererBackend::createGraphicsPipeline() {
     pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     pipelineCreateInfo.pNext = &renderingCreateInfo;
-    pipelineCreateInfo.stageCount = static_cast<uint32_t>(worldShaderStages.size());
-    pipelineCreateInfo.pStages = worldShaderStages.data();
-    pipelineCreateInfo.pVertexInputState = &vertexInputInfo;
     pipelineCreateInfo.pInputAssemblyState = &inputAssembly;
     pipelineCreateInfo.pViewportState = &viewportState;
     pipelineCreateInfo.pRasterizationState = &rasterizer;
@@ -2437,152 +1747,6 @@ bool RendererBackend::createGraphicsPipeline() {
     pipelineCreateInfo.layout = m_pipelineLayout;
     pipelineCreateInfo.renderPass = VK_NULL_HANDLE;
     pipelineCreateInfo.subpass = 0;
-
-    VkPipeline worldPipeline = VK_NULL_HANDLE;
-    const VkResult worldPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipelineCreateInfo,
-        nullptr,
-        &worldPipeline
-    );
-    if (worldPipelineResult != VK_SUCCESS) {
-        destroySceneShaderModules();
-        logVkFailure("vkCreateGraphicsPipelines(world)", worldPipelineResult);
-        return false;
-    }
-    VkPipeline worldRtPipeline = VK_NULL_HANDLE;
-    if (hasRtWorldVariant) {
-        VkGraphicsPipelineCreateInfo worldRtPipelineCreateInfo = pipelineCreateInfo;
-        worldRtPipelineCreateInfo.pStages = worldRtShaderStages.data();
-        const VkResult worldRtPipelineResult = vkCreateGraphicsPipelines(
-            m_device,
-            m_pipelineCache,
-            1,
-            &worldRtPipelineCreateInfo,
-            nullptr,
-            &worldRtPipeline
-        );
-        if (worldRtPipelineResult != VK_SUCCESS) {
-            vkDestroyPipeline(m_device, worldPipeline, nullptr);
-            destroySceneShaderModules();
-            logVkFailure("vkCreateGraphicsPipelines(world_rt)", worldRtPipelineResult);
-            return false;
-        }
-    }
-    VOX_LOGI("render") << "pipeline config (world): samples=" << static_cast<uint32_t>(m_colorSampleCount)
-              << ", cullMode=" << static_cast<uint32_t>(rasterizer.cullMode)
-              << ", depthCompare=" << static_cast<uint32_t>(depthStencil.depthCompareOp)
-              << ", shadowPolicyMode=" << worldFragmentSpecializationData.shadowPolicyMode
-              << ", ambientPolicyMode=" << worldFragmentSpecializationData.ambientPolicyMode
-              << ", rtVariant=" << (worldRtPipeline != VK_NULL_HANDLE ? "yes" : "no")
-              << "\n";
-
-    VkPipelineRasterizationStateCreateInfo previewAddRasterizer = rasterizer;
-    previewAddRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    // Preview draws closed helper geometry; disable culling to avoid face dropouts from winding mismatches.
-    previewAddRasterizer.cullMode = VK_CULL_MODE_NONE;
-    previewAddRasterizer.depthBiasEnable = VK_FALSE;
-
-    VkPipelineRasterizationStateCreateInfo previewRemoveRasterizer = rasterizer;
-    previewRemoveRasterizer.polygonMode = m_supportsWireframePreview ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-    previewRemoveRasterizer.cullMode = VK_CULL_MODE_NONE;
-    previewRemoveRasterizer.depthBiasEnable = VK_FALSE;
-
-    VkPipelineDepthStencilStateCreateInfo previewDepthStencil = depthStencil;
-    previewDepthStencil.depthWriteEnable = VK_TRUE;
-    previewDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
-
-    std::array<VkDynamicState, 3> previewDynamicStates = {
-        VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR,
-        VK_DYNAMIC_STATE_DEPTH_BIAS,
-    };
-    VkPipelineDynamicStateCreateInfo previewDynamicState{};
-    previewDynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    previewDynamicState.dynamicStateCount = static_cast<uint32_t>(previewDynamicStates.size());
-    previewDynamicState.pDynamicStates = previewDynamicStates.data();
-
-    VkGraphicsPipelineCreateInfo previewAddPipelineCreateInfo = pipelineCreateInfo;
-    previewAddPipelineCreateInfo.pRasterizationState = &previewAddRasterizer;
-    previewAddPipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
-    previewAddPipelineCreateInfo.pDynamicState = &previewDynamicState;
-
-    VkPipeline previewAddPipeline = VK_NULL_HANDLE;
-    const VkResult previewAddPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &previewAddPipelineCreateInfo,
-        nullptr,
-        &previewAddPipeline
-    );
-    if (previewAddPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        destroySceneShaderModules();
-        logVkFailure("vkCreateGraphicsPipelines(previewAdd)", previewAddPipelineResult);
-        return false;
-    }
-
-    VkGraphicsPipelineCreateInfo previewRemovePipelineCreateInfo = pipelineCreateInfo;
-    previewRemovePipelineCreateInfo.pRasterizationState = &previewRemoveRasterizer;
-    previewRemovePipelineCreateInfo.pDepthStencilState = &previewDepthStencil;
-    previewRemovePipelineCreateInfo.pDynamicState = &previewDynamicState;
-
-    VkPipeline previewRemovePipeline = VK_NULL_HANDLE;
-    const VkResult previewRemovePipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &previewRemovePipelineCreateInfo,
-        nullptr,
-        &previewRemovePipeline
-    );
-
-    if (previewRemovePipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        destroySceneShaderModules();
-        logVkFailure("vkCreateGraphicsPipelines(previewRemove)", previewRemovePipelineResult);
-        return false;
-    }
-
-    VkPipelineInputAssemblyStateCreateInfo previewFaceOutlineInputAssembly = inputAssembly;
-    previewFaceOutlineInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-
-    VkPipelineRasterizationStateCreateInfo previewFaceOutlineRasterizer = rasterizer;
-    previewFaceOutlineRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    previewFaceOutlineRasterizer.cullMode = VK_CULL_MODE_NONE;
-    previewFaceOutlineRasterizer.depthBiasEnable = VK_FALSE;
-
-    VkPipelineDepthStencilStateCreateInfo previewFaceOutlineDepthStencil = depthStencil;
-    previewFaceOutlineDepthStencil.depthWriteEnable = VK_FALSE;
-    previewFaceOutlineDepthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
-
-    VkGraphicsPipelineCreateInfo previewFaceOutlinePipelineCreateInfo = pipelineCreateInfo;
-    previewFaceOutlinePipelineCreateInfo.pInputAssemblyState = &previewFaceOutlineInputAssembly;
-    previewFaceOutlinePipelineCreateInfo.pRasterizationState = &previewFaceOutlineRasterizer;
-    previewFaceOutlinePipelineCreateInfo.pDepthStencilState = &previewFaceOutlineDepthStencil;
-    previewFaceOutlinePipelineCreateInfo.pDynamicState = &previewDynamicState;
-
-    VkPipeline previewFaceOutlinePipeline = VK_NULL_HANDLE;
-    const VkResult previewFaceOutlinePipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &previewFaceOutlinePipelineCreateInfo,
-        nullptr,
-        &previewFaceOutlinePipeline
-    );
-    if (previewFaceOutlinePipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        destroySceneShaderModules();
-        logVkFailure("vkCreateGraphicsPipelines(previewFaceOutline)", previewFaceOutlinePipelineResult);
-        return false;
-    }
 
     VkPipelineShaderStageCreateInfo skyboxVertexShaderStage{};
     skyboxVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -2633,10 +1797,6 @@ bool RendererBackend::createGraphicsPipeline() {
     );
 
     if (skyboxPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         destroySceneShaderModules();
         logVkFailure("vkCreateGraphicsPipelines(skybox)", skyboxPipelineResult);
         return false;
@@ -2718,10 +1878,6 @@ bool RendererBackend::createGraphicsPipeline() {
 
     if (toneMapPipelineResult != VK_SUCCESS) {
         destroySceneShaderModules();
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(toneMap)", toneMapPipelineResult);
         return false;
@@ -2730,32 +1886,6 @@ bool RendererBackend::createGraphicsPipeline() {
               << static_cast<uint32_t>(toneMapMultisampling.rasterizationSamples)
               << ", swapchainFormat=" << static_cast<int>(m_swapchainFormat)
               << "\n";
-
-    const std::array<ShaderModuleLoadSpec, 1> shadowShaderLoadSpecs = {{
-        {kShadowVertexShaderPath, "shadow_depth.vert"},
-    }};
-    if (!createShaderModulesFromFiles(
-            m_device,
-            shadowShaderLoadSpecs,
-            std::span<VkShaderModule>(sceneShaderModules).subspan(7, 1)
-        )) {
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        return false;
-    }
-    VkPipelineShaderStageCreateInfo shadowVertexShaderStage{};
-    shadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    shadowVertexShaderStage.module = shadowVertShaderModule;
-    shadowVertexShaderStage.pName = "main";
-
-    const std::array<VkPipelineShaderStageCreateInfo, 1> shadowShaderStages = {
-        shadowVertexShaderStage
-    };
 
     VkPipelineMultisampleStateCreateInfo shadowMultisampling{};
     shadowMultisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -2795,9 +1925,6 @@ bool RendererBackend::createGraphicsPipeline() {
     shadowPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     shadowPipelineCreateInfo.flags = VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     shadowPipelineCreateInfo.pNext = &shadowRenderingCreateInfo;
-    shadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(shadowShaderStages.size());
-    shadowPipelineCreateInfo.pStages = shadowShaderStages.data();
-    shadowPipelineCreateInfo.pVertexInputState = &vertexInputInfo;
     shadowPipelineCreateInfo.pInputAssemblyState = &inputAssembly;
     shadowPipelineCreateInfo.pViewportState = &viewportState;
     shadowPipelineCreateInfo.pRasterizationState = &shadowRasterizer;
@@ -2809,135 +1936,7 @@ bool RendererBackend::createGraphicsPipeline() {
     shadowPipelineCreateInfo.renderPass = VK_NULL_HANDLE;
     shadowPipelineCreateInfo.subpass = 0;
 
-    VkPipeline shadowPipeline = VK_NULL_HANDLE;
-    const VkResult shadowPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &shadowPipelineCreateInfo,
-        nullptr,
-        &shadowPipeline
-    );
-
     destroySceneShaderModules();
-
-    if (shadowPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        logVkFailure("vkCreateGraphicsPipelines(shadow)", shadowPipelineResult);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (shadow): depthFormat=" << static_cast<int>(m_shadowDepthFormat)
-              << ", depthBias=" << (shadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
-              << ", cullMode=" << static_cast<uint32_t>(shadowRasterizer.cullMode)
-              << ", samples=" << static_cast<uint32_t>(shadowMultisampling.rasterizationSamples)
-              << "\n";
-
-    std::array<VkShaderModule, 1> pipeShadowShaderModules = {VK_NULL_HANDLE};
-    VkShaderModule& pipeShadowVertShaderModule = pipeShadowShaderModules[0];
-    const std::array<ShaderModuleLoadSpec, 1> pipeShadowShaderLoadSpecs = {{
-        {kPipeShadowVertexShaderPath, "pipe_shadow.vert"},
-    }};
-    if (!createShaderModulesFromFiles(m_device, pipeShadowShaderLoadSpecs, pipeShadowShaderModules)) {
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        return false;
-    }
-    VkPipelineShaderStageCreateInfo pipeShadowVertexShaderStage{};
-    pipeShadowVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    pipeShadowVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    pipeShadowVertexShaderStage.module = pipeShadowVertShaderModule;
-    pipeShadowVertexShaderStage.pName = "main";
-
-    const std::array<VkPipelineShaderStageCreateInfo, 1> pipeShadowShaderStages = {
-        pipeShadowVertexShaderStage
-    };
-
-    VkVertexInputBindingDescription pipeShadowBindings[2]{};
-    pipeShadowBindings[0].binding = 0;
-    pipeShadowBindings[0].stride = sizeof(PipeVertex);
-    pipeShadowBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-    pipeShadowBindings[1].binding = 1;
-    pipeShadowBindings[1].stride = sizeof(PipeInstance);
-    pipeShadowBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-    VkVertexInputAttributeDescription pipeShadowAttributes[6]{};
-    pipeShadowAttributes[0].location = 0;
-    pipeShadowAttributes[0].binding = 0;
-    pipeShadowAttributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    pipeShadowAttributes[0].offset = static_cast<uint32_t>(offsetof(PipeVertex, position));
-    pipeShadowAttributes[1].location = 1;
-    pipeShadowAttributes[1].binding = 0;
-    pipeShadowAttributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    pipeShadowAttributes[1].offset = static_cast<uint32_t>(offsetof(PipeVertex, normal));
-    pipeShadowAttributes[2].location = 2;
-    pipeShadowAttributes[2].binding = 1;
-    pipeShadowAttributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeShadowAttributes[2].offset = static_cast<uint32_t>(offsetof(PipeInstance, originLength));
-    pipeShadowAttributes[3].location = 3;
-    pipeShadowAttributes[3].binding = 1;
-    pipeShadowAttributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeShadowAttributes[3].offset = static_cast<uint32_t>(offsetof(PipeInstance, axisRadius));
-    pipeShadowAttributes[4].location = 4;
-    pipeShadowAttributes[4].binding = 1;
-    pipeShadowAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeShadowAttributes[4].offset = static_cast<uint32_t>(offsetof(PipeInstance, tint));
-    pipeShadowAttributes[5].location = 5;
-    pipeShadowAttributes[5].binding = 1;
-    pipeShadowAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    pipeShadowAttributes[5].offset = static_cast<uint32_t>(offsetof(PipeInstance, extensions));
-
-    VkPipelineVertexInputStateCreateInfo pipeShadowVertexInputInfo{};
-    pipeShadowVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    pipeShadowVertexInputInfo.vertexBindingDescriptionCount = 2;
-    pipeShadowVertexInputInfo.pVertexBindingDescriptions = pipeShadowBindings;
-    pipeShadowVertexInputInfo.vertexAttributeDescriptionCount = 6;
-    pipeShadowVertexInputInfo.pVertexAttributeDescriptions = pipeShadowAttributes;
-
-    VkGraphicsPipelineCreateInfo pipeShadowPipelineCreateInfo = shadowPipelineCreateInfo;
-    pipeShadowPipelineCreateInfo.stageCount = static_cast<uint32_t>(pipeShadowShaderStages.size());
-    pipeShadowPipelineCreateInfo.pStages = pipeShadowShaderStages.data();
-    pipeShadowPipelineCreateInfo.pVertexInputState = &pipeShadowVertexInputInfo;
-    VkPipelineRasterizationStateCreateInfo pipeShadowRasterizer = shadowRasterizer;
-    pipeShadowRasterizer.cullMode = VK_CULL_MODE_NONE;
-    pipeShadowPipelineCreateInfo.pRasterizationState = &pipeShadowRasterizer;
-
-    VkPipeline pipeShadowPipeline = VK_NULL_HANDLE;
-    const VkResult pipeShadowPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &pipeShadowPipelineCreateInfo,
-        nullptr,
-        &pipeShadowPipeline
-    );
-
-    destroyShaderModules(m_device, pipeShadowShaderModules);
-
-    if (pipeShadowPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-        logVkFailure("vkCreateGraphicsPipelines(pipeShadow)", pipeShadowPipelineResult);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (pipeShadow): cullMode="
-              << static_cast<uint32_t>(pipeShadowRasterizer.cullMode)
-              << ", depthBias=" << (pipeShadowRasterizer.depthBiasEnable == VK_TRUE ? 1 : 0)
-              << "\n";
 
     constexpr const char* kImportedStaticShadowFragmentShaderPath = "../src/render/shaders/imported_static_shadow.frag.slang.spv";
     std::array<VkShaderModule, 2> importedShadowShaderModules = {VK_NULL_HANDLE, VK_NULL_HANDLE};
@@ -2946,12 +1945,6 @@ bool RendererBackend::createGraphicsPipeline() {
         {kImportedStaticShadowFragmentShaderPath, "imported_static_shadow.frag"},
     }};
     if (!createShaderModulesFromFiles(m_device, importedShadowShaderLoadSpecs, importedShadowShaderModules)) {
-        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         return false;
@@ -3158,12 +2151,6 @@ bool RendererBackend::createGraphicsPipeline() {
 
     destroyShaderModules(m_device, importedShadowShaderModules);
     if (importedShadowPipelineResult != VK_SUCCESS) {
-        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
         vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
         vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
         logVkFailure("vkCreateGraphicsPipelines(importedStaticShadow)", importedShadowPipelineResult);
@@ -3176,242 +2163,8 @@ bool RendererBackend::createGraphicsPipeline() {
 
     // (removed) grass billboard shadow-caster pipeline.
 
-    VkPipeline terrainTessPipeline = VK_NULL_HANDLE;
-    if (!m_strategyMapMode) {
-    std::array<VkShaderModule, 4> terrainShaderModules = {
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE,
-        VK_NULL_HANDLE
-    };
-    const std::array<ShaderModuleLoadSpec, 4> terrainShaderLoadSpecs = {{
-        {kTerrainVertexShaderPath, "terrain_heightmap.vert"},
-        {kTerrainTessControlShaderPath, "terrain_heightmap.tesc"},
-        {kTerrainTessEvalShaderPath, "terrain_heightmap.tese"},
-        {kTerrainFragmentShaderPath, "terrain_heightmap.frag"},
-    }};
-    auto destroyNewScenePipelines = [&]() {
-        vkDestroyPipeline(m_device, importedStaticShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, pipeShadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, shadowPipeline, nullptr);
-        vkDestroyPipeline(m_device, worldPipeline, nullptr);
-        if (worldRtPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, worldRtPipeline, nullptr);
-        }
-        vkDestroyPipeline(m_device, previewAddPipeline, nullptr);
-        vkDestroyPipeline(m_device, previewRemovePipeline, nullptr);
-        vkDestroyPipeline(m_device, previewFaceOutlinePipeline, nullptr);
-        vkDestroyPipeline(m_device, skyboxPipeline, nullptr);
-        vkDestroyPipeline(m_device, toneMapPipeline, nullptr);
-    };
-    if (!createShaderModulesFromFiles(m_device, terrainShaderLoadSpecs, terrainShaderModules)) {
-        destroyNewScenePipelines();
-        return false;
-    }
-
-    VkPipelineShaderStageCreateInfo terrainVertexShaderStage{};
-    terrainVertexShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    terrainVertexShaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    terrainVertexShaderStage.module = terrainShaderModules[0];
-    terrainVertexShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo terrainTessControlShaderStage{};
-    terrainTessControlShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    terrainTessControlShaderStage.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-    terrainTessControlShaderStage.module = terrainShaderModules[1];
-    terrainTessControlShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo terrainTessEvalShaderStage{};
-    terrainTessEvalShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    terrainTessEvalShaderStage.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-    terrainTessEvalShaderStage.module = terrainShaderModules[2];
-    terrainTessEvalShaderStage.pName = "main";
-
-    VkPipelineShaderStageCreateInfo terrainFragmentShaderStage{};
-    terrainFragmentShaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    terrainFragmentShaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    terrainFragmentShaderStage.module = terrainShaderModules[3];
-    terrainFragmentShaderStage.pName = "main";
-
-    const std::array<VkPipelineShaderStageCreateInfo, 4> terrainShaderStages = {
-        terrainVertexShaderStage,
-        terrainTessControlShaderStage,
-        terrainTessEvalShaderStage,
-        terrainFragmentShaderStage
-    };
-
-    VkPipelineVertexInputStateCreateInfo terrainVertexInputInfo{};
-    terrainVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-
-    VkPipelineInputAssemblyStateCreateInfo terrainInputAssembly{};
-    terrainInputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    terrainInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
-
-    VkPipelineTessellationStateCreateInfo terrainTessellationState{};
-    terrainTessellationState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-    terrainTessellationState.patchControlPoints = 4;
-
-    VkPipelineRasterizationStateCreateInfo terrainRasterizer = rasterizer;
-    terrainRasterizer.cullMode = VK_CULL_MODE_NONE;
-
-    VkGraphicsPipelineCreateInfo terrainPipelineCreateInfo = pipelineCreateInfo;
-    terrainPipelineCreateInfo.stageCount = static_cast<uint32_t>(terrainShaderStages.size());
-    terrainPipelineCreateInfo.pStages = terrainShaderStages.data();
-    terrainPipelineCreateInfo.pVertexInputState = &terrainVertexInputInfo;
-    terrainPipelineCreateInfo.pInputAssemblyState = &terrainInputAssembly;
-    terrainPipelineCreateInfo.pTessellationState = &terrainTessellationState;
-    terrainPipelineCreateInfo.pRasterizationState = &terrainRasterizer;
-
-    const VkResult terrainPipelineResult = vkCreateGraphicsPipelines(
-        m_device,
-        m_pipelineCache,
-        1,
-        &terrainPipelineCreateInfo,
-        nullptr,
-        &terrainTessPipeline
-    );
-    destroyShaderModules(m_device, terrainShaderModules);
-    if (terrainPipelineResult != VK_SUCCESS) {
-        destroyNewScenePipelines();
-        logVkFailure("vkCreateGraphicsPipelines(terrainHeightmapTess)", terrainPipelineResult);
-        return false;
-    }
-    VOX_LOGI("render") << "pipeline config (terrainHeightmapTess): topology=patch_list"
-              << ", patchControlPoints=" << terrainTessellationState.patchControlPoints
-              << ", cullMode=" << static_cast<uint32_t>(terrainRasterizer.cullMode)
-              << "\n";
-    } // if (!m_strategyMapMode) terrain block
-
-    // Hex strategy-map land surface: one shared subdivided hex base mesh instanced per
-    // land tile, tessellated and height-displaced on the GPU. Created only in strategy
-    // map mode when tessellation is supported; a failure here is non-fatal (the app
-    // keeps the flat imported-static land via hexTerrainReady() == false).
-    VkPipeline hexTerrainPipeline = VK_NULL_HANDLE;
-    if (m_strategyMapMode && m_supportsTessellationShader) {
-        std::array<VkShaderModule, 4> hexShaderModules = {
-            VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE
-        };
-        const std::array<ShaderModuleLoadSpec, 4> hexShaderLoadSpecs = {{
-            {kHexTerrainVertexShaderPath, "hex_terrain.vert"},
-            {kHexTerrainTessControlShaderPath, "hex_terrain.tesc"},
-            {kHexTerrainTessEvalShaderPath, "hex_terrain.tese"},
-            {kHexTerrainFragmentShaderPath, "hex_terrain.frag"},
-        }};
-        if (!createShaderModulesFromFiles(m_device, hexShaderLoadSpecs, hexShaderModules)) {
-            VOX_LOGW("render") << "hex terrain pipeline disabled: shader modules failed to load";
-        } else {
-            std::array<VkPipelineShaderStageCreateInfo, 4> hexShaderStages{};
-            const std::array<VkShaderStageFlagBits, 4> hexStageBits = {
-                VK_SHADER_STAGE_VERTEX_BIT,
-                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
-                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
-            };
-            for (std::size_t i = 0; i < 4; ++i) {
-                hexShaderStages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-                hexShaderStages[i].stage = hexStageBits[i];
-                hexShaderStages[i].module = hexShaderModules[i];
-                hexShaderStages[i].pName = "main";
-            }
-
-            VkVertexInputBindingDescription hexBindings[2]{};
-            hexBindings[0].binding = 0;
-            hexBindings[0].stride = sizeof(odai::importer::HexBaseVertex);
-            hexBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-            hexBindings[1].binding = 1;
-            hexBindings[1].stride = sizeof(odai::importer::HexTileInstance);
-            hexBindings[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-
-            VkVertexInputAttributeDescription hexAttributes[8]{};
-            hexAttributes[0].location = 0;  // localXZ
-            hexAttributes[0].binding = 0;
-            hexAttributes[0].format = VK_FORMAT_R32G32_SFLOAT;
-            hexAttributes[0].offset = static_cast<uint32_t>(offsetof(odai::importer::HexBaseVertex, localXZ));
-            hexAttributes[1].location = 1;  // cornerIndex
-            hexAttributes[1].binding = 0;
-            hexAttributes[1].format = VK_FORMAT_R32_UINT;
-            hexAttributes[1].offset = static_cast<uint32_t>(offsetof(odai::importer::HexBaseVertex, cornerIndex));
-            hexAttributes[2].location = 2;  // centerXZ
-            hexAttributes[2].binding = 1;
-            hexAttributes[2].format = VK_FORMAT_R32G32_SFLOAT;
-            hexAttributes[2].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, centerXZ));
-            hexAttributes[3].location = 3;  // classFlags
-            hexAttributes[3].binding = 1;
-            hexAttributes[3].format = VK_FORMAT_R32_UINT;
-            hexAttributes[3].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, classFlags));
-            hexAttributes[4].location = 4;  // detailParams
-            hexAttributes[4].binding = 1;
-            hexAttributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-            hexAttributes[4].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, detailParams));
-            hexAttributes[5].location = 5;  // ownAndNear = {ownElevY, neighborElevY[0..2]}
-            hexAttributes[5].binding = 1;
-            hexAttributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-            hexAttributes[5].offset = static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, ownElevY));
-            hexAttributes[6].location = 6;  // farAndSize = {neighborElevY[3..5], hexSize}
-            hexAttributes[6].binding = 1;
-            hexAttributes[6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-            hexAttributes[6].offset =
-                static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, neighborElevY) + (3u * sizeof(float)));
-            hexAttributes[7].location = 7;  // neighborTerrainPacked: 4-bit terrain type per edge (k=0..5)
-            hexAttributes[7].binding = 1;
-            hexAttributes[7].format = VK_FORMAT_R32_UINT;
-            hexAttributes[7].offset =
-                static_cast<uint32_t>(offsetof(odai::importer::HexTileInstance, neighborTerrainPacked));
-
-            VkPipelineVertexInputStateCreateInfo hexVertexInputInfo{};
-            hexVertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-            hexVertexInputInfo.vertexBindingDescriptionCount = 2;
-            hexVertexInputInfo.pVertexBindingDescriptions = hexBindings;
-            hexVertexInputInfo.vertexAttributeDescriptionCount = 8;
-            hexVertexInputInfo.pVertexAttributeDescriptions = hexAttributes;
-
-            VkPipelineInputAssemblyStateCreateInfo hexInputAssembly{};
-            hexInputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-            hexInputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
-
-            VkPipelineTessellationStateCreateInfo hexTessellationState{};
-            hexTessellationState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-            hexTessellationState.patchControlPoints = 3;
-
-            VkPipelineRasterizationStateCreateInfo hexRasterizer = rasterizer;
-            hexRasterizer.cullMode = VK_CULL_MODE_NONE;
-
-            VkGraphicsPipelineCreateInfo hexPipelineCreateInfo = pipelineCreateInfo;
-            hexPipelineCreateInfo.stageCount = static_cast<uint32_t>(hexShaderStages.size());
-            hexPipelineCreateInfo.pStages = hexShaderStages.data();
-            hexPipelineCreateInfo.pVertexInputState = &hexVertexInputInfo;
-            hexPipelineCreateInfo.pInputAssemblyState = &hexInputAssembly;
-            hexPipelineCreateInfo.pTessellationState = &hexTessellationState;
-            hexPipelineCreateInfo.pRasterizationState = &hexRasterizer;
-
-            const VkResult hexPipelineResult = vkCreateGraphicsPipelines(
-                m_device, m_pipelineCache, 1, &hexPipelineCreateInfo, nullptr, &hexTerrainPipeline);
-            destroyShaderModules(m_device, hexShaderModules);
-            if (hexPipelineResult != VK_SUCCESS) {
-                logVkFailure("vkCreateGraphicsPipelines(hexTerrain)", hexPipelineResult);
-                hexTerrainPipeline = VK_NULL_HANDLE;
-            } else {
-                VOX_LOGI("render") << "pipeline config (hexTerrain): topology=patch_list"
-                          << ", patchControlPoints=" << hexTessellationState.patchControlPoints
-                          << ", cullMode=" << static_cast<uint32_t>(hexRasterizer.cullMode) << "\n";
-            }
-        }
-    }
-
-    if (m_pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipeline, nullptr);
-    }
-    if (m_pipelineRt != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipelineRt, nullptr);
-    }
     if (m_skyboxPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_skyboxPipeline, nullptr);
-    }
-    if (m_shadowPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);
-    }
-    if (m_pipeShadowPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_pipeShadowPipeline, nullptr);
     }
     if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_importedStaticShadowPipeline, nullptr);
@@ -3419,85 +2172,21 @@ bool RendererBackend::createGraphicsPipeline() {
     if (m_tonemapPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(m_device, m_tonemapPipeline, nullptr);
     }
-    if (m_previewAddPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_previewAddPipeline, nullptr);
-    }
-    if (m_previewRemovePipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_previewRemovePipeline, nullptr);
-    }
-    if (m_previewFaceOutlinePipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_previewFaceOutlinePipeline, nullptr);
-    }
-    if (m_terrainTessPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_terrainTessPipeline, nullptr);
-    }
-    if (m_hexTerrainPipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(m_device, m_hexTerrainPipeline, nullptr);
-    }
-    m_pipeline = worldPipeline;
-    m_pipelineRt = worldRtPipeline;
-    m_terrainTessPipeline = terrainTessPipeline;
-    m_hexTerrainPipeline = hexTerrainPipeline;
     m_skyboxPipeline = skyboxPipeline;
-    m_shadowPipeline = shadowPipeline;
-    m_pipeShadowPipeline = pipeShadowPipeline;
     m_importedStaticShadowPipeline = importedStaticShadowPipeline;
     m_tonemapPipeline = toneMapPipeline;
-    m_previewAddPipeline = previewAddPipeline;
-    m_previewRemovePipeline = previewRemovePipeline;
-    m_previewFaceOutlinePipeline = previewFaceOutlinePipeline;
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeline), "pipeline.world");
-    if (m_pipelineRt != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipelineRt), "pipeline.world.rt");
-    }
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_terrainTessPipeline), "pipeline.terrainHeightmapTess");
-    if (m_hexTerrainPipeline != VK_NULL_HANDLE) {
-        setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_hexTerrainPipeline), "pipeline.hexTerrain");
-    }
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_skyboxPipeline), "pipeline.skybox");
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_shadowPipeline), "pipeline.shadow.voxels");
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_pipeShadowPipeline), "pipeline.shadow.pipes");
     setObjectName(
         VK_OBJECT_TYPE_PIPELINE,
         vkHandleToUint64(m_importedStaticShadowPipeline),
         "pipeline.shadow.importedStatic"
     );
     setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_tonemapPipeline), "pipeline.tonemap");
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewAddPipeline), "pipeline.preview.add");
-    setObjectName(VK_OBJECT_TYPE_PIPELINE, vkHandleToUint64(m_previewRemovePipeline), "pipeline.preview.remove");
-    setObjectName(
-        VK_OBJECT_TYPE_PIPELINE,
-        vkHandleToUint64(m_previewFaceOutlinePipeline),
-        "pipeline.preview.faceOutline"
-    );
-    // The voxel world + voxel shadow pipelines (m_pipeline / m_pipelineRt /
-    // m_shadowPipeline) are NOT dead: src/games/voxelcraft draws voxel chunks through
-    // them. They were listed here when the strategy map was the only consumer, which
-    // destroyed them immediately after creation and left VoxelCraft rendering nothing but
-    // sky. Games without voxel chunks never bind them -- prepareFrameChunkDrawData yields
-    // no indirect commands, so the draw is skipped on its own.
-    //
-    // The pipe-shadow and voxel-edit preview pipelines below genuinely have no caller
-    // left; their draw sites are still removed from the main and shadow passes.
-    for (VkPipeline* deadPipeline : {&m_pipeShadowPipeline, &m_previewAddPipeline,
-                                     &m_previewRemovePipeline, &m_previewFaceOutlinePipeline}) {
-        if (*deadPipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(m_device, *deadPipeline, nullptr);
-            *deadPipeline = VK_NULL_HANDLE;
-        }
-    }
-    if (!m_strategyMapMode && !createMagicaPipeline()) {
-        VOX_LOGE("render") << "createGraphicsPipeline failed: createMagicaPipeline\n";
-        return false;
-    }
     m_rtMainPassImplemented =
         m_rayTracingRuntimeEnabled &&
-        (m_pipelineRt != VK_NULL_HANDLE ||
-         m_magicaPipelineRt != VK_NULL_HANDLE ||
-         m_importedStaticPipelineRt != VK_NULL_HANDLE);
+        (m_importedStaticPipelineRt != VK_NULL_HANDLE);
     refreshShadowStats();
-    VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap + preview="
-              << (m_supportsWireframePreview ? "wireframe" : "ghost")
+    VOX_LOGI("render") << "graphics pipelines ready (shadow + hdr scene + tonemap"
               << ")\n";
     return true;
 }

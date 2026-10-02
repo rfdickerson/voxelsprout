@@ -1,9 +1,9 @@
-#include "import/fnv/nif_particles.h"
+#include "import/bethesda/nif_particles.h"
 #include <cmath>
 #include <cstring>
 #include <iostream>
 #include <limits>
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 using Bytes = std::vector<std::uint8_t>;
 template <class T> void put(Bytes &b, T v) {
   auto *p = (std::uint8_t *)&v;

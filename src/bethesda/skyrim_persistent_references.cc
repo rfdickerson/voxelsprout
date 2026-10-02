@@ -1,6 +1,6 @@
 #include "bethesda/skyrim_persistent_references.h"
 #include "bethesda/record_resolver.h"
-#include "import/fnv/actor_records.h"
+#include "import/bethesda/actor_records.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,21 +25,21 @@ struct Placement {
 };
 } // namespace
 
-bool materializeSkyrimPersistentReferences(const importer::fnv::FalloutLoadOrder &order,
+bool materializeSkyrimPersistentReferences(const importer::bethesda::FalloutLoadOrder &order,
                                            const std::set<std::uint32_t> &references,
                                            BethesdaWorld &world, std::string &error) {
     std::map<std::uint32_t, Placement> placements;
     std::map<std::uint32_t, Cell> cells;
     for (std::size_t plugin = 0; plugin < order.size(); ++plugin) {
-        importer::fnv::EsmReader reader;
+        importer::bethesda::EsmReader reader;
         if (!reader.open(order.entries()[plugin].path)) {
             error = reader.lastError();
             return false;
         }
         std::uint32_t currentCell = 0u, currentWorld = 0u;
         std::vector<std::pair<std::uint32_t, std::uint32_t>> parents;
-        importer::fnv::EsmReader::Visitor visitor;
-        visitor.onGroupEnter = [&](const importer::fnv::EsmGroupView &group) {
+        importer::bethesda::EsmReader::Visitor visitor;
+        visitor.onGroupEnter = [&](const importer::bethesda::EsmGroupView &group) {
             parents.emplace_back(currentCell, currentWorld);
             if (group.groupType == 1)
                 currentWorld = order.remapFormId(
@@ -51,18 +51,18 @@ bool materializeSkyrimPersistentReferences(const importer::fnv::FalloutLoadOrder
                                 reinterpret_cast<const std::uint8_t *>(group.rawLabel.data())));
             return true;
         };
-        visitor.onGroupExit = [&](const importer::fnv::EsmGroupView &) {
+        visitor.onGroupExit = [&](const importer::bethesda::EsmGroupView &) {
             currentCell = parents.back().first;
             currentWorld = parents.back().second;
             parents.pop_back();
         };
-        visitor.onRecordHeader = [&](const importer::fnv::EsmRecordHeaderView &record) {
+        visitor.onRecordHeader = [&](const importer::bethesda::EsmRecordHeaderView &record) {
             return record.type == "CELL" ||
                    ((record.type == "ACHR" || record.type == "REFR") &&
                     references.contains(order.remapFormId(plugin, record.formId)));
         };
         bool failed = false;
-        visitor.onRecord = [&](const importer::fnv::EsmRecordView &record) {
+        visitor.onRecord = [&](const importer::bethesda::EsmRecordView &record) {
             if (failed)
                 return;
             const auto form = order.remapFormId(plugin, record.formId);
@@ -161,13 +161,13 @@ bool materializeSkyrimPersistentReferences(const importer::fnv::FalloutLoadOrder
             return false;
         }
     }
-    importer::fnv::FalloutActorScan actors;
+    importer::bethesda::FalloutActorScan actors;
     std::unordered_map<std::uint32_t, std::string> voiceOwners;
     if (std::any_of(placements.begin(), placements.end(),
                     [](const auto &entry) {
                         return entry.second.object.kind == RuntimeObjectKind::Actor;
                     }) &&
-        !importer::fnv::findAllActorsAcrossOrder(order, actors, voiceOwners, error))
+        !importer::bethesda::findAllActorsAcrossOrder(order, actors, voiceOwners, error))
         return false;
     // Validate everything before committing any objects.
     for (auto &[form, placement] : placements) {

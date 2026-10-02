@@ -1,10 +1,10 @@
-#include "import/fnv/character_asset_manifest.h"
+#include "import/bethesda/character_asset_manifest.h"
 #include "tools/character_coverage.h"
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <fstream>
 #include <iostream>
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 namespace fs = std::filesystem;
 int main() {
     int failures = 0;

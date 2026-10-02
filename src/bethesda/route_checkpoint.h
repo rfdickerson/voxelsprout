@@ -7,7 +7,7 @@ namespace odai::bethesda {
 nlohmann::json bleakFallsRouteContract();
 nlohmann::json scenarioStartContract(const std::string& id);
 nlohmann::json assessScenarioStart(const BethesdaSession& session);
-nlohmann::json routeProfileMetadata(const importer::fnv::ResolvedContentProfile& profile);
+nlohmann::json routeProfileMetadata(const importer::bethesda::ResolvedContentProfile& profile);
 nlohmann::json routeCheckpoint(const BethesdaSession& session);
 nlohmann::json assessBleakFallsStart(const BethesdaSession& session);
 }

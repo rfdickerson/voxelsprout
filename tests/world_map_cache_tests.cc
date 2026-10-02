@@ -1,9 +1,9 @@
-#include "import/fnv/world_map_cache.h"
+#include "import/bethesda/world_map_cache.h"
 #include <cassert>
 #include <iostream>
 #include <limits>
 
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 int main() {
     const auto path = std::filesystem::temp_directory_path() /
         ("odai-map-cache-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

@@ -3,7 +3,7 @@
 #include <cmath>
 
 namespace odai::bethesda {
-bool readSkyrimScene(const importer::fnv::EsmRecordView& record,
+bool readSkyrimScene(const importer::bethesda::EsmRecordView& record,
     RecordKey stable, SkyrimSceneDefinition& out, std::string& error) {
     out = {}; out.record = std::move(stable);
     SkyrimScenePhase* phase = nullptr;

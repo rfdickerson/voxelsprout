@@ -9,14 +9,14 @@
 
 namespace {
 
-using odai::games::newvegas::ActorNavigationWorld;
-using odai::games::newvegas::ActorNavigationStep;
-using odai::games::newvegas::ActorNavigationStepKind;
-using odai::games::newvegas::GeneratedNavigationConfig;
+using odai::games::bethesda::ActorNavigationWorld;
+using odai::games::bethesda::ActorNavigationStep;
+using odai::games::bethesda::ActorNavigationStepKind;
+using odai::games::bethesda::GeneratedNavigationConfig;
 using odai::importer::CellCoord;
-using odai::importer::fnv::FalloutNavMeshRecord;
-using odai::importer::fnv::FalloutNavMeshTriangle;
-using odai::importer::fnv::kNavMeshNoNeighbour;
+using odai::importer::bethesda::FalloutNavMeshRecord;
+using odai::importer::bethesda::FalloutNavMeshTriangle;
+using odai::importer::bethesda::kNavMeshNoNeighbour;
 using odai::math::Vector3;
 
 void addCollisionTriangle(odai::importer::ImportedScene& scene,

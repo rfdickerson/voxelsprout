@@ -1,5 +1,4 @@
 #pragma once
-
-// Compatibility include for downstream code. The unified five-game runtime
-// now lives behind the Bethesda-named application header.
-#include "games/newvegas/bethesda_app.h"
+// Compatibility include; shared implementation lives under Bethesda names.
+#include "games/bethesda/newvegas_app.h"
+#include "games/bethesda/legacy_names.h"

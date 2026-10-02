@@ -22,14 +22,6 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
     const VkExtent2D aoExtent = merged ? m_renderExtent : context.aoExtent;
     const VkViewport& aoViewport = merged ? context.viewport : context.aoViewport;
     const VkRect2D& aoScissor = merged ? context.scissor : context.aoScissor;
-    // Voxel chunk inputs: consumed by the chunk draw below, mirroring the main pass.
-    // The magica/pipe prepass inputs remain on PrepassInputs but stay unconsumed —
-    // those draws belong to the prior factory sim and have no caller left.
-    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
-    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
-    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
-    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -129,45 +121,7 @@ void RendererBackend::recordNormalDepthPrepass(const FrameExecutionContext& cont
         return;
     }
 
-    // Voxel chunks (VoxelCraft). This is what gives ambient occlusion something to
-    // occlude against in a voxel world — without it the AO input buffer holds only
-    // imported statics and skinned actors, and every AO mode reads flat where the
-    // terrain is. Guards mirror the main pass exactly: games with no voxel chunks
-    // produce no indirect commands, so canDrawChunksIndirect is false and the whole
-    // block is skipped.
-    if (m_voxelNormalDepthPipeline != VK_NULL_HANDLE &&
-        frameChunkDrawData.canDrawChunksIndirect &&
-        chunkVertexBuffer != VK_NULL_HANDLE &&
-        chunkIndexBuffer != VK_NULL_HANDLE &&
-        chunkInstanceBuffer != VK_NULL_HANDLE &&
-        chunkInstanceSliceOpt.has_value()) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_voxelNormalDepthPipeline);
-        bindGraphicsDescriptorBuffers(commandBuffer);
-        const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
-        const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-        vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-        vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-        // Per-chunk offsets ride the instance buffer; the push constant block stays
-        // zeroed so the shader's chunkOffset/cascadeData path matches the main pass.
-        ChunkPushConstants chunkPushConstants{};
-        // Neutral alpha-test threshold. Draws that carry an authored one
-        // overwrite this; leaving it zeroed would mean nothing cuts out.
-        chunkPushConstants.materialParams[0] = 0.5f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &chunkPushConstants
-        );
-        drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsPrepass, frameChunkDrawData);
-    }
-
-    // Opaque normal+depth for SSAO. Gated on the imported-static normal-depth pipeline
-    // (the strategy map's settlements/units/grid); the prior game's magica normal-depth
-    // draws remain removed.
+    // Opaque imported-scene normal and depth for SSAO.
     if (m_importedStaticNormalDepthPipeline != VK_NULL_HANDLE) {
         // The normal-depth shader alpha-tests too, so it needs the same
         // authored threshold the main pass uses -- otherwise SSAO sees a

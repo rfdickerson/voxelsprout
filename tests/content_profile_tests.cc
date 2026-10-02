@@ -1,5 +1,5 @@
-#include "import/fnv/content_profile.h"
-#include "import/fnv/asset_source.h"
+#include "import/bethesda/content_profile.h"
+#include "import/bethesda/asset_source.h"
 
 #include <algorithm>
 #include <chrono>
@@ -12,7 +12,7 @@
 namespace {
 
 namespace fs = std::filesystem;
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 
 int failures = 0;
 

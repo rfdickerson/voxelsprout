@@ -54,13 +54,13 @@ are, so a mod directory holding nothing but the `.esp` works.
 
 ## 3. Installing a texture pack
 
-Normalize the pack first. `odai_fnv_texture_pack` mip-drops it to the ceiling you intend to
+Normalize the pack first. `odai_texture_pack` mip-drops it to the ceiling you intend to
 run and lowercases every path:
 
 ```bash
 7z x -o/tmp/nmc "NMCs Textures NV SMALL Pack SINGLE FILE FOR NMM-43135-1-0.7z"
 
-./odai_fnv_texture_pack \
+./odai_texture_pack \
   --in /tmp/nmc/NMCsTexPack_SMALL \
   --out ~/.local/share/odai/fnv-mods/nmc \
   --max-size 1024
@@ -248,7 +248,7 @@ fudge, not physics.
 
 ## 9. Known gaps
 
-- `odai_newvegas_cooker` has no `--mod`; only the streaming path honours mods.
+- `odai_bethesda_cooker` has no `--mod`; only the streaming path honours mods.
 - Only **weather** records are read from extra plugins. Cell contents still come from the
   main plugin alone, so a mod's placed objects do not appear.
 - No rain **particles** — a rainy scene is sky, fog and sound.

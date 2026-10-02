@@ -1,13 +1,13 @@
 #include "tools/tri_probe.h"
-#include "import/fnv/asset_source.h"
-#include "import/fnv/content_profile.h"
-#include "import/fnv/tri_morph.h"
+#include "import/bethesda/asset_source.h"
+#include "import/bethesda/content_profile.h"
+#include "import/bethesda/tri_morph.h"
 #include <cmath>
 #include <iostream>
 #include <nlohmann/json.hpp>
 int probeTriMorphs(const std::filesystem::path &source, const std::string &path,
                    bool useProfile) {
-  using namespace odai::importer::fnv;
+  using namespace odai::importer::bethesda;
   using nlohmann::json;
   FalloutAssetSource assets;
   std::string error;

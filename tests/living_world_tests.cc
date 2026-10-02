@@ -154,7 +154,7 @@ int main() {
     assert(atNine->anchor == reference(105u));
 
     BethesdaSession session;
-    assert(session.configure({odai::importer::fnv::BethesdaGame::Morrowind,
+    assert(session.configure({odai::importer::bethesda::BethesdaGame::Morrowind,
         payload.contentFingerprint, "", 11u}, error));
     addFixtureObjects(session.world());
     assert(session.installGameplayCells({payload}, error));
@@ -262,7 +262,7 @@ int main() {
         std::filesystem::temp_directory_path() / "odai-living-world-save.json";
     assert(saveOdaiGameAtomic(save, session, error));
     BethesdaSession restored;
-    assert(restored.configure({odai::importer::fnv::BethesdaGame::Morrowind,
+    assert(restored.configure({odai::importer::bethesda::BethesdaGame::Morrowind,
         payload.contentFingerprint, "", 11u}, error));
     assert(restored.installGameplayCells({payload}, error));
     SaveLoadReport report;

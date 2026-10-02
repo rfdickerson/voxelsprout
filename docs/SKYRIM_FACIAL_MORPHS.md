@@ -7,7 +7,7 @@ cooked-scene layout changed, and the running JK/SMIM city preview is unaffected.
 
 ## Implemented
 
-`src/import/fnv/tri_morph.{h,cc}` reads FRTRI003 using the
+`src/import/bethesda/tri_morph.{h,cc}` reads FRTRI003 using the
 [NifTools format definition](https://raw.githubusercontent.com/niftools/pyffi/develop/pyffi/formats/tri/tri.xml).
 It preserves source vertices, triangle/quad topology, UVs, named signed-short
 relative targets and scales, absolute modifier replacements, and reserved header

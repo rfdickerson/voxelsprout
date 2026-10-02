@@ -26,13 +26,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     VkQueryPool gpuTimestampQueryPool = context.gpuTimestampQueryPool;
     CoreFrameGraphOrderValidator& coreFramePassOrderValidator = *context.frameOrderValidator;
     const CoreFrameGraphPlan& coreFrameGraphPlan = *context.frameGraphPlan;
-    // Voxel chunk shadow inputs: consumed by the per-cascade caster draw below
-    // (VoxelCraft). The magica/pipe inputs remain unconsumed here.
-    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
-    const std::optional<FrameArenaSlice>& shadowChunkInstanceSliceOpt = *inputs.shadowChunkInstanceSliceOpt;
-    const VkBuffer shadowChunkInstanceBuffer = inputs.shadowChunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
-    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -362,8 +355,7 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
     shadowDepthClearValue.depthStencil.depth = 0.0f;
     shadowDepthClearValue.depthStencil.stencil = 0;
 
-    // Shadow caster pass. Gated on the imported-static shadow pipeline (strategy-map
-    // settlements/units); the prior game's voxel chunk + magica shadow draws were removed.
+    // Imported-scene shadow caster pass.
     if (m_importedStaticShadowPipeline != VK_NULL_HANDLE) {
         for (uint32_t cascadeIndex = 0; cascadeIndex < kShadowCascadeCount; ++cascadeIndex) {
             if ((inputs.skipCascadeMask & (1u << cascadeIndex)) != 0u) {
@@ -421,41 +413,6 @@ void RendererBackend::recordShadowAtlasPass(const FrameExecutionContext& context
                 (m_shadowDebugSettings.casterSlopeBiasCascadeScale * cascadeF);
             // Reverse-Z uses GREATER depth tests, so flip bias sign.
             vkCmdSetDepthBias(commandBuffer, -constantBias, 0.0f, -slopeBias);
-
-            // Voxel chunk shadow casters for this cascade. Skipped entirely when a game
-            // has no voxel chunks (no per-cascade indirect commands are produced).
-            // (Magica model shadow casters remain removed.)
-            if (m_shadowPipeline != VK_NULL_HANDLE &&
-                frameChunkDrawData.canDrawShadowChunksIndirectByCascade[cascadeIndex] &&
-                shadowChunkInstanceSliceOpt.has_value() &&
-                shadowChunkInstanceBuffer != VK_NULL_HANDLE &&
-                chunkVertexBuffer != VK_NULL_HANDLE &&
-                chunkIndexBuffer != VK_NULL_HANDLE) {
-                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-                bindGraphicsDescriptorBuffers(commandBuffer);
-                const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, shadowChunkInstanceBuffer};
-                const VkDeviceSize voxelVertexOffsets[2] = {0, shadowChunkInstanceSliceOpt->offset};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-                vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-                // cascadeData[0] selects the light matrix for this cascade in the shadow
-                // vertex shader; chunk offsets ride the instance buffer.
-                ChunkPushConstants chunkPushConstants{};
-                // Neutral alpha-test threshold. Draws that carry an authored one
-                // overwrite this; leaving it zeroed would mean nothing cuts out.
-                chunkPushConstants.materialParams[0] = 0.5f;
-                chunkPushConstants.cascadeData[0] = cascadeF;
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipelineLayout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    sizeof(ChunkPushConstants),
-                    &chunkPushConstants
-                );
-                drawIndirectShadowChunkRanges(
-                    commandBuffer, m_debugDrawCallsShadow, cascadeIndex, frameChunkDrawData);
-            }
 
             const std::span<const ImportedMeshDraw> cascadeImportedMeshDraws =
                 importedPageCullingEnabled ? inputs.importedMeshDrawsByCascade[cascadeIndex] : importedMeshDraws;

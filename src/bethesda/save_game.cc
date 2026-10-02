@@ -1663,7 +1663,7 @@ bool loadOdaiGame(
     std::uint64_t nextStimulusSequence = 1u;
     std::string savedFingerprint;
     try {
-        const auto savedGame = static_cast<importer::fnv::BethesdaGame>(
+        const auto savedGame = static_cast<importer::bethesda::BethesdaGame>(
             payload.at("game").get<std::uint8_t>());
         if (savedGame != session.config().game) {
             outError = "save targets a different Bethesda game"; return false;
@@ -2403,7 +2403,7 @@ bool loadOdaiGame(
         outReport.diagnostics.push_back(
             "pre-version-14 save initialized native ragdoll state as inactive");
     }
-    if (!tes3State.present && session.config().game == importer::fnv::BethesdaGame::Morrowind) {
+    if (!tes3State.present && session.config().game == importer::bethesda::BethesdaGame::Morrowind) {
         outReport.diagnostics.push_back(
             "save has no TES3 extension; journal, MWScript, topics, and dialogue initialized empty");
     }

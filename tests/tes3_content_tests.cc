@@ -13,7 +13,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace odai::bethesda;
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 
 int failures = 0;
 

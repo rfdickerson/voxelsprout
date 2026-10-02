@@ -1,4 +1,4 @@
 #pragma once
-
-// Compatibility include for code that still uses the original runtime path.
-#include "games/newvegas/bethesda_collision.h"
+// Compatibility include; shared implementation lives under Bethesda names.
+#include "games/bethesda/newvegas_collision.h"
+#include "games/bethesda/legacy_names.h"

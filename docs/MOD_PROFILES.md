@@ -75,9 +75,9 @@ The familiar cooker also accepts the resolved graph and bakes merged winning
 records rather than a single plugin in isolation:
 
 ```bash
-odai_newvegas_cooker --profile <profile> region.bin --data <Data> \
+odai_bethesda_cooker --profile <profile> region.bin --data <Data> \
   --worldspace Tamriel -2 -2 2 2
-odai_newvegas_cooker --profile <profile> interior.bin --data <Data> \
+odai_bethesda_cooker --profile <profile> interior.bin --data <Data> \
   --cell MyInteriorEditorID
 ```
 

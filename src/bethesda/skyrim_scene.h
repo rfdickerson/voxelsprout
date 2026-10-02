@@ -68,7 +68,7 @@ struct SkyrimScriptTrigger {
     std::vector<std::string> scripts;
     std::set<ObjectId> occupants;
 };
-bool readSkyrimScene(const importer::fnv::EsmRecordView& record,
+bool readSkyrimScene(const importer::bethesda::EsmRecordView& record,
     RecordKey stable, SkyrimSceneDefinition& out, std::string& error);
 bool readVmadSceneFragments(std::span<const std::uint8_t> bytes,
     VmadAttachments& common, std::vector<SkyrimSceneFragment>& fragments,

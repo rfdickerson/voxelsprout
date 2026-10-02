@@ -1,12 +1,12 @@
-#include "import/fnv/nif_material_animation.h"
-#include "import/fnv/nif_effect_sequence.h"
+#include "import/bethesda/nif_material_animation.h"
+#include "import/bethesda/nif_effect_sequence.h"
 #include "import/imported_lighting_material.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 using namespace odai::importer;
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 namespace {
 int failures = 0;
 void check(bool ok, const char *message) {

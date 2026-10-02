@@ -111,8 +111,8 @@ Retained inspection and content commands:
 
 ```text
 odai_bethesda_probe
-odai_newvegas_cooker
-odai_fnv_texture_pack
+odai_bethesda_cooker
+odai_texture_pack
 ```
 
 For Skyrim compatibility work, `odai_bethesda_probe <Data> --scriptcheck

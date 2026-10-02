@@ -5,7 +5,7 @@
 #include <limits>
 #include <utility>
 
-namespace odai::games::newvegas {
+namespace odai::games::bethesda {
 
 namespace {
 
@@ -20,8 +20,8 @@ float horizontalDistanceSquared(
 
 NavMeshPlayerSimulator::NavMeshPlayerSimulator(
     const ActorNavigationWorld& navigation,
-    bethesda::BethesdaPhysicsWorld& physics,
-    bethesda::ObjectId player,
+    odai::bethesda::BethesdaPhysicsWorld& physics,
+    odai::bethesda::ObjectId player,
     NavigationSimulationConfig config)
     : m_navigation(navigation), m_physics(physics), m_player(std::move(player)),
       m_config(config) {
@@ -72,7 +72,7 @@ NavigationSimulationResult NavMeshPlayerSimulator::runTo(
             std::abs(state->position.y - route[waypoint].position.y) <=
                 std::max(48.0f, m_config.waypointRadius * 2.0f)) {
             if (route[waypoint].kind == ActorNavigationStepKind::ActivateDoor) {
-                bethesda::PhysicsCharacterSnapshot relocated;
+                odai::bethesda::PhysicsCharacterSnapshot relocated;
                 relocated.object = m_player;
                 relocated.position = route[waypoint].arrivalPosition;
                 relocated.rotation = state->rotation;
@@ -89,14 +89,14 @@ NavigationSimulationResult NavMeshPlayerSimulator::runTo(
             ++waypoint;
         }
         if (waypoint >= route.size()) {
-            (void)m_physics.setCharacterInput(m_player, bethesda::PhysicsCharacterInput{});
+            (void)m_physics.setCharacterInput(m_player, odai::bethesda::PhysicsCharacterInput{});
             result.status = NavigationSimulationStatus::Arrived;
             return result;
         }
 
         const odai::math::Vector3 delta = route[waypoint].position - state->position;
         const float horizontalLength = std::sqrt((delta.x * delta.x) + (delta.z * delta.z));
-        bethesda::PhysicsCharacterInput input;
+        odai::bethesda::PhysicsCharacterInput input;
         if (horizontalLength > 1.0e-5f) {
             input.desiredVelocity = {delta.x * (m_config.speed / horizontalLength),
                 0.0f, delta.z * (m_config.speed / horizontalLength)};
@@ -121,7 +121,7 @@ NavigationSimulationResult NavMeshPlayerSimulator::runTo(
             return result;
         }
     }
-    (void)m_physics.setCharacterInput(m_player, bethesda::PhysicsCharacterInput{});
+    (void)m_physics.setCharacterInput(m_player, odai::bethesda::PhysicsCharacterInput{});
     result.status = NavigationSimulationStatus::TimedOut;
     return result;
 }
@@ -144,4 +144,4 @@ SimulatedQuestResult NavMeshPlayerSimulator::runQuest(
     return result;
 }
 
-}  // namespace odai::games::newvegas
+}  // namespace odai::games::bethesda

@@ -1,6 +1,6 @@
 #include "bethesda/tes3_content.h"
 
-#include "import/fnv/esm_reader.h"
+#include "import/bethesda/esm_reader.h"
 
 #include <algorithm>
 #include <array>
@@ -15,11 +15,11 @@
 namespace odai::bethesda {
 namespace {
 
-using importer::fnv::EsmReader;
-using importer::fnv::EsmRecordView;
-using importer::fnv::EsmSubrecordView;
-using importer::fnv::FalloutLoadOrder;
-using importer::fnv::FalloutLoadOrderEntry;
+using importer::bethesda::EsmReader;
+using importer::bethesda::EsmRecordView;
+using importer::bethesda::EsmSubrecordView;
+using importer::bethesda::FalloutLoadOrder;
+using importer::bethesda::FalloutLoadOrderEntry;
 
 std::string lowerAscii(std::string value) {
     for (char& ch : value) {
@@ -552,7 +552,7 @@ bool Tes3ContentStore::load(
         return false;
     }
     for (const FalloutLoadOrderEntry& entry : order.entries()) {
-        if (entry.header.format != importer::fnv::EsmPluginFormat::kMorrowind) {
+        if (entry.header.format != importer::bethesda::EsmPluginFormat::kMorrowind) {
             outError = "TES3 content store cannot load non-Morrowind plugin " + entry.header.fileName;
             return false;
         }
@@ -569,7 +569,7 @@ bool Tes3ContentStore::load(
         }
         std::optional<RecordKey> currentDialogue;
         EsmReader::Visitor visitor;
-        visitor.onRecordHeader = [](const importer::fnv::EsmRecordHeaderView&) { return true; };
+        visitor.onRecordHeader = [](const importer::bethesda::EsmRecordHeaderView&) { return true; };
         visitor.onRecord = [&](const EsmRecordView& record) {
             ++m_stats.recordsRead;
             ++ordinal;

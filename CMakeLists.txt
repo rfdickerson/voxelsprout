@@ -142,27 +142,12 @@ if(SLANGC_EXECUTABLE)
         set(SLANG_SHADER_OUTPUTS "${SLANG_SHADER_OUTPUTS}" PARENT_SCOPE)
     endfunction()
 
-    # This list is reduced further when the imported-only renderer is pruned.
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.vert.slang" vertex)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang" fragment)
-    add_slang_variant("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed.frag.slang" fragment
-        "${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_packed_rt.frag.slang.spv" -DODAI_RT_SHADOWS=1)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/voxel_normaldepth.frag.slang" fragment)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.vert.slang" vertex)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.tesc.slang" hull)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.tese.slang" domain)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/terrain_heightmap.frag.slang" fragment)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.vert.slang" vertex)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.tesc.slang" hull)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.tese.slang" domain)
-    add_slang_shader("${CMAKE_SOURCE_DIR}/src/render/shaders/hex_terrain.frag.slang" fragment)
     foreach(name skybox.vert skybox.frag sky_cloud.vert sky_cloud.frag tone_map.vert tone_map.frag
-                 ui.vert ui.frag shadow_depth.vert shadow_depth.frag pipe_shadow.vert pipe_shadow.frag
-                 imported_static_shadow.vert imported_static_shadow.frag
-                 pipe_instanced.vert pipe_instanced.frag imported_static.vert imported_static.frag
+                 ui.vert ui.frag imported_static_shadow.vert imported_static_shadow.frag
+                 imported_static.vert imported_static.frag
                  imported_fire_particle.vert imported_fire_particle.frag imported_mist_particle.vert imported_mist_particle.frag imported_water.vert
                  imported_water.frag imported_static_normaldepth.frag imported_static_depthonly.frag
-                 imported_water_normaldepth.frag pipe_normaldepth.frag skinned_velocity.vert
+                 imported_water_normaldepth.frag skinned_velocity.vert
                  skinned_velocity.frag)
         if(name MATCHES "\\.vert$")
             set(stage vertex)
@@ -272,19 +257,19 @@ add_library(odai_bethesda_import STATIC
     src/bethesda/condition.cc
     src/import/dds.cc src/import/imported_scene.cc src/import/imported_scene_query.cc
     src/import/cell_residency_planner.cc
-    src/import/fnv/actor_records.cc src/import/fnv/asset_source.cc
-    src/import/fnv/async_asset_loader.cc src/import/fnv/bsa_archive.cc
-    src/import/fnv/cell_builder.cc src/import/fnv/skyrim_grass.cc src/import/fnv/character_builder.cc
-    src/import/fnv/content_profile.cc src/import/fnv/content_record_index.cc src/import/fnv/mod_check.cc
-    src/import/fnv/decoded_texture_cache.cc src/import/fnv/dialogue_records.cc
-    src/import/fnv/esm_reader.cc src/import/fnv/fallout_records.cc
-    src/import/fnv/kf_animation.cc src/import/fnv/land_lod.cc src/import/fnv/skyrim_lod_handoff.cc src/import/fnv/lz4_frame.cc
-    src/import/fnv/tri_morph.cc src/import/fnv/nif_scene.cc src/import/fnv/nif_particles.cc src/import/fnv/plugin_load_order.cc
-    src/import/fnv/spt_scene.cc src/import/fnv/skyrim_tree_lod.cc
-    src/import/fnv/skyrim_animation_assets.cc
-    src/import/fnv/character_asset_manifest.cc
-    src/import/fnv/strings_table.cc src/import/fnv/weather_records.cc
-    src/import/fnv/image_space_records.cc)
+    src/import/bethesda/actor_records.cc src/import/bethesda/asset_source.cc
+    src/import/bethesda/async_asset_loader.cc src/import/bethesda/bsa_archive.cc
+    src/import/bethesda/cell_builder.cc src/import/bethesda/skyrim_grass.cc src/import/bethesda/character_builder.cc
+    src/import/bethesda/content_profile.cc src/import/bethesda/content_record_index.cc src/import/bethesda/mod_check.cc
+    src/import/bethesda/decoded_texture_cache.cc src/import/bethesda/dialogue_records.cc
+    src/import/bethesda/esm_reader.cc src/import/bethesda/fallout_records.cc
+    src/import/bethesda/kf_animation.cc src/import/bethesda/land_lod.cc src/import/bethesda/skyrim_lod_handoff.cc src/import/bethesda/lz4_frame.cc
+    src/import/bethesda/tri_morph.cc src/import/bethesda/nif_scene.cc src/import/bethesda/nif_banner_cloth.cc src/import/bethesda/nif_particles.cc src/import/bethesda/plugin_load_order.cc
+    src/import/bethesda/spt_scene.cc src/import/bethesda/skyrim_tree_lod.cc
+    src/import/bethesda/skyrim_animation_assets.cc
+    src/import/bethesda/character_asset_manifest.cc
+    src/import/bethesda/strings_table.cc src/import/bethesda/weather_records.cc
+    src/import/bethesda/image_space_records.cc)
 odai_source_includes(odai_bethesda_import)
 target_link_libraries(odai_bethesda_import PUBLIC odai_core odai_anim odai_dialogue
     ZLIB::ZLIB Jolt::Jolt nlohmann_json::nlohmann_json)
@@ -303,6 +288,7 @@ add_library(odai_bethesda_runtime STATIC
     src/bethesda/skyrim_scenario_content.cc src/bethesda/skyrim_persistent_references.cc src/bethesda/skyrim_items.cc
     src/bethesda/pex_reader.cc src/bethesda/papyrus_vm.cc
     src/bethesda/scenario.cc src/bethesda/route_checkpoint.cc src/bethesda/bethesda_session.cc
+    src/bethesda/session_papyrus_natives.cc src/bethesda/session_tes3_natives.cc
     src/bethesda/save_game.cc src/bethesda/bethesda_physics_world.cc)
 odai_source_includes(odai_bethesda_runtime)
 target_link_libraries(odai_bethesda_runtime PUBLIC
@@ -312,13 +298,13 @@ odai_warnings(odai_bethesda_runtime)
 # The Vulkan renderer is compiled once for the imported-scene path.
 add_library(odai_renderer STATIC
     src/render/frame_graph.cc src/render/renderer.cc src/render/video_writer.cc
-    src/render/stb_image_impl.cc src/render/packed_vertex.cc
+    src/render/stb_image_impl.cc
     src/render/upscale/temporal_upscaler.cc src/render/upscale/vendor_backends.cc
     src/render/backend/vulkan/buffer_helpers.cc
     src/render/backend/vulkan/chunk_upload.cc src/render/backend/vulkan/contact_shadows.cc
     src/render/backend/vulkan/descriptor_buffer.cc src/render/backend/vulkan/descriptors.cc
     src/render/backend/vulkan/device.cc src/render/backend/vulkan/frame.cc
-    src/render/backend/vulkan/frame_capture.cc src/render/backend/vulkan/frame_chunks.cc
+    src/render/backend/vulkan/frame_capture.cc
     src/render/backend/vulkan/frame_draws.cc src/render/backend/vulkan/frame_graph_core.cc
     src/render/backend/vulkan/frame_graph_runtime.cc
     src/render/backend/vulkan/frame_pass_main.cc src/render/backend/vulkan/frame_pass_prepass.cc
@@ -328,8 +314,8 @@ add_library(odai_renderer STATIC
     src/render/backend/vulkan/init.cc src/render/backend/vulkan/init_resources.cc
     src/render/backend/vulkan/light_clusters.cc src/render/backend/vulkan/pass_gi.cc
     src/render/backend/vulkan/pass_pipelines.cc src/render/backend/vulkan/post_compute.cc
-    src/render/backend/vulkan/screen_space_gi.cc src/render/backend/vulkan/shadow_culling.cc
-    src/render/backend/vulkan/shadow_culling_utils.cc src/render/backend/vulkan/skinning_resources.cc src/render/backend/vulkan/pose_compute.cc
+    src/render/backend/vulkan/screen_space_gi.cc
+    src/render/backend/vulkan/skinning_resources.cc src/render/backend/vulkan/pose_compute.cc
     src/render/backend/vulkan/swapchain_targets.cc src/render/backend/vulkan/ui_panels.cc
     src/render/backend/vulkan/ui_renderer.cc src/render/backend/vulkan/vma_usage.cc
 )
@@ -350,17 +336,17 @@ odai_warnings(odai_renderer)
 
 if(ODAI_BUILD_RUNTIME)
     add_library(odai_traversal STATIC
-        src/games/newvegas/newvegas_traversal_state.cc)
+        src/games/bethesda/traversal_state.cc)
     odai_source_includes(odai_traversal)
     target_link_libraries(odai_traversal PUBLIC nlohmann_json::nlohmann_json)
     odai_warnings(odai_traversal)
 
     add_executable(odai
-        src/games/newvegas/newvegas_main.cc src/games/newvegas/bethesda_app.cc
-        src/games/newvegas/skyrim_first_person.cc
-        src/games/newvegas/bethesda_collision.cc src/bethesda/navigation_world.cc
-        src/games/newvegas/newvegas_ogg.cc src/games/newvegas/newvegas_victor.cc
-        src/games/newvegas/bethesda_actors.cc src/import/fnv/cell_streamer.cc
+        src/games/bethesda/bethesda_main.cc src/games/bethesda/bethesda_app.cc
+        src/games/bethesda/skyrim_first_person.cc
+        src/games/bethesda/bethesda_collision.cc src/bethesda/navigation_world.cc
+        src/games/bethesda/audio_decode.cc src/games/bethesda/newvegas_victor.cc
+        src/games/bethesda/bethesda_actors.cc src/import/bethesda/cell_streamer.cc
         src/engine/game_app.cc)
     target_include_directories(odai PRIVATE src ${Stb_INCLUDE_DIR})
     target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
@@ -370,20 +356,20 @@ if(ODAI_BUILD_RUNTIME)
 endif()
 
 if(ODAI_BUILD_TOOLS)
-    add_executable(odai_bethesda_probe src/tools/character_coverage.cc src/tools/tri_probe.cc src/tools/newvegas_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
+    add_executable(odai_bethesda_probe src/tools/character_coverage.cc src/tools/tri_probe.cc src/tools/bethesda_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
     target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
     odai_source_includes(odai_bethesda_probe)
     odai_warnings(odai_bethesda_probe)
 
-    add_executable(odai_newvegas_cooker src/tools/newvegas_cooker_main.cc)
-    target_link_libraries(odai_newvegas_cooker PRIVATE odai_bethesda_import)
-    odai_source_includes(odai_newvegas_cooker)
-    odai_warnings(odai_newvegas_cooker)
+    add_executable(odai_bethesda_cooker src/tools/bethesda_cooker_main.cc)
+    target_link_libraries(odai_bethesda_cooker PRIVATE odai_bethesda_import)
+    odai_source_includes(odai_bethesda_cooker)
+    odai_warnings(odai_bethesda_cooker)
 
-    add_executable(odai_fnv_texture_pack src/tools/fnv_texture_pack_main.cc)
-    target_link_libraries(odai_fnv_texture_pack PRIVATE odai_bethesda_import)
-    odai_source_includes(odai_fnv_texture_pack)
-    odai_warnings(odai_fnv_texture_pack)
+    add_executable(odai_texture_pack src/tools/texture_pack_main.cc)
+    target_link_libraries(odai_texture_pack PRIVATE odai_bethesda_import)
+    odai_source_includes(odai_texture_pack)
+    odai_warnings(odai_texture_pack)
 endif()
 
 if(BUILD_TESTING)
@@ -420,8 +406,8 @@ if(BUILD_TESTING)
     target_link_libraries(odai_image_space_tests PRIVATE odai_bethesda_import)
     odai_plain_test(odai_material_animation_tests tests/material_animation_tests.cc)
     target_link_libraries(odai_material_animation_tests PRIVATE odai_bethesda_import)
-    odai_plain_test(odai_fnv_import_tests tests/fnv_import_tests.cc)
-    target_link_libraries(odai_fnv_import_tests PRIVATE odai_bethesda_import)
+    odai_plain_test(odai_bethesda_import_tests tests/bethesda_import_tests.cc)
+    target_link_libraries(odai_bethesda_import_tests PRIVATE odai_bethesda_import)
 
     odai_plain_test(odai_skyrim_animation_tests tests/skyrim_animation_tests.cc)
     target_link_libraries(odai_skyrim_animation_tests PRIVATE
@@ -537,15 +523,15 @@ if(BUILD_TESTING)
     target_sources(odai_tes3_navigation_simulation_tests PRIVATE
         src/bethesda/navigation_world.cc
         src/bethesda/navigation_simulation.cc
-        src/games/newvegas/bethesda_collision.cc)
+        src/games/bethesda/bethesda_collision.cc)
     target_link_libraries(odai_tes3_navigation_simulation_tests PRIVATE
         odai_bethesda_runtime)
 
     odai_plain_test(odai_actor_movement_tests tests/bethesda_actor_movement_tests.cc)
     target_sources(odai_actor_movement_tests PRIVATE
-        src/games/newvegas/bethesda_actors.cc
+        src/games/bethesda/bethesda_actors.cc
         src/bethesda/navigation_world.cc
-        src/games/newvegas/newvegas_ogg.cc)
+        src/games/bethesda/audio_decode.cc)
     target_include_directories(odai_actor_movement_tests PRIVATE ${Stb_INCLUDE_DIR})
     target_link_libraries(odai_actor_movement_tests PRIVATE
         odai_bethesda_import odai_bethesda_runtime odai_audio)

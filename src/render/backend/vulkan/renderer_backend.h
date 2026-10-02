@@ -1,10 +1,10 @@
 #pragma once
 
+#include "core/log.h"
 #include "core/resource_path.h"
 #include "core/grid3.h"
 
 #include "core/ring_buffer.h"
-#include "import/hex_terrain_data.h"
 #include "import/imported_scene.h"
 #include "render/upscale/upscaler_backend.h"
 #include "render/backend/vulkan/buffer_helpers.h"
@@ -15,14 +15,18 @@
 #include "render/backend/vulkan/pipeline_manager.h"
 #include "render/backend/vulkan/ui_renderer.h"
 #include "render/renderer_types.h"
-#include "world/chunk_grid.h"
-#include "render/packed_vertex.h"
 #include "world/spatial_index.h"
 #include "math/math.h"
+#include <limits>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <string_view>
 #include <optional>
 #include <functional>
 #include <span>
@@ -41,29 +45,6 @@ namespace odai::render {
 
 class CoreFrameGraphOrderValidator;
 struct CoreFrameGraphPlan;
-
-// Transitional backend-only state used by the old preview draw code. It is
-// deliberately not part of the renderer facade or public renderer types.
-struct VoxelPreview {
-    enum class Mode { Add, Remove };
-    bool visible = false;
-    int x = 0;
-    int y = 0;
-    int z = 0;
-    int brushSize = 1;
-    Mode mode = Mode::Add;
-    bool faceVisible = false;
-    int faceX = 0;
-    int faceY = 0;
-    int faceZ = 0;
-    std::uint32_t faceId = 0;
-    bool pipeStyle = false;
-    float pipeAxisX = 0.0f;
-    float pipeAxisY = 1.0f;
-    float pipeAxisZ = 0.0f;
-    float pipeRadius = 0.45f;
-    float pipeStyleId = 0.0f;
-};
 
 // Dedup key for an imported texture: its source path, lowercased with separators
 // unified. Fallout's ESM records, its NIF texture sets and its BSA index disagree
@@ -116,33 +97,12 @@ struct RtAccelerationStructure {
     std::uint32_t primitiveCount = 0;
 };
 
-struct RtChunkSceneRecord {
-    int chunkX = 0;
-    int chunkY = 0;
-    int chunkZ = 0;
-    RtGeometryBuffers geometry{};
-    RtAccelerationStructure blas{};
-    std::uint32_t vertexCount = 0;
-    std::uint32_t indexCount = 0;
-    bool geometryResident = false;
-    bool rtEligible = false;
-    bool dirty = false;
-};
-
 struct RtImportedSceneRecord {
     RtGeometryBuffers geometry{};
     RtAccelerationStructure blas{};
     bool geometryResident = false;
     bool dirty = false;
     const char* debugName = nullptr;
-};
-
-struct ChunkResidentKey {
-    int chunkX = 0;
-    int chunkY = 0;
-    int chunkZ = 0;
-
-    [[nodiscard]] bool operator==(const ChunkResidentKey& other) const = default;
 };
 
 class RendererBackend {
@@ -424,8 +384,6 @@ public:
                              std::uint32_t& outHeight);
     void destroyFrameCaptureResources();
     bool init(GLFWwindow* window);
-    void clearMagicaVoxelMeshes();
-    bool uploadMagicaVoxelMesh(const odai::world::ChunkMeshData& mesh, float worldOffsetX, float worldOffsetY, float worldOffsetZ);
     void clearGpuScene();
     void clearImportedSceneMeshes();
     bool uploadImportedScene(const odai::importer::ImportedScene& scene);
@@ -474,14 +432,6 @@ public:
     // default so every existing game and test renders pixel-identical; the
     // Fallout viewer opts in.
     void setTaaEnabled(bool enabled) { m_taaEnabled = enabled; }
-    // GPU-instanced, tessellated, height-displaced hex land surface. Available only
-    // when the device supports tessellation (hexTerrainReady()); the caller keeps the
-    // flat imported-static land otherwise. setHexTerrainEnabled gates the draw at
-    // runtime (e.g. off for the flat 2D board view).
-    void clearHexTerrain();
-    bool uploadHexTerrain(const odai::importer::HexTerrainData& data);
-    [[nodiscard]] bool hexTerrainReady() const { return m_hexTerrainPipeline != VK_NULL_HANDLE; }
-    void setHexTerrainEnabled(bool enabled) { m_hexTerrainEnabled = enabled; }
     void setVoxelBaseColorPalette(const std::array<std::uint32_t, 16>& paletteRgba);
     bool useSpatialPartitioningQueries() const;
     void setSpatialQueryStats(bool used, const odai::world::SpatialQueryStats& stats, std::uint32_t visibleChunkCount);
@@ -678,7 +628,9 @@ private:
     static constexpr uint32_t kGpuTimestampQueryScreenSpaceGiEnd = 51;
     static constexpr uint32_t kGpuTimestampQueryWaterReflectionResolveStart = 52;
     static constexpr uint32_t kGpuTimestampQueryWaterReflectionResolveEnd = 53;
-    static constexpr uint32_t kGpuTimestampQueryCount = 54;
+    static constexpr uint32_t kGpuTimestampQueryReflectionStart = 54;
+    static constexpr uint32_t kGpuTimestampQueryReflectionEnd = 55;
+    static constexpr uint32_t kGpuTimestampQueryCount = 56;
     static constexpr std::uint32_t kTimingHistorySampleCount = 240;
 
     struct FrameResources {
@@ -755,14 +707,11 @@ private:
     void recordPoseCompute(VkCommandBuffer commandBuffer);
     bool createTimelineSemaphore();
     bool createGraphicsPipeline();
-    bool createMagicaPipeline();
     bool createUploadRingBuffer();
     bool createTransferResources();
-    bool createPipeBuffers();
-    bool createPipePipeline();
+    bool createImportedScenePipelines();
     bool createImportedFireParticlePipeline(bool mist = false);
     bool createAoPipelines();
-    bool createPreviewBuffers();
     bool createEnvironmentResources();
     bool createDiffuseTextureResources();
     bool createWaterNormalTextureResources();
@@ -887,10 +836,6 @@ private:
     void buildSunDebugUi();
     void buildGameplayHudUi();
     void buildAimReticleUi();
-    std::vector<std::uint8_t> buildShadowCandidateMask(
-        std::span<const odai::world::Chunk> chunks,
-        std::span<const std::size_t> visibleChunkIndices
-    ) const;
     void recordVoxelGiDispatchSequence(
         VkCommandBuffer commandBuffer,
         uint32_t mvpDynamicOffset,
@@ -912,11 +857,8 @@ private:
     void destroySsaoComputeResources();
     void destroySkinningComputeResources();
     void destroyFrameResources();
-    void destroyChunkBuffers();
-    void destroyMagicaBuffers();
+    void destroyDeferredResources();
     void destroyImportedBuffers();
-    void destroyPipeBuffers();
-    void destroyPreviewBuffers();
     void destroyEnvironmentResources();
     void destroyDiffuseTextureResources();
     void destroyTransferResources();
@@ -1191,27 +1133,6 @@ private:
         std::uint64_t scratchAlignment = 0;
     };
 
-    struct ChunkDrawRange {
-        uint32_t firstIndex = 0;
-        int32_t vertexOffset = 0;
-        uint32_t indexCount = 0;
-        float offsetX = 0.0f;
-        float offsetY = 0.0f;
-        float offsetZ = 0.0f;
-    };
-
-    struct PipeVertex {
-        float position[3];
-        float normal[3];
-    };
-
-    struct PipeInstance {
-        float originLength[4];
-        float axisRadius[4];
-        float tint[4];
-        float extensions[4];
-    };
-
     // Compact vertex stream for the shadow cascades.
     //
     // The shadow pass reads position plus what alpha testing needs (uv, texture
@@ -1246,8 +1167,8 @@ private:
     //
     //   normal  float3 -> octahedral snorm16x2.  Max error ~0.004 degrees.
     //   color   float3 -> sRGB-encoded unorm8x4. Encoded rather than linear
-    //           because these values are authored as sRGB (hex literals on the
-    //           strategy map, LAND VCLR bytes in Fallout) and quantizing the
+    //           because these values are authored as sRGB (for example LAND
+    //           VCLR bytes in Fallout) and quantizing the
     //           LINEAR value instead puts all 256 steps in the highlights and
     //           bands the darks.
     //   layer   4x u32 -> 4x u16. Bindless slots, capped at
@@ -1299,25 +1220,6 @@ private:
         std::uint32_t flowTextureSlot;
         std::uint32_t extraNormalTextureSlots[2];
         odai::importer::ImportedWaterAppearance appearance;
-    };
-
-    struct ReadyMagicaDraw {
-        VkBuffer vertexBuffer = VK_NULL_HANDLE;
-        VkBuffer indexBuffer = VK_NULL_HANDLE;
-        std::uint32_t indexCount = 0;
-        float offsetX = 0.0f;
-        float offsetY = 0.0f;
-        float offsetZ = 0.0f;
-    };
-
-    struct FrameInstanceDrawData {
-        uint32_t pipeInstanceCount = 0;
-        std::optional<FrameArenaSlice> pipeInstanceSliceOpt = std::nullopt;
-        uint32_t transportInstanceCount = 0;
-        std::optional<FrameArenaSlice> transportInstanceSliceOpt = std::nullopt;
-        uint32_t beltCargoInstanceCount = 0;
-        std::optional<FrameArenaSlice> beltCargoInstanceSliceOpt = std::nullopt;
-        std::vector<ReadyMagicaDraw> readyMagicaDraws;
     };
 
     struct ImportedMeshDraw {
@@ -1372,6 +1274,18 @@ private:
         float boundsMin[3] = {};
         float boundsMax[3] = {};
     };
+
+    struct VisibleImportedDrawCounts {
+        std::uint32_t terrain = 0;
+        std::uint32_t nearTerrain = 0;
+    };
+
+    void prepareImportedVisibility(
+        const odai::math::Vector3& eye, const CameraPose& camera, float projectionYScale);
+    [[nodiscard]] VisibleImportedDrawCounts buildVisibleImportedDraws(
+        const odai::math::Matrix4& clipMatrix, float clipMargin,
+        std::vector<ImportedMeshDraw>& outDraws,
+        float minimumY = -std::numeric_limits<float>::infinity());
 
     // One independently added and removed unit of imported geometry -- a
     // streamed exterior cell, or (for the non-streaming callers) an entire
@@ -1443,30 +1357,6 @@ private:
         VkImageView imageView = VK_NULL_HANDLE;
     };
 
-    struct FrameChunkDrawData {
-        bool canDrawChunksIndirect = false;
-        std::array<bool, kShadowCascadeCount> canDrawShadowChunksIndirectByCascade{};
-        std::optional<FrameArenaSlice> chunkInstanceSliceOpt = std::nullopt;
-        std::optional<FrameArenaSlice> chunkIndirectSliceOpt = std::nullopt;
-        std::optional<FrameArenaSlice> shadowChunkInstanceSliceOpt = std::nullopt;
-        std::array<std::optional<FrameArenaSlice>, kShadowCascadeCount> shadowCascadeIndirectSliceOpts{};
-        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkIndirectBuffer = VK_NULL_HANDLE;
-        VkBuffer shadowChunkInstanceBuffer = VK_NULL_HANDLE;
-        std::array<VkBuffer, kShadowCascadeCount> shadowCascadeIndirectBuffers{};
-        std::array<uint32_t, kShadowCascadeCount> shadowCascadeIndirectDrawCounts{};
-        uint32_t chunkIndirectDrawCount = 0;
-    };
-
-    struct MagicaMeshDraw {
-        BufferHandle vertexBufferHandle = kInvalidBufferHandle;
-        BufferHandle indexBufferHandle = kInvalidBufferHandle;
-        std::uint32_t indexCount = 0;
-        float offsetX = 0.0f;
-        float offsetY = 0.0f;
-        float offsetZ = 0.0f;
-    };
-
     struct FrameExecutionContext {
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkQueryPool gpuTimestampQueryPool = VK_NULL_HANDLE;
@@ -1490,15 +1380,6 @@ private:
         // `render` is false when the cached six-face maps still match.
         bool renderInteriorPointShadows = false;
         std::uint32_t interiorPointShadowLightCount = 0;
-        const FrameChunkDrawData* frameChunkDrawData = nullptr;
-        const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
-        const std::optional<FrameArenaSlice>* shadowChunkInstanceSliceOpt = nullptr;
-        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
-        VkBuffer shadowChunkInstanceBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkVertexBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
-        bool canDrawMagica = false;
-        std::span<const ReadyMagicaDraw> readyMagicaDraws;
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
         // 28-byte compact stream; null falls back to importedVertexBuffer.
         VkBuffer importedShadowVertexBuffer = VK_NULL_HANDLE;
@@ -1527,12 +1408,6 @@ private:
         // sampling and content always agree.
         std::uint32_t skipCascadeMask = 0;
         std::array<std::uint32_t, kShadowCascadeCount> importedTerrainDrawCountsByCascade{};
-        uint32_t pipeInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
-        uint32_t transportInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* transportInstanceSliceOpt = nullptr;
-        uint32_t beltCargoInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* beltCargoInstanceSliceOpt = nullptr;
     };
 
     struct PrepassInputs {
@@ -1543,13 +1418,6 @@ private:
         // three off was re-rendering its entire geometry every frame for a
         // texture nothing sampled.
         bool normalDepthNeeded = true;
-        const FrameChunkDrawData* frameChunkDrawData = nullptr;
-        const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
-        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkVertexBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
-        bool canDrawMagica = false;
-        std::span<const ReadyMagicaDraw> readyMagicaDraws;
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
@@ -1565,23 +1433,10 @@ private:
         // vertexBufferHandle/indexBufferHandle (see ImportedMeshDraw), resolved
         // and bound per-draw rather than via one shared buffer pair.
         std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
-        uint32_t pipeInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
-        uint32_t transportInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* transportInstanceSliceOpt = nullptr;
-        uint32_t beltCargoInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* beltCargoInstanceSliceOpt = nullptr;
     };
 
     struct MainPassInputs {
         float cameraPosition[3]{};
-        const FrameChunkDrawData* frameChunkDrawData = nullptr;
-        const std::optional<FrameArenaSlice>* chunkInstanceSliceOpt = nullptr;
-        VkBuffer chunkInstanceBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkVertexBuffer = VK_NULL_HANDLE;
-        VkBuffer chunkIndexBuffer = VK_NULL_HANDLE;
-        bool canDrawMagica = false;
-        std::span<const ReadyMagicaDraw> readyMagicaDraws;
         VkBuffer importedVertexBuffer = VK_NULL_HANDLE;
         VkBuffer importedIndexBuffer = VK_NULL_HANDLE;
         std::span<const ImportedMeshDraw> importedMeshDraws;
@@ -1607,34 +1462,8 @@ private:
         // vertexBufferHandle/indexBufferHandle (see ImportedMeshDraw), resolved
         // and bound per-draw rather than via one shared buffer pair.
         std::span<const ImportedMeshDraw> skinnedActorMeshDraws;
-        uint32_t pipeInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* pipeInstanceSliceOpt = nullptr;
-        uint32_t transportInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* transportInstanceSliceOpt = nullptr;
-        uint32_t beltCargoInstanceCount = 0;
-        const std::optional<FrameArenaSlice>* beltCargoInstanceSliceOpt = nullptr;
-        const VoxelPreview* preview = nullptr;
     };
 
-    FrameChunkDrawData prepareFrameChunkDrawData(
-        const std::vector<odai::world::Chunk>& chunks,
-        std::span<const std::size_t> visibleChunkIndices,
-        const std::array<odai::math::Matrix4, kShadowCascadeCount>& lightViewProjMatrices,
-        int cameraChunkX,
-        int cameraChunkY,
-        int cameraChunkZ
-    );
-    void drawIndirectChunkRanges(
-        VkCommandBuffer commandBuffer,
-        std::uint32_t& passDrawCounter,
-        const FrameChunkDrawData& frameChunkDrawData
-    );
-    void drawIndirectShadowChunkRanges(
-        VkCommandBuffer commandBuffer,
-        std::uint32_t& passDrawCounter,
-        std::uint32_t cascadeIndex,
-        const FrameChunkDrawData& frameChunkDrawData
-    );
     void recordShadowAtlasPass(const FrameExecutionContext& context, const ShadowPassInputs& inputs);
     void recordNormalDepthPrepass(const FrameExecutionContext& context, const PrepassInputs& inputs);
     void recordSsaoPasses(
@@ -2156,10 +1985,8 @@ private:
     bool m_voxelGiPreviousRestirSpatialReuseEnabled = false;
     float m_voxelGiPreviousRestirSpatialRadius = 0.0f;
     std::array<float, 3> m_voxelGiOccupancyBuildOrigin{0.0f, 0.0f, 0.0f};
-    std::size_t m_voxelGiOccupancyFullRebuildCursor = 0;
     bool m_voxelGiOccupancyFullRebuildInProgress = false;
     bool m_voxelGiOccupancyFullRebuildNeedsClear = false;
-    std::vector<std::size_t> m_voxelGiDirtyChunkIndices;
     BufferHandle m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     BufferHandle m_autoExposureStateBufferHandle = kInvalidBufferHandle;
 
@@ -2183,7 +2010,6 @@ private:
     double m_materialAnimationTimeSeconds=0;
     // Countdown, not a flag: one edit must reach every frame-in-flight region.
     std::uint32_t m_importedMaterialTableDirtyFrames = kMaxFramesInFlight;
-    bool m_strategyMapMode = false;
     bool m_autoExposureComputeAvailable = false;
     bool m_autoExposureHistoryValid = false;
     uint64_t m_autoExposureUpdateFrameIndex = 0u;
@@ -2357,22 +2183,13 @@ private:
 
     // Existing Renderer call sites use these aliases while ownership lives in managers.
     VkPipelineLayout& m_pipelineLayout = m_pipelineManager.pipelineLayout;
-    VkPipeline& m_pipeline = m_pipelineManager.pipeline;
-    VkPipeline& m_pipelineRt = m_pipelineManager.pipelineRt;
-    VkPipeline& m_terrainTessPipeline = m_pipelineManager.terrainTessPipeline;
-    VkPipeline& m_hexTerrainPipeline = m_pipelineManager.hexTerrainPipeline;
-    VkPipeline& m_shadowPipeline = m_pipelineManager.shadowPipeline;
-    VkPipeline& m_pipeShadowPipeline = m_pipelineManager.pipeShadowPipeline;
     VkPipeline& m_skyboxPipeline = m_pipelineManager.skyboxPipeline;
     VkPipeline& m_skyCloudPipeline = m_pipelineManager.skyCloudPipeline;
     VkPipeline& m_tonemapPipeline = m_pipelineManager.tonemapPipeline;
-    VkPipeline& m_pipePipeline = m_pipelineManager.pipePipeline;
     VkPipeline& m_importedMistParticlePipeline = m_pipelineManager.importedMistParticlePipeline;
     std::unordered_map<std::string,float> m_mistStartTimes;
     VkPipeline& m_importedFireParticlePipeline =
         m_pipelineManager.importedFireParticlePipeline;
-    VkPipeline& m_voxelNormalDepthPipeline = m_pipelineManager.voxelNormalDepthPipeline;
-    VkPipeline& m_pipeNormalDepthPipeline = m_pipelineManager.pipeNormalDepthPipeline;
     VkPipeline& m_importedStaticPipeline = m_pipelineManager.importedStaticPipeline;
     VkPipeline& m_importedStaticPipelineAdditive = m_pipelineManager.importedStaticPipelineAdditive;
     VkPipeline& m_importedStaticPipelineAdditiveTwoSided = m_pipelineManager.importedStaticPipelineAdditiveTwoSided;
@@ -2381,6 +2198,8 @@ private:
         m_pipelineManager.importedStaticPipelineBlendedTwoSided;
     VkPipeline& m_importedStaticPipelineTwoSided =
         m_pipelineManager.importedStaticPipelineTwoSided;
+    VkPipeline& m_importedStaticReflectionPipelineTwoSided =
+        m_pipelineManager.importedStaticReflectionPipelineTwoSided;
     VkPipeline& m_importedStaticDepthPrewritePipeline =
         m_pipelineManager.importedStaticDepthPrewritePipeline;
     VkPipeline& m_importedStaticDepthPrewritePipelineTwoSided =
@@ -2406,15 +2225,10 @@ private:
         m_pipelineManager.importedStaticShadowPipelineTwoSided;
     VkPipeline& m_importedStaticShadowCompactPipelineTwoSided =
         m_pipelineManager.importedStaticShadowCompactPipelineTwoSided;
-    VkPipeline& m_magicaPipeline = m_pipelineManager.magicaPipeline;
-    VkPipeline& m_magicaPipelineRt = m_pipelineManager.magicaPipelineRt;
     VkPipeline& m_ssaoPipeline = m_pipelineManager.ssaoPipeline;
     VkPipeline& m_ssaoHbaoPipeline = m_pipelineManager.ssaoHbaoPipeline;
     VkPipeline& m_ssaoGtaoPipeline = m_pipelineManager.ssaoGtaoPipeline;
     VkPipeline& m_ssaoBlurPipeline = m_pipelineManager.ssaoBlurPipeline;
-    VkPipeline& m_previewAddPipeline = m_pipelineManager.previewAddPipeline;
-    VkPipeline& m_previewRemovePipeline = m_pipelineManager.previewRemovePipeline;
-    VkPipeline& m_previewFaceOutlinePipeline = m_pipelineManager.previewFaceOutlinePipeline;
     VkPipelineLayout& m_voxelGiPipelineLayout = m_pipelineManager.voxelGiPipelineLayout;
     VkPipeline& m_voxelGiSurfacePipeline = m_pipelineManager.voxelGiSurfacePipeline;
     VkPipeline& m_voxelGiSurfacePipelineRt = m_pipelineManager.voxelGiSurfacePipelineRt;
@@ -2433,7 +2247,6 @@ private:
     // Graphics path: main per-frame set (set 0) + bindless texture array (set 1).
     DescriptorBufferSet m_mainBufferSet{};
     DescriptorBufferSet m_bindlessBufferSet{};
-    bool m_supportsWireframePreview = false;
     bool m_supportsSamplerAnisotropy = false;
     bool m_supportsMultiDrawIndirect = false;
     bool m_supportsTessellationShader = false;
@@ -2459,7 +2272,7 @@ private:
     bool m_rayTracingRuntimeEnabled = false;
     // Snapshot of m_rayTracingRuntimeEnabled taken right after init()'s
     // loadRayTracingFunctions() call, before any app/mode-driven override
-    // (strategyMapMode, setRayTracingEnabled) can force it off. The floor
+    // (setRayTracingEnabled) can force it off. The floor
     // setRayTracingEnabled(true) restores to.
     bool m_rayTracingHardwareCapable = false;
     bool m_rtMainPassImplemented = false;
@@ -2499,21 +2312,10 @@ private:
     // Future chunk streaming can replace this with sparse streaming allocations.
     BufferAllocator m_bufferAllocator;
     FrameArena m_frameArena;
-    BufferHandle m_previewVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_previewIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_chunkVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_chunkIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_pipeVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_pipeIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_transportVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_transportIndexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedVertexBufferHandle = kInvalidBufferHandle;
     // 28-byte stream the shadow cascades bind instead of the full vertex.
     BufferHandle m_importedShadowVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_hexBaseVertexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_hexBaseIndexBufferHandle = kInvalidBufferHandle;
-    BufferHandle m_hexInstanceBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterVertexBufferHandle = kInvalidBufferHandle;
     BufferHandle m_importedWaterIndexBufferHandle = kInvalidBufferHandle;
     // What is currently in the buffer above, kept so rebuildImportedWaterBuffers
@@ -2525,10 +2327,6 @@ private:
     std::vector<DeferredBufferRelease> m_deferredBufferReleases;
     std::vector<DeferredImageRelease> m_deferredImageReleases;
     std::vector<DeferredCommandPoolRelease> m_deferredCommandPoolReleases;
-    std::vector<ChunkDrawRange> m_chunkDrawRanges;
-    std::vector<ChunkResidentKey> m_chunkResidentKeys;
-    std::vector<odai::world::ChunkLodMeshes> m_chunkLodMeshCache;
-    std::vector<MagicaMeshDraw> m_magicaMeshDraws;
     // Derived caches, rebuilt from m_importedSceneChunks on every add/remove.
     std::vector<ImportedMeshDraw> m_importedMeshDraws;
     std::vector<ImportedScenePageDrawRange> m_importedPageDrawRanges;
@@ -2550,7 +2348,8 @@ private:
     std::vector<ImportedMeshDraw> m_visibleImportedReflectionMeshDraws;
     std::array<std::vector<ImportedMeshDraw>, kShadowCascadeCount> m_visibleImportedShadowMeshDraws;
     std::vector<std::uint32_t> m_importedTextureSlots;
-    std::vector<std::uint8_t> m_visibleImportedPageScratch;
+    std::vector<std::uint8_t> m_importedVegetationLodVisible;
+    std::vector<std::uint8_t> m_importedPageNearTerrain;
     // Indices of the pages that survived the clip test, in arena order. Member
     // rather than local to keep it out of the per-frame allocator.
     std::vector<std::uint32_t> m_visibleImportedPageOrder;
@@ -2563,10 +2362,7 @@ private:
     std::vector<ImportedGiTriangle> m_importedGiTriangles;
     std::vector<ImportedLocalLight> m_importedLocalLights;
     std::vector<odai::importer::ImportedSceneParticleEmitter> m_importedParticleEmitters;
-    std::vector<RtChunkSceneRecord> m_rtChunkSceneRecords;
     std::vector<RtImportedSceneRecord> m_rtImportedSceneRecords;
-    std::vector<RtGeometryBuffers> m_rtMagicaGeometries;
-    std::vector<RtAccelerationStructure> m_rtMagicaBlases;
     RtAccelerationStructure m_rtTlas{};
     BufferHandle m_rtTlasInstanceBufferHandle = kInvalidBufferHandle;
     bool m_rtSceneDirty = false;
@@ -2574,18 +2370,9 @@ private:
     std::uint32_t m_rtBlasBuildCount = 0;
     std::uint32_t m_rtTlasBuildCount = 0;
     std::uint32_t m_rtDirtyChunkCount = 0;
-    bool m_chunkLodMeshCacheValid = false;
-    bool m_chunkMeshRebuildRequested = false;
-    std::vector<ChunkResidentKey> m_pendingChunkRemeshKeys;
     // Off-thread mesh results waiting to be consumed by the remesh path;
     // keyed by chunk grid coordinates, replaced on newer arrival.
-    uint32_t m_previewIndexCount = 0;
-    uint32_t m_pipeIndexCount = 0;
-    uint32_t m_transportIndexCount = 0;
     uint32_t m_importedIndexCount = 0;
-    uint32_t m_hexIndexCount = 0;
-    uint32_t m_hexInstanceCount = 0;
-    bool m_hexTerrainEnabled = true;
     uint32_t m_importedTerrainDrawCount = 0;
     // Reused every frame so the back-to-front sort of blended imported draws
     // does not allocate in the render loop.
@@ -2645,7 +2432,6 @@ private:
     PFN_vkGetRefreshCycleDurationGOOGLE m_getRefreshCycleDurationGoogle = nullptr;
     PFN_vkGetPastPresentationTimingGOOGLE m_getPastPresentationTimingGoogle = nullptr;
     uint64_t m_pendingTransferTimelineValue = 0;
-    uint64_t m_currentChunkReadyTimelineValue = 0;
     uint64_t m_lastGraphicsTimelineValue = 0;
     uint64_t m_nextTimelineValue = 1;
     uint32_t m_nextDisplayTimingPresentId = 1;
@@ -2781,6 +2567,7 @@ private:
     float m_debugGpuVelocityTimeMs = 0.0f;
     float m_debugGpuTaaTimeMs = 0.0f;
     float m_debugGpuWaterReflectionResolveTimeMs = 0.0f;
+    float m_debugGpuReflectionTimeMs = 0.0f;
     float m_debugGpuPostTimeMs = 0.0f;
     float m_debugGpuUiTimeMs = 0.0f;
     float m_debugResolvedExposure = 1.0f;
@@ -2825,11 +2612,6 @@ private:
     odai::core::RingBuffer<float, kTimingHistorySampleCount> m_debugPresentedFrameTimingMsHistory{};
     float m_debugFps = 0.0f;
     std::uint32_t m_debugLatePresentCount = 0;
-    std::uint32_t m_debugChunkCount = 0;
-    std::uint32_t m_debugMacroCellUniformCount = 0;
-    std::uint32_t m_debugMacroCellRefined4Count = 0;
-    std::uint32_t m_debugMacroCellRefined1Count = 0;
-    bool m_debugMacroCellStatsDirty = true;
     std::uint32_t m_debugDrawnLod0Ranges = 0;
     std::uint32_t m_debugDrawnLod1Ranges = 0;
     std::uint32_t m_debugDrawnLod2Ranges = 0;
@@ -2837,7 +2619,6 @@ private:
     bool m_debugSpatialQueriesUsed = false;
     odai::world::SpatialQueryStats m_debugSpatialQueryStats{};
     std::uint32_t m_debugSpatialVisibleChunkCount = 0;
-    std::uint32_t m_debugChunkIndirectCommandCount = 0;
     // Indirect batching for imported-scene draws.
     //
     // Every imported draw shares ONE vertex buffer and ONE index buffer (see

@@ -2,8 +2,8 @@
 
 #include "bethesda/bethesda_session.h"
 #include "bethesda/scenario.h"
-#include "import/fnv/asset_source.h"
-#include "import/fnv/plugin_load_order.h"
+#include "import/bethesda/asset_source.h"
+#include "import/bethesda/plugin_load_order.h"
 
 #include <cstddef>
 #include <string>
@@ -44,8 +44,8 @@ struct SkyrimScenarioContentReport {
 // compatibility probe so they cannot disagree about scenario readiness.
 bool loadSkyrimScenarioContent(
     const ScenarioDefinition& scenario,
-    const importer::fnv::FalloutLoadOrder& loadOrder,
-    const importer::fnv::FalloutAssetSource& assets,
+    const importer::bethesda::FalloutLoadOrder& loadOrder,
+    const importer::bethesda::FalloutAssetSource& assets,
     BethesdaSession& session,
     SkyrimScenarioContentReport& outReport,
     std::string& outError);

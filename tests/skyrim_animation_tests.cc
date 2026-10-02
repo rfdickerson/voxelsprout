@@ -1,7 +1,7 @@
-#include "import/fnv/character_asset_manifest.h"
+#include "import/bethesda/character_asset_manifest.h"
 #include "anim/hkx_packfile.h"
-#include "games/newvegas/npc_demo_locomotion.h"
-#include "import/fnv/skyrim_animation_assets.h"
+#include "games/bethesda/npc_demo_locomotion.h"
+#include "import/bethesda/skyrim_animation_assets.h"
 #include <fstream>
 #include <chrono>
 #include "anim/skyrim_animation.h"
@@ -769,7 +769,7 @@ void testCharacterAssetReferences() {
 }
 
 void testLayeredCharacterDependencies() {
-    using namespace odai::importer::fnv;
+    using namespace odai::importer::bethesda;
     const auto root = std::filesystem::temp_directory_path() /
         ("odai-fnis-layers-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const auto base = root / "base";
@@ -1150,7 +1150,7 @@ void testMeleeTimelineAndSaveContinuation() {
     using namespace odai::bethesda;
     using namespace odai::anim;
     BethesdaSessionConfig config;
-    config.game = odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition;
+    config.game = odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition;
     config.contentFingerprint = "timeline-fixture";
     BethesdaSession session;
     std::string error;
@@ -1216,7 +1216,7 @@ void testEquipmentTimelinePersistence() {
     using namespace odai::anim;
     BethesdaSession session;
     BethesdaSessionConfig config;
-    config.game = odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition;
+    config.game = odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition;
     config.contentFingerprint = "equipment-timeline";
     std::string error;
     assert(session.configure(config, error));
@@ -1280,7 +1280,7 @@ void testStudioJoltLocomotionTransitions() {
     using namespace odai::anim;
     BethesdaSession session;
     BethesdaSessionConfig config;
-    config.game = odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition;
+    config.game = odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition;
     config.contentFingerprint = "studio-jolt-test";
     config.livingWorldEnabled = false;
     std::string error;
@@ -1353,9 +1353,9 @@ void testStudioJoltLocomotionTransitions() {
     assert(std::abs(session.physics().characterState(actor.id)->position.y) < 1.0f);
     assert(session.actorAnimationOutput(actor.id)->activeState == "idle");
 
-    odai::newvegas::NpcDemoLocomotion route;
+    odai::games::bethesda::NpcDemoLocomotion route;
     {
-        odai::newvegas::NpcDemoLocomotion stopping;
+        odai::games::bethesda::NpcDemoLocomotion stopping;
         stopping.input(false, false, {1,0,0});
         odai::math::Vector3 velocity{230,0,0};
         stopping.input(false, false, {});
@@ -1469,7 +1469,7 @@ void testStudioJoltLocomotionTransitions() {
     route.input(false, true, {});
     assert(odai::math::length(route.target({140,0,0})) > 200.0f);
     route.input(false, false, {1,0,0});
-    assert(route.mode == odai::newvegas::NpcDemoLocomotion::Mode::Manual);
+    assert(route.mode == odai::games::bethesda::NpcDemoLocomotion::Mode::Manual);
     assert(route.target({140,0,0}).x == 230.0f);
     route.input(false, false, {});
     assert(odai::math::length(route.target({140,0,0})) == 0.0f);
@@ -1494,7 +1494,7 @@ void testSessionFixedTickAndSaveContinuation() {
     auto first = std::make_shared<odai::anim::AnimationView>(*third);
 
     BethesdaSessionConfig config;
-    config.game = odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition;
+    config.game = odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition;
     config.contentFingerprint = "animation-save-fixture";
     std::string error;
     BethesdaSession session;

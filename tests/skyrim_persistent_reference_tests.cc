@@ -121,10 +121,10 @@ int main() {
     append(plugin, record("CELL", 0x90, cell));
     append(plugin, group(0x90, 6, actor()));
     write(dir / "Fixture.esm", plugin);
-    odai::importer::fnv::FalloutLoadOrder order;
+    odai::importer::bethesda::FalloutLoadOrder order;
     std::string error;
     assert(order.open(dir, {"Fixture.esm"}, error));
-    odai::importer::fnv::FalloutAssetSource assets;
+    odai::importer::bethesda::FalloutAssetSource assets;
     assert(assets.open(dir));
     std::map<RecordKey, SkyrimItemDefinition> itemCatalog;
     assert(loadSkyrimItems(order, assets, itemCatalog, error));

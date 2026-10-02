@@ -20,7 +20,7 @@ float f32(const std::uint8_t* bytes) {
     return value;
 }
 
-std::string zstring(const importer::fnv::EsmSubrecordView& subrecord) {
+std::string zstring(const importer::bethesda::EsmSubrecordView& subrecord) {
     std::string value(reinterpret_cast<const char*>(subrecord.data), subrecord.size);
     while (!value.empty() && value.back() == '\0') value.pop_back();
     return value;
@@ -29,7 +29,7 @@ std::string zstring(const importer::fnv::EsmSubrecordView& subrecord) {
 }  // namespace
 
 bool readSkyrimLocation(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimLocationDefinition& out,
     std::string& outError) {
@@ -39,7 +39,7 @@ bool readSkyrimLocation(
     }
     SkyrimLocationDefinition parsed;
     parsed.record = std::move(stableRecord);
-    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
         if (subrecord.type == "EDID") {
             parsed.editorId = zstring(subrecord);
         } else if (subrecord.type == "PNAM") {
@@ -69,7 +69,7 @@ bool readSkyrimLocation(
 }
 
 bool readSkyrimGlobalVariable(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimGlobalVariableDefinition& out,
     std::string& outError) {
@@ -80,7 +80,7 @@ bool readSkyrimGlobalVariable(
     SkyrimGlobalVariableDefinition parsed;
     parsed.record = std::move(stableRecord);
     bool hasValue = false;
-    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
         if (subrecord.type == "EDID") {
             parsed.editorId = zstring(subrecord);
         } else if (subrecord.type == "FLTV") {

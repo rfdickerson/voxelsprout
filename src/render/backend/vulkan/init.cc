@@ -7,7 +7,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -302,8 +301,8 @@ bool RendererBackend::init(GLFWwindow* window) {
         shutdown();
         return false;
     }
-    if (!runStep("createPipePipeline", [&] { return createPipePipeline(); })) {
-        VOX_LOGE("render") << "init failed at createPipePipeline\n";
+    if (!runStep("createImportedScenePipelines", [&] { return createImportedScenePipelines(); })) {
+        VOX_LOGE("render") << "init failed at createImportedScenePipelines\n";
         shutdown();
         return false;
     }
@@ -375,7 +374,7 @@ bool RendererBackend::init(GLFWwindow* window) {
     VOX_LOGI("render") << "ray tracing release status: " << rayTracingReleaseStatusName()
                        << ", requested=" << (m_shadowSettings.mode == ShadowMode::ShadowMaps ? "shadow_maps" : "rt_beta")
                        << ", optionalRtShaderVariant=" << (m_rtShaderVariantFileAvailable ? "yes" : "no")
-                       << ", betaScope=main_pass_voxels_magica_only";
+                       << ", betaScope=imported_scene_main_pass";
 
     // Persist the pipeline cache now that the bulk of pipelines exist, so an
     // unclean exit (crash, task kill) doesn't lose the compilation work.
@@ -386,27 +385,14 @@ bool RendererBackend::init(GLFWwindow* window) {
 }
 
 bool RendererBackend::validateReleaseRuntimeAssets() {
-    constexpr std::array<RuntimeAssetSpec, 21> kRuntimeAssetSpecs = {{
-        {"../src/render/shaders/voxel_packed.vert.slang.spv", "world vertex shader", true},
-        {"../src/render/shaders/voxel_packed.frag.slang.spv", "world fragment shader", true},
-        {"../src/render/shaders/terrain_heightmap.vert.slang.spv", "terrain heightmap vertex shader", true},
-        {"../src/render/shaders/terrain_heightmap.tesc.slang.spv", "terrain heightmap tess-control shader", true},
-        {"../src/render/shaders/terrain_heightmap.tese.slang.spv", "terrain heightmap tess-eval shader", true},
-        {"../src/render/shaders/terrain_heightmap.frag.slang.spv", "terrain heightmap fragment shader", true},
+    constexpr std::array<RuntimeAssetSpec, 11> kRuntimeAssetSpecs = {{
         {"../src/render/shaders/skybox.vert.slang.spv", "skybox vertex shader", true},
         {"../src/render/shaders/skybox.frag.slang.spv", "skybox fragment shader", true},
         {"../src/render/shaders/sky_cloud.vert.slang.spv", "sky cloud vertex shader", true},
         {"../src/render/shaders/sky_cloud.frag.slang.spv", "sky cloud fragment shader", true},
         {"../src/render/shaders/tone_map.vert.slang.spv", "tonemap vertex shader", true},
         {"../src/render/shaders/tone_map.frag.slang.spv", "tonemap fragment shader", true},
-        {"../src/render/shaders/shadow_depth.vert.slang.spv", "shadow vertex shader", true},
-        {"../src/render/shaders/pipe_shadow.vert.slang.spv", "pipe shadow vertex shader", true},
-        {"../src/render/shaders/pipe_instanced.vert.slang.spv", "pipe vertex shader", true},
-        {"../src/render/shaders/pipe_instanced.frag.slang.spv", "pipe fragment shader", true},
-        // (removed) the five grass_billboard* shaders — no pipeline compiles them any more.
         {"../src/render/shaders/imported_water_normaldepth.frag.slang.spv", "imported water normal-depth shader", true},
-        {"../src/render/shaders/pipe_normaldepth.frag.slang.spv", "pipe normal-depth shader", true},
-        {"../src/render/shaders/voxel_normaldepth.frag.slang.spv", "voxel normal-depth shader", true},
         {"../src/render/shaders/ssao.comp.slang.spv", "ssao shader", true},
         {"../src/render/shaders/ssao_blur.comp.slang.spv", "ssao blur shader", true},
     }};
@@ -416,7 +402,7 @@ bool RendererBackend::validateReleaseRuntimeAssets() {
         {"../src/render/shaders/sun_shafts.comp.slang.spv", "sun shafts shader", true},
     }};
     constexpr RuntimeAssetSpec kOptionalRtShaderVariant = {
-        "../src/render/shaders/voxel_packed_rt.frag.slang.spv",
+        "../src/render/shaders/imported_static_rt.frag.slang.spv",
         "ray-traced main-pass fragment shader variant",
         false
     };
@@ -897,7 +883,6 @@ bool RendererBackend::pickPhysicalDevice() {
         m_graphicsQueueIndex = selected.graphicsQueueIndex;
         m_transferQueueFamilyIndex = selected.transferQueueFamilyIndex;
         m_transferQueueIndex = selected.transferQueueIndex;
-        m_supportsWireframePreview = selected.supportsWireframe;
         m_supportsSamplerAnisotropy = selected.supportsSamplerAnisotropy;
         m_supportsMultiDrawIndirect = selected.supportsMultiDrawIndirect;
         m_supportsTessellationShader = selected.supportsTessellationShader;
@@ -937,7 +922,6 @@ bool RendererBackend::pickPhysicalDevice() {
                            << ", graphicsQueueIndex=" << m_graphicsQueueIndex
                            << ", transferQueueFamily=" << m_transferQueueFamilyIndex
                            << ", transferQueueIndex=" << m_transferQueueIndex
-                           << ", wireframePreview=" << (m_supportsWireframePreview ? "yes" : "no")
                            << ", samplerAnisotropy=" << (m_supportsSamplerAnisotropy ? "yes" : "no")
                            << ", drawIndirectFirstInstance="
                            << (selected.supportsDrawIndirectFirstInstance ? "yes" : "no")
@@ -1031,7 +1015,7 @@ bool RendererBackend::createLogicalDevice() {
 
     VkPhysicalDeviceFeatures2 enabledFeatures2{};
     enabledFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    enabledFeatures2.features.fillModeNonSolid = m_supportsWireframePreview ? VK_TRUE : VK_FALSE;
+    enabledFeatures2.features.fillModeNonSolid = VK_FALSE;
     enabledFeatures2.features.samplerAnisotropy = m_supportsSamplerAnisotropy ? VK_TRUE : VK_FALSE;
     enabledFeatures2.features.multiDrawIndirect = m_supportsMultiDrawIndirect ? VK_TRUE : VK_FALSE;
     enabledFeatures2.features.drawIndirectFirstInstance = VK_TRUE;
@@ -1233,7 +1217,7 @@ bool RendererBackend::createLogicalDevice() {
         m_enableDisplayTiming = false;
     }
     m_rayTracingRuntimeEnabled = loadRayTracingFunctions();
-    // Snapshot before strategyMapMode/setRayTracingEnabled can override it below.
+    // Retain hardware capability even when the user disables ray tracing.
     m_rayTracingHardwareCapable = m_rayTracingRuntimeEnabled;
     loadHostImageCopyFunctions();
     loadDescriptorBufferFunctions();
@@ -1243,13 +1227,6 @@ bool RendererBackend::createLogicalDevice() {
         m_supportsVrs = m_cmdSetFragmentShadingRate != nullptr;
         VOX_LOGI("render") << "fragment shading rate (VRS): "
                            << (m_supportsVrs ? "enabled" : "extension present but entrypoint missing") << "\n";
-    }
-    if (m_strategyMapMode) {
-        // The flat hex map needs no ray-traced shadows/GI. Disabling the RT
-        // runtime skips the BLAS/TLAS acceleration-structure build (multi-second
-        // on first frames) and forces voxel GI to its cheap legacy path.
-        m_rayTracingRuntimeEnabled = false;
-        m_voxelGiDebugSettings.surfaceMode = VoxelGiSurfaceMode::Legacy;
     }
     VOX_LOGI("render") << "present runtime: displayTimingSupport=" << (m_supportsDisplayTiming ? "yes" : "no")
         << ", displayTimingExtension=" << (m_hasDisplayTimingExtension ? "yes" : "no")
@@ -1582,7 +1559,6 @@ bool RendererBackend::createTimelineSemaphore() {
 
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
-    m_currentChunkReadyTimelineValue = 0;
     for (TransferCommandSlot& slot : m_transferCommandSlots) {
         slot.inFlightTimelineValue = 0;
         slot.stagingFrameIndex = 0;
@@ -1682,176 +1658,6 @@ bool RendererBackend::createTransferResources() {
 
     return true;
 }
-
-
-bool RendererBackend::createPipeBuffers() {
-    if (m_pipeVertexBufferHandle != kInvalidBufferHandle &&
-        m_pipeIndexBufferHandle != kInvalidBufferHandle &&
-        m_transportVertexBufferHandle != kInvalidBufferHandle &&
-        m_transportIndexBufferHandle != kInvalidBufferHandle) {
-        return true;
-    }
-
-    const PipeMeshData pipeMesh = buildPipeCylinderMesh();
-    const PipeMeshData transportMesh = buildTransportBoxMesh();
-    if (pipeMesh.vertices.empty() || pipeMesh.indices.empty()) {
-        VOX_LOGE("render") << "pipe cylinder mesh build failed\n";
-        return false;
-    }
-    if (transportMesh.vertices.empty() || transportMesh.indices.empty()) {
-        VOX_LOGE("render") << "transport box mesh build failed\n";
-        return false;
-    }
-
-    auto createMeshBuffers = [&](const PipeMeshData& mesh, BufferHandle& outVertex, BufferHandle& outIndex, const char* label) -> bool {
-        if (outVertex != kInvalidBufferHandle || outIndex != kInvalidBufferHandle) {
-            return true;
-        }
-        BufferCreateDesc vertexCreateDesc{};
-        vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(PipeMeshData::Vertex));
-        vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        vertexCreateDesc.initialData = mesh.vertices.data();
-        outVertex = m_bufferAllocator.createBuffer(vertexCreateDesc);
-        if (outVertex == kInvalidBufferHandle) {
-            VOX_LOGE("render") << label << " vertex buffer allocation failed\n";
-            return false;
-        }
-        const VkBuffer vertexBuffer = m_bufferAllocator.getBuffer(outVertex);
-        if (vertexBuffer != VK_NULL_HANDLE) {
-            const std::string vertexName = std::string("mesh.") + label + ".vertex";
-            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(vertexBuffer), vertexName.c_str());
-        }
-
-        BufferCreateDesc indexCreateDesc{};
-        indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
-        indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-        indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        indexCreateDesc.initialData = mesh.indices.data();
-        outIndex = m_bufferAllocator.createBuffer(indexCreateDesc);
-        if (outIndex == kInvalidBufferHandle) {
-            VOX_LOGE("render") << label << " index buffer allocation failed\n";
-            m_bufferAllocator.destroyBuffer(outVertex);
-            outVertex = kInvalidBufferHandle;
-            return false;
-        }
-        const VkBuffer indexBuffer = m_bufferAllocator.getBuffer(outIndex);
-        if (indexBuffer != VK_NULL_HANDLE) {
-            const std::string indexName = std::string("mesh.") + label + ".index";
-            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(indexBuffer), indexName.c_str());
-        }
-        return true;
-    };
-
-    if (!createMeshBuffers(pipeMesh, m_pipeVertexBufferHandle, m_pipeIndexBufferHandle, "pipe")) {
-        return false;
-    }
-    if (!createMeshBuffers(
-            transportMesh,
-            m_transportVertexBufferHandle,
-            m_transportIndexBufferHandle,
-            "transport"
-        )) {
-        VOX_LOGE("render") << "transport mesh buffer setup failed\n";
-        return false;
-    }
-
-    // (removed) the shared grass billboard quad (8 verts / 12 indices). Nothing
-    // scatters instances or binds a grass pipeline any more.
-
-    m_pipeIndexCount = static_cast<uint32_t>(pipeMesh.indices.size());
-    m_transportIndexCount = static_cast<uint32_t>(transportMesh.indices.size());
-    return true;
-}
-
-
-bool RendererBackend::createPreviewBuffers() {
-    if (m_previewVertexBufferHandle != kInvalidBufferHandle && m_previewIndexBufferHandle != kInvalidBufferHandle) {
-        return true;
-    }
-
-    const odai::world::ChunkMeshData addMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 250);
-    const odai::world::ChunkMeshData removeMesh = buildSingleVoxelPreviewMesh(0, 0, 0, 15, 251);
-    if (addMesh.vertices.empty() || addMesh.indices.empty() || removeMesh.vertices.empty() || removeMesh.indices.empty()) {
-        VOX_LOGE("render") << "preview mesh build failed\n";
-        return false;
-    }
-
-    odai::world::ChunkMeshData mesh{};
-    mesh.vertices = addMesh.vertices;
-    mesh.indices = addMesh.indices;
-    mesh.vertices.insert(mesh.vertices.end(), removeMesh.vertices.begin(), removeMesh.vertices.end());
-    mesh.indices.reserve(mesh.indices.size() + removeMesh.indices.size());
-    const uint32_t removeBaseVertex = static_cast<uint32_t>(addMesh.vertices.size());
-    for (const uint32_t index : removeMesh.indices) {
-        mesh.indices.push_back(index + removeBaseVertex);
-    }
-
-    const uint32_t addFaceBaseVertex = 0u;
-    for (uint32_t faceId = 0; faceId < 6u; ++faceId) {
-        const uint32_t faceVertex = addFaceBaseVertex + (faceId * 4u);
-        mesh.indices.push_back(faceVertex + 0u);
-        mesh.indices.push_back(faceVertex + 1u);
-        mesh.indices.push_back(faceVertex + 1u);
-        mesh.indices.push_back(faceVertex + 2u);
-        mesh.indices.push_back(faceVertex + 2u);
-        mesh.indices.push_back(faceVertex + 3u);
-        mesh.indices.push_back(faceVertex + 3u);
-        mesh.indices.push_back(faceVertex + 0u);
-    }
-
-    for (uint32_t faceId = 0; faceId < 6u; ++faceId) {
-        const uint32_t faceVertex = removeBaseVertex + (faceId * 4u);
-        mesh.indices.push_back(faceVertex + 0u);
-        mesh.indices.push_back(faceVertex + 1u);
-        mesh.indices.push_back(faceVertex + 1u);
-        mesh.indices.push_back(faceVertex + 2u);
-        mesh.indices.push_back(faceVertex + 2u);
-        mesh.indices.push_back(faceVertex + 3u);
-        mesh.indices.push_back(faceVertex + 3u);
-        mesh.indices.push_back(faceVertex + 0u);
-    }
-
-    BufferCreateDesc vertexCreateDesc{};
-    vertexCreateDesc.size = static_cast<VkDeviceSize>(mesh.vertices.size() * sizeof(odai::world::PackedVoxelVertex));
-    vertexCreateDesc.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    vertexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vertexCreateDesc.initialData = mesh.vertices.data();
-    m_previewVertexBufferHandle = m_bufferAllocator.createBuffer(vertexCreateDesc);
-    if (m_previewVertexBufferHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "preview vertex buffer allocation failed\n";
-        return false;
-    }
-    {
-        const VkBuffer previewVertexBuffer = m_bufferAllocator.getBuffer(m_previewVertexBufferHandle);
-        if (previewVertexBuffer != VK_NULL_HANDLE) {
-            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(previewVertexBuffer), "preview.voxel.vertex");
-        }
-    }
-
-    BufferCreateDesc indexCreateDesc{};
-    indexCreateDesc.size = static_cast<VkDeviceSize>(mesh.indices.size() * sizeof(std::uint32_t));
-    indexCreateDesc.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    indexCreateDesc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    indexCreateDesc.initialData = mesh.indices.data();
-    m_previewIndexBufferHandle = m_bufferAllocator.createBuffer(indexCreateDesc);
-    if (m_previewIndexBufferHandle == kInvalidBufferHandle) {
-        VOX_LOGE("render") << "preview index buffer allocation failed\n";
-        m_bufferAllocator.destroyBuffer(m_previewVertexBufferHandle);
-        m_previewVertexBufferHandle = kInvalidBufferHandle;
-        return false;
-    }
-    {
-        const VkBuffer previewIndexBuffer = m_bufferAllocator.getBuffer(m_previewIndexBufferHandle);
-        if (previewIndexBuffer != VK_NULL_HANDLE) {
-            setObjectName(VK_OBJECT_TYPE_BUFFER, vkHandleToUint64(previewIndexBuffer), "preview.voxel.index");
-        }
-    }
-
-    m_previewIndexCount = static_cast<uint32_t>(mesh.indices.size());
-    return true;
-}
-
 
 
 bool RendererBackend::createSwapchain() {
@@ -2223,8 +2029,8 @@ bool RendererBackend::recreateSwapchain() {
         VOX_LOGE("render") << "recreateSwapchain failed: createGraphicsPipeline\n";
         return false;
     }
-    if (!createPipePipeline()) {
-        VOX_LOGE("render") << "recreateSwapchain failed: createPipePipeline\n";
+    if (!createImportedScenePipelines()) {
+        VOX_LOGE("render") << "recreateSwapchain failed: createImportedScenePipelines\n";
         return false;
     }
     if (!createImportedFireParticlePipeline()) {
@@ -2293,36 +2099,10 @@ void RendererBackend::destroyTransferResources() {
 }
 
 
-void RendererBackend::destroyPreviewBuffers() {
-    if (m_previewIndexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_previewIndexBufferHandle);
-        m_previewIndexBufferHandle = kInvalidBufferHandle;
-    }
-    if (m_previewVertexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_previewVertexBufferHandle);
-        m_previewVertexBufferHandle = kInvalidBufferHandle;
-    }
-    m_previewIndexCount = 0;
-}
 
 
-void RendererBackend::destroyMagicaBuffers() {
-    for (MagicaMeshDraw& draw : m_magicaMeshDraws) {
-        if (draw.indexBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(draw.indexBufferHandle);
-            draw.indexBufferHandle = kInvalidBufferHandle;
-        }
-        if (draw.vertexBufferHandle != kInvalidBufferHandle) {
-            m_bufferAllocator.destroyBuffer(draw.vertexBufferHandle);
-            draw.vertexBufferHandle = kInvalidBufferHandle;
-        }
-        draw.indexCount = 0;
-        draw.offsetX = 0.0f;
-        draw.offsetY = 0.0f;
-        draw.offsetZ = 0.0f;
-    }
-    m_magicaMeshDraws.clear();
-}
+
+
 
 
 void RendererBackend::destroyImportedBuffers() {
@@ -2377,7 +2157,8 @@ void RendererBackend::destroyImportedBuffers() {
     for (std::vector<ImportedMeshDraw>& shadowDraws : m_visibleImportedShadowMeshDraws) {
         shadowDraws.clear();
     }
-    m_visibleImportedPageScratch.clear();
+    m_importedVegetationLodVisible.clear();
+    m_importedPageNearTerrain.clear();
     m_visibleImportedTerrainDrawCount = 0;
     m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
@@ -2419,38 +2200,7 @@ void RendererBackend::destroyImportedBuffers() {
 }
 
 
-void RendererBackend::destroyPipeBuffers() {
-
-    if (m_transportIndexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_transportIndexBufferHandle);
-        m_transportIndexBufferHandle = kInvalidBufferHandle;
-    }
-    if (m_transportVertexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_transportVertexBufferHandle);
-        m_transportVertexBufferHandle = kInvalidBufferHandle;
-    }
-    m_transportIndexCount = 0;
-
-    if (m_pipeIndexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_pipeIndexBufferHandle);
-        m_pipeIndexBufferHandle = kInvalidBufferHandle;
-    }
-    if (m_pipeVertexBufferHandle != kInvalidBufferHandle) {
-        m_bufferAllocator.destroyBuffer(m_pipeVertexBufferHandle);
-        m_pipeVertexBufferHandle = kInvalidBufferHandle;
-    }
-    m_pipeIndexCount = 0;
-}
-
-
-
-void RendererBackend::destroyChunkBuffers() {
-    for (ChunkDrawRange& drawRange : m_chunkDrawRanges) {
-        drawRange.firstIndex = 0;
-        drawRange.vertexOffset = 0;
-        drawRange.indexCount = 0;
-    }
-
+void RendererBackend::destroyDeferredResources() {
     for (const DeferredBufferRelease& release : m_deferredBufferReleases) {
         if (release.handle != kInvalidBufferHandle) {
             m_bufferAllocator.destroyBuffer(release.handle);
@@ -2471,15 +2221,7 @@ void RendererBackend::destroyChunkBuffers() {
     }
     m_deferredCommandPoolReleases.clear();
 
-    m_chunkDrawRanges.clear();
-    m_chunkLodMeshCache.clear();
-    m_chunkLodMeshCacheValid = false;
-    m_bufferAllocator.destroyBuffer(m_chunkVertexBufferHandle);
-    m_chunkVertexBufferHandle = kInvalidBufferHandle;
-    m_bufferAllocator.destroyBuffer(m_chunkIndexBufferHandle);
-    m_chunkIndexBufferHandle = kInvalidBufferHandle;
     m_pendingTransferTimelineValue = 0;
-    m_currentChunkReadyTimelineValue = 0;
     for (TransferCommandSlot& slot : m_transferCommandSlots) {
         slot.inFlightTimelineValue = 0;
         slot.stagingFrameIndex = 0;
@@ -2508,9 +2250,6 @@ void RendererBackend::shutdown() {
             vkDestroySemaphore(m_device, m_renderTimelineSemaphore, nullptr);
             m_renderTimelineSemaphore = VK_NULL_HANDLE;
         }
-        destroyPipeBuffers();
-        destroyPreviewBuffers();
-        destroyMagicaBuffers();
         destroyImportedBuffers();
         destroyRayTracingScene();
         destroyEnvironmentResources();
@@ -2528,7 +2267,7 @@ void RendererBackend::shutdown() {
         destroyXeGtaoResources();
         destroySsaoComputeResources();
         destroySkinningComputeResources();
-        destroyChunkBuffers();
+        destroyDeferredResources();
         destroyPipeline();
         destroyPipelineCache();
         destroyDescriptorBufferSet(m_mainBufferSet);
@@ -2643,10 +2382,8 @@ void RendererBackend::shutdown() {
     m_voxelGiPreviousBounceStrength = 0.0f;
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
     m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
-    m_voxelGiOccupancyFullRebuildCursor = 0;
     m_voxelGiOccupancyFullRebuildInProgress = false;
     m_voxelGiOccupancyFullRebuildNeedsClear = false;
-    m_voxelGiDirtyChunkIndices.clear();
     m_autoExposureHistogramBufferHandle = kInvalidBufferHandle;
     m_autoExposureStateBufferHandle = kInvalidBufferHandle;
     m_autoExposureComputeAvailable = false;
@@ -2654,7 +2391,6 @@ void RendererBackend::shutdown() {
     m_autoExposureUpdateFrameIndex = 0u;
     m_sunShaftComputeAvailable = false;
     m_sunShaftShaderAvailable = false;
-    m_supportsWireframePreview = false;
     m_supportsSamplerAnisotropy = false;
     m_supportsMultiDrawIndirect = false;
     m_supportsTessellationShader = false;
@@ -2664,8 +2400,6 @@ void RendererBackend::shutdown() {
     m_shadowSettings = {};
     m_shadowStats = {};
     m_rtShaderVariantFileAvailable = false;
-    m_chunkMeshRebuildRequested = false;
-    m_pendingChunkRemeshKeys.clear();
     m_gpuTimestampsSupported = false;
     m_gpuTimestampPeriodNs = 0.0f;
     m_gpuTimestampQueryPools.fill(VK_NULL_HANDLE);
@@ -2756,7 +2490,6 @@ void RendererBackend::shutdown() {
     m_getAccelerationStructureDeviceAddressKhr = nullptr;
     m_frameTimelineValues.fill(0);
     m_pendingTransferTimelineValue = 0;
-    m_currentChunkReadyTimelineValue = 0;
     for (TransferCommandSlot& slot : m_transferCommandSlots) {
         slot.inFlightTimelineValue = 0;
         slot.stagingFrameIndex = 0;

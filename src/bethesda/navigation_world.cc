@@ -10,7 +10,7 @@
 #include <tuple>
 #include <unordered_map>
 
-namespace odai::games::newvegas {
+namespace odai::games::bethesda {
 
 namespace {
 
@@ -187,10 +187,10 @@ Vector3 triangleCentroid(const MeshType& mesh, const TriangleType& triangle) {
 
 void ActorNavigationWorld::addCell(
     const importer::CellCoord& cell,
-    const std::vector<importer::fnv::FalloutNavMeshRecord>& records) {
+    const std::vector<importer::bethesda::FalloutNavMeshRecord>& records) {
     std::vector<Mesh> meshes;
     meshes.reserve(records.size());
-    for (const importer::fnv::FalloutNavMeshRecord& record : records) {
+    for (const importer::bethesda::FalloutNavMeshRecord& record : records) {
         const std::size_t vertexCount = record.vertices.size() / 3u;
         if (vertexCount == 0u || record.triangles.empty()) {
             continue;
@@ -207,7 +207,7 @@ void ActorNavigationWorld::addCell(
             mesh.vertices.push_back(Vector3{source[0], source[2], -source[1]});
         }
         mesh.triangles.reserve(record.triangles.size());
-        for (const importer::fnv::FalloutNavMeshTriangle& source : record.triangles) {
+        for (const importer::bethesda::FalloutNavMeshTriangle& source : record.triangles) {
             if (source.vertex[0] >= vertexCount || source.vertex[1] >= vertexCount ||
                 source.vertex[2] >= vertexCount) {
                 continue;
@@ -892,7 +892,7 @@ bool ActorNavigationWorld::buildWanderPath(
             candidates.push_back(current);
         }
         for (const std::uint16_t neighbour : mesh.triangles[current].neighbour) {
-            if (neighbour == importer::fnv::kNavMeshNoNeighbour || neighbour >= count ||
+            if (neighbour == importer::bethesda::kNavMeshNoNeighbour || neighbour >= count ||
                 parent[neighbour] != -2) {
                 continue;
             }
@@ -1016,7 +1016,7 @@ bool ActorNavigationWorld::buildPath(
             const Triangle& triangle = mesh.triangles[triangleIndex];
             const std::size_t node = offsets[meshIndex] + triangleIndex;
             for (const std::uint16_t neighbour : triangle.neighbour) {
-                if (neighbour == importer::fnv::kNavMeshNoNeighbour ||
+                if (neighbour == importer::bethesda::kNavMeshNoNeighbour ||
                     neighbour >= mesh.triangles.size()) continue;
                 graph[node].push_back(Link{offsets[meshIndex] + neighbour,
                     sharedEdgeMidpoint(mesh, triangle, mesh.triangles[neighbour])});
@@ -1093,7 +1093,7 @@ bool ActorNavigationWorld::buildPath(
     std::unordered_map<std::uint32_t, std::vector<std::size_t>> portalNodes;
     for (std::size_t meshIndex = 0u; meshIndex < meshes.size(); ++meshIndex) {
         const Mesh& mesh = *meshes[meshIndex];
-        for (const importer::fnv::FalloutNavMeshDoorPortal& portal : mesh.doorPortals) {
+        for (const importer::bethesda::FalloutNavMeshDoorPortal& portal : mesh.doorPortals) {
             if (portal.doorRefFormId == 0u || portal.triangleIndex >= mesh.triangles.size()) {
                 continue;
             }
@@ -1218,4 +1218,4 @@ std::size_t ActorNavigationWorld::generatedNodeCount() const {
     return count;
 }
 
-}  // namespace odai::games::newvegas
+}  // namespace odai::games::bethesda

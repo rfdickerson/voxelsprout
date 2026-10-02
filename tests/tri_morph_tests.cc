@@ -1,6 +1,6 @@
-#include "import/fnv/asset_source.h"
-#include "import/fnv/content_profile.h"
-#include "import/fnv/tri_morph.h"
+#include "import/bethesda/asset_source.h"
+#include "import/bethesda/content_profile.h"
+#include "import/bethesda/tri_morph.h"
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 using Bytes = std::vector<std::uint8_t>;
 void u32(Bytes &b, std::uint32_t v) {
   for (int i = 0; i < 4; ++i)

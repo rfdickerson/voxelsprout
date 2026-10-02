@@ -1,7 +1,7 @@
-#include "games/newvegas/bethesda_actors.h"
+#include "games/bethesda/bethesda_actors.h"
 #include "bethesda/bethesda_session.h"
 #include "anim/hkx_packfile.h"
-#include "import/fnv/skyrim_animation_assets.h"
+#include "import/bethesda/skyrim_animation_assets.h"
 
 #include <algorithm>
 #include <cassert>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-using namespace odai::games::newvegas;
+using namespace odai::games::bethesda;
 
 namespace {
 
@@ -35,7 +35,7 @@ std::uint64_t replayHash(const std::vector<double>& frameDeltas) {
     BethesdaSession session;
     std::string error;
     assert(session.configure({
-        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "actor-movement-fixture", "skyrim-bleak-falls", 41u}, error));
     RuntimeObject object;
     object.id = ObjectId::persistent(makeRecordKey("Skyrim.esm", 0x1234u));
@@ -119,7 +119,7 @@ int main() {
         bone.localRotation.w = 1.0f;
         childRig.bones.push_back(std::move(bone));
     }
-    odai::importer::fnv::FalloutAssetSource emptyAssets;
+    odai::importer::bethesda::FalloutAssetSource emptyAssets;
     odai::anim::AnimationClip childIdle;
     std::string childIdleWhy;
     assert(loadActorIdleClip(emptyAssets,
@@ -267,11 +267,11 @@ int main() {
     assert(std::fabs(tes3Actors[0].position[2] - 32.0f) < 1.0e-4f);
     assert(tes3Actors[0].runtimeControllerNeedsRelocation);
 
-    odai::importer::fnv::FalloutNavMeshRecord floor;
+    odai::importer::bethesda::FalloutNavMeshRecord floor;
     floor.formId = 1u;
     floor.vertices = {0.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f,
         0.0f, 100.0f, 0.0f};
-    odai::importer::fnv::FalloutNavMeshTriangle triangle;
+    odai::importer::bethesda::FalloutNavMeshTriangle triangle;
     triangle.vertex[0] = 0u;
     triangle.vertex[1] = 1u;
     triangle.vertex[2] = 2u;
@@ -360,7 +360,7 @@ int main() {
                  "actors\\character\\character assets\\hair\\male\\hair01.nif"}) {
             assert(std::any_of(
                 avatar.character.parts.begin(), avatar.character.parts.end(),
-                [&](const odai::importer::fnv::FalloutCharacterPart& part) {
+                [&](const odai::importer::bethesda::FalloutCharacterPart& part) {
                     return part.sourcePath == requiredFace;
                 }));
         }
@@ -368,14 +368,14 @@ int main() {
         assert(!avatar.idleClip.name.starts_with("procedural"));
         assert(!avatar.walkClip.name.starts_with("procedural"));
         assert(avatar.authoredLocomotionClips.size() == 7u);
-        odai::importer::fnv::FalloutAssetSource retailAssets;
+        odai::importer::bethesda::FalloutAssetSource retailAssets;
         assert(retailAssets.open(skyrimData));
         std::string graphFingerprint, graphError;
-        auto graphProgram = odai::importer::fnv::loadSkyrimBehaviorProgram(retailAssets,
+        auto graphProgram = odai::importer::bethesda::loadSkyrimBehaviorProgram(retailAssets,
             "meshes\\actors\\character\\behaviors\\0_master.hkx", graphFingerprint, graphError);
         assert(graphProgram && !graphProgram->graph.eventNames.empty());
         for (const bool female : {false, true}) {
-            auto view = odai::importer::fnv::loadSkyrimNpcAnimationView(retailAssets,
+            auto view = odai::importer::bethesda::loadSkyrimNpcAnimationView(retailAssets,
                 avatar.character.skeleton, avatar.character.inverseBindMatrices, female,
                 avatar.idleClip, avatar.walkClip, graphProgram, graphFingerprint);
             std::cerr << "retail NPC " << (female ? "female" : "male") << ": " << view->clips.size()

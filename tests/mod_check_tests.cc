@@ -1,5 +1,5 @@
-#include "import/fnv/mod_check.h"
-#include "import/fnv/plugin_load_order.h"
+#include "import/bethesda/mod_check.h"
+#include "import/bethesda/plugin_load_order.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -10,7 +10,7 @@
 
 namespace {
 namespace fs = std::filesystem;
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 int failures = 0;
 void check(bool ok, const std::string& name) { if (!ok) { std::cerr << "FAIL: " << name << '\n'; ++failures; } }
 void u32(std::string& bytes, std::uint32_t n) { for (unsigned i = 0; i < 4; ++i) bytes += static_cast<char>(n >> (8u * i)); }

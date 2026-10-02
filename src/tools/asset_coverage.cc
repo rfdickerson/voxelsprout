@@ -1,10 +1,10 @@
 #include "tools/asset_coverage.h"
 #include "import/dds.h"
-#include "import/fnv/cell_builder.h"
-#include "import/fnv/content_record_index.h"
-#include "import/fnv/image_space_records.h"
-#include "import/fnv/nif_scene.h"
-#include "import/fnv/weather_records.h"
+#include "import/bethesda/cell_builder.h"
+#include "import/bethesda/content_record_index.h"
+#include "import/bethesda/image_space_records.h"
+#include "import/bethesda/nif_scene.h"
+#include "import/bethesda/weather_records.h"
 #include "tools/asset_coverage_report.h"
 #include <algorithm>
 #include <fstream>
@@ -24,7 +24,7 @@ std::string materialSignature(const Material &m, std::vector<std::string> paths)
     paths.resize(9);
     for (auto &path : paths)
         if (!path.empty())
-            path = canonical(odai::importer::fnv::normalizeTexturePath(path));
+            path = canonical(odai::importer::bethesda::normalizeTexturePath(path));
     return nlohmann::json{{"shaderType", m.shaderType},
                           {"flags1", m.flags1},
                           {"flags2", m.flags2},
@@ -45,11 +45,11 @@ std::string materialSignature(const Material &m, std::vector<std::string> paths)
 
 } // namespace
 
-bool writeAssetCoverage(const odai::importer::fnv::FalloutAssetSource &assets,
-                        const odai::importer::fnv::FalloutLoadOrder &order,
+bool writeAssetCoverage(const odai::importer::bethesda::FalloutAssetSource &assets,
+                        const odai::importer::bethesda::FalloutLoadOrder &order,
                         const std::filesystem::path &output, std::string &error) {
     using namespace odai::importer;
-    using namespace odai::importer::fnv;
+    using namespace odai::importer::bethesda;
     using nlohmann::json;
     if (output.extension() != ".json") {
         error = "coverage output must end in .json";

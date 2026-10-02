@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-namespace odai::games::newvegas {
+namespace odai::games::bethesda {
 
 enum class NavigationSimulationStatus : std::uint8_t {
     Arrived,
@@ -56,8 +56,8 @@ class NavMeshPlayerSimulator {
 public:
     NavMeshPlayerSimulator(
         const ActorNavigationWorld& navigation,
-        bethesda::BethesdaPhysicsWorld& physics,
-        bethesda::ObjectId player,
+        odai::bethesda::BethesdaPhysicsWorld& physics,
+        odai::bethesda::ObjectId player,
         NavigationSimulationConfig config = {});
 
     [[nodiscard]] NavigationSimulationResult runTo(
@@ -67,9 +67,9 @@ public:
 
 private:
     const ActorNavigationWorld& m_navigation;
-    bethesda::BethesdaPhysicsWorld& m_physics;
-    bethesda::ObjectId m_player;
+    odai::bethesda::BethesdaPhysicsWorld& m_physics;
+    odai::bethesda::ObjectId m_player;
     NavigationSimulationConfig m_config;
 };
 
-}  // namespace odai::games::newvegas
+}  // namespace odai::games::bethesda

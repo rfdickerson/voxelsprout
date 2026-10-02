@@ -1,8 +1,8 @@
 #include "bethesda/gameplay_catalog.h"
 #include "bethesda/record_resolver.h"
 #include "bethesda/tes3_content.h"
-#include "import/fnv/actor_records.h"
-#include "import/fnv/cell_builder.h"
+#include "import/bethesda/actor_records.h"
+#include "import/bethesda/cell_builder.h"
 
 #include <algorithm>
 #include <charconv>
@@ -708,16 +708,16 @@ bool compileTes3GameplayExteriorCell(
 }
 
 bool compilePostTes3GameplayCell(
-    importer::fnv::BethesdaGame game,
-    const importer::fnv::FalloutLoadOrder& loadOrder,
-    const importer::fnv::FalloutActorScan& actors,
-    const importer::fnv::FalloutCellRecord& cell,
-    const importer::fnv::FalloutWorldTables& tables,
+    importer::bethesda::BethesdaGame game,
+    const importer::bethesda::FalloutLoadOrder& loadOrder,
+    const importer::bethesda::FalloutActorScan& actors,
+    const importer::bethesda::FalloutCellRecord& cell,
+    const importer::bethesda::FalloutWorldTables& tables,
     std::string contentFingerprint,
     GameplayCellPayload& outPayload,
     std::string& outError) {
-    if (game == importer::fnv::BethesdaGame::Unknown ||
-        game == importer::fnv::BethesdaGame::Morrowind ||
+    if (game == importer::bethesda::BethesdaGame::Unknown ||
+        game == importer::bethesda::BethesdaGame::Morrowind ||
         contentFingerprint.empty() || cell.formId == 0u) {
         outError = "post-TES3 gameplay compilation requires a later game, cell, and fingerprint";
         return false;
@@ -737,7 +737,7 @@ bool compilePostTes3GameplayCell(
     }
 
     std::set<std::uint32_t> actorReferences;
-    for (const importer::fnv::FalloutActorPlacement& placement : actors.placements) {
+    for (const importer::bethesda::FalloutActorPlacement& placement : actors.placements) {
         RecordKey actorKey;
         RecordKey baseKey;
         if (!stableRecordKey(loadOrder, placement.refFormId, actorKey, outError) ||
@@ -773,7 +773,7 @@ bool compilePostTes3GameplayCell(
             ObjectId::persistent(actorKey), {}, 1u, true, {"actor-origin"}});
     }
 
-    for (const importer::fnv::FalloutPlacedReference& reference : cell.references) {
+    for (const importer::bethesda::FalloutPlacedReference& reference : cell.references) {
         if (reference.isDeleted || (reference.recordFlags & 0x00000800u) != 0u ||
             actorReferences.contains(reference.formId)) continue;
         RecordKey objectKey;

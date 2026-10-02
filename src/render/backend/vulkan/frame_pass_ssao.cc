@@ -381,9 +381,7 @@ void RendererBackend::recordSsaoPasses(const FrameExecutionContext& context) {
         );
         vkCmdDispatch(commandBuffer, dispatchX, dispatchY, 1u);
 
-        // Final consumers of the blurred AO texture are the main-pass ambient terms in
-        // imported_static.frag.slang and voxel_packed.frag.slang (both binding 7) plus
-        // the tonemap debug-visualize modes -- not another compute pass.
+        // Imported-scene ambient shading and tonemap debug modes sample blurred AO.
         transitionImageLayout(
             commandBuffer,
             m_ssaoBlurImages[aoFrameIndex],

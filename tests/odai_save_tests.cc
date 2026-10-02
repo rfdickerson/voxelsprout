@@ -131,7 +131,7 @@ int main() {
     BethesdaSession original;
     std::string error;
     const BethesdaSessionConfig config{
-        odai::importer::fnv::BethesdaGame::SkyrimSpecialEdition,
+        odai::importer::bethesda::BethesdaGame::SkyrimSpecialEdition,
         "profile-a", "skyrim-bleak-falls", 77u};
     assert(original.configure(config, error));
     RuntimeObject player;

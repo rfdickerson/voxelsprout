@@ -108,7 +108,7 @@ Validation evidence is local under `captures/grass-pipeline-*` (PNG, JSON, log):
 - Synthetic coverage includes malformed/deleted records, negative and adjacent
   cell ownership, repeatability, grassless roads, zero density, water modes,
   worldspace/interior exclusion, and slope alignment at different rotations.
-- `ODAI_GRASS_TEST_DATA="$SKYRIM_DATA" build-linux-relwithdebinfo/odai_fnv_import_tests`
+- `ODAI_GRASS_TEST_DATA="$SKYRIM_DATA" build-linux-relwithdebinfo/odai_bethesda_import_tests`
   also verifies original assets and scene serialization. Four Riverwood cells
   produced 99 eligible clumps (73 after collision exclusion), with no missing
   grass textures or grass physics triangles.

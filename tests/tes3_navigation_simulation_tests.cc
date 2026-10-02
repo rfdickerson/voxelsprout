@@ -1,6 +1,6 @@
 #include "bethesda/tes3_runtime.h"
 #include "bethesda/navigation_simulation.h"
-#include "games/newvegas/bethesda_collision.h"
+#include "games/bethesda/bethesda_collision.h"
 
 #include <algorithm>
 #include <cassert>
@@ -19,10 +19,10 @@ namespace {
 using odai::bethesda::BethesdaPhysicsWorld;
 using odai::bethesda::ObjectId;
 using odai::bethesda::PhysicsCharacterConfig;
-using odai::games::newvegas::ActorNavigationWorld;
-using odai::games::newvegas::NavMeshPlayerSimulator;
-using odai::games::newvegas::NavigationSimulationStatus;
-using odai::games::newvegas::SimulatedQuestObjective;
+using odai::games::bethesda::ActorNavigationWorld;
+using odai::games::bethesda::NavMeshPlayerSimulator;
+using odai::games::bethesda::NavigationSimulationStatus;
+using odai::games::bethesda::SimulatedQuestObjective;
 using odai::importer::ImportedScene;
 using odai::math::Vector3;
 
@@ -229,7 +229,7 @@ void testIntersectingBridgeDeckRecovery() {
     ImportedScene scene;
     addFloor(scene, -256.0f, 256.0f, -256.0f, 256.0f, 0.0f);
     addFloor(scene, -128.0f, 128.0f, -128.0f, 128.0f, 80.0f);
-    odai::games::newvegas::CollisionWorld collision;
+    odai::games::bethesda::CollisionWorld collision;
     collision.addCell({0, 0}, scene);
 
     float recoveredFeetY = 0.0f;
@@ -250,13 +250,13 @@ void testInitiallyHiddenCollisionIsExcludedFromGrounding() {
         scene.collisionTriangles[index].sourceReferenceFormId = kHiddenReference;
     }
 
-    odai::games::newvegas::CollisionWorld unfiltered;
+    odai::games::bethesda::CollisionWorld unfiltered;
     unfiltered.addCell({0, 0}, scene);
     float ground = -1.0f;
     assert(unfiltered.groundHeight(0.0f, 0.0f, 80.0f, ground));
     assert(std::fabs(ground - 80.0f) < 1.0e-4f);
 
-    odai::games::newvegas::CollisionWorld filtered;
+    odai::games::bethesda::CollisionWorld filtered;
     filtered.addCell({0, 0}, scene, {kHiddenReference});
     assert(filtered.groundHeight(0.0f, 0.0f, 80.0f, ground));
     assert(std::fabs(ground) < 1.0e-4f);
@@ -266,7 +266,7 @@ void testProjectedSpawnIsPushedClearOfWall() {
     ImportedScene scene;
     addFloor(scene, -256.0f, 256.0f, -256.0f, 256.0f, 0.0f);
     addWall(scene, 0.0f, -192.0f, 192.0f, 0.0f, 180.0f);
-    odai::games::newvegas::CollisionWorld collision;
+    odai::games::bethesda::CollisionWorld collision;
     collision.addCell({0, 0}, scene);
 
     PhysicsCharacterConfig capsule;
@@ -317,11 +317,11 @@ void runOptionalRetailSceneProbe(const char* environmentName, const char* label)
     // stair signature: several legal sub-step-height rises and a meaningfully
     // higher destination. This remains useful with modded Balmora geometry;
     // it does not hardcode one mesh's exact top landing.
-    std::vector<odai::games::newvegas::ActorNavigationStep> bestRoute;
+    std::vector<odai::games::bethesda::ActorNavigationStep> bestRoute;
     float bestScore = -1.0f;
     float bestRise = 0.0f;
     std::uint32_t bestRisingEdges = 0u;
-    const auto considerRoute = [&](std::vector<odai::games::newvegas::ActorNavigationStep> route) {
+    const auto considerRoute = [&](std::vector<odai::games::bethesda::ActorNavigationStep> route) {
         if (route.empty()) return;
         float peak = start.y;
         float previousY = start.y;
@@ -342,7 +342,7 @@ void runOptionalRetailSceneProbe(const char* environmentName, const char* label)
         }
     };
     for (std::uint32_t seed = 0u; seed < 4096u; ++seed) {
-        std::vector<odai::games::newvegas::ActorNavigationStep> route;
+        std::vector<odai::games::bethesda::ActorNavigationStep> route;
         if (!navigation.buildWanderPath(start, start, 950.0f, seed, route) ||
             route.empty()) continue;
         considerRoute(std::move(route));
@@ -378,7 +378,7 @@ void runOptionalRetailSceneProbe(const char* environmentName, const char* label)
             return (ldx * ldx) + (ldz * ldz) < (rdx * rdx) + (rdz * rdz);
         });
         for (const Vector3& destination : elevated) {
-            std::vector<odai::games::newvegas::ActorNavigationStep> route;
+            std::vector<odai::games::bethesda::ActorNavigationStep> route;
             if (navigation.buildPath(start, destination, route)) {
                 considerRoute(std::move(route));
                 if (bestRise >= 24.0f && bestRisingEdges >= 2u) break;
@@ -405,7 +405,7 @@ void runOptionalRetailSceneProbe(const char* environmentName, const char* label)
     character.boundsHalfExtents = {16.0f, 56.0f, 16.0f};
     character.stepHeight = 18.0f;
     assert(physics.addCharacter(player, character, error));
-    odai::games::newvegas::NavigationSimulationConfig config;
+    odai::games::bethesda::NavigationSimulationConfig config;
     config.speed = 90.0f;
     config.waypointRadius = 18.0f;
     config.blockedStepLimit = 180u;
@@ -438,7 +438,7 @@ void runOptionalRetailBridgeProbe(const char* environmentName, const char* label
     assert(odai::importer::loadImportedScene(path, scene));
     Vector3 start;
     assert(std::sscanf(startText, "%f,%f,%f", &start.x, &start.y, &start.z) == 3);
-    odai::games::newvegas::CollisionWorld collision;
+    odai::games::bethesda::CollisionWorld collision;
     collision.addCell({0, 0}, scene);
     float recoveredFeetY = 0.0f;
     assert(collision.recoverFeetAboveIntersectingFloor(

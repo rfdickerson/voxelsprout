@@ -30,13 +30,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const uint32_t imageIndex = context.imageIndex;
     const VkViewport& viewport = context.viewport;
     const VkRect2D& scissor = context.scissor;
-    // Voxel chunk inputs: consumed by the chunk draw below (VoxelCraft). The magica/pipe
-    // inputs are still present on MainPassInputs but remain unconsumed here.
-    const FrameChunkDrawData& frameChunkDrawData = *inputs.frameChunkDrawData;
-    const std::optional<FrameArenaSlice>& chunkInstanceSliceOpt = *inputs.chunkInstanceSliceOpt;
-    const VkBuffer chunkInstanceBuffer = inputs.chunkInstanceBuffer;
-    const VkBuffer chunkVertexBuffer = inputs.chunkVertexBuffer;
-    const VkBuffer chunkIndexBuffer = inputs.chunkIndexBuffer;
     const VkBuffer importedVertexBuffer = inputs.importedVertexBuffer;
     const VkBuffer importedIndexBuffer = inputs.importedIndexBuffer;
     const std::span<const ImportedMeshDraw> importedMeshDraws = inputs.importedMeshDraws;
@@ -50,11 +43,9 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     const std::span<const std::uint32_t> importedActorBlendedDrawOrder =
         inputs.importedActorBlendedDrawOrder;
     const std::span<const ImportedMeshDraw> skinnedActorMeshDraws = inputs.skinnedActorMeshDraws;
-    const bool renderingImportedScene = !importedMeshDraws.empty() || !importedActorMeshDraws.empty();
     const bool useRtMainShadows =
         m_shadowStats.activeMode == ShadowMode::RayTraced &&
         m_shadowStats.mainPassRayTracingReady;
-    const bool useRtVoxelShadows = useRtMainShadows && m_pipelineRt != VK_NULL_HANDLE;
     m_shadowStats.mainPassRayTracingActive = useRtMainShadows;
 
     if (useRtMainShadows) {
@@ -132,6 +123,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_waterReflectionResolvePipeline != VK_NULL_HANDLE &&
         m_waterReflectionResolveBufferSet.valid();
     if (canRenderPlanarWaterReflection) {
+        writeGpuTimestampTop(kGpuTimestampQueryReflectionStart);
         const auto reflectionMeshDraws = inputs.reflectionMeshDraws;
         beginDebugLabel(commandBuffer, "Pass: Planar Water Reflection", 0.08f, 0.34f, 0.42f, 1.0f);
         transitionImageLayout(
@@ -297,13 +289,19 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
                     draw.vertexOffset, 0);
             }
         };
-        // The normal imported pipeline is configured for the merged depth
-        // prepass: depth test on, writes off. The reflection owns a separate
-        // depth image, so replay the exact same batches through the depth-only
-        // pipeline first or the sky's EQUAL-to-clear test would paint over all
-        // reflected geometry.
-        drawReflectionGeometry(m_importedStaticDepthPrewritePipelineTwoSided);
-        drawReflectionGeometry(m_importedStaticPipelineTwoSided);
+        // The reflection owns a separate depth image. The depth-writing
+        // shading variant avoids replaying every batch. Retain the prewrite
+        // path for A/B timing and for devices where late depth writes lose.
+        static const bool s_reflectionPrewrite = []() {
+            const char* env = std::getenv("ODAI_REFLECTION_PREWRITE");
+            return env != nullptr && env[0] != '0';
+        }();
+        if (!s_reflectionPrewrite && m_importedStaticReflectionPipelineTwoSided != VK_NULL_HANDLE) {
+            drawReflectionGeometry(m_importedStaticReflectionPipelineTwoSided);
+        } else {
+            drawReflectionGeometry(m_importedStaticDepthPrewritePipelineTwoSided);
+            drawReflectionGeometry(m_importedStaticPipelineTwoSided);
+        }
 
         if (reflectionHasSky && m_skyboxPipeline != VK_NULL_HANDLE) {
             vkCmdBindPipeline(
@@ -351,6 +349,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
         m_waterReflectionImageInitialized[aoFrameIndex] = true;
         m_waterReflectionDepthImageInitialized[aoFrameIndex] = true;
         endDebugLabel(commandBuffer);
+        writeGpuTimestampBottom(kGpuTimestampQueryReflectionEnd);
     }
 
     // Null when the sample count is 1: createMsaaColorTargets skips the image
@@ -457,78 +456,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     vkCmdBeginRendering(commandBuffer, &renderingInfo);
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-    if (!renderingImportedScene && m_terrainTessPipeline != VK_NULL_HANDLE) {
-        constexpr std::uint32_t kTerrainPatchGridResolution = 16u;
-        constexpr std::uint32_t kTerrainPatchControlPointCount = 4u;
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_terrainTessPipeline);
-        bindGraphicsDescriptorBuffers(commandBuffer);
-        countDrawCalls(m_debugDrawCallsMain, 1);
-        vkCmdDraw(
-            commandBuffer,
-            kTerrainPatchControlPointCount * kTerrainPatchGridResolution * kTerrainPatchGridResolution,
-            1,
-            0,
-            0
-        );
-    }
-
-    // Hex strategy-map land: one instanced, tessellated, height-displaced draw of the
-    // shared base hex fan (one instance per land tile). The TESC collapses distant
-    // tiles to the base fan, so a single all-instances draw is cheap.
-    if (m_hexTerrainEnabled && m_hexTerrainPipeline != VK_NULL_HANDLE && m_hexInstanceCount > 0) {
-        const VkBuffer hexBaseVertexBuffer = m_bufferAllocator.getBuffer(m_hexBaseVertexBufferHandle);
-        const VkBuffer hexBaseIndexBuffer = m_bufferAllocator.getBuffer(m_hexBaseIndexBufferHandle);
-        const VkBuffer hexInstanceBuffer = m_bufferAllocator.getBuffer(m_hexInstanceBufferHandle);
-        if (hexBaseVertexBuffer != VK_NULL_HANDLE && hexBaseIndexBuffer != VK_NULL_HANDLE &&
-            hexInstanceBuffer != VK_NULL_HANDLE) {
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_hexTerrainPipeline);
-            bindGraphicsDescriptorBuffers(commandBuffer);
-            const VkBuffer hexVertexBuffers[2] = {hexBaseVertexBuffer, hexInstanceBuffer};
-            const VkDeviceSize hexVertexOffsets[2] = {0, 0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 2, hexVertexBuffers, hexVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, hexBaseIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            vkCmdDrawIndexed(commandBuffer, m_hexIndexCount, m_hexInstanceCount, 0, 0, 0);
-        }
-    }
-
-    // Voxel chunk draws (VoxelCraft). Games with no voxel chunks produce no indirect
-    // commands, so canDrawChunksIndirect is false and this whole block is skipped.
-    // (Magica model main-pass draws remain removed -- no current game uploads them.)
-    if (frameChunkDrawData.canDrawChunksIndirect &&
-        m_pipeline != VK_NULL_HANDLE &&
-        chunkVertexBuffer != VK_NULL_HANDLE &&
-        chunkIndexBuffer != VK_NULL_HANDLE &&
-        chunkInstanceBuffer != VK_NULL_HANDLE &&
-        chunkInstanceSliceOpt.has_value()) {
-        vkCmdBindPipeline(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            useRtVoxelShadows ? m_pipelineRt : m_pipeline
-        );
-        bindGraphicsDescriptorBuffers(commandBuffer);
-        const VkBuffer voxelVertexBuffers[2] = {chunkVertexBuffer, chunkInstanceBuffer};
-        const VkDeviceSize voxelVertexOffsets[2] = {0, chunkInstanceSliceOpt->offset};
-        vkCmdBindVertexBuffers(commandBuffer, 0, 2, voxelVertexBuffers, voxelVertexOffsets);
-        vkCmdBindIndexBuffer(commandBuffer, chunkIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-        // Per-chunk offsets ride the instance buffer; the push constant block stays zeroed
-        // so the shader's chunkOffset/cascadeData path matches the shadow pass.
-        ChunkPushConstants chunkPushConstants{};
-        // Neutral alpha-test threshold. Draws that carry an authored one
-        // overwrite this; leaving it zeroed would mean nothing cuts out.
-        chunkPushConstants.materialParams[0] = 0.5f;
-        vkCmdPushConstants(
-            commandBuffer,
-            m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            sizeof(ChunkPushConstants),
-            &chunkPushConstants
-        );
-        drawIndirectChunkRanges(commandBuffer, m_debugDrawCallsMain, frameChunkDrawData);
-    }
 
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
         importedVertexBuffer != VK_NULL_HANDLE &&
@@ -1105,7 +1032,7 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
             auto [it, added] = m_mistStartTimes.try_emplace(e.sourceId, now);
             if (now < it->second)
                 it->second = now;
-            auto particles = odai::importer::fnv::sampleNifMist(*e.mist, now - it->second, e.seed);
+            auto particles = odai::importer::bethesda::sampleNifMist(*e.mist, now - it->second, e.seed);
             for (const auto &p : particles) {
                 Draw d{};
                 const auto &t = e.mistTransform;

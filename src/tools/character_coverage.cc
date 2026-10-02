@@ -1,15 +1,15 @@
 #include "tools/character_coverage.h"
-#include "import/fnv/character_asset_manifest.h"
-#include "import/fnv/content_record_index.h"
-#include "import/fnv/nif_scene.h"
-#include "import/fnv/tri_morph.h"
+#include "import/bethesda/character_asset_manifest.h"
+#include "import/bethesda/content_record_index.h"
+#include "import/bethesda/nif_scene.h"
+#include "import/bethesda/tri_morph.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
 
-using namespace odai::importer::fnv;
+using namespace odai::importer::bethesda;
 using namespace odai::anim;
 using nlohmann::json;
 namespace {

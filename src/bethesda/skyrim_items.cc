@@ -1,6 +1,6 @@
 #include "bethesda/skyrim_items.h"
 #include "bethesda/record_resolver.h"
-#include "import/fnv/strings_table.h"
+#include "import/bethesda/strings_table.h"
 #include <cmath>
 #include <cstring>
 
@@ -11,7 +11,7 @@ template <class T> T read(const std::uint8_t *p) {
     std::memcpy(&v, p, sizeof(v));
     return v;
 }
-std::string text(const importer::fnv::EsmSubrecordView &sub) {
+std::string text(const importer::bethesda::EsmSubrecordView &sub) {
     std::string value(reinterpret_cast<const char *>(sub.data), sub.size);
     const auto nul = value.find('\0');
     if (nul != std::string::npos)
@@ -30,27 +30,27 @@ struct Item {
     bool unsupported = false;
 };
 } // namespace
-bool loadSkyrimItems(const importer::fnv::FalloutLoadOrder &order,
-                     const importer::fnv::FalloutAssetSource &assets,
+bool loadSkyrimItems(const importer::bethesda::FalloutLoadOrder &order,
+                     const importer::bethesda::FalloutAssetSource &assets,
                      std::map<RecordKey, SkyrimItemDefinition> &out, std::string &error) {
     std::map<std::uint32_t, Item> items;
     std::map<std::uint32_t, bool> healingEffects;
     for (std::size_t plugin = 0; plugin < order.size(); ++plugin) {
         const auto &source = order.entries()[plugin];
-        importer::fnv::EsmReader reader;
+        importer::bethesda::EsmReader reader;
         if (!reader.open(source.path)) {
             error = reader.lastError();
             return false;
         }
-        importer::fnv::FalloutStringTable names, descriptions;
+        importer::bethesda::FalloutStringTable names, descriptions;
         std::string localizationError;
         if (source.header.isLocalized) {
-            (void)importer::fnv::loadFalloutStringTable(
-                assets, source.header.fileName, importer::fnv::falloutStringLanguage(),
-                importer::fnv::FalloutStringFileKind::Strings, names, localizationError);
-            (void)importer::fnv::loadFalloutStringTable(
-                assets, source.header.fileName, importer::fnv::falloutStringLanguage(),
-                importer::fnv::FalloutStringFileKind::DlStrings, descriptions, localizationError);
+            (void)importer::bethesda::loadFalloutStringTable(
+                assets, source.header.fileName, importer::bethesda::falloutStringLanguage(),
+                importer::bethesda::FalloutStringFileKind::Strings, names, localizationError);
+            (void)importer::bethesda::loadFalloutStringTable(
+                assets, source.header.fileName, importer::bethesda::falloutStringLanguage(),
+                importer::bethesda::FalloutStringFileKind::DlStrings, descriptions, localizationError);
         }
         const auto localized = [&](const auto &sub, const auto &table) {
             if (!source.header.isLocalized)
@@ -60,14 +60,14 @@ bool loadSkyrimItems(const importer::fnv::FalloutLoadOrder &order,
                     return *value;
             return std::string{};
         };
-        importer::fnv::EsmReader::Visitor visitor;
+        importer::bethesda::EsmReader::Visitor visitor;
         visitor.onRecordHeader = [](const auto &r) {
             return r.type == "NPC_" || r.type == "CELL" || r.type == "LCTN" || r.type == "MGEF" || r.type == "MISC" || r.type == "BOOK" || r.type == "WEAP" ||
                    r.type == "ARMO" || r.type == "ALCH" || r.type == "INGR" || r.type == "KEYM" ||
                    r.type == "AMMO" || r.type == "SLGM" || r.type == "SCRL";
         };
         bool failed = false;
-        visitor.onRecord = [&](const importer::fnv::EsmRecordView &r) {
+        visitor.onRecord = [&](const importer::bethesda::EsmRecordView &r) {
             const auto id = order.remapFormId(plugin, r.formId);
             if (r.type == "MGEF") {
                 bool healing = false, conditioned = false;

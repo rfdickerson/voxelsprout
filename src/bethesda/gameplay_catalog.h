@@ -22,13 +22,13 @@ class Tes3ContentStore;
 
 }  // namespace odai::bethesda
 
-namespace odai::importer::fnv {
+namespace odai::importer::bethesda {
 enum class BethesdaGame : std::uint8_t;
 class FalloutLoadOrder;
 struct FalloutActorScan;
 struct FalloutCellRecord;
 struct FalloutWorldTables;
-}  // namespace odai::importer::fnv
+}  // namespace odai::importer::bethesda
 
 namespace odai::bethesda {
 
@@ -182,11 +182,11 @@ bool compileTes3GameplayExteriorCell(
 // Common TES4/Fallout/TES5 adapter. `actors` is the winning population already
 // filtered for this cell by the existing actor catalog/residency path.
 bool compilePostTes3GameplayCell(
-    importer::fnv::BethesdaGame game,
-    const importer::fnv::FalloutLoadOrder& loadOrder,
-    const importer::fnv::FalloutActorScan& actors,
-    const importer::fnv::FalloutCellRecord& cell,
-    const importer::fnv::FalloutWorldTables& tables,
+    importer::bethesda::BethesdaGame game,
+    const importer::bethesda::FalloutLoadOrder& loadOrder,
+    const importer::bethesda::FalloutActorScan& actors,
+    const importer::bethesda::FalloutCellRecord& cell,
+    const importer::bethesda::FalloutWorldTables& tables,
     std::string contentFingerprint,
     GameplayCellPayload& outPayload,
     std::string& outError);

@@ -43,7 +43,7 @@ json assessScenarioStart(const BethesdaSession& session) {
     }
     return {{"ok", errors.empty()}, {"errors", errors}, {"release_gate_passed", false}};
 }
-json routeProfileMetadata(const importer::fnv::ResolvedContentProfile& profile) {
+json routeProfileMetadata(const importer::bethesda::ResolvedContentProfile& profile) {
     json layers = json::array(), archives = json::array(), plugins = json::array();
     for (const auto& layer : profile.layers)
         layers.push_back({{"id",layer.id}, {"version",layer.version},
@@ -53,7 +53,7 @@ json routeProfileMetadata(const importer::fnv::ResolvedContentProfile& profile) 
             {"layer",archive.layerId}, {"required",archive.required}});
     for (const auto& plugin : profile.plugins)
         plugins.push_back(std::filesystem::path(plugin).filename().string());
-    return {{"game",importer::fnv::bethesdaGameName(profile.game)},
+    return {{"game",importer::bethesda::bethesdaGameName(profile.game)},
         {"fingerprint",profile.fingerprint}, {"plugins",plugins},
         {"layers",layers}, {"archives",archives}};
 }

@@ -5,7 +5,6 @@
 #include "core/grid3.h"
 #include "core/log.h"
 #include "math/math.h"
-#include "render/packed_vertex.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -4048,10 +4047,8 @@ void RendererBackend::destroyVoxelGiResources() {
     m_voxelGiPreviousDiffusionSoftness = 0.0f;
     m_voxelGiPreviousSurfaceMode = VoxelGiSurfaceMode::RestirSurface;
     m_voxelGiOccupancyBuildOrigin = {0.0f, 0.0f, 0.0f};
-    m_voxelGiOccupancyFullRebuildCursor = 0;
     m_voxelGiOccupancyFullRebuildInProgress = false;
     m_voxelGiOccupancyFullRebuildNeedsClear = false;
-    m_voxelGiDirtyChunkIndices.clear();
     m_voxelGiPreviousRtSurfaceTracingEnabled = false;
     m_voxelGiPreviousRtSurfaceSampleCount = 0.0f;
     m_voxelGiPreviousRtSurfaceBiasScale = 0.0f;

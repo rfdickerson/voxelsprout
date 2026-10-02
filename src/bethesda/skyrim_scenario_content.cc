@@ -4,9 +4,9 @@
 #include "bethesda/skyrim_runtime_records.h"
 #include "bethesda/skyrim_persistent_references.h"
 #include <memory>
-#include "import/fnv/esm_reader.h"
-#include "import/fnv/actor_records.h"
-#include "import/fnv/strings_table.h"
+#include "import/bethesda/esm_reader.h"
+#include "import/bethesda/actor_records.h"
+#include "import/bethesda/strings_table.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,13 +30,13 @@ std::string lowerAscii(std::string value) {
 
 bool loadSkyrimScenarioContent(
     const ScenarioDefinition& scenario,
-    const importer::fnv::FalloutLoadOrder& loadOrder,
-    const importer::fnv::FalloutAssetSource& assets,
+    const importer::bethesda::FalloutLoadOrder& loadOrder,
+    const importer::bethesda::FalloutAssetSource& assets,
     BethesdaSession& session,
     SkyrimScenarioContentReport& outReport,
     std::string& outError) {
     outReport = {};
-    if (scenario.game != importer::fnv::BethesdaGame::SkyrimSpecialEdition || loadOrder.empty()) {
+    if (scenario.game != importer::bethesda::BethesdaGame::SkyrimSpecialEdition || loadOrder.empty()) {
         outError = "Skyrim scenario content requires a Skyrim scenario and active load order";
         return false;
     }
@@ -61,19 +61,19 @@ bool loadSkyrimScenarioContent(
     std::set<std::uint32_t> deletedRequiredQuests;
     for (std::size_t pluginIndex = 0u; pluginIndex < loadOrder.entries().size(); ++pluginIndex) {
         const auto& entry = loadOrder.entries()[pluginIndex];
-        importer::fnv::EsmReader reader;
+        importer::bethesda::EsmReader reader;
         if (!reader.open(entry.path)) {
             outError = "could not open quest source " + entry.path.string() + ": " + reader.lastError();
             return false;
         }
-        importer::fnv::EsmReader::Visitor visitor;
-        visitor.onRecordHeader = [&](const importer::fnv::EsmRecordHeaderView& header) {
+        importer::bethesda::EsmReader::Visitor visitor;
+        visitor.onRecordHeader = [&](const importer::bethesda::EsmRecordHeaderView& header) {
             return header.type == "QUST" && wantedQuestForms.contains(
                 loadOrder.remapFormId(pluginIndex, header.formId));
         };
         bool parseFailed = false;
         std::string parseError;
-        visitor.onRecord = [&](const importer::fnv::EsmRecordView& record) {
+        visitor.onRecord = [&](const importer::bethesda::EsmRecordView& record) {
             const std::uint32_t resolved = loadOrder.remapFormId(pluginIndex, record.formId);
             const auto match = wantedQuestForms.find(resolved);
             if (match == wantedQuestForms.end()) return;
@@ -125,9 +125,9 @@ bool loadSkyrimScenarioContent(
         definitions.push_back(std::move(definition));
     }
 
-    std::unordered_map<std::string, importer::fnv::FalloutStringTable> stringTables;
+    std::unordered_map<std::string, importer::bethesda::FalloutStringTable> stringTables;
     std::set<std::string> unavailableStringTables;
-    std::map<std::string, importer::fnv::FalloutStringTable> journalTables;
+    std::map<std::string, importer::bethesda::FalloutStringTable> journalTables;
     const auto resolveObjectiveText = [&](SkyrimQuestDefinition& definition,
                                           std::size_t sourcePluginIndex) {
         const std::string sourcePlugin =
@@ -136,12 +136,12 @@ bool loadSkyrimScenarioContent(
         if (unavailableStringTables.contains(plugin)) return;
         auto table = stringTables.find(plugin);
         if (table == stringTables.end()) {
-            importer::fnv::FalloutStringTable loaded;
+            importer::bethesda::FalloutStringTable loaded;
             std::string error;
-            if (!importer::fnv::loadFalloutStringTable(
+            if (!importer::bethesda::loadFalloutStringTable(
                     assets, sourcePlugin,
-                    importer::fnv::falloutStringLanguage(),
-                    importer::fnv::FalloutStringFileKind::Strings,
+                    importer::bethesda::falloutStringLanguage(),
+                    importer::bethesda::FalloutStringFileKind::Strings,
                     loaded, error)) {
                 unavailableStringTables.insert(plugin);
                 outReport.diagnostics.push_back(
@@ -154,10 +154,10 @@ bool loadSkyrimScenarioContent(
         if (const auto* title = table->second.find(definition.titleId)) definition.title = *title;
         auto journal = journalTables.find(plugin);
         if (journal == journalTables.end()) {
-            importer::fnv::FalloutStringTable loaded;
+            importer::bethesda::FalloutStringTable loaded;
             std::string error;
-            (void)importer::fnv::loadFalloutStringTable(assets, sourcePlugin,
-                importer::fnv::falloutStringLanguage(), importer::fnv::FalloutStringFileKind::DlStrings,
+            (void)importer::bethesda::loadFalloutStringTable(assets, sourcePlugin,
+                importer::bethesda::falloutStringLanguage(), importer::bethesda::FalloutStringFileKind::DlStrings,
                 loaded, error);
             journal = journalTables.emplace(plugin, std::move(loaded)).first;
         }
@@ -240,15 +240,15 @@ bool loadSkyrimScenarioContent(
         bool winningDeleted = false;
         for (std::size_t pluginIndex = 0u;
              pluginIndex < loadOrder.entries().size(); ++pluginIndex) {
-            importer::fnv::EsmReader reader;
+            importer::bethesda::EsmReader reader;
             if (!reader.open(loadOrder.entries()[pluginIndex].path)) continue;
-            importer::fnv::EsmReader::Visitor visitor;
-            visitor.onRecordHeader = [&](const importer::fnv::EsmRecordHeaderView& header) {
+            importer::bethesda::EsmReader::Visitor visitor;
+            visitor.onRecordHeader = [&](const importer::bethesda::EsmRecordHeaderView& header) {
                 return header.type == "QUST" &&
                     loadOrder.remapFormId(pluginIndex, header.formId) == resolvedQuestFormId;
             };
             std::string parseError;
-            visitor.onRecord = [&](const importer::fnv::EsmRecordView& questRecord) {
+            visitor.onRecord = [&](const importer::bethesda::EsmRecordView& questRecord) {
                 if ((questRecord.flags & 0x20u) != 0u) {
                     winning.reset();
                     winningDeleted = true;
@@ -415,17 +415,17 @@ bool loadSkyrimScenarioContent(
         std::size_t winningPluginIndex = 0u;
         for (std::size_t pluginIndex = 0u;
              pluginIndex < loadOrder.entries().size(); ++pluginIndex) {
-            importer::fnv::EsmReader reader;
+            importer::bethesda::EsmReader reader;
             if (!reader.open(loadOrder.entries()[pluginIndex].path)) continue;
-            importer::fnv::EsmReader::Visitor visitor;
-            visitor.onRecordHeader = [&](const importer::fnv::EsmRecordHeaderView& header) {
+            importer::bethesda::EsmReader::Visitor visitor;
+            visitor.onRecordHeader = [&](const importer::bethesda::EsmRecordHeaderView& header) {
                 const bool expected = type == "location"
                     ? header.type == "LCTN" : header.type == "GLOB";
                 return expected &&
                     loadOrder.remapFormId(pluginIndex, header.formId) == resolvedFormId;
             };
             std::string parseError;
-            visitor.onRecord = [&](const importer::fnv::EsmRecordView& record) {
+            visitor.onRecord = [&](const importer::bethesda::EsmRecordView& record) {
                 if (type == "location") {
                     SkyrimLocationDefinition definition;
                     if (!readSkyrimLocation(record, stable, definition, parseError)) return;
@@ -772,15 +772,15 @@ bool loadSkyrimScenarioContent(
     std::map<std::uint32_t, std::pair<SkyrimSceneDefinition, std::size_t>> winningScenes;
     std::uint64_t authoredInfoOrder = 0u;
     for (std::size_t pluginIndex = 0u; pluginIndex < loadOrder.entries().size(); ++pluginIndex) {
-        importer::fnv::EsmReader reader;
+        importer::bethesda::EsmReader reader;
         if (!reader.open(loadOrder.entries()[pluginIndex].path)) {
             outError = "could not open dialogue source " +
                 loadOrder.entries()[pluginIndex].path.string() + ": " + reader.lastError();
             return false;
         }
         std::uint32_t currentTopicFormId = 0u;
-        importer::fnv::EsmReader::Visitor visitor;
-        visitor.onGroupEnter = [&](const importer::fnv::EsmGroupView& group) {
+        importer::bethesda::EsmReader::Visitor visitor;
+        visitor.onGroupEnter = [&](const importer::bethesda::EsmGroupView& group) {
             if (group.groupType == 7 && group.rawLabel.size() == 4u) {
                 std::uint32_t raw = 0u;
                 std::memcpy(&raw, group.rawLabel.data(), sizeof(raw));
@@ -788,13 +788,13 @@ bool loadSkyrimScenarioContent(
             }
             return true;
         };
-        visitor.onRecordHeader = [](const importer::fnv::EsmRecordHeaderView& header) {
+        visitor.onRecordHeader = [](const importer::bethesda::EsmRecordHeaderView& header) {
             return header.type == "DLBR" || header.type == "DIAL" ||
                 header.type == "INFO" || header.type == "SCEN";
         };
         bool parseFailed = false;
         std::string parseError;
-        visitor.onRecord = [&](const importer::fnv::EsmRecordView& record) {
+        visitor.onRecord = [&](const importer::bethesda::EsmRecordView& record) {
             const std::uint32_t resolvedRecord =
                 loadOrder.remapFormId(pluginIndex, record.formId);
             if ((record.flags & 0x20u) != 0u) {
@@ -901,25 +901,25 @@ bool loadSkyrimScenarioContent(
         }
     }
 
-    std::map<std::string, importer::fnv::FalloutStringTable> dialogueStrings;
-    std::map<std::string, importer::fnv::FalloutStringTable> dialogueIlStrings;
+    std::map<std::string, importer::bethesda::FalloutStringTable> dialogueStrings;
+    std::map<std::string, importer::bethesda::FalloutStringTable> dialogueIlStrings;
     std::set<std::string> missingDialogueStringTables;
     const auto dialogueTable = [&](std::size_t pluginIndex,
-                                   importer::fnv::FalloutStringFileKind kind)
-        -> const importer::fnv::FalloutStringTable* {
+                                   importer::bethesda::FalloutStringFileKind kind)
+        -> const importer::bethesda::FalloutStringTable* {
         const std::string pluginName = loadOrder.entries()[pluginIndex].header.fileName;
         const std::string key = lowerAscii(pluginName);
-        auto& tables = kind == importer::fnv::FalloutStringFileKind::Strings
+        auto& tables = kind == importer::bethesda::FalloutStringFileKind::Strings
             ? dialogueStrings : dialogueIlStrings;
         const std::string missingKey = key + ":" +
             std::to_string(static_cast<unsigned>(kind));
         if (missingDialogueStringTables.contains(missingKey)) return nullptr;
         auto table = tables.find(key);
         if (table != tables.end()) return &table->second;
-        importer::fnv::FalloutStringTable loaded;
+        importer::bethesda::FalloutStringTable loaded;
         std::string error;
-        if (!importer::fnv::loadFalloutStringTable(
-                assets, pluginName, importer::fnv::falloutStringLanguage(),
+        if (!importer::bethesda::loadFalloutStringTable(
+                assets, pluginName, importer::bethesda::falloutStringLanguage(),
                 kind, loaded, error)) {
             missingDialogueStringTables.insert(missingKey);
             outReport.diagnostics.push_back(
@@ -967,7 +967,7 @@ bool loadSkyrimScenarioContent(
         if (winning.definition.promptStringId != 0u) {
             const auto* table = dialogueTable(
                 winning.sourcePluginIndex,
-                importer::fnv::FalloutStringFileKind::Strings);
+                importer::bethesda::FalloutStringFileKind::Strings);
             if (table != nullptr) {
                 if (const std::string* prompt = table->find(
                         winning.definition.promptStringId)) {
@@ -1010,10 +1010,10 @@ bool loadSkyrimScenarioContent(
             info.linkedTopics.push_back(std::move(linked));
         }
         const auto* table = dialogueTable(sourcePluginIndex,
-            importer::fnv::FalloutStringFileKind::IlStrings);
+            importer::bethesda::FalloutStringFileKind::IlStrings);
         if (info.promptStringId != 0u) {
             const auto* promptTable = dialogueTable(sourcePluginIndex,
-                importer::fnv::FalloutStringFileKind::Strings);
+                importer::bethesda::FalloutStringFileKind::Strings);
             if (promptTable != nullptr) {
                 if (const std::string* prompt = promptTable->find(info.promptStringId)) {
                     info.prompt = *prompt;
@@ -1200,9 +1200,9 @@ bool loadSkyrimScenarioContent(
     }
     // Scene travel actions reuse the existing NAVM RequestMoveTo path. Resolve
     // location data from winning PACK records, never a scenario-specific route.
-    importer::fnv::FalloutActorScan actorCatalog;
+    importer::bethesda::FalloutActorScan actorCatalog;
     std::unordered_map<std::uint32_t, std::string> voiceOwners;
-    if (!importer::fnv::findAllActorsAcrossOrder(loadOrder, actorCatalog, voiceOwners, outError)) return false;
+    if (!importer::bethesda::findAllActorsAcrossOrder(loadOrder, actorCatalog, voiceOwners, outError)) return false;
     for (const auto& definition : definitions) {
         const auto source = definitionSourcePluginIndices.at(definition.record);
         for (const auto& alias : definition.aliases) {
@@ -1224,9 +1224,9 @@ bool loadSkyrimScenarioContent(
     }
     std::set<std::uint32_t> patrolStarts;
     for (std::size_t source = 0; source < loadOrder.entries().size(); ++source) {
-        importer::fnv::EsmReader reader;
+        importer::bethesda::EsmReader reader;
         if (!reader.open(loadOrder.entries()[source].path)) { outError = reader.lastError(); return false; }
-        importer::fnv::EsmReader::Visitor visitor;
+        importer::bethesda::EsmReader::Visitor visitor;
         visitor.onRecordHeader = [&](const auto& record) { return record.type == "PACK" && scenePackageForms.contains(loadOrder.remapFormId(source, record.formId)); };
         visitor.onRecord = [&](const auto& record) {
             SkyrimScenePackage package;
@@ -1296,9 +1296,9 @@ bool loadSkyrimScenarioContent(
     std::map<std::uint32_t, TriggerPlacement> triggerPlacements;
     std::map<std::uint32_t, std::uint32_t> patrolLinks;
     for (std::size_t source = 0; source < loadOrder.entries().size(); ++source) {
-        importer::fnv::EsmReader reader;
+        importer::bethesda::EsmReader reader;
         if (!reader.open(loadOrder.entries()[source].path)) { outError = reader.lastError(); return false; }
-        importer::fnv::EsmReader::Visitor visitor;
+        importer::bethesda::EsmReader::Visitor visitor;
         visitor.onRecordHeader = [](const auto& record) { return record.type == "ACTI" || record.type == "REFR"; };
         visitor.onRecord = [&](const auto& record) {
             const auto id = loadOrder.remapFormId(source, record.formId);
@@ -1480,21 +1480,21 @@ bool loadSkyrimScenarioContent(
             if (!stableRecordKey(loadOrder, ownerFormId, ownerRecord, ownerError)) continue;
             for (std::size_t pluginIndex = 0u;
                  pluginIndex < loadOrder.entries().size(); ++pluginIndex) {
-                importer::fnv::EsmReader reader;
+                importer::bethesda::EsmReader reader;
                 if (!reader.open(loadOrder.entries()[pluginIndex].path)) continue;
-                importer::fnv::EsmReader::Visitor visitor;
-                visitor.onRecordHeader = [&](const importer::fnv::EsmRecordHeaderView& header) {
+                importer::bethesda::EsmReader::Visitor visitor;
+                visitor.onRecordHeader = [&](const importer::bethesda::EsmRecordHeaderView& header) {
                     return loadOrder.remapFormId(pluginIndex, header.formId) == ownerFormId;
                 };
                 std::string vmadError;
-                visitor.onRecord = [&](const importer::fnv::EsmRecordView& record) {
+                visitor.onRecord = [&](const importer::bethesda::EsmRecordView& record) {
                     if (record.type == "QUST") {
                         SkyrimQuestDefinition definition;
                         if (!readSkyrimQuest(record, ownerRecord, definition, vmadError)) return;
                         winningQuestDefinition = std::move(definition);
                         winningQuestPluginIndex = pluginIndex;
                     }
-                    for (const importer::fnv::EsmSubrecordView& subrecord : record.subrecords) {
+                    for (const importer::bethesda::EsmSubrecordView& subrecord : record.subrecords) {
                         if (subrecord.type != "VMAD") continue;
                         VmadAttachments attachments;
                         if (!readVmadAttachments(

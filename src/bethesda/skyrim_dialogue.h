@@ -3,7 +3,7 @@
 #include "bethesda/condition.h"
 #include "bethesda/runtime_ids.h"
 #include "bethesda/vmad_reader.h"
-#include "import/fnv/esm_reader.h"
+#include "import/bethesda/esm_reader.h"
 
 #include <cstdint>
 #include <string>
@@ -65,19 +65,19 @@ struct SkyrimDialogueInfoDefinition {
 };
 
 bool readSkyrimDialogueBranch(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimDialogueBranchDefinition& out,
     std::string& outError);
 
 bool readSkyrimDialogueTopic(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimDialogueTopicDefinition& out,
     std::string& outError);
 
 bool readSkyrimDialogueInfo(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     RecordKey stableTopic,
     RecordKey stableQuest,

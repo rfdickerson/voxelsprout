@@ -1,4 +1,4 @@
-#include "games/newvegas/newvegas_traversal_state.h"
+#include "games/bethesda/traversal_state.h"
 
 #include <cassert>
 #include <filesystem>
@@ -6,7 +6,7 @@
 #include <iostream>
 
 int main() {
-    namespace nv = odai::games::newvegas;
+    namespace nv = odai::games::bethesda;
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() / "odai-traversal-state-tests";
     std::filesystem::create_directories(root);

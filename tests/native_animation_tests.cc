@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <chrono>
-#include "import/fnv/skyrim_animation_assets.h"
+#include "import/bethesda/skyrim_animation_assets.h"
 
 using namespace odai::anim;
 
@@ -214,9 +214,9 @@ int main(int argc, char** argv) {
     std::ofstream(low / "odai/animations/a.json") << json;
     std::ofstream(high / "odai/animations/b.json") << json;
     std::ofstream(high / "odai/animations/broken.json") << "{}";
-    odai::importer::fnv::FalloutAssetSource assets;
+    odai::importer::bethesda::FalloutAssetSource assets;
     assert(assets.addModDirectory(low) && assets.addModDirectory(high));
-    odai::importer::fnv::loadSkyrimNativeAnimationPacks(assets, view);
+    odai::importer::bethesda::loadSkyrimNativeAnimationPacks(assets, view);
     assert(view.nativeProgram->rules.size() == 2);
     const auto* winning = view.nativeProgram->select("locomotion", context);
     assert(winning && winning->id.ends_with("b.json#walk"));
@@ -230,13 +230,13 @@ int main(int argc, char** argv) {
             {"time":0,"value":[0,10,0]},{"time":1,"value":[2,90,3]}]}]})";
     std::ofstream(high / "odai/animations/jump.json") << R"({"version":1,"rules":[
         {"id":"jump","state":"jump","variants":[{"clip":"meshes/jump.json","loop":false}]}]})";
-    odai::importer::fnv::FalloutAssetSource jumpAssets;
+    odai::importer::bethesda::FalloutAssetSource jumpAssets;
     assert(jumpAssets.addModDirectory(high));
     AnimationView jumpView;
     auto jumpRig = std::make_shared<Skeleton>();
     jumpRig->bones.push_back({"NPC COM [COM ]", -1});
     jumpView.skeleton = jumpRig;
-    odai::importer::fnv::loadSkyrimNativeAnimationPacks(jumpAssets, jumpView);
+    odai::importer::bethesda::loadSkyrimNativeAnimationPacks(jumpAssets, jumpView);
     const auto jumpClip = std::find_if(jumpView.clips.begin(), jumpView.clips.end(),
         [](const auto& clip) { return clip.name == "meshes\\jump.json"; });
     assert(jumpClip != jumpView.clips.end());
@@ -250,7 +250,7 @@ int main(int argc, char** argv) {
       {"id":"authored","state":"idle","variants":[{"clip":"meshes/jump.json","loop":false}]},
       {"id":"loop","state":"walk","variants":[{"clip":"meshes/jump.json","loop":true}]}]})";
     AnimationView sharedView; sharedView.skeleton = jumpRig;
-    odai::importer::fnv::loadSkyrimNativeAnimationPacks(jumpAssets, sharedView);
+    odai::importer::bethesda::loadSkyrimNativeAnimationPacks(jumpAssets, sharedView);
     const auto findRuleClip = [&](const std::string& state) -> const AnimationClip& {
         const auto* rule = sharedView.nativeProgram->select(state, {});
         assert(rule);

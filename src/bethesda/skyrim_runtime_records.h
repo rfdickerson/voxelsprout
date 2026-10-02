@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bethesda/runtime_ids.h"
-#include "import/fnv/esm_reader.h"
+#include "import/bethesda/esm_reader.h"
 
 #include <cstdint>
 #include <string>
@@ -23,13 +23,13 @@ struct SkyrimGlobalVariableDefinition {
 };
 
 bool readSkyrimLocation(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimLocationDefinition& out,
     std::string& outError);
 
 bool readSkyrimGlobalVariable(
-    const importer::fnv::EsmRecordView& record,
+    const importer::bethesda::EsmRecordView& record,
     RecordKey stableRecord,
     SkyrimGlobalVariableDefinition& out,
     std::string& outError);
