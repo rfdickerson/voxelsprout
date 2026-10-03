@@ -1511,6 +1511,7 @@ CellSceneBuilder::CellSceneBuilder(
     const FalloutWorldTables& tables,
     DecodedTextureCache* textureCache)
     : m_assets(assets), m_tables(tables), m_textureCache(textureCache) {
+    if (tables.morrowind) m_maxTextureSize = 0;
     m_syntheticStaticModelPaths.emplace(
         0xfff00001u, "Clutter\\Lumbermill\\LumbermillSaw01\\LumbermillSaw01.nif");
     m_syntheticStaticModelPaths.emplace(
@@ -1550,6 +1551,8 @@ std::uint32_t CellSceneBuilder::resolveTextureIndex(
         return kNoTextureIndex;
     }
     if (m_scene.textures.size() >= m_textureBudget) {
+        m_stats.textureFailures.emplace(texturePath, "scene texture budget exceeded");
+        m_stats.unresolvedTexturePaths.insert(texturePath);
         if (!m_warnedTextureBudget) {
             m_warnedTextureBudget = true;
             m_stats.textureBudgetExceeded = true;
@@ -1558,37 +1561,36 @@ std::uint32_t CellSceneBuilder::resolveTextureIndex(
     }
 
     const core::Stopwatch decodeTimer;
+    std::string decodeError;
+    const auto failed = [&](const std::string& reason) {
+        m_failedTexturePaths.insert(key);
+        m_stats.textureFailures.emplace(texturePath, reason);
+        m_stats.unresolvedTexturePaths.insert(texturePath);
+    };
     ImportedSceneTexture texture;
     if (m_textureCache != nullptr) {
         // Shared across every builder: the decode happens once per distinct
         // texture no matter how many cells are being built at the same time.
         ImportedSceneTexture owned;
         const ImportedSceneTexture* cached =
-            m_textureCache->get(m_assets, texturePath, m_maxTextureSize, owned);
+            m_textureCache->get(m_assets, texturePath, m_maxTextureSize, owned, &decodeError, linearData);
         if (cached == nullptr) {
-            m_failedTexturePaths.insert(key);
+            failed(decodeError);
             return kNoTextureIndex;
         }
         // ImportedScene embeds its textures by value, so the scene still gets
         // its own copy -- what the cache saves is the decode, not the bytes.
         texture = *cached;
     } else {
-        std::vector<std::uint8_t> ddsBytes;
-        std::string resolveError;
-        if (!m_assets.resolveTexture(texturePath, ddsBytes, resolveError)) {
-            m_failedTexturePaths.insert(key);
+        FalloutAssetSource::ResolvedAsset asset;
+        if (!m_assets.resolveTextureWithProvider(texturePath, asset, decodeError) ||
+            !loadTextureFromMemory(asset.bytes.data(), asset.bytes.size(),
+                asset.canonicalVirtualPath, texture, m_maxTextureSize, decodeError, linearData)) {
+            failed(decodeError);
             return kNoTextureIndex;
         }
-        if (!loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
-            m_failedTexturePaths.insert(key);
-            return kNoTextureIndex;
-        }
-        if (m_maxTextureSize != 0u) {
-            dropDdsMipLevels(texture, m_maxTextureSize);
-        }
-        texture.sourcePath = texturePath;
     }
-    if (texture.arrayLayers != (cube ? 6u : 1u)) { m_failedTexturePaths.insert(key); return kNoTextureIndex; }
+    if (texture.arrayLayers != (cube ? 6u : 1u)) { failed("unexpected texture layer count"); return kNoTextureIndex; }
     texture.linearData = linearData;
     texture.clampMode = static_cast<std::uint8_t>(std::min(clampMode,3u));
     // DDS does not carry colour-space intent. Most DXT1 assets are albedo and
@@ -1893,7 +1895,13 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
         const std::string flowPath =
             "textures\\water\\skyrim.esm\\flow." + std::to_string(cell.gridX) +
             "." + std::to_string(cell.gridZ) + ".dds";
-        const std::uint32_t flowTexture = (!authored || (authored->flags & 0x08u) != 0u)
+        // Generated Skyrim flow maps are optional resources, not authored
+        // TES3 texture requests. Missing maps use the existing water fallback.
+        std::vector<std::uint8_t> flowBytes;
+        std::string flowError;
+        const std::uint32_t flowTexture = m_tables.skyrim &&
+            (!authored || (authored->flags & 0x08u) != 0u) &&
+            m_assets.resolveTexture(flowPath, flowBytes, flowError)
             ? resolveTextureIndex(flowPath, /*linearData=*/true) : kNoTextureIndex;
         std::uint32_t normals[3]{kNoTextureIndex, kNoTextureIndex, kNoTextureIndex};
         ImportedWaterAppearance appearance{};
@@ -1974,6 +1982,9 @@ void CellSceneBuilder::addCellTerrain(const FalloutCellRecord& cell) {
             if (found != m_tables.morrowindLandTexturePaths.end()) {
                 return resolveTextureIndex(found->second);
             }
+            m_stats.textureFailures.emplace("LAND(" + std::to_string(cell.gridX) + "," +
+                std::to_string(cell.gridZ) + ")/LTEX=" + std::to_string(formId),
+                "missing LTEX in source plugin " + std::to_string(cell.land->sourcePluginIndex));
             return kNoTextureIndex;
         }
         return resolveLandTexture(formId, /*exact=*/true);
@@ -2289,6 +2300,20 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                     parsedModel = parseNifStaticMesh(nifBytes, nifModel, nifError);
                 }
                 if (!parsedModel || nifModel.shapes.empty()) {
+                    if (m_tables.morrowind && nifModel.shapes.empty() &&
+                        (nifError.empty() || nifError.find("no renderable static mesh") != std::string::npos)) {
+                        NifBlockSummary summary;
+                        std::string summaryError;
+                        if (parseNifBlockSummary(nifBytes, summary, summaryError) &&
+                            std::none_of(summary.blockTypeNames.begin(), summary.blockTypeNames.end(),
+                                [](const auto& name) { return name == "NiSourceTexture"; })) {
+                            // A fully parsed, nonrenderable TES3 skeleton or
+                            // hidden untextured mesh has no image requests.
+                            // Keep it distinct from a missing textured object.
+                            noteDroppedReference(ref.baseFormId, StaticDropReason::kIntentional);
+                            continue;
+                        }
+                    }
                     if (nifError.empty()) {
                         nifError = nifModel.shapes.empty()
                             ? "no renderable static mesh was emitted (particle/effect-only NIF or unsupported shape family)"
@@ -2425,7 +2450,9 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                 // flat grey, since the slope tint applies to untextured surfaces.
                 std::unordered_map<std::uint32_t, std::size_t> modelTextureUse;
                 for (const auto& shape : nifModel.shapes) {
-                    const std::uint32_t shapeTexture = resolveTextureIndex(shape.diffuseTexturePath);
+                    const auto clampMode = shape.lightingMaterial.parametersValid
+                        ? shape.lightingMaterial.textureClampMode : shape.baseTextureClampMode;
+                    const std::uint32_t shapeTexture = resolveTextureIndex(shape.diffuseTexturePath, false, clampMode);
                     if (shapeTexture != kNoTextureIndex) {
                         ++modelTextureUse[shapeTexture];
                     }
@@ -2619,7 +2646,7 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                         if (!skyrimTreeNif &&
                             (v * 4u) + 3u < shape.colors.size()) {
                             vertex.colorAlpha = shape.colors[(v * 4u) + 3u];
-                            if (shape.alphaSemantic == NifAlphaSemantic::ExplicitBlend) {
+                            if (m_tables.morrowind || shape.alphaSemantic == NifAlphaSemantic::ExplicitBlend) {
                                 std::copy_n(&shape.colors[v * 4u], 3u, vertex.color);
                             }
                         }
@@ -2656,8 +2683,12 @@ void CellSceneBuilder::addCellStatics(const FalloutCellRecord& cell) {
                             ? opaqueIndexCount
                             : partIndexCount;
                         const auto clampMode = shape.lightingMaterial.parametersValid
-                            ? shape.lightingMaterial.textureClampMode : 3u;
+                            ? shape.lightingMaterial.textureClampMode : shape.baseTextureClampMode;
                         part.textureIndex = resolveTextureIndex(shape.diffuseTexturePath, false, clampMode);
+                        if (!shape.diffuseTexturePath.empty() && shape.uvs.size() != shape.positions.size() / 3 * 2) {
+                            m_stats.textureFailures.emplace(staticModelPath + ":" + shape.name,
+                                "textured shape is missing authored UV set " + std::to_string(shape.baseTextureUvSet));
+                        }
                         const std::uint32_t normalTextureIndex =
                             resolveTextureIndex(shape.normalTexturePath, /*linearData=*/true, clampMode);
                         for (std::size_t vertex = baseVertex; vertex < mesh.vertices.size(); ++vertex)

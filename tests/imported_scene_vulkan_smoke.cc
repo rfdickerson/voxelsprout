@@ -1,3 +1,4 @@
+#include "tes3_texture_fixture.h"
 #include "import/bethesda/cell_builder.h"
 #include "import/imported_scene.h"
 #include "render/renderer.h"
@@ -97,7 +98,7 @@ odai::importer::ImportedScene makeSyntheticScene() {
     return scene;
 }
 
-odai::importer::ImportedScene makeMorrowindTerrainScene() {
+odai::importer::ImportedScene makeMorrowindTerrainScene(bool highResolution = true, bool thirdRegion = false) {
     using namespace odai::importer::bethesda;
     const auto root = std::filesystem::temp_directory_path() / "odai_terrain_texture_smoke";
     std::filesystem::create_directories(root / "textures");
@@ -115,8 +116,17 @@ odai::importer::ImportedScene makeMorrowindTerrainScene() {
         out.write(reinterpret_cast<const char*>(dds.data()), static_cast<std::streamsize>(dds.size()));
     };
     writeDds("_land_default.dds", 0xff406080u);
-    writeDds("ground.dds", 0xff208020u);
-    writeDds("rock.dds", 0xff808080u);
+    auto ground = tes3_texture_fixture::tga(highResolution ? 2048 : 4, 8);
+    for (std::size_t i = 18; i < ground.size(); i += 4) { ground[i]=32; ground[i+1]=128; ground[i+2]=32; }
+    auto rock = tes3_texture_fixture::bmp(highResolution ? 4096 : 4, 8);
+    std::fill(rock.begin()+54, rock.end(), 128);
+    tes3_texture_fixture::write(root / "textures/ground.tga", ground);
+    tes3_texture_fixture::write(root / "textures/rock.bmp", rock);
+    if(thirdRegion) {
+        auto blue=tes3_texture_fixture::tga(highResolution ? 2048 : 4,8);
+        for(std::size_t i=18;i<blue.size();i+=4) {blue[i]=255;blue[i+1]=0;blue[i+2]=0;}
+        tes3_texture_fixture::write(root/"textures/blue.tga",blue);
+    }
     FalloutCellRecord cell;
     cell.hasGridCoords = true;
     cell.hasWater = true;
@@ -128,7 +138,7 @@ odai::importer::ImportedScene makeMorrowindTerrainScene() {
     for (int row = 0; row < 16; ++row)
         for (int col = 0; col < 16; ++col)
             cell.land->morrowindTextureGrid[static_cast<std::size_t>(row * 16 + col)] =
-                col < 5 ? 1u : col < 11 ? 2u : 0u;
+                col < 5 ? (thirdRegion && row>=10 ? 3u : 1u) : col < 11 ? 2u : 0u;
     cell.land->heights.resize(65u * 65u);
     for (int row = 0; row < 65; ++row)
         for (int col = 0; col < 65; ++col)
@@ -140,13 +150,203 @@ odai::importer::ImportedScene makeMorrowindTerrainScene() {
     tables.morrowind = true;
     tables.morrowindLandTexturePaths.emplace(1u, "ground.dds");
     tables.morrowindLandTexturePaths.emplace(2u, "rock.dds");
+    if(thirdRegion) tables.morrowindLandTexturePaths.emplace(3u,"blue.tga");
     CellSceneBuilder builder(assets, tables);
     builder.addCellTerrain(cell);
     odai::importer::ImportedScene scene;
     builder.finish(scene);
+    if (!builder.stats().textureFailures.empty()) {
+        std::cerr << "TES3 terrain fixture has missing textures\n";
+        return {};
+    }
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);
     return scene;
+}
+
+bool verifyTes3TerrainQuality(odai::render::Renderer& renderer) {
+    using namespace odai::importer;
+    renderer.setNeutralColorGrading();
+    renderer.setWaterRenderingEnabled(false);
+    std::vector<std::array<int,3>> baseline;
+    bool passed=true;
+    for(bool high:{false,true}) {
+        auto scene=makeMorrowindTerrainScene(high,true);
+        for(auto& vertex:scene.packedVertices) vertex.flags|=kImportedSceneMaterialFlagUnlit;
+        if(!renderer.uploadImportedScene(scene) || !renderer.waitForImportedSceneUploads()) return false;
+        odai::render::CameraPose camera{};camera.x=4096;camera.y=9000;camera.z=-4096;
+        camera.yawDegrees=-90;camera.pitchDegrees=-89.9f;camera.fovDegrees=60;
+        for(int i=0;i<8;++i) renderer.renderFrame(camera);
+        if(!renderer.prepareFrameCapture()) return false;
+        renderer.renderFrame(camera);
+        std::vector<std::uint8_t> pixels;unsigned width=0,height=0;
+        if(!renderer.captureFrameRgb(pixels,width,height)) return false;
+        std::vector<std::array<int,3>> samples;
+        // Independent top-down sample positions: first painted region, its
+        // boundary, second region, and unpainted default terrain.
+        for(unsigned x:{110,133,160,215}) {
+            const auto index=(std::size_t(height/2)*width+width*x/320)*3;
+            samples.push_back({pixels[index],pixels[index+1],pixels[index+2]});
+        }
+        const auto blueIndex=(std::size_t(height*60/180)*width+width*110/320)*3;
+        samples.push_back({pixels[blueIndex],pixels[blueIndex+1],pixels[blueIndex+2]});
+        const auto& green=samples[0];const auto& seam=samples[1];const auto& gray=samples[2];const auto& soil=samples[3];
+        bool correct=green[1]>green[0]+30 && green[1]>green[2]+30 &&
+            seam[1]>seam[0]+10 && seam[0]>green[0]+10 &&
+            // Normal post processing includes atmospheric scattering over
+            // the 9,000-unit sightline; neutral rock stays within 15 values.
+            std::abs(gray[0]-gray[1])<15 && std::abs(gray[1]-gray[2])<15 && gray[0]>80 &&
+            soil[2]>soil[1]+10 && soil[1]>soil[0]+10 &&
+            samples[4][2]>samples[4][0]+30 && samples[4][2]>samples[4][1]+30;
+        if(high) for(unsigned i=0;i<samples.size();++i) for(unsigned c=0;c<3;++c)
+            correct=correct && std::abs(samples[i][c]-baseline[i][c])<3;
+        else baseline=samples;
+        std::cerr<<"TES3 terrain highResolution="<<high<<" pixels=";
+        for(const auto& c:samples) std::cerr<<'('<<c[0]<<','<<c[1]<<','<<c[2]<<") ";
+        std::cerr<<"passed="<<correct<<'\n';passed=passed && correct;
+        if(!correct) renderer.captureFrameToFile("/tmp/odai-terrain-texture-failure.ppm");
+    }
+    renderer.setWaterRenderingEnabled(true);
+    return passed;
+}
+
+bool verifyTes3TextureMapping(odai::render::Renderer& renderer) {
+    using namespace odai::importer;
+    using namespace odai::importer::bethesda;
+    namespace fixture = tes3_texture_fixture;
+    const auto root=std::filesystem::temp_directory_path()/"odai_tes3_texture_pixels";
+    std::filesystem::remove_all(root);
+    const auto capture = [&](const ImportedScene& scene, std::vector<std::uint8_t>& pixels, unsigned& width, unsigned& height) {
+        if (!renderer.uploadImportedScene(scene) || !renderer.waitForImportedSceneUploads()) return false;
+        odai::render::CameraPose camera{}; camera.z=8; camera.yawDegrees=-90; camera.fovDegrees=60;
+        for(int frame=0;frame<8;++frame) { glfwPollEvents(); renderer.renderFrame(camera); }
+        if(!renderer.prepareFrameCapture()) return false;
+        renderer.renderFrame(camera);
+        return renderer.captureFrameRgb(pixels,width,height);
+    };
+    renderer.setDebugView(odai::render::DebugView::Albedo);
+    renderer.setAutoExposureEnabled(false);
+    bool passed=true;
+    for(unsigned size:{8,2048,4096,8192}) {
+        fixture::write(root/"textures/quadrants.dds",fixture::bc1Dds(size));
+        fixture::write(root/"meshes/plane.nif",fixture::nif("quadrants.tga"));
+        FalloutAssetSource assets;
+        if(!assets.open(root)) { passed=false; break; }
+        FalloutWorldTables tables; tables.morrowind=true; tables.staticModelPaths.emplace(1,"plane.nif");
+        FalloutCellRecord cell; FalloutPlacedReference ref; ref.formId=2; ref.baseFormId=1; ref.scale=2; cell.references.push_back(ref);
+        CellSceneBuilder builder(assets,tables); builder.addCellStatics(cell);
+        ImportedScene scene; builder.finish(scene);
+        if(!builder.stats().textureFailures.empty() || scene.textures.size()!=1 || scene.textures[0].width!=size) {
+            std::cerr<<"TES3 object texture fixture missing asset or source resolution\n";passed=false;break;
+        }
+        // A synthetic imported object is sampled at four independently known
+        // screen positions; upload success cannot hide swapped/missing UVs.
+        std::vector<std::uint8_t> pixels; unsigned width=0,height=0;
+        if(!capture(scene,pixels,width,height)) { passed=false;break; }
+        const auto color = [&](int sx,int sy) {
+            const auto x=width/2+sx*int(height)/180, y=height/2+sy*int(height)/180;
+            const auto i=(std::size_t(y)*width+x)*3;
+            return std::array<int,3>{pixels[i],pixels[i+1],pixels[i+2]};
+        };
+        const auto red=color(-20,-20),green=color(20,-20),blue=color(-20,20),yellow=color(20,20);
+        const bool mapped=red[0]>red[1]+40 && red[0]>red[2]+40 && green[1]>green[0]+40 && green[1]>green[2]+40 &&
+            blue[2]>blue[0]+40 && blue[2]>blue[1]+40 && yellow[0]>yellow[2]+40 && yellow[1]>yellow[2]+40;
+        std::cerr<<"TES3 texture pixels "<<size<<" square: ";
+        for(const auto& c:{red,green,blue,yellow}) std::cerr<<'('<<c[0]<<','<<c[1]<<','<<c[2]<<") ";
+        std::cerr<<"missing="<<builder.stats().textureFailures.size()<<" mapped="<<mapped<<'\n';
+        if(!mapped) { renderer.captureFrameToFile("/tmp/odai-tex-mapping-failure.ppm");passed=false;break; }
+        // Eviction/re-entry must restore bindings, including a changed image
+        // at the same virtual path on the next iteration.
+        renderer.removeImportedSceneChunk(0);
+        if(renderer.isImportedSceneChunkReady(0)) {passed=false;break;}
+    }
+    // The second authored UV set repeats twice. At x=5,y=-28 the U
+    // coordinate exceeds one: repeat selects red, clamp selects green.
+    std::filesystem::remove(root/"textures/quadrants.dds");
+    fixture::write(root/"textures/quadrants.tga",fixture::tga(64,64));
+    const auto build = [&](unsigned clamp, bool cutout, float tint, bool blend) {
+        fixture::write(root/"meshes/plane.nif",fixture::nif("quadrants.tga",clamp,1,cutout,tint,false,blend));
+        FalloutAssetSource assets; assets.open(root);
+        FalloutWorldTables tables; tables.morrowind=true; tables.staticModelPaths.emplace(1,"plane.nif");
+        FalloutCellRecord cell; FalloutPlacedReference ref; ref.formId=2; ref.baseFormId=1; ref.scale=2; cell.references.push_back(ref);
+        CellSceneBuilder builder(assets,tables); builder.addCellStatics(cell);
+        ImportedScene scene; builder.finish(scene);
+        if(!builder.stats().textureFailures.empty()) passed=false;
+        return scene;
+    };
+    const auto sample = [](const std::vector<std::uint8_t>& pixels, unsigned width, unsigned height, int sx, int sy) {
+        const auto x=int(width)/2+sx*int(height)/180,y=int(height)/2+sy*int(height)/180;
+        const auto i=(std::size_t(y)*width+x)*3;
+        return std::array<int,3>{pixels[i],pixels[i+1],pixels[i+2]};
+    };
+    for(unsigned format:{2,3,7}) for(bool authored:{false,true}) {
+        fixture::write(root/"textures/quadrants.dds",fixture::redDds(format,authored));
+        auto scene=build(3,false,1,false);
+        std::vector<std::uint8_t> pixels; unsigned width=0,height=0;
+        if(!capture(scene,pixels,width,height)) {passed=false;break;}
+        const auto c=sample(pixels,width,height,-20,-20);
+        const bool correct=c[0]>c[1]+100 && c[0]>c[2]+100 &&
+            scene.textures[0].width==8 && scene.textures[0].height==4 && scene.textures[0].mipLevelCount==4;
+        passed=passed && correct;
+        std::cerr<<"TES3 BC"<<format<<" authoredMips="<<authored<<" redPixel="<<c[0]<<','<<c[1]<<','<<c[2]<<" passed="<<correct<<'\n';
+    }
+    std::filesystem::remove(root/"textures/quadrants.dds");
+    for(unsigned clamp:{3,0}) {
+        auto scene=build(clamp,false,1,false);
+        std::vector<std::uint8_t> pixels; unsigned width=0,height=0;
+        if(!capture(scene,pixels,width,height)) {passed=false;break;}
+        const auto c=sample(pixels,width,height,5,-28);
+        const bool correct=clamp==3 ? c[0]>c[1]+100 : c[1]>c[0]+100;
+        std::cerr<<"TES3 sampler "<<clamp<<" pixel="<<c[0]<<','<<c[1]<<','<<c[2]<<" passed="<<correct<<'\n';
+        passed=passed && correct;
+    }
+    // Use the normal alpha/tint shader path with a fixed self-lit test light
+    // policy. A zero-alpha cutout/blend must match the cleared background;
+    // an opaque material must retain color even when its image alpha is zero.
+    renderer.setDebugView(odai::render::DebugView::Off);
+    auto transparent=fixture::tga(64,64);
+    for(std::size_t i=21;i<transparent.size();i+=4) transparent[i]=0;
+    fixture::write(root/"textures/quadrants.tga",transparent);
+    int opaqueRed=0;
+    for(int mode=0;mode<5;++mode) {
+        if(mode==3) {
+            for(std::size_t i=21;i<transparent.size();i+=4) transparent[i]=128;
+            fixture::write(root/"textures/quadrants.tga",transparent);
+        }
+        auto scene=build(3,mode==1,mode==4 ? .05f : .5f,mode==2 || mode==3);
+        std::cerr<<"TES3 alpha input mode="<<mode<<" textureAlpha="<<int(scene.textures[0].rgba8[3])
+                 <<" color="<<scene.packedVertices[0].color[0]<<" opacity="<<scene.packedVertices[0].colorAlpha
+                 <<" flags="<<scene.packedVertices[0].flags<<'\n';
+        for(auto& vertex:scene.packedVertices) vertex.flags|=kImportedSceneMaterialFlagUnlit;
+        // Parsed meshes are retained for bounds; the packed render data is
+        // authoritative for these controlled lighting checks.
+        std::vector<std::uint8_t> pixels; unsigned width=0,height=0;
+        if(!capture(scene,pixels,width,height)) {passed=false;break;}
+        const auto c=sample(pixels,width,height,-28,-28);
+        if(mode==0) {
+            passed=passed && c[0]>c[1]+40; // repeated UV selects red
+            opaqueRed=c[0];
+        } else if(mode==1 || mode==2) {
+            // Identical row gives the same sky color on either side of the
+            // absent plane, independent of the renderer's tonemap curve.
+            const auto sky=sample(pixels,width,height,-48,-28);
+            for(unsigned channel=0;channel<3;++channel) passed=passed && std::abs(c[channel]-sky[channel])<12;
+        } else if(mode==3) {
+            const auto sky=sample(pixels,width,height,-48,-28);
+            passed=passed && c[0]>sky[0]+20 && c[0]<opaqueRed-10;
+        } else {
+            passed=passed && c[0]>c[1]+20 && c[0]<opaqueRed-20;
+        }
+        std::cerr<<"TES3 alpha mode="<<mode<<" pixel="<<c[0]<<','<<c[1]<<','<<c[2]<<" passed="<<passed<<'\n';
+    }
+    // An impossible upload is a controlled load failure, not a valid binding
+    // to another texture. No huge allocation is attempted.
+    auto invalid=build(3,false,1,false);
+    if(!invalid.textures.empty()) invalid.textures[0].width=0xffffffffu;
+    passed=passed && !renderer.uploadImportedScene(invalid);
+    renderer.setDebugView(odai::render::DebugView::Off);
+    std::filesystem::remove_all(root);
+    return passed;
 }
 
 }  // namespace
@@ -230,6 +430,8 @@ int main() {
             if (!passed) {
                 std::cerr << "rendered frame capture was empty or invalid\n";
             }
+            if (passed) passed = verifyTes3TextureMapping(renderer);
+            if (passed) passed = verifyTes3TerrainQuality(renderer);
             if (passed) {
                 auto terrain = makeMorrowindTerrainScene();
                 const bool materialIndicesValid = std::all_of(

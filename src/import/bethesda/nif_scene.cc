@@ -1264,7 +1264,8 @@ struct GeometryBlock {
     std::size_t vertexCount = 0;
     std::vector<float> positions;
     std::vector<float> normals;
-    std::vector<float> uvs;  // UV set 0 only, 2 floats per vertex
+    std::vector<float> uvs;  // selected/default UV set, 2 floats per vertex
+    std::vector<std::vector<float>> uvSets; // TES3 authored sets
     // RGBA per vertex, 0-1. Empty when the source stored none, which is the
     // common case -- most meshes carry no vertex colour at all.
     //
@@ -2200,7 +2201,7 @@ bool readNiTriStripsDataTail(ByteCursor& cursor, GeometryBlock& out) {
 }
 
 // Reads one geometry-data block of either shape. `isStrips` selects the tail.
-bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out);
+bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out, int particleKind);
 
 bool readGeometryData(ByteCursor& cursor, std::size_t blockEnd, bool isStrips, bool morrowind,
                       std::uint32_t version, GeometryBlock& out) {
@@ -2208,7 +2209,7 @@ bool readGeometryData(ByteCursor& cursor, std::size_t blockEnd, bool isStrips, b
     // bools, float vertex colours, the UV count read after the colours. It has
     // its own reader, which is the same code the sequential walker measures with.
     if (morrowind) {
-        return consumeMorrowindGeometryData(cursor, isStrips, &out);
+        return consumeMorrowindGeometryData(cursor, isStrips, &out, 0);
     }
     std::uint16_t numTriangles = 0;
     if (!readNiTriBasedGeomDataPrefix(cursor, out, numTriangles, version)) {
@@ -3320,12 +3321,13 @@ bool consumeMorrowindAvObject(ByteCursor& cursor) {
     return !hasBounds || consumeMorrowindBoundingVolume(cursor);
 }
 
-bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out);
+bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out, int particleKind);
 
 // Consumes exactly one 4.0.0.2 block of `typeName`. False means "this reader
 // does not know how long that block is", which fails the file -- there is no
 // size to skip by and no separator to resynchronize on.
 bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
+    if (typeName == "NiSequenceStreamHelper") return consumeMorrowindObjectNet(cursor);
     // Every one of these is a bare NiNode on disk. RootCollisionNode's type name
     // is its entire semantics: its children are collision geometry that must not
     // be drawn, which the caller handles -- here it is just a node.
@@ -3362,11 +3364,25 @@ bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
         return consumeMorrowindAvObject(cursor) && cursor.skip(8u);
     }
     if (typeName == "NiTriShapeData") {
-        return consumeMorrowindGeometryData(cursor, /*strips=*/false, nullptr);
+        return consumeMorrowindGeometryData(cursor, /*strips=*/false, nullptr, 0);
     }
     if (typeName == "NiTriStripsData") {
-        return consumeMorrowindGeometryData(cursor, /*strips=*/true, nullptr);
+        return consumeMorrowindGeometryData(cursor, /*strips=*/true, nullptr, 0);
     }
+    // Measure particle records so decorative effects do not prevent the
+    // textured static geometry later in a TES3 lamp from importing.
+    if (typeName == "NiParticleSystemController" || typeName == "NiBSPArrayController") {
+        std::uint16_t count = 0;
+        return cursor.skip(26 + 24 + 12 + 16 + 12 + 1 + 12 + 2 + 12 + 4 + 16) &&
+            cursor.read(count) && cursor.skip(2 + std::size_t(count) * 40 + 13);
+    }
+    if (typeName == "NiParticleGrowFade") return cursor.skip(16);
+    if (typeName == "NiParticleColorModifier") return cursor.skip(12);
+    if (typeName == "NiGravity") return cursor.skip(44);
+    if (typeName == "NiParticlesData" || typeName == "NiAutoNormalParticlesData" ||
+        typeName == "NiRotatingParticlesData")
+        return consumeMorrowindGeometryData(cursor, false, nullptr,
+            typeName == "NiRotatingParticlesData" ? 2 : 1);
     if (typeName == "NiRotatingParticles" || typeName == "NiAutoNormalParticles" ||
         typeName == "NiParticles") {
         // Particle GEOMETRY blocks share NiTriShape's tail: data ref + skin
@@ -3631,7 +3647,7 @@ bool consumeMorrowindBlock(ByteCursor& cursor, std::string_view typeName) {
 // One layout, two uses: `out` null measures the block for the sequential walk,
 // non-null also extracts it. They must stay the same code -- a walker and a
 // reader that disagree by one field produce a file that "parses" into noise.
-bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out) {
+bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock* out, int particleKind) {
     std::uint16_t vertexCount = 0;
     if (!cursor.read(vertexCount)) {
         return false;
@@ -3671,7 +3687,7 @@ bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock
     // use -- 16 bytes per vertex, and skipping 4 desynchronizes the UV count.
     bool hasColors = false;
     if (!readWideBool(cursor, hasColors) ||
-        !cursor.skip(hasColors ? static_cast<std::size_t>(vertexCount) * 16u : 0u)) {
+        !readVectorOrSkip(hasColors, 4u, out ? &out->colors : nullptr)) {
         return false;
     }
     std::uint16_t uvSetCount = 0;
@@ -3687,11 +3703,20 @@ bool consumeMorrowindGeometryData(ByteCursor& cursor, bool strips, GeometryBlock
         uvSetCount = 0;
     }
     for (std::uint16_t set = 0; set < uvSetCount; ++set) {
-        // Only UV set 0 is kept, matching every other generation's reader.
-        std::vector<float>* dst = (set == 0u && out != nullptr) ? &out->uvs : nullptr;
+        if (out && set == 0) out->uvSets.resize(uvSetCount);
+        std::vector<float>* dst = out ? &out->uvSets[set] : nullptr;
         if (!readVectorOrSkip(true, 2u, dst)) {
             return false;
         }
+    }
+    if (out && !out->uvSets.empty()) out->uvs = out->uvSets.front();
+    if (particleKind) {
+        bool hasSizes = false, hasRotations = false;
+        if (!cursor.skip(8) || !readWideBool(cursor, hasSizes) ||
+            !cursor.skip(hasSizes ? std::size_t(vertexCount) * 4 : 0)) return false;
+        if (particleKind == 2 && (!readWideBool(cursor, hasRotations) ||
+            !cursor.skip(hasRotations ? std::size_t(vertexCount) * 16 : 0))) return false;
+        return true;
     }
     std::uint16_t triangleCount = 0;
     if (!cursor.read(triangleCount)) {
@@ -4459,6 +4484,25 @@ static void extractStaticCollisionTriangles(const CollisionBlockContext& collisi
 
 }
 
+struct MorrowindBaseTexture {
+    bool valid = false;
+    std::int32_t source = -1;
+    std::uint32_t clamp = 3, uvSet = 0;
+};
+MorrowindBaseTexture readMorrowindBaseTexture(ByteCursor& cursor) {
+    MorrowindBaseTexture result;
+    std::uint32_t count = 0, filter = 0;
+    bool enabled = false;
+    if (!readNiObjectNetPrefix(cursor, true, true) || !cursor.skip(6) ||
+        !cursor.read(count) || count == 0 || count > 16 ||
+        !readWideBool(cursor, enabled) || !enabled ||
+        !cursor.read(result.source) || !cursor.read(result.clamp) ||
+        !cursor.read(filter) || !cursor.read(result.uvSet) || !cursor.skip(6) ||
+        result.clamp > 3 || result.uvSet > 63) return result;
+    result.valid = true;
+    return result;
+}
+
 // NiSourceTexture may follow the property that references it, so link classic
 // texture paths only after the block scan has finished.
 static void resolveTexturingPropertyPaths(
@@ -4471,7 +4515,11 @@ static void resolveTexturingPropertyPaths(
         if (header.blockTypeNames[header.blockTypeIndex[i]] != "NiTexturingProperty") continue;
         ByteCursor propertyCursor(bytes.data() + blockStart[i], blockEnd[i] - blockStart[i]);
         std::string fileName;
-        if (findTexturingPropertySource(propertyCursor, sourceTexturePaths, fileName)) {
+        if (header.version == kMorrowindNifVersion) {
+            const auto base = readMorrowindBaseTexture(propertyCursor);
+            if (base.valid && base.source >= 0 && std::size_t(base.source) < sourceTexturePaths.size())
+                texturingPropertyPaths[i] = sourceTexturePaths[base.source];
+        } else if (findTexturingPropertySource(propertyCursor, sourceTexturePaths, fileName)) {
             texturingPropertyPaths[i] = std::move(fileName);
         }
     }
@@ -5245,11 +5293,30 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                     ++outModel.stencilDrawModeCounts[stencilProperties[propertyIndex].drawMode & 0x3u];
                     return;
                 }
+                if (header.version == kMorrowindNifVersion &&
+                    header.blockTypeNames[header.blockTypeIndex[propertyIndex]] == "NiMaterialProperty") {
+                    ByteCursor materialCursor(bytes.data() + blockStart[propertyIndex],
+                        blockEnd[propertyIndex] - blockStart[propertyIndex]);
+                    float diffuse[4] = {1, 1, 1, 1};
+                    if (readNiObjectNetPrefix(materialCursor, true, true) && materialCursor.skip(14) &&
+                        materialCursor.readBytes(diffuse, 12) && materialCursor.skip(28) && materialCursor.read(diffuse[3])) {
+                        if (std::all_of(std::begin(diffuse), std::end(diffuse), [](float v) { return std::isfinite(v); }))
+                            std::copy_n(diffuse, 4, shape.classicDiffuse);
+                    }
+                    return;
+                }
                 if (!shape.diffuseTexturePath.empty()) {
                     return;
                 }
                 if (!texturingPropertyPaths[propertyIndex].empty()) {
                     shape.diffuseTexturePath = texturingPropertyPaths[propertyIndex];
+                    if (header.version == kMorrowindNifVersion) {
+                        ByteCursor propertyCursor(bytes.data() + blockStart[propertyIndex],
+                            blockEnd[propertyIndex] - blockStart[propertyIndex]);
+                        const auto base = readMorrowindBaseTexture(propertyCursor);
+                        shape.baseTextureClampMode = base.clamp;
+                        shape.baseTextureUvSet = base.uvSet;
+                    }
                     return;
                 }
                 // A texture set, when the property has one. Type-validate the
@@ -5315,7 +5382,9 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 shape.twoSided = true;
             }
 
-            shape.uvs = src.uvs;
+            shape.uvs = header.version == kMorrowindNifVersion
+                ? (shape.baseTextureUvSet < src.uvSets.size() ? src.uvSets[shape.baseTextureUvSet] : std::vector<float>{})
+                : src.uvs;
             // Visibility of every ancestor gates this shape independently.
             // Keep the mesh resident so a later sequence can reveal it.
             for (int ancestor = int(blockIndex), depth = 0;
@@ -5338,6 +5407,12 @@ bool parseNifStaticMesh(const std::vector<std::uint8_t>& bytes, NifModel& outMod
                 }
             }
             shape.colors = src.colors;
+            if (header.version == kMorrowindNifVersion) {
+                if (shape.colors.empty()) shape.colors.resize(src.positions.size() / 3 * 4, 1.f);
+                for (std::size_t i = 0; i < shape.colors.size(); ++i)
+                    shape.colors[i] *= std::clamp(shape.classicDiffuse[i % 4], 0.f, 1.f);
+                vertexAlphaEnabled = true;
+            }
             // A stored RGBA stream does not enable its RGB channels. Skyrim's
             // material controls RGB and opacity independently; keep alpha for
             // the vertex-alpha/material-opacity policy below. Resolve from the
@@ -6191,6 +6266,14 @@ bool parseNifSkinnedMesh(
             }
             if (!texturingPropertyPaths[propertyIndex].empty()) {
                 shape.diffuseTexturePath = texturingPropertyPaths[propertyIndex];
+                    if (header.version == kMorrowindNifVersion) {
+                        ByteCursor propertyCursor(bytes.data() + blockStart[propertyIndex],
+                            blockEnd[propertyIndex] - blockStart[propertyIndex]);
+                        const auto base = readMorrowindBaseTexture(propertyCursor);
+                        shape.baseTextureClampMode = base.clamp;
+                        shape.baseTextureUvSet = base.uvSet;
+                        shape.uvs = base.uvSet < src.uvSets.size() ? src.uvSets[base.uvSet] : std::vector<float>{};
+                    }
                 return;
             }
             const std::int32_t textureSetRef = shaderTextureSetRefs[propertyIndex];

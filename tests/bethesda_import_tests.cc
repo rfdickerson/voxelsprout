@@ -1,3 +1,5 @@
+#include "import/bethesda/decoded_texture_cache.h"
+#include "tes3_texture_fixture.h"
 #include "import/bethesda/fuz.h"
 #include "import/bethesda/skyrim_lod_handoff.h"
 #include <algorithm>
@@ -3696,8 +3698,8 @@ void testModDirectoryOverridesArchives() {
         FalloutAssetSource source;
         expectTrue(source.open(dataDir), "asset source opens the data directory");
         expectTrue(
-            source.modFingerprint().empty(),
-            "with no mod directory the fingerprint is empty, so an unmodded cache key is unchanged");
+            !source.modFingerprint().empty(),
+            "base asset manifest participates in cooked texture cache identity");
 
         expectTrue(source.addModDirectory(modA), "a readable mod directory is added");
         expectTrue(source.modDirectoryCount() == 1u, "the mod directory is counted");
@@ -5022,9 +5024,9 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
             }
             return {};
         };
-        expectTrue(textureAt(256.0f, 256.0f) == "tr_ground.dds" &&
-                       textureAt(768.0f, 256.0f) == "rock.dds" &&
-                       textureAt(2304.0f, 256.0f) == "textures/_land_default.dds",
+        expectTrue(textureAt(256.0f, 256.0f) == "textures\\tr_ground.dds" &&
+                       textureAt(768.0f, 256.0f) == "textures\\rock.dds" &&
+                       textureAt(2304.0f, 256.0f) == "textures\\_land_default.dds",
                    "known terrain positions select the correct LTEX and default textures");
         bool blended = false;
         for (const auto& vertex : mesh.vertices) {
@@ -5033,7 +5035,7 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
             for (int slot = 0; slot < 3; ++slot) {
                 const auto index = vertex.layerTextureIndex[slot];
                 if (index < painted.textures.size() &&
-                    painted.textures[index].sourcePath == "rock.dds" &&
+                    painted.textures[index].sourcePath == "textures\\rock.dds" &&
                     vertex.layerWeight[slot] > 0.0f && vertex.layerWeight[slot] < 1.0f)
                     blended = true;
             }
@@ -8001,7 +8003,92 @@ void testSkyrimGrassPipeline() {
     }
 }
 
+void testTes3TextureResolutionAndMapping() {
+    using namespace odai::importer;
+    using namespace odai::importer::bethesda;
+    namespace fixture = tes3_texture_fixture;
+    const auto root=std::filesystem::temp_directory_path()/"odai_tes3_texture_contract";
+    std::filesystem::remove_all(root);
+    const auto data=root/"Data", mod=root/"Mod";
+    fixture::write(data/"textures/quadrants.bmp",fixture::bmp());
+    fixture::write(data/"textures/quadrants.dds",fixture::bc1Dds(4));
+    fixture::write(mod/"Textures/Quadrants.TGA",fixture::tga());
+    fixture::write(data/"meshes/plane.nif",fixture::nif("quadrants.bmp",0,1,true,.5f));
+    FalloutAssetSource assets; std::string error;
+    expectTrue(assets.open(data) && assets.addModDirectory(mod),"texture layers index");
+    FalloutAssetSource::ResolvedAsset winner;
+    expectTrue(assets.resolveTextureWithProvider("TEXTURES/QUADRANTS.bmp",winner,error) &&
+        winner.canonicalVirtualPath=="textures\\quadrants.tga" && winner.providerRoot==mod,
+        "higher-priority TGA overrides base DDS/BMP through legacy aliases");
+    DecodedTextureCache cache;
+    ImportedSceneTexture owned;
+    const auto* texture=cache.get(assets,"quadrants.bmp",0,owned,&error);
+    expectTrue(texture && texture->width==4,"shared cache decodes real legacy images");
+    fixture::write(mod/"Textures/Quadrants.TGA",fixture::tga(8,4));
+    expectTrue(assets.open(data) && assets.addModDirectory(mod),"fresh resource source indexes replacement");
+    texture=cache.get(assets,"quadrants.bmp",0,owned,&error);
+    expectTrue(texture && texture->width==8,"reopened source cannot return stale cached bytes");
+    fixture::write(mod/"textures/quadrants.dds",fixture::bc1Dds(16));
+    assets.open(data); assets.addModDirectory(mod);
+    expectTrue(assets.resolveTextureWithProvider("quadrants.bmp",winner,error) &&
+        winner.canonicalVirtualPath=="textures\\quadrants.dds" && winner.providerRoot==mod,
+        "ambiguous same-layer candidates deterministically prefer DDS");
+    std::filesystem::remove(mod/"textures/quadrants.dds");
+    assets.open(data); assets.addModDirectory(mod);
+    NifModel mesh;
+    expectTrue(parseNifStaticMesh(fixture::nif("quadrants.tga",0,1,true,.5f),mesh,error) && mesh.shapes.size()==1,
+        "synthetic TES3 textured NIF parses");
+    if(!mesh.shapes.empty()) {
+        const auto& s=mesh.shapes[0];
+        expectTrue(s.diffuseTexturePath=="quadrants.tga" && s.baseTextureClampMode==0 && s.baseTextureUvSet==1,
+            "base descriptor source, clamp and selected UV set survive import");
+        expectTrue(s.uvs==std::vector<float>({0,2,2,2,2,0,0,0}),"authored UV set selection preserves orientation and repeat scale");
+        expectTrue(s.colors.size()==16 && s.colors[0]==.5f && s.alphaTest && s.alphaThreshold==128,
+            "TES3 vertex/material tint and alpha test survive import");
+    }
+    NifModel lamp;
+    expectTrue(parseNifStaticMesh(fixture::nif("quadrants.tga",3,0,false,1,true),lamp,error) && lamp.shapes.size()==1,
+        "particle record sizing keeps textured TES3 lamp geometry importable");
+    FalloutWorldTables tables; tables.morrowind=true; tables.staticModelPaths.emplace(1,"plane.nif");
+    FalloutCellRecord cell; FalloutPlacedReference ref; ref.baseFormId=1; ref.formId=2;
+    ref.position[0]=10; ref.rotationRadians[2]=.25f; ref.scale=2; cell.references.push_back(ref);
+    CellSceneBuilder builder(assets,tables,&cache); builder.addCellStatics(cell);
+    ImportedScene scene; builder.finish(scene);
+    expectTrue(builder.stats().textureFailures.empty() && !scene.packedVertices.empty(),"object fixture has zero missing textures/UVs");
+    expectTrue(!scene.packedVertices.empty() && scene.packedVertices[0].color[0]==.5f &&
+        (scene.packedVertices[0].flags & kImportedSceneMaterialFlagVertexColorTint)!=0,
+        "TES3 opaque/cutout material tint reaches packed render data");
+    bool clamped=false;
+    for(const auto& t:scene.textures) if(t.clampMode==0 && t.width==8) clamped=true;
+    expectTrue(clamped,"authored clamp survives scene texture packing");
+    fixture::write(data/"meshes/repeat.nif",fixture::nif("quadrants.bmp",3,1));
+    tables.staticModelPaths.emplace(3,"repeat.nif");
+    ref.baseFormId=3; ref.formId=4; ref.position[0]=-10; cell.references.push_back(ref);
+    CellSceneBuilder shared(assets,tables,&cache); shared.addCellStatics(cell); shared.finish(scene);
+    expectTrue(shared.stats().textureFailures.empty() && scene.textures.size()==2 &&
+        scene.textures[0].clampMode!=scene.textures[1].clampMode && scene.instances.size()==2,
+        "shared image retains separate clamped/repeated materials across transformed instances");
+    CellSceneBuilder limited(assets,tables); limited.setTextureBudget(0); limited.addCellStatics(cell); limited.finish(scene);
+    expectTrue(limited.stats().textureBudgetExceeded && !limited.stats().textureFailures.empty(),
+        "scene texture slot budget reports required material failures");
+    std::filesystem::remove(mod/"Textures/Quadrants.TGA"); std::filesystem::remove(data/"textures/quadrants.bmp");
+    std::filesystem::remove(data/"textures/quadrants.dds");
+    expectTrue(assets.open(data),"missing texture fixture reopens");
+    CellSceneBuilder broken(assets,tables); broken.addCellStatics(cell); broken.finish(scene);
+    expectTrue(!broken.stats().textureFailures.empty(),"missing object texture is recorded even when fallback could rescue it");
+    cell.land=std::make_unique<FalloutLandRecord>(); cell.land->gridSize=65;
+    cell.land->hasHeights=true; cell.land->heights.resize(65*65); cell.land->morrowindTextureGrid.resize(256,7);
+    CellSceneBuilder terrain(assets,tables); terrain.addCellTerrain(cell); terrain.finish(scene);
+    expectTrue(terrain.stats().textureFailures.size()>=2,"missing LTEX and default terrain texture both fail strict audit");
+    DecodedTextureCache tiny(1); fixture::write(data/"textures/quadrants.bmp",fixture::bmp()); assets.open(data);
+    texture=tiny.get(assets,"quadrants.bmp",0,owned,&error);
+    expectTrue(texture && tiny.stats().residentBytes==0 && tiny.stats().residentCount==0,
+        "oversize decoded entry remains caller-owned and cache respects byte budget");
+    std::filesystem::remove_all(root);
+}
+
 int main() {
+    testTes3TextureResolutionAndMapping();
     testTextureSetSlotsAndOverrides();
     testSkyrimGrassPipeline();
     testBsaArchiveReadsFoldersAndFiles(/*embedFileNames=*/false);

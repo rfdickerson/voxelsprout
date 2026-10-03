@@ -1,3 +1,4 @@
+#include "tes3_texture_fixture.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1638,7 +1639,87 @@ void testDdsCubemaps() {
     std::filesystem::remove(path);
 }
 
+void testTes3TextureFormatsAndQuality() {
+    using namespace odai::importer;
+    using namespace tes3_texture_fixture;
+    ImportedSceneTexture texture;
+    std::string error;
+    const std::array<std::uint8_t,16> expected{255,0,0,255,0,255,0,255,0,0,255,255,255,255,0,255};
+    for(bool top:{false,true}) for(bool right:{false,true}) for(bool rle:{false,true}) {
+        const auto bytes=tga(2,2,top,right,rle);
+        expectTrue(loadTextureFromMemory(bytes.data(),bytes.size(),"test.tga",texture,0,error),"TGA origin/RLE decodes");
+        expectTrue(texture.width==2 && texture.height==2 && texture.mipLevelCount==2 &&
+            std::equal(expected.begin(),expected.end(),texture.rgba8.begin()),"TGA mapping and channel order match independent expected quadrants");
+        expectTrue(texture.rgba8[16] >= 187 && texture.rgba8[16] <= 188,"sRGB mip generation averages linear light");
+        auto broken=bytes; broken.pop_back(); const auto original=texture.rgba8;
+        expectTrue(!loadTextureFromMemory(broken.data(),broken.size(),"test.tga",texture,0,error) && texture.rgba8==original,
+            "truncated TGA fails transactionally");
+    }
+    for(bool top:{false,true}) {
+        const auto bytes=bmp(3,2,top);
+        expectTrue(loadTextureFromMemory(bytes.data(),bytes.size(),"test.bmp",texture,0,error),"BMP padded rows/origins decode");
+        expectTrue(texture.width==3 && texture.height==2 && texture.rgba8[0]==255 && texture.rgba8[4]==0 && texture.rgba8[5]==255 &&
+            texture.rgba8[14]==255,"BMP asymmetric mapping including row padding");
+    }
+    for(unsigned size:{2048,4096,8192}) {
+        const auto bytes=tga(size,8);
+        expectTrue(loadTextureFromMemory(bytes.data(),bytes.size(),"large.tga",texture,0,error) && texture.width==size && texture.height==8,
+            "2K/4K/8K rectangular textures retain full source resolution");
+        expectTrue(loadTextureFromMemory(bytes.data(),bytes.size(),"large.tga",texture,512,error) && texture.width==512 &&
+            texture.height==std::max(1u,8u/(size/512)) && texture.mipLevelCount==10,"explicit ceiling works for an image without authored mips");
+    }
+    // Required compressed color formats without authored mip chains. These
+    // endpoint/index blocks have independent known red and opaque output.
+    for(unsigned format:{1,2,3,7}) {
+        auto dds=bc1Dds(8); dds.resize(format==7 ? 148 : 128);
+        const auto word=[&](unsigned at,std::uint32_t v){std::memcpy(dds.data()+at,&v,4);};
+        word(12,4); word(28,1);
+        word(84,format==1 ? 0x31545844 : format==2 ? 0x33545844 : format==3 ? 0x35545844 : 0x30315844);
+        if(format==7) {word(128,98);word(132,3);word(136,0);word(140,1);word(144,0);}
+        for(unsigned blockIndex=0;blockIndex<2;++blockIndex) {
+            std::vector<std::uint8_t> block(format==1 ? 8 : 16);
+            if(format==7) {
+                unsigned bit=0;
+                const auto bits=[&](unsigned v,unsigned n){for(unsigned i=0;i<n;++i,++bit) block[bit/8]|=((v>>i)&1)<<(bit%8);};
+                bits(64,7); // BC7 mode 6
+                for(unsigned value:{127,0,0,127}) {bits(value,7);bits(value,7);}
+                bits(1,1);bits(1,1);bits(0,3);for(int i=1;i<16;++i) bits(0,4);
+            } else {
+                const auto color=format==1 ? 0 : 8;
+                block[color]=0;block[color+1]=248;
+                if(format==2) std::fill(block.begin(),block.begin()+8,255);
+                if(format==3) block[0]=255;
+            }
+            dds.insert(dds.end(),block.begin(),block.end());
+        }
+        expectTrue(loadTextureFromMemory(dds.data(),dds.size(),"single.dds",texture,0,error) &&
+            texture.width==8 && texture.height==4 && texture.mipLevelCount==4 && texture.rgba8[0]==255 && texture.rgba8[3]==255,
+            "BC1/BC2/BC3/BC7 single-level color generates valid RGBA mips with preserved alpha");
+        expectTrue(loadTextureFromMemory(dds.data(),dds.size(),"single.dds",texture,2,error) &&
+            texture.width==2 && texture.height==1,"compressed single-level texture obeys an explicit ceiling");
+        const auto previous=texture.rgba8;dds.pop_back();
+        expectTrue(!loadTextureFromMemory(dds.data(),dds.size(),"single.dds",texture,0,error) && texture.rgba8==previous,
+            "truncated compressed source fails without publishing partial pixels");
+    }
+    // 24-bit DDS RGB with padded rows. No source alpha becomes opaque.
+    auto rgb=bc1Dds(8);rgb.resize(128);
+    const auto rgbWord=[&](unsigned at,std::uint32_t v){std::memcpy(rgb.data()+at,&v,4);};
+    rgbWord(8,0x100f);rgbWord(12,2);rgbWord(16,3);rgbWord(20,12);rgbWord(28,1);
+    rgbWord(80,0x40);rgbWord(84,0);rgbWord(88,24);rgbWord(92,0xff0000);rgbWord(96,0xff00);rgbWord(100,0xff);rgbWord(104,0);
+    for(int row=0;row<2;++row) rgb.insert(rgb.end(),{0,0,255,0,255,0,255,0,0,0,0,0});
+    expectTrue(loadTextureFromMemory(rgb.data(),rgb.size(),"rgb.dds",texture,0,error) && texture.width==3 && texture.height==2 &&
+        texture.rgba8[0]==255 && texture.rgba8[3]==255 && texture.rgba8[5]==255,"24-bit DDS row padding and color masks decode");
+    auto bytes=tga(4,4); bytes[12]=255; bytes[13]=255;
+    expectTrue(!loadTextureFromMemory(bytes.data(),bytes.size(),"oversize.tga",texture,0,error),"oversize/malformed dimensions reject before allocation");
+    bytes=tga(2,2); bytes[2]=10; bytes.resize(18); bytes.push_back(0xff); bytes.insert(bytes.end(),{0,0,255,255});
+    expectTrue(!loadTextureFromMemory(bytes.data(),bytes.size(),"bad-rle.tga",texture,0,error),"RLE packet cannot overrun image bounds");
+    const auto linear=tga(2,2);
+    expectTrue(loadTextureFromMemory(linear.data(),linear.size(),"linear.tga",texture,0,error,true) &&
+        texture.format==TextureFormat::RGBA8 && texture.rgba8[16]==128,"linear data mips do not apply sRGB conversion");
+}
+
 int main() {
+    testTes3TextureFormatsAndQuality();
     testDdsCubemaps();
     testNifLightingSerialization();
     testTerrainNormalBindings();

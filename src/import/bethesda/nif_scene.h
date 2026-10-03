@@ -123,6 +123,9 @@ struct NifShape {
     // and backslash-separated. Empty when the shape has no resolvable
     // BSShaderTextureSet.
     std::string diffuseTexturePath;
+    std::uint32_t baseTextureClampMode = 3;
+    std::uint32_t baseTextureUvSet = 0;
+    float classicDiffuse[4] = {1, 1, 1, 1};
     // Tangent-space normal map from BSShaderTextureSet slot 1. This remains
     // transient NIF-import data: the cell packer stores its resolved texture
     // index in the packed vertex's otherwise-unused first layer slot for
@@ -361,6 +364,9 @@ struct NifSkinnedShape {
     std::vector<float> uvs;
     std::vector<std::uint32_t> triangleIndices;
     std::string diffuseTexturePath;
+    std::uint32_t baseTextureClampMode = 3;
+    std::uint32_t baseTextureUvSet = 0;
+    float classicDiffuse[4] = {1, 1, 1, 1};
     std::string normalTexturePath;
     bool modelSpaceNormals = false;
     NifLightingMaterial lightingMaterial;

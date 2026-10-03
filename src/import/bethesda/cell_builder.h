@@ -304,6 +304,9 @@ struct CellBuildStats {
     // "<base record not found>" for a formID with no record at all.
     std::unordered_map<std::string, std::size_t> droppedReferencesByBaseType;
     bool textureBudgetExceeded = false;
+    // Every failed request, including terrain and auxiliary textures. Strict
+    // scene audits must inspect this, not just the object-shape counters.
+    std::unordered_map<std::string, std::string> textureFailures;
 
     // Diagnostic name sets the cooker reports. Kept here rather than dropped in
     // the extraction: "half the rock is grey" being a list of model paths rather

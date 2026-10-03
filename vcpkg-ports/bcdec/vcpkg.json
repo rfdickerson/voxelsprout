@@ -1,0 +1,7 @@
+{
+  "name": "bcdec",
+  "version-string": "0.985-20260902",
+  "description": "Header-only BC image decompression for missing texture mip chains",
+  "homepage": "https://github.com/iOrange/bcdec",
+  "license": "MIT OR Unlicense"
+}

@@ -142,6 +142,11 @@ public:
     bool resolveTexture(
         const std::string& texturePath, std::vector<std::uint8_t>& outBytes, std::string& outError) const;
 
+    // Layer priority precedes extension preference (DDS, TGA, BMP).
+    bool resolveTextureWithProvider(
+        const std::string& texturePath, ResolvedAsset& outAsset, std::string& outError) const;
+    [[nodiscard]] std::uint64_t cacheIdentity() const { return m_cacheIdentity; }
+
     [[nodiscard]] const std::vector<std::string>& warnings() const { return m_warnings; }
     [[nodiscard]] std::size_t archiveCount() const { return m_archives.size(); }
     // Unique canonical candidates from the same indexed layers as resolution.
@@ -177,6 +182,7 @@ private:
     bool openDataFiles(
         const std::filesystem::path& dataFilesPath, std::uint32_t contentMask);
 
+    std::uint64_t m_cacheIdentity = 0;
     std::filesystem::path m_dataFilesPath;
     // Canonical virtual keys for case-insensitive base loose-file lookup on POSIX.
     std::unordered_map<std::string,std::filesystem::path> m_baseLooseFiles;

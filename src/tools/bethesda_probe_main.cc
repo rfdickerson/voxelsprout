@@ -28,6 +28,7 @@
 #include "import/bethesda/asset_source.h"
 #include "import/bethesda/bsa_archive.h"
 #include "import/bethesda/cell_builder.h"
+#include "import/bethesda/decoded_texture_cache.h"
 #include "import/bethesda/character_builder.h"
 #include "import/bethesda/content_profile.h"
 #include "import/bethesda/content_record_index.h"
@@ -1133,9 +1134,9 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
         std::cout << "could not index archives under " << dataPath << "\n";
         return 1;
     }
-    std::vector<std::uint8_t> ddsBytes;
+    bethesda::FalloutAssetSource::ResolvedAsset resolved;
     std::string error;
-    if (!assets.resolveTexture(texturePath, ddsBytes, error)) {
+    if (!assets.resolveTextureWithProvider(texturePath, resolved, error)) {
         std::cout << "resolve failed: " << error << "\n";
         return 1;
     }
@@ -1145,13 +1146,14 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
     // can print, and getting it wrong renders a seam rather than an error.
     if (const char* dumpPath = std::getenv("ODAI_NIF_DUMP")) {
         std::ofstream out(dumpPath, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(ddsBytes.data()),
-                  static_cast<std::streamsize>(ddsBytes.size()));
-        std::cout << "wrote " << ddsBytes.size() << " bytes to " << dumpPath << "\n";
+        out.write(reinterpret_cast<const char*>(resolved.bytes.data()),
+                  static_cast<std::streamsize>(resolved.bytes.size()));
+        std::cout << "wrote " << resolved.bytes.size() << " bytes to " << dumpPath << "\n";
     }
     ImportedSceneTexture texture;
-    if (!loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), texture)) {
-        std::cout << "DDS decode failed\n";
+    if (!loadTextureFromMemory(resolved.bytes.data(), resolved.bytes.size(),
+                               resolved.canonicalVirtualPath, texture, 0, error)) {
+        std::cout << "texture decode failed: " << error << "\n";
         return 1;
     }
     const char* formatName = "?";
@@ -1159,6 +1161,7 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
         case TextureFormat::RGBA8: formatName = "RGBA8"; break;
         case TextureFormat::RGBA8Srgb: formatName = "RGBA8-sRGB"; break;
         case TextureFormat::BC1: formatName = "BC1"; break;
+        case TextureFormat::BC2: formatName = "BC2"; break;
         case TextureFormat::BC3: formatName = "BC3"; break;
         case TextureFormat::BC5: formatName = "BC5"; break;
         case TextureFormat::BC7: formatName = "BC7"; break;
@@ -1168,7 +1171,8 @@ int probeTexture(const std::filesystem::path& dataPath, const std::string& textu
     }
     std::cout << texturePath << ": " << texture.width << "x" << texture.height
               << " format=" << formatName << " mips=" << texture.mipLevelCount
-              << " bytes=" << ddsBytes.size() << "\n";
+              << " bytes=" << resolved.bytes.size() << " source=" << resolved.canonicalVirtualPath
+              << " provider=" << resolved.providerRoot << "\n";
     // The GPU samples the compressed data directly, so decode base mip 0 to
     // RGBA only when the loader already did; otherwise report what is known.
     if ((texture.format != TextureFormat::RGBA8 &&
@@ -5970,6 +5974,7 @@ void printUsage() {
               << "  odai_bethesda_probe --why <profile> <virtualPath|formID> [--data <Data>]\n"
               << "  odai_bethesda_probe --conflicts <profile> [--data <Data>]\n"
               << "  odai_bethesda_probe --export-profile <profile> <out.json> [--data <Data>]\n"
+        << "  odai_bethesda_probe --tes3-texturecheck <profile-or-Data> <expectations.json>\n"
               << "  odai_bethesda_probe --tes3-scriptcheck <profile> [--strict] [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-script-source <profile> <script-id> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-dialogue-trace <profile> <actor-or-topic> [--data <Data>]\n"
@@ -6807,6 +6812,157 @@ bool openProfileLoadOrder(
     const odai::importer::bethesda::ResolvedContentProfile& profile,
     odai::importer::bethesda::FalloutLoadOrder& order, std::string& error) {
     return order.open(profile, error);
+}
+
+nlohmann::json auditTes3TextureScene(
+    const odai::importer::bethesda::FalloutLoadOrder& order,
+    odai::importer::bethesda::FalloutAssetSource& source,
+    const nlohmann::json& check, std::string& decodeError) {
+    using namespace odai::importer;
+    using namespace odai::importer::bethesda;
+    using Json = nlohmann::json;
+    auto* assets = &source;
+    const auto id = check.at("id").get<std::string>();
+    Json actual = {{"exists", false}, {"parsed", false}};
+    bool decodePassed = false;
+    FalloutCellIndex index;
+    FalloutWorldTables tables;
+    if (!buildFalloutCellIndex(order, index, decodeError) ||
+        !buildFalloutWorldTables(order, tables, decodeError)) throw std::runtime_error(decodeError);
+    const FalloutCellIndexEntry* selected = nullptr;
+    for (const auto& entry : index.cells) {
+        if (check.contains("grid")) {
+            const auto grid = check.at("grid").get<std::array<int, 2>>();
+            if (!entry.isInterior && entry.hasGridCoords && entry.gridX == grid[0] && entry.gridZ == grid[1]) selected = &entry;
+        } else if (entry.isInterior && toLowerAscii(entry.editorId) == toLowerAscii(id)) selected = &entry;
+    }
+    if (!selected) { decodePassed = false; decodeError = "texture audit cell not found: " + id; }
+    else {
+        FalloutCellRecord cell;
+        decodePassed = extractFalloutCellMerged(index, order, *selected, cell, decodeError);
+        if (decodePassed) {
+            const auto start = std::chrono::steady_clock::now();
+            const bool measureCached = check.value("measure_cached", false);
+            DecodedTextureCache decodedCache;
+            CellSceneBuilder builder(*assets, tables, measureCached ? &decodedCache : nullptr);
+            builder.setMaxTextureSize(check.value("max_dimension", 0u));
+            builder.addCellTerrain(cell);
+            builder.addCellStatics(cell);
+            ImportedScene scene;
+            builder.finish(scene);
+            const double sceneBuildMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+            double cachedBuildMs = 0;
+            bool cachedBindingsValid = true;
+            if (measureCached) {
+                const auto warmStart = std::chrono::steady_clock::now();
+                CellSceneBuilder warm(*assets, tables, &decodedCache);
+                warm.setMaxTextureSize(check.value("max_dimension", 0u));
+                warm.addCellTerrain(cell); warm.addCellStatics(cell);
+                ImportedScene warmed; warm.finish(warmed);
+                cachedBuildMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - warmStart).count();
+                cachedBindingsValid = warm.stats().textureFailures.empty() &&
+                    warmed.textures.size() == scene.textures.size() &&
+                    warmed.packedDraws.size() == scene.packedDraws.size();
+                if (cachedBindingsValid) for (std::size_t i = 0; i < scene.textures.size(); ++i)
+                    cachedBindingsValid = cachedBindingsValid && warmed.textures[i].rgba8 == scene.textures[i].rgba8 &&
+                        warmed.textures[i].sourcePath == scene.textures[i].sourcePath;
+            }
+            const auto& stats = builder.stats();
+            Json failures = Json::array(), inventory = Json::array();
+            std::uint64_t decodedBytes = 0;
+            for (const auto& [path, reason] : stats.textureFailures)
+                failures.push_back({{"path", path}, {"reason", reason}});
+            bool bindingsValid = true;
+            for (const auto& vertex : scene.packedVertices) {
+                if (vertex.textureIndex != 0xffffffffu && vertex.textureIndex >= scene.textures.size()) bindingsValid = false;
+                for (auto layer : vertex.layerTextureIndex)
+                    if (layer != 0xffffffffu && layer >= scene.textures.size()) bindingsValid = false;
+            }
+            for (const auto& texture : scene.textures) {
+                FalloutAssetSource::ResolvedAsset source;
+                std::string error;
+                ImportedSceneTexture original;
+                const bool resolved = assets->resolveTextureWithProvider(texture.sourcePath, source, error);
+                const bool decoded = resolved && loadTextureFromMemory(source.bytes.data(), source.bytes.size(),
+                    source.canonicalVirtualPath, original, 0, error, texture.linearData);
+                if (!decoded) failures.push_back({{"path", texture.sourcePath}, {"reason", error}});
+                decodedBytes += texture.rgba8.size();
+                inventory.push_back({{"path", texture.sourcePath}, {"provider", source.providerName},
+                    {"archive", source.archiveName}, {"fingerprint", source.contentFingerprint},
+                    {"source_width", original.width}, {"source_height", original.height},
+                    {"width", texture.width}, {"height", texture.height}, {"mips", texture.mipLevelCount},
+                    {"format", int(texture.format)}, {"bytes", texture.rgba8.size()},
+                    {"clamp", texture.clampMode}});
+            }
+            const auto meshFailures = stats.referencesDroppedMeshUnresolved + stats.referencesDroppedMeshUnreadable;
+            // No allow-list or sibling/default rescue may conceal an
+            // authored request failing to load, including LAND.
+            decodePassed = failures.empty() && !stats.textureBudgetExceeded && bindingsValid && cachedBindingsValid && meshFailures == 0;
+            if (!decodePassed) decodeError = "strict scene texture audit failed";
+            actual = {{"exists", true}, {"parsed", decodePassed}, {"missing_textures", failures.size()},
+                {"texture_failures", failures}, {"texture_count", scene.textures.size()},
+                {"mesh_failures", meshFailures}, {"dropped_reference_types", stats.droppedReferencesByBaseType}, {"bindings_valid", bindingsValid},
+                {"untextured_shapes", stats.untexturedShapes}, {"no_texture_path_shapes", stats.shapesWithNoTexturePath},
+                {"sibling_texture_rescues", stats.untexturedShapesGivenModelTexture},
+                {"terrain_cells", cell.land ? 1 : 0}, {"terrain_parts", stats.terrainPartsEmitted}, {"draw_count", scene.packedDraws.size()},
+                {"decoded_bytes", decodedBytes}, {"textures", inventory},
+                {"scene_build_ms", sceneBuildMs},
+                {"build_ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()}};
+            if (measureCached) {
+                const auto cacheStats = decodedCache.stats();
+                actual.update({{"cached_build_ms", cachedBuildMs}, {"cached_bindings_valid", cachedBindingsValid},
+                    {"cache_hits", cacheStats.hits}, {"cache_misses", cacheStats.misses},
+                    {"cache_bytes", cacheStats.residentBytes}});
+            }
+        }
+    }
+    return actual;
+}
+
+int tes3TextureCheckCommand(const std::filesystem::path& source,
+    const std::filesystem::path& expectations, int argc, char** argv, int optionStart) {
+    using namespace odai::importer::bethesda;
+    using Json = nlohmann::json;
+    Json output = {{"version", 1}, {"ok", false}, {"scope", "TES3 scene texture audit"}, {"checks", Json::array()}};
+    const auto fail = [&](const std::string& error) {
+        output["error"] = error; std::cout << output.dump(2) << '\n'; return 1;
+    };
+    ResolvedContentProfile profile;
+    FalloutLoadOrder order;
+    FalloutAssetSource assets;
+    std::string error;
+    if (!resolveProbeContentProfile(source, argc, argv, optionStart, profile, error) ||
+        !openProfileLoadOrder(profile, order, error)) return fail(error);
+    if (profile.game != BethesdaGame::Morrowind) return fail("texture audit requires a Morrowind profile");
+    if (!assets.open(profile)) return fail("cannot open profile asset sources");
+    output["profile"] = profile.name; output["fingerprint"] = assets.modFingerprint();
+    try {
+        Json plan; std::ifstream input(expectations); input >> plan;
+        if (!plan.is_object() || plan.at("version") != 1 || !plan.at("checks").is_array() ||
+            plan.at("checks").empty() || plan.at("checks").size() > 10000)
+            return fail("expected version 1 and 1..10000 scene texture checks");
+        bool passed = true;
+        for (const auto& check : plan.at("checks")) {
+            if (check.at("kind") != "scene-textures" || check.at("id").get<std::string>().empty() ||
+                !check.at("expected").is_object() || check.at("expected").empty())
+                return fail("expected a named scene-textures check with nonempty expectations");
+            error.clear();
+            const auto actual = auditTes3TextureScene(order, assets, check, error);
+            std::string mismatch;
+            for (const auto& [key, value] : check.at("expected").items()) {
+                if (!actual.contains(key) || actual.at(key) != value) {mismatch = "/" + key; break;}
+            }
+            const bool ok = actual.value("parsed", false) && mismatch.empty();
+            output["checks"].push_back({{"kind", "scene-textures"}, {"id", check.at("id")},
+                {"actual", actual}, {"expected", check.at("expected")}, {"passed", ok},
+                {"diagnostic", error}, {"mismatch_path", mismatch}});
+            passed = passed && ok;
+        }
+        output["ok"] = passed;
+        std::cout << output.dump(2) << '\n'; return passed ? 0 : 1;
+    } catch (const std::exception& exception) {return fail(exception.what());}
 }
 
 struct Tes3ProbeContext {
@@ -7673,6 +7829,9 @@ int main(int argc, char** argv) {
             std::cout << "export failed: " << error << '\n'; return 1;
         }
         std::cout << "wrote " << argv[3] << '\n'; return 0;
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-texturecheck") == 0) {
+        return tes3TextureCheckCommand(argv[2], argv[3], argc, argv, 4);
     }
     if (argc >= 3 && std::strcmp(argv[1], "--tes3-scriptcheck") == 0) {
         return tes3ScriptCheckCommand(argv[2], argc, argv, 3);

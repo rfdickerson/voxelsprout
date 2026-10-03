@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "kind": "scene-textures",
+      "id": "Balmora, Guild of Mages",
+      "expected": {
+        "parsed": true,
+        "missing_textures": 0,
+        "mesh_failures": 0
+      }
+    },
+    {
+      "kind": "scene-textures",
+      "id": "Balmora, Guild of Fighters",
+      "expected": {
+        "parsed": true,
+        "missing_textures": 0,
+        "mesh_failures": 0
+      }
+    },
+    {
+      "kind": "scene-textures",
+      "id": "Balmora exterior",
+      "grid": [
+        -2,
+        -2
+      ],
+      "expected": {
+        "parsed": true,
+        "missing_textures": 0,
+        "mesh_failures": 0,
+        "terrain_cells": 1
+      }
+    }
+  ]
+}

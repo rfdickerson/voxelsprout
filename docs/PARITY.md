@@ -4,6 +4,7 @@
 |---|---|---|
 | RENDER-TERRAIN-001 | Render Morrowind exterior LAND cell | Implemented |
 | RENDER-TERRAIN-002 | Render Morrowind LAND terrain textures | Implemented |
+| RENDER-TEX-001 | TES3 object and terrain textures, including high-resolution replacements | Implemented — DDS/TGA/BMP, authored UV/clamp/tint/alpha, full/reduced resolution, 2K/4K/8K pixels, cache/residency and strict zero-missing audits pass; see [verification](validation/RENDER-TEX-001.md). |
 | RENDER-WATER-001 | Basic world water rendering | Partial — exterior/interior water, renderer toggle, deterministic animation, packaged normal resource, terrain depth checks, validation smoke, and performance baseline pass; a portable visual golden with clear normal and specular detail remains. |
 
 # Performance

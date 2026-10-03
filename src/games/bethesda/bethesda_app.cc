@@ -7556,6 +7556,10 @@ bool BethesdaApp::initStreaming() {
     // the fixed reference views. The ceiling participates in the stream cache
     // key, so old 512px cooked cells cannot hide the higher-resolution mips.
     // Keep the explicit override for memory-constrained GPUs and texture packs.
+    if (m_streamIsMorrowind) {
+        m_streamer->setMaxTextureSize(0u);
+        VOX_LOGI("bethesda") << "TES3 textures: full source resolution";
+    }
     if (m_streamIsSkyrim) {
         m_streamer->setMaxTextureSize(2048u);
         VOX_LOGI("bethesda") << "Skyrim texture ceiling: 2048 px";

@@ -60,7 +60,7 @@ public:
         const FalloutAssetSource& assets,
         const std::string& texturePath,
         std::uint32_t maxSize,
-        ImportedSceneTexture& outOwned);
+        ImportedSceneTexture& outOwned, std::string* outError = nullptr, bool linearData = false);
 
     [[nodiscard]] DecodedTextureCacheStats stats() const;
 
@@ -69,6 +69,7 @@ private:
         std::once_flag once;
         ImportedSceneTexture texture;
         bool valid = false;
+        std::string error;
     };
 
     std::mutex m_mutex;

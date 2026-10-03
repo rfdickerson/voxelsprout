@@ -462,6 +462,43 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
+    // Fill the background before world transparency. Blended draws do not
+    // write depth, so drawing sky afterward would erase glass against the sky.
+    // The reverse-Z prepass still rejects sky behind opaque/cutout surfaces.
+    if (renderImportedSky && m_skyboxPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
+        bindGraphicsDescriptorBuffers(commandBuffer);
+        // Do not inherit the planar pass's reflection flag in a frame where no
+        // later imported draw happened to overwrite the push constants.
+        ChunkPushConstants skyPushConstants{};
+        vkCmdPushConstants(
+            commandBuffer, m_pipelineLayout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0, sizeof(skyPushConstants), &skyPushConstants);
+        countDrawCalls(m_debugDrawCallsMain, 1);
+        m_debugTrianglesTotal += ((3) / 3u) * (1);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    }
+    if (renderImportedSky &&
+        m_skyCloudPipeline != VK_NULL_HANDLE &&
+        m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
+        m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
+        m_skyCloudIndexCount > 0) {
+        const VkBuffer skyCloudVertexBuffer = m_bufferAllocator.getBuffer(m_skyCloudVertexBufferHandle);
+        const VkBuffer skyCloudIndexBuffer = m_bufferAllocator.getBuffer(m_skyCloudIndexBufferHandle);
+        if (skyCloudVertexBuffer != VK_NULL_HANDLE && skyCloudIndexBuffer != VK_NULL_HANDLE) {
+            const VkBuffer skyCloudVertexBuffers[1] = {skyCloudVertexBuffer};
+            const VkDeviceSize skyCloudVertexOffsets[1] = {0};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyCloudPipeline);
+            bindGraphicsDescriptorBuffers(commandBuffer);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, skyCloudVertexBuffers, skyCloudVertexOffsets);
+            vkCmdBindIndexBuffer(commandBuffer, skyCloudIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            countDrawCalls(m_debugDrawCallsMain, 1);
+            m_debugTrianglesTotal += ((m_skyCloudIndexCount) / 3u) * (1);
+            vkCmdDrawIndexed(commandBuffer, m_skyCloudIndexCount, 1, 0, 0, 0);
+        }
+    }
+
     if (m_importedStaticPipeline != VK_NULL_HANDLE &&
         importedVertexBuffer != VK_NULL_HANDLE &&
         importedIndexBuffer != VK_NULL_HANDLE &&
@@ -1320,40 +1357,6 @@ void RendererBackend::recordMainScenePass(const FrameExecutionContext& context, 
     // (removed) voxel/pipe placement-preview draws — legacy editor overlays from the
     // prior game (cube/face brush + pipe ghost); the strategy map has no voxel editing.
 
-    // Draw skybox last with depth-test so sun/sky only appears where no geometry wrote depth.
-    if (renderImportedSky && m_skyboxPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyboxPipeline);
-        bindGraphicsDescriptorBuffers(commandBuffer);
-        // Do not inherit the planar pass's reflection flag in a frame where no
-        // later imported draw happened to overwrite the push constants.
-        ChunkPushConstants skyPushConstants{};
-        vkCmdPushConstants(
-            commandBuffer, m_pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0, sizeof(skyPushConstants), &skyPushConstants);
-        countDrawCalls(m_debugDrawCallsMain, 1);
-        m_debugTrianglesTotal += ((3) / 3u) * (1);
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-    }
-    if (renderImportedSky &&
-        m_skyCloudPipeline != VK_NULL_HANDLE &&
-        m_skyCloudVertexBufferHandle != kInvalidBufferHandle &&
-        m_skyCloudIndexBufferHandle != kInvalidBufferHandle &&
-        m_skyCloudIndexCount > 0) {
-        const VkBuffer skyCloudVertexBuffer = m_bufferAllocator.getBuffer(m_skyCloudVertexBufferHandle);
-        const VkBuffer skyCloudIndexBuffer = m_bufferAllocator.getBuffer(m_skyCloudIndexBufferHandle);
-        if (skyCloudVertexBuffer != VK_NULL_HANDLE && skyCloudIndexBuffer != VK_NULL_HANDLE) {
-            const VkBuffer skyCloudVertexBuffers[1] = {skyCloudVertexBuffer};
-            const VkDeviceSize skyCloudVertexOffsets[1] = {0};
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyCloudPipeline);
-            bindGraphicsDescriptorBuffers(commandBuffer);
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, skyCloudVertexBuffers, skyCloudVertexOffsets);
-            vkCmdBindIndexBuffer(commandBuffer, skyCloudIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            countDrawCalls(m_debugDrawCallsMain, 1);
-            m_debugTrianglesTotal += ((m_skyCloudIndexCount) / 3u) * (1);
-            vkCmdDrawIndexed(commandBuffer, m_skyCloudIndexCount, 1, 0, 0, 0);
-        }
-    }
 
     vkCmdEndRendering(commandBuffer);
     endDebugLabel(commandBuffer);

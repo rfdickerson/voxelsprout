@@ -1,6 +1,12 @@
 #include "import/dds.h"
 
+#define BCDEC_IMPLEMENTATION
+#include <bcdec.h>
+
 #include <cstring>
+#include <cmath>
+#include <cctype>
+#include <array>
 #include <bit>
 #include <algorithm>
 #include <fstream>
@@ -122,8 +128,8 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
 
     DdsHeader hdr{};
     std::memcpy(&hdr, data + 4u, sizeof(DdsHeader));
-    if (hdr.size != 124u || hdr.width == 0u || hdr.height == 0u) return false;
-    if (hdr.width > 32768u || hdr.height > 32768u || hdr.mipMapCount > std::bit_width(std::max(hdr.width,hdr.height)) ||
+    if (hdr.size != 124u || hdr.ddspf.size != 32u || hdr.width == 0u || hdr.height == 0u) return false;
+    if (hdr.width > 32768u || hdr.height > 32768u || hdr.mipMapCount > static_cast<unsigned>(std::bit_width(std::max(hdr.width,hdr.height))) ||
         (hdr.caps2 & 0x200000u) != 0u) return false;
     std::uint32_t layers = (hdr.caps2 & 0x200u) ? 6u : 1u;
     if (layers == 6 && hdr.ddspf.fourCC != kFourCCDx10 && ((hdr.caps2 & 0xfc00u) != 0xfc00u || hdr.width != hdr.height)) return false;
@@ -152,6 +158,39 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
     const bool legacyRgba =
         hdr.ddspf.rMask == 0x000000ffu && hdr.ddspf.gMask == 0x0000ff00u &&
         hdr.ddspf.bMask == 0x00ff0000u && hdr.ddspf.aMask == 0xff000000u;
+    if ((hdr.ddspf.flags & kDdpfRgb) && hdr.ddspf.rgbBitCnt == 24u &&
+        (legacyBgrx || (hdr.ddspf.rMask == 0xffu && hdr.ddspf.gMask == 0xff00u &&
+                       hdr.ddspf.bMask == 0xff0000u && hdr.ddspf.aMask == 0))) {
+        const auto mips = std::max(1u, hdr.mipMapCount);
+        std::size_t inputBytes = 0, outputBytes = 0;
+        const bool padded = (hdr.flags & 8u) && hdr.pitchOrLinearSz == ((hdr.width * 3u + 3u) & ~3u);
+        for (unsigned mip = 0; mip < mips; ++mip) {
+            const auto w = std::max(1u, hdr.width >> mip), h = std::max(1u, hdr.height >> mip);
+            inputBytes += std::size_t(padded ? ((w * 3u + 3u) & ~3u) : w * 3u) * h;
+            outputBytes += std::size_t(w) * h * 4;
+        }
+        inputBytes *= layers; outputBytes *= layers;
+        if (outputBytes > 512ull * 1024 * 1024 || inputBytes > fileSize - dataOffset) return false;
+        ImportedSceneTexture decoded;
+        decoded.width = hdr.width; decoded.height = hdr.height;
+        decoded.mipLevelCount = mips; decoded.arrayLayers = layers;
+        decoded.format = TextureFormat::RGBA8Srgb; decoded.rgba8.resize(outputBytes);
+        std::size_t src = dataOffset, dst = 0;
+        for (unsigned face = 0; face < layers; ++face) for (unsigned mip = 0; mip < mips; ++mip) {
+            const auto w = std::max(1u, hdr.width >> mip), h = std::max(1u, hdr.height >> mip);
+            const auto stride = padded ? ((w * 3u + 3u) & ~3u) : w * 3u;
+            for (unsigned y = 0; y < h; ++y) for (unsigned x = 0; x < w; ++x) {
+                const auto pixel = src + y * stride + x * 3;
+                decoded.rgba8[dst++] = data[pixel + (legacyBgrx ? 2 : 0)];
+                decoded.rgba8[dst++] = data[pixel + 1];
+                decoded.rgba8[dst++] = data[pixel + (legacyBgrx ? 0 : 2)];
+                decoded.rgba8[dst++] = 255;
+            }
+            src += std::size_t(stride) * h;
+        }
+        decoded.sourcePath = out.sourcePath;
+        out = std::move(decoded); return true;
+    }
     if ((hdr.ddspf.flags & kDdpfRgb) != 0u && hdr.ddspf.rgbBitCnt == 32u &&
         (legacyBgra || legacyBgrx || legacyRgba)) {
         const std::uint32_t mipCount = std::max(1u, hdr.mipMapCount);
@@ -164,7 +203,7 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
             mh = std::max(1u, mh >> 1u);
         }
         chainBytes *= layers;
-        if (fileSize < dataOffset + chainBytes) return false;
+        if (chainBytes > 512ull * 1024 * 1024 || chainBytes > fileSize - dataOffset) return false;
         out.arrayLayers = layers;
         out.width = hdr.width;
         out.height = hdr.height;
@@ -227,7 +266,7 @@ bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, Importe
         }
     }
     chainBytes *= layers;
-    if (fileSize < dataOffset + chainBytes) return false;
+    if (chainBytes > 512ull * 1024 * 1024 || chainBytes > fileSize - dataOffset) return false;
 
     out.arrayLayers = layers;
     out.width         = hdr.width;
@@ -256,15 +295,15 @@ bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& out) {
 void dropDdsMipLevels(ImportedSceneTexture& tex, std::uint32_t maxDimension) {
     if (tex.arrayLayers != 1 && tex.arrayLayers != 6) return;
     const std::uint32_t bpb = ddsBlockBytes(tex.format);
-    if (bpb == 0u || maxDimension == 0u || tex.mipLevelCount <= 1u) {
+    if (maxDimension == 0u || tex.mipLevelCount <= 1u) {
         return;
     }
     const auto faceBytes = tex.rgba8.size() / tex.arrayLayers;
     std::size_t dropBytes = 0;
     while (tex.mipLevelCount > 1u && (tex.width > maxDimension || tex.height > maxDimension)) {
-        const std::size_t levelBytes = static_cast<std::size_t>(std::max(1u, (tex.width + 3u) / 4u)) *
-            std::max(1u, (tex.height + 3u) / 4u) * bpb;
-        if (dropBytes + levelBytes >= tex.rgba8.size()) {
+        const std::size_t levelBytes = bpb ? static_cast<std::size_t>((tex.width + 3u) / 4u) *
+            ((tex.height + 3u) / 4u) * bpb : std::size_t(tex.width) * tex.height * 4;
+        if (dropBytes + levelBytes >= faceBytes) {
             break;  // never drop the whole chain
         }
         dropBytes += levelBytes;
@@ -333,6 +372,170 @@ bool writeDds(const std::filesystem::path& path,
     f.write(reinterpret_cast<const char*>(mipData),
             static_cast<std::streamsize>(mipDataSize));
     return f.good();
+}
+
+namespace {
+std::uint32_t imageWord(const std::uint8_t* p, unsigned n) {
+    std::uint32_t v = 0;
+    for (unsigned i = 0; i < n; ++i) v |= std::uint32_t(p[i]) << (i * 8);
+    return v;
+}
+
+bool decodeLegacyImage(const std::uint8_t* data, std::size_t size,
+                       const std::string& extension, ImportedSceneTexture& tex) {
+    if (!data) return false;
+    std::size_t offset = 0, stride = 0;
+    unsigned depth = 0;
+    bool top = true, right = false, rle = false;
+    if (extension == ".tga") {
+        if (size < 18 || data[1] != 0 || (data[2] != 2 && data[2] != 10) ||
+            (data[16] != 24 && data[16] != 32) || (data[17] & 0xc0)) return false;
+        tex.width = imageWord(data + 12, 2); tex.height = imageWord(data + 14, 2);
+        depth = data[16] / 8; offset = 18u + data[0];
+        top = (data[17] & 0x20) != 0; right = (data[17] & 0x10) != 0;
+        rle = data[2] == 10;
+    } else if (extension == ".bmp") {
+        if (size < 54 || data[0] != 'B' || data[1] != 'M' ||
+            imageWord(data + 14, 4) < 40 || imageWord(data + 26, 2) != 1 ||
+            imageWord(data + 30, 4) != 0 ||
+            (imageWord(data + 28, 2) != 24 && imageWord(data + 28, 2) != 32)) return false;
+        const auto headerSize = imageWord(data + 14, 4);
+        const auto w = std::bit_cast<std::int32_t>(imageWord(data + 18, 4));
+        const auto h = std::bit_cast<std::int32_t>(imageWord(data + 22, 4));
+        if (w <= 0 || h == 0 || h == INT32_MIN) return false;
+        tex.width = std::uint32_t(w); tex.height = std::uint32_t(h < 0 ? -h : h);
+        depth = imageWord(data + 28, 2) / 8; offset = imageWord(data + 10, 4);
+        if (headerSize > size - 14 || offset < 14u + headerSize) return false;
+        top = h < 0;
+        stride = (std::size_t(tex.width) * depth + 3) & ~std::size_t(3);
+    } else return false;
+    // Bound allocation before touching payload. 16K covers supported Vulkan
+    // dimensions; image bytes are bounded too, including malicious RLE headers.
+    if (!tex.width || !tex.height || tex.width > 16384 || tex.height > 16384 || offset > size) return false;
+    const std::size_t pixels = std::size_t(tex.width) * tex.height;
+    if (pixels > (512ull * 1024 * 1024) / 4) return false;
+    if (!rle && ((stride ? stride * tex.height : pixels * depth) > size - offset)) return false;
+    // Each RLE packet encodes at most 128 pixels with at least one header and
+    // one pixel; this bounds output allocation against truncated tiny inputs.
+    if (rle && (pixels + 127) / 128 > (size - offset) / (depth + 1)) return false;
+    tex.rgba8.resize(pixels * 4);
+    const auto put = [&](std::size_t index, const std::uint8_t* p) {
+        const auto sx = index % tex.width, sy = index / tex.width;
+        const auto x = right ? tex.width - 1 - sx : sx;
+        const auto y = top ? sy : tex.height - 1 - sy;
+        const auto dst = (y * tex.width + x) * 4;
+        tex.rgba8[dst] = p[2]; tex.rgba8[dst + 1] = p[1]; tex.rgba8[dst + 2] = p[0];
+        tex.rgba8[dst + 3] = depth == 4 ? p[3] : 255;
+    };
+    if (!rle) {
+        for (std::size_t y = 0; y < tex.height; ++y)
+            for (std::size_t x = 0; x < tex.width; ++x)
+                put(y * tex.width + x, data + offset + y * (stride ? stride : tex.width * depth) + x * depth);
+    } else {
+        std::size_t written = 0;
+        while (written < pixels) {
+            if (offset >= size) return false;
+            const auto packet = data[offset++];
+            const auto count = std::size_t((packet & 127) + 1);
+            if (count > pixels - written) return false;
+            const auto bytes = (packet & 128) ? depth : count * depth;
+            if (bytes > size - offset) return false;
+            for (std::size_t i = 0; i < count; ++i) put(written++, data + offset + ((packet & 128) ? 0 : i * depth));
+            offset += bytes;
+        }
+    }
+    tex.format = TextureFormat::RGBA8Srgb;
+    return true;
+}
+
+// Expand color BC images only when a missing chain needs generation or a
+// requested ceiling cannot be reached. Authored compressed chains stay intact.
+bool expandBcColor(ImportedSceneTexture& texture) {
+    using Decode = void (*)(const void*, void*, int);
+    Decode decode = nullptr;
+    switch (texture.format) {
+        case TextureFormat::BC1: case TextureFormat::BC1Linear: decode = bcdec_bc1; break;
+        case TextureFormat::BC2: decode = bcdec_bc2; break;
+        case TextureFormat::BC3: decode = bcdec_bc3; break;
+        case TextureFormat::BC7: decode = bcdec_bc7; break;
+        default: return false;
+    }
+    if (texture.arrayLayers != 1 || std::size_t(texture.width) * texture.height > (512ull * 1024 * 1024) / 4) return false;
+    const auto blockBytes = ddsBlockBytes(texture.format);
+    std::vector<std::uint8_t> rgba(std::size_t(texture.width) * texture.height * 4);
+    for (unsigned by=0; by<(texture.height+3)/4; ++by) for (unsigned bx=0; bx<(texture.width+3)/4; ++bx) {
+        alignas(8) std::array<std::uint8_t,64> block{};
+        decode(texture.rgba8.data() + (std::size_t(by) * ((texture.width+3)/4) + bx) * blockBytes, block.data(), 16);
+        for (unsigned y=0; y<4 && by*4+y<texture.height; ++y)
+            for (unsigned x=0; x<4 && bx*4+x<texture.width; ++x)
+                std::memcpy(rgba.data() + (std::size_t(by*4+y)*texture.width+bx*4+x)*4, block.data()+(y*4+x)*4,4);
+    }
+    texture.rgba8 = std::move(rgba); texture.mipLevelCount = 1;
+    texture.format = TextureFormat::RGBA8Srgb;
+    return true;
+}
+
+// Generate color mips in linear light; averaging encoded sRGB darkens distant
+// textures. Alpha is averaged independently, preserving authored coverage.
+void completeColorMips(ImportedSceneTexture& tex) {
+    if (tex.arrayLayers != 1 || (tex.format != TextureFormat::RGBA8 && tex.format != TextureFormat::RGBA8Srgb)) return;
+    std::uint32_t w = tex.width, h = tex.height;
+    std::size_t offset = 0;
+    for (unsigned mip = 1; mip < tex.mipLevelCount; ++mip) {
+        offset += std::size_t(w) * h * 4; w = std::max(1u, w / 2); h = std::max(1u, h / 2);
+    }
+    while (w > 1 || h > 1) {
+        const auto nw = std::max(1u, w / 2), nh = std::max(1u, h / 2);
+        const auto next = tex.rgba8.size(); tex.rgba8.resize(next + std::size_t(nw) * nh * 4);
+        for (unsigned y = 0; y < nh; ++y) for (unsigned x = 0; x < nw; ++x) {
+            // Area bounds include the trailing row/column of odd-sized inputs.
+            const auto x0 = x * w / nw, x1 = (x + 1) * w / nw;
+            const auto y0 = y * h / nh, y1 = (y + 1) * h / nh;
+            for (unsigned c = 0; c < 4; ++c) {
+                float sum = 0;
+                for (unsigned sy = y0; sy < y1; ++sy) for (unsigned sx = x0; sx < x1; ++sx) {
+                    float value = tex.rgba8[offset + (std::size_t(sy) * w + sx) * 4 + c] / 255.f;
+                    if (c < 3 && tex.format == TextureFormat::RGBA8Srgb)
+                        value = value <= .04045f ? value / 12.92f : std::pow((value + .055f) / 1.055f, 2.4f);
+                    sum += value;
+                }
+                float value = sum / float((x1 - x0) * (y1 - y0));
+                if (c < 3 && tex.format == TextureFormat::RGBA8Srgb)
+                    value = value <= .0031308f ? value * 12.92f : 1.055f * std::pow(value, 1.f / 2.4f) - .055f;
+                tex.rgba8[next + (std::size_t(y) * nw + x) * 4 + c] = std::uint8_t(std::clamp(std::lround(value * 255), 0l, 255l));
+            }
+        }
+        offset = next; w = nw; h = nh; ++tex.mipLevelCount;
+    }
+}
+} // namespace
+
+bool loadTextureFromMemory(const std::uint8_t* bytes, std::size_t size,
+                           const std::string& path, ImportedSceneTexture& out,
+                           std::uint32_t maxDimension, std::string& error, bool linearData) {
+    ImportedSceneTexture texture;
+    const auto dot = path.find_last_of('.');
+    std::string ext = dot == std::string::npos ? "" : path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    const bool ok = ext == ".dds" ? loadDdsFromMemory(bytes, size, texture) : decodeLegacyImage(bytes, size, ext, texture);
+    if (!ok) { error = "invalid or unsupported " + ext + " texture: " + path; return false; }
+    if (!linearData && texture.mipLevelCount == 1 && (texture.width > 1 || texture.height > 1))
+        expandBcColor(texture);
+    if (texture.format == TextureFormat::RGBA8 || texture.format == TextureFormat::RGBA8Srgb)
+        texture.format = linearData ? TextureFormat::RGBA8 : TextureFormat::RGBA8Srgb;
+    completeColorMips(texture);
+    dropDdsMipLevels(texture, maxDimension);
+    if (maxDimension && (texture.width > maxDimension || texture.height > maxDimension) &&
+        !linearData && expandBcColor(texture)) {
+        completeColorMips(texture);
+        dropDdsMipLevels(texture, maxDimension);
+    }
+    if (maxDimension && (texture.width > maxDimension || texture.height > maxDimension)) {
+        error = "texture has no usable mip for requested ceiling " + std::to_string(maxDimension) + ": " + path;
+        return false;
+    }
+    texture.sourcePath = path;
+    out = std::move(texture); error.clear(); return true;
 }
 
 } // namespace odai::importer

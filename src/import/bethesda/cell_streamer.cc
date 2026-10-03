@@ -238,7 +238,8 @@ std::string toLowerAscii(std::string value) {
 // 111: limit neutral refraction fallback to alpha-blended distortion surfaces.
 // 112: authored LAND boundary weights and local overflow layer stacks.
 // 113: Skyrim compound REFR rotations match NiMatrix3::SetEulerAnglesXYZ.
-constexpr int kCellBuildVersion = 114;
+// 115: TES3 legacy formats, authored UV selection/tint, and full-resolution textures.
+constexpr int kCellBuildVersion = 115;
 
 // How long applyCompletedLoads may spend uploading finished cells in one frame,
 // and how slow a single chunk add has to be before it logs itself.

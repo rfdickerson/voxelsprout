@@ -18,13 +18,20 @@ bool loadDds(const std::filesystem::path& path, ImportedSceneTexture& tex);
 // absurd. Leaves tex.sourcePath alone; the caller knows the virtual path.
 bool loadDdsFromMemory(const std::uint8_t* bytes, std::size_t byteCount, ImportedSceneTexture& tex);
 
+// Decode DDS or true-color TGA/BMP by resolved path. Color RGBA inputs get
+// linear-light mip generation; maxDimension=0 retains the original top mip.
+// Failure leaves tex unchanged and describes the reason.
+bool loadTextureFromMemory(const std::uint8_t* bytes, std::size_t byteCount,
+                           const std::string& resolvedPath, ImportedSceneTexture& tex,
+                           std::uint32_t maxDimension, std::string& error, bool linearData = false);
+
 // Drops leading mip levels until the top level is at most maxDimension on its
 // longest side, rewriting width/height/mipLevelCount/rgba8 in place. For a
 // block-compressed chain this is just skipping bytes, and it is how a cook
 // keeps a whole region's textures inside the renderer's bindless budget:
 // Fallout's 1024-square diffuse maps are ~700 KB each and the table holds
 // about a thousand. No-op if the texture is already small enough, if it has
-// only one mip, or for RGBA8.
+// no smaller mip exists. RGBA chains are supported too.
 void dropDdsMipLevels(ImportedSceneTexture& tex, std::uint32_t maxDimension);
 
 // Write a block-compressed DDS file with the given packed mip chain.

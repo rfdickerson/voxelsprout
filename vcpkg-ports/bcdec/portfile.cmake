@@ -1,0 +1,8 @@
+vcpkg_from_github(
+    OUT_SOURCE_PATH SOURCE_PATH
+    REPO iOrange/bcdec
+    REF 80859ed3b7afb1c527a2a99d70c61457bea72d0c
+    SHA512 f0890c9758d8674b5efdcc28b10dfd14fab34e1366300af84a585e33de0a94af0cf8b0f570078ce3f80f3b82b911ae4342d1f943ea43f5f0149b2ad298c667d9
+)
+file(INSTALL "${SOURCE_PATH}/bcdec.h" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
+vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")

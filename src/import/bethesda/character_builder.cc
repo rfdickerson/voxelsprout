@@ -462,6 +462,7 @@ bool appendFalloutCharacterMesh(
         FalloutCharacterPart part;
         part.name = shape.name;
         part.diffuseTexturePath = shape.diffuseTexturePath;
+        part.baseTextureClampMode = shape.baseTextureClampMode;
         part.normalTexturePath = shape.normalTexturePath;
         part.modelSpaceNormals = shape.modelSpaceNormals;
         part.lightingMaterial = shape.lightingMaterial;
@@ -757,6 +758,7 @@ bool appendFalloutCharacterRigidMesh(
         FalloutCharacterPart part;
         part.name = shape.name;
         part.diffuseTexturePath = shape.diffuseTexturePath;
+        part.baseTextureClampMode = shape.baseTextureClampMode;
         part.normalTexturePath = shape.normalTexturePath;
         part.alphaTest = shape.alphaTest;
         part.alphaThreshold = shape.alphaThreshold;

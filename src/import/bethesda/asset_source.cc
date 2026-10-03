@@ -1,3 +1,5 @@
+#include <atomic>
+#include <tuple>
 #include "import/bethesda/asset_source.h"
 
 #include <algorithm>
@@ -337,6 +339,7 @@ std::string normalizeTexturePath(const std::string& path) {
 
 bool FalloutAssetSource::open(
     const std::filesystem::path& dataFilesPath, std::uint32_t contentMask) {
+    m_modDirectories.clear();
     m_profileFingerprint.clear();
     m_forceContentReindex = false;
     m_archiveAllowListEnabled = false;
@@ -346,6 +349,8 @@ bool FalloutAssetSource::open(
 
 bool FalloutAssetSource::openDataFiles(
     const std::filesystem::path& dataFilesPath, std::uint32_t contentMask) {
+    static std::atomic<std::uint64_t> nextIdentity{1};
+    m_cacheIdentity = nextIdentity.fetch_add(1);
     m_dataFilesPath = dataFilesPath;
     m_baseLooseFiles.clear();
     m_archives.clear();
@@ -449,6 +454,7 @@ bool FalloutAssetSource::openDataFiles(
         }
         m_archives.push_back(std::move(archive));
     }
+    m_profileFingerprint += "-" + indexedLayerFingerprint(dataFilesPath, m_baseLooseFiles, archivePaths);
     return true;
 }
 
@@ -482,6 +488,8 @@ bool FalloutAssetSource::open(
 }
 
 bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory) {
+    static std::atomic<std::uint64_t> nextModIdentity{1ull << 32};
+    m_cacheIdentity = nextModIdentity.fetch_add(1);
     ModDirectory mod;
     mod.root = directory;
     mod.id = toLowerAsciiCopy(directory.filename().string());
@@ -567,7 +575,7 @@ bool FalloutAssetSource::addModDirectory(const std::filesystem::path& directory)
         [](const std::filesystem::path& a, const std::filesystem::path& b) {
             return toLowerAsciiCopy(a.filename().string()) < toLowerAsciiCopy(b.filename().string());
         });
-    if (!m_profileFingerprint.empty()) {
+    {
         // Fold the normalized indexed manifest into the cache identity. The
         // profile resolver captures ordered roots and plugin metadata; this
         // captures nested loose files too, including in-place replacements
@@ -767,11 +775,44 @@ bool FalloutAssetSource::resolveMesh(
 
 bool FalloutAssetSource::resolveTexture(
     const std::string& texturePath, std::vector<std::uint8_t>& outBytes, std::string& outError) const {
+    ResolvedAsset asset;
+    if (!resolveTextureWithProvider(texturePath, asset, outError)) return false;
+    outBytes = std::move(asset.bytes);
+    return true;
+}
+
+bool FalloutAssetSource::resolveTextureWithProvider(
+    const std::string& texturePath, ResolvedAsset& outAsset, std::string& outError) const {
+    outAsset = {};
     outError.clear();
-    // Texture paths already carry "textures\", so the loose root is Data Files
-    // itself rather than Data Files\textures.
-    const std::string normalized = normalizeTexturePath(texturePath);
-    return resolve(normalized, m_dataFilesPath, normalized, outBytes, outError);
+    const auto normalized = normalizeTexturePath(texturePath);
+    std::vector<std::string> candidates{normalized};
+    const auto dot = normalized.find_last_of('.');
+    const auto ext = dot == std::string::npos ? std::string{} : toLowerAsciiCopy(normalized.substr(dot));
+    if (ext == ".dds") {
+        candidates.push_back(normalized.substr(0, dot) + ".tga");
+        candidates.push_back(normalized.substr(0, dot) + ".bmp");
+    }
+    // Rank actual providers, not extensions globally: a mod TGA must beat a
+    // base DDS. Within one provider DDS wins, matching TES3's archive aliases.
+    const auto rank = [&](const ResolvedAsset& asset) {
+        int archiveOrder = -1;
+        const std::vector<BsaArchive>* archives = &m_archives;
+        for (const auto& mod : m_modDirectories)
+            if (mod.root == asset.providerRoot && asset.layerPriority >= 2) archives = &mod.archives;
+        for (std::size_t i = 0; i < archives->size(); ++i)
+            if ((*archives)[i].path().filename().string() == asset.archiveName) archiveOrder = int(i);
+        return std::tuple(asset.layerPriority, !asset.physicalPath.empty(), archiveOrder);
+    };
+    bool found = false;
+    for (const auto& candidate : candidates) {
+        ResolvedAsset asset;
+        std::string error;
+        if (!resolveAssetWithProvider(candidate, asset, error)) { outError = error; continue; }
+        if (!found || rank(asset) > rank(outAsset)) { outAsset = std::move(asset); found = true; }
+    }
+    if (found) outError.clear();
+    return found;
 }
 
 }  // namespace odai::importer::bethesda

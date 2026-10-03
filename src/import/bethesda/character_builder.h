@@ -42,6 +42,7 @@ struct FalloutCharacterPart {
     // a time instead of as one anonymous merged vertex buffer.
     std::string sourcePath;
     std::string diffuseTexturePath;
+    std::uint32_t baseTextureClampMode = 3;
     std::string normalTexturePath;
     bool modelSpaceNormals = false;
     NifLightingMaterial lightingMaterial;

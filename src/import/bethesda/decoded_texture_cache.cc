@@ -1,6 +1,7 @@
 #include "import/bethesda/decoded_texture_cache.h"
 
 #include <cctype>
+#include <algorithm>
 
 #include "import/dds.h"
 
@@ -23,23 +24,13 @@ std::string cacheKey(const std::string& texturePath, std::uint32_t maxSize) {
 }
 
 bool decodeTexture(
-    const FalloutAssetSource& assets,
-    const std::string& texturePath,
-    std::uint32_t maxSize,
-    ImportedSceneTexture& outTexture) {
-    std::vector<std::uint8_t> ddsBytes;
-    std::string error;
-    if (!assets.resolveTexture(texturePath, ddsBytes, error)) {
-        return false;
-    }
-    if (!loadDdsFromMemory(ddsBytes.data(), ddsBytes.size(), outTexture)) {
-        return false;
-    }
-    if (maxSize != 0u) {
-        dropDdsMipLevels(outTexture, maxSize);
-    }
-    outTexture.sourcePath = texturePath;
-    return true;
+    const FalloutAssetSource& assets, const std::string& texturePath,
+    std::uint32_t maxSize, ImportedSceneTexture& outTexture,
+    std::string& error, bool linearData) {
+    FalloutAssetSource::ResolvedAsset asset;
+    return assets.resolveTextureWithProvider(texturePath, asset, error) &&
+        loadTextureFromMemory(asset.bytes.data(), asset.bytes.size(),
+            asset.canonicalVirtualPath, outTexture, maxSize, error, linearData);
 }
 
 }  // namespace
@@ -48,11 +39,13 @@ const ImportedSceneTexture* DecodedTextureCache::get(
     const FalloutAssetSource& assets,
     const std::string& texturePath,
     std::uint32_t maxSize,
-    ImportedSceneTexture& outOwned) {
+    ImportedSceneTexture& outOwned, std::string* outError, bool linearData) {
     if (texturePath.empty()) {
         return nullptr;
     }
-    const std::string key = cacheKey(texturePath, maxSize);
+    const std::string key = std::to_string(assets.cacheIdentity()) + "|" +
+        cacheKey(texturePath, maxSize) + (linearData ? "|linear" : "|color");
+    std::string error;
 
     Entry* entry = nullptr;
     bool overBudget = false;
@@ -75,9 +68,10 @@ const ImportedSceneTexture* DecodedTextureCache::get(
     }
 
     if (overBudget) {
-        if (!decodeTexture(assets, texturePath, maxSize, outOwned)) {
+        if (!decodeTexture(assets, texturePath, maxSize, outOwned, error, linearData)) {
             std::lock_guard<std::mutex> lock(m_mutex);
             ++m_stats.failures;
+            if (outError) *outError = error;
             return nullptr;
         }
         return &outOwned;
@@ -86,16 +80,31 @@ const ImportedSceneTexture* DecodedTextureCache::get(
     // Outside the map mutex: two threads missing on DIFFERENT textures decode
     // concurrently, two missing on the SAME texture decode once.
     std::call_once(entry->once, [&]() {
-        entry->valid = decodeTexture(assets, texturePath, maxSize, entry->texture);
+        entry->valid = decodeTexture(assets, texturePath, maxSize, entry->texture, entry->error, linearData);
         std::lock_guard<std::mutex> lock(m_mutex);
         if (entry->valid) {
-            m_stats.residentBytes += static_cast<std::uint64_t>(entry->texture.rgba8.size());
-            ++m_stats.residentCount;
+            // Concurrent misses must not grow the retained budget without bound.
+            if (entry->texture.rgba8.size() <= m_byteBudget - std::min(m_byteBudget, m_stats.residentBytes)) {
+                m_stats.residentBytes += entry->texture.rgba8.size();
+                ++m_stats.residentCount;
+            } else {
+                entry->valid = false;
+                entry->error = "decoded cache budget";
+                entry->texture = {};
+                ++m_stats.overBudgetDecodes;
+            }
         } else {
             ++m_stats.failures;
         }
     });
 
+    if (entry->error == "decoded cache budget") {
+        // call_once entry stays as a nonresident marker; callers own decodes.
+        if (decodeTexture(assets, texturePath, maxSize, outOwned, error, linearData)) return &outOwned;
+        if (outError) *outError = error;
+        return nullptr;
+    }
+    if (outError) *outError = entry->error;
     return entry->valid ? &entry->texture : nullptr;
 }
 

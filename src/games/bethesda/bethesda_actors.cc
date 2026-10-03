@@ -613,14 +613,19 @@ bool buildSkinnedActor(
         }
         const auto loadTexture = [&](const std::string& path, bool linear) -> std::uint32_t {
             if (path.empty()) return 0xffffffffu;
-            const std::string key = toLowerAscii(path);
+            const auto clamp = part.lightingMaterial.parametersValid ? part.lightingMaterial.textureClampMode : part.baseTextureClampMode;
+            const std::string key = toLowerAscii(path) + (linear ? "|linear" : "|color") + "|clamp=" + std::to_string(clamp);
             if (const auto it = localTextureIndexByPath.find(key); it != localTextureIndexByPath.end()) return it->second;
-            std::vector<std::uint8_t> bytes;
+            importer::bethesda::FalloutAssetSource::ResolvedAsset source;
             odai::importer::ImportedSceneTexture texture;
-            if (!assets.resolveTexture(path, bytes, error) ||
-                !odai::importer::loadDdsFromMemory(bytes.data(), bytes.size(), texture)) return 0xffffffffu;
-            texture.sourcePath = path;
+            if (!assets.resolveTextureWithProvider(path, source, error) ||
+                !odai::importer::loadTextureFromMemory(source.bytes.data(), source.bytes.size(),
+                    source.canonicalVirtualPath, texture, 0, error, linear)) {
+                VOX_LOGW("bethesda") << "actor texture unavailable: " << path << " " << error;
+                return 0xffffffffu;
+            }
             texture.linearData = linear;
+            texture.clampMode = std::uint8_t(clamp);
             const auto index = static_cast<std::uint32_t>(outTextures.size());
             localTextureIndexByPath.emplace(key, index);
             outTextures.push_back(std::move(texture));

@@ -74,6 +74,7 @@ endif()
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Jolt CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
+find_path(BCDEC_INCLUDE_DIR bcdec.h REQUIRED)
 if(NOT ODAI_HEADLESS_ONLY)
     find_package(Stb REQUIRED)
     find_package(Vulkan REQUIRED)
@@ -291,6 +292,7 @@ add_library(odai_bethesda_import STATIC
     src/import/bethesda/strings_table.cc src/import/bethesda/weather_records.cc
     src/import/bethesda/image_space_records.cc)
 odai_source_includes(odai_bethesda_import)
+target_include_directories(odai_bethesda_import SYSTEM PRIVATE "${BCDEC_INCLUDE_DIR}")
 target_link_libraries(odai_bethesda_import PUBLIC odai_core odai_anim odai_dialogue
     ZLIB::ZLIB Jolt::Jolt nlohmann_json::nlohmann_json)
 odai_warnings(odai_bethesda_import)
@@ -430,6 +432,14 @@ endif()
 if(ODAI_BUILD_TOOLS)
     add_executable(odai_bethesda_probe src/tools/character_coverage.cc src/tools/tri_probe.cc src/tools/bethesda_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
     target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
+    if(BUILD_TESTING)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME odai_tes3_texture_probe
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/tes3_texture_probe_tests.py
+                    $<TARGET_FILE:odai_bethesda_probe>)
+        endif()
+    endif()
     odai_source_includes(odai_bethesda_probe)
     odai_warnings(odai_bethesda_probe)
 

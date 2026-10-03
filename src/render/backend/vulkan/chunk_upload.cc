@@ -128,7 +128,7 @@ VkFormat vkFormatForImportedTexture(const odai::importer::ImportedSceneTexture& 
         // pipeline. Without this the raw sRGB values are read as linear (~2x too bright)
         // and terrain renders as washed-out pastel. BC4/BC5 are data (single/dual
         // channel — e.g. the water normal map) and must stay UNORM/linear.
-        case odai::importer::TextureFormat::BC1: return tangentSpaceData ? VK_FORMAT_BC1_RGB_UNORM_BLOCK : VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case odai::importer::TextureFormat::BC1: return tangentSpaceData ? VK_FORMAT_BC1_RGB_UNORM_BLOCK : VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
         case odai::importer::TextureFormat::BC1Linear: return VK_FORMAT_BC1_RGB_UNORM_BLOCK;
         case odai::importer::TextureFormat::BC2:
             return tangentSpaceData ? VK_FORMAT_BC2_UNORM_BLOCK : VK_FORMAT_BC2_SRGB_BLOCK;
@@ -1463,7 +1463,7 @@ void RendererBackend::setWeatherClouds(const WeatherCloudTextures& clouds) {
             continue;
         }
         slotAt(layer) = acquireImportedTexture(
-            normalizedImportedTextureKey(texture.sourcePath, texture.format, texture.linearData, texture.clampMode, texture.arrayLayers), texture, commandBuffer,
+            normalizedImportedTextureKey(texture), texture, commandBuffer,
             stagingBufferHandles);
     }
 
@@ -1551,6 +1551,20 @@ std::uint32_t RendererBackend::acquireImportedTexture(
                                << ", inferred=" << inferredMipLevelCount
                                << " (using inferred chain)";
         }
+    }
+
+    VkPhysicalDeviceProperties textureLimits{};
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &textureLimits);
+    VkFormatProperties textureFormatProperties{};
+    vkGetPhysicalDeviceFormatProperties(m_physicalDevice, vkFormatForImportedTexture(srcTexture), &textureFormatProperties);
+    const auto requiredFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    if (srcTexture.width > textureLimits.limits.maxImageDimension2D ||
+        srcTexture.height > textureLimits.limits.maxImageDimension2D ||
+        (textureFormatProperties.optimalTilingFeatures & requiredFeatures) != requiredFeatures) {
+        VOX_LOGE("render") << "unsupported texture dimensions/format: " << srcTexture.sourcePath
+            << " " << srcTexture.width << "x" << srcTexture.height;
+        return kInvalidImportedTextureSlot;
     }
 
     if (!ensureImportedTextureSampler()) {
@@ -1708,6 +1722,11 @@ std::uint32_t RendererBackend::acquireImportedTexture(
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, 0, srcTexture.arrayLayers, 0, mipLevelCount);
 
+    VmaAllocationInfo textureAllocationInfo{};
+    vmaGetAllocationInfo(m_vmaAllocator, resource.allocation, &textureAllocationInfo);
+    VOX_LOGI("render") << "texture resident: " << srcTexture.sourcePath << " "
+        << srcTexture.width << "x" << srcTexture.height << " mips=" << mipLevelCount
+        << " format=" << unsigned(srcTexture.format) << " gpuBytes=" << textureAllocationInfo.size;
     m_importedTextureResources[slotIndex] = resource;
     return static_cast<std::uint32_t>(kBindlessTextureStaticCount + slotIndex);
 }
@@ -1877,12 +1896,14 @@ bool RendererBackend::uploadImportedSceneInternal(
         for (std::size_t textureIndex = 0; textureIndex < uploadScene.textures.size(); ++textureIndex) {
             const odai::importer::ImportedSceneTexture& srcTexture = uploadScene.textures[textureIndex];
             const std::uint32_t slot = acquireImportedTexture(
-                normalizedImportedTextureKey(srcTexture.sourcePath, srcTexture.format, srcTexture.linearData, srcTexture.clampMode, srcTexture.arrayLayers),
+                normalizedImportedTextureKey(srcTexture),
                 srcTexture,
                 commandBuffer,
                 stagingBufferHandles);
             if (slot == kInvalidImportedTextureSlot) {
-                continue;
+                VOX_LOGE("render") << "required imported texture upload failed: " << srcTexture.sourcePath;
+                textureUploadFailed = true;
+                break;
             }
             importedTextureSlots[textureIndex] = slot;
             ++acquiredTextureCount;

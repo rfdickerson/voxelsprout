@@ -79,6 +79,16 @@ inline std::string normalizedImportedTextureKey(
     return key;
 }
 
+inline std::string normalizedImportedTextureKey(const odai::importer::ImportedSceneTexture& texture) {
+    auto key = normalizedImportedTextureKey(texture.sourcePath, texture.format,
+        texture.linearData, texture.clampMode, texture.arrayLayers);
+    if (key.empty()) return key;
+    std::uint64_t hash = 1469598103934665603ull;
+    for (auto byte : texture.rgba8) { hash ^= byte; hash *= 1099511628211ull; }
+    return key + "|" + std::to_string(texture.width) + "x" + std::to_string(texture.height) +
+        "|mips=" + std::to_string(texture.mipLevelCount) + "|bytes=" + std::to_string(hash);
+}
+
 struct RtVertex {
     float position[3];
 };
