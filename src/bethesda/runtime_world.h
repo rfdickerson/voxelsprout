@@ -43,6 +43,7 @@ struct InventoryEntry {
     std::uint64_t equipmentSlots = 0u;
     bool preventUnequip = false;
     bool preventEquip = false;
+    std::int32_t condition = -1; // -1 means the imported full condition/tool uses.
     friend bool operator==(const InventoryEntry&, const InventoryEntry&) = default;
 };
 
@@ -252,6 +253,7 @@ struct RuntimeObject {
     RuntimeSpaceState currentSpace;
     bool enabled = true;
     bool persistent = false;
+    bool saveObject = true;
     bool ghost = false;
     bool interior = false;
     bool inDialogueWithPlayer = false;
@@ -268,6 +270,7 @@ struct RuntimeObject {
     std::optional<RuntimePhysicalState> physicalState;
     std::optional<RuntimeActivatorState> activatorState;
     std::optional<ActorValues> actorValues;
+    std::int32_t itemCondition = -1;
     std::vector<InventoryEntry> inventory;
     std::vector<RelationshipRank> relationships;
     friend bool operator==(const RuntimeObject&, const RuntimeObject&) = default;
@@ -356,6 +359,7 @@ struct WorldCommand {
     RuntimeActivatorState activatorState;
     RecordKey item;
     std::int32_t itemCount = 0;
+    std::optional<std::int32_t> itemCondition;
     bool equipped = false;
     std::uint64_t equipmentSlots = 0u;
     RuntimeEquipmentState equipment;
@@ -370,8 +374,15 @@ struct ItemTransferDelta {
     std::int32_t count = 0;
 };
 
+struct EquipmentDelta {
+    ObjectId owner;
+    RecordKey item;
+    bool equipped = false;
+};
+
 struct CommandApplyResult {
     std::vector<ItemTransferDelta> itemTransfers;
+    std::vector<EquipmentDelta> equipmentChanges;
     std::size_t applied = 0u;
     bool residencyChanged = false;
     std::vector<std::string> diagnostics;

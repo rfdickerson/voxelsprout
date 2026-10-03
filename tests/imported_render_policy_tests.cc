@@ -1,3 +1,4 @@
+#include "render/imported_gi.h"
 #include "render/weather_wind_policy.h"
 #include <cmath>
 #include <cstdlib>
@@ -22,6 +23,56 @@ void expect(bool value, const char* message) {
 
 int main() {
     using namespace odai::render;
+    {
+        using namespace odai::importer;
+        ImportedSceneTexture t;
+        t.width = t.height = 4;
+        t.format = TextureFormat::BC1;
+        t.rgba8 = {0, 248, 31, 0, 0xE4, 0, 0, 0}; // red, blue, both interpolants
+        ImportedScenePackedVertex v{};
+        v.textureIndex = 0;
+        auto sample = [&](float u) { v.uv[0] = u; return sampleImportedGiAlbedo({t}, v); };
+        expect(sample(0)[0] == 1 && sample(0)[2] == 0, "GI decodes BC1 red endpoint");
+        expect(sample(.25f)[2] == 1 && sample(.25f)[0] == 0, "GI decodes BC1 blue endpoint");
+        expect(sample(.5f)[0] > .39f && sample(.5f)[0] < .41f,
+            "GI decodes interpolated BC1 in linear light");
+        expect(sample(-.75f) == sample(.25f), "GI wraps negative texture coordinates");
+        for (auto format : {TextureFormat::BC2, TextureFormat::BC3}) {
+            t.format = format;
+            t.rgba8 = {0,0,0,0,0,0,0,0, 0,248,31,0, 0xE4,0,0,0};
+            expect(sample(.25f)[2] == 1, "GI skips BC2/BC3 alpha block");
+        }
+        t.format = TextureFormat::RGBA8;
+        t.width = t.height = 1;
+        t.rgba8 = {128,64,32,255};
+        expect(std::abs(sample(0)[0] - 128.f/255) < 1e-6f, "GI keeps linear RGBA linear");
+        t.format = TextureFormat::RGBA8Srgb;
+        expect(sample(0)[0] > .21f && sample(0)[0] < .22f, "GI decodes sRGB RGBA");
+        t.rgba8.clear();
+        expect(sample(0)[0] == 1, "truncated texture falls back safely");
+        v.flags = kImportedSceneMaterialFlagVertexColorTint;
+        v.color[0] = .25f;
+        expect(sample(0)[0] == .25f, "GI honors authored vertex tint");
+        const float a[3] = {0,0,0}, b[3] = {1024,0,0}, c[3] = {0,1024,0};
+        expect(importedGiTriangleOverlapsCell(a,b,c,{256,256,0},16), "large wall remains solid");
+        expect(!importedGiTriangleOverlapsCell(a,b,c,{900,900,0},16), "triangle AABB does not fill empty space");
+        expect(!importedGiTriangleOverlapsCell(a,b,c,{256,256,33},16), "wall does not expand into adjacent air");
+        expect(importedGiTriangleOverlapsCell(a,b,c,{256,256,16},16), "boundary contact conservatively blocks light");
+        expect(computeVoxelGiStableOriginY(224,0,true,256) == 0, "GI anchor suppresses small camera motion");
+        expect(computeVoxelGiStableOriginY(256,0,true,256) == 256, "GI anchor follows a moving camera");
+        const std::array<odai::math::Vector3,9> sh{};
+        const std::array<std::array<float,3>,9> oldSh{};
+        const auto flags = [&](bool dirty, bool initialized, float origin, float light) {
+            return computeVoxelGiFlags(sh,oldSh,{origin,0,0},{0,0,0},true,dirty,initialized,
+                {0,-1,0},{0,-1,0},{light,1,1},{1,1,1},1,1,.5f,.5f,.001f,.001f,.001f);
+        };
+        expect(!flags(false,true,0,1).needsComputeUpdate, "stationary GI skips dispatch");
+        expect(flags(true,true,0,1).needsOccupancyUpload, "residency invalidates GI occupancy");
+        expect(flags(false,true,256,1).needsOccupancyUpload, "volume motion invalidates GI occupancy");
+        expect(flags(false,true,0,2).needsComputeUpdate && !flags(false,true,0,2).needsOccupancyUpload,
+            "lighting updates GI without voxelizing geometry again");
+        expect(flags(false,false,0,1).needsOccupancyUpload, "failed occupancy upload retries");
+    }
     const auto north = sampleAuthoredWeatherWind(0, 0, 0.5f, 4);
     const auto east = sampleAuthoredWeatherWind(90, 0, 1, 4);
     expect(std::abs(north[0]) < 1e-6f && north[1] == -1 && north[2] == 0.5f, "Authored north wind maps to engine -Z");
@@ -109,6 +160,11 @@ int main() {
     expect(!shouldUseImportedScreenSpaceGi(exterior), "exterior does not force interior SSGI");
     ImportedExteriorLighting outdoor{};
     outdoor.screenSpaceGi = true;
+
+    constexpr ImportedExteriorLighting morrowind = morrowindExteriorLighting();
+    expect(morrowind.screenSpaceGi && morrowind.worldSpaceGi, "Morrowind exterior enables offscreen diffuse bounce");
+    expect(morrowind.bounceStrength > 0.0f && morrowind.bounceStrength <= 1.0f,
+           "Morrowind exterior bounce stays bounded");
 
     constexpr ImportedExteriorLighting skyrim = skyrimSeExteriorLighting();
     expect(skyrim.screenSpaceGi, "Skyrim exterior enables diffuse bounce");

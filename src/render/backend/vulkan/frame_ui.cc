@@ -296,6 +296,10 @@ void RendererBackend::setImportedSceneDebugState(bool showTerrain, bool showStat
 }
 
 void RendererBackend::setImportedSceneInteriorMode(bool enabled) {
+    if (enabled != m_importedSceneInteriorMode) {
+        m_voxelGiWorldDirty = true;
+        m_voxelGiHasPreviousFrameState = false;
+    }
     m_importedInteriorLighting = ImportedInteriorLighting{};
     m_importedInteriorLighting.enabled = enabled;
     m_importedSceneInteriorMode = enabled;
@@ -306,6 +310,13 @@ void RendererBackend::setImportedInteriorLighting(const ImportedInteriorLighting
     if (lighting.enabled != m_importedInteriorLighting.enabled ||
         lighting.hasAuthoredLighting != m_importedInteriorLighting.hasAuthoredLighting ||
         lighting.indirectLightingMode != m_importedInteriorLighting.indirectLightingMode) {
+        m_screenSpaceGiHistoryValid = false;
+    }
+    if (lighting.enabled != m_importedInteriorLighting.enabled ||
+        lighting.hasAuthoredLighting != m_importedInteriorLighting.hasAuthoredLighting ||
+        !std::equal(std::begin(lighting.ambientColor), std::end(lighting.ambientColor),
+                    std::begin(m_importedInteriorLighting.ambientColor))) {
+        m_voxelGiHasPreviousFrameState = false;
         m_screenSpaceGiHistoryValid = false;
     }
     m_importedInteriorLighting = lighting;

@@ -85,12 +85,12 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const uint voxelType = packedVoxel & 0xFFu;
     const uint albedoPayload = packedVoxel >> 8u;
 
-    const float3 worldPosition = float3(
-        float(chunkMeta.worldMinX) + float(localX) + 0.5,
-        float(chunkMeta.worldMinY) + float(localY) + 0.5,
-        float(chunkMeta.worldMinZ) + float(localZ) + 0.5
-    );
     const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 worldPosition = float3(
+        float(chunkMeta.worldMinX) + (float(localX) + 0.5) * cellSize,
+        float(chunkMeta.worldMinY) + (float(localY) + 0.5) * cellSize,
+        float(chunkMeta.worldMinZ) + (float(localZ) + 0.5) * cellSize
+    );
     const int3 gridCell = int3(floor((worldPosition - camera.voxelGiGridOriginCellSize.xyz) / cellSize));
     uint gridW = 0u;
     uint gridH = 0u;

@@ -613,6 +613,7 @@ float3 applyOrganicDistantMountainSnow(
 
 float3 sampleImportedVoxelGi(float3 worldPosition, float3 normal)
 {
+    if (camera.voxelGiGridExtentStrength.w <= 0.0) return float3(0.0);
     const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
     const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
     const float3 gridExtent = max(camera.voxelGiGridExtentStrength.xyz, float3(cellSize, cellSize, cellSize));
@@ -1665,9 +1666,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
             ((camera.interiorDirectional.w > 0.5) ? ambientIrradiance * float3(0.92, 0.95, 1.00) * 0.22
                                                    : float3(0.0, 0.0, 0.0))
         : legacyAmbient;
-    const float3 voxelGi = (interiorMode && !authoredInterior)
-        ? sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35
-        : float3(0.0, 0.0, 0.0);
+    const float3 voxelGi = sampleImportedVoxelGi(input.inWorldPosition, normal) * 1.35;
     const float3 voxelGiDebug = sampleImportedVoxelGiDebug(input.inWorldPosition, normal);
     const int voxelGiDebugMode = int(camera.shadowVoxelGridOrigin.z + 0.5);
     if (voxelGiDebugMode == 1)
@@ -1773,6 +1772,7 @@ float4 main(FragmentInput input, bool isFrontFace : SV_IsFrontFace) : SV_Target0
     const float giLuma = dot(screenSpaceGi, float3(0.2126, 0.7152, 0.0722));
     const float giLimit = 0.35 * (lightingLuma + 0.05);
     screenSpaceGi *= min(1.0, giLimit / max(giLuma, 1e-5));
+    if (voxelGiDebugMode == 6) return float4(albedo * (voxelGi + screenSpaceGi), 1.0);
     const float3 diffuseLight = directAndAmbient + voxelGi + screenSpaceGi;
 
     // Lighting-balance views. Here rather than in debugViewColor() because

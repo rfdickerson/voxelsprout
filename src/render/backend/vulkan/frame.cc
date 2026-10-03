@@ -3,6 +3,7 @@
 #include "core/log.h"
 
 #include <cstdlib>
+#include <fstream>
 
 #include <algorithm>
 #include <array>
@@ -374,6 +375,23 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
         kGpuTimestampQueryReflectionStart, kGpuTimestampQueryReflectionEnd);
     m_debugGpuPostTimeMs = durationMs(kGpuTimestampQueryPostStart, kGpuTimestampQueryPostEnd);
     m_debugGpuUiTimeMs = durationMs(kGpuTimestampQueryUiStart, kGpuTimestampQueryUiEnd);
+    // Deferred GPU samples retain their submission ID. Do not repeat an old
+    // sample on a frame where timestamp results are unavailable.
+    static std::ofstream giCsv = [] {
+        std::ofstream output;
+        if (const char* path = std::getenv("ODAI_GI_STATS_CSV")) {
+            output.open(path);
+            output << "submission,frame_ms,occupancy_ms,surface_ms,inject_ms,propagate_ms,screen_depth_ms,ssgi_ms,voxel_span_ms\n";
+        }
+        return output;
+    }();
+    if (giCsv && m_debugGpuFrameTimeMs > 0.0f) {
+        giCsv << m_benchmarkGpuSubmissionId << ',' << m_debugGpuFrameTimeMs << ','
+            << m_debugGpuGiOccupancyTimeMs << ',' << m_debugGpuGiSurfaceTimeMs << ','
+            << m_debugGpuGiInjectTimeMs << ',' << m_debugGpuGiPropagateTimeMs << ','
+            << m_debugGpuScreenDepthTimeMs << ',' << m_debugGpuScreenSpaceGiTimeMs << ','
+            << durationMs(kGpuTimestampQueryGiOccupancyStart, kGpuTimestampQueryGiPropagateEnd) << '\n';
+    }
     // Per-pass GPU breakdown. Everything above was already measured and then
     // kept private, so "why is the frame 17 ms" could only be answered by
     // disabling passes one at a time and re-measuring. ODAI_GPU_TIMINGS prints
@@ -421,7 +439,14 @@ bool RendererBackend::readGpuTimestampResults(uint32_t frameIndex) {
                 << " ui=" << m_debugGpuUiTimeMs
                 << " autoExposure=" << m_debugGpuAutoExposureTimeMs
                 << " sunShaft=" << m_debugGpuSunShaftTimeMs
-                << " giOccupancy=" << m_debugGpuGiOccupancyTimeMs;
+                << " giOccupancy=" << m_debugGpuGiOccupancyTimeMs
+                << " giSurface=" << m_debugGpuGiSurfaceTimeMs
+                << " giInject=" << m_debugGpuGiInjectTimeMs
+                << " giPropagate=" << m_debugGpuGiPropagateTimeMs
+                << " giTotal=" << (m_debugGpuScreenDepthTimeMs +
+                    m_debugGpuScreenSpaceGiTimeMs + m_debugGpuGiOccupancyTimeMs +
+                    m_debugGpuGiSurfaceTimeMs + m_debugGpuGiInjectTimeMs +
+                    m_debugGpuGiPropagateTimeMs);
         }
     }
     m_debugGpuFrameTimingMsHistory.push(m_debugGpuFrameTimeMs);

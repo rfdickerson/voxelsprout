@@ -1333,6 +1333,16 @@ bool buildFalloutWorldTables(
                 outTables.staticRecordTypes.insert_or_assign(globalId, source.recordType);
             }
         }
+        for (const FalloutLightRecord& source : data.lights) {
+            const auto found = outTables.baseFormIdsByEditorId.find(
+                toLowerAsciiCopy(source.editorId));
+            if (found == outTables.baseFormIdsByEditorId.end()) {
+                continue;
+            }
+            FalloutLightRecord light = source;
+            light.formId = found->second;
+            outTables.lightsByFormId.insert_or_assign(light.formId, std::move(light));
+        }
         for (const FalloutLandTextureRecord& texture : data.landTextures) {
             if (texture.editorId.empty() || texture.formId == 0u) {
                 continue;

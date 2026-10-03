@@ -1,6 +1,6 @@
 # MECH-001: Player Inventory
 
-Status: Planned
+Status: Implemented
 
 ## Goal
 
@@ -21,6 +21,7 @@ More advanced inventory behavior should be implemented as separate capabilities.
 ## Dependencies
 
 - HARNESS-001: Headless Engine Test Runner
+- HARNESS-006: Headless UI testing, required for UI-level validation
 - Player entity/state system
 - World object/entity representation
 - Basic UI framework
@@ -168,14 +169,21 @@ Do not introduce an artificial state system solely for this test.
 
 ## UI Verification
 
-The capability should also include an automated or deterministic UI-level verification where practical.
+HARNESS-006 must run an automated headless inventory scenario through normal
+mapped input and the production UI flow. Direct gameplay calls in HARNESS-001
+verify inventory state but do not satisfy this UI requirement.
 
 Verify that:
 
 1. inventory can be opened through the normal UI/input system
 2. owned items appear in the inventory view
 3. displayed quantities match inventory state
-4. dropping an item causes the UI to reflect the updated inventory
+4. dropping an item through the UI updates gameplay and world state
+5. reopening or refreshing the UI shows the updated quantity
+
+The scenario must pass in the headless CTest configuration without a display,
+GPU, or retail game data. An intentionally incorrect UI expectation must fail
+with a useful diagnostic.
 
 Visual regression testing is not required for this capability unless the existing harness already supports it.
 
@@ -240,7 +248,25 @@ MECH-001 is Implemented when:
 - dropped item appears in the world
 - inventory/world state remains consistent
 - automated inventory scenarios pass
-- relevant UI verification passes
+- HARNESS-006 headless UI inventory verification passes
 - existing test suite passes
 - no unrelated regressions are introduced
 - docs/PARITY.md is updated to mark MECH-001 Implemented
+
+## Implementation and verification
+
+`BethesdaSession` owns inventory state and queues a `DropItem` world command.
+The command removes one item from the stack and creates a spawned world item
+near the player. Morrowind inventory input and visible selection run through
+`InventoryUiFlow`, which both the interactive app and headless UI runner use.
+The app builds a transient imported-scene chunk from a dropped item's authored
+`MODL` path and retires that chunk when the item leaves the current space.
+
+`player_inventory.json` verifies initial ownership, a stack drop, and a
+final-item drop at the gameplay level. `player_inventory_ui.json` performs the
+same lifecycle through mapped inventory, navigation, drop, and close input and
+checks the visible quantity after reopening. Incorrect UI and world
+expectations fail. Local retail weapon and potion models produced renderable
+imported-scene meshes at the expected world position; the Vulkan imported-scene
+smoke test passed. The headless CTest configuration passes 9/9 tests, and the
+full configuration passes 62/62 tests.

@@ -4651,6 +4651,19 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
         appendBytes(body, subrecord("MODL", zstring(model)));
         return record(type, body);
     };
+    const auto lightRecord = [&](const std::string& id) {
+        std::vector<std::uint8_t> body;
+        appendBytes(body, subrecord("NAME", zstring(id)));
+        std::vector<std::uint8_t> lhdt;
+        appendPod(lhdt, 1.0f);                  // weight
+        appendPod(lhdt, std::int32_t(10));      // value
+        appendPod(lhdt, std::int32_t(-1));      // duration
+        appendPod(lhdt, std::int32_t(256));     // radius
+        lhdt.insert(lhdt.end(), {240u, 72u, 40u, 255u});
+        appendPod(lhdt, std::uint32_t(0u));     // flags
+        appendBytes(body, subrecord("LHDT", lhdt));
+        return record("LIGH", body);
+    };
     const auto ltexRecord = [&](const std::string& id, std::uint32_t index,
                                 const std::string& path) {
         std::vector<std::uint8_t> body;
@@ -4670,6 +4683,11 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
         appendPod(data, x);
         appendPod(data, z);
         appendBytes(body, subrecord("DATA", data));
+        if (interior) {
+            std::vector<std::uint8_t> ambi{32,48,64,0, 80,96,112,0, 128,144,160,0};
+            appendPod(ambi, 0.5f);
+            appendBytes(body, subrecord("AMBI", ambi));
+        }
         return body;
     };
     const auto appendReference = [&](std::vector<std::uint8_t>& cell,
@@ -4733,12 +4751,14 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
     std::vector<std::uint8_t> baseInterior =
         cellHeader("Almas Thirr, Canalworks", true, 0, 0);
     appendReference(baseInterior, 0x00000011u, "crate", 10.0f, 20.0f, 30.0f, false);
+    appendReference(baseInterior, 0x00000012u, "red_lamp", 60.0f, 20.0f, 30.0f, false);
     // Cell (6,-28) deliberately starts as LAND-only in the base plugin. The
     // later TR CELL must make it streamable without losing this contribution.
     writePlugin("Morrowind.esm", {}, true, {
         ltexRecord("ground", 0u, "base_ground.dds"),
         ltexRecord("rock", 1u, "rock.dds"),
         statRecord("crate", "base_crate.nif"),
+        lightRecord("red_lamp"),
         statRecord("guar", "r\\Guar.NIF", "CREA"),
         record("CELL", baseExterior), landRecord(5, -28, 1u), record("CELL", baseInterior),
         landRecord(6, -28, 1u, true)});
@@ -4877,7 +4897,12 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
     expectTrue(interior != nullptr &&
                    extractFalloutCellMerged(index, order, *interior, mergedInterior, error),
                ("the case-insensitive Canalworks interior extracts: " + error).c_str());
-    expectTrue(mergedInterior.references.size() == 2u,
+    expectTrue(interior && interior->hasLighting && mergedInterior.hasLighting &&
+                   std::abs(mergedInterior.ambientColor[0] - 32.f/255.f) < 1e-6f &&
+                   std::abs(mergedInterior.directionalColor[1] - 96.f/255.f) < 1e-6f &&
+                   std::abs(interior->fogColor[2] - 160.f/255.f) < 1e-6f,
+               "TES3 AMBI authored colors survive indexing and merged extraction");
+    expectTrue(mergedInterior.references.size() == 3u,
                "named-interior extraction includes base and TR contributions");
 
     FalloutCellRecord mergedSecondExterior;
@@ -4975,6 +5000,22 @@ void testMorrowindLoadOrderMergesWorldRenderingRecords() {
                    tables.staticModelPaths.at(guar->second) == "r\\Guar.NIF" &&
                    tables.staticRecordTypes.at(guar->second) == "CREA",
                "TES3 creature models enter the placed imported-scene tables");
+    const auto lamp = tables.baseFormIdsByEditorId.find("red_lamp");
+    expectTrue(lamp != tables.baseFormIdsByEditorId.end() &&
+                   tables.lightsByFormId.contains(lamp->second) &&
+                   tables.lightsByFormId.at(lamp->second).radius == 256.0f &&
+                   tables.lightsByFormId.at(lamp->second).color[0] >
+                       tables.lightsByFormId.at(lamp->second).color[1],
+               "TES3 LHDT light radius and colored emitter reach world tables");
+    FalloutAssetSource lightAssets;
+    expectTrue(lightAssets.open(dataDir), "TES3 light fixture assets open");
+    CellSceneBuilder lightBuilder(lightAssets, tables);
+    lightBuilder.addCellStatics(mergedInterior);
+    expectTrue(lightBuilder.scene().lights.size() == 1u &&
+                   lightBuilder.scene().lights.front().radius == 256.0f &&
+                   lightBuilder.scene().lights.front().color[0] >
+                       lightBuilder.scene().lights.front().color[1],
+               "TES3 placed LIGH becomes an imported-scene colored local light");
     const std::uint64_t tdPalette = (3ull << 32u) | 8u;
     const std::uint64_t trPalette = (4ull << 32u) | 8u;
     expectTrue(tables.morrowindLandTexturePaths.at(tdPalette) == "other_ground.dds" &&

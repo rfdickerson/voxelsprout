@@ -354,9 +354,9 @@ Json objectJson(const RuntimeObject& object) {
     for (const InventoryEntry& entry : object.inventory) {
         inventory.push_back({{"item", recordKeyJson(entry.item)}, {"count", entry.count},
                              {"equipped", entry.equipped}, {"equipmentSlots", entry.equipmentSlots},
-            {"preventUnequip", entry.preventUnequip}, {"preventEquip", entry.preventEquip}});
+            {"preventUnequip", entry.preventUnequip}, {"preventEquip", entry.preventEquip}, {"condition", entry.condition}});
     }
-    Json json{{"equipment", {{"initialized", object.equipment.initialized}, {"drawn", object.equipment.drawn},
+    Json json{{"item_condition", object.itemCondition}, {"equipment", {{"initialized", object.equipment.initialized}, {"drawn", object.equipment.drawn},
         {"requestedDrawn", object.equipment.requestedDrawn}, {"transitioning", object.equipment.transitioning},
         {"combatDraw", object.equipment.combatDraw}}},
               {"id", objectIdJson(object.id)}, {"base", recordKeyJson(object.base)},
@@ -494,6 +494,15 @@ Json objectJson(const RuntimeObject& object) {
 
 bool objectFromJson(const Json& json, RuntimeObject& out, std::string& error) {
     try {
+        if (json.contains("item_condition")) {
+            const auto& value = json.at("item_condition");
+            if (!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>() > std::uint64_t(std::numeric_limits<std::int32_t>::max()))) {
+                error = "invalid saved world item condition"; return false;
+            }
+            const auto condition = value.get<std::int64_t>();
+            if (condition < -1 || condition > std::numeric_limits<std::int32_t>::max()) { error = "invalid saved world item condition"; return false; }
+            out.itemCondition = static_cast<std::int32_t>(condition);
+        }
         if (!objectIdFromJson(json.at("id"), out.id, error) ||
             !recordKeyFromJson(json.at("base"), out.base, error) ||
             !transformFromJson(json.at("transform"), out.transform, error)) return false;
@@ -792,6 +801,15 @@ bool objectFromJson(const Json& json, RuntimeObject& out, std::string& error) {
             entry.equipmentSlots = item.value("equipmentSlots", std::uint64_t{0});
             entry.preventUnequip = item.value("preventUnequip", false);
             entry.preventEquip = item.value("preventEquip", false);
+            if (item.contains("condition")) {
+                const auto& value = item.at("condition");
+                if (!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>() > std::uint64_t(std::numeric_limits<std::int32_t>::max()))) {
+                    error = "invalid saved inventory condition"; return false;
+                }
+                const auto condition = value.get<std::int64_t>();
+                if (condition < -1 || condition > std::numeric_limits<std::int32_t>::max()) { error = "invalid saved inventory condition"; return false; }
+                entry.condition = static_cast<std::int32_t>(condition);
+            }
             if ((entry.equipmentSlots >> 35u) != 0u) { error = "invalid saved equipment slot mask"; return false; }
             if (entry.count < 0) { error = "negative saved inventory count"; return false; }
             out.inventory.push_back(std::move(entry));
@@ -978,6 +996,10 @@ Json tes3RuntimeJson(const Tes3Runtime& runtime) {
     }
     Json topics = Json::array();
     for (const RecordKey& topic : runtime.knownTopics()) topics.push_back(recordKeyJson(topic));
+    Json topicResponseActors = Json::array();
+    for (const auto& [info, actor] : runtime.topicResponseActors()) {
+        topicResponseActors.push_back({{"info", recordKeyJson(info)}, {"actor", actor}});
+    }
     Json globals = Json::object();
     for (const auto& [name, value] : runtime.scripts().globals()) globals[name] = tes3ValueJson(value);
     Json threads = Json::array();
@@ -990,7 +1012,10 @@ Json tes3RuntimeJson(const Tes3Runtime& runtime) {
         threads.push_back({{"id", thread.id}, {"program", thread.program},
             {"owner", thread.owner.valid() ? objectIdJson(thread.owner) : Json(nullptr)},
             {"instruction", thread.instruction}, {"locals", std::move(locals)},
-            {"events", std::move(events)}, {"state", static_cast<std::uint8_t>(thread.state)},
+            {"events", std::move(events)}, {"repeat", thread.repeat},
+            {"local", thread.local},
+            {"last_tick", thread.lastTick},
+            {"state", static_cast<std::uint8_t>(thread.state)},
             {"suspension_reason", thread.suspensionReason}, {"error", thread.error}});
     }
     const Tes3DialogueState& dialogue = runtime.dialogue();
@@ -1013,7 +1038,9 @@ Json tes3RuntimeJson(const Tes3Runtime& runtime) {
     Json deathCounts = Json::object();
     for (const auto& [name, count] : dialogue.player.deathCounts) deathCounts[name] = count;
     Json savedDialogue{{"active", dialogue.active}, {"choice", dialogue.choice},
-        {"goodbye", dialogue.goodbye}, {"exhausted", std::move(exhausted)},
+        {"persuasion_temporary", dialogue.persuasionTemporary}, {"persuasion_permanent", dialogue.persuasionPermanent},
+        {"goodbye", dialogue.goodbye}, {"message_box_text", dialogue.messageBoxText},
+        {"exhausted", std::move(exhausted)},
         {"choices", std::move(choices)},
         {"current_topic", dialogue.currentTopic.valid() ? recordKeyJson(dialogue.currentTopic) : Json(nullptr)},
         {"current_info", dialogue.currentInfo.valid() ? recordKeyJson(dialogue.currentInfo) : Json(nullptr)},
@@ -1022,6 +1049,7 @@ Json tes3RuntimeJson(const Tes3Runtime& runtime) {
             {"class", dialogue.actor.actorClass}, {"faction", dialogue.actor.faction},
             {"cell", dialogue.actor.cell}, {"rank", dialogue.actor.rank},
             {"gender", dialogue.actor.gender}, {"disposition", dialogue.actor.disposition},
+            {"talked_to_before", dialogue.actor.talkedToBefore},
             {"locals", std::move(actorLocals)}}},
         {"player", {{"object", dialogue.player.object.valid() ? objectIdJson(dialogue.player.object) : Json(nullptr)},
             {"factions", std::move(playerFactions)}, {"filters", std::move(playerFilters)},
@@ -1044,10 +1072,28 @@ Json tes3RuntimeJson(const Tes3Runtime& runtime) {
     }
     Json persistentPlayer{{"object", runtime.playerState().object.valid()
             ? objectIdJson(runtime.playerState().object) : Json(nullptr)},
+        {"name", runtime.playerState().name}, {"race", runtime.playerState().race},
+        {"class", runtime.playerState().actorClass},
+        {"birthsign", runtime.playerState().birthsign},
+        {"head", runtime.playerState().head}, {"hair", runtime.playerState().hair},
+        {"gender", runtime.playerState().gender},
         {"factions", std::move(persistentFactions)},
         {"filters", std::move(persistentFilters)},
         {"inventory", std::move(persistentInventory)},
         {"death_counts", std::move(persistentDeaths)}};
+    const auto& progression = runtime.playerState().progression;
+    Json customClass = nullptr;
+    if (progression.customClass) {
+        const auto& c = *progression.customClass;
+        customClass = {{"attributes", c.attributes}, {"specialization", c.specialization},
+            {"minor", c.minor}, {"major", c.major}};
+    }
+    persistentPlayer["progression"] = {{"version", 1},
+        {"skills", progression.skillProgress}, {"attributes", progression.attributeIncreases},
+        {"level_progress", progression.levelProgress}, {"selection_open", progression.selectionOpen},
+        {"ready_notification", progression.readyNotification}, {"books", progression.readBooks},
+        {"rest_bed", progression.restBed.valid() ? objectIdJson(progression.restBed) : Json(nullptr)},
+        {"custom_class", std::move(customClass)}};
     Json referenceOverrides = Json::array();
     for (const auto& [id, override] : runtime.referenceOverrides()) {
         Json locals = Json::object();
@@ -1078,7 +1124,9 @@ Json tes3RuntimeJson(const Tes3Runtime& runtime) {
     }
     return {{"journal", {{"quests", std::move(quests)}, {"chronology", std::move(chronology)},
                 {"next_sequence", runtime.journal().nextSequence()}}},
-        {"known_topics", std::move(topics)}, {"globals", std::move(globals)},
+        {"known_topics", std::move(topics)},
+        {"topic_response_actors", std::move(topicResponseActors)},
+        {"globals", std::move(globals)},
         {"threads", std::move(threads)}, {"next_thread_id", runtime.scripts().nextThreadId()},
         {"dialogue", std::move(savedDialogue)}, {"player", std::move(persistentPlayer)},
         {"reference_overrides", std::move(referenceOverrides)},
@@ -1092,6 +1140,7 @@ struct Tes3SavedState {
     std::vector<Tes3JournalVisit> chronology;
     std::uint64_t nextJournalSequence = 1u;
     std::set<RecordKey> knownTopics;
+    std::map<RecordKey, std::string> topicResponseActors;
     std::map<std::string, Tes3Value> globals;
     std::map<std::uint64_t, Tes3ScriptThread> threads;
     std::uint64_t nextThreadId = 1u;
@@ -1156,6 +1205,12 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
                 error = "duplicate known TES3 topic"; return false;
             }
         }
+        for (const Json& saved : json.value("topic_response_actors", Json::array())) {
+            RecordKey info;
+            if (!recordKeyFromJson(saved.at("info"), info, error)) return false;
+            out.topicResponseActors.emplace(std::move(info),
+                saved.at("actor").get<std::string>());
+        }
         for (const auto& [name, saved] : json.at("globals").items()) {
             Tes3Value value;
             if (!tes3ValueFromJson(saved, value, error)) return false;
@@ -1183,6 +1238,9 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
                 if (!tes3ValueFromJson(valueJson, value, error)) return false;
                 thread.eventVariables.emplace(name, std::move(value));
             }
+            thread.repeat = saved.value("repeat", false);
+            thread.local = saved.value("local", false);
+            thread.lastTick = saved.value("last_tick", std::numeric_limits<std::uint64_t>::max());
             if (!out.threads.emplace(thread.id, std::move(thread)).second) {
                 error = "duplicate TES3 script thread"; return false;
             }
@@ -1192,6 +1250,7 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
         out.dialogue.active = dialogue.at("active").get<bool>();
         out.dialogue.choice = dialogue.at("choice").get<std::int32_t>();
         out.dialogue.goodbye = dialogue.at("goodbye").get<bool>();
+        out.dialogue.messageBoxText = dialogue.value("message_box_text", std::string{});
         if (!dialogue.at("current_topic").is_null() &&
             !recordKeyFromJson(dialogue.at("current_topic"), out.dialogue.currentTopic, error)) return false;
         if (!dialogue.at("current_info").is_null() &&
@@ -1206,6 +1265,18 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
                 {saved.at("label").get<std::string>(), saved.at("value").get<std::int32_t>()});
         }
         const Json& actor = dialogue.at("actor");
+        out.dialogue.persuasionTemporary = dialogue.value("persuasion_temporary", std::int32_t{0});
+        out.dialogue.persuasionPermanent = dialogue.value("persuasion_permanent", std::int32_t{0});
+        for (const auto* key : {"persuasion_temporary", "persuasion_permanent"}) {
+            if (dialogue.contains(key) && (!dialogue.at(key).is_number_integer() ||
+                (dialogue.at(key).is_number_unsigned() && dialogue.at(key).get<std::uint64_t>() > 1000000) ||
+                dialogue.at(key).get<std::int64_t>() < -1000000 || dialogue.at(key).get<std::int64_t>() > 1000000)) {
+                error = "invalid TES3 persuasion state"; return false;
+            }
+        }
+        if (!out.dialogue.active && (out.dialogue.persuasionTemporary != 0 || out.dialogue.persuasionPermanent != 0)) {
+            error = "inactive TES3 dialogue has pending persuasion changes"; return false;
+        }
         if (!actor.at("object").is_null() &&
             !objectIdFromJson(actor.at("object"), out.dialogue.actor.object, error)) return false;
         out.dialogue.actor.id = actor.at("id").get<std::string>();
@@ -1215,6 +1286,7 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
         out.dialogue.actor.cell = actor.at("cell").get<std::string>();
         out.dialogue.actor.rank = actor.at("rank").get<std::int8_t>();
         out.dialogue.actor.gender = actor.at("gender").get<std::int8_t>();
+        out.dialogue.actor.talkedToBefore = actor.value("talked_to_before", false);
         out.dialogue.actor.disposition = actor.at("disposition").get<float>();
         out.dialogue.actor.locals = actor.at("locals").get<std::map<std::string, double>>();
         const Json& player = dialogue.at("player");
@@ -1235,6 +1307,13 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
         }
         out.playerState.factionRanks = persistentPlayer.at("factions").get<
             std::map<std::string, std::int8_t>>();
+        out.playerState.name = persistentPlayer.value("name", std::string{});
+        out.playerState.race = persistentPlayer.value("race", std::string{});
+        out.playerState.actorClass = persistentPlayer.value("class", std::string{});
+        out.playerState.birthsign = persistentPlayer.value("birthsign", std::string{});
+        out.playerState.head = persistentPlayer.value("head", std::string{});
+        out.playerState.hair = persistentPlayer.value("hair", std::string{});
+        out.playerState.gender = persistentPlayer.value("gender", std::int8_t{-1});
         out.playerState.numericFilters = persistentPlayer.at("filters").get<
             std::map<std::string, double>>();
         out.playerState.deathCounts = persistentPlayer.at("death_counts").get<
@@ -1245,6 +1324,45 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
             out.playerState.inventory.emplace(
                 std::move(item), saved.at("count").get<std::int32_t>());
         }
+        if (persistentPlayer.contains("progression")) {
+            const Json& saved = persistentPlayer.at("progression");
+            auto& progression = out.playerState.progression;
+            if (saved.at("version").get<int>() != 1 || saved.at("skills").size() != 27 ||
+                saved.at("attributes").size() != 8) {
+                error = "invalid TES3 progression layout"; return false;
+            }
+            progression.skillProgress = saved.at("skills").get<std::array<double, 27>>();
+            progression.attributeIncreases = saved.at("attributes").get<std::array<int, 8>>();
+            progression.levelProgress = saved.at("level_progress").get<int>();
+            progression.selectionOpen = saved.at("selection_open").get<bool>();
+            progression.readyNotification = saved.at("ready_notification").get<bool>();
+            progression.readBooks = saved.at("books").get<std::set<std::string>>();
+            if (saved.contains("rest_bed") && !saved.at("rest_bed").is_null() &&
+                !objectIdFromJson(saved.at("rest_bed"), progression.restBed, error)) return false;
+            if (!saved.at("custom_class").is_null()) {
+                const Json& c = saved.at("custom_class");
+                progression.customClass = Tes3ProgressionClass{
+                    c.at("attributes").get<std::array<int, 2>>(), c.at("specialization").get<int>(),
+                    c.at("minor").get<std::array<int, 5>>(), c.at("major").get<std::array<int, 5>>()};
+                if (!validTes3ProgressionClass(*progression.customClass)) {
+                    error = "invalid saved TES3 custom class"; return false;
+                }
+            }
+            for (double value : progression.skillProgress) if (!std::isfinite(value) || value < 0 || value >= 1) {
+                error = "invalid saved TES3 skill progress"; return false;
+            }
+            for (int value : progression.attributeIncreases) if (value < 0) {
+                error = "invalid saved TES3 attribute increases"; return false;
+            }
+            if (progression.levelProgress < 0) { error = "invalid saved TES3 level progress"; return false; }
+            for (const auto& id : progression.readBooks) if (id.empty() || normalizeTes3Symbol(id) != id) {
+                error = "invalid saved TES3 book identity"; return false;
+            }
+        }
+        // The live dialogue shares the committed player state, including the new
+        // ledger. Older saves start with zero counters, never inferred gains.
+        if (out.dialogue.active) out.dialogue.player = out.playerState;
+        else out.dialogue.player.progression = out.playerState.progression;
         for (const Json& saved : json.value("reference_overrides", Json::array())) {
             ObjectId object;
             if (!objectIdFromJson(saved.at("object"), object, error)) return false;
@@ -1306,6 +1424,7 @@ bool tes3RuntimeFromJson(const Json& json, Tes3SavedState& out, std::string& err
 Json sessionPayload(const BethesdaSession& session) {
     Json objects = Json::array();
     for (const RuntimeObject& object : session.world().orderedObjects()) {
+        if (!object.saveObject) continue;
         objects.push_back(objectJson(object));
     }
     Json quests = Json::array();
@@ -1423,6 +1542,7 @@ Json sessionPayload(const BethesdaSession& session) {
             {"velocity", vectorJson(character.velocity)},
             {"ground_normal", vectorJson(character.groundNormal)},
             {"grounded", character.grounded},
+            {"fall_distance", character.fallDistanceUnits},
             {"movement", {{"coyote", character.movement.coyoteRemaining}, {"buffer", character.movement.bufferRemaining},
                 {"air_x", character.movement.airVelocityX}, {"air_z", character.movement.airVelocityZ},
                 {"jump_held", character.movement.jumpHeld}, {"jump_consumed", character.movement.jumpConsumed}}}};
@@ -1550,6 +1670,10 @@ bool saveOdaiGameAtomic(
     const std::filesystem::path& path,
     const BethesdaSession& session,
     std::string& outError) {
+    if (session.tes3().hasPendingResultTransaction()) {
+        outError = "cannot save during a suspended TES3 dialogue result";
+        return false;
+    }
     if (session.world().hasPendingCommands()) {
         outError = "cannot save before pending gameplay actions reach a fixed-tick boundary";
         return false;
@@ -1695,6 +1819,15 @@ bool loadOdaiGame(
         for (const Json& savedObject : payload.at("world").at("objects")) {
             RuntimeObject object;
             if (!objectFromJson(savedObject, object, outError)) return false;
+            if (session.tes3().content()) for (auto& entry : object.inventory) {
+                if (entry.item.recordType != "ARMO") continue;
+                const auto armor = tes3ArmorDefinition(*session.tes3().content(), entry.item.textId);
+                // Early TES3 gameplay saves assigned bracers separate slots.
+                // Keep their items and policy locks, but restore the hand slot.
+                if (armor && ((armor->slot == 6 && entry.equipmentSlots == (1ull << 9)) ||
+                              (armor->slot == 7 && entry.equipmentSlots == (1ull << 10))))
+                    entry.equipmentSlots = 1ull << armor->slot;
+            }
             objects.push_back(std::move(object));
         }
         for (const Json& savedQuest : payload.at("quests")) {
@@ -1950,6 +2083,10 @@ bool loadOdaiGame(
                 if (!quaternionFromJson(
                         savedPhysics.at("rotation"), character.rotation, outError)) return false;
                 character.grounded = savedPhysics.at("grounded").get<bool>();
+                character.fallDistanceUnits = savedPhysics.value("fall_distance", 0.0f);
+                if (!std::isfinite(character.fallDistanceUnits) || character.fallDistanceUnits < 0) {
+                    outError = "invalid saved fall distance"; return false;
+                }
                 if (savedPhysics.contains("movement")) {
                     const auto& movement = savedPhysics.at("movement");
                     character.movement = {movement.at("coyote").get<float>(), movement.at("buffer").get<float>(),
@@ -2037,6 +2174,14 @@ bool loadOdaiGame(
             outError = "saved TES3 player ObjectId differs from configured player";
             return false;
         }
+        const auto& progression = tes3State.playerState.progression;
+        if (progression.selectionOpen && (session.tes3().levelThreshold() <= 0 ||
+            progression.levelProgress < session.tes3().levelThreshold())) {
+            outError = "saved TES3 level selection is not eligible"; return false;
+        }
+        if (progression.restBed.valid() && !session.tes3().content()->references().contains(progression.restBed)) {
+            outError = "saved TES3 rest bed no longer resolves"; return false;
+        }
         for (const auto& [key, quest] : tes3State.quests) {
             const auto definition = session.tes3().content()->dialogues().find(key);
             if (definition == session.tes3().content()->dialogues().end() ||
@@ -2072,7 +2217,12 @@ bool loadOdaiGame(
         }
         for (const auto& [object, override] : tes3State.referenceOverrides) {
             (void)override;
-            if (!session.tes3().content()->references().contains(object)) {
+            const bool savedSpawnedObject = object.kind == ObjectIdKind::Spawned &&
+                std::any_of(objects.begin(), objects.end(), [&](const RuntimeObject& saved) {
+                    return saved.id == object && session.tes3().content()->findRecord(saved.base.recordType, saved.base.textId);
+                });
+            if (object != session.playerObject() &&
+                !session.tes3().content()->references().contains(object) && !savedSpawnedObject) {
                 outError = "saved TES3 reference override no longer resolves: " +
                     object.toString();
                 return false;
@@ -2428,6 +2578,8 @@ bool loadOdaiGame(
         session.tes3().journal().chronologyForRestore() = std::move(tes3State.chronology);
         session.tes3().journal().setNextSequence(tes3State.nextJournalSequence);
         session.tes3().knownTopicsForRestore() = std::move(tes3State.knownTopics);
+        session.tes3().topicResponseActorsForRestore() =
+            std::move(tes3State.topicResponseActors);
         session.tes3().scripts().globals() = std::move(tes3State.globals);
         session.tes3().scripts().threadsForRestore() = std::move(tes3State.threads);
         session.tes3().scripts().setNextThreadId(tes3State.nextThreadId);

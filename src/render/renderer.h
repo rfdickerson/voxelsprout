@@ -112,6 +112,9 @@ public:
     // Enable or disable the retained Bethesda ray-traced scene variants.
     // Capability probing still decides whether the device can actually use them.
     void setRayTracingEnabled(bool enabled);
+    // Controls indirect diffuse lighting independently of direct lights.
+    // Disabling it skips both screen-space and voxel GI work.
+    void setGlobalIlluminationEnabled(bool enabled);
     // Histogram-driven eye adaptation, off by default. With it off the scene
     // renders at a fixed exposure, so content whose light levels differ from
     // that baseline comes out uniformly too dark or too bright. Worth enabling
@@ -145,6 +148,7 @@ public:
     // cheapest large reduction in main-pass cost available.
     void setMsaaSamples(std::uint32_t samples);
     // Request capture before rendering the frame, then consume the readback below.
+    bool captureVoxelGi(VoxelGiCapture& output);
     bool prepareFrameCapture();
     // Write the requested frame to binary PPM after rendering completes.
     bool captureFrameToFile(const std::string& outputPath);

@@ -914,6 +914,29 @@ void parseMorrowindStatRecord(
     scene.statics.push_back(std::move(entry));
 }
 
+void parseMorrowindLightRecord(const EsmRecordView& record, FalloutSceneData& scene) {
+    FalloutLightRecord light{};
+    bool hasData = false;
+    for (const EsmSubrecordView& sub : record.subrecords) {
+        if (sub.type == "NAME") {
+            light.editorId = subrecordString(sub);
+        } else if (sub.type == "MODL") {
+            light.modelPath = subrecordString(sub);
+        } else if (sub.type == "LHDT" && sub.size >= 24u) {
+            // TES3 LHDT: weight, value, duration, radius, RGBA, flags.
+            light.radius = static_cast<float>(readI32(sub.data + 12u));
+            for (int channel = 0; channel < 3; ++channel) {
+                light.color[channel] = static_cast<float>(sub.data[16u + channel]) / 255.0f;
+            }
+            light.flags = readU32(sub.data + 20u);
+            hasData = true;
+        }
+    }
+    if (hasData && !light.editorId.empty()) {
+        scene.lights.push_back(std::move(light));
+    }
+}
+
 void parseMorrowindLandTextureRecord(const EsmRecordView& record, FalloutSceneData& outScene) {
     FalloutLandTextureRecord entry{};
     bool haveIndex = false;
@@ -1016,6 +1039,16 @@ void parseMorrowindCellRecord(
                 outCell.gridX = readI32(sub.data + 4);
                 outCell.gridZ = readI32(sub.data + 8);
                 outCell.hasGridCoords = !outCell.isInterior;
+            } else if (sub.type == "AMBI" && sub.size >= 16u) {
+                // TES3 AMBI: ambient, sunlight and fog RGB packed in three
+                // four-byte colours, followed by fog density. Keep colour in
+                // authored sRGB here; the runtime lighting adapter linearizes.
+                outCell.hasLighting = true;
+                for (int channel = 0; channel < 3; ++channel) {
+                    outCell.ambientColor[channel] = sub.data[channel] / 255.0f;
+                    outCell.directionalColor[channel] = sub.data[4 + channel] / 255.0f;
+                    outCell.fogColor[channel] = sub.data[8 + channel] / 255.0f;
+                }
             } else if (sub.type == "WHGT" && sub.size >= 4u) {
                 outCell.hasWater = true;
                 outCell.waterHeight = readF32(sub.data);
@@ -1185,6 +1218,12 @@ bool buildMorrowindCellIndex(
         entry.editorId = parsed.editorId;
         entry.isInterior = parsed.isInterior;
         entry.cellFlags = parsed.cellFlags;
+        entry.hasLighting = parsed.hasLighting;
+        for (int channel = 0; channel < 3; ++channel) {
+            entry.ambientColor[channel] = parsed.ambientColor[channel];
+            entry.directionalColor[channel] = parsed.directionalColor[channel];
+            entry.fogColor[channel] = parsed.fogColor[channel];
+        }
         entry.hasWater = parsed.hasWater;
         entry.waterHeight = parsed.waterHeight;
         entry.waterFormId = parsed.waterFormId;
@@ -1951,6 +1990,9 @@ bool extractFalloutScene(
                 return;
             }
             parseMorrowindStatRecord(record, record.type, outScene);
+            if (record.type == "LIGH") {
+                parseMorrowindLightRecord(record, outScene);
+            }
             if (!outScene.statics.empty() && outScene.statics.back().formId == 0u) {
                 outScene.statics.back().formId = nextFormId++;
             }

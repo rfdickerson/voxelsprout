@@ -1,6 +1,6 @@
 # MECH-TES3-004: Main Quest Items and Equipment
 
-Status: Planned
+Status: Partial
 
 ## Goal
 
@@ -28,3 +28,9 @@ The player can obtain, inspect, transfer, equip, and use the items needed to com
 ## Definition of Done
 
 The standard route's required item interactions work through normal input, and the final artifacts can be acquired and used with consistent world, inventory, script, and save state.
+
+## Implementation progress
+
+TES3 item activation now delivers attached-script `OnActivate`, and the script's `Activate` command performs the default pickup without redispatching the event. Pickup hides the world source, mirrors player inventory in the issuing tick, delivers `OnPCAdd`, and prevents a second pickup before queued commands apply. Owned armor and weapons can be equipped through inventory input; attached artifact scripts receive `OnPCEquip`. Synthetic pickup/equip/save tests and local Wraithguard, Sunder, and Keening script checkpoints pass.
+
+Still required: normal-input acquisition of the route's package, evidence, and artifacts; full book/notes reading, transfer and use actions; authored artifact use in the final encounter; and an end-to-end base-game verification. The Definition of Done has not passed.

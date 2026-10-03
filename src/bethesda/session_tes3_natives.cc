@@ -49,20 +49,122 @@ void BethesdaSession::syncTes3PlayerInventory() {
     if (player == nullptr) return;
 
     std::map<RecordKey, std::int32_t> inventory;
+    double clothingValue = 0;
+    bool clothingAvailable = m_tes3.content() != nullptr;
     for (const InventoryEntry& entry : player->inventory) {
         if (entry.item.valid() && entry.count > 0) inventory[entry.item] += entry.count;
+        if (!entry.equipped || entry.count <= 0 || !clothingAvailable) continue;
+        const auto value = m_tes3.content()->wornItemValue(entry.item);
+        if (!value.has_value()) clothingAvailable = false;
+        else clothingValue += *value;
     }
+    auto& filters = m_tes3.playerState().numericFilters;
+    if (clothingAvailable) filters["clothingmodifier"] = clothingValue;
+    else filters.erase("clothingmodifier");
     m_tes3.playerState().inventory = inventory;
     if (m_tes3.dialogue().active) {
         m_tes3.dialogueForRestore().player.inventory = std::move(inventory);
+        if (clothingAvailable) m_tes3.dialogueForRestore().player.numericFilters["clothingmodifier"] = clothingValue;
+        else m_tes3.dialogueForRestore().player.numericFilters.erase("clothingmodifier");
     }
 }
 
 Tes3DialogueResponse BethesdaSession::startTes3Dialogue(
     Tes3DialogueActorState actor, Tes3DialoguePlayerState player, bool strict) {
+    const auto* definition = m_tes3.content() != nullptr
+        ? m_tes3.content()->findActor("NPC_", actor.id) : nullptr;
+    if (definition == nullptr && m_tes3.content() != nullptr)
+        definition = m_tes3.content()->findActor("CREA", actor.id);
+    if (definition != nullptr) {
+        actor.race = definition->race;
+        actor.actorClass = definition->actorClass;
+        actor.faction = definition->faction.textId;
+        actor.rank = static_cast<std::int8_t>(definition->rank);
+        actor.gender = definition->gender;
+        actor.disposition = definition->disposition;
+    }
+    if (const auto* object = m_world.find(actor.object); object != nullptr && object->actorValues) {
+        actor.locals["actor:health"] = object->actorValues->health;
+        actor.locals["actor:maxhealth"] = object->actorValues->maxHealth;
+    }
     syncTes3PlayerInventory();
     player.inventory = m_tes3.playerState().inventory;
+    const auto clothing = m_tes3.playerState().numericFilters.find("clothingmodifier");
+    if (clothing != m_tes3.playerState().numericFilters.end()) player.numericFilters["clothingmodifier"] = clothing->second;
+    else player.numericFilters.erase("clothingmodifier");
+    player.deathCounts = m_tes3.playerState().deathCounts;
+    const auto* worldPlayer = m_world.find(m_playerObject);
+    if (worldPlayer != nullptr && worldPlayer->actorValues.has_value()) {
+        const auto& values = *worldPlayer->actorValues;
+        player.numericFilters["health"] = values.health;
+        player.numericFilters["maxhealth"] = values.maxHealth;
+        player.numericFilters["magicka"] = values.magicka;
+        player.numericFilters["fatigue"] = values.stamina;
+    }
     return m_tes3.startDialogue(std::move(actor), std::move(player), strict);
+}
+
+bool BethesdaSession::activateTes3Reference(
+    ObjectId reference, bool fromScript, std::string& error) {
+    const RuntimeObject* object = m_world.find(reference);
+    const auto override = m_tes3.referenceOverrides().find(reference);
+    const bool pendingDisabled = override != m_tes3.referenceOverrides().end() &&
+        (override->second.deleted || override->second.enabled == false);
+    if (m_tes3.content() == nullptr || object == nullptr || !object->enabled || pendingDisabled) {
+        error = "TES3 activation requires an enabled resident reference";
+        return false;
+    }
+    if (!fromScript) {
+        bool scripted = false;
+        for (const auto& [threadId, thread] : m_tes3.scripts().threads()) {
+            (void)threadId;
+            if (thread.owner == reference && thread.local &&
+                thread.state != Tes3ThreadState::Failed) {
+                scripted = true;
+                break;
+            }
+        }
+        if (scripted) {
+            m_tes3.dispatchGameplayEvent("onactivate", reference);
+            error.clear();
+            return true;
+        }
+    }
+    if (object->kind == RuntimeObjectKind::Item) {
+        if (!object->base.valid() || m_world.find(m_playerObject) == nullptr) {
+            error = "TES3 pickup requires an item and player";
+            return false;
+        }
+        WorldCommand add;
+        add.type = WorldCommandType::AddItem;
+        add.target = m_playerObject;
+        add.item = object->base;
+        add.itemCount = 1;
+        add.itemCondition = object->itemCondition;
+        (void)m_world.queue(std::move(add));
+        WorldCommand hide;
+        hide.type = WorldCommandType::SetEnabled;
+        hide.target = reference;
+        hide.enabled = false;
+        (void)m_world.queue(std::move(hide));
+        m_tes3.referenceOverridesForRestore()[reference].enabled = false;
+        ++m_tes3.playerState().inventory[object->base];
+        if (m_tes3.dialogue().active)
+            m_tes3.dialogueForRestore().player.inventory = m_tes3.playerState().inventory;
+        m_tes3.dispatchGameplayEvent("onpcadd", reference);
+    } else if (object->kind == RuntimeObjectKind::Activator) {
+        RuntimeActivatorState state = object->activatorState.value_or(RuntimeActivatorState{});
+        ++state.activationCount;
+        WorldCommand activate;
+        activate.type = WorldCommandType::SetActivatorState;
+        activate.target = reference;
+        activate.activatorState = std::move(state);
+        (void)m_world.queue(std::move(activate));
+    } else if (object->kind == RuntimeObjectKind::Door) {
+        m_tes3DoorActivations.push_back(reference);
+    }
+    error.clear();
+    return true;
 }
 
 Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& call) {
@@ -107,6 +209,15 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
     const std::string command = normalizedEditorId(call.command);
     const ObjectId target = resolveObject(call.target);
     const RuntimeObject* object = target.valid() ? m_world.find(target) : nullptr;
+    if (command == "dontsaveobject") {
+        RuntimeObject* mutableObject = target.valid() ? m_world.find(target) : nullptr;
+        if (mutableObject == nullptr) {
+            result.error = "DontSaveObject requires a resident scripted object";
+            return result;
+        }
+        mutableObject->saveObject = false;
+        return result;
+    }
     const auto actorDefinitionForTarget = [&]() -> const Tes3ActorDefinition* {
         if (m_tes3.content() == nullptr) return nullptr;
         RecordKey base;
@@ -123,18 +234,74 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
     if (command == "getlevel" || command == "getrace" ||
         command == "gethealthgetratio") {
         const Tes3ActorDefinition* actor = actorDefinitionForTarget();
-        if (actor == nullptr) { result.error = command + " requires an authored actor"; return result; }
-        if (command == "getlevel") result.value = Tes3Value::fromNumber(actor->level);
+        if (actor == nullptr && target != m_playerObject) {
+            result.error = command + " requires an authored actor"; return result;
+        }
+        if (command == "getlevel") result.value = Tes3Value::fromNumber(
+            target == m_playerObject ? m_tes3.playerState().numericFilters["level"] : actor->level);
         else if (command == "getrace") {
             if (call.arguments.empty()) { result.error = "GetRace requires a race id"; return result; }
-            result.value = Tes3Value::fromNumber(normalizedEditorId(actor->race) ==
+            const std::string race = target == m_playerObject &&
+                !m_tes3.playerState().race.empty() ? m_tes3.playerState().race :
+                actor != nullptr ? actor->race : std::string{};
+            result.value = Tes3Value::fromNumber(normalizedEditorId(race) ==
                 normalizedEditorId(asText(call.arguments[0])) ? 1.0 : 0.0);
         } else {
-            const double health = object != nullptr && object->actorValues.has_value()
+            double health = object != nullptr && object->actorValues.has_value()
                 ? object->actorValues->health : actor->health;
-            const double maximum = object != nullptr && object->actorValues.has_value()
+            double maximum = object != nullptr && object->actorValues.has_value()
                 ? object->actorValues->maxHealth : actor->health;
+            const auto override = m_tes3.referenceOverrides().find(target);
+            if (override != m_tes3.referenceOverrides().end()) {
+                const auto savedHealth = override->second.locals.find("actor:health");
+                const auto savedMaximum = override->second.locals.find("actor:maxhealth");
+                if (savedHealth != override->second.locals.end()) health = savedHealth->second.number;
+                if (savedMaximum != override->second.locals.end()) maximum = savedMaximum->second.number;
+            }
             result.value = Tes3Value::fromNumber(maximum > 0.0 ? health / maximum : 0.0);
+        }
+        return result;
+    }
+    if (command == "getreputation" || command == "setreputation" || command == "modreputation") {
+        if (!target.valid()) { result.error = command + " target does not resolve"; return result; }
+        const auto* actor = actorDefinitionForTarget();
+        if (target != m_playerObject && actor == nullptr) {
+            result.error = command + " requires an actor"; return result;
+        }
+        double value = target == m_playerObject ? m_tes3.playerState().numericFilters["reputation"] : actor->reputation;
+        if (target != m_playerObject) {
+            const auto& locals = m_tes3.referenceOverridesForRestore()[target].locals;
+            const auto found = locals.find("stat:reputation");
+            if (found != locals.end()) value = found->second.number;
+        }
+        if (command == "getreputation") result.value = Tes3Value::fromNumber(value);
+        else {
+            if (call.arguments.empty()) { result.error = command + " requires a value"; return result; }
+            value = command == "setreputation" ? asNumber(call.arguments[0]) : value + asNumber(call.arguments[0]);
+            if (target == m_playerObject) {
+                m_tes3.playerState().numericFilters["reputation"] = value;
+                m_tes3.dialogueForRestore().player.numericFilters["reputation"] = value;
+            } else m_tes3.referenceOverridesForRestore()[target].locals["stat:reputation"] = Tes3Value::fromNumber(value);
+        }
+        return result;
+    }
+    if (command == "getdisposition" || command == "setdisposition" || command == "moddisposition") {
+        const auto* actor = actorDefinitionForTarget();
+        if (!target.valid() || actor == nullptr || actor->creature) {
+            result.error = command + " requires an authored NPC target";
+            return result;
+        }
+        double value = actor->disposition;
+        if (const auto it = m_tes3.referenceOverrides().find(target); it != m_tes3.referenceOverrides().end())
+            if (const auto saved = it->second.locals.find("stat:disposition"); saved != it->second.locals.end()) value = saved->second.number;
+        if (command == "getdisposition") result.value = Tes3Value::fromNumber(tes3DerivedDisposition(target));
+        else {
+            if (call.arguments.empty()) { result.error = command + " requires a value"; return result; }
+            value = std::clamp(command == "setdisposition" ? asNumber(call.arguments[0]) :
+                value + asNumber(call.arguments[0]), 0.0, 100.0);
+            m_tes3.referenceOverridesForRestore()[target].locals["stat:disposition"] = Tes3Value::fromNumber(value);
+            if (m_tes3.dialogue().active && m_tes3.dialogue().actor.object == target)
+                m_tes3.dialogueForRestore().actor.disposition = static_cast<float>(value);
         }
         return result;
     }
@@ -160,7 +327,7 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
             }
         }
         m_tes3.playerState().object = m_playerObject;
-        (void)m_tes3.startDialogue(dialogueActor, m_tes3.playerState(), false);
+        (void)startTes3Dialogue(dialogueActor, m_tes3.playerState());
         return result;
     }
     constexpr std::array<std::string_view, 35u> tes3ActorStats = {
@@ -192,6 +359,10 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
                     static_cast<std::size_t>(effect.attribute) < tes3Attributes.size() &&
                     tes3Attributes[static_cast<std::size_t>(effect.attribute)] == stat) {
                     magnitude += effect.magnitude;
+                } else if (effect.effectId == 17 && effect.attribute >= 0 &&
+                    static_cast<std::size_t>(effect.attribute) < tes3Attributes.size() &&
+                    tes3Attributes[static_cast<std::size_t>(effect.attribute)] == stat) {
+                    magnitude -= effect.magnitude;
                 } else if (effect.effectId == 83 && effect.skill >= 0 &&
                     static_cast<std::size_t>(effect.skill) < tes3Skills.size() &&
                     tes3Skills[static_cast<std::size_t>(effect.skill)] == stat) {
@@ -201,6 +372,28 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         }
         return magnitude;
     };
+    if (command == "getblightdisease" || command == "getcommondisease") {
+        if (!target.valid()) { result.error = command + " target does not resolve"; return result; }
+        const auto active = m_tes3.activeSpells().find(target);
+        const std::int32_t diseaseType = command == "getblightdisease" ? 2 : 3;
+        bool diseased = false;
+        if (active != m_tes3.activeSpells().end() && m_tes3.content() != nullptr) {
+            for (const Tes3ActiveSpell& item : active->second) {
+                const auto spell = m_tes3.content()->spells().find(item.spell);
+                if (spell != m_tes3.content()->spells().end() &&
+                    spell->second.type == diseaseType &&
+                    std::any_of(item.effects.begin(), item.effects.end(),
+                        [&](const Tes3ActiveSpellEffect& effect) {
+                            return effect.expiresTick > call.tick;
+                        })) {
+                    diseased = true;
+                    break;
+                }
+            }
+        }
+        result.value = Tes3Value::fromNumber(diseased ? 1.0 : 0.0);
+        return result;
+    }
     if (command == "getspelleffects") {
         if (!target.valid() || call.arguments.empty()) {
             result.value = Tes3Value::fromNumber(0.0); return result;
@@ -231,12 +424,83 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         active.spell = spell->record;
         active.caster = call.owner;
         active.appliedTick = call.tick;
-        for (std::size_t index = 0u; index < spell->effects.size(); ++index) {
-            const Tes3SpellEffect& authored = spell->effects[index];
-            if (authored.effectId != 79 && authored.effectId != 83) {
+        for (const Tes3SpellEffect& authored : spell->effects) {
+            if (authored.effectId != 69 && authored.effectId != 70 &&
+                authored.effectId != 71 && authored.effectId != 74 &&
+                authored.effectId != 79 &&
+                authored.effectId != 83) {
                 result.error = "Cast reaches unsupported gameplay magic effect " +
                     std::to_string(authored.effectId);
                 return result;
+            }
+            if (authored.effectId == 74 &&
+                (authored.attribute < 0 ||
+                 static_cast<std::size_t>(authored.attribute) >= tes3Attributes.size())) {
+                result.error = "RestoreAttribute has no authored attribute";
+                return result;
+            }
+        }
+        for (std::size_t index = 0u; index < spell->effects.size(); ++index) {
+            const Tes3SpellEffect& authored = spell->effects[index];
+            if (authored.effectId == 69 || authored.effectId == 70 ||
+                authored.effectId == 71) {
+                std::vector<std::pair<RecordKey, std::int32_t>> diseases;
+                const auto collect = [&](const RecordKey& key, std::int32_t count) {
+                    const auto found = m_tes3.content()->spells().find(key);
+                    if (found == m_tes3.content()->spells().end() || count <= 0) return;
+                    const Tes3SpellDefinition& owned = found->second;
+                    const bool corprus = std::any_of(owned.effects.begin(), owned.effects.end(),
+                        [](const Tes3SpellEffect& effect) { return effect.effectId == 132; });
+                    if ((authored.effectId == 69 && owned.type == 3) ||
+                        (authored.effectId == 70 && owned.type == 2 && !corprus) ||
+                        (authored.effectId == 71 && corprus)) diseases.emplace_back(key, count);
+                };
+                if (recipient == m_playerObject) {
+                    for (const auto& [key, count] : m_tes3.playerState().inventory) collect(key, count);
+                } else if (const RuntimeObject* recipientObject = m_world.find(recipient)) {
+                    for (const InventoryEntry& entry : recipientObject->inventory) {
+                        collect(entry.item, entry.count);
+                    }
+                }
+                for (const auto& [key, count] : diseases) {
+                    WorldCommand remove;
+                    remove.type = WorldCommandType::RemoveItem;
+                    remove.target = recipient;
+                    remove.item = key;
+                    remove.itemCount = count;
+                    (void)m_world.queue(std::move(remove));
+                    if (recipient == m_playerObject) {
+                        m_tes3.playerState().inventory.erase(key);
+                        if (m_tes3.dialogue().active) {
+                            m_tes3.dialogueForRestore().player.inventory.erase(key);
+                        }
+                    }
+                    auto& activeSpells = m_tes3.activeSpellsForRestore()[recipient];
+                    std::erase_if(activeSpells, [&](const Tes3ActiveSpell& item) {
+                        return item.spell == key;
+                    });
+                }
+                continue;
+            }
+            if (authored.effectId == 74) {
+                if (authored.attribute < 0 ||
+                    static_cast<std::size_t>(authored.attribute) >= tes3Attributes.size()) {
+                    result.error = "RestoreAttribute has no authored attribute";
+                    return result;
+                }
+                const std::string key = "damage:" +
+                    std::string(tes3Attributes[static_cast<std::size_t>(authored.attribute)]);
+                const double magnitude = std::max(0, authored.magnitudeMin);
+                if (recipient == m_playerObject) {
+                    double& damage = m_tes3.playerState().numericFilters[key];
+                    damage = std::max(0.0, damage - magnitude);
+                    if (m_tes3.dialogue().active)
+                        m_tes3.dialogueForRestore().player.numericFilters[key] = damage;
+                } else {
+                    Tes3Value& damage = m_tes3.referenceOverridesForRestore()[recipient].locals[key];
+                    damage = Tes3Value::fromNumber(std::max(0.0, damage.number - magnitude));
+                }
+                continue;
             }
             const std::int32_t minimum = std::min(authored.magnitudeMin, authored.magnitudeMax);
             const std::int32_t maximum = std::max(authored.magnitudeMin, authored.magnitudeMax);
@@ -252,9 +516,11 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
                 std::max(1, authored.duration)) * 60u;
             active.effects.push_back(effect);
         }
-        auto& spells = m_tes3.activeSpellsForRestore()[recipient];
-        std::erase_if(spells, [&](const Tes3ActiveSpell& item) { return item.spell == spell->record; });
-        spells.push_back(std::move(active));
+        if (!active.effects.empty()) {
+            auto& spells = m_tes3.activeSpellsForRestore()[recipient];
+            std::erase_if(spells, [&](const Tes3ActiveSpell& item) { return item.spell == spell->record; });
+            spells.push_back(std::move(active));
+        }
         return result;
     }
     const auto actorStatName = [&]() -> std::string {
@@ -295,7 +561,17 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
             }
         }
         if (command.starts_with("get")) {
-            result.value = Tes3Value::fromNumber(value + activeFortify(target, queriedActorStat));
+            const std::string damageKey = "damage:" + queriedActorStat;
+            double damage = 0.0;
+            if (target == m_playerObject) {
+                const auto found = m_tes3.playerState().numericFilters.find(damageKey);
+                if (found != m_tes3.playerState().numericFilters.end()) damage = found->second;
+            } else if (override != nullptr) {
+                const auto found = override->locals.find(damageKey);
+                if (found != override->locals.end()) damage = found->second.number;
+            }
+            result.value = Tes3Value::fromNumber(
+                std::max(0.0, value + activeFortify(target, queriedActorStat) - damage));
             return result;
         }
         if (call.arguments.empty()) { result.error = command + " requires a value"; return result; }
@@ -520,7 +796,9 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
     if (command == "getfight" || command == "setfight" || command == "modfight") {
         if (!target.valid()) { result.error = command + " target does not resolve"; return result; }
         Tes3ReferenceOverride& state = m_tes3.referenceOverridesForRestore()[target];
-        double fight = state.locals["stat:fight"].number;
+        const auto* definition = actorDefinitionForTarget();
+        const auto saved = state.locals.find("stat:fight");
+        double fight = saved == state.locals.end() ? (definition ? definition->fight : 0) : saved->second.number;
         if (command == "getfight") result.value = Tes3Value::fromNumber(fight);
         else if (!call.arguments.empty()) {
             fight = command == "setfight" ? asNumber(call.arguments[0])
@@ -576,12 +854,23 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         return result;
     }
     if (command == "getaipackagedone" || command == "getcurrentaipackage") {
-        if (object == nullptr || !object->aiState.has_value()) {
-            result.value = Tes3Value::fromNumber(command == "getaipackagedone" ? 1.0 : -1.0);
-        } else if (command == "getaipackagedone") {
-            result.value = Tes3Value::fromNumber(object->aiState->scriptedMoveArrived ? 1.0 : 0.0);
+        if (!target.valid()) { result.error = command + " target does not resolve"; return result; }
+        const auto override = m_tes3.referenceOverrides().find(target);
+        if (command == "getaipackagedone") {
+            bool arrived = object != nullptr && object->aiState.has_value() &&
+                object->aiState->scriptedMoveArrived;
+            if (override != m_tes3.referenceOverrides().end()) {
+                const auto done = override->second.locals.find("ai:done");
+                if (done != override->second.locals.end()) arrived = done->second.truthy();
+            }
+            result.value = Tes3Value::fromNumber(arrived ? 1.0 : 0.0);
         } else {
-            result.value = Tes3Value::fromNumber(object->aiState->walking ? 1.0 : -1.0);
+            double package = -1.0;
+            if (override != m_tes3.referenceOverrides().end()) {
+                const auto found = override->second.locals.find("ai:package");
+                if (found != override->second.locals.end()) package = found->second.number;
+            }
+            result.value = Tes3Value::fromNumber(package);
         }
         return result;
     }
@@ -593,15 +882,32 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         ai.scriptedMoveActive = true;
         ai.scriptedMoveArrived = false;
         ++ai.scriptedMoveRevision;
+        ai.path.clear();
+        ai.pathIndex = 0u;
+        ai.pauseSeconds = 0.0f;
+        const int package = command == "aiwander" ? 0 : command == "aitravel" ? 1 :
+            command.starts_with("aiescort") ? 2 : 3;
+        m_tes3.referenceOverridesForRestore()[target].locals["ai:package"] =
+            Tes3Value::fromNumber(package);
+        m_tes3.referenceOverridesForRestore()[target].locals["ai:done"] =
+            Tes3Value::fromNumber(0.0);
         if (command == "aitravel" && call.arguments.size() >= 3u) {
             ai.wanderTarget = {static_cast<float>(asNumber(call.arguments[0])),
-                static_cast<float>(asNumber(call.arguments[1])),
-                static_cast<float>(asNumber(call.arguments[2]))};
+                static_cast<float>(asNumber(call.arguments[2])),
+                -static_cast<float>(asNumber(call.arguments[1]))};
         } else if (command == "aiwander") {
             ai.wanderOrigin = {static_cast<float>(object->transform.position[0]),
                 static_cast<float>(object->transform.position[1]),
                 static_cast<float>(object->transform.position[2])};
             ai.wanderTarget = ai.wanderOrigin;
+            ai.scriptedMoveActive = false;
+            ai.walking = false;
+        } else if (command == "aiescort" && call.arguments.size() >= 5u) {
+            // Escort leads the player to the authored destination; it does
+            // not chase the player like AIFollow.
+            ai.wanderTarget = {static_cast<float>(asNumber(call.arguments[2])),
+                static_cast<float>(asNumber(call.arguments[4])),
+                -static_cast<float>(asNumber(call.arguments[3]))};
         } else if (!call.arguments.empty()) {
             const ObjectId destination = resolveObject(asText(call.arguments[0]));
             if (!destination.valid()) { result.error = command + " destination does not resolve"; return result; }
@@ -660,6 +966,47 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         result.value = Tes3Value::fromNumber(std::sqrt(dx * dx + dy * dy + dz * dz));
         return result;
     }
+    if (command == "getdetected") {
+        if (object == nullptr || call.arguments.empty()) {
+            result.error = "GetDetected requires a resident observer and actor id";
+            return result;
+        }
+        const ObjectId observedId = resolveObject(asText(call.arguments[0]));
+        const RuntimeObject* observed = m_world.find(observedId);
+        bool detected = false;
+        if (observed != nullptr && observed->enabled &&
+            (!observed->actorValues.has_value() || !observed->actorValues->dead) &&
+            (!object->currentSpace.cell.valid() || !observed->currentSpace.cell.valid() ||
+             object->currentSpace.cell == observed->currentSpace.cell)) {
+            const odai::math::Vector3 from{
+                static_cast<float>(object->transform.position[0]),
+                static_cast<float>(object->transform.position[1] + 64.0),
+                static_cast<float>(object->transform.position[2])};
+            const odai::math::Vector3 to{
+                static_cast<float>(observed->transform.position[0]),
+                static_cast<float>(observed->transform.position[1] + 64.0),
+                static_cast<float>(observed->transform.position[2])};
+            const float distance = odai::math::length(to - from);
+            if (distance < 2048.0f) {
+                const auto obstruction = m_physics.castRay(from, to);
+                detected = !obstruction.has_value() ||
+                    obstruction->distance >= distance - 1.0f;
+            }
+        }
+        result.value = Tes3Value::fromNumber(detected ? 1.0 : 0.0);
+        return result;
+    }
+    if (command == "getstandingpc") {
+        if (!target.valid()) { result.error = "GetStandingPC target does not resolve"; return result; }
+        const std::vector<PhysicsCharacterSnapshot> characters = physicsSnapshots();
+        const auto player = std::find_if(characters.begin(), characters.end(),
+            [&](const PhysicsCharacterSnapshot& character) {
+                return character.object == m_playerObject;
+            });
+        result.value = Tes3Value::fromNumber(player != characters.end() &&
+            player->grounded && player->supportingObject == target ? 1.0 : 0.0);
+        return result;
+    }
         return std::nullopt;
     };
     if (auto handled = handleMovementAndCombat()) return *handled;
@@ -711,7 +1058,11 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         if (!target.valid()) { result.error = command + " target does not resolve"; return result; }
         const std::string stat = command.find("alarm") != std::string::npos ? "alarm" :
             command.find("flee") != std::string::npos ? "flee" : "hello";
-        Tes3Value& stored = m_tes3.referenceOverridesForRestore()[target].locals["stat:" + stat];
+        auto& locals = m_tes3.referenceOverridesForRestore()[target].locals;
+        const auto* definition = actorDefinitionForTarget();
+        if (!locals.contains("stat:" + stat) && stat == "flee" && definition)
+            locals["stat:flee"] = Tes3Value::fromNumber(definition->flee);
+        Tes3Value& stored = locals["stat:" + stat];
         if (command.starts_with("get")) result.value = Tes3Value::fromNumber(stored.number);
         else if (!call.arguments.empty()) {
             stored = Tes3Value::fromNumber(command.starts_with("set")
@@ -728,17 +1079,7 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         return result;
     }
     if (command == "activate") {
-        if (!target.valid()) { result.error = "Activate target does not resolve"; return result; }
-        m_tes3.dispatchGameplayEvent("onactivate", target);
-        if (object != nullptr) {
-            RuntimeActivatorState activator = object->activatorState.value_or(RuntimeActivatorState{});
-            ++activator.activationCount;
-            WorldCommand world;
-            world.type = WorldCommandType::SetActivatorState;
-            world.target = target;
-            world.activatorState = std::move(activator);
-            (void)m_world.queue(std::move(world));
-        }
+        if (!activateTes3Reference(target, true, result.error)) return result;
         return result;
     }
     if (command == "getdisabled") {
@@ -757,8 +1098,20 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         return result;
     }
     if (command == "gethealth") {
-        result.value = Tes3Value::fromNumber(object != nullptr && object->actorValues.has_value()
-            ? object->actorValues->health : 0.0f);
+        if (!target.valid()) { result.error = "GetHealth target does not resolve"; return result; }
+        const auto override = m_tes3.referenceOverrides().find(target);
+        if (override != m_tes3.referenceOverrides().end()) {
+            const auto saved = override->second.locals.find("actor:health");
+            if (saved != override->second.locals.end()) {
+                result.value = saved->second;
+                return result;
+            }
+        }
+        if (object != nullptr && object->actorValues.has_value()) {
+            result.value = Tes3Value::fromNumber(object->actorValues->health);
+        } else if (const Tes3ActorDefinition* actor = actorDefinitionForTarget()) {
+            result.value = Tes3Value::fromNumber(actor->health);
+        } else result.error = "GetHealth requires an authored actor";
         return result;
     }
     if (command == "enable" || command == "disable" || command == "delete" ||
@@ -799,36 +1152,121 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
             result.error = command + " names an unresolved item";
             return result;
         }
+        const bool spellCommand = command == "addspell" || command == "removespell" ||
+            command == "getspell";
+        const Tes3SpellDefinition* spell = nullptr;
+        if (spellCommand) {
+            const auto found = m_tes3.content()->spells().find(item);
+            if (found == m_tes3.content()->spells().end()) {
+                result.error = command + " requires a spell record";
+                return result;
+            }
+            spell = &found->second;
+        }
         if (command == "getitemcount" || command == "getspell") {
-            if (command == "getitemcount" && target == m_playerObject) {
+            if (target == m_playerObject) {
                 const auto found = m_tes3.playerState().inventory.find(item);
                 result.value = Tes3Value::fromNumber(found == m_tes3.playerState().inventory.end()
                     ? 0.0 : static_cast<double>(found->second));
                 return result;
             }
-            const auto found = std::find_if(object->inventory.begin(), object->inventory.end(),
-                [&](const InventoryEntry& entry) { return entry.item == item; });
-            result.value = Tes3Value::fromNumber(
-                found == object->inventory.end() ? 0.0 : static_cast<double>(found->count));
+            const std::string pendingKey = "inventory:" + item.toString();
+            const auto override = m_tes3.referenceOverrides().find(target);
+            if (override != m_tes3.referenceOverrides().end()) {
+                const auto pending = override->second.locals.find(pendingKey);
+                if (pending != override->second.locals.end()) {
+                    result.value = Tes3Value::fromNumber(pending->second.number);
+                    return result;
+                }
+            }
+            double count = 0;
+            for (const auto& entry : object->inventory) if (entry.item == item) count += entry.count;
+            result.value = Tes3Value::fromNumber(count);
             return result;
+        }
+        if (command == "addspell" && spell->type >= 1 && spell->type <= 4) {
+            for (const Tes3SpellEffect& effect : spell->effects) {
+                if (effect.effectId != 3 && effect.effectId != 4 &&
+                    effect.effectId != 5 && effect.effectId != 6 &&
+                    effect.effectId != 17 && effect.effectId != 79 &&
+                    effect.effectId != 83 && effect.effectId != 94 &&
+                    effect.effectId != 95 && effect.effectId != 96 &&
+                    effect.effectId != 132) {
+                    result.error = "AddSpell reaches unsupported passive magic effect " +
+                        std::to_string(effect.effectId);
+                    return result;
+                }
+            }
+        }
+        const std::int32_t owned = target == m_playerObject
+            ? (m_tes3.playerState().inventory.contains(item)
+                ? m_tes3.playerState().inventory.at(item) : 0)
+            : [&]() {
+                const std::string pendingKey = "inventory:" + item.toString();
+                const auto override = m_tes3.referenceOverrides().find(target);
+                if (override != m_tes3.referenceOverrides().end()) {
+                    const auto pending = override->second.locals.find(pendingKey);
+                    if (pending != override->second.locals.end())
+                        return static_cast<std::int32_t>(pending->second.number);
+                }
+                std::int64_t total = 0;
+                for (const auto& entry : object->inventory) if (entry.item == item) total += entry.count;
+                return static_cast<std::int32_t>(std::min<std::int64_t>(total, std::numeric_limits<std::int32_t>::max()));
+            }();
+        if (spellCommand && ((command == "addspell" && owned > 0) ||
+            (command == "removespell" && owned == 0))) return result;
+        if ((command == "additem" || command == "addspell") &&
+            owned > std::numeric_limits<std::int32_t>::max() - (spellCommand ? 1 : count)) {
+            result.error = "item addition would overflow inventory count"; return result;
         }
         WorldCommand world;
         world.type = command == "additem" || command == "addspell"
             ? WorldCommandType::AddItem : WorldCommandType::RemoveItem;
         world.target = target;
         world.item = item;
-        world.itemCount = count;
+        world.itemCount = spellCommand ? 1 : count;
         (void)m_world.queue(std::move(world));
         if (target == m_playerObject &&
-            (command == "additem" || command == "removeitem")) {
+            (command == "additem" || command == "removeitem" || spellCommand)) {
             auto& inventory = m_tes3.playerState().inventory;
             const std::int32_t previous = inventory.contains(item) ? inventory.at(item) : 0;
-            const std::int32_t next = command == "additem"
-                ? previous + count : std::max(0, previous - count);
+            const std::int32_t next = command == "additem" || command == "addspell"
+                ? previous + (spellCommand ? 1 : count)
+                : std::max(0, previous - (spellCommand ? 1 : count));
             if (next > 0) inventory[item] = next;
             else inventory.erase(item);
             if (m_tes3.dialogue().active) {
                 m_tes3.dialogueForRestore().player.inventory = inventory;
+            }
+        }
+        if (target != m_playerObject) {
+            const bool adding = command == "additem" || command == "addspell";
+            const std::int32_t next = adding ? owned + (spellCommand ? 1 : count) :
+                std::max(0, owned - (spellCommand ? 1 : count));
+            m_tes3.referenceOverridesForRestore()[target].locals[
+                "inventory:" + item.toString()] = Tes3Value::fromNumber(next);
+        }
+        if (spellCommand) {
+            auto& active = m_tes3.activeSpellsForRestore()[target];
+            if (command == "removespell") {
+                std::erase_if(active, [&](const Tes3ActiveSpell& effect) {
+                    return effect.spell == item;
+                });
+            } else if (spell->type >= 1 && spell->type <= 4) {
+                Tes3ActiveSpell passive;
+                passive.spell = item;
+                passive.caster = target;
+                passive.appliedTick = call.tick;
+                for (const Tes3SpellEffect& authored : spell->effects) {
+                    Tes3ActiveSpellEffect effect;
+                    effect.effectId = authored.effectId;
+                    effect.skill = authored.skill;
+                    effect.attribute = authored.attribute;
+                    effect.magnitude = std::min(authored.magnitudeMin, authored.magnitudeMax);
+                    effect.expiresTick = std::numeric_limits<std::uint64_t>::max();
+                    passive.effects.push_back(effect);
+                }
+                active.push_back(std::move(passive));
             }
         }
         return result;
@@ -865,8 +1303,38 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
         return result;
     }
     if (command == "sethealth" || command == "modhealth" || command == "modcurrenthealth") {
-        if (object == nullptr || !object->actorValues.has_value() || call.arguments.empty()) {
-            result.error = command + " requires a resident actor and value";
+        if (!target.valid() || call.arguments.empty() ||
+            ((object == nullptr || !object->actorValues.has_value()) &&
+             actorDefinitionForTarget() == nullptr)) {
+            result.error = command + " requires an authored actor and value";
+            return result;
+        }
+        const Tes3ActorDefinition* actor = actorDefinitionForTarget();
+        Tes3ReferenceOverride& override = m_tes3.referenceOverridesForRestore()[target];
+        const auto savedCurrent = override.locals.find("actor:health");
+        const auto savedMaximum = override.locals.find("actor:maxhealth");
+        const double current = savedCurrent != override.locals.end() ? savedCurrent->second.number :
+            object != nullptr && object->actorValues.has_value()
+                ? object->actorValues->health : actor->health;
+        const double maximum = savedMaximum != override.locals.end() ? savedMaximum->second.number :
+            object != nullptr && object->actorValues.has_value()
+                ? object->actorValues->maxHealth : actor->health;
+        const double value = asNumber(call.arguments[0]);
+        const double nextCurrent = command == "sethealth" ? value : current + value;
+        const double nextMaximum = command == "modcurrenthealth" ? maximum :
+            command == "sethealth" ? value : maximum + value;
+        override.locals["actor:health"] = Tes3Value::fromNumber(std::max(0.0, nextCurrent));
+        override.locals["actor:maxhealth"] = Tes3Value::fromNumber(std::max(0.0, nextMaximum));
+        override.locals["actor:dead"] = Tes3Value::fromNumber(nextCurrent <= 0.0 ? 1.0 : 0.0);
+        if (target == m_playerObject) {
+            auto& filters = m_tes3.playerState().numericFilters;
+            filters["health"] = std::max(0.0, nextCurrent);
+            filters["maxhealth"] = std::max(0.0, nextMaximum);
+            if (m_tes3.dialogue().active)
+                m_tes3.dialogueForRestore().player.numericFilters = filters;
+        }
+        if (object == nullptr) {
+            m_tes3.recordActorDeath(target, actor->id, nextCurrent <= 0.0);
             return result;
         }
         WorldCommand world;
@@ -875,8 +1343,8 @@ Tes3NativeResult BethesdaSession::executeTes3WorldNative(const Tes3NativeCall& c
             WorldCommandType::AdjustActorValue;
         world.target = target;
         world.actorValue = ActorValue::Health;
-        if (command == "sethealth") world.actorValueAbsolute = static_cast<float>(asInt(call.arguments[0]));
-        else world.actorValueDelta = static_cast<float>(asInt(call.arguments[0]));
+        if (command == "sethealth") world.actorValueAbsolute = static_cast<float>(value);
+        else world.actorValueDelta = static_cast<float>(value);
         (void)m_world.queue(std::move(world));
         return result;
     }

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -56,6 +57,10 @@ struct Tes3ScriptProgram {
     std::map<std::string, Tes3LocalType> locals;
     std::vector<Tes3Instruction> instructions;
     std::set<std::string> commands;
+    // Populated by the content runtime after checking the native registry.
+    // Refuse to start a program with a known unsupported operation so an
+    // earlier one-time quest mutation cannot run before that failure.
+    std::set<std::string> unsupportedOperations;
     std::uint64_t sourceHash = 0u;
 };
 
@@ -116,6 +121,9 @@ struct Tes3ScriptThread {
     std::size_t instruction = 0u;
     std::map<std::string, Tes3Value> locals;
     std::map<std::string, Tes3Value> eventVariables;
+    bool repeat = false;
+    bool local = false;
+    std::uint64_t lastTick = std::numeric_limits<std::uint64_t>::max();
     Tes3ThreadState state = Tes3ThreadState::Running;
     std::string suspensionReason;
     std::string error;
@@ -149,10 +157,15 @@ class Tes3ScriptVm {
 public:
     bool registerProgram(Tes3ScriptProgram program, std::string& outError);
     [[nodiscard]] std::uint64_t start(
-        std::string_view program, ObjectId owner, std::string& outError);
+        std::string_view program, ObjectId owner, std::string& outError,
+        bool repeat = false, bool local = false);
+    void setLocalScriptActive(std::function<bool(const Tes3ScriptThread&)> active) {
+        m_localScriptActive = std::move(active);
+    }
     [[nodiscard]] Tes3VmStepResult step(
         std::uint64_t tick, std::uint32_t instructionBudget,
-        const Tes3NativeExecutor& execute);
+        const Tes3NativeExecutor& execute,
+        std::optional<std::uint64_t> onlyThread = std::nullopt);
     bool resume(std::uint64_t threadId, std::string& outError);
     void clear();
 
@@ -180,6 +193,7 @@ private:
     std::map<std::string, Tes3ScriptProgram> m_programs;
     std::map<std::uint64_t, Tes3ScriptThread> m_threads;
     std::map<std::string, Tes3Value> m_globals;
+    std::function<bool(const Tes3ScriptThread&)> m_localScriptActive;
     std::uint64_t m_nextThreadId = 1u;
 };
 

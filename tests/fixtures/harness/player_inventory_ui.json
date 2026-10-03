@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "kind": "ui_inventory",
+  "name": "morrowind-inventory-ui",
+  "step_seconds": 0.016666666666666666,
+  "viewport": [768, 432],
+  "actor": {
+    "id": "inventory_player",
+    "base": "harness_npc",
+    "position": [0, 100, 0],
+    "inventory": [
+      {"type": "WEAP", "id": "iron_dagger", "count": 1},
+      {"type": "ALCH", "id": "restore_health", "count": 3}
+    ]
+  },
+  "frames": [
+    {"keys": ["I"], "expect": {"screen": "inventory", "selected": "tes3:WEAP:iron_dagger", "visible_items": {"tes3:WEAP:iron_dagger": 1, "tes3:ALCH:restore_health": 3}, "labels": {"tes3:WEAP:iron_dagger": "iron_dagger", "tes3:ALCH:restore_health": "restore_health"}}},
+    {"keys": []},
+    {"keys": ["Down"], "expect": {"selected": "tes3:ALCH:restore_health"}},
+    {"keys": []},
+    {"keys": ["D"], "expect": {"screen": "none", "inventory": {"tes3:WEAP:iron_dagger": 1, "tes3:ALCH:restore_health": 2}, "world_items": ["tes3:ALCH:restore_health"]}},
+    {"keys": []},
+    {"keys": ["I"], "expect": {"screen": "inventory", "visible_items": {"tes3:WEAP:iron_dagger": 1, "tes3:ALCH:restore_health": 2}}},
+    {"keys": []},
+    {"keys": ["I"], "expect": {"screen": "none"}},
+    {"keys": []},
+    {"keys": ["I"], "expect": {"screen": "inventory", "selected": "tes3:WEAP:iron_dagger"}},
+    {"keys": []},
+    {"keys": ["D"], "expect": {"screen": "none", "inventory": {"tes3:ALCH:restore_health": 2}, "world_items": ["tes3:ALCH:restore_health", "tes3:WEAP:iron_dagger"]}},
+    {"keys": []},
+    {"keys": ["I"], "expect": {"screen": "inventory", "visible_items": {"tes3:ALCH:restore_health": 2}}},
+    {"keys": []},
+    {"keys": ["Escape"], "expect": {"screen": "none"}}
+  ]
+}

@@ -103,7 +103,7 @@ endfunction()
 
 # Optional Intel XeSS support. Intel currently ships a Windows runtime only.
 set(ODAI_XESS_FOUND OFF)
-if(ODAI_ENABLE_XESS)
+if(ODAI_ENABLE_XESS AND NOT ODAI_HEADLESS_ONLY)
     find_path(ODAI_XESS_INCLUDE_DIR NAMES xess/xess.h
         HINTS "${ODAI_XESS_SDK_DIR}/inc" "${ODAI_XESS_SDK_DIR}/include")
     if(WIN32)
@@ -262,7 +262,6 @@ odai_source_includes(odai_dialogue)
 target_link_libraries(odai_dialogue PRIVATE nlohmann_json::nlohmann_json)
 odai_warnings(odai_dialogue)
 
-if(NOT ODAI_HEADLESS_ONLY)
 add_library(odai_upscale STATIC src/render/upscale/upscale_policy.cc
     src/render/upscale/upscale_contract.cc)
 odai_source_includes(odai_upscale)
@@ -272,7 +271,6 @@ if(ODAI_XESS_FOUND)
     target_link_libraries(odai_upscale PRIVATE ${ODAI_XESS_LIBRARY})
 endif()
 odai_warnings(odai_upscale)
-endif()
 
 add_library(odai_bethesda_import STATIC
     src/bethesda/condition.cc
@@ -280,7 +278,7 @@ add_library(odai_bethesda_import STATIC
     src/import/cell_residency_planner.cc
     src/import/bethesda/actor_records.cc src/import/bethesda/asset_source.cc
     src/import/bethesda/async_asset_loader.cc src/import/bethesda/bsa_archive.cc
-    src/import/bethesda/cell_builder.cc src/import/bethesda/skyrim_grass.cc src/import/bethesda/character_builder.cc
+    src/import/bethesda/cell_builder.cc src/import/bethesda/runtime_item_scene.cc src/import/bethesda/skyrim_grass.cc src/import/bethesda/character_builder.cc
     src/import/bethesda/content_profile.cc src/import/bethesda/content_record_index.cc src/import/bethesda/mod_check.cc
     src/import/bethesda/decoded_texture_cache.cc src/import/bethesda/dialogue_records.cc
     src/import/bethesda/esm_reader.cc src/import/bethesda/fallout_records.cc
@@ -299,9 +297,10 @@ odai_warnings(odai_bethesda_import)
 
 add_library(odai_bethesda_runtime STATIC
     src/bethesda/runtime_ids.cc src/bethesda/record_resolver.cc src/bethesda/tes3_content.cc
-    src/bethesda/tes3_script.cc src/bethesda/tes3_runtime.cc
+    src/bethesda/tes3_script.cc src/bethesda/tes3_runtime.cc src/bethesda/tes3_progression.cc src/bethesda/tes3_level_ui_flow.cc src/bethesda/tes3_class_ui_flow.cc
     src/bethesda/fixed_step_clock.cc
     src/bethesda/runtime_world.cc src/bethesda/gameplay_catalog.cc
+    src/bethesda/inventory_ui_flow.cc
     src/bethesda/living_world.cc src/bethesda/vmad_reader.cc src/bethesda/skyrim_quest.cc
     src/bethesda/skyrim_dialogue.cc
     src/bethesda/skyrim_scene.cc
@@ -310,7 +309,7 @@ add_library(odai_bethesda_runtime STATIC
     src/bethesda/skyrim_scenario_content.cc src/bethesda/skyrim_persistent_references.cc src/bethesda/skyrim_items.cc
     src/bethesda/pex_reader.cc src/bethesda/papyrus_vm.cc
     src/bethesda/scenario.cc src/bethesda/route_checkpoint.cc src/bethesda/bethesda_session.cc
-    src/bethesda/session_papyrus_natives.cc src/bethesda/session_tes3_natives.cc
+    src/bethesda/session_papyrus_natives.cc src/bethesda/session_tes3_natives.cc src/bethesda/session_tes3_progression.cc
     src/bethesda/save_game.cc src/bethesda/bethesda_physics_world.cc)
 odai_source_includes(odai_bethesda_runtime)
 target_link_libraries(odai_bethesda_runtime PUBLIC
@@ -322,6 +321,10 @@ if(ODAI_BUILD_HEADLESS)
     odai_source_includes(odai_headless)
     odai_warnings(odai_headless)
     target_link_libraries(odai_headless PRIVATE odai_bethesda_runtime)
+    add_executable(odai_headless_ui src/tools/odai_headless_ui_main.cc)
+    odai_source_includes(odai_headless_ui)
+    odai_warnings(odai_headless_ui)
+    target_link_libraries(odai_headless_ui PRIVATE odai_bethesda_runtime)
     if(BUILD_TESTING)
         add_test(NAME odai_headless_actor
             COMMAND odai_headless
@@ -335,8 +338,19 @@ if(ODAI_BUILD_HEADLESS)
         add_test(NAME odai_headless_inventory
             COMMAND odai_headless
                 ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/player_inventory.json)
+        add_test(NAME odai_headless_ui_inventory
+            COMMAND odai_headless_ui
+                ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/player_inventory_ui.json)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
+            add_test(NAME odai_tes3_release_audit
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tes3_release_audit_tests.py)
+            add_test(NAME odai_headless_ui_replay
+                COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/headless_ui_tests.py
+                    $<TARGET_FILE:odai_headless_ui>
+                    ${CMAKE_SOURCE_DIR}/tests/fixtures/harness/player_inventory_ui.json)
             add_test(NAME odai_headless_actor_replay
                 COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/headless_runner_replay_tests.py
@@ -358,102 +372,15 @@ if(ODAI_BUILD_HEADLESS)
     endif()
 endif()
 
-if(ODAI_HEADLESS_ONLY)
-    return()
-endif()
-
-# The Vulkan renderer is compiled once for the imported-scene path.
-add_library(odai_renderer STATIC
-    src/render/frame_graph.cc src/render/renderer.cc src/render/video_writer.cc
-    src/render/stb_image_impl.cc
-    src/render/upscale/temporal_upscaler.cc src/render/upscale/vendor_backends.cc
-    src/render/backend/vulkan/buffer_helpers.cc
-    src/render/backend/vulkan/chunk_upload.cc src/render/backend/vulkan/contact_shadows.cc
-    src/render/backend/vulkan/descriptor_buffer.cc src/render/backend/vulkan/descriptors.cc
-    src/render/backend/vulkan/device.cc src/render/backend/vulkan/frame.cc
-    src/render/backend/vulkan/frame_capture.cc
-    src/render/backend/vulkan/frame_draws.cc src/render/backend/vulkan/frame_graph_core.cc
-    src/render/backend/vulkan/frame_graph_runtime.cc
-    src/render/backend/vulkan/frame_pass_main.cc src/render/backend/vulkan/frame_pass_prepass.cc
-    src/render/backend/vulkan/frame_pass_shadow.cc src/render/backend/vulkan/frame_pass_skinning.cc
-    src/render/backend/vulkan/frame_pass_ssao.cc src/render/backend/vulkan/frame_pass_velocity.cc
-    src/render/backend/vulkan/frame_run.cc src/render/backend/vulkan/frame_ui.cc
-    src/render/backend/vulkan/init.cc src/render/backend/vulkan/init_resources.cc
-    src/render/backend/vulkan/light_clusters.cc src/render/backend/vulkan/pass_gi.cc
-    src/render/backend/vulkan/pass_pipelines.cc src/render/backend/vulkan/post_compute.cc
-    src/render/backend/vulkan/screen_space_gi.cc
-    src/render/backend/vulkan/skinning_resources.cc src/render/backend/vulkan/pose_compute.cc
-    src/render/backend/vulkan/swapchain_targets.cc src/render/backend/vulkan/ui_panels.cc
-    src/render/backend/vulkan/ui_renderer.cc src/render/backend/vulkan/vma_usage.cc
-)
-odai_source_includes(odai_renderer)
-target_include_directories(odai_renderer PRIVATE ${Stb_INCLUDE_DIR})
-target_compile_definitions(odai_renderer PUBLIC ODAI_HAS_VULKAN=1)
-target_link_libraries(odai_renderer PUBLIC odai_core odai_ui odai_upscale odai_bethesda_import
-    Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui glfw)
-if(ODAI_XESS_FOUND)
-    target_compile_definitions(odai_renderer PRIVATE ODAI_HAS_XESS=1)
-    target_include_directories(odai_renderer PRIVATE ${ODAI_XESS_INCLUDE_DIR})
-    target_link_libraries(odai_renderer PRIVATE ${ODAI_XESS_LIBRARY})
-endif()
-if(TARGET slang_shaders)
-    add_dependencies(odai_renderer slang_shaders)
-endif()
-odai_warnings(odai_renderer)
-
 if(ODAI_BUILD_RUNTIME)
     add_library(odai_traversal STATIC
         src/games/bethesda/traversal_state.cc)
     odai_source_includes(odai_traversal)
     target_link_libraries(odai_traversal PUBLIC nlohmann_json::nlohmann_json)
     odai_warnings(odai_traversal)
-
-    add_executable(odai
-        src/games/bethesda/bethesda_main.cc src/games/bethesda/bethesda_app.cc
-        src/games/bethesda/skyrim_first_person.cc
-        src/games/bethesda/bethesda_collision.cc src/bethesda/navigation_world.cc
-        src/games/bethesda/audio_decode.cc src/games/bethesda/newvegas_victor.cc
-        src/games/bethesda/bethesda_actors.cc src/import/bethesda/cell_streamer.cc
-        src/engine/game_app.cc)
-    target_include_directories(odai PRIVATE src ${Stb_INCLUDE_DIR})
-    target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
-        ODAI_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(odai PRIVATE odai_renderer odai_audio odai_traversal odai_bethesda_runtime)
-    target_link_libraries(odai PRIVATE ${CMAKE_DL_LIBS})
-    odai_warnings(odai)
-
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        add_library(odai_bench_heap SHARED src/tools/bench_heap_interposer.cc)
-        set_target_properties(odai_bench_heap PROPERTIES OUTPUT_NAME odai_bench_heap)
-        odai_warnings(odai_bench_heap)
-    endif()
 endif()
 
-if(ODAI_BUILD_TOOLS)
-    add_executable(odai_bethesda_probe src/tools/character_coverage.cc src/tools/tri_probe.cc src/tools/bethesda_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
-    target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
-    if(BUILD_TESTING)
-        find_package(Python3 COMPONENTS Interpreter QUIET)
-        if(Python3_Interpreter_FOUND)
-            add_test(NAME odai_tes3_texture_probe
-                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/tes3_texture_probe_tests.py
-                    $<TARGET_FILE:odai_bethesda_probe>)
-        endif()
-    endif()
-    odai_source_includes(odai_bethesda_probe)
-    odai_warnings(odai_bethesda_probe)
-
-    add_executable(odai_bethesda_cooker src/tools/bethesda_cooker_main.cc)
-    target_link_libraries(odai_bethesda_cooker PRIVATE odai_bethesda_import)
-    odai_source_includes(odai_bethesda_cooker)
-    odai_warnings(odai_bethesda_cooker)
-
-    add_executable(odai_texture_pack src/tools/texture_pack_main.cc)
-    target_link_libraries(odai_texture_pack PRIVATE odai_bethesda_import)
-    odai_source_includes(odai_texture_pack)
-    odai_warnings(odai_texture_pack)
-endif()
-
+# Portable validation must be registered before the presentation-only return.
 if(BUILD_TESTING)
     function(odai_plain_test target source)
         add_executable(${target} ${source})
@@ -500,33 +427,13 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_mod_check_tests tests/mod_check_tests.cc)
     target_link_libraries(odai_mod_check_tests PRIVATE odai_bethesda_import)
-    foreach(mod_check_target IN ITEMS odai odai_bethesda_probe)
-        if(TARGET ${mod_check_target})
-            set(mod_check_subcommand "--mod-check")
-            if(mod_check_target STREQUAL "odai")
-                set(mod_check_subcommand "mod-check")
-            endif()
-            add_test(NAME ${mod_check_target}_mod_check_headless
-                COMMAND ${CMAKE_COMMAND} -E env DISPLAY= WAYLAND_DISPLAY=
-                    $<TARGET_FILE:${mod_check_target}> ${mod_check_subcommand} --help)
-            set_tests_properties(${mod_check_target}_mod_check_headless PROPERTIES
-                PASS_REGULAR_EXPRESSION "odai mod-check --profile")
-        endif()
-    endforeach()
+
     odai_plain_test(odai_content_profile_tests tests/content_profile_tests.cc)
     target_link_libraries(odai_content_profile_tests PRIVATE odai_bethesda_import)
 
     if(TARGET odai_traversal)
         odai_plain_test(odai_traversal_state_tests tests/traversal_state_tests.cc)
         target_link_libraries(odai_traversal_state_tests PRIVATE odai_traversal)
-    endif()
-
-    if(TARGET slang_shaders)
-        odai_plain_test(odai_pose_compute_tests src/render/tests/pose_compute_tests.cc)
-        target_link_libraries(odai_pose_compute_tests PRIVATE odai_anim Vulkan::Vulkan)
-        target_compile_definitions(odai_pose_compute_tests PRIVATE ODAI_POSE_SHADER="${ODAI_RESOURCE_DIR}/shaders/pose_evaluate.comp.slang.spv")
-        add_dependencies(odai_pose_compute_tests slang_shaders)
-        set_tests_properties(odai_pose_compute_tests PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     odai_plain_test(odai_pose_graph_tests tests/pose_graph_tests.cc)
@@ -545,17 +452,11 @@ if(BUILD_TESTING)
     odai_plain_test(odai_dialogue_tests tests/dialogue_tests.cc)
     target_link_libraries(odai_dialogue_tests PRIVATE odai_dialogue)
 
-    odai_plain_test(odai_audio_tests tests/audio_tests.cc)
-    target_link_libraries(odai_audio_tests PRIVATE odai_audio)
-
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME odai_launcher_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/launcher_tests.py)
         add_test(NAME odai_iridius_bench_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/iridius_bench_tests.py)
-        if(TARGET odai_bench_heap)
-            add_test(NAME odai_bench_heap_tests COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/tests/bench_heap_tests.py $<TARGET_FILE:odai_bench_heap>)
-        endif()
+
         add_test(
             NAME odai_skyrim_showcase_manifest_tests
             COMMAND ${Python3_EXECUTABLE}
@@ -572,10 +473,8 @@ if(BUILD_TESTING)
     target_link_libraries(odai_cell_residency_planner_tests PRIVATE odai_bethesda_import)
 
     odai_plain_test(odai_bindless_slot_table_tests tests/bindless_slot_table_tests.cc)
-    target_link_libraries(odai_bindless_slot_table_tests PRIVATE odai_renderer)
 
     odai_plain_test(odai_gpu_arena_allocator_tests tests/gpu_arena_allocator_tests.cc)
-    target_link_libraries(odai_gpu_arena_allocator_tests PRIVATE odai_renderer)
 
     odai_plain_test(odai_job_system_tests tests/job_system_tests.cc)
     target_link_libraries(odai_job_system_tests PRIVATE odai_core)
@@ -597,6 +496,9 @@ if(BUILD_TESTING)
     odai_plain_test(odai_tes3_script_tests tests/tes3_script_tests.cc)
     target_link_libraries(odai_tes3_script_tests PRIVATE odai_bethesda_runtime)
 
+    odai_plain_test(odai_tes3_progression_tests tests/tes3_progression_tests.cc)
+    target_link_libraries(odai_tes3_progression_tests PRIVATE odai_bethesda_runtime)
+
     odai_plain_test(odai_tes3_runtime_tests tests/tes3_runtime_tests.cc)
     target_link_libraries(odai_tes3_runtime_tests PRIVATE odai_bethesda_runtime)
 
@@ -614,15 +516,6 @@ if(BUILD_TESTING)
     target_link_libraries(odai_tes3_navigation_simulation_tests PRIVATE
         odai_bethesda_runtime)
 
-    odai_plain_test(odai_actor_movement_tests tests/bethesda_actor_movement_tests.cc)
-    target_sources(odai_actor_movement_tests PRIVATE
-        src/games/bethesda/bethesda_actors.cc
-        src/bethesda/navigation_world.cc
-        src/games/bethesda/audio_decode.cc)
-    target_include_directories(odai_actor_movement_tests PRIVATE ${Stb_INCLUDE_DIR})
-    target_link_libraries(odai_actor_movement_tests PRIVATE
-        odai_bethesda_import odai_bethesda_runtime odai_audio)
-
     odai_plain_test(odai_papyrus_vm_tests tests/papyrus_vm_tests.cc)
     target_link_libraries(odai_papyrus_vm_tests PRIVATE odai_bethesda_runtime)
 
@@ -636,21 +529,161 @@ if(BUILD_TESTING)
 
     odai_plain_test(odai_world_map_cache_tests tests/world_map_cache_tests.cc)
 
+    odai_plain_test(odai_frame_graph_tests tests/frame_graph_plain_tests.cc)
+    target_sources(odai_frame_graph_tests PRIVATE
+        src/render/frame_graph.cc src/render/backend/vulkan/frame_graph_runtime.cc)
+    target_link_libraries(odai_frame_graph_tests PRIVATE odai_core)
+
+    odai_plain_test(odai_imported_render_policy_tests tests/imported_render_policy_tests.cc)
+
+    odai_plain_test(odai_pbr_material_tests tests/pbr_material_tests.cc)
+    target_link_libraries(odai_pbr_material_tests PRIVATE odai_bethesda_import)
+endif()
+
+if(ODAI_HEADLESS_ONLY)
+    return()
+endif()
+
+# The Vulkan renderer is compiled once for the imported-scene path.
+add_library(odai_renderer STATIC
+    src/render/frame_graph.cc src/render/renderer.cc src/render/video_writer.cc
+    src/render/stb_image_impl.cc
+    src/render/upscale/temporal_upscaler.cc src/render/upscale/vendor_backends.cc
+    src/render/backend/vulkan/buffer_helpers.cc
+    src/render/backend/vulkan/chunk_upload.cc src/render/backend/vulkan/contact_shadows.cc
+    src/render/backend/vulkan/descriptor_buffer.cc src/render/backend/vulkan/descriptors.cc
+    src/render/backend/vulkan/device.cc src/render/backend/vulkan/frame.cc
+    src/render/backend/vulkan/frame_capture.cc
+    src/render/backend/vulkan/frame_draws.cc src/render/backend/vulkan/frame_graph_core.cc
+    src/render/backend/vulkan/frame_graph_runtime.cc
+    src/render/backend/vulkan/frame_pass_main.cc src/render/backend/vulkan/frame_pass_prepass.cc
+    src/render/backend/vulkan/frame_pass_shadow.cc src/render/backend/vulkan/frame_pass_skinning.cc
+    src/render/backend/vulkan/frame_pass_ssao.cc src/render/backend/vulkan/frame_pass_velocity.cc
+    src/render/backend/vulkan/frame_run.cc src/render/backend/vulkan/frame_ui.cc
+    src/render/backend/vulkan/init.cc src/render/backend/vulkan/init_resources.cc
+    src/render/backend/vulkan/light_clusters.cc src/render/backend/vulkan/pass_gi.cc
+    src/render/backend/vulkan/pass_pipelines.cc src/render/backend/vulkan/post_compute.cc
+    src/render/backend/vulkan/screen_space_gi.cc
+    src/render/backend/vulkan/skinning_resources.cc src/render/backend/vulkan/pose_compute.cc
+    src/render/backend/vulkan/swapchain_targets.cc src/render/backend/vulkan/ui_panels.cc
+    src/render/backend/vulkan/ui_renderer.cc src/render/backend/vulkan/vma_usage.cc
+)
+odai_source_includes(odai_renderer)
+target_include_directories(odai_renderer PRIVATE ${Stb_INCLUDE_DIR})
+target_compile_definitions(odai_renderer PUBLIC ODAI_HAS_VULKAN=1)
+target_link_libraries(odai_renderer PUBLIC odai_core odai_ui odai_upscale odai_bethesda_import
+    Vulkan::Vulkan GPUOpen::VulkanMemoryAllocator imgui::imgui glfw)
+if(ODAI_XESS_FOUND)
+    target_compile_definitions(odai_renderer PRIVATE ODAI_HAS_XESS=1)
+    target_include_directories(odai_renderer PRIVATE ${ODAI_XESS_INCLUDE_DIR})
+    target_link_libraries(odai_renderer PRIVATE ${ODAI_XESS_LIBRARY})
+endif()
+if(TARGET slang_shaders)
+    add_dependencies(odai_renderer slang_shaders)
+endif()
+odai_warnings(odai_renderer)
+
+if(ODAI_BUILD_RUNTIME)
+    add_executable(odai
+        src/games/bethesda/bethesda_main.cc src/games/bethesda/bethesda_app.cc
+        src/games/bethesda/skyrim_first_person.cc
+        src/games/bethesda/bethesda_collision.cc src/bethesda/navigation_world.cc
+        src/games/bethesda/audio_decode.cc src/games/bethesda/newvegas_victor.cc
+        src/games/bethesda/bethesda_actors.cc src/import/bethesda/cell_streamer.cc
+        src/engine/game_app.cc)
+    target_include_directories(odai PRIVATE src ${Stb_INCLUDE_DIR})
+    target_compile_definitions(odai PRIVATE ODAI_HAS_GLFW=1
+        ODAI_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(odai PRIVATE odai_renderer odai_audio odai_traversal odai_bethesda_runtime)
+    target_link_libraries(odai PRIVATE ${CMAKE_DL_LIBS})
+    odai_warnings(odai)
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_library(odai_bench_heap SHARED src/tools/bench_heap_interposer.cc)
+        set_target_properties(odai_bench_heap PROPERTIES OUTPUT_NAME odai_bench_heap)
+        odai_warnings(odai_bench_heap)
+    endif()
+endif()
+
+if(ODAI_BUILD_TOOLS)
+    add_executable(odai_bethesda_probe src/tools/character_coverage.cc src/tools/tri_probe.cc src/tools/bethesda_probe_main.cc src/tools/asset_coverage.cc src/tools/asset_coverage_report.cc)
+    target_link_libraries(odai_bethesda_probe PRIVATE odai_bethesda_import odai_bethesda_runtime)
+    if(BUILD_TESTING)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME odai_tes3_texture_probe
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/tes3_texture_probe_tests.py
+                    $<TARGET_FILE:odai_bethesda_probe>)
+        endif()
+    endif()
+    odai_source_includes(odai_bethesda_probe)
+    odai_warnings(odai_bethesda_probe)
+    if(BUILD_TESTING)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME odai_tes3_probe_records
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/tes3_probe_record_tests.py
+                    $<TARGET_FILE:odai_bethesda_probe>)
+        endif()
+    endif()
+
+    add_executable(odai_bethesda_cooker src/tools/bethesda_cooker_main.cc)
+    target_link_libraries(odai_bethesda_cooker PRIVATE odai_bethesda_import)
+    odai_source_includes(odai_bethesda_cooker)
+    odai_warnings(odai_bethesda_cooker)
+
+    add_executable(odai_texture_pack src/tools/texture_pack_main.cc)
+    target_link_libraries(odai_texture_pack PRIVATE odai_bethesda_import)
+    odai_source_includes(odai_texture_pack)
+    odai_warnings(odai_texture_pack)
+endif()
+
+if(BUILD_TESTING)
+    foreach(mod_check_target IN ITEMS odai odai_bethesda_probe)
+        if(TARGET ${mod_check_target})
+            set(mod_check_subcommand "--mod-check")
+            if(mod_check_target STREQUAL "odai")
+                set(mod_check_subcommand "mod-check")
+            endif()
+            add_test(NAME ${mod_check_target}_mod_check_headless
+                COMMAND ${CMAKE_COMMAND} -E env DISPLAY= WAYLAND_DISPLAY=
+                    $<TARGET_FILE:${mod_check_target}> ${mod_check_subcommand} --help)
+            set_tests_properties(${mod_check_target}_mod_check_headless PROPERTIES
+                PASS_REGULAR_EXPRESSION "odai mod-check --profile")
+        endif()
+    endforeach()
+
+    if(TARGET slang_shaders)
+        odai_plain_test(odai_pose_compute_tests src/render/tests/pose_compute_tests.cc)
+        target_link_libraries(odai_pose_compute_tests PRIVATE odai_anim Vulkan::Vulkan)
+        target_compile_definitions(odai_pose_compute_tests PRIVATE ODAI_POSE_SHADER="${ODAI_RESOURCE_DIR}/shaders/pose_evaluate.comp.slang.spv")
+        add_dependencies(odai_pose_compute_tests slang_shaders)
+        set_tests_properties(odai_pose_compute_tests PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+
+    odai_plain_test(odai_audio_tests tests/audio_tests.cc)
+    target_link_libraries(odai_audio_tests PRIVATE odai_audio)
+
+    if(Python3_Interpreter_FOUND AND TARGET odai_bench_heap)
+        add_test(NAME odai_bench_heap_tests COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/tests/bench_heap_tests.py $<TARGET_FILE:odai_bench_heap>)
+    endif()
+
+    odai_plain_test(odai_actor_movement_tests tests/bethesda_actor_movement_tests.cc)
+    target_sources(odai_actor_movement_tests PRIVATE
+        src/games/bethesda/bethesda_actors.cc
+        src/bethesda/navigation_world.cc
+        src/games/bethesda/audio_decode.cc)
+    target_include_directories(odai_actor_movement_tests PRIVATE ${Stb_INCLUDE_DIR})
+    target_link_libraries(odai_actor_movement_tests PRIVATE
+        odai_bethesda_import odai_bethesda_runtime odai_audio)
+
     odai_plain_test(odai_swf_font_tests tests/swf_font_tests.cc)
     target_link_libraries(odai_swf_font_tests PRIVATE odai_ui)
 
     odai_plain_test(odai_ui_tests tests/ui_tests.cc)
     target_compile_definitions(odai_ui_tests PRIVATE ODAI_TEST_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets")
     target_link_libraries(odai_ui_tests PRIVATE odai_ui)
-
-    odai_plain_test(odai_frame_graph_tests tests/frame_graph_plain_tests.cc)
-    target_link_libraries(odai_frame_graph_tests PRIVATE odai_renderer)
-
-    odai_plain_test(odai_imported_render_policy_tests tests/imported_render_policy_tests.cc)
-    target_link_libraries(odai_imported_render_policy_tests PRIVATE odai_renderer)
-
-    odai_plain_test(odai_pbr_material_tests tests/pbr_material_tests.cc)
-    target_link_libraries(odai_pbr_material_tests PRIVATE odai_bethesda_import)
 
     add_executable(odai_imported_scene_vulkan_smoke tests/imported_scene_vulkan_smoke.cc)
     odai_source_includes(odai_imported_scene_vulkan_smoke)

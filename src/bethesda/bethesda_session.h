@@ -195,6 +195,7 @@ public:
     bool configure(BethesdaSessionConfig config, std::string& outError);
     bool configureTes3Content(
         std::shared_ptr<const Tes3ContentStore> content, std::string& outError);
+    bool bindTes3ActorLocalScript(ObjectId actor, std::string& outError);
     BethesdaSessionStep advance(
         double frameDeltaSeconds, const BeforeSimulationTick& beforeTick = {});
     bool applyScenario(const ScenarioDefinition& scenario, std::string& outError);
@@ -208,7 +209,7 @@ public:
         ObjectId object, PhysicsDynamicBodyConfig config, std::string& outError);
     bool unregisterActorController(ObjectId object);
     bool unregisterActorAnimation(ObjectId object);
-    bool setActorControllerInput(ObjectId object, const PhysicsCharacterInput& input);
+    bool setActorControllerInput(ObjectId object, const PhysicsCharacterInput& input, bool running = false);
     bool addActorImpulse(ObjectId object, const odai::math::Vector3& velocityChange);
     [[nodiscard]] bool hasActorAnimation(ObjectId object) const { return m_actorAnimations.contains(object); }
     bool setActorAnimationInput(ObjectId object, odai::anim::AnimationInputState input);
@@ -221,6 +222,7 @@ public:
     [[nodiscard]] MeleeAttackResult performMeleeAttack(
         ObjectId attacker, const odai::math::Vector3& forward,
         float damage = 25.0f, float rangeBethesdaUnits = 180.0f);
+    [[nodiscard]] double tes3MeleeHitChance(ObjectId attacker, ObjectId target) const;
     void setSkyrimItems(std::map<RecordKey, SkyrimItemDefinition> items) { m_skyrimItems = std::move(items); }
     [[nodiscard]] const SkyrimItemDefinition* skyrimItem(const RecordKey& key) const {
         const auto found = m_skyrimItems.find(key);
@@ -231,7 +233,16 @@ public:
         bool leftHand, std::string& error, bool equipmentPolicy = false, bool scriptOverride = false);
     bool requestActorWeaponDraw(ObjectId actor, bool drawn, std::string& error, bool combatDraw = false);
     bool useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error);
-    bool dropInventoryItem(ObjectId actor, const RecordKey& item, std::string& error);
+    bool dropInventoryItem(ObjectId actor, const RecordKey& item, std::string& error,
+        std::optional<std::int32_t> condition = {});
+    // Player activation delivers the local script event; MWScript Activate
+    // calls the same default action without redelivering that event.
+    bool activateTes3Reference(ObjectId reference, bool fromScript, std::string& error);
+    [[nodiscard]] std::vector<ObjectId> takeTes3DoorActivations() {
+        std::vector<ObjectId> result;
+        result.swap(m_tes3DoorActivations);
+        return result;
+    }
     // Transient held input and presentation events: never serialized.
     void setActorGuard(ObjectId actor, bool held, const odai::math::Vector3& forward);
     bool actorGuarding(ObjectId actor) const;
@@ -332,6 +343,33 @@ public:
         std::string_view journalId) const {
         return m_tes3.journal().find(journalId);
     }
+    bool initializeTes3PlayerProgression(std::string& error);
+    bool readTes3SkillBook(const RecordKey& book, std::string& error);
+    struct Tes3RepairOption { std::size_t inventoryIndex = 0; RecordKey item; int condition = 0; int maximum = 0; };
+    struct Tes3RepairResult { bool accepted = false; bool success = false; int repaired = 0; bool toolConsumed = false; };
+    [[nodiscard]] std::vector<Tes3RepairOption> tes3RepairTools() const;
+    [[nodiscard]] std::vector<Tes3RepairOption> tes3RepairTargets() const;
+    [[nodiscard]] Tes3RepairResult repairTes3PlayerItem(std::size_t itemIndex, std::size_t toolIndex, std::string& error);
+    struct Tes3TrainingOffer { int skill = -1; int price = 0; bool eligible = false; };
+    [[nodiscard]] std::vector<Tes3TrainingOffer> tes3TrainingOffers(ObjectId trainer) const;
+    bool trainTes3PlayerSkill(ObjectId trainer, int skill, std::string& error);
+    // Rest legality is derived from resident content/physics, never supplied by UI.
+    bool restTes3Player(int hours, bool sleep, std::string& error, ObjectId bed = {});
+    bool confirmTes3PlayerLevel(const std::vector<int>& attributes, std::string& error);
+    void synchronizeTes3PlayerValues();
+    [[nodiscard]] double modifiedTes3Stat(ObjectId actor, std::string_view stat) const;
+    [[nodiscard]] int tes3DerivedDisposition(ObjectId npc, bool clamp = true) const;
+    enum class Tes3PersuasionAction { Admire, Intimidate, Taunt, Bribe10, Bribe100, Bribe1000 };
+    struct Tes3PersuasionResult {
+        bool accepted = false;
+        bool success = false;
+        int temporaryChange = 0;
+        int permanentChange = 0;
+        Tes3DialogueResponse response;
+    };
+    [[nodiscard]] Tes3PersuasionResult persuadeTes3Npc(Tes3PersuasionAction action, std::string& error);
+    [[nodiscard]] double tes3MagicEffectMagnitude(ObjectId actor, int effect,
+        int skill = -1, int attribute = -1) const;
     void dispatchTes3GameplayEvent(
         std::string eventName, ObjectId target,
         Tes3Value value = Tes3Value::fromNumber(1.0)) {
@@ -479,6 +517,7 @@ private:
     void registerActorNatives();
     [[nodiscard]] Tes3NativeResult executeTes3WorldNative(const Tes3NativeCall& call);
     void syncTes3PlayerInventory();
+    void finishTes3Persuasion();
     void queueQuestAliasEvent(
         ObjectId alias, std::string event, std::vector<PapyrusValue> arguments);
     void flushQuestAliasEvents();
@@ -487,6 +526,11 @@ private:
     void queueCombatActions();
     void advanceActorAnimations(float fixedDelta, BethesdaSessionStep& result);
     void queuePhysicsTransforms(float fixedDelta);
+    void advanceTes3RestHour(bool sleep);
+    void resolveTes3PlayerLanding(const PhysicsCharacterStep&);
+    void updateTes3PlayerWater();
+    void awardTes3PlayerArmorHit(ObjectId attacker, std::uint64_t hitSequence);
+    [[nodiscard]] int tes3ActorWeaponSkill(ObjectId) const;
     void advanceScriptsAndApplyCommands(
         std::uint64_t tick, double stepSeconds, BethesdaSessionStep& result);
     [[nodiscard]] ConditionEvaluation evaluateDialogueConditions(
@@ -496,6 +540,7 @@ private:
     BethesdaSessionConfig m_config;
     FixedStepClock m_clock;
     BethesdaWorld m_world;
+    std::optional<BethesdaWorld> m_tes3ResultWorldSnapshot;
     BethesdaPhysicsWorld m_physics;
     LivingWorldSimulation m_livingWorld;
     PapyrusVm m_papyrus;
@@ -535,7 +580,11 @@ private:
     std::vector<std::string> m_pendingDiagnostics;
     std::vector<PendingQuestAliasEvent> m_pendingQuestAliasEvents;
     ResolvedFormResolver m_resolvedFormResolver;
+    bool m_tes3PlayerRunning = false;
+    bool m_tes3PlayerMoving = false;
+    bool m_tes3PlayerJumpRequested = false;
     std::map<ObjectId, odai::math::Vector3> m_actorGuards;
+    std::vector<ObjectId> m_tes3DoorActivations;
     std::vector<MeleeContactEvent> m_meleeContacts;
     std::map<ObjectId, ActorAnimationRuntime> m_actorAnimations;
     std::map<ObjectId, AnimationActorSnapshot> m_pendingAnimationSnapshots;

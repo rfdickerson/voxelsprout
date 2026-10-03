@@ -1,6 +1,6 @@
 # MECH-TES3-003: Main Quest MWScript Commands and Effects
 
-Status: Planned
+Status: Partial
 
 ## Goal
 
@@ -27,3 +27,11 @@ MWScript commands and magic effects required by MECH-002 produce their authored 
 ## Definition of Done
 
 Every MWScript operation and effect exercised by MECH-002's standard route has tested gameplay behavior, and the route's script checkpoints complete without unsupported-command or VM diagnostics.
+
+## Current implementation and remaining work
+
+The VM preflights unsupported native operations and scripted cast effects before starting a program. Blocked dialogue results leave journal, inventory, and one-time response state untouched. Immediate failures and failures after a suspended MessageBox choice roll back those changes and queued world commands; saves reject an in-flight result transaction. World-script MessageBox text and choices are presented to the player and survive save/load with the suspended thread. Diagnostics identify program, line, target, and operation. Active spell and repeating local-script state survives save/load. Scripted reference activation, item pickup, equipment events, Corprus disease/cure, weather mutation, player controls and character menus, voice gating, and several actor queries now affect runtime state; synthetic fixtures cover these changes.
+
+The local base-game route closure audit includes journal conditions/results, related actor and item scripts, character generation, the Heart of Lorkhan, and literal `StartScript` dependencies. Its 1,609 candidate programs have no blocked native/effect operation or unresolved start. Eight isolated local checkpoints pass: opening script, name voice/menu gate, Corprus Cure, finale `EndGame`, Wraithguard equip, Sunder and Keening with Wraithguard, and the Heart's Sunder/Keening hit sequence with Dagoth Ur's shield changes. Synthetic fixtures also cover `HitOnMe`, cross-reference locals, shield and Restore Attribute effects, scripted doors, pickup, and same-tick non-player spell queries. The 60-test CTest suite passes.
+
+Remaining: this static closure is deliberately broad and cannot prove which scripts are reached during ordinary play. The checkpoints seed late-game inventory and execute selected scripts directly. Verify an event-driven standard route, including the dialogue, item, and encounter gates, and exercise every reached operation's gameplay behavior before marking Implemented.

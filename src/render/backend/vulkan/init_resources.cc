@@ -3759,6 +3759,21 @@ bool RendererBackend::createVoxelGiResources() {
             return false;
         }
     }
+    VkDeviceSize giResourceBytes = 0;
+    const auto countGiImage = [&](VkImage image) {
+        if (image == VK_NULL_HANDLE) return;
+        VkMemoryRequirements requirements{};
+        vkGetImageMemoryRequirements(m_device, image, &requirements);
+        giResourceBytes += requirements.size;
+    };
+    for (auto image : m_voxelGiImages) countGiImage(image);
+    for (auto image : m_voxelGiSurfaceFaceImages) countGiImage(image);
+    countGiImage(m_voxelGiSkyExposureImage);
+    countGiImage(m_voxelGiOccupancyImage);
+    giResourceBytes += m_bufferAllocator.getSize(m_voxelGiRestirReservoirCurrentBufferHandle) +
+        m_bufferAllocator.getSize(m_voxelGiRestirReservoirPreviousBufferHandle) +
+        m_bufferAllocator.getSize(m_voxelGiRestirReservoirScratchBufferHandle);
+    VOX_LOGI("render") << "GI allocated resource bytes=" << giResourceBytes;
     VOX_LOGI("render") << "voxel GI resources ready: "
                        << kVoxelGiGridResolution << "^3, format=" << static_cast<int>(m_voxelGiFormat)
                        << ", occupancyFormat=" << static_cast<int>(m_voxelGiOccupancyFormat)

@@ -1,6 +1,6 @@
 #pragma once
 
-// Reader for Gamebryo .kf animation files (Fallout 3 / Fallout: New Vegas).
+// Reader for TES3 and Gamebryo .kf animation files.
 //
 // A .kf is a NIF by format -- same header, same block table, same string table
 // -- carrying no geometry at all. What it holds is one NiControllerSequence: a
@@ -91,8 +91,10 @@ struct KfAnimation {
     [[nodiscard]] bool loops() const { return cycleType == 0; }
 };
 
-// Parses one .kf. Returns false with outError set when the file is not a
-// readable NIF 20.2.0.7, holds no NiControllerSequence, or fails the internal
+// Parses one .kf. TES3 4.0.0.2 streams bind linked NiStringExtraData names to
+// linked NiKeyframeControllers; modern files use NiControllerSequence.
+// Returns false with outError set when the file is unreadable, has neither
+// supported sequence representation, or fails the internal
 // consistency checks (block refs and string indices must all be in range --
 // these are what catch a wrong ControlledBlock stride, which otherwise
 // produces confident nonsense).

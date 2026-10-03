@@ -74,6 +74,28 @@ std::uint64_t replayHash(const std::vector<double>& frameDeltas) {
 }  // namespace
 
 int main() {
+    {
+        std::vector<SkinnedActor> actors{walkingActor(false)};
+        const float destination[3] = {90.0f, 0.0f, 90.0f};
+        applyActorScriptedMovement(actors[0], destination, 1u, true);
+        const auto noGround = [](float, float, float, float&) { return false; };
+        const auto noWalls = [](float&, float&, float, float, float) {};
+        for (int tick = 0; tick < 300; ++tick) {
+            applyActorScriptedMovement(actors[0], destination, 1u, true);
+            updateActorWandering(actors, 1.0f / 60.0f, nullptr, noGround, noWalls, -1);
+        }
+        assert(actors[0].scriptedMoveArrived);
+        assert(!actors[0].scriptedMoveActive && !actors[0].wanders);
+        const float arrivedX = actors[0].position[0];
+        updateActorWandering(actors, 1.0f, nullptr, noGround, noWalls, -1);
+        assert(actors[0].position[0] == arrivedX);
+        const float escortDestination[3] = {195.0f, 170.0f, -100.0f};
+        applyActorScriptedMovement(actors[0], escortDestination, 2u, true);
+        assert(!actors[0].scriptedMoveArrived && actors[0].scriptedMoveActive);
+        assert(actors[0].wanderTarget[2] == -100.0f);
+        applyActorScriptedMovement(actors[0], escortDestination, 3u, false);
+        assert(!actors[0].wanders && !actors[0].scriptedMoveActive);
+    }
     const auto noGround = [](float, float, float, float&) { return false; };
     const auto noWalls = [](float&, float&, float, float, float) {};
 

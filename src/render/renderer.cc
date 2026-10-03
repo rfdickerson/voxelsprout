@@ -111,6 +111,10 @@ void Renderer::setRayTracingEnabled(bool enabled) {
     m_backend->setRayTracingEnabled(enabled);
 }
 
+bool Renderer::captureVoxelGi(VoxelGiCapture& output) {
+    return m_backend->captureVoxelGi(output);
+}
+
 bool Renderer::prepareFrameCapture() {
     return m_backend->prepareFrameCapture();
 }
@@ -151,6 +155,10 @@ bool Renderer::isAutoExposureEnabled() const {
 
 void Renderer::setDebugView(DebugView view) {
     m_backend->setDebugView(view);
+}
+
+void Renderer::setGlobalIlluminationEnabled(bool enabled) {
+    m_backend->setGlobalIlluminationEnabled(enabled);
 }
 
 DebugView Renderer::debugView() const {

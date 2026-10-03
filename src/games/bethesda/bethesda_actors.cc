@@ -2450,6 +2450,20 @@ void updateActorFollowTarget(SkinnedActor& actor, const ActorNavigationWorld* na
     actor.scriptedMoveArrived = false;
 }
 
+void applyActorScriptedMovement(SkinnedActor& actor, const float destination[3],
+    std::uint64_t revision, bool moving) {
+    if (revision == actor.scriptedMoveRevision) return;
+    actor.scriptedMoveRevision = revision;
+    actor.scriptedMoveActive = moving;
+    actor.scriptedMoveArrived = false;
+    actor.wanders = moving;
+    actor.walking = false;
+    actor.wanderPauseSeconds = 0.0f;
+    actor.wanderPath.clear();
+    actor.wanderPathIndex = 0u;
+    std::copy_n(destination, 3u, actor.wanderTarget);
+}
+
 void updateActorWandering(
     std::vector<SkinnedActor>& actors,
     float deltaSeconds,
@@ -2678,6 +2692,7 @@ void updateActorWandering(
             if (actor.scriptedMoveActive) {
                 actor.scriptedMoveActive = false;
                 actor.scriptedMoveArrived = true;
+                actor.wanders = false;
                 actor.walking = false;
                 continue;
             }

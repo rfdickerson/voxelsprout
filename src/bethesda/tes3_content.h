@@ -3,6 +3,7 @@
 #include "bethesda/runtime_ids.h"
 #include "import/bethesda/plugin_load_order.h"
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -111,6 +112,18 @@ struct Tes3GlobalDefinition {
     std::string sourcePlugin;
 };
 
+struct Tes3FactionDefinition {
+    struct Rank {
+        std::int32_t attribute1 = 0, attribute2 = 0;
+        std::int32_t primarySkill = 0, favouredSkill = 0, reputation = 0;
+    };
+    RecordKey record;
+    std::array<std::int32_t, 2> attributes{};
+    std::array<std::int32_t, 7> skills{};
+    std::array<Rank, 10> ranks{};
+    std::map<std::string, std::int32_t> reactions;
+};
+
 struct Tes3ActorDefinition {
     struct TravelDestination {
         std::string cell;
@@ -126,6 +139,9 @@ struct Tes3ActorDefinition {
     RecordKey script;
     std::int32_t level = 1;
     std::int32_t rank = -1;
+    std::int8_t gender = -1;
+    float disposition = 50.0f;
+    std::int32_t reputation = 0;
     float health = 100.0f;
     float magicka = 100.0f;
     float fatigue = 100.0f;
@@ -134,6 +150,8 @@ struct Tes3ActorDefinition {
     bool creature = false;
     bool autoCalculate = false;
     std::uint32_t serviceFlags = 0u;
+    std::int32_t fight = 0;
+    std::int32_t flee = 0;
     std::vector<TravelDestination> travelDestinations;
     std::vector<std::pair<RecordKey, std::int32_t>> inventory;
     std::string sourcePlugin;
@@ -194,6 +212,7 @@ struct Tes3ReferenceDefinition {
     bool deleted = false;
     std::optional<float> scale;
     std::optional<std::int32_t> lockLevel;
+    std::int32_t itemCondition = -1; // TES3 INTV: full/default when absent.
     float position[3] = {};
     float rotationRadians[3] = {};
     bool hasTransform = false;
@@ -247,6 +266,8 @@ public:
     [[nodiscard]] const Tes3ScriptDefinition* findScript(std::string_view id) const;
     [[nodiscard]] const Tes3ActorDefinition* findActor(
         std::string_view type, std::string_view id) const;
+    [[nodiscard]] const Tes3FactionDefinition* findFaction(std::string_view id) const;
+    [[nodiscard]] std::optional<std::int32_t> wornItemValue(const RecordKey& item) const;
     [[nodiscard]] const Tes3SpellDefinition* findSpell(std::string_view id) const;
     [[nodiscard]] const Tes3NamedRecord* findRecord(
         std::string_view type, std::string_view id) const;
@@ -257,6 +278,7 @@ private:
     std::map<RecordKey, Tes3ScriptDefinition> m_scripts;
     std::map<RecordKey, Tes3GlobalDefinition> m_globals;
     std::map<RecordKey, Tes3ActorDefinition> m_actors;
+    std::map<RecordKey, Tes3FactionDefinition> m_factions;
     std::map<RecordKey, Tes3SpellDefinition> m_spells;
     std::map<RecordKey, Tes3NamedRecord> m_namedRecords;
     std::map<ObjectId, Tes3ReferenceDefinition> m_references;

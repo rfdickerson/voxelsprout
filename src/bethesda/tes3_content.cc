@@ -1,4 +1,5 @@
 #include "bethesda/tes3_content.h"
+#include "bethesda/tes3_progression.h"
 
 #include "import/bethesda/esm_reader.h"
 
@@ -8,6 +9,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -91,6 +93,31 @@ std::string decodedDataString(
     return decodeTes3Text(bytes, encoding);
 }
 
+std::optional<Tes3FactionDefinition> parseFactionDefinition(
+    const Tes3NamedRecord& record, std::string_view encoding) {
+    Tes3FactionDefinition faction;
+    faction.record = record.record;
+    bool hasData = false;
+    std::string reactionFaction;
+    for (const auto& sub : record.subrecords) {
+        if (sub.type == "FADT" && sub.data.size() == 240u) {
+            hasData = true;
+            for (std::size_t i = 0; i < 2; ++i) faction.attributes[i] = readI32(sub.data.data() + i * 4);
+            for (std::size_t i = 0; i < 10; ++i) {
+                const auto* data = sub.data.data() + 8 + i * 20;
+                faction.ranks[i] = {readI32(data), readI32(data + 4), readI32(data + 8),
+                    readI32(data + 12), readI32(data + 16)};
+            }
+            for (std::size_t i = 0; i < 7; ++i) faction.skills[i] = readI32(sub.data.data() + 208 + i * 4);
+        } else if (sub.type == "ANAM") reactionFaction = lowerAscii(decodedDataString(sub, encoding));
+        else if (sub.type == "INTV" && sub.data.size() == 4u && !reactionFaction.empty()) {
+            faction.reactions[reactionFaction] = readI32(sub.data.data());
+            reactionFaction.clear();
+        }
+    }
+    return hasData ? std::optional<Tes3FactionDefinition>(std::move(faction)) : std::nullopt;
+}
+
 Tes3ActorDefinition parseActorDefinition(
     const Tes3NamedRecord& record, std::string_view encoding) {
     constexpr std::array<std::string_view, 8u> attributeNames = {
@@ -120,6 +147,7 @@ Tes3ActorDefinition parseActorDefinition(
             if (!script.empty()) result.script = makeTes3RecordKey("SCPT", script);
         } else if (sub.type == "FLAG" && sub.data.size() >= 4u) {
             result.autoCalculate = (readU32(sub.data.data()) & 0x10u) != 0u;
+            if (!result.creature) result.gender = (readU32(sub.data.data()) & 1u) != 0u ? 1 : 0;
         } else if (sub.type == "NPDT") {
             if (!result.creature && sub.data.size() >= 52u) {
                 result.level = readI16(sub.data.data());
@@ -133,16 +161,30 @@ Tes3ActorDefinition parseActorDefinition(
                 result.magicka = readI16(sub.data.data() + 40u);
                 result.fatigue = readI16(sub.data.data() + 42u);
                 result.rank = static_cast<std::int8_t>(sub.data[46u]);
+                result.disposition = sub.data[44u];
+                result.reputation = sub.data[45u];
             } else if (!result.creature && sub.data.size() >= 12u) {
                 result.level = readI16(sub.data.data());
                 result.rank = static_cast<std::int8_t>(sub.data[4u]);
+                result.disposition = sub.data[2u];
+                result.reputation = sub.data[3u];
                 result.autoCalculate = true;
             } else if (result.creature && sub.data.size() >= 96u) {
                 result.level = readI32(sub.data.data() + 4u);
+                for (std::size_t i = 0; i < attributeNames.size(); ++i)
+                    result.attributes.emplace(std::string(attributeNames[i]), readI32(sub.data.data() + 8u + i * 4u));
+                result.skills.emplace("combat", readI32(sub.data.data() + 56u));
+                result.skills.emplace("magic", readI32(sub.data.data() + 60u));
+                result.skills.emplace("stealth", readI32(sub.data.data() + 64u));
                 result.health = static_cast<float>(readI32(sub.data.data() + 40u));
                 result.magicka = static_cast<float>(readI32(sub.data.data() + 44u));
                 result.fatigue = static_cast<float>(readI32(sub.data.data() + 48u));
             }
+        } else if (sub.type == "NPCS") {
+            const auto id = decodedDataString(sub, encoding);
+            const auto spell = makeTes3RecordKey("SPEL", id);
+            if (!id.empty() && std::none_of(result.inventory.begin(), result.inventory.end(),
+                [&](const auto& item) { return item.first == spell; })) result.inventory.emplace_back(spell, 1);
         } else if (sub.type == "NPCO" && sub.data.size() >= 36u) {
             const std::int32_t count = readI32(sub.data.data());
             std::string bytes(reinterpret_cast<const char*>(sub.data.data() + 4u), 32u);
@@ -154,6 +196,8 @@ Tes3ActorDefinition parseActorDefinition(
             }
         } else if (sub.type == "AIDT" && sub.data.size() >= 12u) {
             result.serviceFlags = readU32(sub.data.data() + 8u);
+            result.fight = sub.data[2];
+            result.flee = sub.data[3];
         } else if (sub.type == "DODT" && sub.data.size() >= 24u) {
             Tes3ActorDefinition::TravelDestination destination;
             for (std::size_t axis = 0u; axis < 3u; ++axis) {
@@ -277,6 +321,12 @@ bool cellGrid(
 }
 
 std::string recordId(const EsmRecordView& record, std::string_view encoding) {
+    if (record.type == "SKIL") {
+        for (const EsmSubrecordView& sub : record.subrecords)
+            if (sub.type == "INDX" && sub.size == 4u)
+                return std::to_string(readI32(sub.data));
+        return {};
+    }
     if (record.type == "SCPT") return scriptId(record, encoding);
     if (record.type == "CELL") return cellId(record, encoding);
     if (record.type == "LAND") {
@@ -420,6 +470,20 @@ Tes3GlobalDefinition parseGlobal(
         if (sub.type == "FNAM" && sub.size >= 1u) result.valueType = static_cast<char>(sub.data[0]);
         else if (sub.type == "FLTV" && sub.size >= 4u) result.value = readF32(sub.data);
     }
+    // TES3 stores integer globals as floats. Match the original integer
+    // conversion, including the short narrowing of invalid integer floats.
+    if (result.valueType == 's' || result.valueType == 'l') {
+        const double value = result.value;
+        const auto integer = !std::isfinite(value) ||
+                value < std::numeric_limits<std::int32_t>::min() ||
+                value > std::numeric_limits<std::int32_t>::max()
+            ? std::numeric_limits<std::int32_t>::min()
+            : static_cast<std::int32_t>(value);
+        if (result.valueType == 's') {
+            const auto bits = static_cast<std::uint16_t>(integer);
+            result.value = bits < 32768u ? bits : static_cast<int>(bits) - 65536;
+        } else result.value = static_cast<float>(integer);
+    }
     return result;
 }
 
@@ -483,6 +547,9 @@ void parseCellReferences(
             current->scale = readF32(sub.data);
         } else if (sub.type == "FLTV" && sub.size >= 4u) {
             current->lockLevel = readI32(sub.data);
+        } else if (sub.type == "INTV" && sub.size == 4u) {
+            const auto condition = readI32(sub.data);
+            if (condition >= -1) current->itemCondition = condition;
         } else if (sub.type == "DELE") {
             current->deleted = true;
             current->enabled = false;
@@ -543,6 +610,7 @@ bool Tes3ContentStore::load(
     m_scripts.clear();
     m_globals.clear();
     m_actors.clear();
+    m_factions.clear();
     m_spells.clear();
     m_namedRecords.clear();
     m_references.clear();
@@ -681,16 +749,47 @@ bool Tes3ContentStore::load(
     for (const auto& [key, record] : m_namedRecords) {
         if (key.recordType == "NPC_" || key.recordType == "CREA") {
             Tes3ActorDefinition actor = parseActorDefinition(record, m_encoding);
+            if (!actor.creature) {
+                if (const auto* race = findRecord("RACE", actor.race)) {
+                    for (const auto& sub : race->subrecords) if (sub.type == "NPCS") {
+                        const auto id = decodedDataString(sub, m_encoding);
+                        const auto spell = makeTes3RecordKey("SPEL", id);
+                        if (!id.empty() && std::none_of(actor.inventory.begin(), actor.inventory.end(),
+                            [&](const auto& item) { return item.first == spell; }))
+                            actor.inventory.emplace_back(spell, 1);
+                    }
+                }
+            }
             for (auto& [item, count] : actor.inventory) {
                 (void)count;
+                if (item.recordType != "REFR") continue;
                 const auto found = uniqueBase.find(item.textId);
                 if (found != uniqueBase.end() && !ambiguousBase.contains(item.textId)) {
                     item = found->second;
                 }
             }
             m_actors.insert_or_assign(key, std::move(actor));
+        } else if (key.recordType == "FACT") {
+            if (auto faction = parseFactionDefinition(record, m_encoding))
+                m_factions.insert_or_assign(key, std::move(*faction));
         } else if (key.recordType == "SPEL") {
             m_spells.insert_or_assign(key, parseSpellDefinition(record, m_encoding));
+        }
+    }
+    for (auto& [key, actor] : m_actors) {
+        (void)key;
+        if (actor.autoCalculate && !actor.creature) (void)tes3AutoCalculateNpc(*this, actor);
+        // TES3 replaces authored NPC reputation for faction members, including
+        // explicitly authored stats. Autocalc is not an eligibility condition.
+        if (!actor.creature && actor.faction.valid()) {
+            const double factionMod = tes3NumericSetting(*this, "iAutoRepFacMod", 2);
+            const double levelMod = tes3NumericSetting(*this, "iAutoRepLevMod", 0);
+            const double reputation = factionMod * (actor.rank + 1.0) + levelMod * (actor.level - 1.0);
+            if (std::isfinite(factionMod) && std::isfinite(levelMod) &&
+                factionMod == std::trunc(factionMod) && levelMod == std::trunc(levelMod) &&
+                std::isfinite(reputation) && reputation >= std::numeric_limits<std::int32_t>::min() &&
+                reputation <= std::numeric_limits<std::int32_t>::max())
+                actor.reputation = static_cast<std::int32_t>(reputation);
         }
     }
     return true;
@@ -704,6 +803,31 @@ const Tes3DialogueDefinition* Tes3ContentStore::findDialogue(std::string_view id
 const Tes3ScriptDefinition* Tes3ContentStore::findScript(std::string_view id) const {
     const auto found = m_scripts.find(makeTes3RecordKey("SCPT", std::string(id)));
     return found == m_scripts.end() ? nullptr : &found->second;
+}
+
+const Tes3FactionDefinition* Tes3ContentStore::findFaction(std::string_view id) const {
+    const auto found = m_factions.find(makeTes3RecordKey("FACT", std::string(id)));
+    return found == m_factions.end() ? nullptr : &found->second;
+}
+
+std::optional<std::int32_t> Tes3ContentStore::wornItemValue(const RecordKey& item) const {
+    if (item.recordType != "CLOT" && item.recordType != "ARMO") return 0;
+    const auto* record = findRecord(item.recordType, item.textId);
+    if (record == nullptr) return std::nullopt;
+    for (const auto& sub : record->subrecords) {
+        if (item.recordType == "CLOT" && sub.type == "CTDT" && sub.data.size() == 12u) {
+            const auto type = readI32(sub.data.data());
+            if (type < 0 || type > 9) return std::nullopt;
+            return std::int32_t(sub.data[8]) | (std::int32_t(sub.data[9]) << 8);
+        }
+        if (item.recordType == "ARMO" && sub.type == "AODT" && sub.data.size() == 24u) {
+            const auto type = readI32(sub.data.data());
+            if (type < 0 || type > 10) return std::nullopt;
+            // The held shield slot is outside PC Clothing Modifier's 0..15.
+            return type == 8 ? 0 : std::max(0, readI32(sub.data.data() + 8));
+        }
+    }
+    return std::nullopt;
 }
 
 const Tes3ActorDefinition* Tes3ContentStore::findActor(

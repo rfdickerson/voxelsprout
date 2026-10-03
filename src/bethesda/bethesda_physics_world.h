@@ -50,6 +50,7 @@ struct PhysicsCharacterStep {
     JumpPhase jumpPhase = JumpPhase::Grounded;
     LandingSeverity landingSeverity = LandingSeverity::Light;
     float landingImpactMetres = 0;
+    float fallDistanceUnits = 0;
     bool leftLedge = false;
     odai::math::Vector3 position{};
     odai::math::Quaternion rotation{};
@@ -57,6 +58,7 @@ struct PhysicsCharacterStep {
     odai::math::Vector3 groundVelocity{};
     odai::math::Vector3 groundNormal{0.0f, 1.0f, 0.0f};
     bool grounded = false;
+    bool swimming = false;
     bool falling = false;
     bool landed = false;
     bool blocked = false;
@@ -72,6 +74,7 @@ struct PhysicsCharacterSnapshot {
     bool grounded = false;
     std::optional<ObjectId> supportingObject;
     CharacterMovementState movement;
+    float fallDistanceUnits = 0;
     friend bool operator==(const PhysicsCharacterSnapshot& left,
                            const PhysicsCharacterSnapshot& right) {
         return left.object == right.object &&
@@ -89,7 +92,8 @@ struct PhysicsCharacterSnapshot {
             left.groundNormal.y == right.groundNormal.y &&
             left.groundNormal.z == right.groundNormal.z &&
             left.grounded == right.grounded &&
-            left.supportingObject == right.supportingObject && left.movement == right.movement;
+            left.supportingObject == right.supportingObject && left.movement == right.movement &&
+            left.fallDistanceUnits == right.fallDistanceUnits;
     }
 };
 
@@ -230,6 +234,7 @@ public:
     bool addCharacter(ObjectId object, const PhysicsCharacterConfig& config, std::string& outError);
     bool removeCharacter(ObjectId object);
     bool setCharacterInput(ObjectId object, const PhysicsCharacterInput& input);
+    bool setCharacterWaterLevel(ObjectId object, std::optional<float> waterHeightUnits, float swimHeightScale);
     // Adds an instantaneous velocity change without replacing locomotion
     // intent. This is the fixed-tick entry point for knockback, explosions and
     // shoves; gravity continues the resulting fall after support is lost.

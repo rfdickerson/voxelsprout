@@ -195,6 +195,37 @@ float sampleRtSunVisibility(float3 faceWorldPosition, float3 normal, float ndotl
 }
 #endif
 
+// Walk every crossed occupancy cell; a fixed distance step can skip thin walls.
+float importedGiLightVisibility(float3 origin, float3 lightPosition)
+{
+    const float cellSize = max(camera.voxelGiGridOriginCellSize.w, 0.001);
+    const float3 start = (origin - camera.voxelGiGridOriginCellSize.xyz) / cellSize;
+    const float3 delta = (lightPosition - origin) / cellSize;
+    int3 cell = int3(floor(start));
+    const int3 lightCell = int3(floor(start + delta - normalize(delta) * 1e-4));
+    const int3 cellStep = int3(sign(delta));
+    const float3 invDelta = 1.0 / max(abs(delta), float3(1e-8));
+    const float3 boundary = float3(cell) + step(float3(0.0), delta);
+    float3 next = abs(boundary - start) * invDelta;
+    uint w, h, d;
+    voxelGiOccupancy.GetDimensions(w, h, d);
+    for (int i = 0; i < 192; ++i)
+    {
+        if (!inBounds(cell, int3(w, h, d))) return 1.0;
+        // LIGH positions commonly sit inside a lantern's own mesh. The final
+        // emitter voxel is not an intervening wall (same endpoint bias as a
+        // finite shadow ray). Still test every cell between receiver and light.
+        if (all(cell == lightCell)) return 1.0;
+        if (voxelGiOccupancy.Load(int4(cell, 0)).x > 0.5) return 0.0;
+        const float t = min(next.x, min(next.y, next.z));
+        if (t >= 1.0) return 1.0;
+        if (next.x <= t) { cell.x += cellStep.x; next.x += invDelta.x; }
+        if (next.y <= t) { cell.y += cellStep.y; next.y += invDelta.y; }
+        if (next.z <= t) { cell.z += cellStep.z; next.z += invDelta.z; }
+    }
+    return 0.0;
+}
+
 float3 evaluateImportedLocalLightIrradiance(float3 faceWorldPosition, float3 normal)
 {
     const int lightCount = clamp(int(camera.importedLightConfig.x + 0.5), 0, 64);
@@ -228,7 +259,8 @@ float3 evaluateImportedLocalLightIrradiance(float3 faceWorldPosition, float3 nor
         const float normalizedDistance = saturate(distanceToLight / radius);
         const float falloff = saturate(1.0 - (normalizedDistance * normalizedDistance));
         const float attenuation = falloff * falloff;
-        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation);
+        const float visibility = importedGiLightVisibility(faceWorldPosition, positionRadius.xyz);
+        lighting += colorIntensity.rgb * (colorIntensity.w * globalIntensity * ndotl * attenuation * visibility);
     }
     return lighting;
 }
@@ -261,7 +293,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float3 gridOrigin = camera.voxelGiGridOriginCellSize.xyz;
     const float3 worldPosition = gridOrigin + ((float3(dispatchThreadId) + 0.5) * cellSize);
     const float3 sunDirection = normalize(camera.sunDirectionIntensity.xyz);
-    const float sunIntensity = max(camera.sunDirectionIntensity.w, 0.0);
+    const bool interior = camera.interiorFogRange.w > 0.5;
+    const float sunIntensity = interior ? 0.0 : max(camera.sunDirectionIntensity.w, 0.0);
     const float injectSunScale = clamp(camera.shadowConfig2.w, 0.0, 4.0);
     const float injectShScale = clamp(camera.shadowConfig3.x, 0.0, 4.0);
 
@@ -334,7 +367,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const float skyFactor = lerp(0.25, 1.0, skyColumnExposure) * skyLocalOcclusion;
         const float upFactor = saturate((normal.y * 0.5) + 0.5);
         const float ambientBoost = lerp(0.6, 1.2, upFactor);
-        const float3 skyIrradiance = evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
+        const float3 skyIrradiance = interior ? max(camera.interiorAmbient.xyz, float3(0.0)) :
+            evaluateShIrradiance(normal) * (injectShScale * skyFactor * ambientBoost);
         const float3 localLightIrradiance = evaluateImportedLocalLightIrradiance(worldPosition + faceCenterOffset, normal);
         const float3 directIrradiance =
             camera.sunColorShadow.xyz * (sunIntensity * ndotl * directVisibility * injectSunScale);

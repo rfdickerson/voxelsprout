@@ -131,13 +131,15 @@ static_assert(
      kInteriorPointShadowCubesPerRow) * 2u * kInteriorPointShadowFaceSize <= kShadowAtlasSize);
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
-constexpr uint32_t kVoxelGiPropagationIterations = 8u;
+constexpr uint32_t kVoxelGiPropagationIterations = 1u;
 constexpr uint32_t kHdrResolveBloomMipCount = 6u;
 constexpr uint32_t kAutoExposureHistogramBins = 64u;
 constexpr uint32_t kAutoExposureWorkgroupSize = 16u;
 constexpr uint32_t kSunShaftWorkgroupSize = 8u;
 constexpr uint32_t kSsaoComputeWorkgroupSize = 8u;
-constexpr float kVoxelGiCellSize = 1.0f;
+// Imported Bethesda geometry is expressed in game units. A one-unit voxel
+// covered only a tiny patch around the camera in an ordinary interior.
+constexpr float kVoxelGiCellSize = 32.0f;
 constexpr odai::math::Vector3 kBeltTint{0.78f, 0.62f, 0.18f};
 constexpr odai::math::Vector3 kTrackTint{0.52f, 0.54f, 0.58f};
 constexpr float kBeltCargoLength = 0.30f;

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <tuple>
 
 namespace odai::bethesda {
 namespace {
@@ -25,9 +26,10 @@ void hashString(std::uint64_t& hash, const std::string& text) {
     hashBytes(hash, &terminator, 1u);
 }
 
-InventoryEntry* inventoryEntry(RuntimeObject& object, const RecordKey& item) {
+InventoryEntry* inventoryEntry(RuntimeObject& object, const RecordKey& item,
+    std::optional<std::int32_t> condition = {}) {
     const auto found = std::find_if(object.inventory.begin(), object.inventory.end(),
-        [&](const InventoryEntry& entry) { return entry.item == item; });
+        [&](const InventoryEntry& entry) { return entry.item == item && (!condition || entry.condition == *condition); });
     return found == object.inventory.end() ? nullptr : &*found;
 }
 
@@ -430,51 +432,84 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 break;
             case WorldCommandType::AddItem:
             case WorldCommandType::RemoveItem: {
-                const std::int32_t signedCount = command.type == WorldCommandType::AddItem
-                    ? command.itemCount : -command.itemCount;
-                InventoryEntry* entry = inventoryEntry(*object, command.item);
-                if (entry == nullptr && signedCount > 0) {
-                    object->inventory.push_back(InventoryEntry{command.item, signedCount, false});
-                    ++result.applied;
-                } else if (entry != nullptr) {
-                    entry->count = std::max<std::int32_t>(0, entry->count + signedCount);
-                    if (entry->count == 0) {
-                        object->inventory.erase(std::remove_if(
-                            object->inventory.begin(), object->inventory.end(),
-                            [&](const InventoryEntry& candidate) {
-                                return candidate.item == command.item;
-                            }), object->inventory.end());
-                    }
-                    ++result.applied;
-                } else {
-                    result.diagnostics.push_back(
-                        "cannot remove absent item " + command.item.toString() + " from " +
-                        command.target.toString());
+                if (!command.item.valid() || command.itemCount <= 0 ||
+                    (command.itemCondition && *command.itemCondition < -1)) {
+                    result.diagnostics.push_back("invalid inventory item/count/condition"); break;
                 }
+                if (command.type == WorldCommandType::AddItem) {
+                    std::int64_t total = 0;
+                    for (const auto& owned : object->inventory) if (owned.item == command.item) total += owned.count;
+                    if (total > std::numeric_limits<std::int32_t>::max() - command.itemCount) {
+                        result.diagnostics.push_back("item addition would overflow aggregate count"); break;
+                    }
+                    const auto condition = command.itemCondition.value_or(-1);
+                    auto* entry = inventoryEntry(*object, command.item, condition);
+                    if (entry && entry->count > std::numeric_limits<std::int32_t>::max() - command.itemCount) {
+                        result.diagnostics.push_back("item addition would overflow stack"); break;
+                    }
+                    if (entry) entry->count += command.itemCount;
+                    else {
+                        InventoryEntry added{command.item, command.itemCount, false}; added.condition = condition;
+                        object->inventory.push_back(std::move(added));
+                    }
+                } else {
+                    auto remaining = command.itemCount;
+                    bool found = false;
+                    for (auto& entry : object->inventory) {
+                        if (entry.item != command.item || (command.itemCondition && entry.condition != *command.itemCondition)) continue;
+                        found = true;
+                        const auto taken = std::min(entry.count, remaining);
+                        entry.count -= taken; remaining -= taken;
+                        if (remaining == 0) break;
+                    }
+                    if (!found) { result.diagnostics.push_back("cannot remove absent item " + command.item.toString()); break; }
+                    std::erase_if(object->inventory, [](const auto& entry) { return entry.count == 0; });
+                }
+                ++result.applied;
                 break;
             }
             case WorldCommandType::TransferItem: {
                 auto* destination = find(command.other);
-                auto* entry = inventoryEntry(*object, command.item);
-                if (!destination || destination == object || command.itemCount <= 0 ||
-                    !entry || entry->count < command.itemCount) {
-                    result.diagnostics.push_back("item transfer source no longer owns the requested quantity");
-                    break;
+                std::int64_t available = 0;
+                for (const auto& entry : object->inventory)
+                    if (entry.item == command.item && (!command.itemCondition || entry.condition == *command.itemCondition)) available += entry.count;
+                if (!destination || destination == object || command.itemCount <= 0 || available < command.itemCount) {
+                    result.diagnostics.push_back("item transfer source no longer owns the requested quantity"); break;
                 }
-                auto* received = inventoryEntry(*destination, command.item);
-                if (received && received->count > std::numeric_limits<std::int32_t>::max() - command.itemCount) {
-                    result.diagnostics.push_back("item transfer would overflow destination stack");break;
+                std::int64_t destinationCount = 0;
+                for (const auto& entry : destination->inventory) if (entry.item == command.item) destinationCount += entry.count;
+                if (destinationCount > std::numeric_limits<std::int32_t>::max() - command.itemCount) {
+                    result.diagnostics.push_back("item transfer would overflow aggregate destination count"); break;
                 }
-                if (received) received->count += command.itemCount;
-                else destination->inventory.push_back({command.item, command.itemCount, false});
-                entry->count -= command.itemCount;
-                if (entry->count == 0) std::erase_if(object->inventory, [&](const auto& owned) { return owned.item == command.item; });
+                auto sourceItems = object->inventory;
+                auto destinationItems = destination->inventory;
+                auto remaining = command.itemCount;
+                bool overflow = false;
+                for (auto& entry : sourceItems) {
+                    if (entry.item != command.item || (command.itemCondition && entry.condition != *command.itemCondition)) continue;
+                    const auto taken = std::min(entry.count, remaining);
+                    auto received = std::find_if(destinationItems.begin(), destinationItems.end(), [&](const auto& target) {
+                        return target.item == entry.item && target.condition == entry.condition;
+                    });
+                    if (received != destinationItems.end()) {
+                        if (received->count > std::numeric_limits<std::int32_t>::max() - taken) { overflow = true; break; }
+                        received->count += taken;
+                    } else {
+                        InventoryEntry added{entry.item, taken, false}; added.condition = entry.condition;
+                        destinationItems.push_back(std::move(added));
+                    }
+                    entry.count -= taken; remaining -= taken;
+                    if (remaining == 0) break;
+                }
+                if (overflow) { result.diagnostics.push_back("item transfer would overflow destination stack"); break; }
+                std::erase_if(sourceItems, [](const auto& entry) { return entry.count == 0; });
+                object->inventory = std::move(sourceItems); destination->inventory = std::move(destinationItems);
                 result.itemTransfers.push_back({command.target, command.other, command.item, command.itemCount});
                 ++result.applied;
                 break;
             }
             case WorldCommandType::DropItem: {
-                InventoryEntry* entry = inventoryEntry(*object, command.item);
+                InventoryEntry* entry = inventoryEntry(*object, command.item, command.itemCondition);
                 if (object->kind != RuntimeObjectKind::Actor || !object->enabled ||
                     (object->actorValues && object->actorValues->dead) ||
                     !entry || entry->count < 1 || !command.item.valid()) {
@@ -484,6 +519,7 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 RuntimeObject dropped;
                 dropped.id = allocateRuntimeId();
                 dropped.base = entry->item;
+                dropped.itemCondition = entry->condition;
                 dropped.kind = RuntimeObjectKind::Item;
                 dropped.transform = object->transform;
                 dropped.transform.position[0] += 80.0;
@@ -499,7 +535,7 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                 }
                 if (--entry->count == 0)
                     std::erase_if(object->inventory, [&](const InventoryEntry& owned) {
-                        return owned.item == command.item;
+                        return owned.count == 0;
                     });
                 result.residencyChanged = result.residencyChanged ||
                     object->currentSpace.kind != RuntimeSpaceKind::Unknown;
@@ -555,12 +591,19 @@ CommandApplyResult BethesdaWorld::applyQueuedCommands() {
                     })));
                 if (blocked) { result.diagnostics.push_back("equipment change blocked by script policy"); break; }
                 if (command.equipped && command.equipmentSlots != 0u)
-                    for (auto& owned : object->inventory)
-                        if ((owned.equipmentSlots & command.equipmentSlots) != 0u) owned.equipped = false;
+                    for (auto& owned : object->inventory) {
+                        if (owned.item == command.item || !owned.equipped ||
+                            (owned.equipmentSlots & command.equipmentSlots) == 0u) continue;
+                        owned.equipped = false;
+                        result.equipmentChanges.push_back(
+                            {command.target, owned.item, false});
+                    }
                 entry->equipmentSlots = command.equipmentSlots;
                 entry->equipped = command.equipped;
                 entry->preventUnequip = command.equipped && command.equipmentPolicy;
                 entry->preventEquip = !command.equipped && command.equipmentPolicy;
+                result.equipmentChanges.push_back(
+                    {command.target, command.item, command.equipped});
                 object->equipment.transitioning = false;
                 object->equipment.requestedDrawn = object->equipment.drawn;
                 ++result.applied;
@@ -627,11 +670,13 @@ std::vector<RuntimeObject> BethesdaWorld::orderedObjects() const {
 std::uint64_t BethesdaWorld::deterministicHash() const {
     std::uint64_t hash = 1469598103934665603ull;
     for (RuntimeObject object : orderedObjects()) {
+        if (!object.saveObject) continue;
         const std::string id = object.id.toString();
         hashString(hash, id);
         hashString(hash, object.base.plugin);
         hashBytes(hash, &object.base.localFormId, sizeof(object.base.localFormId));
         hashBytes(hash, &object.kind, sizeof(object.kind));
+        hashBytes(hash, &object.itemCondition, sizeof(object.itemCondition));
         for (const double position : object.transform.position) {
             hashBytes(hash, &position, sizeof(position));
         }
@@ -814,10 +859,14 @@ std::uint64_t BethesdaWorld::deterministicHash() const {
             hashBytes(hash, &physical.meaningful, sizeof(physical.meaningful));
         }
         std::sort(object.inventory.begin(), object.inventory.end(),
-            [](const InventoryEntry& left, const InventoryEntry& right) { return left.item < right.item; });
+            [](const InventoryEntry& left, const InventoryEntry& right) { return std::tie(left.item, left.condition, left.equipped, left.equipmentSlots, left.preventUnequip, left.preventEquip) <
+                    std::tie(right.item, right.condition, right.equipped, right.equipmentSlots, right.preventUnequip, right.preventEquip); });
         for (const InventoryEntry& entry : object.inventory) {
             hashString(hash, entry.item.plugin);
             hashBytes(hash, &entry.item.localFormId, sizeof(entry.item.localFormId));
+            hashString(hash, entry.item.recordType);
+            hashString(hash, entry.item.textId);
+            hashBytes(hash, &entry.condition, sizeof(entry.condition));
             hashBytes(hash, &entry.count, sizeof(entry.count));
             hashBytes(hash, &entry.equipped, sizeof(entry.equipped));
             hashBytes(hash, &entry.equipmentSlots, sizeof(entry.equipmentSlots));

@@ -1,0 +1,209 @@
+[
+  {
+    "id": "chargen statssheet",
+    "op": "activate"
+  },
+  {
+    "op": "choice",
+    "value": 0
+  },
+  {
+    "op": "wait",
+    "ticks": 1
+  },
+  {
+    "op": "choice",
+    "value": 0
+  },
+  {
+    "id": "chargen captain",
+    "op": "talk",
+    "info": "103402350204808451"
+  },
+  {
+    "id": "Morrowind",
+    "op": "topic",
+    "info": "3253423749290424070"
+  },
+  {
+    "id": "duties",
+    "journal": {
+      "A1_1_FindSpymaster": 1
+    },
+    "op": "topic",
+    "info": "1729913769476329813"
+  },
+  {
+    "id": "caius cosades",
+    "op": "talk",
+    "info": "2572521291321832207"
+  },
+  {
+    "id": "Report to Caius Cosades",
+    "op": "topic",
+    "info": "26751152351377319357"
+  },
+  {
+    "op": "choice",
+    "value": 1,
+    "info": "43741759216181215"
+  },
+  {
+    "journal": {
+      "A1_1_FindSpymaster": 14
+    },
+    "op": "choice",
+    "value": 3,
+    "info": "1987530856903725209"
+  },
+  {
+    "id": "orders",
+    "journal": {
+      "A1_1_FindSpymaster": 18
+    },
+    "op": "topic",
+    "info": "2090431221919117613"
+  },
+  {
+    "id": "orders",
+    "op": "topic",
+    "info": "16539151961972116834"
+  },
+  {
+    "journal": {
+      "A1_2_AntabolisInformant": 1
+    },
+    "op": "choice",
+    "value": 1,
+    "info": "14520215453172227671"
+  },
+  {
+    "op": "save_reload"
+  },
+  {
+    "id": "hasphat antabolis",
+    "op": "talk",
+    "info": "2363817580166924727"
+  },
+  {
+    "id": "favor",
+    "journal": {
+      "A1_2_AntabolisInformant": 5
+    },
+    "op": "topic",
+    "info": "266351095457551500"
+  },
+  {
+    "id": "misc_dwrv_ark_cube00",
+    "op": "activate"
+  },
+  {
+    "id": "hasphat antabolis",
+    "op": "talk",
+    "info": "827132001043014630"
+  },
+  {
+    "id": "favor",
+    "journal": {
+      "A1_2_AntabolisInformant": 10
+    },
+    "op": "topic",
+    "info": "17006234403263719357"
+  },
+  {
+    "id": "Sixth House",
+    "journal": {
+      "A1_2_AntabolisInformant": 15
+    },
+    "op": "topic",
+    "info": "24786265931023614933"
+  },
+  {
+    "id": "caius cosades",
+    "op": "talk",
+    "info": "2618730816270503334"
+  },
+  {
+    "id": "orders",
+    "journal": {
+      "A1_2_AntabolisInformant": 20
+    },
+    "op": "topic",
+    "info": "2012622432489029727"
+  },
+  {
+    "id": "orders",
+    "journal": {
+      "A1_4_MuzgobInformant": 1
+    },
+    "op": "topic",
+    "info": "23588256493054024115"
+  },
+  {
+    "id": "sharn gra-muzgob",
+    "op": "talk",
+    "info": "12452206762580911498"
+  },
+  {
+    "id": "errand",
+    "journal": {
+      "A1_4_MuzgobInformant": 10
+    },
+    "op": "topic",
+    "info": "288918185757411443"
+  },
+  {
+    "id": "Andrano Ancestral Tomb",
+    "journal": {
+      "A1_4_MuzgobInformant": 12
+    },
+    "op": "topic",
+    "info": "1091431135261045346"
+  },
+  {
+    "id": "misc_skull_llevule",
+    "op": "activate"
+  },
+  {
+    "id": "sharn gra-muzgob",
+    "op": "talk",
+    "info": "165379896266010783"
+  },
+  {
+    "id": "errand",
+    "journal": {
+      "A1_4_MuzgobInformant": 15
+    },
+    "op": "topic",
+    "info": "2369241622602432340"
+  },
+  {
+    "id": "Nerevarine cult",
+    "journal": {
+      "A1_4_MuzgobInformant": 20
+    },
+    "op": "topic",
+    "info": "2436419953283993854"
+  },
+  {
+    "id": "caius cosades",
+    "op": "talk",
+    "info": "2618730816270503334"
+  },
+  {
+    "id": "orders",
+    "journal": {
+      "A1_4_MuzgobInformant": 25
+    },
+    "op": "topic",
+    "info": "2581185871472231536"
+  },
+  {
+    "id": "orders",
+    "info": "7418104811174331576",
+    "op": "topic"
+  },
+  {
+    "op": "save_reload"
+  }
+]

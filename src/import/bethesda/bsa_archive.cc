@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <limits>
 
 #include <zlib.h>
 
@@ -260,6 +261,16 @@ bool BsaArchive::openMorrowind(
     constexpr std::uint32_t kSizeOffsetPairBytes = 8u;
     constexpr std::uint32_t kNameOffsetBytes = 4u;
     constexpr std::uint32_t kHashBytes = 8u;
+    input.seekg(0, std::ios::end);
+    const auto fileEnd = input.tellg();
+    const std::uint64_t tableBytes = std::uint64_t(fileCount) * (kSizeOffsetPairBytes + kNameOffsetBytes);
+    const std::uint64_t dataStartChecked = std::uint64_t(kHeaderSize) + hashTableOffset +
+        std::uint64_t(fileCount) * kHashBytes;
+    if (fileEnd < 0 || hashTableOffset < tableBytes || dataStartChecked > std::uint64_t(fileEnd)) {
+        m_lastError = "Morrowind archive tables run past file bounds: " + path.string();
+        return false;
+    }
+    input.seekg(kHeaderSize, std::ios::beg);
     if (fileCount == 0u) {
         return true;  // an empty archive is legal and indexes to nothing
     }
@@ -311,6 +322,10 @@ bool BsaArchive::openMorrowind(
         const char* nameStart = nameBlock.data() + nameOffsets[i];
         const std::size_t maxLength = static_cast<std::size_t>(nameBlockBytes - nameOffsets[i]);
         const std::size_t nameLength = ::strnlen(nameStart, maxLength);
+        if (nameLength == maxLength) {
+            m_lastError = "Unterminated Morrowind archive filename: " + path.string();
+            return false;
+        }
         std::string virtualPath =
             toLowerAscii(normalizeSeparators(std::string(nameStart, nameLength)));
         if (!loweredFolderPrefix.empty() &&
@@ -318,6 +333,11 @@ bool BsaArchive::openMorrowind(
             continue;
         }
         const std::uint64_t absoluteOffset = dataStart + offsets[i];
+        if (absoluteOffset > std::numeric_limits<std::uint32_t>::max() ||
+            absoluteOffset + sizes[i] > std::uint64_t(fileEnd)) {
+            m_lastError = "Morrowind archive entry runs past file bounds: " + path.string();
+            return false;
+        }
         BsaFileEntry entry{};
         entry.virtualPath = std::move(virtualPath);
         entry.dataOffset = static_cast<std::uint32_t>(absoluteOffset);

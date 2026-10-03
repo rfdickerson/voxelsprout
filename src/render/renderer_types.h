@@ -14,6 +14,14 @@
 
 namespace odai::render {
 
+// Explicit diagnostic readback; never used by the runtime frame loop.
+struct VoxelGiCapture {
+    std::array<float, 3> origin{};
+    float cellSize = 0;
+    std::uint32_t resolution = 0;
+    std::vector<float> rgb; // linear radiance, X fastest, then Y, then Z
+};
+
 enum class FramePacingMode : std::uint8_t {
     Off = 0,
     Passive = 1,
@@ -472,8 +480,19 @@ struct ImportedExteriorLighting {
     float sunlightScale = 1.0f;
     float daytimeLocalLightScale = 1.0f;
     bool screenSpaceGi = false;
+    bool worldSpaceGi = false;
     float bounceStrength = 0.35f;
 };
+
+// Morrowind's dense town streets benefit from diffuse bounce, while the
+// quarter-resolution screen-space path keeps the default integrated-GPU cost
+// bounded. Keep this as an exterior policy so indoor lighting remains authored.
+inline constexpr ImportedExteriorLighting morrowindExteriorLighting() {
+    ImportedExteriorLighting lighting{};
+    lighting.screenSpaceGi = true;
+    lighting.worldSpaceGi = true;
+    return lighting;
+}
 
 // Skyrim SE's exterior weather colors are already authored as the scene's sky
 // and sun illumination. A narrow diffuse wrap keeps pine needles and timber

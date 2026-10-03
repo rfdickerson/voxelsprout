@@ -34,6 +34,13 @@
 
 namespace odai::games::bethesda {
 
+struct SkinnedActor;
+
+// Consume a newly issued coordinate package once, before movement is stepped.
+// The destination is already in engine space.
+void applyActorScriptedMovement(SkinnedActor& actor, const float destination[3],
+    std::uint64_t revision, bool moving);
+
 // How close, and how squarely faced, an actor has to be for "press E to talk".
 // Generous on both: a conversation the player has to hunt for the exact angle
 // of is worse than one that occasionally offers itself a step early.

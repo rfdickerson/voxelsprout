@@ -15,6 +15,7 @@
 
 #include "import/bethesda/land_lod.h"
 #include "import/bethesda/morrowind_terrain.h"
+#include "import/bethesda/runtime_item_scene.h"
 #include "import/bethesda/skyrim_tree_lod.h"
 
 #include "render/upscale/upscale_policy.h"
@@ -623,6 +624,7 @@ void restoreRuntimeAiState(
     actor.scriptedMoveActive = state.scriptedMoveActive;
     actor.scriptedMoveArrived = state.scriptedMoveArrived;
     actor.scriptedMoveRevision = state.scriptedMoveRevision;
+    if (state.scriptedMoveRevision != 0u) actor.wanders = state.scriptedMoveActive;
 }
 
 }  // namespace
@@ -1458,7 +1460,7 @@ bool BethesdaApp::beginTes3Conversation(int actorIndex) {
         m_bethesdaSession.tes3().playerState();
     player.object = m_bethesdaSession.playerObject();
     const odai::bethesda::Tes3DialogueResponse response =
-        m_bethesdaSession.startTes3Dialogue(std::move(state), std::move(player), false);
+        m_bethesdaSession.startTes3Dialogue(std::move(state), std::move(player), true);
     for (const std::string& diagnostic : response.diagnostics) {
         VOX_LOGW("tes3-dialogue") << diagnostic;
     }
@@ -1472,7 +1474,7 @@ bool BethesdaApp::beginTes3Conversation(int actorIndex) {
     VOX_LOGI("tes3-dialogue") << "conversation: " << actor.name
                                << " cell=\"" <<
         m_bethesdaSession.tes3().dialogue().actor.cell << "\" topics="
-                               << m_bethesdaSession.tes3DialogueTopics(false).size()
+                               << m_bethesdaSession.tes3DialogueTopics(true).size()
                                << " faceHeight=" << conversationFaceHeight(actor)
                                << " bindFaceHeight=" << actor.headHeightUnits
                                << " standingHeight=" << actor.standingHeightUnits;
@@ -1494,15 +1496,20 @@ void BethesdaApp::rebuildTes3ConversationTree(
         m_tes3DialogueActions.push_back(
             {Tes3DialogueActionKind::Choice, {}, choice.value});
     }
-    for (const std::string& topic : m_bethesdaSession.tes3DialogueTopics(false)) {
-        if (m_tes3DialogueActions.size() >= 8u) break;
-        node.choices.push_back({topic, node.id, {}, {}});
+    const bool awaitingResultChoice =
+        m_bethesdaSession.tes3().hasPendingResultTransaction() &&
+        !m_bethesdaSession.tes3().dialogue().messageBoxText.empty();
+    if (!awaitingResultChoice) {
+        for (const std::string& topic : m_bethesdaSession.tes3DialogueTopics(true)) {
+            if (m_tes3DialogueActions.size() >= 8u) break;
+            node.choices.push_back({topic, node.id, {}, {}});
+            m_tes3DialogueActions.push_back(
+                {Tes3DialogueActionKind::Topic, topic, 0});
+        }
+        node.choices.push_back({"Goodbye", node.id, {}, {}});
         m_tes3DialogueActions.push_back(
-            {Tes3DialogueActionKind::Topic, topic, 0});
+            {Tes3DialogueActionKind::Goodbye, {}, 0});
     }
-    node.choices.push_back({"Goodbye", node.id, {}, {}});
-    m_tes3DialogueActions.push_back(
-        {Tes3DialogueActionKind::Goodbye, {}, 0});
     actor.tree.nodes.emplace(node.id, std::move(node));
     actor.runtime.begin(actor.tree, actor.context);
     m_dialogueChoice = 0;
@@ -1651,8 +1658,8 @@ void BethesdaApp::chooseConversationChoice(std::size_t index) {
         }
         const odai::bethesda::Tes3DialogueResponse response =
             action.kind == Tes3DialogueActionKind::Choice
-                ? m_bethesdaSession.answerTes3Choice(action.choice, false)
-                : m_bethesdaSession.selectTes3Topic(action.topic, false);
+                ? m_bethesdaSession.answerTes3Choice(action.choice, true)
+                : m_bethesdaSession.selectTes3Topic(action.topic, true);
         for (const std::string& diagnostic : response.diagnostics) {
             VOX_LOGW("tes3-dialogue") << diagnostic;
         }
@@ -4226,7 +4233,8 @@ bool BethesdaApp::onInit() {
     // frame; otherwise Skyrim silently inherits the generic exterior policy.
     render::ImportedExteriorLighting exteriorLighting = m_streamIsSkyrim
         ? render::skyrimSeExteriorLighting()
-        : render::ImportedExteriorLighting{};
+        : (m_streamIsMorrowind ? render::morrowindExteriorLighting()
+                               : render::ImportedExteriorLighting{});
     if (m_streamIsSkyrim) {
         // Let authored weather drive the exposure while retaining highlight
         // detail in Riverwood's pale logs, roofs and water reflections.
@@ -4235,6 +4243,11 @@ bool BethesdaApp::onInit() {
         // color separation. A low floor lets bright views adapt without clipping.
         m_renderer.setAutoExposureRange(0.18f, 1.45f);
         m_renderer.setAutoExposureKeyValue(0.10f);
+    }
+    if (m_streamIsMorrowind) {
+        // Authored TES3 interiors need more exposure headroom than daylight
+        // exteriors. Keep adaptation active when stepping back onto the dock.
+        m_renderer.setAutoExposureRange(0.70f, 8.0f);
     }
     if (m_whiterunMarketReferenceShowcase) {
         // The shared 0.70 exposure floor pinned bright exteriors regardless of
@@ -4274,6 +4287,10 @@ bool BethesdaApp::onInit() {
             lighting.screenSpaceGi = std::strcmp(gi, "off") != 0;
         }
         m_renderer.setImportedExteriorLighting(lighting);
+        if (const char* gi = std::getenv("ODAI_GI")) {
+            m_renderer.setGlobalIlluminationEnabled(
+                std::strcmp(gi, "off") != 0 && std::strcmp(gi, "0") != 0);
+        }
         VOX_LOGI("showcase") << "exterior lighting: wrap=" << lighting.diffuseWrap
             << " ambient=" << lighting.ambientScale << " sun=" << lighting.sunlightScale
             << " daytimeLocal=" << lighting.daytimeLocalLightScale
@@ -6716,6 +6733,13 @@ bool BethesdaApp::updateFlythrough(float deltaSeconds) {
     return raw < 1.0f;
 }
 
+bool BethesdaApp::tes3ControlEnabled(std::string_view control) const {
+    if (!m_streamIsMorrowind || !m_bethesdaSessionConfigured) return true;
+    const auto& filters = m_bethesdaSession.tes3().playerState().numericFilters;
+    const auto found = filters.find("control:" + std::string(control));
+    return found == filters.end() || found->second != 0.0;
+}
+
 void BethesdaApp::updateCamera(float deltaSeconds) {
     const char* followName = std::getenv("ODAI_CAPTURE_FOLLOW_ACTOR");
     const bool captureFollow = !m_captureVideoPath.empty() &&
@@ -6751,7 +6775,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         // timing consumes an unpredictable prefix of the benchmark route.
         if ((!m_captureVideoPath.empty() || !m_captureDirectory.empty()) && !m_captureStarted) {
             float groundHeight = 0.0f;
-            if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) m_cameraY = groundHeight + kEyeHeightUnits;
+            if (m_walkMode && groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) m_cameraY = groundHeight + kEyeHeightUnits;
             return;
         }
         // Optional stationary preroll for performance runs. Sequence capture
@@ -6763,7 +6787,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         if (benchWarmupRemaining > 0) {
             --benchWarmupRemaining;
             float groundHeight = 0;
-            if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) m_cameraY = groundHeight + kEyeHeightUnits;
+            if (m_walkMode && groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) m_cameraY = groundHeight + kEyeHeightUnits;
             return;
         }
         // ODAI_FNV_BENCH_FIXED_DT=1 advances by a FIXED step instead of real
@@ -6814,7 +6838,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         m_cameraX += std::cos(yawRadians) * kBenchSpeed * step;
         m_cameraZ += std::sin(yawRadians) * kBenchSpeed * step;
         float groundHeight = 0.0f;
-        if (groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
+        if (m_walkMode && groundHeightAt(m_cameraX, m_cameraZ, groundHeight)) {
             m_cameraY = groundHeight + kEyeHeightUnits;
         }
         return;
@@ -6854,9 +6878,14 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
     }
     const bool giftMenuOpen = m_bethesdaSessionConfigured &&
         !m_bethesdaSession.giftMenuRequests().empty();
-    const bool canControlPlayer =
-        !inConversation && !m_menuOpen && !giftMenuOpen && !m_playerInventoryOpen && !m_scenarioSpawnPending && !playerDead;
-    if (m_mouseCaptured && !suppressMouseLook && !inConversation && !giftMenuOpen && !m_playerInventoryOpen) {
+    const bool canUsePlayerInput =
+        !inConversation && !m_menuOpen && !giftMenuOpen && !m_playerInventoryOpen &&
+        m_tes3CharacterMenu == 0 && !tes3MessageBoxOpen() &&
+        !m_scenarioSpawnPending && !playerDead;
+    const bool canControlPlayer = canUsePlayerInput && tes3ControlEnabled("playercontrols");
+    if (m_mouseCaptured && !suppressMouseLook && canUsePlayerInput &&
+        tes3ControlEnabled("playerlooking") &&
+        !m_playerInventoryOpen && m_tes3CharacterMenu == 0) {
         if (m_hasCursorSample) {
             m_yawDegrees += static_cast<float>(cursorX - m_lastCursorX) * kMouseSensitivity;
             m_pitchDegrees -= static_cast<float>(cursorY - m_lastCursorY) * kMouseSensitivity;
@@ -6871,7 +6900,8 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
 
     if (thirdPersonPlayerShowcase()) {
         const bool viewDown = keyDown(m_window, GLFW_KEY_V);
-        if (canControlPlayer && viewDown && !m_viewToggleLatch) {
+        if (canControlPlayer && tes3ControlEnabled("playerviewswitch") &&
+            viewDown && !m_viewToggleLatch) {
             m_thirdPersonView = !m_thirdPersonView;
             reconstructPlayerCamera(deltaSeconds, true);
         }
@@ -7159,7 +7189,8 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         if (keyDown(m_window, GLFW_KEY_S)) { moveX -= forwardX; moveZ -= forwardZ; }
         if (keyDown(m_window, GLFW_KEY_D)) { moveX += rightX;   moveZ += rightZ; }
         if (keyDown(m_window, GLFW_KEY_A)) { moveX -= rightX;   moveZ -= rightZ; }
-        if (!m_npcDemoPhysicsReady && keyDown(m_window, GLFW_KEY_SPACE)) { moveY += 1.0f; }
+        if (!m_npcDemoPhysicsReady && tes3ControlEnabled("playerjumping") &&
+            keyDown(m_window, GLFW_KEY_SPACE)) { moveY += 1.0f; }
         if (keyDown(m_window, GLFW_KEY_LEFT_CONTROL)) { moveY -= 1.0f; }
     }
 
@@ -7251,9 +7282,22 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
         input.desiredVelocity = {moveX * speed, 0.0f, moveZ * speed};
         const odai::bethesda::ObjectId playerId = m_bethesdaSession.playerObject();
         const auto physical = m_bethesdaSession.physics().characterState(playerId);
-        if (m_streamIsSkyrim) {
-            input.jumpRequested = canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_SPACE);
-        } else if (canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_SPACE) &&
+        if (m_streamIsMorrowind && physical && physical->swimming) {
+            const float forward = moveX * forwardX + moveZ * forwardZ;
+            const float pitch = m_pitchDegrees * (kPi / 180.f);
+            input.desiredVelocity.x += forwardX * forward * speed * (std::cos(pitch) - 1);
+            input.desiredVelocity.z += forwardZ * forward * speed * (std::cos(pitch) - 1);
+            input.desiredVelocity.y = forward * speed * std::sin(pitch);
+            if (canControlPlayer && !captureFollow && tes3ControlEnabled("playerjumping") && keyDown(m_window, GLFW_KEY_SPACE))
+                input.desiredVelocity.y += speed;
+            if (canControlPlayer && !captureFollow && keyDown(m_window, GLFW_KEY_LEFT_CONTROL)) input.desiredVelocity.y -= speed;
+            const float swimSpeed = odai::math::length(input.desiredVelocity);
+            if (swimSpeed > speed) input.desiredVelocity = input.desiredVelocity * (speed / swimSpeed);
+        } else if (m_streamIsSkyrim) {
+            input.jumpRequested = canControlPlayer && tes3ControlEnabled("playerjumping") &&
+                !captureFollow && keyDown(m_window, GLFW_KEY_SPACE);
+        } else if (canControlPlayer && tes3ControlEnabled("playerjumping") &&
+            !captureFollow && keyDown(m_window, GLFW_KEY_SPACE) &&
             physical.has_value() && physical->grounded) {
             input.desiredVelocity.y = m_streamIsMorrowind
                 ? odai::bethesda::jumpSpeedForHeightBethesdaUnits(
@@ -7307,7 +7351,7 @@ void BethesdaApp::updateCamera(float deltaSeconds) {
             (void)m_bethesdaSession.setActorAnimationInput(
                 playerId, std::move(animationInput));
         }
-        (void)m_bethesdaSession.setActorControllerInput(playerId, input);
+        (void)m_bethesdaSession.setActorControllerInput(playerId, input, sprinting);
         m_bethesdaControllerOwnsCamera = true;
         if (thirdPersonPlayerShowcase()) reconstructPlayerCamera(deltaSeconds);
         return;
@@ -8678,6 +8722,28 @@ bool BethesdaApp::initStreaming() {
         VOX_LOGI("bethesda") << "resumed camera (" << m_cameraX << ", " << m_cameraY
                              << ", " << m_cameraZ << ")";
     }
+    // Interior startup bypasses the exterior spawn block. Apply the same
+    // diagnostic camera controls after the final startup/resume pose is known.
+    if (m_interiorStarted) {
+        if (const char* pos = std::getenv("ODAI_FNV_SPAWN_POS")) {
+            float x, y, z;
+            if (std::sscanf(pos, "%f,%f,%f", &x, &y, &z) == 3) {
+                m_cameraX = x;
+                m_cameraY = y;
+                m_cameraZ = z;
+                if (!std::getenv("ODAI_FNV_WALK")) m_walkMode = false;
+            }
+        }
+        if (const char* yaw = std::getenv("ODAI_FNV_YAW")) m_yawDegrees = std::atof(yaw);
+        if (const char* pitch = std::getenv("ODAI_FNV_PITCH")) m_pitchDegrees = std::atof(pitch);
+        if (const char* height = std::getenv("ODAI_FNV_SPAWN_HEIGHT")) m_cameraY += std::atof(height);
+    }
+    if (const char* fly = std::getenv("ODAI_FNV_FLY")) {
+        if (fly[0] != '\0' && fly[0] != '0') m_walkMode = false;
+    }
+    VOX_LOGI("bethesda") << "capture camera: position=(" << m_cameraX << ", " << m_cameraY
+                         << ", " << m_cameraZ << ") yaw=" << m_yawDegrees
+                         << " pitch=" << m_pitchDegrees << " mode=" << (m_walkMode ? "walk" : "fly");
     // Skyrim has no special startup companion. Populate only after resume has
     // supplied the final camera and space identity, otherwise a saved Bannered
     // Mare session scans the default Tamriel spawn and carries those actors
@@ -9606,7 +9672,8 @@ void BethesdaApp::onTick(float deltaSeconds) {
         syncBethesdaPlayerState(false);
         const odai::bethesda::BethesdaSessionStep sessionStep =
             m_bethesdaSession.advance(
-                (m_playerInventoryOpen || m_scenarioSpawnPending) ? 0.0 : static_cast<double>(deltaSeconds),
+                (m_playerInventoryOpen || m_tes3CharacterMenu != 0 || m_scenarioSpawnPending)
+                    ? 0.0 : static_cast<double>(deltaSeconds),
                 [this](std::uint64_t, double fixedStepSeconds) {
                     stepBethesdaActorControllers(
                         static_cast<float>(fixedStepSeconds));
@@ -9628,6 +9695,30 @@ void BethesdaApp::onTick(float deltaSeconds) {
                     }
                     m_meleeAttackPending = false;
                 });
+        if (m_streamIsMorrowind) {
+            for (const auto& id : m_bethesdaSession.takeTes3DoorActivations()) {
+                const auto* object = m_bethesdaSession.world().find(id);
+                if (object == nullptr) continue;
+                const importer::ImportedSceneDoor* nearest = nullptr;
+                float distanceSquared = 100.0f * 100.0f;
+                for (const auto& door : m_doors) {
+                    const float dx = door.position[0] -
+                        static_cast<float>(object->transform.position[0]);
+                    const float dy = door.position[1] -
+                        static_cast<float>(object->transform.position[1]);
+                    const float dz = door.position[2] -
+                        static_cast<float>(object->transform.position[2]);
+                    const float candidate = dx * dx + dy * dy + dz * dz;
+                    if (candidate >= distanceSquared) continue;
+                    distanceSquared = candidate;
+                    nearest = &door;
+                }
+                if (nearest != nullptr) {
+                    const importer::ImportedSceneDoor selected = *nearest;
+                    useDoor(selected);
+                }
+            }
+        }
         m_sessionInterpolationAlpha =
             static_cast<float>(sessionStep.clock.interpolationAlpha);
         if (m_skyrimCitySpawnSettlementPending) {
@@ -9641,6 +9732,7 @@ void BethesdaApp::onTick(float deltaSeconds) {
         // multi-second hitch loop. Stream cell callbacks above are the sole
         // presentation-residency authority.
         (void)m_renderer.applyRuntimeRenderDeltas(sessionStep.renderDeltas);
+        if (m_streamIsMorrowind) syncDroppedItemPresentation();
         for (const std::string& diagnostic : sessionStep.diagnostics) {
             VOX_LOGW("runtime") << diagnostic;
         }
@@ -9707,6 +9799,8 @@ void BethesdaApp::onTick(float deltaSeconds) {
     // Before anything reads input: the menu toggle decided here gates whether
     // camera movement runs at all this frame.
     pollNavInput(deltaSeconds);
+    updateTes3CharacterMenu();
+    updateTes3MessageBox();
     updateTes3JournalInput();
     updateGiftMenu();
     updatePlayerInventory();
@@ -9715,7 +9809,9 @@ void BethesdaApp::onTick(float deltaSeconds) {
     const bool meleeDown =
         glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
     if (meleeDown && !m_meleeAttackButtonLatch && m_bethesdaSessionConfigured &&
-        !m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && !giftMenuOpen && m_talkingActor < 0 &&
+        !m_menuOpen && !m_tes3JournalOpen && !m_playerInventoryOpen && !giftMenuOpen &&
+        !tes3MessageBoxOpen() && m_talkingActor < 0 &&
+        tes3ControlEnabled("playerfighting") &&
         m_doorTransitionPhase == DoorTransitionPhase::None) {
         m_meleeAttackPending = !m_firstPersonGuardHeld && (m_thirdPersonView || m_firstPersonAttackTime < 0);
     }
@@ -10031,7 +10127,8 @@ void BethesdaApp::onTick(float deltaSeconds) {
     const bool escapeDown = keyDown(m_window, GLFW_KEY_ESCAPE);
     const bool escapePressed = escapeDown && !m_escapeLatch;
     m_escapeLatch = escapeDown;
-    if (escapePressed && speaker != nullptr) {
+    if (escapePressed && speaker != nullptr &&
+        !m_bethesdaSession.tes3().hasPendingResultTransaction()) {
         endConversation();
         return;
     }
@@ -10090,7 +10187,9 @@ void BethesdaApp::onTick(float deltaSeconds) {
     const float cameraPosition[3] = {
         activationOrigin.x, activationOrigin.y, activationOrigin.z};
     const bool canActivateWorld = !m_menuOpen && !giftMenuOpen &&
-        !m_playerInventoryOpen && !m_tes3JournalOpen && m_talkingActor < 0;
+        !m_playerInventoryOpen && m_tes3CharacterMenu == 0 && !m_tes3JournalOpen &&
+        !tes3MessageBoxOpen() && m_talkingActor < 0 &&
+        tes3ControlEnabled("playercontrols");
     m_activationLootActor = canActivateWorld ? findLootableActorInReach() : -1;
     m_activationActor = -1;
     if (canActivateWorld && m_activationLootActor < 0) {
@@ -10139,13 +10238,83 @@ void BethesdaApp::onTick(float deltaSeconds) {
     } else if (canActivateWorld && doorEdge) {
         const int doorIndex = findUsableDoor();
         if (doorIndex >= 0) {
-            useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
+            bool scriptedDoor = false;
+            if (m_streamIsMorrowind && m_bethesdaSessionConfigured) {
+                const auto& door = m_doors[static_cast<std::size_t>(doorIndex)];
+                odai::bethesda::ObjectId closest;
+                float closestDistanceSquared = 100.0f * 100.0f;
+                for (const auto& id : m_bethesdaSession.world().orderedObjectIds()) {
+                    const auto* object = m_bethesdaSession.world().find(id);
+                    if (object == nullptr || !object->enabled ||
+                        object->kind != odai::bethesda::RuntimeObjectKind::Door) continue;
+                    const float dx = static_cast<float>(object->transform.position[0]) - door.position[0];
+                    const float dy = static_cast<float>(object->transform.position[1]) - door.position[1];
+                    const float dz = static_cast<float>(object->transform.position[2]) - door.position[2];
+                    const float candidate = dx * dx + dy * dy + dz * dz;
+                    if (candidate >= closestDistanceSquared) continue;
+                    closest = id;
+                    closestDistanceSquared = candidate;
+                }
+                if (closest.valid()) {
+                    for (const auto& [threadId, thread] :
+                         m_bethesdaSession.tes3().scripts().threads()) {
+                        (void)threadId;
+                        if (thread.owner == closest && thread.local &&
+                            thread.state != odai::bethesda::Tes3ThreadState::Failed) {
+                            std::string activationError;
+                            scriptedDoor = m_bethesdaSession.activateTes3Reference(
+                                closest, false, activationError);
+                            if (!scriptedDoor && !activationError.empty()) {
+                                VOX_LOGW("tes3") << activationError;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!scriptedDoor) useDoor(m_doors[static_cast<std::size_t>(doorIndex)]);
         } else {
             const float yaw = m_yawDegrees * kPi / 180.f;
             const float pitch = m_pitchDegrees * kPi / 180.f;
-            m_renderer.activateImportedEffect(m_cameraX, m_cameraY, m_cameraZ,
-                std::cos(yaw) * std::cos(pitch), std::sin(pitch),
-                std::sin(yaw) * std::cos(pitch));
+            const float forwardX = std::cos(yaw) * std::cos(pitch);
+            const float forwardY = std::sin(pitch);
+            const float forwardZ = std::sin(yaw) * std::cos(pitch);
+            bool activatedTes3 = false;
+            if (m_streamIsMorrowind && m_bethesdaSessionConfigured) {
+                const auto* player = m_bethesdaSession.world().find(
+                    m_bethesdaSession.playerObject());
+                odai::bethesda::ObjectId nearest;
+                float nearestDistanceSquared = 260.0f * 260.0f;
+                for (const auto& id : m_bethesdaSession.world().orderedObjectIds()) {
+                    const auto* object = m_bethesdaSession.world().find(id);
+                    if (object == nullptr || !object->enabled ||
+                        (object->kind != odai::bethesda::RuntimeObjectKind::Item &&
+                         object->kind != odai::bethesda::RuntimeObjectKind::Activator) ||
+                        (player != nullptr &&
+                         object->currentSpace.cell != player->currentSpace.cell)) continue;
+                    const float dx = static_cast<float>(object->transform.position[0]) - activationOrigin.x;
+                    const float dy = static_cast<float>(object->transform.position[1]) - activationOrigin.y;
+                    const float dz = static_cast<float>(object->transform.position[2]) - activationOrigin.z;
+                    const float distanceSquared = dx * dx + dy * dy + dz * dz;
+                    if (distanceSquared < 1.0f || distanceSquared >= nearestDistanceSquared) continue;
+                    const float facing = (dx * forwardX + dy * forwardY + dz * forwardZ) /
+                        std::sqrt(distanceSquared);
+                    if (facing < 0.5f) continue;
+                    nearest = id;
+                    nearestDistanceSquared = distanceSquared;
+                }
+                if (nearest.valid()) {
+                    std::string activationError;
+                    activatedTes3 = m_bethesdaSession.activateTes3Reference(
+                        nearest, false, activationError);
+                    if (!activatedTes3 && !activationError.empty()) {
+                        VOX_LOGW("tes3") << activationError;
+                    }
+                }
+            }
+            if (!activatedTes3) m_renderer.activateImportedEffect(
+                m_cameraX, m_cameraY, m_cameraZ,
+                forwardX, forwardY, forwardZ);
         }
     }
 
@@ -10333,7 +10502,8 @@ void BethesdaApp::pollNavInput(float deltaSeconds) {
     const bool giftMenuOpen = m_bethesdaSessionConfigured &&
         !m_bethesdaSession.giftMenuRequests().empty();
     if (m_nav.pressed(ui::UiNavAction::Menu) &&
-        m_talkingActor < 0 && !giftMenuOpen && !m_playerInventoryOpen && !m_tes3JournalOpen) {
+        m_talkingActor < 0 && !giftMenuOpen && !m_playerInventoryOpen &&
+        m_tes3CharacterMenu == 0 && !m_tes3JournalOpen && !tes3MessageBoxOpen()) {
         // The weather picker is a sub-page of the menu, so Escape backs out of
         // it one level rather than closing everything. Closing straight to the
         // world would make the picker feel like a separate mode the player had
@@ -10457,6 +10627,52 @@ std::string BethesdaApp::inventoryItemName(const odai::bethesda::RecordKey& item
     return definition && !definition->name.empty() ? definition->name : item.toString();
 }
 
+void BethesdaApp::syncDroppedItemPresentation() {
+    if (!m_streamer || !m_bethesdaSession.tes3().content()) return;
+    const auto content = m_bethesdaSession.tes3().content();
+    const auto* player = m_bethesdaSession.world().find(m_bethesdaSession.playerObject());
+    if (!player) return;
+    const auto visible = [&](const odai::bethesda::RuntimeObject* item) {
+        return item && item->enabled && item->kind == odai::bethesda::RuntimeObjectKind::Item &&
+            item->currentSpace == player->currentSpace;
+    };
+    for (auto it = m_droppedItemChunks.begin(); it != m_droppedItemChunks.end();) {
+        if (visible(m_bethesdaSession.world().find(it->first))) { ++it; continue; }
+        m_renderer.removeImportedSceneChunk(it->second);
+        it = m_droppedItemChunks.erase(it);
+    }
+    for (const auto& id : m_bethesdaSession.world().orderedObjectIds()) {
+        if (id.kind != odai::bethesda::ObjectIdKind::Spawned ||
+            m_droppedItemChunks.contains(id) || m_failedDroppedItemMeshes.contains(id)) continue;
+        const auto* item = m_bethesdaSession.world().find(id);
+        if (!visible(item)) continue;
+        const auto record = content->namedRecords().find(item->base);
+        if (record == content->namedRecords().end()) continue;
+        const std::string model = tes3SubrecordText(record->second, "MODL", content->encoding());
+        if (model.empty()) {
+            m_failedDroppedItemMeshes.insert(id);
+            VOX_LOGW("inventory") << "dropped item has no model: " << item->base.toString();
+            continue;
+        }
+        importer::ImportedScene scene;
+        std::string error;
+        if (!importer::bethesda::buildRuntimeItemScene(m_streamer->assets(), model,
+                item->base.textId, item->transform.position, item->transform.scale,
+                scene, error)) {
+            m_failedDroppedItemMeshes.insert(id);
+            VOX_LOGW("inventory") << error;
+            continue;
+        }
+        const std::size_t chunk = m_renderer.addImportedSceneChunk(scene);
+        if (chunk == render::Renderer::kInvalidImportedChunkIndex) {
+            m_failedDroppedItemMeshes.insert(id);
+            VOX_LOGW("inventory") << "could not upload dropped item model " << model;
+            continue;
+        }
+        m_droppedItemChunks.emplace(id, chunk);
+    }
+}
+
 std::vector<std::size_t> BethesdaApp::visibleInventoryItems() const {
     const auto id = m_inventorySource.valid() ? m_inventorySource : m_bethesdaSession.playerObject();
     const auto* source = m_bethesdaSession.world().find(id);
@@ -10474,6 +10690,280 @@ std::vector<std::size_t> BethesdaApp::visibleInventoryItems() const {
     return items;
 }
 
+static std::vector<std::pair<std::string, std::string>> tes3CharacterChoices(
+    const odai::bethesda::Tes3ContentStore& content, int menu, int raceStage,
+    std::string_view race, std::int8_t gender) {
+    if (menu == 2 && raceStage == 1) return {{"Male", "male"}, {"Female", "female"}};
+    if (menu == 2 && raceStage >= 2) {
+        std::vector<std::pair<std::string, std::string>> variants;
+        const std::uint8_t wantedPart = raceStage == 2 ? 0u : 1u;
+        for (const auto& [key, record] : content.namedRecords()) {
+            if (key.recordType != "BODY" ||
+                odai::bethesda::normalizeTes3Symbol(
+                    tes3SubrecordText(record, "FNAM", content.encoding())) !=
+                    odai::bethesda::normalizeTes3Symbol(race)) continue;
+            const auto* data = tes3Subrecord(record, "BYDT");
+            if (data == nullptr || data->data.size() < 4u ||
+                data->data[0] != wantedPart || (data->data[2] & 0x2u) != 0u ||
+                ((data->data[2] & 0x1u) != 0u) != (gender == 1)) continue;
+            variants.emplace_back(record.id, record.id);
+        }
+        std::ranges::sort(variants);
+        return variants;
+    }
+    const std::string type = menu == 2 ? "RACE" : menu == 3 ? "CLAS" :
+        menu == 4 ? "BSGN" : std::string{};
+    std::vector<std::pair<std::string, std::string>> choices;
+    if (type.empty()) return choices;
+    for (const auto& [key, record] : content.namedRecords()) {
+        if (key.recordType != type) continue;
+        const std::string label = tes3SubrecordText(record, "FNAM", content.encoding());
+        if (!label.empty()) choices.emplace_back(label, record.id);
+    }
+    std::ranges::sort(choices);
+    if (menu == 3) choices.insert(choices.begin(), {"Create custom class", "__custom_class__"});
+    return choices;
+}
+
+void BethesdaApp::updateTes3CharacterMenu() {
+    if (!m_streamIsMorrowind || !m_bethesdaSessionConfigured ||
+        m_bethesdaSession.tes3().content() == nullptr) return;
+    auto& player = m_bethesdaSession.tes3().playerState();
+    const bool restKey = keyDown(m_window, GLFW_KEY_T);
+    const bool statsKey = keyDown(m_window, GLFW_KEY_F1);
+    const bool trainingKey = keyDown(m_window, GLFW_KEY_R);
+    const bool persuasionKey = keyDown(m_window, GLFW_KEY_H);
+    const bool repairKey = keyDown(m_window, GLFW_KEY_F2);
+    const auto pending = player.numericFilters.find("chargen:menu");
+    int menu = pending == player.numericFilters.end() ? 0 : static_cast<int>(pending->second);
+    if (player.progression.selectionOpen) menu = 7;
+    if (menu == 0 && !m_menuOpen && !m_playerInventoryOpen && !m_tes3JournalOpen && !tes3MessageBoxOpen()) {
+        if (m_talkingActor < 0 && restKey && !m_tes3RestKeyLatch && tes3ControlEnabled("rest")) {
+            menu = 6; player.progression.restBed = {}; m_tes3RestHours = 1; m_tes3WaitOnly = false;
+        } else if (m_talkingActor < 0 && repairKey && !m_tes3RepairKeyLatch &&
+            !m_bethesdaSession.tes3RepairTargets().empty()) { menu = 12; m_tes3RepairTool.reset(); }
+        else if (m_talkingActor < 0 && statsKey && !m_tes3StatsKeyLatch) menu = 9;
+        else if (m_talkingActor >= 0 && trainingKey && !m_tes3TrainingKeyLatch &&
+            !m_bethesdaSession.tes3TrainingOffers(m_bethesdaSession.tes3().dialogue().actor.object).empty()) menu = 8;
+        else if (m_talkingActor >= 0 && persuasionKey && !m_tes3PersuasionKeyLatch &&
+            m_bethesdaSession.tes3().dialogue().choices.empty() && !m_bethesdaSession.tes3().hasPendingResultTransaction()) menu = 11;
+        if (menu != 0) player.numericFilters["chargen:menu"] = menu;
+    }
+    m_tes3RestKeyLatch = restKey; m_tes3StatsKeyLatch = statsKey; m_tes3TrainingKeyLatch = trainingKey;
+    m_tes3PersuasionKeyLatch = persuasionKey; m_tes3RepairKeyLatch = repairKey;
+    if (player.progression.readyNotification) {
+        m_toasts.push("Level up available", "Rest and meditate on what you have learned.", "tes3-level-ready");
+        player.progression.readyNotification = false;
+        m_bethesdaSession.tes3().synchronizePlayerDialogue();
+    }
+    if (menu != m_tes3CharacterMenu) {
+        m_tes3CharacterMenu = menu;
+        m_tes3CharacterChoice = 0;
+        m_tes3RaceStage = 0;
+        if (menu == 10) m_tes3ClassUi.reset();
+        if (menu != 0) setMouseCaptured(false);
+        else if (!m_menuOpen && !m_playerInventoryOpen && !m_tes3JournalOpen)
+            setMouseCaptured(true);
+    }
+    if (menu == 0) return;
+    auto finish = [&]() {
+        player.numericFilters["chargen:menu"] = 0.0;
+        m_tes3CharacterMenu = 0;
+        m_bethesdaSession.tes3().synchronizePlayerDialogue();
+        setMouseCaptured(true);
+    };
+    if (menu == 10) {
+        const bool back = m_nav.pressed(ui::UiNavAction::Cancel);
+        if (back && m_tes3ClassUi.stage() == 0) {
+            player.numericFilters["chargen:menu"] = 3;
+            return;
+        }
+        if (m_tes3ClassUi.update({m_nav.pressed(ui::UiNavAction::Up),
+                m_nav.pressed(ui::UiNavAction::Down), m_nav.pressed(ui::UiNavAction::Accept), back},
+                m_bethesdaSession)) finish();
+        return;
+    }
+    if (menu == 1) {
+        for (const std::uint32_t codepoint : m_uiInput.textInput) {
+            if (codepoint >= 32u && codepoint < 127u && player.name.size() < 32u)
+                player.name.push_back(static_cast<char>(codepoint));
+        }
+        const bool backspace = keyDown(m_window, GLFW_KEY_BACKSPACE);
+        if (backspace && !m_tes3NameBackspaceLatch && !player.name.empty()) player.name.pop_back();
+        m_tes3NameBackspaceLatch = backspace;
+        if (m_nav.pressed(ui::UiNavAction::Accept) && !player.name.empty()) finish();
+        return;
+    }
+    if (menu == 5) {
+        if (m_nav.pressed(ui::UiNavAction::Accept) && !player.name.empty() &&
+            !player.race.empty() && !player.actorClass.empty() && !player.birthsign.empty()) {
+            std::string error;
+            if (m_bethesdaSession.initializeTes3PlayerProgression(error)) finish();
+            else m_toasts.push("Cannot complete character", error, "tes3-character-stats");
+        }
+        return;
+    }
+    if (menu == 6) {
+        if (m_nav.pressed(ui::UiNavAction::Up)) m_tes3RestHours = std::min(24, m_tes3RestHours + 1);
+        if (m_nav.pressed(ui::UiNavAction::Down)) m_tes3RestHours = std::max(1, m_tes3RestHours - 1);
+        if (m_nav.pressed(ui::UiNavAction::Left) || m_nav.pressed(ui::UiNavAction::Right)) m_tes3WaitOnly = !m_tes3WaitOnly;
+        if (m_nav.pressed(ui::UiNavAction::Accept)) {
+            std::string error;
+            if (m_bethesdaSession.restTes3Player(m_tes3RestHours, !m_tes3WaitOnly, error, player.progression.restBed)) {
+                m_timeOfDayHours = static_cast<float>(player.numericFilters["gamehour"]);
+                finish();
+                if (player.progression.selectionOpen) { m_tes3CharacterMenu = 7; setMouseCaptured(false); }
+            } else m_toasts.push("Cannot rest", error, "tes3-rest");
+        } else if (m_nav.pressed(ui::UiNavAction::Cancel)) finish();
+        return;
+    }
+    if (menu == 7) {
+        std::string error;
+        if (m_tes3LevelUi.update({m_nav.pressed(ui::UiNavAction::Up), m_nav.pressed(ui::UiNavAction::Down),
+            m_nav.pressed(ui::UiNavAction::Accept)}, m_bethesdaSession, error)) finish();
+        else if (!error.empty()) m_toasts.push("Choose your attributes", error, "tes3-level-choices");
+        return;
+    }
+    if (menu == 12) {
+        const auto tools = m_bethesdaSession.tes3RepairTools();
+        const auto targets = m_bethesdaSession.tes3RepairTargets();
+        if (tools.empty() || targets.empty()) { m_tes3RepairTool.reset(); finish(); return; }
+        if (m_nav.pressed(ui::UiNavAction::Cancel)) {
+            if (m_tes3RepairTool) { m_tes3RepairTool.reset(); m_tes3CharacterChoice = 0; }
+            else finish();
+            return;
+        }
+        const auto& options = m_tes3RepairTool ? targets : tools;
+        const int count = static_cast<int>(options.size());
+        m_tes3CharacterChoice = std::clamp(m_tes3CharacterChoice, 0, count - 1);
+        if (m_nav.pressed(ui::UiNavAction::Up)) m_tes3CharacterChoice = (m_tes3CharacterChoice + count - 1) % count;
+        if (m_nav.pressed(ui::UiNavAction::Down)) m_tes3CharacterChoice = (m_tes3CharacterChoice + 1) % count;
+        if (m_nav.pressed(ui::UiNavAction::Accept)) {
+            if (!m_tes3RepairTool) {
+                m_tes3RepairTool = options[m_tes3CharacterChoice]; m_tes3CharacterChoice = 0;
+            } else {
+                const auto selected = std::find_if(tools.begin(), tools.end(), [&](const auto& tool) {
+                    return tool.item == m_tes3RepairTool->item && tool.condition == m_tes3RepairTool->condition;
+                });
+                std::string error;
+                if (selected == tools.end()) {
+                    m_toasts.push("Choose a repair tool", "The selected tool is no longer available.", "tes3-repair");
+                } else {
+                    const auto result = m_bethesdaSession.repairTes3PlayerItem(options[m_tes3CharacterChoice].inventoryIndex,
+                        selected->inventoryIndex, error);
+                    if (result.accepted) m_toasts.push(result.success ? "Repair succeeded" : "Repair failed",
+                        result.success ? "Restored " + std::to_string(result.repaired) + " condition." : "One tool use was spent.", "tes3-repair");
+                    else m_toasts.push("Cannot repair", error, "tes3-repair");
+                }
+                m_tes3RepairTool.reset(); m_tes3CharacterChoice = 0;
+            }
+        }
+        return;
+    }
+    if (menu == 11) {
+        if (!m_bethesdaSession.tes3().dialogue().active || m_nav.pressed(ui::UiNavAction::Cancel)) { finish(); return; }
+        if (m_nav.pressed(ui::UiNavAction::Up)) m_tes3CharacterChoice = (m_tes3CharacterChoice + 5) % 6;
+        if (m_nav.pressed(ui::UiNavAction::Down)) m_tes3CharacterChoice = (m_tes3CharacterChoice + 1) % 6;
+        if (m_nav.pressed(ui::UiNavAction::Accept)) {
+            std::string error;
+            const auto result = m_bethesdaSession.persuadeTes3Npc(
+                static_cast<odai::bethesda::BethesdaSession::Tes3PersuasionAction>(m_tes3CharacterChoice), error);
+            if (result.accepted) {
+                for (const auto& diagnostic : result.response.diagnostics) VOX_LOGW("tes3-persuasion") << diagnostic;
+                finish();
+                if (result.response.goodbye) endConversation();
+                else if (result.response.accepted) {
+                    if (auto* actor = talkingActor()) rebuildTes3ConversationTree(*actor, result.response);
+                    syncTes3JournalPanel();
+                } else m_toasts.push(result.success ? "Persuasion succeeded" : "Persuasion failed",
+                    "No authored response is available.", "tes3-persuasion");
+            } else m_toasts.push("Cannot persuade", error, "tes3-persuasion");
+        }
+        return;
+    }
+    if (menu == 8) {
+        const auto trainer = m_bethesdaSession.tes3().dialogue().actor.object;
+        const auto offers = m_bethesdaSession.tes3TrainingOffers(trainer);
+        if (offers.empty() || m_nav.pressed(ui::UiNavAction::Cancel)) { finish(); return; }
+        if (m_nav.pressed(ui::UiNavAction::Up)) m_tes3CharacterChoice = (m_tes3CharacterChoice + int(offers.size()) - 1) % int(offers.size());
+        if (m_nav.pressed(ui::UiNavAction::Down)) m_tes3CharacterChoice = (m_tes3CharacterChoice + 1) % int(offers.size());
+        m_tes3CharacterChoice = std::min(m_tes3CharacterChoice, int(offers.size()) - 1);
+        if (m_nav.pressed(ui::UiNavAction::Accept)) {
+            std::string error;
+            if (m_bethesdaSession.trainTes3PlayerSkill(trainer, offers[m_tes3CharacterChoice].skill, error)) {
+                m_timeOfDayHours = static_cast<float>(player.numericFilters["gamehour"]); finish();
+            } else m_toasts.push("Cannot train", error, "tes3-training");
+        }
+        return;
+    }
+    if (menu == 9) {
+        if (m_nav.pressed(ui::UiNavAction::Up)) m_tes3CharacterChoice = std::max(0, m_tes3CharacterChoice - 1);
+        if (m_nav.pressed(ui::UiNavAction::Down)) m_tes3CharacterChoice = std::min(26, m_tes3CharacterChoice + 1);
+        if (m_nav.pressed(ui::UiNavAction::Cancel)) finish();
+        return;
+    }
+    const auto choices = tes3CharacterChoices(
+        *m_bethesdaSession.tes3().content(), menu, m_tes3RaceStage,
+        player.race, player.gender);
+    if (choices.empty()) return;
+    if (m_nav.pressed(ui::UiNavAction::Up))
+        m_tes3CharacterChoice = (m_tes3CharacterChoice + static_cast<int>(choices.size()) - 1) %
+            static_cast<int>(choices.size());
+    if (m_nav.pressed(ui::UiNavAction::Down))
+        m_tes3CharacterChoice = (m_tes3CharacterChoice + 1) % static_cast<int>(choices.size());
+    if (!m_nav.pressed(ui::UiNavAction::Accept)) return;
+    const std::string& id = choices[static_cast<std::size_t>(m_tes3CharacterChoice)].second;
+    if (menu == 2) {
+        if (m_tes3RaceStage == 0) player.race = id;
+        else if (m_tes3RaceStage == 1) player.gender = id == "male" ? 0 : 1;
+        else if (m_tes3RaceStage == 2) player.head = id;
+        else player.hair = id;
+        ++m_tes3RaceStage;
+        m_tes3CharacterChoice = 0;
+        if (m_tes3RaceStage == 4) finish();
+    } else if (menu == 3) {
+        if (id == "__custom_class__") player.numericFilters["chargen:menu"] = 10;
+        else { player.actorClass = id; player.progression.customClass.reset(); finish(); }
+    }
+    else if (menu == 4) { player.birthsign = id; finish(); }
+}
+
+bool BethesdaApp::tes3MessageBoxOpen() const {
+    if (!m_streamIsMorrowind || !m_bethesdaSessionConfigured) return false;
+    const auto& dialogue = m_bethesdaSession.tes3().dialogue();
+    return !dialogue.active && !dialogue.messageBoxText.empty() &&
+        !dialogue.choices.empty();
+}
+
+void BethesdaApp::updateTes3MessageBox() {
+    const bool open = tes3MessageBoxOpen();
+    if (open != m_tes3MessageBoxWasOpen) {
+        m_tes3MessageBoxChoice = 0;
+        m_tes3MessageBoxWasOpen = open;
+        if (open) setMouseCaptured(false);
+        else if (!m_menuOpen && !m_playerInventoryOpen && !m_tes3JournalOpen &&
+                 m_tes3CharacterMenu == 0) setMouseCaptured(true);
+    }
+    if (!open) return;
+    const auto& choices = m_bethesdaSession.tes3().dialogue().choices;
+    if (m_nav.pressed(ui::UiNavAction::Up))
+        m_tes3MessageBoxChoice = (m_tes3MessageBoxChoice +
+            static_cast<int>(choices.size()) - 1) % static_cast<int>(choices.size());
+    if (m_nav.pressed(ui::UiNavAction::Down))
+        m_tes3MessageBoxChoice = (m_tes3MessageBoxChoice + 1) %
+            static_cast<int>(choices.size());
+    if (!m_nav.pressed(ui::UiNavAction::Accept)) return;
+    const std::int32_t selected = choices[static_cast<std::size_t>(m_tes3MessageBoxChoice)].value;
+    const auto response = m_bethesdaSession.answerTes3Choice(selected, true);
+    for (const std::string& diagnostic : response.diagnostics)
+        VOX_LOGW("tes3-messagebox") << diagnostic;
+    if (!tes3MessageBoxOpen()) {
+        m_tes3MessageBoxWasOpen = false;
+        if (!m_menuOpen && !m_playerInventoryOpen && !m_tes3JournalOpen &&
+            m_tes3CharacterMenu == 0) setMouseCaptured(true);
+    }
+}
+
 void BethesdaApp::updatePlayerInventory() {
     GLFWgamepadstate pad{};
     const bool hasPad = glfwGetGamepadState(GLFW_JOYSTICK_1, &pad) == GLFW_TRUE;
@@ -10488,8 +10978,34 @@ void BethesdaApp::updatePlayerInventory() {
     const bool dropDown = keyDown(m_window, GLFW_KEY_D);
     const bool dropEdge = dropDown && !m_inventoryDropKeyLatch;
     m_inventoryDropKeyLatch = dropDown;
-    if (!m_bethesdaSessionConfigured || (!m_streamIsSkyrim && !m_streamIsMorrowind)) return;
+    if (!m_bethesdaSessionConfigured || (!m_streamIsSkyrim && !m_streamIsMorrowind) ||
+        m_tes3CharacterMenu != 0) return;
     const bool giftOpen = !m_bethesdaSession.giftMenuRequests().empty();
+    const bool sharedMorrowindInventory = m_streamIsMorrowind &&
+        !m_inventorySource.valid() && !m_inventoryBook.valid();
+    if (sharedMorrowindInventory) {
+        const bool wasOpen = m_playerInventoryOpen;
+        const auto outcome = m_morrowindInventoryUi.update({
+            down && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+                m_doorTransitionPhase == DoorTransitionPhase::None,
+            m_nav.down(ui::UiNavAction::Up),
+            m_nav.down(ui::UiNavAction::Down), dropDown,
+            m_nav.down(ui::UiNavAction::Cancel),
+            m_nav.pressed(ui::UiNavAction::Up),
+            m_nav.pressed(ui::UiNavAction::Down)}, m_bethesdaSession);
+        m_playerInventoryOpen = m_morrowindInventoryUi.isOpen();
+        m_giftMenuChoice = static_cast<int>(m_morrowindInventoryUi.selection());
+        if (outcome.dropped)
+            m_toasts.push("Item dropped", inventoryItemName(outcome.droppedItem), "inventory-drop");
+        else if (!outcome.error.empty())
+            m_toasts.push("Cannot drop item", outcome.error, "inventory-drop");
+        if (wasOpen != m_playerInventoryOpen) {
+            m_meleeAttackPending = false;
+            m_bethesdaSession.physics().setCharacterInput(
+                m_bethesdaSession.playerObject(), odai::bethesda::PhysicsCharacterInput{});
+            setMouseCaptured(!m_playerInventoryOpen);
+        }
+    }
     if (!m_interiorStarted) {
         const auto eye = bethesdaPlayerEyePosition();
         m_mapPlayerX = eye.x; m_mapPlayerY = -eye.z; m_mapPlayerKnown = true;
@@ -10565,9 +11081,10 @@ void BethesdaApp::updatePlayerInventory() {
         if (keyDown(m_window, GLFW_KEY_PAGE_UP) || (hasPad && pad.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y] < -0.5f)) m_questLogScroll = std::max(0, m_questLogScroll - 1);
         return;
     }
-    if (edge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
+    if (!sharedMorrowindInventory && edge && !giftOpen && !m_menuOpen && m_talkingActor < 0 &&
         m_doorTransitionPhase == DoorTransitionPhase::None) {
         m_playerInventoryOpen = !m_playerInventoryOpen;
+        if (m_streamIsMorrowind && !m_playerInventoryOpen) m_morrowindInventoryUi.close();
         m_inventorySource = {};
         m_inventoryBook = {};
         m_giftMenuChoice = 0;
@@ -10597,8 +11114,7 @@ void BethesdaApp::updatePlayerInventory() {
     const auto visible = visibleInventoryItems();
     const int count = static_cast<int>(visible.size());
     m_giftMenuChoice = std::clamp(m_giftMenuChoice, 0, std::max(0, count - 1));
-    if (!m_inventorySource.valid() && count > 0 &&
-        (dropEdge || (m_streamIsMorrowind && m_nav.pressed(ui::UiNavAction::Accept)))) {
+    if (!sharedMorrowindInventory && !m_inventorySource.valid() && count > 0 && dropEdge) {
         const auto item = source->inventory[visible[static_cast<std::size_t>(m_giftMenuChoice)]].item;
         std::string error;
         if (m_bethesdaSession.dropInventoryItem(playerId, item, error)) {
@@ -10608,9 +11124,9 @@ void BethesdaApp::updatePlayerInventory() {
             return;
         } else m_toasts.push("Cannot drop item", error, "inventory-drop");
     }
-    if (count > 0 && m_nav.pressed(ui::UiNavAction::Up)) m_giftMenuChoice = (m_giftMenuChoice + count - 1) % count;
-    if (count > 0 && m_nav.pressed(ui::UiNavAction::Down)) m_giftMenuChoice = (m_giftMenuChoice + 1) % count;
-    if (count > 0 && ((m_streamIsSkyrim && m_nav.pressed(ui::UiNavAction::Accept)) ||
+    if (!sharedMorrowindInventory && count > 0 && m_nav.pressed(ui::UiNavAction::Up)) m_giftMenuChoice = (m_giftMenuChoice + count - 1) % count;
+    if (!sharedMorrowindInventory && count > 0 && m_nav.pressed(ui::UiNavAction::Down)) m_giftMenuChoice = (m_giftMenuChoice + 1) % count;
+    if (count > 0 && (m_nav.pressed(ui::UiNavAction::Accept) ||
         (takeAll && m_inventorySource.valid()))) {
         const auto item = source->inventory[visible[static_cast<std::size_t>(m_giftMenuChoice)]].item;
         const auto* definition = m_bethesdaSession.skyrimItem(item);
@@ -10626,16 +11142,25 @@ void BethesdaApp::updatePlayerInventory() {
             m_inventoryBook = item;
             m_inventoryBookScroll = 0;
             return;
+        } else if (m_streamIsMorrowind && item.recordType == "BOOK") {
+            if (!m_bethesdaSession.readTes3SkillBook(item, error)) {
+                m_toasts.push("Cannot read book", error, "tes3-book"); return;
+            }
+            m_inventoryBook = item;
+            m_inventoryBookScroll = 0;
+            return;
         } else accepted = m_bethesdaSession.useInventoryItem(playerId, item, error);
         if (accepted) {
             // Leave the paused menu so the accepted action reaches the next fixed tick.
             m_playerInventoryOpen = false;
+            if (sharedMorrowindInventory) m_morrowindInventoryUi.close();
             m_inventorySource = {};
             setMouseCaptured(true);
         } else m_toasts.push("Cannot use item", error, "inventory-use");
     }
-    if (m_nav.pressed(ui::UiNavAction::Cancel)) {
+    if (!sharedMorrowindInventory && m_nav.pressed(ui::UiNavAction::Cancel)) {
         m_playerInventoryOpen = false;
+        if (m_streamIsMorrowind) m_morrowindInventoryUi.close();
         m_inventorySource = {};
         setMouseCaptured(true);
     }
@@ -10940,6 +11465,7 @@ void BethesdaApp::cacheBethesdaCollisionCell(
             m_disabledBethesdaCollisionReferences.insert(instance.sourceReferenceFormId);
         }
         if (!m_bethesdaSessionConfigured || !m_streamIsMorrowind ||
+            m_bethesdaSession.tes3().content() == nullptr ||
             instance.sourceReferenceIdentity.empty()) continue;
         odai::bethesda::RecordKey referenceKey;
         if (!odai::bethesda::parseRecordKey(instance.sourceReferenceIdentity, referenceKey) ||
@@ -10965,6 +11491,7 @@ void BethesdaApp::cacheBethesdaCollisionCell(
         odai::bethesda::RuntimeObject object;
         object.id = id;
         object.base = definition->second.base;
+        object.itemCondition = definition->second.itemCondition;
         object.persistent = true;
         object.enabled = instance.initiallyVisible && definition->second.enabled;
         object.transform.position = {
@@ -11018,6 +11545,21 @@ void BethesdaApp::cacheBethesdaCollisionCell(
                     object.inventory.push_back({item, count, false});
                 }
             }
+            if (savedOverride != m_bethesdaSession.tes3().referenceOverrides().end()) {
+                const auto& locals = savedOverride->second.locals;
+                const auto health = locals.find("actor:health");
+                const auto maximum = locals.find("actor:maxhealth");
+                const auto dead = locals.find("actor:dead");
+                if (health != locals.end()) {
+                    object.actorValues->health = static_cast<float>(health->second.number);
+                }
+                if (maximum != locals.end()) {
+                    object.actorValues->maxHealth = static_cast<float>(maximum->second.number);
+                }
+                if (dead != locals.end()) {
+                    object.actorValues->dead = dead->second.truthy();
+                }
+            }
         } else if (type == "CONT") object.kind = odai::bethesda::RuntimeObjectKind::Container;
         else if (type == "DOOR") object.kind = odai::bethesda::RuntimeObjectKind::Door;
         else if (type == "ACTI") object.kind = odai::bethesda::RuntimeObjectKind::Activator;
@@ -11026,13 +11568,22 @@ void BethesdaApp::cacheBethesdaCollisionCell(
         if (!m_bethesdaSession.world().addInitialObject(std::move(object), bindError)) {
             VOX_LOGW("tes3") << "could not bind streamed reference "
                                << instance.sourceReferenceIdentity << ": " << bindError;
-        } else if (actorDefinition != nullptr && actorDefinition->script.valid()) {
+        } else {
+            std::string scriptId;
+            if (actorDefinition != nullptr && actorDefinition->script.valid()) {
+                scriptId = actorDefinition->script.textId;
+            } else if (const auto* record = m_bethesdaSession.tes3().content()->findRecord(
+                           type, definition->second.base.textId)) {
+                scriptId = tes3SubrecordText(*record, "SCRI",
+                    m_bethesdaSession.tes3().content()->encoding());
+            }
+            if (scriptId.empty()) continue;
             std::string scriptError;
             const std::uint64_t threadId = m_bethesdaSession.tes3().scripts().start(
-                actorDefinition->script.textId, id, scriptError);
+                scriptId, id, scriptError, true, true);
             if (threadId == 0u) {
                 VOX_LOGW("tes3") << "could not start local script "
-                    << actorDefinition->script.toString() << " for "
+                    << scriptId << " for "
                     << instance.sourceReferenceIdentity << ": " << scriptError;
             } else if (savedOverride != m_bethesdaSession.tes3().referenceOverrides().end()) {
                 auto thread = m_bethesdaSession.tes3().scripts().threadsForRestore().find(threadId);
@@ -11874,6 +12425,7 @@ bool BethesdaApp::initBethesdaSession() {
                                   : std::sqrt(nearestActorDistanceSquared));
         registerCachedBethesdaCollision();
         if (!registerBethesdaPlayerController()) return false;
+        m_tes3FreshGame = false;
         if (thirdPersonPlayerShowcase() && !initSkyrimPlayerAvatar()) return false;
         if (!m_gameplayLoadPath.empty() && !loadGameplayState()) return false;
         return true;
@@ -12094,6 +12646,17 @@ bool BethesdaApp::registerBethesdaPlayerController() {
         static_cast<float>(player->transform.position[0]),
         static_cast<float>(player->transform.position[1]),
         static_cast<float>(player->transform.position[2])};
+    if (m_tes3FreshGame) {
+        // PositionCell gives an authored placement above the ship's lower
+        // floor. Snap down before creating a capsule: the generic overlap
+        // recovery otherwise lifts it onto the deck through the ceiling.
+        const auto floor = m_bethesdaSession.physics().castDown(
+            {config.position.x, config.position.y + 20.0f, config.position.z}, 8192.0f);
+        if (floor && floor->normal.y >= 0.64f) {
+            config.position.y = std::min(config.position.y + 20.0f, floor->position.y) + 0.1f;
+            VOX_LOGI("tes3") << "fresh player settled at feet y=" << config.position.y;
+        }
+    }
     std::string error;
     if (!m_bethesdaSession.registerActorController(playerId, config, error)) {
         VOX_LOGE("physics") << "could not register player controller: " << error;
@@ -12870,6 +13433,19 @@ void BethesdaApp::stepBethesdaActorControllers(float fixedDeltaSeconds) {
         const std::optional<odai::bethesda::ObjectId> id = runtimeObjectIdForActor(actor);
         if (!id.has_value()) continue;
         const odai::bethesda::RuntimeObject* runtime = m_bethesdaSession.world().find(*id);
+        if (m_streamIsMorrowind && runtime != nullptr && runtime->aiState.has_value()) {
+            const auto override = m_bethesdaSession.tes3().referenceOverrides().find(*id);
+            if (override != m_bethesdaSession.tes3().referenceOverrides().end()) {
+                const auto package = override->second.locals.find("ai:package");
+                if (package != override->second.locals.end() &&
+                    (package->second.number == 0.0 || package->second.number == 1.0 ||
+                     package->second.number == 2.0)) {
+                    const auto& ai = *runtime->aiState;
+                    applyActorScriptedMovement(actor, ai.wanderTarget.data(),
+                        ai.scriptedMoveRevision, ai.scriptedMoveActive);
+                }
+            }
+        }
         actor.runtimeDead = runtime != nullptr && runtime->actorValues.has_value() &&
             runtime->actorValues->dead;
         if (actor.runtimeDead) {
@@ -13116,6 +13692,12 @@ void BethesdaApp::submitBethesdaActorControllerIntents() {
         if (!resolved.has_value()) continue;
         const odai::bethesda::ObjectId& id = *resolved;
         if (m_bethesdaSession.world().find(id) == nullptr) continue;
+        if (m_streamIsMorrowind) {
+            std::string scriptError;
+            if (!m_bethesdaSession.bindTes3ActorLocalScript(id, scriptError)) {
+                VOX_LOGW("tes3") << "actor local script " << actor.name << ": " << scriptError;
+            }
+        }
         if (!m_npcDemoPhysicsReady) syncSkyrimActorEquipment(actor, id);
         actor.runtimeAnimationRegistered = m_bethesdaSession.hasActorAnimation(id);
         if (actor.animationView && !actor.runtimeAnimationRegistered) {
@@ -13402,8 +13984,17 @@ void BethesdaApp::syncBethesdaActors(bool addMissing, bool applyNow) {
             (void)m_bethesdaSession.world().queue(std::move(ai));
         }
         actor.renderVisible = existing->enabled;
+        if (m_streamIsMorrowind && actor.scriptedMoveArrived && existing->aiState.has_value() &&
+            existing->aiState->scriptedMoveRevision == actor.scriptedMoveRevision) {
+            m_bethesdaSession.tes3().referenceOverridesForRestore()[id]
+                .locals["ai:done"] = odai::bethesda::Tes3Value::fromNumber(1.0);
+        }
         if (!actor.followsPlayer && actor.scriptedMoveArrived && existing->navigationRequest.has_value() &&
             existing->navigationRequest->revision == actor.scriptedMoveRevision) {
+            if (m_streamIsMorrowind) {
+                m_bethesdaSession.tes3().referenceOverridesForRestore()[id]
+                    .locals["ai:done"] = odai::bethesda::Tes3Value::fromNumber(1.0);
+            }
             odai::bethesda::WorldCommand arrived;
             arrived.type = odai::bethesda::WorldCommandType::SetNavigationStatus;
             arrived.target = id;
@@ -13632,10 +14223,187 @@ bool BethesdaApp::loadGameplayState() {
     // --load-game chooses the initial generation; F9 subsequently reloads the
     // active save slot, including after recovering into a new launcher slot.
     m_gameplayLoadPath.clear();
+    m_tes3LevelUi.reset();
+    m_tes3ClassUi.reset();
     return true;
 }
 
+void BethesdaApp::drawTes3CharacterMenu() {
+    if (m_tes3CharacterMenu == 0 || m_bethesdaSession.tes3().content() == nullptr) return;
+    int width = 0, height = 0;
+    framebufferSize(width, height);
+    const float scale = contentScale();
+    const float left = width * 0.18f, right = width * 0.82f;
+    const float top = height * 0.13f, bottom = height * 0.87f;
+    const ui::UiColor parchment{0.075f, 0.065f, 0.052f, 0.96f};
+    const ui::UiColor gold{0.91f, 0.83f, 0.68f, 1.0f};
+    const ui::UiColor muted{0.68f, 0.61f, 0.50f, 1.0f};
+    m_uiDrawList.addRectFilled({left, top, right, bottom}, parchment);
+    m_uiDrawList.addRect({left, top, right, bottom}, muted, 2.0f * scale);
+    const auto& font = m_tes3JournalFont.valid() ? m_tes3JournalFont : m_uiFont;
+    const auto& player = m_bethesdaSession.tes3().playerState();
+    const std::string title = m_tes3CharacterMenu == 1 ? "Your name" :
+        m_tes3CharacterMenu == 2 ? (m_tes3RaceStage == 0 ? "Choose race" :
+            m_tes3RaceStage == 1 ? "Choose gender" :
+            m_tes3RaceStage == 2 ? "Choose head" : "Choose hair") :
+        m_tes3CharacterMenu == 3 ? "Choose class" :
+        m_tes3CharacterMenu == 4 ? "Choose birthsign" :
+        m_tes3CharacterMenu == 5 ? "Review your character" :
+        m_tes3CharacterMenu == 7 ? "Level " + std::to_string(int(player.numericFilters.at("level")) + 1) :
+        m_tes3CharacterMenu == 8 ? "Training" : m_tes3CharacterMenu == 9 ? "Player stats" :
+        m_tes3CharacterMenu == 10 ? m_tes3ClassUi.prompt() : m_tes3CharacterMenu == 11 ? "Persuasion" :
+        m_tes3CharacterMenu == 12 ? (m_tes3RepairTool ? "Choose item to repair" : "Choose repair tool") : "Rest";
+    const float x = left + 24.0f * scale;
+    const float line = std::min(font.lineHeightPx() * 1.35f, (bottom - top - 44.0f * scale) / 13.0f);
+    m_uiDrawList.addText(font, title.c_str(), {x, top + 22.0f * scale}, gold);
+    if (m_tes3CharacterMenu == 1) {
+        const std::string name = player.name.empty() ? "Type your name" : player.name + "_";
+        m_uiDrawList.addText(font, name.c_str(), {x, top + 22.0f * scale + line * 2}, gold);
+    } else if (m_tes3CharacterMenu == 5) {
+        const std::vector<std::string> summary = {
+            "Name: " + player.name, "Race: " + player.race,
+            "Class: " + player.actorClass, "Birthsign: " + player.birthsign};
+        for (std::size_t index = 0; index < summary.size(); ++index)
+            m_uiDrawList.addText(font, summary[index].c_str(),
+                {x, top + 22.0f * scale + line * (2.0f + static_cast<float>(index))}, gold);
+    } else if (m_tes3CharacterMenu == 10) {
+        if (m_tes3ClassUi.stage() == 13) {
+            const auto& draft = m_tes3ClassUi.draft();
+            constexpr const char* specializations[]{"Combat", "Magic", "Stealth"};
+            std::vector<std::string> rows{specializations[draft.specialization],
+                "Favored: " + std::string(odai::bethesda::tes3AttributeNames[draft.attributes[0]]) + ", " +
+                    std::string(odai::bethesda::tes3AttributeNames[draft.attributes[1]])};
+            rows.push_back("Major skills / Minor skills");
+            for (int i = 0; i < 5; ++i) rows.push_back(std::string(odai::bethesda::tes3SkillNames[draft.major[i]]) +
+                " / " + std::string(odai::bethesda::tes3SkillNames[draft.minor[i]]));
+            for (std::size_t i = 0; i < rows.size(); ++i)
+                m_uiDrawList.addText(font, rows[i].c_str(), {x, top + 22 * scale + line * (1 + i)}, gold);
+        } else {
+            const auto options = m_tes3ClassUi.choices();
+            const int first = std::max(0, m_tes3ClassUi.cursor() - 7);
+            const int last = std::min(int(options.size()), first + 9);
+            for (int i = first; i < last; ++i) {
+                const std::string label = std::string(i == m_tes3ClassUi.cursor() ? "> " : "  ") + m_tes3ClassUi.label(options[i]);
+                m_uiDrawList.addText(font, label.c_str(), {x, top + 22 * scale + line * (2 + i - first)}, gold);
+            }
+        }
+    } else if (m_tes3CharacterMenu == 6) {
+        const std::string description = std::string(m_tes3WaitOnly ? "Wait " : "Sleep ") + std::to_string(m_tes3RestHours) + " hour(s)";
+        m_uiDrawList.addText(font, description.c_str(), {x, top + 22.0f * scale + line * 2}, gold);
+        m_uiDrawList.addText(font, "Up / Down: hours   Left / Right: sleep or wait",
+            {x, top + 22.0f * scale + line * 3}, muted);
+    } else if (m_tes3CharacterMenu == 7) {
+        for (int a = 0; a < 8; ++a) {
+            const auto name = std::string(odai::bethesda::tes3AttributeNames[a]);
+            const int gain = m_bethesdaSession.tes3().playerAttributeGain(a);
+            const bool chosen = std::find(m_tes3LevelUi.selected().begin(), m_tes3LevelUi.selected().end(), a) != m_tes3LevelUi.selected().end();
+            const int base = int(player.numericFilters.at(name));
+            const std::string label = (m_tes3LevelUi.cursor() == a ? "> " : "  ") + name + "  " + std::to_string(base) +
+                (gain > 0 ? " +" + std::to_string(gain) : " (maximum)") + (chosen ? "  [selected] -> " + std::to_string(base + gain) : "");
+            m_uiDrawList.addText(font, label.c_str(), {x, top + 22.0f * scale + line * (2 + a)}, gain > 0 ? gold : muted);
+        }
+        const std::string confirm = std::string(m_tes3LevelUi.cursor() == 8 ? "> " : "  ") + "Confirm  (" +
+            std::to_string(m_tes3LevelUi.selected().size()) + "/" + std::to_string(m_bethesdaSession.tes3().levelChoiceCount()) + " selected)";
+        m_uiDrawList.addText(font, confirm.c_str(), {x, top + 22.0f * scale + line * 10}, gold);
+    } else if (m_tes3CharacterMenu == 12) {
+        const auto options = m_tes3RepairTool ? m_bethesdaSession.tes3RepairTargets() : m_bethesdaSession.tes3RepairTools();
+        const int first = std::max(0, m_tes3CharacterChoice - 7);
+        const int last = std::min(static_cast<int>(options.size()), first + 9);
+        for (int i = first; i < last; ++i) {
+            const auto& option = options[i];
+            const auto label = std::string(i == m_tes3CharacterChoice ? "> " : "  ") + inventoryItemName(option.item) +
+                "  " + std::to_string(option.condition) + "/" + std::to_string(option.maximum) + (m_tes3RepairTool ? " condition" : " uses");
+            m_uiDrawList.addText(font, label.c_str(), {x, top + 22 * scale + line * (2 + i - first)}, gold);
+        }
+    } else if (m_tes3CharacterMenu == 11) {
+        constexpr std::array<const char*, 6> options{"Admire", "Intimidate", "Taunt", "Bribe 10 gold", "Bribe 100 gold", "Bribe 1000 gold"};
+        const auto disposition = "Disposition: " + std::to_string(m_bethesdaSession.tes3DerivedDisposition(m_bethesdaSession.tes3().dialogue().actor.object));
+        m_uiDrawList.addText(font, disposition.c_str(), {x, top + 22.0f * scale + line}, gold);
+        for (int i = 0; i < 6; ++i) {
+            const auto label = std::string(i == m_tes3CharacterChoice ? "> " : "  ") + options[i];
+            m_uiDrawList.addText(font, label.c_str(), {x, top + 22.0f * scale + line * (2 + i)}, gold);
+        }
+    } else if (m_tes3CharacterMenu == 8) {
+        const auto offers = m_bethesdaSession.tes3TrainingOffers(m_bethesdaSession.tes3().dialogue().actor.object);
+        for (std::size_t i = 0; i < offers.size(); ++i) {
+            const auto& offer = offers[i];
+            const std::string label = std::string(int(i) == m_tes3CharacterChoice ? "> " : "  ") +
+                std::string(odai::bethesda::tes3SkillNames[offer.skill]) + "  " + std::to_string(offer.price) + " gold";
+            m_uiDrawList.addText(font, label.c_str(), {x, top + 22.0f * scale + line * (2 + i)}, offer.eligible ? gold : muted);
+        }
+    } else if (m_tes3CharacterMenu == 9) {
+        const std::string progress = "Level " + std::to_string(int(player.numericFilters.at("level"))) + "  " +
+            std::to_string(player.progression.levelProgress) + "/" + std::to_string(m_bethesdaSession.tes3().levelThreshold()) +
+            (m_bethesdaSession.tes3().playerLevelReady() ? "  Ready to rest" : "");
+        m_uiDrawList.addText(font, progress.c_str(), {x, top + 22.0f * scale + line * 1.5f}, gold);
+        for (int i = m_tes3CharacterChoice; i < std::min(27, m_tes3CharacterChoice + 8); ++i) {
+            const auto name = std::string(odai::bethesda::tes3SkillNames[i]);
+            const auto stat = player.numericFilters.find(name);
+            const std::string label = name + "  " + std::to_string(stat == player.numericFilters.end() ? 0 : int(stat->second)) +
+                "  (" + std::to_string(int(player.progression.skillProgress[i] * 100)) + "%)";
+            m_uiDrawList.addText(font, label.c_str(), {x, top + 22.0f * scale + line * (3 + i - m_tes3CharacterChoice)}, gold);
+        }
+    } else {
+        const auto choices = tes3CharacterChoices(
+            *m_bethesdaSession.tes3().content(), m_tes3CharacterMenu, m_tes3RaceStage,
+            player.race, player.gender);
+        const int first = std::max(0, m_tes3CharacterChoice - 8);
+        const int last = std::min(static_cast<int>(choices.size()), first + 12);
+        for (int index = first; index < last; ++index) {
+            const std::string label = (index == m_tes3CharacterChoice ? "> " : "  ") +
+                choices[static_cast<std::size_t>(index)].first;
+            m_uiDrawList.addText(font, label.c_str(),
+                {x, top + 22.0f * scale + line * (2.0f + float(index - first))},
+                index == m_tes3CharacterChoice ? gold : muted);
+        }
+    }
+    m_uiDrawList.addText(font, m_tes3CharacterMenu == 10 ?
+        "Enter / A  confirm   Up / Down  choose   Esc / B  back" : "Enter / A  confirm     Up / Down  choose",
+        {x, bottom - line * 1.7f}, muted);
+}
+
+void BethesdaApp::drawTes3MessageBox() {
+    if (!tes3MessageBoxOpen()) return;
+    const auto& dialogue = m_bethesdaSession.tes3().dialogue();
+    int width = 0, height = 0;
+    framebufferSize(width, height);
+    const float scale = contentScale();
+    const float left = width * 0.17f, right = width * 0.83f;
+    const float top = height * 0.18f, bottom = height * 0.82f;
+    const ui::UiColor panel{0.075f, 0.065f, 0.052f, 0.97f};
+    const ui::UiColor gold{0.91f, 0.83f, 0.68f, 1.0f};
+    const ui::UiColor muted{0.68f, 0.61f, 0.50f, 1.0f};
+    m_uiDrawList.addRectFilled({left, top, right, bottom}, panel);
+    m_uiDrawList.addRect({left, top, right, bottom}, muted, 2.0f * scale);
+    const auto& font = m_tes3JournalFont.valid() ? m_tes3JournalFont : m_uiFont;
+    const float x = left + 22.0f * scale;
+    const float line = font.lineHeightPx() * 1.35f;
+    const auto lines = wrapTextToWidth(
+        font, dialogue.messageBoxText, right - left - 44.0f * scale);
+    for (std::size_t index = 0; index < lines.size(); ++index)
+        m_uiDrawList.addText(font, lines[index].c_str(),
+            {x, top + 22.0f * scale + line * static_cast<float>(index)}, gold);
+    const int first = std::max(0, m_tes3MessageBoxChoice - 4);
+    const int last = std::min(static_cast<int>(dialogue.choices.size()), first + 6);
+    for (int index = first; index < last; ++index) {
+        const std::string label = (index == m_tes3MessageBoxChoice ? "> " : "  ") +
+            dialogue.choices[static_cast<std::size_t>(index)].label;
+        m_uiDrawList.addText(font, label.c_str(),
+            {x, top + 22.0f * scale + line *
+                (static_cast<float>(lines.size()) + 1.0f + float(index - first))},
+            index == m_tes3MessageBoxChoice ? gold : muted);
+    }
+}
+
 void BethesdaApp::drawPipBoyHud() {
+    if (m_tes3CharacterMenu != 0) {
+        drawTes3CharacterMenu();
+        return;
+    }
+    if (tes3MessageBoxOpen()) {
+        drawTes3MessageBox();
+        return;
+    }
     const float scale = contentScale();
     int screenWidth = 0;
     int screenHeight = 0;
@@ -13719,6 +14487,13 @@ void BethesdaApp::drawPipBoyHud() {
         ui::UiVec2{statusRect.minX + (margin * 0.75f), statusRect.minY + (5.0f * scale)},
         kPipGreen);
 
+    }
+
+    if (m_streamIsMorrowind && m_bethesdaSessionConfigured) {
+        const auto& runtime = m_bethesdaSession.tes3();
+        std::string hint = runtime.playerLevelReady() ? "Level up ready  [T] Rest   [F1] Stats" : "[T] Rest   [F1] Stats";
+        if (!m_bethesdaSession.tes3RepairTargets().empty()) hint += "   [F2] Repair";
+        m_uiDrawList.addText(m_uiFont, hint.c_str(), {margin, margin}, kPipGreen);
     }
 
     // Interaction prompt, centred low -- where an action prompt belongs, and
@@ -14420,6 +15195,11 @@ void BethesdaApp::drawDialoguePanel(
         ? ui::UiColor{0.58f, 0.48f, 0.34f, 0.96f} : kPipGreenDim;
     const ui::UiColor dialoguePanel = compactTes3
         ? ui::UiColor{0.075f, 0.065f, 0.052f, 0.91f} : kPipPanelSolid;
+
+    if (compactTes3 && !m_bethesdaSession.tes3TrainingOffers(m_bethesdaSession.tes3().dialogue().actor.object).empty())
+        m_uiDrawList.addText(choiceFont, "[R] Training", {24.0f * scale, 24.0f * scale}, dialogueText);
+    if (compactTes3 && m_bethesdaSession.tes3().dialogue().choices.empty())
+        m_uiDrawList.addText(choiceFont, "[H] Persuasion", {24.0f * scale, 48.0f * scale}, dialogueText);
 
     // Width is capped in *scaled* units as well as as a fraction of the screen.
     // A line of text that spans an entire 4K width is unreadable no matter how
@@ -15410,7 +16190,13 @@ void BethesdaApp::drawGiftMenu() {
     const float width = std::min(720.0f * scale, static_cast<float>(screenWidth) * 0.72f);
     const float padding = 28.0f * scale;
     const float lineHeight = m_uiFont.lineHeightPx() + (10.0f * scale);
-    const std::size_t itemCount = source == nullptr ? 0u : source->inventory.size();
+    const auto uiSnapshot = m_streamIsMorrowind && m_playerInventoryOpen &&
+        !m_inventorySource.valid() && !m_inventoryBook.valid()
+        ? m_morrowindInventoryUi.snapshot(m_bethesdaSession,
+            [this](const odai::bethesda::RecordKey& key) { return inventoryItemName(key); })
+        : odai::bethesda::InventoryUiSnapshot{};
+    const std::size_t itemCount = uiSnapshot.open ? uiSnapshot.entries.size()
+        : source == nullptr ? 0u : source->inventory.size();
     const std::size_t visibleCount = std::min<std::size_t>(itemCount, 10u);
     const float height = m_inventoryBook.valid()
         ? std::min(600.0f * scale, static_cast<float>(screenHeight) * 0.8f)
@@ -15431,16 +16217,21 @@ void BethesdaApp::drawGiftMenu() {
     if (m_playerInventoryOpen && m_inventoryBook.valid()) {
         const auto* book = m_bethesdaSession.skyrimItem(m_inventoryBook);
         std::string plain;
-        if (book) {
+        std::string bookText = book ? book->text : std::string{};
+        if (m_streamIsMorrowind && m_bethesdaSession.tes3().content()) {
+            if (const auto* record = m_bethesdaSession.tes3().content()->findRecord("BOOK", m_inventoryBook.textId))
+                bookText = tes3SubrecordText(*record, "TEXT", m_bethesdaSession.tes3().content()->encoding());
+        }
+        if (!bookText.empty()) {
             // Book markup is presentation data, never executable UI content.
-            for (std::size_t i = 0; i < book->text.size();) {
-                if (book->text[i] == '<') {
-                    const auto end = book->text.find('>', i);
-                    if (end == std::string::npos) { plain.append(book->text.substr(i)); break; }
-                    const auto tag = toLowerAscii(book->text.substr(i + 1, end - i - 1));
+            for (std::size_t i = 0; i < bookText.size();) {
+                if (bookText[i] == '<') {
+                    const auto end = bookText.find('>', i);
+                    if (end == std::string::npos) { plain.append(bookText.substr(i)); break; }
+                    const auto tag = toLowerAscii(bookText.substr(i + 1, end - i - 1));
                     if (tag == "br" || tag == "br/" || tag == "/p" || tag == "p" || tag == "pagebreak") plain += '\n';
                     i = end + 1;
-                } else plain += book->text[i++];
+                } else plain += bookText[i++];
             }
         }
         const auto lines = wrapTextToWidth(m_uiFont, plain, width - 2.0f * padding);
@@ -15473,7 +16264,8 @@ void BethesdaApp::drawGiftMenu() {
         for (std::size_t row = 0u; row < visibleCount; ++row) {
             const std::size_t index = first + row;
             const odai::bethesda::InventoryEntry& entry = source->inventory[index];
-            const bool selected = static_cast<int>(index) == m_giftMenuChoice;
+            const bool selected = uiSnapshot.open ? uiSnapshot.entries[index].selected
+                : static_cast<int>(index) == m_giftMenuChoice;
             const ui::UiRect rowRect{
                 panel.minX + (padding * 0.5f), y,
                 panel.maxX - (padding * 0.5f), y + lineHeight};
@@ -15483,8 +16275,11 @@ void BethesdaApp::drawGiftMenu() {
                     ui::UiColor{kPipGreen.r, kPipGreen.g, kPipGreen.b, 0.20f},
                     3.0f * scale);
             }
-            std::string name = inventoryItemName(entry.item);
-            const std::string suffix = "  x" + std::to_string(entry.count) + (entry.equipped ? " [E]" : "");
+            std::string name = uiSnapshot.open ? uiSnapshot.entries[index].label
+                : inventoryItemName(entry.item);
+            const std::string suffix = "  x" + std::to_string(uiSnapshot.open
+                ? uiSnapshot.entries[index].quantity : entry.count) +
+                (entry.equipped ? " [E]" : "");
             const float available = width - 2.0f * padding - m_uiFont.measureText(
                 "> " + suffix + "...");
             bool shortened = false;
@@ -15759,6 +16554,9 @@ void BethesdaApp::onRender(float deltaSeconds) {
         const bool settled = m_framesRendered >= m_captureWarmupFrameCeiling ||
             (streamReady && lodReady && m_captureUploadsReady);
         if (m_framesRendered >= m_screenshotWarmupFrames && settled) {
+            VOX_LOGI("bethesda") << "screenshot camera: position=(" << m_cameraX << ", " << m_cameraY
+                                 << ", " << m_cameraZ << ") yaw=" << m_yawDegrees
+                                 << " pitch=" << m_pitchDegrees << " mode=" << (m_walkMode ? "walk" : "fly");
             if (!m_renderer.captureFrameToFile(m_screenshotPath)) {
                 VOX_LOGE("bethesda") << "screenshot capture failed";
             }

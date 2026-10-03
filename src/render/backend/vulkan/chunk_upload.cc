@@ -1,3 +1,4 @@
+#include "render/imported_gi.h"
 #include "render/backend/vulkan/renderer_backend.h"
 
 #include <GLFW/glfw3.h>
@@ -216,45 +217,6 @@ ImportedDrawBounds computeImportedDrawBounds(
     return bounds;
 }
 
-std::array<float, 3> sampleImportedTextureBaseColor(
-    const std::vector<odai::importer::ImportedSceneTexture>& textures,
-    const odai::importer::ImportedScenePackedVertex& vertex
-) {
-    if (vertex.textureIndex >= textures.size()) {
-        return {vertex.color[0], vertex.color[1], vertex.color[2]};
-    }
-    const odai::importer::ImportedSceneTexture& texture = textures[vertex.textureIndex];
-    if (texture.format != odai::importer::TextureFormat::RGBA8 &&
-        texture.format != odai::importer::TextureFormat::RGBA8Srgb) {
-        return {vertex.color[0], vertex.color[1], vertex.color[2]};
-    }
-    if (texture.width == 0u ||
-        texture.height == 0u ||
-        texture.rgba8.size() < static_cast<std::size_t>(texture.width) *
-            static_cast<std::size_t>(texture.height) * 4u) {
-        return {vertex.color[0], vertex.color[1], vertex.color[2]};
-    }
-
-    const float u = vertex.uv[0] - std::floor(vertex.uv[0]);
-    const float v = vertex.uv[1] - std::floor(vertex.uv[1]);
-    const std::uint32_t x = std::min(
-        static_cast<std::uint32_t>(u * static_cast<float>(texture.width)),
-        texture.width - 1u);
-    const std::uint32_t y = std::min(
-        static_cast<std::uint32_t>(v * static_cast<float>(texture.height)),
-        texture.height - 1u);
-    const std::size_t offset =
-        ((static_cast<std::size_t>(y) * static_cast<std::size_t>(texture.width)) +
-            static_cast<std::size_t>(x)) * 4u;
-    return {
-        static_cast<float>(texture.rgba8[offset + 0u]) / 255.0f,
-        static_cast<float>(texture.rgba8[offset + 1u]) / 255.0f,
-        static_cast<float>(texture.rgba8[offset + 2u]) / 255.0f
-    };
-}
-
-
-
 void destroyRtGeometryBuffers(BufferAllocator& allocator, RtGeometryBuffers& geometry) {
     if (geometry.indexBufferHandle != kInvalidBufferHandle) {
         allocator.destroyBuffer(geometry.indexBufferHandle);
@@ -449,6 +411,9 @@ void RendererBackend::clearGpuScene() {
     m_visibleImportedNearTerrainDrawCount = 0;
     m_visibleImportedShadowTerrainDrawCounts.fill(0u);
     m_importedGiTriangles.clear();
+    m_voxelGiWorldDirty = true;
+    m_voxelGiHasPreviousFrameState = false;
+    m_screenSpaceGiHistoryValid = false;
     m_debugImportedGiTriangleCount = 0;
     m_debugImportedGiVoxelizedCellCount = 0;
     m_importedLocalLights.clear();
@@ -956,6 +921,14 @@ void RendererBackend::removeImportedSceneChunk(std::size_t chunkIndex) {
         releaseImportedTexture(slot);
     }
 
+    const auto removedGi = std::erase_if(m_importedGiTriangles,
+        [chunkIndex](const ImportedGiTriangle& triangle) { return triangle.chunkIndex == chunkIndex; });
+    if (removedGi) {
+        m_voxelGiWorldDirty = true;
+        m_voxelGiHasPreviousFrameState = false;
+        m_screenSpaceGiHistoryValid = false;
+        ++m_voxelGiWorldVersion;
+    }
     chunk.alive = false;
     chunk.draws.clear();
     chunk.draws.shrink_to_fit();
@@ -3021,11 +2994,14 @@ bool RendererBackend::uploadImportedSceneInternal(
     if (!appendChunk) {
         m_importedGiTriangles.clear();
     }
-    if (importedSceneIsInterior) {
-        constexpr std::size_t kImportedGiTriangleLimit = 300000u;
+    if (importedSceneIsInterior || m_importedExteriorLighting.worldSpaceGi) {
+        // Bounded by the resident imported geometry; eviction removes these
+        // triangles alongside its GPU draw ranges. Never silently truncate walls.
+        const std::size_t kImportedGiTriangleLimit =
+            m_importedGiTriangles.size() + uploadScene.packedIndices.size() / 3u;
         m_importedGiTriangles.reserve(
             std::min<std::size_t>(uploadScene.packedIndices.size() / 3u, kImportedGiTriangleLimit));
-        for (const odai::importer::ImportedScenePackedDraw& draw : staticDraws) {
+        for (const odai::importer::ImportedScenePackedDraw& draw : allDraws) {
             const std::size_t indexEnd =
                 static_cast<std::size_t>(draw.firstIndex) + static_cast<std::size_t>(draw.indexCount);
             if (draw.indexCount < 3u || indexEnd > uploadScene.packedIndices.size()) {
@@ -3044,13 +3020,18 @@ bool RendererBackend::uploadImportedSceneInternal(
                 const odai::importer::ImportedScenePackedVertex& v0 = uploadScene.packedVertices[i0];
                 const odai::importer::ImportedScenePackedVertex& v1 = uploadScene.packedVertices[i1];
                 const odai::importer::ImportedScenePackedVertex& v2 = uploadScene.packedVertices[i2];
+                if (m_importedGiTriangles.size() >= kImportedGiTriangleLimit) break;
+                // Transparent effects must not become opaque GI blockers.
+                if ((v0.flags & (odai::importer::kImportedSceneMaterialFlagAlphaBlend |
+                                 odai::importer::kImportedSceneMaterialFlagAlphaTest)) != 0u) continue;
                 ImportedGiTriangle triangle{};
+                triangle.chunkIndex = m_lastImportedChunkIndex;
                 std::memcpy(triangle.p0, v0.position, sizeof(triangle.p0));
                 std::memcpy(triangle.p1, v1.position, sizeof(triangle.p1));
                 std::memcpy(triangle.p2, v2.position, sizeof(triangle.p2));
-                const std::array<float, 3> c0 = sampleImportedTextureBaseColor(uploadScene.textures, v0);
-                const std::array<float, 3> c1 = sampleImportedTextureBaseColor(uploadScene.textures, v1);
-                const std::array<float, 3> c2 = sampleImportedTextureBaseColor(uploadScene.textures, v2);
+                const std::array<float, 3> c0 = sampleImportedGiAlbedo(uploadScene.textures, v0);
+                const std::array<float, 3> c1 = sampleImportedGiAlbedo(uploadScene.textures, v1);
+                const std::array<float, 3> c2 = sampleImportedGiAlbedo(uploadScene.textures, v2);
                 triangle.albedo[0] = (c0[0] + c1[0] + c2[0]) * (1.0f / 3.0f);
                 triangle.albedo[1] = (c0[1] + c1[1] + c2[1]) * (1.0f / 3.0f);
                 triangle.albedo[2] = (c0[2] + c1[2] + c2[2]) * (1.0f / 3.0f);
@@ -3175,7 +3156,7 @@ bool RendererBackend::uploadImportedSceneInternal(
         ++m_voxelGiWorldVersion;
         m_voxelGiOccupancyFullRebuildInProgress = true;
         m_voxelGiOccupancyFullRebuildNeedsClear = true;
-        VOX_LOGI("render") << "imported interior GI source triangles="
+        VOX_LOGI("render") << "imported GI source triangles="
                            << m_importedGiTriangles.size();
     }
     if (m_importedWaterIndexCount > 0) {

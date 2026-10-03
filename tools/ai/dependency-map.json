@@ -1,0 +1,2253 @@
+{
+  "build": "build-linux",
+  "cmake_sha256": "b641d5e641c3d8d029a474380b8a4386dbacde9c9a27c500b949124b4584c78f",
+  "configuration": "Debug",
+  "local_includes": {
+    "src/anim/animation_clip.h": [
+      "src/math/math.h"
+    ],
+    "src/anim/animation_sampler.cc": [
+      "src/anim/animation_sampler.h"
+    ],
+    "src/anim/animation_sampler.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/skeleton.h",
+      "src/math/math.h"
+    ],
+    "src/anim/behavior_program.cc": [
+      "src/anim/behavior_program.h"
+    ],
+    "src/anim/behavior_program.h": [
+      "src/anim/hkx_packfile.h"
+    ],
+    "src/anim/character_dynamics.cc": [
+      "src/anim/character_dynamics.h"
+    ],
+    "src/anim/character_dynamics.h": [
+      "src/math/math.h"
+    ],
+    "src/anim/gpu_pose.cc": [
+      "src/anim/gpu_pose.h"
+    ],
+    "src/anim/gpu_pose.h": [
+      "src/anim/pose_graph.h"
+    ],
+    "src/anim/hkx_packfile.cc": [
+      "src/anim/hkx_packfile.h"
+    ],
+    "src/anim/hkx_packfile.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/skeleton.h"
+    ],
+    "src/anim/humanoid_rig.cc": [
+      "src/anim/humanoid_rig.h"
+    ],
+    "src/anim/humanoid_rig.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/skeleton.h"
+    ],
+    "src/anim/native_program.cc": [
+      "src/anim/native_program.h"
+    ],
+    "src/anim/native_program.h": [
+      "src/anim/pose_graph.h"
+    ],
+    "src/anim/pose_graph.cc": [
+      "src/anim/pose_graph.h"
+    ],
+    "src/anim/pose_graph.h": [
+      "src/anim/animation_sampler.h",
+      "src/anim/humanoid_rig.h",
+      "src/anim/pose_modifiers.h"
+    ],
+    "src/anim/pose_modifiers.cc": [
+      "src/anim/pose_modifiers.h"
+    ],
+    "src/anim/pose_modifiers.h": [
+      "src/anim/animation_sampler.h",
+      "src/anim/humanoid_rig.h"
+    ],
+    "src/anim/skeleton.h": [
+      "src/math/math.h"
+    ],
+    "src/anim/skeleton_io.cc": [
+      "src/anim/skeleton_io.h"
+    ],
+    "src/anim/skeleton_io.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/skeleton.h"
+    ],
+    "src/anim/skyrim_animation.cc": [
+      "src/anim/skyrim_animation.h"
+    ],
+    "src/anim/skyrim_animation.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/animation_sampler.h",
+      "src/anim/behavior_program.h",
+      "src/anim/humanoid_rig.h",
+      "src/anim/native_program.h",
+      "src/anim/pose_modifiers.h",
+      "src/anim/skeleton.h",
+      "src/math/math.h"
+    ],
+    "src/audio/audio.cc": [
+      "src/audio/audio.h",
+      "src/audio/audio_backend.h",
+      "src/math/math.h"
+    ],
+    "src/audio/audio.h": [
+      "src/audio/audio_types.h"
+    ],
+    "src/audio/audio_backend.h": [
+      "src/audio/audio_types.h"
+    ],
+    "src/audio/audio_types.h": [
+      "src/math/math.h"
+    ],
+    "src/audio/miniaudio_backend.cc": [
+      "src/audio/audio_backend.h",
+      "src/core/log.h",
+      "src/math/math.h"
+    ],
+    "src/audio/miniaudio_impl.cc": [],
+    "src/audio/null_backend.cc": [
+      "src/audio/audio_backend.h"
+    ],
+    "src/audio/wav_writer.cc": [
+      "src/audio/wav_writer.h",
+      "src/core/log.h"
+    ],
+    "src/audio/wav_writer.h": [],
+    "src/bethesda/bethesda_physics_world.cc": [
+      "src/bethesda/bethesda_physics_world.h",
+      "src/bethesda/runtime_world.h",
+      "src/core/log.h",
+      "src/import/bethesda/morrowind_terrain.h"
+    ],
+    "src/bethesda/bethesda_physics_world.h": [
+      "src/bethesda/character_movement.h",
+      "src/bethesda/runtime_ids.h",
+      "src/math/math.h"
+    ],
+    "src/bethesda/bethesda_session.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/session_text.h",
+      "src/core/hash.h"
+    ],
+    "src/bethesda/bethesda_session.h": [
+      "src/anim/character_dynamics.h",
+      "src/anim/skyrim_animation.h",
+      "src/bethesda/bethesda_physics_world.h",
+      "src/bethesda/fixed_step_clock.h",
+      "src/bethesda/living_world.h",
+      "src/bethesda/papyrus_vm.h",
+      "src/bethesda/runtime_render_delta.h",
+      "src/bethesda/runtime_world.h",
+      "src/bethesda/scenario.h",
+      "src/bethesda/skyrim_dialogue.h",
+      "src/bethesda/skyrim_items.h",
+      "src/bethesda/skyrim_quest.h",
+      "src/bethesda/skyrim_scene.h",
+      "src/bethesda/tes3_runtime.h",
+      "src/import/bethesda/content_profile.h"
+    ],
+    "src/bethesda/character_movement.h": [
+      "src/math/math.h"
+    ],
+    "src/bethesda/condition.cc": [
+      "src/bethesda/condition.h"
+    ],
+    "src/bethesda/condition.h": [],
+    "src/bethesda/fixed_step_clock.cc": [
+      "src/bethesda/fixed_step_clock.h"
+    ],
+    "src/bethesda/fixed_step_clock.h": [],
+    "src/bethesda/gameplay_catalog.cc": [
+      "src/bethesda/gameplay_catalog.h",
+      "src/bethesda/record_resolver.h",
+      "src/bethesda/tes3_content.h",
+      "src/import/bethesda/actor_records.h",
+      "src/import/bethesda/cell_builder.h"
+    ],
+    "src/bethesda/gameplay_catalog.h": [
+      "src/bethesda/runtime_world.h"
+    ],
+    "src/bethesda/inventory_ui_flow.cc": [
+      "src/bethesda/inventory_ui_flow.h"
+    ],
+    "src/bethesda/inventory_ui_flow.h": [
+      "src/bethesda/bethesda_session.h"
+    ],
+    "src/bethesda/living_world.cc": [
+      "src/bethesda/living_world.h"
+    ],
+    "src/bethesda/living_world.h": [
+      "src/bethesda/gameplay_catalog.h"
+    ],
+    "src/bethesda/navigation_simulation.cc": [
+      "src/bethesda/navigation_simulation.h"
+    ],
+    "src/bethesda/navigation_simulation.h": [
+      "src/bethesda/bethesda_physics_world.h",
+      "src/bethesda/navigation_world.h"
+    ],
+    "src/bethesda/navigation_world.cc": [
+      "src/bethesda/navigation_world.h"
+    ],
+    "src/bethesda/navigation_world.h": [
+      "src/import/bethesda/fallout_records.h",
+      "src/import/cell_residency_planner.h",
+      "src/import/imported_scene.h",
+      "src/math/math.h"
+    ],
+    "src/bethesda/oblivion_presentation.h": [],
+    "src/bethesda/papyrus_vm.cc": [
+      "src/bethesda/papyrus_vm.h",
+      "src/bethesda/runtime_world.h"
+    ],
+    "src/bethesda/papyrus_vm.h": [
+      "src/bethesda/pex_reader.h",
+      "src/bethesda/runtime_ids.h"
+    ],
+    "src/bethesda/pex_reader.cc": [
+      "src/bethesda/pex_reader.h"
+    ],
+    "src/bethesda/pex_reader.h": [],
+    "src/bethesda/record_resolver.cc": [
+      "src/bethesda/record_resolver.h"
+    ],
+    "src/bethesda/record_resolver.h": [
+      "src/bethesda/runtime_ids.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/bethesda/route_checkpoint.cc": [
+      "src/bethesda/route_checkpoint.h"
+    ],
+    "src/bethesda/route_checkpoint.h": [
+      "src/bethesda/bethesda_session.h"
+    ],
+    "src/bethesda/runtime_ids.cc": [
+      "src/bethesda/runtime_ids.h",
+      "src/core/hash.h"
+    ],
+    "src/bethesda/runtime_ids.h": [],
+    "src/bethesda/runtime_render_delta.h": [
+      "src/bethesda/runtime_ids.h",
+      "src/bethesda/runtime_transform.h"
+    ],
+    "src/bethesda/runtime_transform.h": [],
+    "src/bethesda/runtime_world.cc": [
+      "src/bethesda/runtime_world.h",
+      "src/core/hash.h"
+    ],
+    "src/bethesda/runtime_world.h": [
+      "src/bethesda/runtime_ids.h",
+      "src/bethesda/runtime_render_delta.h",
+      "src/bethesda/runtime_transform.h"
+    ],
+    "src/bethesda/save_game.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/save_game.h"
+    ],
+    "src/bethesda/save_game.h": [
+      "src/bethesda/runtime_ids.h"
+    ],
+    "src/bethesda/scenario.cc": [
+      "src/bethesda/scenario.h"
+    ],
+    "src/bethesda/scenario.h": [
+      "src/import/bethesda/content_profile.h"
+    ],
+    "src/bethesda/session_papyrus_natives.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/session_text.h"
+    ],
+    "src/bethesda/session_tes3_natives.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/session_text.h",
+      "src/core/hash.h"
+    ],
+    "src/bethesda/session_tes3_progression.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/core/hash.h"
+    ],
+    "src/bethesda/session_text.h": [],
+    "src/bethesda/skyrim_dialogue.cc": [
+      "src/bethesda/skyrim_dialogue.h"
+    ],
+    "src/bethesda/skyrim_dialogue.h": [
+      "src/bethesda/condition.h",
+      "src/bethesda/runtime_ids.h",
+      "src/bethesda/vmad_reader.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/bethesda/skyrim_items.cc": [
+      "src/bethesda/record_resolver.h",
+      "src/bethesda/skyrim_items.h",
+      "src/import/bethesda/strings_table.h"
+    ],
+    "src/bethesda/skyrim_items.h": [
+      "src/bethesda/runtime_ids.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/bethesda/skyrim_persistent_references.cc": [
+      "src/bethesda/record_resolver.h",
+      "src/bethesda/skyrim_persistent_references.h",
+      "src/import/bethesda/actor_records.h"
+    ],
+    "src/bethesda/skyrim_persistent_references.h": [
+      "src/bethesda/runtime_world.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/bethesda/skyrim_quest.cc": [
+      "src/bethesda/skyrim_quest.h"
+    ],
+    "src/bethesda/skyrim_quest.h": [
+      "src/bethesda/condition.h",
+      "src/bethesda/runtime_ids.h",
+      "src/bethesda/vmad_reader.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/bethesda/skyrim_runtime_records.cc": [
+      "src/bethesda/skyrim_runtime_records.h"
+    ],
+    "src/bethesda/skyrim_runtime_records.h": [
+      "src/bethesda/runtime_ids.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/bethesda/skyrim_scenario_content.cc": [
+      "src/bethesda/record_resolver.h",
+      "src/bethesda/skyrim_persistent_references.h",
+      "src/bethesda/skyrim_runtime_records.h",
+      "src/bethesda/skyrim_scenario_content.h",
+      "src/import/bethesda/actor_records.h",
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/strings_table.h"
+    ],
+    "src/bethesda/skyrim_scenario_content.h": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/scenario.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/bethesda/skyrim_scene.cc": [
+      "src/bethesda/skyrim_scene.h"
+    ],
+    "src/bethesda/skyrim_scene.h": [
+      "src/bethesda/skyrim_dialogue.h"
+    ],
+    "src/bethesda/skyrim_scene_runtime.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/core/log.h"
+    ],
+    "src/bethesda/tes3_class_ui_flow.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/tes3_class_ui_flow.h"
+    ],
+    "src/bethesda/tes3_class_ui_flow.h": [
+      "src/bethesda/tes3_progression.h"
+    ],
+    "src/bethesda/tes3_content.cc": [
+      "src/bethesda/tes3_content.h",
+      "src/bethesda/tes3_progression.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/bethesda/tes3_content.h": [
+      "src/bethesda/runtime_ids.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/bethesda/tes3_level_ui_flow.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/tes3_level_ui_flow.h"
+    ],
+    "src/bethesda/tes3_level_ui_flow.h": [],
+    "src/bethesda/tes3_progression.cc": [
+      "src/bethesda/tes3_progression.h",
+      "src/bethesda/tes3_runtime.h"
+    ],
+    "src/bethesda/tes3_progression.h": [
+      "src/bethesda/runtime_ids.h"
+    ],
+    "src/bethesda/tes3_runtime.cc": [
+      "src/bethesda/tes3_runtime.h",
+      "src/core/hash.h"
+    ],
+    "src/bethesda/tes3_runtime.h": [
+      "src/bethesda/runtime_transform.h",
+      "src/bethesda/tes3_content.h",
+      "src/bethesda/tes3_progression.h",
+      "src/bethesda/tes3_script.h"
+    ],
+    "src/bethesda/tes3_script.cc": [
+      "src/bethesda/tes3_script.h"
+    ],
+    "src/bethesda/tes3_script.h": [
+      "src/bethesda/runtime_ids.h"
+    ],
+    "src/bethesda/vmad_reader.cc": [
+      "src/bethesda/skyrim_scene.h",
+      "src/bethesda/vmad_reader.h"
+    ],
+    "src/bethesda/vmad_reader.h": [],
+    "src/bethesda/whiterun_presentation.h": [],
+    "src/core/frame_profiler.h": [
+      "src/core/ring_buffer.h"
+    ],
+    "src/core/grid3.h": [
+      "src/math/math.h"
+    ],
+    "src/core/hash.h": [
+      "src/core/grid3.h"
+    ],
+    "src/core/job_system.cc": [
+      "src/core/job_system.h"
+    ],
+    "src/core/job_system.h": [],
+    "src/core/lcg.h": [],
+    "src/core/log.cc": [
+      "src/core/log.h"
+    ],
+    "src/core/log.h": [],
+    "src/core/resource_path.cc": [
+      "src/core/resource_path.h"
+    ],
+    "src/core/resource_path.h": [],
+    "src/core/ring_buffer.h": [],
+    "src/core/win_timer_resolution.h": [],
+    "src/dialogue/dialogue_context.h": [],
+    "src/dialogue/dialogue_io.cc": [
+      "src/dialogue/dialogue_io.h"
+    ],
+    "src/dialogue/dialogue_io.h": [
+      "src/dialogue/dialogue_types.h"
+    ],
+    "src/dialogue/dialogue_runtime.cc": [
+      "src/dialogue/dialogue_runtime.h"
+    ],
+    "src/dialogue/dialogue_runtime.h": [
+      "src/dialogue/dialogue_context.h",
+      "src/dialogue/dialogue_types.h"
+    ],
+    "src/dialogue/dialogue_state_io.cc": [
+      "src/dialogue/dialogue_state_io.h"
+    ],
+    "src/dialogue/dialogue_state_io.h": [
+      "src/dialogue/dialogue_context.h"
+    ],
+    "src/dialogue/dialogue_types.h": [],
+    "src/engine/frame_timing_csv.h": [
+      "src/engine/tick_timing.h"
+    ],
+    "src/engine/game_app.cc": [
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/core/win_timer_resolution.h",
+      "src/engine/frame_timing_csv.h",
+      "src/engine/game_app.h",
+      "src/render/upscale/upscale_policy.h",
+      "src/ui/ui_cursor.h"
+    ],
+    "src/engine/game_app.h": [
+      "src/audio/audio.h",
+      "src/engine/game_frame_stats.h",
+      "src/engine/tick_timing.h",
+      "src/render/renderer.h",
+      "src/render/renderer_types.h",
+      "src/ui/font.h",
+      "src/ui/ui_context.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_input.h"
+    ],
+    "src/engine/game_frame_stats.h": [
+      "src/core/frame_profiler.h"
+    ],
+    "src/engine/tick_timing.h": [],
+    "src/games/bethesda/audio_decode.cc": [
+      "src/games/bethesda/audio_decode.h"
+    ],
+    "src/games/bethesda/audio_decode.h": [],
+    "src/games/bethesda/bethesda_actors.cc": [
+      "src/bethesda/navigation_world.h",
+      "src/core/lcg.h",
+      "src/core/log.h",
+      "src/games/bethesda/audio_decode.h",
+      "src/games/bethesda/bethesda_actors.h",
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/dialogue_records.h",
+      "src/import/bethesda/fuz.h",
+      "src/import/bethesda/kf_animation.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/skyrim_animation_assets.h",
+      "src/import/bethesda/strings_table.h",
+      "src/import/dds.h"
+    ],
+    "src/games/bethesda/bethesda_actors.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/animation_sampler.h",
+      "src/anim/skyrim_animation.h",
+      "src/audio/audio.h",
+      "src/bethesda/navigation_world.h",
+      "src/bethesda/runtime_ids.h",
+      "src/dialogue/dialogue_context.h",
+      "src/dialogue/dialogue_runtime.h",
+      "src/dialogue/dialogue_types.h",
+      "src/import/bethesda/actor_records.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/character_builder.h",
+      "src/import/imported_scene.h",
+      "src/math/math.h"
+    ],
+    "src/games/bethesda/bethesda_app.cc": [
+      "src/bethesda/oblivion_presentation.h",
+      "src/bethesda/record_resolver.h",
+      "src/bethesda/route_checkpoint.h",
+      "src/bethesda/save_game.h",
+      "src/bethesda/scenario.h",
+      "src/bethesda/skyrim_scenario_content.h",
+      "src/bethesda/vmad_reader.h",
+      "src/bethesda/whiterun_presentation.h",
+      "src/core/log.h",
+      "src/games/bethesda/audio_decode.h",
+      "src/games/bethesda/bethesda_app.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/dialogue_records.h",
+      "src/import/bethesda/fuz.h",
+      "src/import/bethesda/land_lod.h",
+      "src/import/bethesda/morrowind_terrain.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/runtime_item_scene.h",
+      "src/import/bethesda/skyrim_tree_lod.h",
+      "src/import/bethesda/strings_table.h",
+      "src/import/dds.h",
+      "src/render/upscale/upscale_policy.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/games/bethesda/bethesda_app.h": [
+      "src/anim/character_dynamics.h",
+      "src/anim/skeleton.h",
+      "src/audio/wav_writer.h",
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/inventory_ui_flow.h",
+      "src/bethesda/navigation_world.h",
+      "src/bethesda/tes3_class_ui_flow.h",
+      "src/bethesda/tes3_level_ui_flow.h",
+      "src/core/job_system.h",
+      "src/engine/game_app.h",
+      "src/games/bethesda/bethesda_actors.h",
+      "src/games/bethesda/bethesda_collision.h",
+      "src/games/bethesda/newvegas_victor.h",
+      "src/games/bethesda/npc_demo_locomotion.h",
+      "src/games/bethesda/traversal_state.h",
+      "src/import/bethesda/cell_streamer.h",
+      "src/import/bethesda/character_builder.h",
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/image_space_records.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/skyrim_lod_handoff.h",
+      "src/import/bethesda/weather_records.h",
+      "src/import/imported_scene.h",
+      "src/render/video_writer.h",
+      "src/ui/nav_focus.h",
+      "src/ui/nav_input.h",
+      "src/ui/toast_host.h",
+      "src/ui/widgets/tes3_journal_panel.h"
+    ],
+    "src/games/bethesda/bethesda_collision.cc": [
+      "src/games/bethesda/bethesda_collision.h",
+      "src/import/bethesda/fallout_records.h"
+    ],
+    "src/games/bethesda/bethesda_collision.h": [
+      "src/import/cell_residency_planner.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/games/bethesda/bethesda_main.cc": [
+      "src/games/bethesda/bethesda_app.h",
+      "src/import/bethesda/mod_check.h",
+      "src/render/upscale/upscale_policy.h"
+    ],
+    "src/games/bethesda/newvegas_victor.cc": [
+      "src/core/frame_profiler.h",
+      "src/core/log.h",
+      "src/games/bethesda/audio_decode.h",
+      "src/games/bethesda/newvegas_victor.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/dialogue_records.h",
+      "src/import/bethesda/kf_animation.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/dds.h"
+    ],
+    "src/games/bethesda/newvegas_victor.h": [
+      "src/audio/audio.h",
+      "src/games/bethesda/bethesda_actors.h",
+      "src/import/bethesda/asset_source.h"
+    ],
+    "src/games/bethesda/npc_demo_locomotion.h": [
+      "src/math/math.h"
+    ],
+    "src/games/bethesda/skyrim_first_person.cc": [
+      "src/core/log.h",
+      "src/games/bethesda/bethesda_app.h",
+      "src/import/bethesda/character_asset_manifest.h"
+    ],
+    "src/games/bethesda/traversal_state.cc": [
+      "src/games/bethesda/traversal_state.h"
+    ],
+    "src/games/bethesda/traversal_state.h": [],
+    "src/import/bethesda/actor_records.cc": [
+      "src/import/bethesda/actor_records.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/import/bethesda/actor_records.h": [
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/asset_source.cc": [
+      "src/import/bethesda/asset_source.h"
+    ],
+    "src/import/bethesda/asset_source.h": [
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/content_profile.h"
+    ],
+    "src/import/bethesda/async_asset_loader.cc": [
+      "src/core/job_system.h",
+      "src/import/bethesda/async_asset_loader.h"
+    ],
+    "src/import/bethesda/async_asset_loader.h": [
+      "src/import/bethesda/asset_source.h"
+    ],
+    "src/import/bethesda/bsa_archive.cc": [
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/lz4_frame.h"
+    ],
+    "src/import/bethesda/bsa_archive.h": [],
+    "src/import/bethesda/cell_builder.cc": [
+      "src/core/frame_profiler.h",
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/morrowind_terrain.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/spt_scene.h",
+      "src/import/dds.h"
+    ],
+    "src/import/bethesda/cell_builder.h": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/decoded_texture_cache.h",
+      "src/import/bethesda/fallout_records.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/plugin_load_order.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/import/bethesda/cell_streamer.cc": [
+      "src/core/frame_profiler.h",
+      "src/core/job_system.h",
+      "src/core/log.h",
+      "src/import/bethesda/cell_streamer.h",
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/strings_table.h",
+      "src/import/imported_scene.h",
+      "src/render/renderer.h"
+    ],
+    "src/import/bethesda/cell_streamer.h": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/decoded_texture_cache.h",
+      "src/import/bethesda/fallout_records.h",
+      "src/import/bethesda/plugin_load_order.h",
+      "src/import/bethesda/world_map_cache.h",
+      "src/import/cell_residency_planner.h"
+    ],
+    "src/import/bethesda/character_asset_manifest.cc": [
+      "src/anim/skeleton_io.h",
+      "src/import/bethesda/character_asset_manifest.h"
+    ],
+    "src/import/bethesda/character_asset_manifest.h": [
+      "src/import/bethesda/skyrim_animation_assets.h"
+    ],
+    "src/import/bethesda/character_builder.cc": [
+      "src/import/bethesda/character_builder.h"
+    ],
+    "src/import/bethesda/character_builder.h": [
+      "src/anim/animation_clip.h",
+      "src/anim/humanoid_rig.h",
+      "src/anim/skeleton.h",
+      "src/import/bethesda/kf_animation.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/imported_scene.h",
+      "src/math/math.h",
+      "src/render/renderer_types.h"
+    ],
+    "src/import/bethesda/content_profile.cc": [
+      "src/import/bethesda/content_profile.h"
+    ],
+    "src/import/bethesda/content_profile.h": [],
+    "src/import/bethesda/content_record_index.cc": [
+      "src/import/bethesda/content_record_index.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/import/bethesda/content_record_index.h": [
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/decoded_texture_cache.cc": [
+      "src/import/bethesda/decoded_texture_cache.h",
+      "src/import/dds.h"
+    ],
+    "src/import/bethesda/decoded_texture_cache.h": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/import/bethesda/dialogue_records.cc": [
+      "src/bethesda/condition.h",
+      "src/import/bethesda/dialogue_records.h",
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/import/bethesda/dialogue_records.h": [
+      "src/dialogue/dialogue_types.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/esm_reader.cc": [
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/import/bethesda/esm_reader.h": [],
+    "src/import/bethesda/fallout_records.cc": [
+      "src/import/bethesda/fallout_records.h"
+    ],
+    "src/import/bethesda/fallout_records.h": [
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/fuz.h": [],
+    "src/import/bethesda/image_space_records.cc": [
+      "src/import/bethesda/image_space_records.h"
+    ],
+    "src/import/bethesda/image_space_records.h": [
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/kf_animation.cc": [
+      "src/import/bethesda/kf_animation.h",
+      "src/import/bethesda/nif_scene.h"
+    ],
+    "src/import/bethesda/kf_animation.h": [
+      "src/math/math.h"
+    ],
+    "src/import/bethesda/land_lod.cc": [
+      "src/import/bethesda/land_lod.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/dds.h"
+    ],
+    "src/import/bethesda/land_lod.h": [
+      "src/import/bethesda/fallout_records.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/import/bethesda/lz4_frame.cc": [
+      "src/import/bethesda/lz4_frame.h"
+    ],
+    "src/import/bethesda/lz4_frame.h": [],
+    "src/import/bethesda/mod_check.cc": [
+      "src/import/bethesda/content_record_index.h",
+      "src/import/bethesda/mod_check.h"
+    ],
+    "src/import/bethesda/mod_check.h": [
+      "src/import/bethesda/content_profile.h"
+    ],
+    "src/import/bethesda/morrowind_terrain.h": [
+      "src/import/bethesda/fallout_records.h",
+      "src/math/math.h"
+    ],
+    "src/import/bethesda/nif_banner_cloth.cc": [
+      "src/import/bethesda/nif_scene.h"
+    ],
+    "src/import/bethesda/nif_effect_sequence.h": [
+      "src/import/bethesda/nif_material_animation.h"
+    ],
+    "src/import/bethesda/nif_material_animation.h": [
+      "src/import/material_animation.h"
+    ],
+    "src/import/bethesda/nif_particles.cc": [
+      "src/import/bethesda/nif_particles.h",
+      "src/import/bethesda/nif_scene.h"
+    ],
+    "src/import/bethesda/nif_particles.h": [],
+    "src/import/bethesda/nif_scene.cc": [
+      "src/import/bethesda/nif_effect_sequence.h",
+      "src/import/bethesda/nif_material_animation.h",
+      "src/import/bethesda/nif_scene.h"
+    ],
+    "src/import/bethesda/nif_scene.h": [
+      "src/import/bethesda/kf_animation.h",
+      "src/import/blend_mode.h",
+      "src/import/material_animation.h"
+    ],
+    "src/import/bethesda/plugin_load_order.cc": [
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/plugin_load_order.h": [
+      "src/import/bethesda/esm_reader.h"
+    ],
+    "src/import/bethesda/runtime_item_scene.cc": [
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/runtime_item_scene.h"
+    ],
+    "src/import/bethesda/runtime_item_scene.h": [
+      "src/import/imported_scene.h"
+    ],
+    "src/import/bethesda/skyrim_animation_assets.cc": [
+      "src/anim/skeleton_io.h",
+      "src/import/bethesda/character_asset_manifest.h",
+      "src/import/bethesda/skyrim_animation_assets.h"
+    ],
+    "src/import/bethesda/skyrim_animation_assets.h": [
+      "src/anim/hkx_packfile.h",
+      "src/anim/skyrim_animation.h",
+      "src/import/bethesda/asset_source.h"
+    ],
+    "src/import/bethesda/skyrim_grass.cc": [
+      "src/import/bethesda/cell_builder.h"
+    ],
+    "src/import/bethesda/skyrim_lod_handoff.cc": [
+      "src/import/bethesda/skyrim_lod_handoff.h"
+    ],
+    "src/import/bethesda/skyrim_lod_handoff.h": [
+      "src/import/imported_scene.h"
+    ],
+    "src/import/bethesda/skyrim_tree_lod.cc": [
+      "src/import/bethesda/skyrim_tree_lod.h",
+      "src/import/dds.h"
+    ],
+    "src/import/bethesda/skyrim_tree_lod.h": [
+      "src/import/bethesda/land_lod.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/import/bethesda/spt_scene.cc": [
+      "src/import/bethesda/spt_scene.h"
+    ],
+    "src/import/bethesda/spt_scene.h": [
+      "src/import/bethesda/nif_scene.h"
+    ],
+    "src/import/bethesda/strings_table.cc": [
+      "src/core/log.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/strings_table.h"
+    ],
+    "src/import/bethesda/strings_table.h": [],
+    "src/import/bethesda/tri_morph.cc": [
+      "src/import/bethesda/tri_morph.h"
+    ],
+    "src/import/bethesda/tri_morph.h": [],
+    "src/import/bethesda/weather_records.cc": [
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/weather_records.h"
+    ],
+    "src/import/bethesda/weather_records.h": [
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/import/bethesda/world_map_cache.h": [],
+    "src/import/blend_mode.h": [],
+    "src/import/cell_residency_planner.cc": [
+      "src/import/cell_residency_planner.h"
+    ],
+    "src/import/cell_residency_planner.h": [],
+    "src/import/dds.cc": [
+      "src/import/dds.h"
+    ],
+    "src/import/dds.h": [
+      "src/import/imported_scene.h"
+    ],
+    "src/import/imported_lighting_material.h": [
+      "src/import/imported_scene.h"
+    ],
+    "src/import/imported_material.h": [],
+    "src/import/imported_scene.cc": [
+      "src/import/dds.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/import/imported_scene.h": [
+      "src/import/bethesda/nif_particles.h",
+      "src/import/blend_mode.h",
+      "src/import/imported_material.h",
+      "src/import/material_animation.h"
+    ],
+    "src/import/imported_scene_query.cc": [
+      "src/import/imported_material.h",
+      "src/import/imported_scene_query.h"
+    ],
+    "src/import/imported_scene_query.h": [
+      "src/import/imported_scene.h",
+      "src/math/geometry.h"
+    ],
+    "src/import/material_animation.h": [],
+    "src/math/geometry.h": [
+      "src/math/math.h"
+    ],
+    "src/math/math.h": [],
+    "src/render/backend/vulkan/buffer_helpers.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/buffer_helpers.h"
+    ],
+    "src/render/backend/vulkan/buffer_helpers.h": [
+      "src/render/frame_arena_alias.h"
+    ],
+    "src/render/backend/vulkan/chunk_upload.cc": [
+      "src/core/frame_profiler.h",
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/import/dds.h",
+      "src/import/imported_lighting_material.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/frame_math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/imported_gi.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/contact_shadows.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/descriptor_buffer.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/descriptor_manager.h": [],
+    "src/render/backend/vulkan/descriptors.cc": [
+      "src/core/log.h",
+      "src/import/imported_lighting_material.h",
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/device.cc": [
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/frame_capture.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_draws.cc": [
+      "src/render/backend/vulkan/frame_math.h",
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/frame_graph_core.cc": [
+      "src/render/backend/vulkan/frame_graph_core.h"
+    ],
+    "src/render/backend/vulkan/frame_graph_core.h": [
+      "src/render/frame_graph.h"
+    ],
+    "src/render/backend/vulkan/frame_graph_runtime.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/frame_graph_runtime.h"
+    ],
+    "src/render/backend/vulkan/frame_graph_runtime.h": [
+      "src/render/backend/vulkan/frame_graph_core.h"
+    ],
+    "src/render/backend/vulkan/frame_math.h": [
+      "src/math/math.h",
+      "src/render/renderer_types.h"
+    ],
+    "src/render/backend/vulkan/frame_pass_main.cc": [
+      "src/render/backend/vulkan/frame_graph_runtime.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_pass_prepass.cc": [
+      "src/render/backend/vulkan/frame_graph_runtime.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_pass_shadow.cc": [
+      "src/render/backend/vulkan/frame_graph_runtime.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_pass_skinning.cc": [
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_pass_ssao.cc": [
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_pass_velocity.cc": [
+      "src/core/resource_path.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/frame_run.cc": [
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/frame_graph_core.h",
+      "src/render/backend/vulkan/frame_graph_runtime.h",
+      "src/render/backend/vulkan/frame_math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/imported_gi.h",
+      "src/render/renderer_shared.h",
+      "src/render/upscale/upscale_contract.h",
+      "src/render/weather_wind_policy.h"
+    ],
+    "src/render/backend/vulkan/frame_ui.cc": [
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/init.cc": [
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h",
+      "src/render/upscale/upscale_policy.h"
+    ],
+    "src/render/backend/vulkan/init_resources.cc": [
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/light_clusters.cc": [
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/pass_gi.cc": [
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/pass_pipelines.cc": [
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/pipeline_manager.h": [],
+    "src/render/backend/vulkan/pose_compute.cc": [
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/post_compute.cc": [
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/renderer_backend.h": [
+      "src/core/grid3.h",
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/core/ring_buffer.h",
+      "src/import/imported_scene.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/buffer_helpers.h",
+      "src/render/backend/vulkan/descriptor_manager.h",
+      "src/render/backend/vulkan/pipeline_manager.h",
+      "src/render/backend/vulkan/ui_renderer.h",
+      "src/render/bindless_slot_table.h",
+      "src/render/frame_graph.h",
+      "src/render/gpu_arena_allocator.h",
+      "src/render/renderer_types.h",
+      "src/render/upscale/upscaler_backend.h",
+      "src/world/spatial_index.h"
+    ],
+    "src/render/backend/vulkan/screen_space_gi.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/frame_math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/skinning_resources.cc": [
+      "src/core/log.h",
+      "src/math/math.h",
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer_shared.h"
+    ],
+    "src/render/backend/vulkan/swapchain_targets.cc": [
+      "src/core/log.h",
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/ui_panels.cc": [
+      "src/render/backend/vulkan/renderer_backend.h"
+    ],
+    "src/render/backend/vulkan/ui_renderer.cc": [
+      "src/core/log.h",
+      "src/core/resource_path.h",
+      "src/render/backend/vulkan/ui_renderer.h"
+    ],
+    "src/render/backend/vulkan/ui_renderer.h": [
+      "src/render/backend/vulkan/buffer_helpers.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/render/backend/vulkan/vma_usage.cc": [],
+    "src/render/bindless_slot_table.h": [],
+    "src/render/frame_arena_alias.h": [],
+    "src/render/frame_graph.cc": [
+      "src/render/frame_graph.h"
+    ],
+    "src/render/frame_graph.h": [],
+    "src/render/gpu_arena_allocator.h": [],
+    "src/render/image_space_contrast.h": [],
+    "src/render/imported_gi.h": [
+      "src/import/imported_scene.h",
+      "src/math/math.h"
+    ],
+    "src/render/renderer.cc": [
+      "src/render/backend/vulkan/renderer_backend.h",
+      "src/render/renderer.h"
+    ],
+    "src/render/renderer.h": [
+      "src/bethesda/runtime_render_delta.h",
+      "src/import/imported_scene.h",
+      "src/render/renderer_types.h"
+    ],
+    "src/render/renderer_shared.h": [],
+    "src/render/renderer_types.h": [
+      "src/anim/gpu_pose.h",
+      "src/anim/skyrim_animation.h",
+      "src/import/imported_scene.h",
+      "src/math/math.h"
+    ],
+    "src/render/stb_image_impl.cc": [],
+    "src/render/taa_depth_policy.h": [],
+    "src/render/tests/pose_compute_tests.cc": [
+      "src/anim/gpu_pose.h"
+    ],
+    "src/render/upscale/temporal_upscaler.cc": [
+      "src/render/upscale/temporal_upscaler.h"
+    ],
+    "src/render/upscale/temporal_upscaler.h": [
+      "src/render/upscale/upscaler_backend.h"
+    ],
+    "src/render/upscale/upscale_contract.cc": [
+      "src/render/upscale/upscale_contract.h"
+    ],
+    "src/render/upscale/upscale_contract.h": [
+      "src/render/renderer_types.h"
+    ],
+    "src/render/upscale/upscale_policy.cc": [
+      "src/render/upscale/upscale_policy.h"
+    ],
+    "src/render/upscale/upscale_policy.h": [
+      "src/render/renderer_types.h"
+    ],
+    "src/render/upscale/upscaler_backend.h": [
+      "src/render/upscale/upscale_contract.h",
+      "src/render/upscale/upscale_policy.h"
+    ],
+    "src/render/upscale/vendor_backends.cc": [
+      "src/render/upscale/temporal_upscaler.h",
+      "src/render/upscale/upscaler_backend.h"
+    ],
+    "src/render/video_writer.cc": [
+      "src/core/log.h",
+      "src/render/video_writer.h"
+    ],
+    "src/render/video_writer.h": [],
+    "src/render/water_depth_policy.h": [],
+    "src/render/weather_wind_policy.h": [],
+    "src/tools/asset_coverage.cc": [
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/content_record_index.h",
+      "src/import/bethesda/image_space_records.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/weather_records.h",
+      "src/import/dds.h",
+      "src/tools/asset_coverage.h",
+      "src/tools/asset_coverage_report.h"
+    ],
+    "src/tools/asset_coverage.h": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/tools/asset_coverage_report.cc": [
+      "src/tools/asset_coverage_report.h"
+    ],
+    "src/tools/asset_coverage_report.h": [],
+    "src/tools/bench_heap_interposer.cc": [],
+    "src/tools/bethesda_cooker_main.cc": [
+      "src/core/frame_profiler.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/fallout_records.h",
+      "src/import/bethesda/land_lod.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/dds.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/tools/bethesda_probe_main.cc": [
+      "src/bethesda/bethesda_physics_world.h",
+      "src/bethesda/papyrus_vm.h",
+      "src/bethesda/route_checkpoint.h",
+      "src/bethesda/save_game.h",
+      "src/bethesda/skyrim_quest.h",
+      "src/bethesda/skyrim_scenario_content.h",
+      "src/bethesda/tes3_content.h",
+      "src/bethesda/tes3_runtime.h",
+      "src/bethesda/vmad_reader.h",
+      "src/import/bethesda/actor_records.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/character_builder.h",
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/content_record_index.h",
+      "src/import/bethesda/decoded_texture_cache.h",
+      "src/import/bethesda/dialogue_records.h",
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/fallout_records.h",
+      "src/import/bethesda/kf_animation.h",
+      "src/import/bethesda/mod_check.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/skyrim_animation_assets.h",
+      "src/import/bethesda/strings_table.h",
+      "src/import/dds.h",
+      "src/import/imported_scene.h",
+      "src/tools/asset_coverage.h",
+      "src/tools/character_coverage.h",
+      "src/tools/tri_probe.h"
+    ],
+    "src/tools/character_coverage.cc": [
+      "src/import/bethesda/character_asset_manifest.h",
+      "src/import/bethesda/content_record_index.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/tri_morph.h",
+      "src/tools/character_coverage.h"
+    ],
+    "src/tools/character_coverage.h": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "src/tools/odai_headless_main.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/runtime_ids.h",
+      "src/import/bethesda/morrowind_terrain.h"
+    ],
+    "src/tools/odai_headless_ui_main.cc": [
+      "src/bethesda/inventory_ui_flow.h",
+      "src/bethesda/runtime_ids.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/runtime_item_scene.h"
+    ],
+    "src/tools/texture_pack_main.cc": [
+      "src/import/dds.h",
+      "src/import/imported_scene.h"
+    ],
+    "src/tools/tri_probe.cc": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/tri_morph.h",
+      "src/tools/tri_probe.h"
+    ],
+    "src/tools/tri_probe.h": [],
+    "src/ui/animation.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/cached_rich_text.cc": [
+      "src/ui/cached_rich_text.h"
+    ],
+    "src/ui/cached_rich_text.h": [
+      "src/ui/font.h",
+      "src/ui/rich_text.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/font.cc": [
+      "src/core/log.h",
+      "src/ui/font.h",
+      "src/ui/ui_text_util.h"
+    ],
+    "src/ui/font.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/icon_atlas.cc": [
+      "src/core/log.h",
+      "src/ui/icon_atlas.h"
+    ],
+    "src/ui/icon_atlas.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/nav_focus.h": [
+      "src/ui/nav_input.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/nav_input.h": [
+      "src/ui/ui_input.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/resource_style.cc": [
+      "src/ui/resource_style.h"
+    ],
+    "src/ui/resource_style.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/rich_text.cc": [
+      "src/ui/icon_atlas.h",
+      "src/ui/rich_text.h"
+    ],
+    "src/ui/rich_text.h": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/signal.cc": [
+      "src/ui/signal.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/signal.h": [],
+    "src/ui/toast_host.cc": [
+      "src/ui/animation.h",
+      "src/ui/toast_host.h"
+    ],
+    "src/ui/toast_host.h": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/tooltip.cc": [
+      "src/ui/rich_text.h",
+      "src/ui/tooltip.h",
+      "src/ui/ui_draw_list.h"
+    ],
+    "src/ui/tooltip.h": [
+      "src/ui/animation.h",
+      "src/ui/font.h",
+      "src/ui/rich_text.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/ui_context.cc": [
+      "src/ui/ui_context.h",
+      "src/ui/ui_draw_list.h"
+    ],
+    "src/ui/ui_context.h": [
+      "src/ui/ui_input.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/ui_cursor.cc": [
+      "src/ui/ui_cursor.h",
+      "src/ui/ui_draw_list.h"
+    ],
+    "src/ui/ui_cursor.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/ui_draw_list.cc": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_text_util.h"
+    ],
+    "src/ui/ui_draw_list.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/ui_input.h": [
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/ui_text_util.h": [],
+    "src/ui/ui_types.h": [],
+    "src/ui/widget.h": [
+      "src/ui/signal.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_input.h",
+      "src/ui/ui_types.h"
+    ],
+    "src/ui/widgets/button.cc": [
+      "src/ui/widgets/button.h"
+    ],
+    "src/ui/widgets/button.h": [
+      "src/ui/animation.h",
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/context_menu.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/context_menu.h"
+    ],
+    "src/ui/widgets/context_menu.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/dialogue_panel.cc": [
+      "src/ui/widgets/button.h",
+      "src/ui/widgets/dialogue_panel.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h",
+      "src/ui/widgets/rich_text_view.h"
+    ],
+    "src/ui/widgets/dialogue_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/dropdown.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/dropdown.h"
+    ],
+    "src/ui/widgets/dropdown.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/event_tracker_panel.cc": [
+      "src/ui/icon_atlas.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/event_tracker_panel.h",
+      "src/ui/widgets/image.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h"
+    ],
+    "src/ui/widgets/event_tracker_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/faction_panel.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/button.h",
+      "src/ui/widgets/faction_panel.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h",
+      "src/ui/widgets/rich_text_view.h",
+      "src/ui/widgets/scroll_view.h"
+    ],
+    "src/ui/widgets/faction_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/grid_picker_panel.cc": [
+      "src/ui/icon_atlas.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/grid_picker_panel.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h",
+      "src/ui/widgets/scroll_view.h"
+    ],
+    "src/ui/widgets/grid_picker_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/icon_button.cc": [
+      "src/ui/widget.h",
+      "src/ui/widgets/icon_button.h"
+    ],
+    "src/ui/widgets/icon_button.h": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/image.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/image.h"
+    ],
+    "src/ui/widgets/image.h": [
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/label.cc": [
+      "src/ui/widgets/label.h"
+    ],
+    "src/ui/widgets/label.h": [
+      "src/ui/cached_rich_text.h",
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/minimap_panel.cc": [
+      "src/ui/widgets/button.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/minimap_panel.h",
+      "src/ui/widgets/panel.h"
+    ],
+    "src/ui/widgets/minimap_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/modal.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/modal.h"
+    ],
+    "src/ui/widgets/modal.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h",
+      "src/ui/widgets/window.h"
+    ],
+    "src/ui/widgets/panel.cc": [
+      "src/ui/widgets/panel.h"
+    ],
+    "src/ui/widgets/panel.h": [
+      "src/ui/animation.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/progress_bar.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/progress_bar.h"
+    ],
+    "src/ui/widgets/progress_bar.h": [
+      "src/ui/animation.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/radio_button.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/radio_button.h"
+    ],
+    "src/ui/widgets/radio_button.h": [
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/resource_bar_panel.cc": [
+      "src/ui/icon_atlas.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h",
+      "src/ui/widgets/resource_bar_panel.h"
+    ],
+    "src/ui/widgets/resource_bar_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/rich_text_view.cc": [
+      "src/ui/widgets/rich_text_view.h"
+    ],
+    "src/ui/widgets/rich_text_view.h": [
+      "src/ui/cached_rich_text.h",
+      "src/ui/font.h",
+      "src/ui/rich_text.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/scroll_view.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/scroll_view.h"
+    ],
+    "src/ui/widgets/scroll_view.h": [
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/selection_inspector_panel.cc": [
+      "src/ui/icon_atlas.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/icon_button.h",
+      "src/ui/widgets/image.h",
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h",
+      "src/ui/widgets/selection_inspector_panel.h"
+    ],
+    "src/ui/widgets/selection_inspector_panel.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/slider.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/slider.h"
+    ],
+    "src/ui/widgets/slider.h": [
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/spinner.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/spinner.h"
+    ],
+    "src/ui/widgets/spinner.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/stack_layout.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/stack_layout.h"
+    ],
+    "src/ui/widgets/stack_layout.h": [
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/tab_bar.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/tab_bar.h"
+    ],
+    "src/ui/widgets/tab_bar.h": [
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/tes3_journal_panel.cc": [
+      "src/ui/widgets/label.h",
+      "src/ui/widgets/panel.h",
+      "src/ui/widgets/tes3_journal_panel.h"
+    ],
+    "src/ui/widgets/tes3_journal_panel.h": [
+      "src/ui/font.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/text_box.cc": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/text_box.h"
+    ],
+    "src/ui/widgets/text_box.h": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/toast.cc": [
+      "src/ui/icon_atlas.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/toast.h"
+    ],
+    "src/ui/widgets/toast.h": [
+      "src/ui/animation.h",
+      "src/ui/font.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/toggle.cc": [
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/toggle.h"
+    ],
+    "src/ui/widgets/toggle.h": [
+      "src/ui/animation.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/toolbar.cc": [
+      "src/ui/font.h",
+      "src/ui/icon_atlas.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/toolbar.h"
+    ],
+    "src/ui/widgets/toolbar.h": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/ui/widgets/window.cc": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widgets/window.h"
+    ],
+    "src/ui/widgets/window.h": [
+      "src/ui/font.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/ui_types.h",
+      "src/ui/widget.h"
+    ],
+    "src/world/spatial_index.h": [],
+    "tests/animation_tests.cc": [
+      "src/anim/animation_clip.h",
+      "src/anim/animation_sampler.h",
+      "src/anim/skeleton.h",
+      "src/anim/skeleton_io.h",
+      "src/math/math.h"
+    ],
+    "tests/asset_coverage_tests.cc": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/content_record_index.h",
+      "src/tools/asset_coverage_report.h"
+    ],
+    "tests/audio_tests.cc": [
+      "src/audio/audio.h",
+      "src/audio/wav_writer.h",
+      "src/math/math.h"
+    ],
+    "tests/bethesda_actor_movement_tests.cc": [
+      "src/anim/hkx_packfile.h",
+      "src/bethesda/bethesda_session.h",
+      "src/games/bethesda/bethesda_actors.h",
+      "src/import/bethesda/skyrim_animation_assets.h"
+    ],
+    "tests/bethesda_import_tests.cc": [
+      "src/bethesda/bethesda_physics_world.h",
+      "src/core/job_system.h",
+      "src/import/bethesda/actor_records.h",
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/async_asset_loader.h",
+      "src/import/bethesda/bsa_archive.h",
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/character_builder.h",
+      "src/import/bethesda/decoded_texture_cache.h",
+      "src/import/bethesda/dialogue_records.h",
+      "src/import/bethesda/esm_reader.h",
+      "src/import/bethesda/fallout_records.h",
+      "src/import/bethesda/fuz.h",
+      "src/import/bethesda/kf_animation.h",
+      "src/import/bethesda/land_lod.h",
+      "src/import/bethesda/lz4_frame.h",
+      "src/import/bethesda/morrowind_terrain.h",
+      "src/import/bethesda/nif_scene.h",
+      "src/import/bethesda/plugin_load_order.h",
+      "src/import/bethesda/skyrim_lod_handoff.h",
+      "src/import/bethesda/skyrim_tree_lod.h",
+      "src/import/bethesda/spt_scene.h",
+      "src/import/bethesda/weather_records.h"
+    ],
+    "tests/bethesda_runtime_tests.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/condition.h",
+      "src/bethesda/oblivion_presentation.h",
+      "src/bethesda/runtime_ids.h",
+      "src/bethesda/runtime_world.h",
+      "src/bethesda/scenario.h",
+      "src/bethesda/skyrim_dialogue.h",
+      "src/bethesda/skyrim_quest.h",
+      "src/bethesda/skyrim_runtime_records.h",
+      "src/bethesda/vmad_reader.h",
+      "src/bethesda/whiterun_presentation.h",
+      "src/import/bethesda/cell_builder.h",
+      "src/import/bethesda/morrowind_terrain.h",
+      "src/import/cell_residency_planner.h"
+    ],
+    "tests/bindless_slot_table_tests.cc": [
+      "src/render/bindless_slot_table.h"
+    ],
+    "tests/cell_residency_planner_tests.cc": [
+      "src/import/cell_residency_planner.h"
+    ],
+    "tests/character_coverage_tests.cc": [
+      "src/import/bethesda/character_asset_manifest.h",
+      "src/tools/character_coverage.h"
+    ],
+    "tests/character_dynamics_tests.cc": [
+      "src/anim/character_dynamics.h"
+    ],
+    "tests/content_profile_tests.cc": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/content_profile.h"
+    ],
+    "tests/core_types_tests.cc": [
+      "src/core/frame_profiler.h",
+      "src/core/grid3.h",
+      "src/core/hash.h",
+      "src/core/lcg.h",
+      "src/core/ring_buffer.h",
+      "src/math/geometry.h",
+      "src/math/math.h"
+    ],
+    "tests/dialogue_tests.cc": [
+      "src/dialogue/dialogue_context.h",
+      "src/dialogue/dialogue_io.h",
+      "src/dialogue/dialogue_runtime.h",
+      "src/dialogue/dialogue_state_io.h",
+      "src/dialogue/dialogue_types.h"
+    ],
+    "tests/engine_frame_stats_tests.cc": [
+      "src/engine/frame_timing_csv.h",
+      "src/engine/game_frame_stats.h"
+    ],
+    "tests/frame_graph_plain_tests.cc": [
+      "src/render/backend/vulkan/frame_graph_runtime.h",
+      "src/render/frame_graph.h"
+    ],
+    "tests/gpu_arena_allocator_tests.cc": [
+      "src/render/gpu_arena_allocator.h"
+    ],
+    "tests/humanoid_rig_tests.cc": [
+      "src/anim/animation_sampler.h",
+      "src/anim/humanoid_rig.h",
+      "src/import/bethesda/character_builder.h"
+    ],
+    "tests/image_space_tests.cc": [
+      "src/import/bethesda/image_space_records.h"
+    ],
+    "tests/imported_render_policy_tests.cc": [
+      "src/render/backend/vulkan/frame_math.h",
+      "src/render/image_space_contrast.h",
+      "src/render/imported_gi.h",
+      "src/render/renderer_types.h",
+      "src/render/water_depth_policy.h",
+      "src/render/weather_wind_policy.h"
+    ],
+    "tests/imported_scene_tests.cc": [
+      "src/import/dds.h",
+      "src/import/imported_scene.h",
+      "src/import/imported_scene_query.h"
+    ],
+    "tests/imported_scene_vulkan_smoke.cc": [
+      "src/import/bethesda/cell_builder.h",
+      "src/import/imported_scene.h",
+      "src/render/renderer.h"
+    ],
+    "tests/job_system_tests.cc": [
+      "src/core/job_system.h"
+    ],
+    "tests/living_world_tests.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/gameplay_catalog.h",
+      "src/bethesda/living_world.h",
+      "src/bethesda/save_game.h"
+    ],
+    "tests/material_animation_tests.cc": [
+      "src/import/bethesda/nif_effect_sequence.h",
+      "src/import/bethesda/nif_material_animation.h",
+      "src/import/imported_lighting_material.h"
+    ],
+    "tests/mod_check_tests.cc": [
+      "src/import/bethesda/mod_check.h",
+      "src/import/bethesda/plugin_load_order.h"
+    ],
+    "tests/native_animation_tests.cc": [
+      "src/anim/native_program.h",
+      "src/anim/skyrim_animation.h",
+      "src/bethesda/character_movement.h",
+      "src/import/bethesda/skyrim_animation_assets.h"
+    ],
+    "tests/navigation_world_tests.cc": [
+      "src/bethesda/navigation_world.h"
+    ],
+    "tests/nif_particle_tests.cc": [
+      "src/import/bethesda/nif_particles.h"
+    ],
+    "tests/odai_save_tests.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/save_game.h"
+    ],
+    "tests/papyrus_vm_tests.cc": [
+      "src/bethesda/papyrus_vm.h",
+      "src/bethesda/runtime_world.h"
+    ],
+    "tests/pbr_material_tests.cc": [
+      "src/import/imported_lighting_material.h",
+      "src/import/imported_scene.h"
+    ],
+    "tests/pose_graph_tests.cc": [
+      "src/anim/native_program.h",
+      "src/anim/pose_graph.h",
+      "src/anim/pose_modifiers.h",
+      "src/anim/skyrim_animation.h"
+    ],
+    "tests/route_checkpoint_tests.cc": [
+      "src/bethesda/route_checkpoint.h"
+    ],
+    "tests/skyrim_animation_tests.cc": [
+      "src/anim/hkx_packfile.h",
+      "src/anim/skyrim_animation.h",
+      "src/bethesda/bethesda_physics_world.h",
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/runtime_ids.h",
+      "src/bethesda/save_game.h",
+      "src/games/bethesda/npc_demo_locomotion.h",
+      "src/import/bethesda/character_asset_manifest.h",
+      "src/import/bethesda/skyrim_animation_assets.h"
+    ],
+    "tests/skyrim_inventory_tests.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/save_game.h"
+    ],
+    "tests/skyrim_persistent_reference_tests.cc": [
+      "src/bethesda/skyrim_items.h",
+      "src/bethesda/skyrim_persistent_references.h"
+    ],
+    "tests/swf_font_tests.cc": [
+      "src/ui/font.h"
+    ],
+    "tests/taa_depth_tests.cc": [
+      "src/render/taa_depth_policy.h"
+    ],
+    "tests/tes3_content_tests.cc": [
+      "src/bethesda/gameplay_catalog.h",
+      "src/bethesda/tes3_content.h"
+    ],
+    "tests/tes3_navigation_simulation_tests.cc": [
+      "src/bethesda/navigation_simulation.h",
+      "src/bethesda/tes3_runtime.h",
+      "src/games/bethesda/bethesda_collision.h"
+    ],
+    "tests/tes3_progression_tests.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/save_game.h",
+      "src/bethesda/tes3_class_ui_flow.h",
+      "src/bethesda/tes3_level_ui_flow.h"
+    ],
+    "tests/tes3_runtime_tests.cc": [
+      "src/bethesda/bethesda_session.h",
+      "src/bethesda/save_game.h",
+      "src/bethesda/tes3_runtime.h"
+    ],
+    "tests/tes3_script_tests.cc": [
+      "src/bethesda/tes3_script.h"
+    ],
+    "tests/traversal_state_tests.cc": [
+      "src/games/bethesda/traversal_state.h"
+    ],
+    "tests/tri_morph_tests.cc": [
+      "src/import/bethesda/asset_source.h",
+      "src/import/bethesda/content_profile.h",
+      "src/import/bethesda/tri_morph.h"
+    ],
+    "tests/ui_tests.cc": [
+      "src/ui/font.h",
+      "src/ui/nav_focus.h",
+      "src/ui/nav_input.h",
+      "src/ui/toast_host.h",
+      "src/ui/ui_draw_list.h",
+      "src/ui/widget.h",
+      "src/ui/widgets/button.h",
+      "src/ui/widgets/slider.h",
+      "src/ui/widgets/tes3_journal_panel.h",
+      "src/ui/widgets/toggle.h"
+    ],
+    "tests/upscaler_tests.cc": [
+      "src/render/upscale/upscale_contract.h",
+      "src/render/upscale/upscale_policy.h"
+    ],
+    "tests/world_map_cache_tests.cc": [
+      "src/import/bethesda/world_map_cache.h"
+    ]
+  },
+  "schema_version": 1,
+  "scope": "Configured targets only; include closure is textual, test association is not coverage.",
+  "target_edges": {
+    "odai": [
+      "odai_anim",
+      "odai_audio",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue",
+      "odai_renderer",
+      "odai_traversal",
+      "odai_ui",
+      "odai_upscale"
+    ],
+    "odai_actor_movement_tests": [
+      "odai_anim",
+      "odai_audio",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_anim": [],
+    "odai_animation_tests": [
+      "odai_anim"
+    ],
+    "odai_asset_coverage_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_audio": [
+      "odai_core"
+    ],
+    "odai_audio_tests": [
+      "odai_audio",
+      "odai_core"
+    ],
+    "odai_bench_heap": [],
+    "odai_bethesda_cooker": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_bethesda_import": [
+      "odai_anim",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_bethesda_import_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_bethesda_probe": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_bethesda_runtime": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_bethesda_runtime_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_bindless_slot_table_tests": [],
+    "odai_cell_residency_planner_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_character_coverage_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_character_dynamics_tests": [
+      "odai_anim"
+    ],
+    "odai_content_profile_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_core": [],
+    "odai_core_types_tests": [],
+    "odai_dialogue": [],
+    "odai_dialogue_tests": [
+      "odai_dialogue"
+    ],
+    "odai_engine_stats_tests": [],
+    "odai_frame_graph_tests": [
+      "odai_core"
+    ],
+    "odai_gpu_arena_allocator_tests": [],
+    "odai_headless": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_headless_ui": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_humanoid_rig_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_image_space_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_imported_render_policy_tests": [],
+    "odai_imported_scene_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_imported_scene_vulkan_smoke": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue",
+      "odai_renderer",
+      "odai_ui",
+      "odai_upscale"
+    ],
+    "odai_job_system_tests": [
+      "odai_core"
+    ],
+    "odai_living_world_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_material_animation_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_mod_check_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_native_animation_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_navigation_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_nif_particle_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_papyrus_vm_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_pbr_material_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_pose_compute_tests": [
+      "odai_anim",
+      "slang_shaders"
+    ],
+    "odai_pose_graph_tests": [
+      "odai_anim"
+    ],
+    "odai_renderer": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue",
+      "odai_ui",
+      "odai_upscale",
+      "slang_shaders"
+    ],
+    "odai_route_checkpoint_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_save_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_skyrim_animation_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_skyrim_inventory_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_skyrim_persistent_reference_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_swf_font_tests": [
+      "odai_core",
+      "odai_ui"
+    ],
+    "odai_taa_depth_tests": [],
+    "odai_tes3_content_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_tes3_navigation_simulation_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_tes3_progression_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_tes3_runtime_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_tes3_script_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_bethesda_runtime",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_texture_pack": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_traversal": [],
+    "odai_traversal_state_tests": [
+      "odai_traversal"
+    ],
+    "odai_tri_morph_tests": [
+      "odai_anim",
+      "odai_bethesda_import",
+      "odai_core",
+      "odai_dialogue"
+    ],
+    "odai_ui": [
+      "odai_core"
+    ],
+    "odai_ui_tests": [
+      "odai_core",
+      "odai_ui"
+    ],
+    "odai_upscale": [],
+    "odai_upscaler_tests": [
+      "odai_upscale"
+    ],
+    "odai_world_map_cache_tests": [],
+    "slang_shaders": []
+  }
+}

@@ -27,18 +27,40 @@ For performance work use `linux-vcpkg-relwithdebinfo` or
 Options retained by policy: `ODAI_BUILD_RUNTIME`, `ODAI_BUILD_TOOLS`,
 `BUILD_TESTING`, ccache, LTO, native-arch, temporal upscaling, and XeSS.
 
-## Architecture
+## Navigation
 
-- `odai_core`: logging and jobs.
-- `odai_bethesda_import`: archives/plugins/NIFs/records, DDS, cell building,
-  actors, dialogue, weather, animation, and `ImportedScene` serialization.
-- `odai_renderer`: the Vulkan imported-scene renderer and RPG UI backend.
-- Focused `odai_ui`, `odai_audio`, `odai_anim`, `odai_dialogue`, and
-  `odai_upscale` libraries.
+Start with the owning subsystem below, read its local `AGENTS.md`, then inspect
+only relevant interfaces and implementations. Use `python3 tools/ai/nav.py owner
+<file>` and `tests <file>` to find configured ownership and focused validation.
+For target neighbors use `neighbors <target>`; for literal symbol lookup use
+`find <symbol> --scope <target-or-file>`. See `tools/ai/README.md` for map refresh,
+callers, implementation search, compile checks, and runtime evidence.
+
+| Task | Start here | Build owner |
+| --- | --- | --- |
+| Archives, records, NIF/DDS, cooked scenes, residency | `src/import/` | `odai_bethesda_import` |
+| Sessions, world state, inventory, TES3/Papyrus, saves | `src/bethesda/` | `odai_bethesda_runtime` (exceptions in local guide) |
+| Window, input, actors, collision, streaming integration | `src/games/bethesda/`, `src/engine/` | `odai` |
+| Vulkan passes, GPU memory, lighting, shaders | `src/render/` | `odai_renderer` |
+| Upscaling policy and contract | `src/render/upscale/` | `odai_upscale`; backends belong to renderer |
+| Animation, audio, dialogue, retained widgets, jobs | corresponding `src/{anim,audio,dialogue,ui,core}/` | matching focused library |
+| Probes, cooker, texture pack, headless harnesses | `src/tools/` | tool executables |
+| Regression tests and synthetic fixtures | `tests/`, `src/render/tests/` | CTest targets |
+
+Dependency direction: application/tools → runtime/renderer → importer and focused
+libraries. Core is foundational. CMake exposes all of `src/` to targets, so headers
+are not encapsulated by the linker graph. Validated inventory and boundary caveats:
+`docs/architecture/agent-navigation.md`. Generated maps describe one configured
+build, not every optional configuration; never read them wholesale.
+
+Exclude `build*/`, `captures/`, `references/`, assets and binary fixtures from
+ordinary searches. Search active target files before legacy `src/world/`,
+`src/games/newvegas/`, `src/import/fnv/`, or `src/tools/oblivion_nif_lab/`.
+Expand from implementation → direct includes/callers → owning target → neighbor
+only when a failure or missing evidence requires it. Do not traverse vendor code.
 
 Renderer passes use explicit barriers and explicit control flow. Preserve streamed
-chunk and cooked-scene serialization compatibility unless the serialized layout truly
-changes.
+chunk and cooked-scene serialization compatibility unless the layout truly changes.
 
 ## Testing
 
@@ -100,7 +122,7 @@ Do not weaken capability requirements merely to make tests pass.
 
 OpenMW is available as a read-only behavioral reference at:
 
-    ../references/openmw/
+    references/openmw/
 
 Use it to understand expected Morrowind-compatible behavior.
 
@@ -109,7 +131,7 @@ Do not modify it.
 Do not copy OpenMW architecture into Iridius unless the existing
 Iridius architecture independently warrants that design.
 
-## Architecture
+## Architecture documents
 
 Architecture documentation lives under:
 

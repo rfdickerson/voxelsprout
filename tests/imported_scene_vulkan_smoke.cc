@@ -15,6 +15,8 @@
 #include <cmath>
 #include <vector>
 
+#include "imported_gi_fixture.h"
+
 namespace {
 
 odai::importer::ImportedScene makeSyntheticScene() {
@@ -574,6 +576,7 @@ int main() {
                 }
             }
         }
+        if (passed) passed = runImportedGiFixture(renderer);
     }
 
     glfwDestroyWindow(window);

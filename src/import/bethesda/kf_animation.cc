@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <set>
 
 namespace odai::importer::bethesda {
 
@@ -851,6 +852,79 @@ bool parseKfAnimation(
     NifBlockSummary summary;
     if (!parseNifBlockSummary(bytes, summary, outError)) {
         return false;
+    }
+    if (summary.version == 0x04000002u) {
+        for (std::size_t helper = 0; helper < summary.blockTypeNames.size(); ++helper) {
+            if (summary.blockTypeNames[helper] != "NiSequenceStreamHelper") continue;
+            const auto block = [&](std::size_t index) {
+                return BlockCursor(bytes.data() + summary.blockStarts[index], summary.blockSizes[index]);
+            };
+            const auto isBlock = [&](std::int32_t index, std::string_view type) {
+                return index >= 0 && static_cast<std::size_t>(index) < summary.blockTypeNames.size() &&
+                    summary.blockTypeNames[index] == type;
+            };
+            const auto fail = [&](const char* message) { outError = message; return false; };
+            KfAnimation animation;
+            auto stream = block(helper);
+            std::int32_t extra = -1, controller = -1;
+            if (!stream.readSizedString32(animation.name) || !stream.readI32(extra) || !stream.readI32(controller))
+                return fail("NiSequenceStreamHelper truncated");
+            if (!isBlock(extra, "NiTextKeyExtraData")) return fail("TES3 animation stream requires text-key extra data");
+            auto textKeys = block(extra);
+            if (!textKeys.readI32(extra)) return fail("TES3 animation text-key chain truncated");
+            if (animation.name.empty()) animation.name = "TES3 stream";
+            std::set<std::int32_t> extras, controllers;
+            std::set<std::string> names;
+            float firstTime = std::numeric_limits<float>::infinity(), lastTime = -std::numeric_limits<float>::infinity();
+            // TES3 binds controller chains to the matching string-extra chain,
+            // rather than to NiAVObject targets or a modern sequence table.
+            while (extra != -1 && controller != -1) {
+                if (!extras.insert(extra).second || !controllers.insert(controller).second)
+                    return fail("cyclic TES3 animation stream chain");
+                if (!isBlock(extra, "NiStringExtraData") || !isBlock(controller, "NiKeyframeController"))
+                    return fail("TES3 animation stream has an invalid name/controller link");
+                auto nameBlock = block(extra);
+                std::uint32_t unusedSize = 0;
+                KfBoneTrack track;
+                if (!nameBlock.readI32(extra) || !nameBlock.readU32(unusedSize) ||
+                    !nameBlock.readSizedString32(track.nodeName) || track.nodeName.empty())
+                    return fail("TES3 animation stream name truncated or empty");
+                auto controlBlock = block(controller);
+                std::uint16_t flags = 0;
+                float frequency = 1, phase = 0, start = 0, stop = 0;
+                std::int32_t target = -1, data = -1;
+                if (!controlBlock.readI32(controller) || !controlBlock.readU16(flags) ||
+                    !controlBlock.readFloat(frequency) || !controlBlock.readFloat(phase) ||
+                    !controlBlock.readFloat(start) || !controlBlock.readFloat(stop) ||
+                    !controlBlock.readI32(target) || !controlBlock.readI32(data))
+                    return fail("TES3 animation stream controller truncated");
+                if (!std::isfinite(frequency) || frequency <= 0 || !std::isfinite(phase) ||
+                    !std::isfinite(start) || !std::isfinite(stop) || stop < start ||
+                    !std::isfinite(start / frequency) || !std::isfinite(stop / frequency))
+                    return fail("TES3 animation stream has invalid timing");
+                if (!isBlock(data, "NiKeyframeData")) return fail("TES3 animation stream has invalid keyframe data");
+                if (!readTransformData(bytes.data() + summary.blockStarts[data], summary.blockSizes[data],
+                        track, outError, true)) return false;
+                const auto rebase = [&](auto& keys) {
+                    for (auto& key : keys) key.time /= frequency;
+                };
+                rebase(track.translationKeys); rebase(track.rotationKeys); rebase(track.scaleKeys);
+                firstTime = std::min(firstTime, start / frequency);
+                lastTime = std::max(lastTime, stop / frequency);
+                if (animation.tracks.empty()) animation.cycleType = (flags & 6u) == 0 ? 0 : (flags & 6u) == 2 ? 1 : 2;
+                if (names.insert(track.nodeName).second) animation.tracks.push_back(std::move(track));
+                ++animation.stats.controlledBlocks;
+            }
+            if (extra != -1 || controller != -1 || animation.tracks.empty())
+                return fail("TES3 animation stream name/controller chains do not match");
+            for (auto& track : animation.tracks) {
+                const auto rebase = [&](auto& keys) { for (auto& key : keys) key.time -= firstTime; };
+                rebase(track.translationKeys); rebase(track.rotationKeys); rebase(track.scaleKeys);
+            }
+            animation.startTime = 0; animation.stopTime = lastTime - firstTime;
+            outAnimation = std::move(animation);
+            return true;
+        }
     }
     for (std::size_t i = 0; i < summary.blockTypeNames.size(); ++i) {
         if (summary.blockTypeNames[i] == "NiControllerSequence") {

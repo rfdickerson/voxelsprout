@@ -1271,6 +1271,10 @@ bool CellStreamer::buildInteriorScene(
     builder.setMaxTextureSize(m_maxTextureSize);
     builder.addCellStatics(record);
     builder.finish(outScene);
+    // The renderer uses this scene identity to retain interior geometry for
+    // its world-space GI occupancy cache. The builder deliberately knows only
+    // about geometry, so publish the cell kind at the streamer boundary.
+    outScene.sourceTag = m_worldTables.morrowind ? "morrowind_interior" : "fnv_interior";
     appendResolvedDoors(record, m_cellIndex, outScene);
     outInterior.navMeshes = record.navMeshes;
 

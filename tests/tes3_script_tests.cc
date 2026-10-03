@@ -117,6 +117,74 @@ void testDiagnosticsAndRegistry() {
           "presentation-only no-op eligibility is explicit");
     check(registry.find("UnknownTRCommand") == nullptr,
           "unknown commands remain visible to strict closure checks");
+
+    const Tes3CompileResult blocked = compiler.compile(
+        "begin quest_gate\nJournal Quest 10\nDoor->MissingNative\nend", "quest_gate");
+    check(blocked.success(), "unsupported native remains visible after compilation");
+    Tes3ScriptProgram program = blocked.program;
+    program.unsupportedOperations.insert("missingnative");
+    Tes3ScriptVm vm;
+    std::string error;
+    check(vm.registerProgram(std::move(program), error), error);
+    const ObjectId owner = ObjectId::persistent(makeTes3RecordKey("NPC_", "player"));
+    check(vm.start("quest_gate", owner, error) == 0u &&
+              error.find("quest_gate: line 3") != std::string::npos &&
+              error.find("target Door") != std::string::npos &&
+              error.find("unsupported operation missingnative") != std::string::npos &&
+              vm.threads().empty(),
+          "known unsupported operation rejects the script before its quest mutation");
+
+    const Tes3CompileResult runtimeFailure = compiler.compile(
+        "begin failing\nDoor->MissingNative\nend", "failing");
+    check(vm.registerProgram(runtimeFailure.program, error), error);
+    const std::uint64_t failingThread = vm.start("failing", owner, error);
+    const Tes3VmStepResult failed = vm.step(1u, 10u, [](const Tes3NativeCall&) {
+        Tes3NativeResult result;
+        result.error = "unresolved reference";
+        return result;
+    });
+    check(failingThread != 0u && !failed.diagnostics.empty() &&
+              failed.diagnostics.front().find("failing: line 2: target Door, operation missingnative")
+                  != std::string::npos,
+          "runtime failure identifies program, source line, target, and operation");
+
+    const Tes3CompileResult expressionFailure = compiler.compile(
+        "begin failed_query\nshort result\nset result to Door->GetEffect 12\nend",
+        "failed_query");
+    check(vm.registerProgram(expressionFailure.program, error), error);
+    const std::uint64_t queryThread = vm.start("failed_query", owner, error);
+    const Tes3VmStepResult queryFailed = vm.step(2u, 10u,
+        [](const Tes3NativeCall&) {
+            Tes3NativeResult result;
+            result.error = "effect query unavailable";
+            return result;
+        });
+    check(queryThread != 0u && !queryFailed.diagnostics.empty() &&
+              queryFailed.diagnostics.front().find(
+                  "failed_query: line 3: target Door, operation geteffect") !=
+                  std::string::npos,
+          "expression native failure retains target and operation context");
+}
+
+void testRepeatingLocalScript() {
+    Tes3ScriptCompiler compiler;
+    const auto compiled = compiler.compile(
+        "begin repeat_local\nshort count\nset count to count + 1\nend", "repeat_local");
+    check(compiled.success(), "repeating local fixture compiles");
+    Tes3ScriptVm vm;
+    std::string error;
+    check(vm.registerProgram(compiled.program, error), error);
+    const std::uint64_t id = vm.start("repeat_local", {}, error, true);
+    const auto execute = [](const Tes3NativeCall&) { return Tes3NativeResult{}; };
+    check(vm.step(4u, 32u, execute).diagnostics.empty() &&
+              vm.threads().at(id).locals.at("count").number == 1.0,
+          "local script runs on its first tick");
+    (void)vm.step(4u, 32u, execute);
+    check(vm.threads().at(id).locals.at("count").number == 1.0,
+          "completed local script does not repeat within a tick");
+    (void)vm.step(5u, 32u, execute);
+    check(vm.threads().at(id).locals.at("count").number == 2.0,
+          "local script repeats on the next tick with its locals retained");
 }
 
 }  // namespace
@@ -124,6 +192,7 @@ void testDiagnosticsAndRegistry() {
 int main() {
     testCompilerAndVm();
     testDiagnosticsAndRegistry();
+    testRepeatingLocalScript();
     if (failures == 0) std::cout << "tes3 script tests passed\n";
     return failures == 0 ? 0 : 1;
 }

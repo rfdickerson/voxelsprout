@@ -5974,12 +5974,16 @@ void printUsage() {
               << "  odai_bethesda_probe --why <profile> <virtualPath|formID> [--data <Data>]\n"
               << "  odai_bethesda_probe --conflicts <profile> [--data <Data>]\n"
               << "  odai_bethesda_probe --export-profile <profile> <out.json> [--data <Data>]\n"
-        << "  odai_bethesda_probe --tes3-texturecheck <profile-or-Data> <expectations.json>\n"
               << "  odai_bethesda_probe --tes3-scriptcheck <profile> [--strict] [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-texturecheck <profile-or-Data> <expectations.json>\n"
+              << "  odai_bethesda_probe --tes3-recordcheck <profile> <expectations.json> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-script-source <profile> <script-id> [--data <Data>]\n"
-              << "  odai_bethesda_probe --tes3-dialogue-trace <profile> <actor-or-topic> [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-dialogue-trace <profile> <actor-or-topic> [--actor] [--topic <id>] [--choice <n>] [--expect-info <id>] [--expect-journal <id> <index>] [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-dialogue-replay <profile> <intents.json> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-quest-trace <profile> <journal-id> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-quest-suite <profile> [--quest <journal-id>] [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-route-scriptcheck <profile> [--data <Data>]\n"
+              << "  odai_bethesda_probe --tes3-route-checkpoints <profile> [--data <Data>]\n"
               << "  odai_bethesda_probe --tes3-virtual-player <profile> [--strict] [--report <json>] [--data <Data>]\n"
               << "  odai_bethesda_probe <DataFilesPath> --archives\n"
               << "  odai_bethesda_probe <DataFilesPath> --asset-coverage <report.json> [Plugin.esm ...]\n"
@@ -6974,7 +6978,7 @@ struct Tes3ProbeContext {
 
 bool loadTes3ProbeContext(
     const std::filesystem::path& source, int argc, char** argv, int optionStart,
-    Tes3ProbeContext& out, std::string& error) {
+    Tes3ProbeContext& out, std::string& error, bool configureRuntime = true) {
     using namespace odai::bethesda;
     using namespace odai::importer::bethesda;
     if (!resolveProbeContentProfile(source, argc, argv, optionStart, out.profile, error)) {
@@ -6987,8 +6991,251 @@ bool loadTes3ProbeContext(
     if (!openProfileLoadOrder(out.profile, out.order, error)) return false;
     out.content = std::make_shared<Tes3ContentStore>();
     if (!out.content->load(out.order, out.profile.encoding, error)) return false;
-    return out.runtime.configure(out.content,
+    return !configureRuntime || out.runtime.configure(out.content,
         ObjectId::persistent(makeTes3RecordKey("NPC_", "player")), error);
+}
+
+int tes3RecordCheckCommand(const std::filesystem::path& source,
+    const std::filesystem::path& expectations, int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    using Json = nlohmann::json;
+    Json output = {{"version", 1}, {"ok", false}, {"scope", "TES3 artifact and record parsing"},
+        {"checks", Json::array()}};
+    const auto fail = [&](const std::string& error) {
+        output["error"] = error;
+        std::cout << output.dump(2) << '\n';
+        return 1;
+    };
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error, false)) return fail(error);
+    const auto& content = *context.content;
+    std::unique_ptr<odai::importer::bethesda::FalloutAssetSource> assets;
+    output["profile"] = context.profile.name;
+    output["fingerprint"] = context.profile.fingerprint;
+    output["encoding"] = content.encoding();
+    output["counts"] = {{"records", content.stats().recordsRead},
+        {"dialogues", content.dialogues().size()}, {"scripts", content.scripts().size()},
+        {"globals", content.globals().size()}, {"actors", content.actors().size()},
+        {"references", content.references().size()}, {"spells", content.spells().size()}};
+    try {
+        Json plan;
+        std::ifstream input(expectations); input >> plan;
+        if (!plan.is_object() || plan.at("version") != 1 || !plan.at("checks").is_array() ||
+            plan.at("checks").empty() || plan.at("checks").size() > 10000)
+            return fail("expected version 1 and 1..10000 record checks");
+        bool passed = true;
+        for (const auto& check : plan.at("checks")) {
+            const auto kind = check.at("kind").get<std::string>();
+            const auto id = check.at("id").get<std::string>();
+            if (id.empty()) return fail("record check id must not be empty");
+            const auto& expected = check.at("expected");
+            if (!expected.is_object() || expected.empty()) return fail("expected must be a nonempty object: " + id);
+            Json actual = {{"exists", false}};
+            bool decodePassed = true;
+            std::string decodeError;
+            if (kind == "global") {
+                const auto found = content.globals().find(makeTes3RecordKey("GLOB", id));
+                if (found != content.globals().end()) {
+                    const auto& global = found->second;
+                    actual = {{"exists", true}, {"type", std::string(1, global.valueType)},
+                        {"value", global.value}, {"source", global.sourcePlugin}};
+                    if (!std::isfinite(global.value)) {
+                        decodePassed = false; decodeError = "non-finite TES3 global value";
+                    }
+                }
+            } else if (kind == "actor") {
+                if (const auto* actor = content.findActor(check.value("type", std::string("NPC_")), id)) {
+                    actual = {{"exists", true}, {"level", actor->level}, {"rank", actor->rank},
+                        {"gender", actor->gender}, {"disposition", actor->disposition}, {"reputation", actor->reputation},
+                        {"health", actor->health}, {"magicka", actor->magicka}, {"fatigue", actor->fatigue},
+                        {"attributes", actor->attributes}, {"skills", actor->skills}, {"race", actor->race},
+                        {"class", actor->actorClass}, {"faction", actor->faction.textId},
+                        {"script", actor->script.textId}, {"source", actor->sourcePlugin}, {"inventory", Json::object()}};
+                    for (const auto& [item, count] : actor->inventory) actual["inventory"][item.textId] = count;
+                }
+            } else if (kind == "faction") {
+                if (const auto* faction = content.findFaction(id)) {
+                    actual = {{"exists", true}, {"attributes", faction->attributes},
+                        {"skills", faction->skills}, {"reactions", faction->reactions}, {"ranks", Json::array()}};
+                    for (const auto& rank : faction->ranks) actual["ranks"].push_back({
+                        {"attribute1", rank.attribute1}, {"attribute2", rank.attribute2},
+                        {"primary_skill", rank.primarySkill}, {"favoured_skill", rank.favouredSkill},
+                        {"reputation", rank.reputation}});
+                }
+            } else if (kind == "script") {
+                if (const auto* script = content.findScript(id)) {
+                    actual = {{"exists", true}, {"shorts", script->shortCount}, {"longs", script->longCount},
+                        {"floats", script->floatCount}, {"variables", script->variableNames},
+                        {"bytecode_bytes", script->bytecode.size()}, {"source_bytes", script->source.size()},
+                        {"source", script->sourcePlugin}};
+                }
+            } else if (kind == "dialogue") {
+                if (const auto* topic = content.findDialogue(id)) {
+                    actual = {{"exists", true}, {"type", static_cast<int>(topic->type)},
+                        {"source", topic->sourcePlugin}, {"infos", Json::array()}};
+                    for (const auto& info : topic->infos) {
+                        Json conditions = Json::array();
+                        for (const auto& condition : info.conditions) conditions.push_back({
+                            {"valid", condition.valid}, {"function", static_cast<int>(condition.function)},
+                            {"comparison", std::string(1, condition.comparison)}, {"variable", condition.variable},
+                            {"value", std::visit([](auto value) { return double(value); }, condition.value)}});
+                        actual["infos"].push_back({{"id", info.id}, {"previous", info.previousId},
+                            {"next", info.nextId}, {"index", info.dispositionOrJournalIndex},
+                            {"quest_status", static_cast<int>(info.questStatus)}, {"source", info.sourcePlugin},
+                            {"conditions", conditions}, {"has_result", !info.resultScript.empty()}});
+                    }
+                }
+            } else if (kind == "spell") {
+                if (const auto* spell = content.findSpell(id)) {
+                    actual = {{"exists", true}, {"type", spell->type}, {"cost", spell->cost},
+                        {"flags", spell->flags}, {"source", spell->sourcePlugin}, {"effects", Json::array()}};
+                    for (const auto& effect : spell->effects) actual["effects"].push_back({
+                        {"id", effect.effectId}, {"skill", effect.skill}, {"attribute", effect.attribute},
+                        {"range", effect.range}, {"area", effect.area}, {"duration", effect.duration},
+                        {"min", effect.magnitudeMin}, {"max", effect.magnitudeMax}});
+                }
+            } else if (kind == "reference") {
+                if (!check.at("frmr").is_number_integer()) return fail("reference frmr must be an integer");
+                const auto frmr = check.at("frmr").get<std::int64_t>();
+                if (frmr <= 0 || frmr > 0x00ffffff) return fail("reference frmr must be a local 24-bit identity");
+                const auto object = ObjectId::persistent(makeTes3ReferenceKey(
+                    check.at("plugin").get<std::string>(), static_cast<std::uint32_t>(frmr)));
+                const auto found = content.references().find(object);
+                if (found != content.references().end()) {
+                    const auto& reference = found->second;
+                    actual = {{"exists", true}, {"base", reference.baseId}, {"cell", reference.cell.textId},
+                        {"interior", reference.interior}, {"grid", {reference.cellGridX, reference.cellGridZ}},
+                        {"position", reference.position}, {"rotation", reference.rotationRadians},
+                        {"enabled", reference.enabled}, {"source", reference.sourcePlugin}, {"condition", reference.itemCondition}};
+                }
+            } else if (kind == "archive") {
+                const auto filename = std::filesystem::path(id);
+                if (filename.has_parent_path() || filename.is_absolute()) return fail("archive id must be a filename");
+                BsaArchive archive;
+                decodePassed = archive.open(context.profile.dataRoot / filename);
+                actual = {{"exists", std::filesystem::exists(context.profile.dataRoot / filename)},
+                    {"parsed", decodePassed}, {"files", archive.files().size()}};
+                decodeError = archive.lastError();
+            } else if (kind == "asset") {
+                using namespace odai::importer;
+                using namespace odai::importer::bethesda;
+                const auto type = check.at("type").get<std::string>();
+                if (type != "dds" && type != "texture" && type != "nif" && type != "animation")
+                    return fail("unsupported asset decoder: " + type);
+                if (!assets) {
+                    assets = std::make_unique<FalloutAssetSource>();
+                    if (!assets->open(context.profile)) return fail("cannot open profile asset sources");
+                }
+                FalloutAssetSource::ResolvedAsset winner;
+                decodePassed = type == "texture" ? assets->resolveTextureWithProvider(id, winner, decodeError)
+                    : assets->resolveAssetWithProvider(id, winner, decodeError);
+                actual = {{"exists", decodePassed}, {"parsed", false}, {"bytes", winner.bytes.size()},
+                    {"archive", winner.archiveName}, {"provider", winner.providerName}};
+                if (decodePassed && (type == "dds" || type == "texture")) {
+                    ImportedSceneTexture texture;
+                    decodePassed = type == "dds" ? loadDdsFromMemory(winner.bytes.data(), winner.bytes.size(), texture)
+                        : loadTextureFromMemory(winner.bytes.data(), winner.bytes.size(), winner.canonicalVirtualPath,
+                            texture, check.value("max_dimension", 0u), decodeError);
+                    if (!decodePassed) decodeError = "DDS decode failed";
+                    actual.update({{"width", texture.width}, {"height", texture.height},
+                        {"mips", texture.mipLevelCount}, {"layers", texture.arrayLayers},
+                        {"format", static_cast<int>(texture.format)}, {"decoded_bytes", texture.rgba8.size()}});
+                } else if (decodePassed && type == "nif") {
+                    NifBlockSummary summary;
+                    decodePassed = parseNifBlockSummary(winner.bytes, summary, decodeError);
+                    actual.update({{"version", summary.version}, {"blocks", summary.blockTypeNames}});
+                    if (decodePassed) {
+                        NifModel mesh;
+                        decodePassed = parseNifStaticMesh(winner.bytes, mesh, decodeError);
+                        std::size_t vertices = 0, triangles = 0;
+                        for (const auto& shape : mesh.shapes) {
+                            vertices += shape.positions.size() / 3;
+                            triangles += shape.triangleIndices.size() / 3;
+                        }
+                        actual.update({{"shapes", mesh.shapes.size()}, {"vertices", vertices}, {"triangles", triangles}});
+                    }
+                } else if (decodePassed) {
+                    std::vector<KfAnimation> clips;
+                    NifModel animatedMesh;
+                    decodePassed = parseNifStaticMesh(winner.bytes, animatedMesh, decodeError);
+                    if (decodePassed) clips = std::move(animatedMesh.embeddedAnimations);
+                    if (decodePassed && clips.empty()) {
+                        KfAnimation clip;
+                        decodePassed = parseKfAnimation(winner.bytes, clip, decodeError);
+                        if (decodePassed) clips.push_back(std::move(clip));
+                    }
+                    actual["clips"] = Json::array();
+                    for (const auto& clip : clips) {
+                        Json channels = Json::array();
+                        for (const auto& track : clip.tracks) {
+                            Json channel = {{"node", track.nodeName}, {"rotation_keys", track.rotationKeys.size()},
+                                {"translation_keys", track.translationKeys.size()}, {"scale_keys", track.scaleKeys.size()}};
+                            if (!track.rotationKeys.empty()) {
+                                const auto& first = track.rotationKeys.front();
+                                const auto& last = track.rotationKeys.back();
+                                channel.update({{"rotation_times", {first.time, last.time}},
+                                    {"rotation_first", {first.value.x, first.value.y, first.value.z, first.value.w}},
+                                    {"rotation_last", {last.value.x, last.value.y, last.value.z, last.value.w}}});
+                            }
+                            channels.push_back(std::move(channel));
+                        }
+                        actual["clips"].push_back({{"name", clip.name}, {"duration", clip.duration()},
+                            {"tracks", clip.tracks.size()}, {"channels", channels},
+                            {"unsupported_interpolators", clip.stats.unsupportedInterpolators}});
+                    }
+                }
+                actual["parsed"] = decodePassed;
+            } else if (kind == "scene-textures") {
+                using namespace odai::importer;
+                using namespace odai::importer::bethesda;
+                if (!assets) {
+                    assets = std::make_unique<FalloutAssetSource>();
+                    if (!assets->open(context.profile)) return fail("cannot open profile asset sources");
+                }
+                actual = auditTes3TextureScene(context.order, *assets, check, decodeError);
+                decodePassed = actual.value("parsed", false);
+            } else if (kind == "record" || kind == "item") {
+                const auto type = check.at("type").get<std::string>();
+                if (const auto* record = content.findRecord(type, id)) {
+                    actual = {{"exists", true}, {"source", record->sourcePlugin}, {"subrecords", Json::array()}};
+                    for (const auto& sub : record->subrecords)
+                        actual["subrecords"].push_back({{"type", sub.type}, {"bytes", sub.data.size()}});
+                    if (kind == "item") {
+                        const auto value = content.wornItemValue(record->record);
+                        actual["worn_value"] = value ? Json(*value) : Json(nullptr);
+                    }
+                }
+            } else return fail("unsupported check kind: " + kind);
+            std::string mismatch;
+            const auto matches = [&](const auto& self, const Json& want, const Json& got, const std::string& path) -> bool {
+                if (want.is_object()) {
+                    if (!got.is_object()) { mismatch = path; return false; }
+                    for (const auto& [key, value] : want.items()) {
+                        if (!got.contains(key)) { mismatch = path + "/" + key; return false; }
+                        if (!self(self, value, got.at(key), path + "/" + key)) return false;
+                    }
+                    return true;
+                }
+                if (want.is_array()) {
+                    if (!got.is_array() || want.size() != got.size()) { mismatch = path; return false; }
+                    for (std::size_t i = 0; i < want.size(); ++i)
+                        if (!self(self, want[i], got[i], path + "/" + std::to_string(i))) return false;
+                    return true;
+                }
+                if (want == got) return true;
+                mismatch = path; return false;
+            };
+            const bool ok = matches(matches, expected, actual, "") && decodePassed;
+            output["checks"].push_back({{"kind", kind}, {"id", id}, {"expected", expected},
+                {"actual", actual}, {"passed", ok}, {"mismatch_path", mismatch}, {"diagnostic", decodeError}});
+            passed &= ok;
+        }
+        output["ok"] = passed;
+        if (!passed) output["error"] = "TES3 record expectations failed";
+    } catch (const std::exception& e) { return fail("invalid record expectations: " + std::string(e.what())); }
+    std::cout << output.dump(2) << '\n';
+    return output.at("ok").get<bool>() ? 0 : 1;
 }
 
 const char* tes3QuestStatusName(odai::bethesda::Tes3QuestStatus status) {
@@ -7106,7 +7353,11 @@ int tes3DialogueTraceCommand(
     }
     nlohmann::json output = {{"version", 1}, {"ok", true},
         {"query", actorOrTopic}, {"profile", context.profile.name}};
-    if (const Tes3DialogueDefinition* topic = context.content->findDialogue(actorOrTopic)) {
+    bool actorQuery = false;
+    for (int i = optionStart; i < argc; ++i)
+        if (std::strcmp(argv[i], "--actor") == 0) actorQuery = true;
+    if (const Tes3DialogueDefinition* topic = context.content->findDialogue(actorOrTopic);
+        topic != nullptr && !actorQuery) {
         nlohmann::json infos = nlohmann::json::array();
         for (const Tes3DialogueInfo& info : topic->infos) infos.push_back(tes3InfoTrace(info));
         output["kind"] = "topic";
@@ -7114,21 +7365,286 @@ int tes3DialogueTraceCommand(
         output["type"] = static_cast<std::int32_t>(topic->type);
         output["infos"] = std::move(infos);
     } else {
+        BethesdaSession session;
+        BethesdaSessionConfig config;
+        config.game = odai::importer::bethesda::BethesdaGame::Morrowind;
+        config.contentFingerprint = context.order.fingerprint();
+        if (!session.configure(config, error) || !session.configureTes3Content(context.content, error)) {
+            std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+            return 1;
+        }
+        RuntimeObject worldPlayer;
+        worldPlayer.id = session.playerObject();
+        worldPlayer.base = makeTes3RecordKey("NPC_", "player");
+        worldPlayer.kind = RuntimeObjectKind::Actor;
+        worldPlayer.actorValues.emplace();
+        if (!session.world().addInitialObject(std::move(worldPlayer), error)) {
+            std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+            return 1;
+        }
         Tes3DialogueActorState actor;
-        actor.object = ObjectId::persistent(makeTes3ReferenceKey("probe", 1u));
         actor.id = std::string(actorOrTopic);
-        Tes3DialoguePlayerState player;
-        player.object = context.runtime.playerObject();
-        const Tes3DialogueResponse greeting = context.runtime.startDialogue(actor, player, true);
+        const auto* definition = context.content->findActor("NPC_", actor.id);
+        if (definition == nullptr) definition = context.content->findActor("CREA", actor.id);
+        if (definition == nullptr) {
+            std::cout << nlohmann::json({{"ok", false}, {"error", "actor not found"}}).dump(2) << '\n';
+            return 1;
+        }
+        for (const auto& [id, reference] : context.content->references()) {
+            if (reference.base != definition->record) continue;
+            actor.object = id;
+            actor.cell = reference.cell.textId;
+            break;
+        }
+        if (!actor.object.valid()) {
+            std::cout << nlohmann::json({{"ok", false}, {"error", "actor has no authored reference"}}).dump(2) << '\n';
+            return 1;
+        }
+        RuntimeObject object;
+        object.id = actor.object; object.base = definition->record;
+        object.kind = RuntimeObjectKind::Actor; object.actorValues.emplace();
+        object.currentSpace.cell = makeTes3RecordKey("CELL", actor.cell);
+        for (const auto& [item, count] : definition->inventory) object.inventory.push_back({item, count});
+        if (!session.world().addInitialObject(std::move(object), error)) {
+            std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+            return 1;
+        }
+        const auto greeting = session.startTes3Dialogue(actor, session.tes3().playerState());
         output["kind"] = "actor";
         output["accepted"] = greeting.accepted;
         output["greeting_topic"] = greeting.topic.toString();
         output["greeting_info"] = greeting.info.toString();
         output["discovered_topics"] = greeting.discoveredTopics;
-        output["available_topics"] = context.runtime.availableTopics(true);
         output["diagnostics"] = greeting.diagnostics;
+        output["interactions"] = nlohmann::json::array();
+        bool passed = greeting.accepted;
+        RecordKey lastInfo = greeting.info;
+        std::string expectedInfo;
+        std::string expectedQuest;
+        int expectedIndex = 0;
+        // Replay only normal topic/choice interactions. There is deliberately
+        // no quest-stage, global, inventory, or condition-override option.
+        for (int i = optionStart; i < argc; ++i) {
+            const std::string option = argv[i];
+            if ((option == "--topic" || option == "--choice") && i + 1 < argc) {
+                const std::string value = argv[++i];
+                Tes3DialogueResponse response;
+                if (option == "--topic") response = session.selectTes3Topic(value);
+                else {
+                    try { response = session.answerTes3Choice(std::stoi(value)); }
+                    catch (...) { response.diagnostics.push_back("invalid choice number"); }
+                }
+                output["interactions"].push_back({{"action", option}, {"value", value},
+                    {"accepted", response.accepted}, {"info", response.info.toString()},
+                    {"diagnostics", response.diagnostics}});
+                passed = passed && response.accepted;
+                if (response.accepted) lastInfo = response.info;
+                const auto step = session.advance(1.0 / 60.0);
+                if (!step.diagnostics.empty()) {
+                    passed = false;
+                    output["interactions"].back()["step_diagnostics"] = step.diagnostics;
+                }
+            } else if (option == "--expect-info" && i + 1 < argc) expectedInfo = argv[++i];
+            else if (option == "--expect-journal" && i + 2 < argc) {
+                expectedQuest = argv[++i];
+                try { expectedIndex = std::stoi(argv[++i]); }
+                catch (...) { passed = false; }
+            }
+        }
+        if (!expectedInfo.empty()) passed = passed && normalizeTes3Symbol(lastInfo.textId) == normalizeTes3Symbol(expectedInfo);
+        if (!expectedQuest.empty()) {
+            const auto* quest = context.content->findDialogue(expectedQuest);
+            passed = passed && quest != nullptr && quest->type == Tes3DialogueType::Journal &&
+                session.tes3().journal().index(expectedQuest) == expectedIndex;
+        }
+        output["available_topics"] = session.tes3DialogueTopics();
+        output["journal"] = nlohmann::json::object();
+        for (const auto& [key, quest] : session.tes3().journal().quests()) {
+            (void)key;
+            output["journal"][quest.id] = quest.currentIndex;
+        }
+        output["interaction_assertions_passed"] = passed;
+        output["ok"] = passed;
     }
     std::cout << output.dump(2) << '\n';
+    return output.value("ok", false) ? 0 : 1;
+}
+
+// Retail dialogue replay shares one session. Its inputs are gameplay intents;
+// quest stages, globals, INFO selection, and script execution are not inputs.
+int tes3DialogueReplayCommand(const std::filesystem::path& source,
+    const std::filesystem::path& replayPath, int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    using Json = nlohmann::json;
+    Tes3ProbeContext context;
+    std::string error;
+    Json report = {{"version", 1}, {"ok", false}, {"steps", Json::array()}};
+    const auto fail = [&](std::string message) {
+        report["error"] = std::move(message);
+        std::cout << report.dump(2) << '\n';
+        return 1;
+    };
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) return fail(error);
+    Json plan;
+    try { std::ifstream input(replayPath); input >> plan; }
+    catch (const std::exception& e) { return fail(e.what()); }
+    if (!plan.is_array() || plan.size() > 10000) return fail("replay requires an array of at most 10000 intents");
+    BethesdaSession session;
+    BethesdaSessionConfig config;
+    config.game = odai::importer::bethesda::BethesdaGame::Morrowind;
+    config.contentFingerprint = context.profile.fingerprint;
+    if (!session.configure(config, error) || !session.configureTes3Content(context.content, error)) return fail(error);
+    report["profile"] = context.profile.name;
+    report["fingerprint"] = context.profile.fingerprint;
+    RuntimeObject player;
+    player.id = session.playerObject(); player.base = makeTes3RecordKey("NPC_", "player");
+    player.kind = RuntimeObjectKind::Actor; player.actorValues.emplace();
+    if (const auto* definition = context.content->findActor("NPC_", "player")) {
+        auto& state = session.tes3().playerState();
+        state.gender = definition->gender; state.race = definition->race; state.actorClass = definition->actorClass;
+        state.numericFilters["level"] = definition->level;
+        for (const auto& [name, value] : definition->attributes) state.numericFilters[name] = value;
+        for (const auto& [name, value] : definition->skills) state.numericFilters[name] = value;
+        player.actorValues->health = player.actorValues->maxHealth = definition->health;
+        player.actorValues->magicka = player.actorValues->maxMagicka = definition->magicka;
+        player.actorValues->stamina = player.actorValues->maxStamina = definition->fatigue;
+    }
+    if (!session.world().addInitialObject(std::move(player), error)) return fail(error);
+    const auto findReference = [&](const Json& action) -> const Tes3ReferenceDefinition* {
+        const std::string wanted = normalizeTes3Symbol(action.value("id", std::string{}));
+        const std::string cell = normalizeTes3Symbol(action.value("cell", std::string{}));
+        const Tes3ReferenceDefinition* result = nullptr;
+        for (const auto& [id, reference] : context.content->references()) {
+            (void)id;
+            if (normalizeTes3Symbol(reference.baseId) != wanted ||
+                (!cell.empty() && normalizeTes3Symbol(reference.cell.textId) != cell)) continue;
+            if (action.contains("frmr") && reference.id.reference.localFormId != action.at("frmr").get<std::uint32_t>()) continue;
+            if (result != nullptr) { error = "ambiguous reference; supply cell or frmr: " + wanted; return nullptr; }
+            result = &reference;
+        }
+        if (result == nullptr) error = "reference not found: " + wanted;
+        return result;
+    };
+    const auto bind = [&](const Tes3ReferenceDefinition& reference) -> bool {
+        if (session.world().find(reference.id) != nullptr) return true;
+        RuntimeObject object;
+        object.id = reference.id; object.base = reference.base;
+        object.itemCondition = reference.itemCondition;
+        object.enabled = reference.enabled; object.persistent = true;
+        object.currentSpace.cell = reference.cell;
+        object.currentSpace.kind = reference.interior ? RuntimeSpaceKind::Interior : RuntimeSpaceKind::Exterior;
+        object.currentSpace.gridX = reference.cellGridX; object.currentSpace.gridZ = reference.cellGridZ;
+        object.transform.position = {reference.position[0], reference.position[2], -reference.position[1]};
+        const auto* actor = context.content->findActor(reference.base.recordType, reference.baseId);
+        if (actor != nullptr) {
+            object.kind = RuntimeObjectKind::Actor; object.actorValues.emplace();
+            object.actorValues->health = object.actorValues->maxHealth = actor->health;
+            object.actorValues->magicka = object.actorValues->maxMagicka = actor->magicka;
+            object.actorValues->stamina = object.actorValues->maxStamina = actor->fatigue;
+            for (const auto& [item, count] : actor->inventory) object.inventory.push_back({item, count});
+        } else object.kind = reference.base.recordType == "ACTI" ? RuntimeObjectKind::Activator : RuntimeObjectKind::Item;
+        if (!session.world().addInitialObject(std::move(object), error)) return false;
+        if (const auto* record = context.content->findRecord(reference.base.recordType, reference.base.textId)) {
+            for (const auto& sub : record->subrecords) {
+                if (sub.type != "SCRI") continue;
+                const std::string script(reinterpret_cast<const char*>(sub.data.data()),
+                    std::find(sub.data.begin(), sub.data.end(), 0) - sub.data.begin());
+                if (!script.empty() && session.tes3().scripts().start(script, reference.id, error, true, true) == 0)
+                    return false;
+            }
+        }
+        return true;
+    };
+    const auto arrive = [&](const Tes3ReferenceDefinition& reference) {
+        // Cell navigation is a separate capability. Place the headless player
+        // at the authored interaction location, preserving all quest state.
+        auto* playerObject = session.world().find(session.playerObject());
+        playerObject->currentSpace = session.world().find(reference.id)->currentSpace;
+        playerObject->transform = session.world().find(reference.id)->transform;
+        playerObject->transform.position[2] += 64;
+    };
+    const auto snapshot = [&]() {
+        Json state = {{"topics", session.tes3DialogueTopics()}, {"choices", Json::array()},
+            {"journal", Json::object()}, {"chronology_size", session.tes3().journal().chronology().size()}};
+        for (const auto& choice : session.tes3().dialogue().choices)
+            state["choices"].push_back({{"value", choice.value}, {"label", choice.label}});
+        for (const auto& [key, quest] : session.tes3().journal().quests()) {
+            (void)key; state["journal"][quest.id] = quest.currentIndex;
+        }
+        return state;
+    };
+    try {
+    for (const auto& action : plan) {
+        if (!action.is_object()) return fail("each replay intent must be an object");
+        Json step = {{"intent", action}};
+        const std::string op = action.value("op", std::string{});
+        Tes3DialogueResponse response;
+        bool accepted = false;
+        error.clear();
+        if (op == "talk" || op == "activate" || op == "loot") {
+            const auto* reference = findReference(action);
+            if (reference == nullptr || !bind(*reference)) return fail(error);
+            session.tes3().endDialogue();
+            arrive(*reference);
+            if (op == "talk") {
+                Tes3DialogueActorState actor;
+                actor.id = reference->baseId; actor.object = reference->id; actor.cell = reference->cell.textId;
+                response = session.startTes3Dialogue(actor, session.tes3().playerState());
+                accepted = response.accepted;
+            } else if (op == "activate") accepted = session.activateTes3Reference(reference->id, false, error);
+            else {
+                const auto* actor = session.world().find(reference->id);
+                if (!actor->actorValues || !actor->actorValues->dead) return fail("loot requires a dead actor");
+                for (const auto& item : actor->inventory) {
+                    if (item.count <= 0) continue;
+                    WorldCommand transfer;
+                    transfer.type = WorldCommandType::TransferItem;
+                    transfer.target = reference->id; transfer.other = session.playerObject();
+                    transfer.item = item.item; transfer.itemCount = item.count;
+                    (void)session.world().queue(transfer);
+                }
+                accepted = true;
+            }
+        } else if (op == "topic") { response = session.selectTes3Topic(action.at("id").get<std::string>()); accepted = response.accepted; }
+        else if (op == "choice") { response = session.answerTes3Choice(action.at("value").get<int>()); accepted = response.accepted; }
+        else if (op == "wait" || op == "inspect") accepted = true;
+        else if (op == "save_reload") {
+            const auto path = std::filesystem::temp_directory_path() / "odai-tes3-dialogue-replay.odai";
+            SaveLoadReport saved;
+            const auto hash = session.deterministicHash();
+            accepted = saveOdaiGameAtomic(path, session, error) && loadOdaiGame(path, session, {}, saved, error) &&
+                session.deterministicHash() == hash;
+        } else return fail("unsupported gameplay intent: " + op);
+        step["accepted"] = accepted;
+        step["info"] = response.info.toString();
+        step["diagnostics"] = response.diagnostics;
+        if (!error.empty()) step["error"] = error;
+        bool passed = accepted == action.value("accepted", true);
+        if (action.contains("info")) passed &= response.info.textId == action.at("info").get<std::string>();
+        if (accepted && op != "inspect" && op != "save_reload") {
+            const int ticks = op == "wait" ? action.value("ticks", 1) : 1;
+            if (ticks < 1 || ticks > 10000) return fail("wait tick count is outside 1..10000");
+            for (int tick = 0; tick < ticks; ++tick) {
+                const auto advanced = session.advance(1.0 / 60.0);
+                if (!advanced.diagnostics.empty()) { step["step_diagnostics"] = advanced.diagnostics; passed = false; break; }
+            }
+        }
+        if (action.contains("journal")) {
+            for (const auto& [id, index] : action.at("journal").items()) {
+                const auto* quest = context.content->findDialogue(id);
+                passed &= quest != nullptr && quest->type == Tes3DialogueType::Journal &&
+                    session.tes3().journal().index(id) == index.get<int>();
+            }
+        }
+        step["state"] = snapshot();
+        step["passed"] = passed;
+        report["steps"].push_back(step);
+        if (!passed) return fail("replay assertion failed at step " + std::to_string(report["steps"].size()));
+    }
+    } catch (const std::exception& e) { return fail("invalid replay intent: " + std::string(e.what())); }
+    report["ok"] = true;
+    report["scope"] = "authored dialogue and gameplay intents; cell navigation is outside this trace";
+    std::cout << report.dump(2) << '\n';
     return 0;
 }
 
@@ -7238,6 +7754,492 @@ int tes3QuestSuiteCommand(
         {"runtime_blockers", nlohmann::json::array({
             "authored event-driven transition explorer is not complete"})}}).dump(2) << '\n';
     return selectionFound ? 0 : 1;
+}
+
+int tes3RouteScriptCheckCommand(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    const std::vector<std::string> prefixes = {
+        "a1_", "a2_", "b1_", "b2_", "b3_", "b4_", "b5_", "b6_",
+        "b7_", "b8_", "c0_", "c2_", "c3_"};
+    std::set<std::string> quests;
+    for (const auto& [key, dialogue] : context.content->dialogues()) {
+        (void)key;
+        if (dialogue.type != Tes3DialogueType::Journal) continue;
+        const std::string id = normalizeTes3Symbol(dialogue.id);
+        if (std::any_of(prefixes.begin(), prefixes.end(), [&](const std::string& prefix) {
+            return id.starts_with(prefix);
+        })) quests.insert(id);
+    }
+    const auto& programs = context.runtime.scripts().programs();
+    std::set<std::string> reached;
+    std::vector<std::string> queue;
+    for (const auto& [id, program] : programs) {
+        (void)program;
+        if (id.starts_with("chargen") && reached.insert(id).second) {
+            queue.push_back(id);
+        }
+    }
+    for (const auto& [type, id] : std::array<std::pair<std::string_view,
+             std::string_view>, 4>{{{"ARMO", "wraithguard"}, {"WEAP", "sunder"},
+                                  {"WEAP", "keening"}, {"CREA", "heart_akulakhan"}}}) {
+        const Tes3NamedRecord* item = context.content->findRecord(type, id);
+        if (item == nullptr) continue;
+        for (const Tes3SubrecordData& subrecord : item->subrecords) {
+            if (subrecord.type != "SCRI") continue;
+            const auto end = std::find(subrecord.data.begin(), subrecord.data.end(), 0u);
+            const std::string script = normalizeTes3Symbol(
+                std::string(subrecord.data.begin(), end));
+            if (programs.contains(script) && reached.insert(script).second)
+                queue.push_back(script);
+        }
+    }
+    for (const auto& [id, program] : programs) {
+        bool touchesRoute = false;
+        for (const Tes3Instruction& instruction : program.instructions) {
+            if (instruction.op == Tes3OpCode::Call &&
+                (instruction.command == "journal" ||
+                 instruction.command == "setjournalindex" ||
+                 instruction.command == "getjournalindex") &&
+                !instruction.arguments.empty()) {
+                std::string quest = instruction.arguments.front();
+                quest.erase(std::remove(quest.begin(), quest.end(), '"'), quest.end());
+                touchesRoute |= quests.contains(normalizeTes3Symbol(quest));
+            }
+            if (!instruction.expression.empty()) {
+                const std::string expression = normalizeTes3Symbol(instruction.expression);
+                touchesRoute |= std::any_of(quests.begin(), quests.end(),
+                    [&](const std::string& quest) {
+                        return expression.find(quest) != std::string::npos;
+                    });
+            }
+        }
+        if (touchesRoute && reached.insert(id).second) queue.push_back(id);
+    }
+    std::size_t dialogueSeedTopics = 0u;
+    for (const auto& [key, dialogue] : context.content->dialogues()) {
+        (void)key;
+        const bool routeCondition = std::any_of(dialogue.infos.begin(), dialogue.infos.end(),
+            [&](const Tes3DialogueInfo& info) {
+                return std::any_of(info.conditions.begin(), info.conditions.end(),
+                    [&](const Tes3DialogueCondition& condition) {
+                        return condition.function == Tes3ConditionFunction::Journal &&
+                            quests.contains(normalizeTes3Symbol(condition.variable));
+                    });
+            });
+        if (!routeCondition) continue;
+        ++dialogueSeedTopics;
+        for (const Tes3DialogueInfo& info : dialogue.infos) {
+            const bool infoRouteCondition = std::any_of(info.conditions.begin(),
+                info.conditions.end(), [&](const Tes3DialogueCondition& condition) {
+                    return condition.function == Tes3ConditionFunction::Journal &&
+                        quests.contains(normalizeTes3Symbol(condition.variable));
+                });
+            if (!infoRouteCondition) continue;
+            if (!info.resultScript.empty()) {
+                const std::string id = normalizeTes3Symbol(
+                    "dialogue_result:" + info.record.toString());
+                if (programs.contains(id) && reached.insert(id).second) queue.push_back(id);
+            }
+            if (info.actor.empty()) continue;
+            const std::string actorId = normalizeTes3Symbol(info.actor);
+            for (const auto& [actorKey, actor] : context.content->actors()) {
+                if (actorKey.textId != actorId || !actor.script.valid()) continue;
+                const std::string id = normalizeTes3Symbol(actor.script.textId);
+                if (programs.contains(id) && reached.insert(id).second) queue.push_back(id);
+            }
+        }
+    }
+    std::map<std::string, std::string> attachedScriptByBase;
+    for (const auto& [key, record] : context.content->namedRecords()) {
+        for (const Tes3SubrecordData& subrecord : record.subrecords) {
+            if (subrecord.type != "SCRI") continue;
+            const auto end = std::find(subrecord.data.begin(), subrecord.data.end(), 0u);
+            const std::string script = normalizeTes3Symbol(
+                std::string(subrecord.data.begin(), end));
+            if (programs.contains(script)) attachedScriptByBase[key.textId] = script;
+        }
+    }
+    for (const auto& [key, actor] : context.content->actors()) {
+        if (actor.script.valid() && programs.contains(normalizeTes3Symbol(actor.script.textId)))
+            attachedScriptByBase[key.textId] = normalizeTes3Symbol(actor.script.textId);
+    }
+    std::set<std::string> unresolvedStarts;
+    for (std::size_t cursor = 0u; cursor < queue.size(); ++cursor) {
+        const Tes3ScriptProgram& program = programs.at(queue[cursor]);
+        for (const Tes3Instruction& instruction : program.instructions) {
+            const auto includeAttached = [&](std::string baseId) {
+                baseId.erase(std::remove(baseId.begin(), baseId.end(), '"'), baseId.end());
+                const auto attached = attachedScriptByBase.find(normalizeTes3Symbol(baseId));
+                if (attached != attachedScriptByBase.end() &&
+                    reached.insert(attached->second).second) queue.push_back(attached->second);
+            };
+            if (!instruction.target.empty()) includeAttached(instruction.target);
+            if (instruction.command == "activate" || instruction.command == "enable" ||
+                instruction.command == "disable" || instruction.command == "placeatpc" ||
+                instruction.command == "placeatme") {
+                for (const std::string& argument : instruction.arguments)
+                    includeAttached(argument);
+            }
+            if (instruction.op != Tes3OpCode::Call ||
+                instruction.command != "startscript" || instruction.arguments.empty()) continue;
+            std::string started = instruction.arguments.front();
+            started.erase(std::remove(started.begin(), started.end(), '"'), started.end());
+            started = normalizeTes3Symbol(started);
+            if (!programs.contains(started)) unresolvedStarts.insert(started);
+            else if (reached.insert(started).second) queue.push_back(started);
+        }
+    }
+    std::map<std::string, std::uint64_t> commandUse;
+    std::map<std::string, std::set<std::string>> blockedPrograms;
+    std::map<std::string, std::string> blockedDialogueTopics;
+    std::set<std::string> castSpells;
+    std::set<std::string> addedSpells;
+    for (const std::string& id : reached) {
+        const Tes3ScriptProgram& program = programs.at(id);
+        for (const std::string& command : program.commands) ++commandUse[command];
+        if (!program.unsupportedOperations.empty()) {
+            blockedPrograms.emplace(id, program.unsupportedOperations);
+            if (id.starts_with("dialogue_result:")) {
+                for (const auto& [key, dialogue] : context.content->dialogues()) {
+                    (void)key;
+                    const auto found = std::find_if(dialogue.infos.begin(), dialogue.infos.end(),
+                        [&](const Tes3DialogueInfo& info) {
+                            return normalizeTes3Symbol("dialogue_result:" +
+                                info.record.toString()) == id;
+                        });
+                    if (found != dialogue.infos.end()) {
+                        blockedDialogueTopics[id] = dialogue.id;
+                        break;
+                    }
+                }
+            }
+        }
+        for (const Tes3Instruction& instruction : program.instructions) {
+            if (instruction.op != Tes3OpCode::Call || instruction.arguments.empty()) continue;
+            if (instruction.command == "cast") castSpells.insert(instruction.arguments.front());
+            if (instruction.command == "addspell") addedSpells.insert(instruction.arguments.front());
+        }
+    }
+    std::cout << nlohmann::json({{"version", 1}, {"ok", true},
+        {"profile", context.profile.name}, {"fingerprint", context.profile.fingerprint},
+        {"seed_quest_count", quests.size()}, {"dialogue_seed_topics", dialogueSeedTopics},
+        {"route_program_count", reached.size()},
+        {"programs", reached}, {"command_use", commandUse},
+        {"blocked_programs", blockedPrograms},
+        {"blocked_dialogue_topics", blockedDialogueTopics},
+        {"unresolved_starts", unresolvedStarts},
+        {"cast_spells", castSpells}, {"added_spells", addedSpells},
+        {"scope_note", "Journal references and conditions, related dialogue results and actor scripts, character generation, three required artifacts, and literal StartScript closure; full event-driven route verification remains separate"}}).dump(2) << '\n';
+    return 0;
+}
+
+int tes3RouteCheckpointsCommand(
+    const std::filesystem::path& source, int argc, char** argv, int optionStart) {
+    using namespace odai::bethesda;
+    Tes3ProbeContext context;
+    std::string error;
+    if (!loadTes3ProbeContext(source, argc, argv, optionStart, context, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    BethesdaSession session;
+    BethesdaSessionConfig config;
+    config.game = odai::importer::bethesda::BethesdaGame::Morrowind;
+    config.contentFingerprint = context.profile.fingerprint;
+    if (!session.configure(config, error) ||
+        !session.configureTes3Content(context.content, error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    RuntimeObject player;
+    player.id = session.playerObject();
+    player.base = makeTes3RecordKey("NPC_", "player");
+    player.kind = RuntimeObjectKind::Actor;
+    player.actorValues.emplace();
+    player.inventory.push_back({makeTes3RecordKey("SPEL", "corprus"), 1, false});
+    player.inventory.push_back({makeTes3RecordKey("SPEL", "ash-chancre"), 1, false});
+    player.inventory.push_back({makeTes3RecordKey("ARMO", "wraithguard"), 1, false});
+    player.inventory.push_back({makeTes3RecordKey("WEAP", "sunder"), 1, false});
+    player.inventory.push_back({makeTes3RecordKey("WEAP", "keening"), 1, false});
+    if (!session.world().addInitialObject(std::move(player), error)) {
+        std::cout << nlohmann::json({{"ok", false}, {"error", error}}).dump(2) << '\n';
+        return 1;
+    }
+    (void)session.advance(1.0 / 60.0);
+    nlohmann::json checkpoints = nlohmann::json::array();
+    const std::uint64_t openingThread = session.tes3().scripts().start(
+        "CharGen", session.playerObject(), error);
+    const BethesdaSessionStep openingStep = session.advance(1.0 / 60.0);
+    const auto opening = session.tes3().scripts().threads().find(openingThread);
+    const RuntimeObject* openingPlayer = session.world().find(session.playerObject());
+    const bool openingOk = openingThread != 0u &&
+        opening != session.tes3().scripts().threads().end() &&
+        opening->second.state == Tes3ThreadState::Completed &&
+        openingStep.diagnostics.empty() && openingPlayer != nullptr &&
+        openingPlayer->currentSpace.cell ==
+            makeTes3RecordKey("CELL", "Imperial Prison Ship") &&
+        session.tes3().scripts().globals().contains("chargenstate") &&
+        session.tes3().scripts().globals().at("chargenstate").number == 10.0;
+    checkpoints.push_back({{"name", "character_generation_script"}, {"ok", openingOk},
+        {"thread_error", opening == session.tes3().scripts().threads().end()
+            ? error : opening->second.error}, {"diagnostics", openingStep.diagnostics}});
+    RuntimeObject nameActor;
+    nameActor.id = ObjectId::persistent(makeTes3ReferenceKey(
+        "Morrowind.esm", 0x7fff0001u));
+    nameActor.base = makeTes3RecordKey("NPC_", "chargen name npc");
+    nameActor.kind = RuntimeObjectKind::Actor;
+    nameActor.actorValues.emplace();
+    nameActor.transform = session.world().find(session.playerObject())->transform;
+    nameActor.currentSpace.cell = makeTes3RecordKey("CELL", "Imperial Prison Ship");
+    const bool nameActorAdded = session.world().addInitialObject(nameActor, error);
+    const std::uint64_t nameThread = nameActorAdded ? session.tes3().scripts().start(
+        "CharGenNameNPC", nameActor.id, error, true) : 0u;
+    std::vector<std::string> nameDiagnostics;
+    int nameTicks = 0;
+    while (nameThread != 0u && nameTicks < 600 &&
+           session.tes3().playerState().numericFilters["chargen:menu"] == 0.0) {
+        const BethesdaSessionStep step = session.advance(1.0 / 60.0);
+        nameDiagnostics.insert(nameDiagnostics.end(),
+            step.diagnostics.begin(), step.diagnostics.end());
+        ++nameTicks;
+        if (!step.diagnostics.empty()) break;
+    }
+    const auto nameScript = session.tes3().scripts().threads().find(nameThread);
+    const bool nameMenuOk = nameThread != 0u && nameDiagnostics.empty() &&
+        nameScript != session.tes3().scripts().threads().end() &&
+        nameScript->second.locals.at("state").number == 20.0 &&
+        session.tes3().playerState().numericFilters["chargen:menu"] == 1.0;
+    checkpoints.push_back({{"name", "character_name_voice_and_menu"}, {"ok", nameMenuOk},
+        {"ticks", nameTicks}, {"diagnostics", nameDiagnostics}});
+    session.tes3().playerState().name = "Nerevarine";
+    session.tes3().playerState().numericFilters["chargen:menu"] = 0.0;
+    if (nameThread != 0u) session.tes3().scripts().threadsForRestore().at(nameThread).repeat = false;
+    std::string cureProgram;
+    for (const auto& [id, program] : session.tes3().scripts().programs()) {
+        if (!id.starts_with("dialogue_result:")) continue;
+        const bool removesCorprus = std::any_of(program.instructions.begin(),
+            program.instructions.end(), [](const Tes3Instruction& instruction) {
+                if (instruction.op != Tes3OpCode::Call ||
+                    instruction.command != "removespell" ||
+                    instruction.arguments.empty()) return false;
+                std::string spell = instruction.arguments.front();
+                spell.erase(std::remove(spell.begin(), spell.end(), '"'), spell.end());
+                return normalizeTes3Symbol(spell) == "corprus";
+            });
+        if (removesCorprus) { cureProgram = id; break; }
+    }
+    if (cureProgram.empty()) {
+        checkpoints.push_back({{"name", "corprus_cure"}, {"ok", false},
+            {"error", "no authored result script removes Corprus"}});
+    } else {
+        const std::uint64_t threadId = session.tes3().scripts().start(
+            cureProgram, session.playerObject(), error);
+        const BethesdaSessionStep step = session.advance(1.0 / 60.0);
+        const auto thread = session.tes3().scripts().threads().find(threadId);
+        const auto& inventory = session.tes3().playerState().inventory;
+        const bool ok = threadId != 0u && thread != session.tes3().scripts().threads().end() &&
+            thread->second.state == Tes3ThreadState::Completed && step.diagnostics.empty() &&
+            session.tes3().journal().index("A2_3_CorprusCure") == 50 &&
+            !inventory.contains(makeTes3RecordKey("SPEL", "corprus")) &&
+            !inventory.contains(makeTes3RecordKey("SPEL", "ash-chancre")) &&
+            inventory.contains(makeTes3RecordKey("SPEL", "corprus immunity")) &&
+            inventory.contains(makeTes3RecordKey("SPEL", "blight disease immunity")) &&
+            inventory.contains(makeTes3RecordKey("SPEL", "common disease immunity"));
+        checkpoints.push_back({{"name", "corprus_cure"}, {"ok", ok},
+            {"program", cureProgram}, {"journal_index",
+                session.tes3().journal().index("A2_3_CorprusCure")},
+            {"thread_error", thread == session.tes3().scripts().threads().end()
+                ? error : thread->second.error}, {"diagnostics", step.diagnostics}});
+    }
+    const std::uint64_t endThread = session.tes3().scripts().start(
+        "EndGame", session.playerObject(), error);
+    const BethesdaSessionStep endStep = session.advance(1.0 / 60.0);
+    const auto ending = session.tes3().scripts().threads().find(endThread);
+    const bool endingOk = endThread != 0u && ending != session.tes3().scripts().threads().end() &&
+        ending->second.state == Tes3ThreadState::Completed && endStep.diagnostics.empty() &&
+        session.tes3().journal().index("C3_DestroyDagoth") == 20 &&
+        session.tes3().scripts().globals().contains("destroyblight") &&
+        session.tes3().scripts().globals().at("destroyblight").number == -1.0 &&
+        session.tes3().playerState().numericFilters.contains("reputation") &&
+        session.tes3().playerState().numericFilters.at("reputation") == 10.0;
+    checkpoints.push_back({{"name", "finale_endgame"}, {"ok", endingOk},
+        {"journal_index", session.tes3().journal().index("C3_DestroyDagoth")},
+        {"thread_error", ending == session.tes3().scripts().threads().end()
+            ? error : ending->second.error}, {"diagnostics", endStep.diagnostics}});
+    const bool equipAccepted = session.useInventoryItem(
+        session.playerObject(), makeTes3RecordKey("ARMO", "wraithguard"), error);
+    const BethesdaSessionStep artifactStep = session.advance(1.0 / 60.0);
+    const BethesdaSessionStep artifactScriptStep = session.advance(1.0 / 60.0);
+    const auto artifact = std::find_if(session.tes3().scripts().threads().begin(),
+        session.tes3().scripts().threads().end(), [](const auto& pair) {
+            return pair.second.program == "wraithguardscript";
+        });
+    const RuntimeObject* artifactOwner = session.world().find(session.playerObject());
+    const bool artifactEquipped = artifactOwner != nullptr &&
+        std::any_of(artifactOwner->inventory.begin(), artifactOwner->inventory.end(),
+            [](const InventoryEntry& entry) {
+                return entry.item == makeTes3RecordKey("ARMO", "wraithguard") &&
+                    entry.equipped;
+            });
+    const bool artifactOk = equipAccepted && artifactEquipped &&
+        artifact != session.tes3().scripts().threads().end() &&
+        artifact->second.state == Tes3ThreadState::Completed &&
+        artifactStep.diagnostics.empty() && artifactScriptStep.diagnostics.empty() &&
+        session.tes3().scripts().globals().contains("wraithguardequipped") &&
+        session.tes3().scripts().globals().at("wraithguardequipped").number == 1.0;
+    checkpoints.push_back({{"name", "wraithguard_equip_script"}, {"ok", artifactOk},
+        {"thread_error", artifact == session.tes3().scripts().threads().end()
+            ? error : artifact->second.error}, {"diagnostics", artifactStep.diagnostics},
+        {"script_diagnostics", artifactScriptStep.diagnostics}});
+    const double artifactHealth = session.world().find(session.playerObject())->actorValues->health;
+    const bool sunderAccepted = session.useInventoryItem(
+        session.playerObject(), makeTes3RecordKey("WEAP", "sunder"), error);
+    const BethesdaSessionStep sunderEquipStep = session.advance(1.0 / 60.0);
+    const BethesdaSessionStep sunderScriptStep = session.advance(1.0 / 60.0);
+    std::vector<std::string> sunderTimedDiagnostics;
+    for (int tick = 0; tick < 70; ++tick) {
+        const BethesdaSessionStep timed = session.advance(1.0 / 60.0);
+        sunderTimedDiagnostics.insert(sunderTimedDiagnostics.end(),
+            timed.diagnostics.begin(), timed.diagnostics.end());
+    }
+    const bool sunderOk = sunderAccepted && sunderEquipStep.diagnostics.empty() &&
+        sunderScriptStep.diagnostics.empty() && sunderTimedDiagnostics.empty() &&
+        session.tes3().journal().index("C0_Act_C") == 15 &&
+        session.world().find(session.playerObject())->actorValues->health == artifactHealth;
+    const auto sunderThread = std::find_if(session.tes3().scripts().threads().begin(),
+        session.tes3().scripts().threads().end(), [](const auto& pair) {
+            return pair.second.program == "ouch_sunder";
+        });
+    checkpoints.push_back({{"name", "sunder_with_wraithguard"}, {"ok", sunderOk},
+        {"journal_index", session.tes3().journal().index("C0_Act_C")},
+        {"inventory_count", session.tes3().playerState().inventory.contains(
+            makeTes3RecordKey("WEAP", "sunder"))
+                ? session.tes3().playerState().inventory.at(makeTes3RecordKey("WEAP", "sunder")) : 0},
+        {"script_started", std::any_of(session.tes3().scripts().threads().begin(),
+            session.tes3().scripts().threads().end(), [](const auto& pair) {
+                return pair.second.program == "ouch_sunder";
+            })},
+        {"onpcequip", sunderThread == session.tes3().scripts().threads().end()
+            ? -1.0 : sunderThread->second.locals.at("onpcequip").number},
+        {"doonce", sunderThread == session.tes3().scripts().threads().end()
+            ? -1.0 : sunderThread->second.locals.at("doonce").number},
+        {"diagnostics", sunderTimedDiagnostics}});
+    const bool keeningAccepted = session.useInventoryItem(
+        session.playerObject(), makeTes3RecordKey("WEAP", "keening"), error);
+    const BethesdaSessionStep keeningEquipStep = session.advance(1.0 / 60.0);
+    const BethesdaSessionStep keeningScriptStep = session.advance(1.0 / 60.0);
+    std::vector<std::string> keeningTimedDiagnostics;
+    for (int tick = 0; tick < 70; ++tick) {
+        const BethesdaSessionStep timed = session.advance(1.0 / 60.0);
+        keeningTimedDiagnostics.insert(keeningTimedDiagnostics.end(),
+            timed.diagnostics.begin(), timed.diagnostics.end());
+    }
+    const bool keeningOk = keeningAccepted && keeningEquipStep.diagnostics.empty() &&
+        keeningScriptStep.diagnostics.empty() && keeningTimedDiagnostics.empty() &&
+        std::any_of(session.tes3().journal().chronology().begin(),
+            session.tes3().journal().chronology().end(), [](const Tes3JournalVisit& visit) {
+                return visit.quest == makeTes3RecordKey("DIAL", "C0_Act_C") &&
+                    visit.index == 10;
+            }) &&
+        session.world().find(session.playerObject())->actorValues->health == artifactHealth;
+    checkpoints.push_back({{"name", "keening_with_wraithguard"}, {"ok", keeningOk},
+        {"script_started", std::any_of(session.tes3().scripts().threads().begin(),
+            session.tes3().scripts().threads().end(), [](const auto& pair) {
+                return pair.second.program == "ouch_keening";
+            })},
+        {"diagnostics", keeningTimedDiagnostics}});
+    BethesdaSession heartSession;
+    bool heartReady = heartSession.configure(config, error) &&
+        heartSession.configureTes3Content(context.content, error);
+    ObjectId heartId;
+    ObjectId dagothId;
+    for (const auto& [id, reference] : context.content->references()) {
+        if (reference.baseId == "heart_akulakhan") heartId = id;
+        if (reference.baseId == "dagoth_ur_2") dagothId = id;
+    }
+    heartReady = heartReady && heartId.valid() && dagothId.valid();
+    if (heartReady) {
+        RuntimeObject heartPlayer;
+        heartPlayer.id = heartSession.playerObject();
+        heartPlayer.base = makeTes3RecordKey("NPC_", "player");
+        heartPlayer.kind = RuntimeObjectKind::Actor;
+        heartPlayer.actorValues.emplace();
+        heartPlayer.transform.position = {2000.0, 0.0, 0.0};
+        RuntimeObject heart;
+        heart.id = heartId;
+        heart.base = makeTes3RecordKey("CREA", "heart_akulakhan");
+        heart.kind = RuntimeObjectKind::Actor;
+        heart.actorValues.emplace();
+        RuntimeObject dagoth;
+        dagoth.id = dagothId;
+        dagoth.base = makeTes3RecordKey("CREA", "dagoth_ur_2");
+        dagoth.kind = RuntimeObjectKind::Actor;
+        dagoth.actorValues.emplace();
+        heartReady = heartSession.world().addInitialObject(std::move(heartPlayer), error) &&
+            heartSession.world().addInitialObject(std::move(heart), error) &&
+            heartSession.world().addInitialObject(std::move(dagoth), error);
+    }
+    std::vector<std::string> heartDiagnostics;
+    bool dagothShieldedBeforeHits = false;
+    std::uint64_t heartThread = 0u;
+    std::uint64_t dagothThread = 0u;
+    if (heartReady) {
+        heartThread = heartSession.tes3().scripts().start(
+            "LorkhanHeart", heartId, error, true, true);
+        dagothThread = heartSession.tes3().scripts().start(
+            "DagothUrCreature2", dagothId, error, true, true);
+        heartReady = heartThread != 0u && dagothThread != 0u;
+    }
+    if (heartReady) {
+        for (int tick = 0; tick < 70; ++tick) {
+            const auto step = heartSession.advance(1.0 / 60.0);
+            heartDiagnostics.insert(heartDiagnostics.end(),
+                step.diagnostics.begin(), step.diagnostics.end());
+            if (!heartDiagnostics.empty()) break;
+        }
+        dagothShieldedBeforeHits = heartSession.tes3().activeSpells().contains(dagothId);
+        heartSession.dispatchTes3GameplayEvent("hitonme", heartId,
+            Tes3Value::fromString("sunder"));
+        const auto sunder = heartSession.advance(1.0 / 60.0);
+        heartDiagnostics.insert(heartDiagnostics.end(),
+            sunder.diagnostics.begin(), sunder.diagnostics.end());
+        for (int hit = 0; hit < 5 && heartDiagnostics.empty(); ++hit) {
+            heartSession.dispatchTes3GameplayEvent("hitonme", heartId,
+                Tes3Value::fromString("keening"));
+            const auto step = heartSession.advance(1.0 / 60.0);
+            heartDiagnostics.insert(heartDiagnostics.end(),
+                step.diagnostics.begin(), step.diagnostics.end());
+        }
+    }
+    const auto heartState = heartSession.tes3().scripts().threads().find(heartThread);
+    const bool heartOk = heartReady && heartDiagnostics.empty() &&
+        heartState != heartSession.tes3().scripts().threads().end() &&
+        heartState->second.locals.at("counthits").number == 5.0 &&
+        heartSession.tes3().scripts().globals().contains("heartdestroyed") &&
+        heartSession.tes3().scripts().globals().at("heartdestroyed").number == 1.0 &&
+        dagothShieldedBeforeHits &&
+        !heartSession.tes3().activeSpells().contains(dagothId);
+    checkpoints.push_back({{"name", "heart_sunder_keening_sequence"}, {"ok", heartOk},
+        {"count_hits", heartState == heartSession.tes3().scripts().threads().end()
+            ? -1.0 : heartState->second.locals.at("counthits").number},
+        {"heart_destroyed", heartSession.tes3().scripts().globals().contains("heartdestroyed")
+            ? heartSession.tes3().scripts().globals().at("heartdestroyed").number : -1.0},
+        {"dagoth_shields_before_hits", dagothShieldedBeforeHits},
+        {"dagoth_shields_after_hits", heartSession.tes3().activeSpells().contains(dagothId)},
+        {"diagnostics", heartDiagnostics}, {"error", heartReady ? "" : error}});
+    const bool ok = std::all_of(checkpoints.begin(), checkpoints.end(),
+        [](const nlohmann::json& checkpoint) { return checkpoint.at("ok").get<bool>(); });
+    std::cout << nlohmann::json({{"version", 1}, {"ok", ok},
+        {"profile", context.profile.name}, {"fingerprint", context.profile.fingerprint},
+        {"checkpoints", std::move(checkpoints)}}).dump(2) << '\n';
+    return ok ? 0 : 1;
 }
 
 struct Tes3VirtualDoor {
@@ -7833,6 +8835,9 @@ int main(int argc, char** argv) {
     if (argc >= 4 && std::strcmp(argv[1], "--tes3-texturecheck") == 0) {
         return tes3TextureCheckCommand(argv[2], argv[3], argc, argv, 4);
     }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-recordcheck") == 0) {
+        return tes3RecordCheckCommand(argv[2], argv[3], argc, argv, 4);
+    }
     if (argc >= 3 && std::strcmp(argv[1], "--tes3-scriptcheck") == 0) {
         return tes3ScriptCheckCommand(argv[2], argc, argv, 3);
     }
@@ -7841,6 +8846,9 @@ int main(int argc, char** argv) {
     }
     if (argc >= 4 && std::strcmp(argv[1], "--tes3-spell-trace") == 0) {
         return tes3SpellTraceCommand(argv[2], argv[3], argc, argv, 4);
+    }
+    if (argc >= 4 && std::strcmp(argv[1], "--tes3-dialogue-replay") == 0) {
+        return tes3DialogueReplayCommand(argv[2], argv[3], argc, argv, 4);
     }
     if (argc >= 4 && std::strcmp(argv[1], "--tes3-dialogue-trace") == 0) {
         return tes3DialogueTraceCommand(argv[2], argv[3], argc, argv, 4);
@@ -7854,6 +8862,12 @@ int main(int argc, char** argv) {
             if (std::strcmp(argv[i], "--quest") == 0) quest = argv[i + 1];
         }
         return tes3QuestSuiteCommand(argv[2], std::move(quest), argc, argv, 3);
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--tes3-route-scriptcheck") == 0) {
+        return tes3RouteScriptCheckCommand(argv[2], argc, argv, 3);
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--tes3-route-checkpoints") == 0) {
+        return tes3RouteCheckpointsCommand(argv[2], argc, argv, 3);
     }
     if (argc >= 3 && std::strcmp(argv[1], "--tes3-virtual-player") == 0) {
         return tes3VirtualPlayerCommand(argv[2], argc, argv, 3);

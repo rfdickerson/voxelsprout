@@ -6,6 +6,7 @@
 | RENDER-TERRAIN-002 | Render Morrowind LAND terrain textures | Implemented |
 | RENDER-TEX-001 | TES3 object and terrain textures, including high-resolution replacements | Implemented — DDS/TGA/BMP, authored UV/clamp/tint/alpha, full/reduced resolution, 2K/4K/8K pixels, cache/residency and strict zero-missing audits pass; see [verification](validation/RENDER-TEX-001.md). |
 | RENDER-WATER-001 | Basic world water rendering | Partial — exterior/interior water, renderer toggle, deterministic animation, packaged normal resource, terrain depth checks, validation smoke, and performance baseline pass; a portable visual golden with clear normal and specular detail remains. |
+| RENDER-GI-001 | Global illumination | Partial — deterministic linear red/blue transfer, blocker, off-screen retention, light response, eviction and grid movement pass Vulkan validation; full optimized CTest 60/60. TES3 AMBI and compressed diffuse color feed the existing volume path. Comparison probes use pinned fly cameras at native DPI. Real-scene source/receiver visual acceptance, traversal/transition history evidence, and the full PERF-001 pacing gate remain; see the capability for local measurements. |
 
 # Performance
 
@@ -26,13 +27,21 @@
 
 | Capability | Description | Status |
 |---|---|---|
-| MECH-001 | Player inventory: view and drop items | Partial — gameplay drop and inventory UI are wired; spawned items still need imported-scene rendering and automated UI input verification. |
-| MECH-002 | Play and complete Morrowind's main quest | Partial — live player inventory now drives TES3 dialogue item conditions, including scripted transfers; character generation, quest-required gameplay behavior, and an end-to-end base-game playthrough remain. |
-| MECH-TES3-001 | Morrowind new game and character generation | Partial — fresh launch runs `CharGen` aboard the prison ship and opening state survives save/load; character menus, authored progression, camera placement, package gate, and Seyda Neen completion remain. |
-| MECH-TES3-002 | Main quest dialogue and journal conditions | Planned |
-| MECH-TES3-003 | Main quest MWScript commands and effects | Planned |
-| MECH-TES3-004 | Main quest items and equipment | Planned |
+| MECH-001 | Player inventory: view and drop items | Implemented |
+| MECH-002 | Play and complete Morrowind's main quest | Partial — live inventory drives TES3 dialogue item conditions and scripted transfers; opening guard movement and tutorial gates pass focused tests, and a base-game ship start reaches name entry. Character-generation release, quest-required gameplay behavior, and an end-to-end playthrough remain. |
+| MECH-TES3-001 | Morrowind new game and character generation | Partial — fresh launch runs `CharGen`, character menus and persistence are wired, BODY appearance choices and authored input locks are available. Guard coordinate movement/arrival and tutorial gates have synthetic coverage; corrected ship floor placement reaches retail name entry; 66 CTest targets pass. Ordinary-input progression through the Census Office, package gate, camera facing, and Seyda Neen completion remain. |
+| MECH-TES3-002 | Main quest dialogue and journal conditions | Partial — authored filters, faction/clothing/stat inputs, result ordering, journal persistence, and a 35-step retail opening replay pass; normal leveling and the remaining retail main-quest gate trace remain. |
+| MECH-TES3-003 | Main quest MWScript commands and effects | Partial — the 1,609-program local route closure has no blocked operations or unresolved starts; eight isolated base-game opening, Corprus, artifact, Heart, and finale checkpoints and 60 CTest tests pass. Dialogue-result rollback spans MessageBox suspension. Event-driven standard-route verification remains. |
+| MECH-TES3-004 | Main quest items and equipment | Partial — scripted world pickup, duplicate prevention, inventory equip, artifact script events, and save/load fixtures pass; normal-input route acquisition, reading, and final use remain. |
 | MECH-TES3-005 | Main quest encounters and finale | Planned |
+| MECH-TES3-006 | Morrowind player skill advancement and leveling | Partial — progression rules, live run/jump/melee uses, training/books, rest/attribute UI, and save/load pass synthetic verification; 65 CTest targets and local retail record initialization pass. Remaining skill-use producers, complete rest/service parity, and normal-input level-3/Caius verification remain. |
+| MECH-TES3-007 | Morrowind alchemy: brewing, ingredient eating, and potion use | Planned |
+
+# Mod Content
+
+| Capability | Description | Status |
+|---|---|---|
+| MOD-TES3-001 | Tamriel Rebuilt released mainland regions and quests | Partial — installed 25.08.12 A/B profiles pinned and structurally inventoried; all cells/quests remain UNVERIFIED, strict scripts fail, and gameplay/classification/process-restart validation is incomplete. [Certification](validation/MOD-TES3-001.md). |
 
 ## Engineering Harness
 
@@ -43,3 +52,5 @@
 | HARNESS-003 | State snapshot/dump | Implemented |
 | HARNESS-004 | Visual regression testing | Implemented |
 | HARNESS-005 | Performance scenarios | Implemented |
+| HARNESS-006 | Headless UI testing | Implemented |
+| HARNESS-007 | Bethesda probe artifact and record validation | Implemented — typed record and BSA/NIF/DDS/animation assertions, malformed-input checks, deterministic reports, and local retail validation pass. |

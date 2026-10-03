@@ -136,11 +136,15 @@ bool BethesdaSession::configure(BethesdaSessionConfig config, std::string& outEr
         72u * 60u, 64u});
     m_actorAnimations.clear();
     m_actorGuards.clear();
+    m_tes3PlayerRunning = false;
+    m_tes3PlayerMoving = false;
+    m_tes3PlayerJumpRequested = false;
     m_meleeContacts.clear();
     m_pendingAnimationSnapshots.clear();
     m_pendingPhysicsSnapshots.clear();
     m_papyrus.clearRuntimeState();
     m_tes3.clear();
+    m_tes3DoorActivations.clear();
     m_quests.clear();
     m_questJournal.clear();
     m_questStageFragments.clear();
@@ -274,6 +278,56 @@ bool BethesdaSession::configureTes3Content(
     if (!m_tes3.configure(std::move(content), m_playerObject, outError)) return false;
     m_tes3.setExternalNativeExecutor(
         [this](const Tes3NativeCall& call) { return executeTes3WorldNative(call); });
+    m_tes3.setDialogueEndHook([this] { finishTes3Persuasion(); });
+    m_tes3.scripts().setLocalScriptActive([this](const Tes3ScriptThread& thread) {
+        const RuntimeObject* owner = m_world.find(thread.owner);
+        const RuntimeObject* player = m_world.find(m_playerObject);
+        if (owner == nullptr || player == nullptr) return false;
+        if (owner == player || !owner->currentSpace.cell.valid() ||
+            !player->currentSpace.cell.valid()) return true;
+        if (owner->currentSpace.cell == player->currentSpace.cell) return true;
+        return owner->currentSpace.kind == RuntimeSpaceKind::Exterior &&
+            player->currentSpace.kind == RuntimeSpaceKind::Exterior &&
+            owner->currentSpace.worldspace == player->currentSpace.worldspace &&
+            std::abs(owner->currentSpace.gridX - player->currentSpace.gridX) <= 1 &&
+            std::abs(owner->currentSpace.gridZ - player->currentSpace.gridZ) <= 1;
+    });
+    m_tes3.setResultTransactionHooks(
+        [this]() { m_tes3ResultWorldSnapshot = m_world; },
+        [this](bool commit) {
+            if (!commit && m_tes3ResultWorldSnapshot.has_value())
+                m_world = std::move(*m_tes3ResultWorldSnapshot);
+            m_tes3ResultWorldSnapshot.reset();
+        });
+    return true;
+}
+
+bool BethesdaSession::bindTes3ActorLocalScript(ObjectId actor, std::string& outError) {
+    outError.clear();
+    const auto& content = m_tes3.content();
+    const auto* object = m_world.find(actor);
+    if (content == nullptr || object == nullptr) {
+        outError = "TES3 actor script binding requires loaded content and a resident actor";
+        return false;
+    }
+    const auto definition = content->actors().find(object->base);
+    if (definition == content->actors().end() || !definition->second.script.valid()) return true;
+    const std::string& script = definition->second.script.textId;
+    // Retain stopped and restored threads too: residency must not reset a
+    // character-generation script or repeat its one-time side effects.
+    for (const auto& [threadId, thread] : m_tes3.scripts().threads()) {
+        (void)threadId;
+        if (thread.local && thread.owner == actor &&
+            thread.program == normalizeTes3Symbol(script)) return true;
+    }
+    const auto threadId = m_tes3.scripts().start(script, actor, outError, true, true);
+    if (threadId == 0u) return false;
+    const auto saved = m_tes3.referenceOverrides().find(actor);
+    if (saved != m_tes3.referenceOverrides().end()) {
+        auto& thread = m_tes3.scripts().threadsForRestore().at(threadId);
+        for (const auto& [name, value] : saved->second.locals)
+            thread.locals.insert_or_assign(name, value);
+    }
     return true;
 }
 
@@ -399,7 +453,12 @@ bool BethesdaSession::unregisterActorAnimation(ObjectId object) {
 }
 
 bool BethesdaSession::setActorControllerInput(
-    ObjectId object, const PhysicsCharacterInput& input) {
+    ObjectId object, const PhysicsCharacterInput& input, bool running) {
+    if (object == m_playerObject) {
+        m_tes3PlayerRunning = running;
+        m_tes3PlayerMoving = odai::math::length(input.desiredVelocity) > 1;
+        m_tes3PlayerJumpRequested = input.jumpRequested || input.desiredVelocity.y > 0;
+    }
     return m_physics.setCharacterInput(object, input);
 }
 
@@ -448,13 +507,41 @@ bool BethesdaSession::equipActorItem(ObjectId actor, const RecordKey& item,
     bool equipped, bool leftHand, std::string& error, bool equipmentPolicy, bool scriptOverride) {
     const auto* owner = m_world.find(actor);
     const auto* definition = skyrimItem(item);
-    if (!owner || !definition || owner->kind != RuntimeObjectKind::Actor || !owner->enabled ||
+    const Tes3NamedRecord* tes3Item = m_tes3.content() != nullptr
+        ? m_tes3.content()->findRecord(item.recordType, item.textId) : nullptr;
+    if (!owner || (!definition && !tes3Item) || owner->kind != RuntimeObjectKind::Actor || !owner->enabled ||
         (owner->actorValues && owner->actorValues->dead) ||
         std::none_of(owner->inventory.begin(), owner->inventory.end(), [&](const auto& entry) {
             return entry.item == item && entry.count > 0;
         })) { error = "Equipment requires a living owner and an owned item"; return false; }
     std::uint64_t slots = 0;
-    if (definition->recordType == "ARMO") slots = definition->bipedSlots;
+    if (tes3Item != nullptr) {
+        if (item.recordType == "WEAP") slots = kEquipmentRightHand;
+        else if (item.recordType == "CLOT") {
+            const auto clothing = std::find_if(tes3Item->subrecords.begin(), tes3Item->subrecords.end(),
+                [](const Tes3SubrecordData& sub) { return sub.type == "CTDT" && sub.data.size() == 12u; });
+            if (clothing == tes3Item->subrecords.end()) { error = "TES3 clothing has no type"; return false; }
+            const std::uint32_t type = std::uint32_t(clothing->data[0]) | (std::uint32_t(clothing->data[1]) << 8u) |
+                (std::uint32_t(clothing->data[2]) << 16u) | (std::uint32_t(clothing->data[3]) << 24u);
+            constexpr std::uint8_t clothingSlots[] = {16, 5, 17, 18, 19, 7, 6, 20, 21, 23};
+            if (type > 9) { error = "Unsupported TES3 clothing type"; return false; }
+            slots = 1ull << (type == 8 && leftHand ? 22 : clothingSlots[type]);
+        }
+        else if (item.recordType == "ARMO") {
+            const auto armor = std::find_if(tes3Item->subrecords.begin(), tes3Item->subrecords.end(),
+                [](const Tes3SubrecordData& sub) { return sub.type == "AODT" && sub.data.size() >= 4u; });
+            if (armor == tes3Item->subrecords.end()) {
+                error = "TES3 armor has no type"; return false;
+            }
+            const std::uint32_t armorType = std::uint32_t(armor->data[0]) |
+                (std::uint32_t(armor->data[1]) << 8u) |
+                (std::uint32_t(armor->data[2]) << 16u) |
+                (std::uint32_t(armor->data[3]) << 24u);
+            if (armorType > 10u) { error = "Unsupported TES3 armor type"; return false; }
+            slots = 1ull << (armorType == 9 ? 6 : armorType == 10 ? 7 : armorType);
+            if (armorType == 8u) slots |= kEquipmentLeftHand;
+        }
+    } else if (definition->recordType == "ARMO") slots = definition->bipedSlots;
     else if (definition->recordType == "AMMO") slots = kEquipmentAmmo;
     else if (definition->recordType == "WEAP") {
         const auto type = definition->weaponAnimationType;
@@ -463,7 +550,7 @@ bool BethesdaSession::equipActorItem(ObjectId actor, const RecordKey& item,
             : leftHand ? kEquipmentLeftHand : kEquipmentRightHand;
     }
     // Skyrim's shield biped slot also owns the left hand.
-    if (definition->recordType == "ARMO" && (definition->bipedSlots & (1u << 9)))
+    if (definition != nullptr && definition->recordType == "ARMO" && (definition->bipedSlots & (1u << 9)))
         slots |= kEquipmentLeftHand;
     if (slots == 0) { error = "Item has no supported equipment slots"; return false; }
     WorldCommand command;
@@ -498,17 +585,19 @@ bool BethesdaSession::requestActorWeaponDraw(ObjectId actor, bool drawn, std::st
     error.clear(); return true;
 }
 
-bool BethesdaSession::dropInventoryItem(ObjectId actor, const RecordKey& item, std::string& error) {
+bool BethesdaSession::dropInventoryItem(ObjectId actor, const RecordKey& item, std::string& error,
+    std::optional<std::int32_t> condition) {
     const RuntimeObject* owner = m_world.find(actor);
     if (actor != m_playerObject || !owner || owner->kind != RuntimeObjectKind::Actor ||
-        !owner->enabled || (owner->actorValues && owner->actorValues->dead) || !item.valid() ||
+        !owner->enabled || (condition && *condition < -1) || (owner->actorValues && owner->actorValues->dead) || !item.valid() ||
         std::none_of(owner->inventory.begin(), owner->inventory.end(),
-            [&](const InventoryEntry& entry) { return entry.item == item && entry.count > 0; })) {
+            [&](const InventoryEntry& entry) { return entry.item == item && entry.count > 0 && (!condition || entry.condition == *condition); })) {
         error = "Player does not own this item";
         return false;
     }
     WorldCommand command;
     command.type = WorldCommandType::DropItem;
+    command.itemCondition = condition;
     command.target = actor;
     command.item = item;
     command.itemCount = 1;
@@ -520,7 +609,9 @@ bool BethesdaSession::dropInventoryItem(ObjectId actor, const RecordKey& item, s
 bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, std::string& error) {
     const auto* definition = skyrimItem(item);
     const auto* owner = m_world.find(actor);
-    if (!definition || !owner || !owner->actorValues || owner->actorValues->dead ||
+    const Tes3NamedRecord* tes3Item = m_tes3.content() != nullptr
+        ? m_tes3.content()->findRecord(item.recordType, item.textId) : nullptr;
+    if ((!definition && !tes3Item) || !owner || !owner->actorValues || owner->actorValues->dead ||
         !owner->enabled || owner->kind != RuntimeObjectKind::Actor ||
         std::none_of(owner->inventory.begin(), owner->inventory.end(), [&](const auto& entry) {
             return entry.item == item && entry.count > 0;
@@ -528,6 +619,14 @@ bool BethesdaSession::useInventoryItem(ObjectId actor, const RecordKey& item, st
     WorldCommand command;
     command.target = actor;
     command.item = item;
+    if (tes3Item != nullptr) {
+        if (item.recordType != "WEAP" && item.recordType != "ARMO") {
+            error = "This TES3 item cannot be equipped or used"; return false;
+        }
+        const auto owned = std::find_if(owner->inventory.begin(), owner->inventory.end(),
+            [&](const auto& entry) { return entry.item == item; });
+        return equipActorItem(actor, item, !owned->equipped, false, error);
+    }
     if (definition->recordType == "WEAP" || definition->recordType == "ARMO" || definition->recordType == "AMMO") {
         const auto owned = std::find_if(owner->inventory.begin(), owner->inventory.end(),
             [&](const auto& entry) { return entry.item == item; });
@@ -710,6 +809,16 @@ MeleeAttackResult BethesdaSession::resolveMeleeContact(ObjectId attacker,
             (target->actorValues.has_value() && target->actorValues->dead)) {
             continue;
         }
+        if (m_tes3.content()) {
+            const double chance = tes3MeleeHitChance(attacker, candidate.object);
+            const auto roll = core::mix64(m_randomState ^ ObjectIdHash{}(attacker) ^
+                ObjectIdHash{}(candidate.object) ^ core::mix64(combat.attacksStarted)) % 100;
+            if (!std::isfinite(chance) || double(roll) >= chance) {
+                result.target = candidate.object;
+                result.diagnostic = "TES3 melee attack missed";
+                return result;
+            }
+        }
         const bool blocked = actorGuarding(candidate.object) &&
             odai::math::dot(m_actorGuards.at(candidate.object), odai::math::normalize(forward)) < -0.35f;
         if (blocked) {
@@ -721,12 +830,62 @@ MeleeAttackResult BethesdaSession::resolveMeleeContact(ObjectId attacker,
             stamina.actorValueDelta = -5.0f;
             (void)m_world.queue(std::move(stamina));
         } else (void)queueActorAnimationEvent(candidate.object, {"staggerStart", {}});
+        if (m_tes3.content() != nullptr) {
+            float shield = 0.0f;
+            float elemental = 0.0f;
+            const auto spells = m_tes3.activeSpells().find(candidate.object);
+            if (spells != m_tes3.activeSpells().end()) {
+                for (const Tes3ActiveSpell& spell : spells->second) {
+                    for (const Tes3ActiveSpellEffect& effect : spell.effects) {
+                        if (effect.expiresTick <= m_clock.tick()) continue;
+                        if (effect.effectId == 3) shield += static_cast<float>(effect.magnitude);
+                        if (effect.effectId >= 4 && effect.effectId <= 6)
+                            elemental += static_cast<float>(effect.magnitude);
+                    }
+                }
+            }
+            if (shield > 0.0f) damage *= damage / (damage + shield);
+            if (elemental > 0.0f) {
+                WorldCommand retaliation;
+                retaliation.type = WorldCommandType::AdjustActorValue;
+                retaliation.target = attacker;
+                retaliation.actorValue = ActorValue::Health;
+                // Base-game fElementalShieldMult is 0.1; elemental shields
+                // strike the melee attacker when contact lands.
+                retaliation.actorValueDelta = -0.1f * elemental;
+                (void)m_world.queue(std::move(retaliation));
+            }
+        }
+        if (m_tes3.content()) {
+            std::string ignored;
+            if (attacker == m_playerObject) {
+                const int skill = tes3ActorWeaponSkill(attacker);
+                if (skill >= 0) (void)m_tes3.usePlayerSkill(skill, 0, 1, ignored);
+            }
+            if (candidate.object == m_playerObject && blocked)
+                (void)m_tes3.usePlayerSkill(0, 0, 1, ignored);
+            if (candidate.object == m_playerObject && std::isfinite(damage) && damage > 0)
+                awardTes3PlayerArmorHit(attacker, combat.hitsLanded);
+        }
         result.damage = damage;
         if (m_meleeContacts.size() < 256) m_meleeContacts.push_back({attacker, true, blocked});
         result.hit = true;
         result.target = candidate.object;
         combat.lastTarget = candidate.object;
         ++combat.hitsLanded;
+        if (m_tes3.content() != nullptr) {
+            if (const RuntimeObject* source = m_world.find(attacker)) {
+                const auto weapon = std::find_if(source->inventory.begin(), source->inventory.end(),
+                    [](const InventoryEntry& entry) {
+                        return entry.equipped && entry.count > 0 &&
+                            entry.item.recordType == "WEAP";
+                    });
+                if (weapon != source->inventory.end()) {
+                    m_tes3.dispatchGameplayEvent("hitonme", candidate.object,
+                        Tes3Value::fromString(weapon->item.textId));
+                }
+            }
+        }
         const float currentHealth = target->actorValues.has_value()
             ? target->actorValues->health : 100.0f;
         result.killed = currentHealth <= damage;
@@ -1572,7 +1731,8 @@ bool BethesdaSession::restorePhysicsSnapshots(
             !std::isfinite(saved.rotation.w) || !std::isfinite(saved.velocity.x) ||
             !std::isfinite(saved.velocity.y) || !std::isfinite(saved.velocity.z) ||
             !std::isfinite(saved.groundNormal.x) || !std::isfinite(saved.groundNormal.y) ||
-            !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement)) {
+            !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement) ||
+            !std::isfinite(saved.fallDistanceUnits) || saved.fallDistanceUnits < 0) {
             outError = "saved physical actor is invalid or duplicated: " +
                 saved.object.toString();
             return false;
@@ -2324,9 +2484,29 @@ void BethesdaSession::advanceActorAnimations(float fixedDelta, BethesdaSessionSt
 }
 
 void BethesdaSession::queuePhysicsTransforms(float fixedDelta) {
+    updateTes3PlayerWater();
+    const auto previousPlayer = m_physics.characterState(m_playerObject);
     for (const auto& [object, physical] : m_physics.step(fixedDelta)) {
         const RuntimeObject* resident = m_world.find(object);
         if (resident == nullptr) continue;
+        if (object == m_playerObject && m_tes3.content() && previousPlayer &&
+            (!resident->actorValues || !resident->actorValues->dead)) {
+            std::string ignored;
+            // Count motion relative to the supporting platform. A held run key
+            // against a wall, flying camera, or moving platform awards nothing.
+            const auto relative = physical.velocity - physical.groundVelocity;
+            const float speed = std::hypot(relative.x, relative.z);
+            if (physical.swimming && m_tes3PlayerMoving && odai::math::length(physical.velocity) > 1 && !physical.blocked)
+                (void)m_tes3.usePlayerSkill(8, 1, fixedDelta, ignored);
+            else if (!physical.swimming && m_tes3PlayerRunning && physical.grounded && speed > 1 && !physical.blocked)
+                (void)m_tes3.usePlayerSkill(8, 0, fixedDelta, ignored);
+            // TES3's native jump path uses an upward velocity request rather
+            // than the TES5 animation buffer. Observe successful takeoff once.
+            if (!physical.swimming && m_tes3PlayerJumpRequested && previousPlayer->grounded && !physical.grounded &&
+                physical.velocity.y - physical.groundVelocity.y > 1)
+                (void)m_tes3.usePlayerSkill(20, 0, 1, ignored);
+            if (physical.landed) resolveTes3PlayerLanding(physical);
+        }
         WorldCommand command;
         command.type = WorldCommandType::SetPosition;
         command.target = object;
@@ -2374,7 +2554,60 @@ void BethesdaSession::advanceScriptsAndApplyCommands(std::uint64_t tick, double 
         std::make_move_iterator(vm.diagnostics.begin()),
         std::make_move_iterator(vm.diagnostics.end()));
     CommandApplyResult commands = m_world.applyQueuedCommands();
-    if (m_tes3.content() != nullptr) syncTes3PlayerInventory();
+    if (m_tes3.content() != nullptr) {
+        for (const ObjectId& id : m_world.orderedActorIds()) {
+            const RuntimeObject* actor = m_world.find(id);
+            if (actor == nullptr || !actor->actorValues) continue;
+            const auto saved = m_tes3.referenceOverrides().find(id);
+            if (actor->actorValues->dead || (saved != m_tes3.referenceOverrides().end() &&
+                    saved->second.locals.contains("actor:deathcounted")))
+                m_tes3.recordActorDeath(id, actor->base.textId, actor->actorValues->dead);
+        }
+        for (const EquipmentDelta& change : commands.equipmentChanges) {
+            if (change.owner != m_playerObject) continue;
+            const Tes3NamedRecord* item = m_tes3.content()->findRecord(
+                change.item.recordType, change.item.textId);
+            if (item == nullptr) continue;
+            const auto script = std::find_if(item->subrecords.begin(), item->subrecords.end(),
+                [](const Tes3SubrecordData& sub) { return sub.type == "SCRI"; });
+            if (script == item->subrecords.end()) continue;
+            const auto terminator = std::find(script->data.begin(), script->data.end(), 0u);
+            const std::string scriptId(script->data.begin(), terminator);
+            if (scriptId.empty()) continue;
+            const std::string normalized = normalizeTes3Symbol(scriptId);
+            std::uint64_t threadId = 0u;
+            for (const auto& [id, thread] : m_tes3.scripts().threads()) {
+                if (thread.program == normalized && thread.owner == change.owner &&
+                    thread.repeat) { threadId = id; break; }
+            }
+            if (threadId == 0u) {
+                std::string error;
+                threadId = m_tes3.scripts().start(scriptId, change.owner, error, true, true);
+                if (threadId == 0u) {
+                    result.diagnostics.push_back("TES3 item script " + scriptId + ": " + error);
+                    continue;
+                }
+            }
+            m_tes3.dispatchScriptEvent(threadId, "onpcequip",
+                Tes3Value::fromNumber(change.equipped ? 1.0 : 0.0));
+        }
+        syncTes3PlayerInventory();
+        for (auto& [id, override] : m_tes3.referenceOverridesForRestore()) {
+            (void)id;
+            std::erase_if(override.locals, [](const auto& entry) {
+                return entry.first.starts_with("inventory:");
+            });
+        }
+        for (auto& [id, override] : m_tes3.referenceOverridesForRestore()) {
+            if (!override.locals.contains("actor:health")) continue;
+            const RuntimeObject* actor = m_world.find(id);
+            if (actor == nullptr || !actor->actorValues.has_value()) continue;
+            override.locals["actor:health"] = Tes3Value::fromNumber(actor->actorValues->health);
+            override.locals["actor:maxhealth"] = Tes3Value::fromNumber(actor->actorValues->maxHealth);
+            override.locals["actor:dead"] = Tes3Value::fromNumber(
+                actor->actorValues->dead ? 1.0 : 0.0);
+        }
+    }
     result.worldCommands += commands.applied;
     result.residencyChanged = result.residencyChanged || commands.residencyChanged;
     result.renderDeltas.insert(result.renderDeltas.end(),
@@ -2531,6 +2764,7 @@ std::uint64_t BethesdaSession::deterministicHash() const {
         hashScalar(hash, character.groundNormal.x); hashScalar(hash, character.groundNormal.y);
         hashScalar(hash, character.groundNormal.z);
         hashScalar(hash, character.grounded);
+        hashScalar(hash, character.fallDistanceUnits);
         hashScalar(hash, character.movement.coyoteRemaining); hashScalar(hash, character.movement.bufferRemaining);
         hashScalar(hash, character.movement.airVelocityX); hashScalar(hash, character.movement.airVelocityZ);
         hashScalar(hash, character.movement.jumpHeld); hashScalar(hash, character.movement.jumpConsumed);
@@ -2623,6 +2857,10 @@ std::uint64_t BethesdaSession::deterministicHash() const {
         for (const RecordKey& topic : m_tes3.knownTopics()) {
             hashString(hash, topic.toString());
         }
+        for (const auto& [info, actor] : m_tes3.topicResponseActors()) {
+            hashString(hash, info.toString());
+            hashString(hash, actor);
+        }
         hashScalar(hash, m_tes3.scripts().nextThreadId());
         for (const auto& [name, value] : m_tes3.scripts().globals()) {
             hashString(hash, name);
@@ -2632,6 +2870,9 @@ std::uint64_t BethesdaSession::deterministicHash() const {
             hashScalar(hash, id);
             hashString(hash, thread.program);
             hashString(hash, thread.owner.toString());
+            hashScalar(hash, thread.repeat);
+            hashScalar(hash, thread.local);
+            hashScalar(hash, thread.lastTick);
             hashScalar(hash, static_cast<std::uint64_t>(thread.instruction));
             hashScalar(hash, thread.state);
             hashString(hash, thread.suspensionReason);
@@ -2683,6 +2924,13 @@ std::uint64_t BethesdaSession::deterministicHash() const {
         }
         const Tes3DialoguePlayerState& tes3Player = m_tes3.playerState();
         hashString(hash, tes3Player.object.toString());
+        hashString(hash, tes3Player.name);
+        hashString(hash, tes3Player.race);
+        hashString(hash, tes3Player.actorClass);
+        hashString(hash, tes3Player.birthsign);
+        hashString(hash, tes3Player.head);
+        hashString(hash, tes3Player.hair);
+        hashScalar(hash, tes3Player.gender);
         for (const auto& [faction, rank] : tes3Player.factionRanks) {
             hashString(hash, faction);
             hashScalar(hash, rank);
@@ -2699,14 +2947,33 @@ std::uint64_t BethesdaSession::deterministicHash() const {
             hashString(hash, actor);
             hashScalar(hash, count);
         }
+        const auto& progression = tes3Player.progression;
+        for (double value : progression.skillProgress) hashScalar(hash, value);
+        for (int value : progression.attributeIncreases) hashScalar(hash, value);
+        hashScalar(hash, progression.levelProgress);
+        hashScalar(hash, progression.selectionOpen);
+        hashString(hash, progression.restBed.toString());
+        hashScalar(hash, progression.readyNotification);
+        for (const auto& book : progression.readBooks) hashString(hash, book);
+        hashScalar(hash, progression.customClass.has_value());
+        if (progression.customClass) {
+            for (int a : progression.customClass->attributes) hashScalar(hash, a);
+            hashScalar(hash, progression.customClass->specialization);
+            for (int skill : progression.customClass->major) hashScalar(hash, skill);
+            for (int skill : progression.customClass->minor) hashScalar(hash, skill);
+        }
         const Tes3DialogueState& dialogue = m_tes3.dialogue();
         hashScalar(hash, dialogue.active);
+        hashScalar(hash, dialogue.persuasionTemporary);
+        hashScalar(hash, dialogue.persuasionPermanent);
         hashString(hash, dialogue.actor.object.toString());
+        hashScalar(hash, dialogue.actor.talkedToBefore);
         hashString(hash, dialogue.player.object.toString());
         hashString(hash, dialogue.currentTopic.toString());
         hashString(hash, dialogue.currentInfo.toString());
         hashScalar(hash, dialogue.choice);
         hashScalar(hash, dialogue.goodbye);
+        hashString(hash, dialogue.messageBoxText);
         for (const RecordKey& info : dialogue.exhaustedInfos) {
             hashString(hash, info.toString());
         }

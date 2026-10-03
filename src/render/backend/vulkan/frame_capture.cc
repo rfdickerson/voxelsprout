@@ -193,7 +193,7 @@ void RendererBackend::recordFrameCapture(VkCommandBuffer commandBuffer, uint32_t
     reuse.buffer = m_captureBuffer;
     reuse.size = VK_WHOLE_SIZE;
     VkDependencyInfo dependency{};
-    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.bufferMemoryBarrierCount = 1;
     dependency.pBufferMemoryBarriers = &reuse;
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
@@ -262,6 +262,106 @@ bool RendererBackend::captureLastFrameRgb(std::vector<std::uint8_t>& outRgb,
         VOX_LOGE("render") << "frame capture: readback failed";
     }
     return read;
+}
+
+bool RendererBackend::captureVoxelGi(VoxelGiCapture& output) {
+    output = {};
+    if (!m_voxelGiInitialized || m_device == VK_NULL_HANDLE ||
+        (m_voxelGiFormat != VK_FORMAT_R16G16B16A16_SFLOAT &&
+         m_voxelGiFormat != VK_FORMAT_R32G32B32A32_SFLOAT)) return false;
+    if (vkQueueWaitIdle(m_graphicsQueue) != VK_SUCCESS) return false;
+    const bool half = m_voxelGiFormat == VK_FORMAT_R16G16B16A16_SFLOAT;
+    const std::size_t cells = std::size_t(kVoxelGiGridResolution) * kVoxelGiGridResolution * kVoxelGiGridResolution;
+    BufferCreateDesc desc{};
+    desc.size = cells * (half ? 8 : 16);
+    desc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    desc.memoryProperties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    const auto buffer = m_bufferAllocator.createBuffer(desc);
+    if (buffer == kInvalidBufferHandle) return false;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = m_graphicsQueueFamilyIndex;
+    bool ok = vkCreateCommandPool(m_device, &poolInfo, nullptr, &pool) == VK_SUCCESS;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo allocate{};
+    allocate.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocate.commandPool = pool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = 1;
+    if (ok) ok = vkAllocateCommandBuffers(m_device, &allocate, &command) == VK_SUCCESS;
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (ok) ok = vkBeginCommandBuffer(command, &begin) == VK_SUCCESS;
+    if (ok) {
+        transitionImageLayout(command, m_voxelGiImages[1],
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {kVoxelGiGridResolution, kVoxelGiGridResolution, kVoxelGiGridResolution};
+        vkCmdCopyImageToBuffer(command, m_voxelGiImages[1], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            m_bufferAllocator.getBuffer(buffer), 1, &copy);
+        VkMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.memoryBarrierCount = 1;
+        dependency.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(command, &dependency);
+        transitionImageLayout(command, m_voxelGiImages[1],
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        ok = vkEndCommandBuffer(command) == VK_SUCCESS;
+    }
+    if (ok) {
+        VkCommandBufferSubmitInfo cb{};
+        cb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        cb.commandBuffer = command;
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &cb;
+        ok = vkQueueSubmit2(m_graphicsQueue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(m_graphicsQueue) == VK_SUCCESS;
+    }
+    if (ok) {
+        const void* data = m_bufferAllocator.mapBuffer(buffer, 0, desc.size);
+        ok = data != nullptr;
+        if (ok) {
+            output.origin = m_voxelGiPreviousGridOrigin;
+            output.cellSize = kVoxelGiCellSize;
+            output.resolution = kVoxelGiGridResolution;
+            output.rgb.resize(cells * 3);
+            for (std::size_t cell = 0; cell < cells; ++cell) {
+                for (unsigned c = 0; c < 3; ++c) {
+                    float value;
+                    if (half) {
+                        const auto h = static_cast<const std::uint16_t*>(data)[cell * 4 + c];
+                        const int exponent = (h >> 10) & 31;
+                        const int mantissa = h & 1023;
+                        value = exponent == 31 ? (mantissa ? std::numeric_limits<float>::quiet_NaN() :
+                            std::numeric_limits<float>::infinity()) :
+                            std::ldexp(float(exponent ? mantissa + 1024 : mantissa), exponent ? exponent - 25 : -24);
+                        if (h & 0x8000) value = -value;
+                    } else value = static_cast<const float*>(data)[cell * 4 + c];
+                    output.rgb[cell * 3 + c] = value;
+                }
+            }
+            m_bufferAllocator.unmapBuffer(buffer);
+        }
+    }
+    if (pool) vkDestroyCommandPool(m_device, pool, nullptr);
+    m_bufferAllocator.destroyBuffer(buffer);
+    return ok;
 }
 
 }  // namespace odai::render

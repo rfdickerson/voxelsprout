@@ -63,4 +63,6 @@ MECH-002 is Implemented only when all required behavior is playable through norm
 
 TES3 dialogue item conditions now read the live player inventory. Scripted `AddItem` and `RemoveItem` calls update that dialogue view immediately and are reconciled with world state after the queued commands apply. A synthetic test covers pickup, delivery, scripted grant, and subsequent dialogue eligibility.
 
-The standard route remains unverified and incomplete. The runtime does not yet provide the full character-generation opening, all quest-required gameplay commands and effects, or a complete event-driven transition and end-to-end playthrough for the base-game quest.
+The opening slice now connects scripted guard travel and coordinate escort destinations to live actor movement, exposes arrival to opening scripts, pauses those scripts during tutorial choices, and settles the fresh player below the ship deck before creating its physics capsule. Synthetic movement, menu-gate, and save/load checks pass; a local base-game launch reaches the name-entry menu. All 66 CTest targets pass after a complete build.
+
+The standard route remains unverified and incomplete. The runtime does not yet provide a verified ordinary-input character-generation route through release in Seyda Neen, all quest-required gameplay commands and effects, or an end-to-end playthrough for the base-game quest.

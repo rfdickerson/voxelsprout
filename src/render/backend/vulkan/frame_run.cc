@@ -1,3 +1,4 @@
+#include "render/imported_gi.h"
 #include "render/weather_wind_policy.h"
 #include "render/backend/vulkan/renderer_backend.h"
 #include "render/upscale/upscale_contract.h"
@@ -460,9 +461,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_sunShaftsRequested && shouldRenderImportedSky(m_importedInteriorLighting);
     const bool importedInteriorGiEnabled =
         m_importedSceneInteriorMode &&
-        !useAuthoredImportedInteriorLighting(m_importedInteriorLighting) &&
+        (!useAuthoredImportedInteriorLighting(m_importedInteriorLighting) ||
+         shouldUseImportedScreenSpaceGi(m_importedInteriorLighting)) &&
         !m_importedGiTriangles.empty();
-    const bool voxelGiSceneEnabled = importedInteriorGiEnabled;
+    const bool voxelGiSceneEnabled = importedInteriorGiEnabled ||
+        (!m_importedSceneInteriorMode && m_importedExteriorLighting.worldSpaceGi &&
+         !m_importedGiTriangles.empty());
     const float farPlane = (s_farPlaneOverride > 0.0f)
         ? s_farPlaneOverride
         : (renderingImportedScene ? 50000.0f : 500.0f);
@@ -1220,8 +1224,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     // Reuse origin XYZ for fixed GI rebalance + debug mode to avoid enlarging camera UBO.
     mvpUniform.shadowVoxelGridOrigin[0] = kVoxelGiAmbientRebalanceStrength;
     mvpUniform.shadowVoxelGridOrigin[1] = kVoxelGiAmbientFloor;
+    int voxelGiVisualization = m_voxelGiDebugSettings.visualizationMode;
+    if (const char* requested = std::getenv("ODAI_GI_VOXEL_DEBUG")) {
+        voxelGiVisualization = std::atoi(requested);
+    }
     mvpUniform.shadowVoxelGridOrigin[2] =
-        static_cast<float>(std::clamp(m_voxelGiDebugSettings.visualizationMode, 0, 5));
+        static_cast<float>(std::clamp(voxelGiVisualization, 0, 6));
     // W channel remains AO enable: 1.0 enables vertex AO, 0.0 disables.
     mvpUniform.shadowVoxelGridOrigin[3] = m_debugEnableVertexAo ? 1.0f : 0.0f;
 
@@ -1729,7 +1737,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
                 outsideFrustum =
                     (odai::math::dot(plane.normal, lightPosition) + plane.distance) < -influenceRadius;
             }
-            if (outsideFrustum) {
+            if (outsideFrustum && !importedInteriorGiEnabled) {
                 ++importedLightsFrustumCulled;
                 continue;
             }
@@ -1744,7 +1752,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             const float behindCameraPenalty = alongView < -influenceRadius ? 16.0f : 0.0f;
             const SelectedImportedLight selected{
                 &light,
-                viewInfluenceScore + (distanceScore * 0.08f) + behindCameraPenalty
+                importedInteriorGiEnabled ? distanceScore :
+                    viewInfluenceScore + (distanceScore * 0.08f) + behindCameraPenalty
             };
             if (selectedImportedLightCount < selectedImportedLights.size()) {
                 selectedImportedLights[selectedImportedLightCount++] = selected;
@@ -2026,6 +2035,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_contactShadowHalfBufferHandle != kInvalidBufferHandle &&
         m_contactShadowFullMaskBufferHandle != kInvalidBufferHandle;
     m_screenSpaceGiActive =
+        m_screenSpaceGiRequested &&
         shouldUseImportedScreenSpaceGi(m_importedInteriorLighting, m_importedExteriorLighting) &&
         m_screenSpaceGiAvailable && m_taaEnabled && useMergedDepthPrepass() &&
         m_contactShadowDepthBufferHandle != kInvalidBufferHandle &&
@@ -2069,19 +2079,12 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     float voxelGiOriginY = voxelGiDesiredOriginY;
     float voxelGiOriginZ = voxelGiDesiredOriginZ;
     const bool keepVoxelGiBuildAnchor =
-        m_voxelGiOccupancyFullRebuildInProgress || m_voxelGiOccupancyFullRebuildNeedsClear;
-    const bool keepVoxelGiGridAnchored =
-        m_voxelGiHasPreviousFrameState &&
-        m_voxelGiOccupancyInitialized &&
-        !m_voxelGiWorldDirty;
+        (m_voxelGiOccupancyFullRebuildInProgress || m_voxelGiOccupancyFullRebuildNeedsClear) &&
+        m_voxelGiOccupancyInitialized && !m_voxelGiWorldDirty;
     if (keepVoxelGiBuildAnchor) {
         voxelGiOriginX = m_voxelGiOccupancyBuildOrigin[0];
         voxelGiOriginY = m_voxelGiOccupancyBuildOrigin[1];
         voxelGiOriginZ = m_voxelGiOccupancyBuildOrigin[2];
-    } else if (keepVoxelGiGridAnchored) {
-        voxelGiOriginX = m_voxelGiPreviousGridOrigin[0];
-        voxelGiOriginY = m_voxelGiPreviousGridOrigin[1];
-        voxelGiOriginZ = m_voxelGiPreviousGridOrigin[2];
     } else {
         voxelGiOriginX = computeVoxelGiStableOriginY(
             voxelGiDesiredOriginX,
@@ -2150,7 +2153,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         std::abs(static_cast<float>(m_voxelGiDebugSettings.restirSpatialRadius) - m_voxelGiPreviousRestirSpatialRadius) >
             kVoxelGiTuningChangeThreshold;
     const bool importedGiLightStateChanged =
-        importedInteriorGiEnabled &&
+        voxelGiSceneEnabled &&
         (!m_voxelGiPreviousImportedLightSignatureValid ||
          importedLightSignature != m_voxelGiPreviousImportedLightSignature);
     if (m_voxelGiDebugSettings.restirHistoryResetRequested) {
@@ -2201,7 +2204,7 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     m_voxelGiPreviousRestirSpatialReuseEnabled = m_voxelGiDebugSettings.restirEnableSpatialReuse;
     m_voxelGiPreviousRestirSpatialRadius = static_cast<float>(m_voxelGiDebugSettings.restirSpatialRadius);
     m_voxelGiPreviousImportedLightSignature = importedLightSignature;
-    m_voxelGiPreviousImportedLightSignatureValid = importedInteriorGiEnabled;
+    m_voxelGiPreviousImportedLightSignatureValid = voxelGiSceneEnabled;
     mvpUniform.voxelGiGridOriginCellSize[0] = voxelGiOriginX;
     mvpUniform.voxelGiGridOriginCellSize[1] = voxelGiOriginY;
     mvpUniform.voxelGiGridOriginCellSize[2] = voxelGiOriginZ;
@@ -2209,7 +2212,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     mvpUniform.voxelGiGridExtentStrength[0] = voxelGiGridSpan;
     mvpUniform.voxelGiGridExtentStrength[1] = voxelGiGridSpan;
     mvpUniform.voxelGiGridExtentStrength[2] = voxelGiGridSpan;
-    mvpUniform.voxelGiGridExtentStrength[3] = kVoxelGiStrength;
+    mvpUniform.voxelGiGridExtentStrength[3] =
+        (m_voxelGiRequested && voxelGiSceneEnabled) ? kVoxelGiStrength : 0.0f;
     for (std::size_t colorIndex = 0; colorIndex < m_voxelBaseColorPaletteRgba.size(); ++colorIndex) {
         const std::uint32_t rgba = m_voxelBaseColorPaletteRgba[colorIndex];
         mvpUniform.voxelBaseColorPalette[colorIndex][0] = static_cast<float>(rgba & 0xFFu) / 255.0f;
@@ -2276,6 +2280,8 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
     bool voxelGiOccupancyClearThisFrame = false;
     float voxelGiOccupancyCpuMs = 0.0f;
     uint32_t importedGiVoxelizedCellCount = 0u;
+    std::array<int, 3> importedGiVoxelMin{64, 64, 64};
+    std::array<int, 3> importedGiVoxelMax{-1, -1, -1};
 
     auto buildImportedGiOccupancyChunks = [&]() {
         std::vector<ImportedGiOccupancyChunk> chunks;
@@ -2290,9 +2296,10 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             for (int cy = 0; cy < 2; ++cy) {
                 for (int cx = 0; cx < 2; ++cx) {
                     ImportedGiOccupancyChunk chunk{};
-                    chunk.worldMinX = originX + (cx * kImportedGiChunkSize);
-                    chunk.worldMinY = originY + (cy * kImportedGiChunkSize);
-                    chunk.worldMinZ = originZ + (cz * kImportedGiChunkSize);
+                    const int worldChunkSize = static_cast<int>(kImportedGiChunkSize * kVoxelGiCellSize);
+                    chunk.worldMinX = originX + (cx * worldChunkSize);
+                    chunk.worldMinY = originY + (cy * worldChunkSize);
+                    chunk.worldMinZ = originZ + (cz * worldChunkSize);
                     chunk.voxels.assign(kVoxelGiChunkVoxelCount, 0u);
                     chunks.push_back(std::move(chunk));
                 }
@@ -2328,17 +2335,15 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             }
             if (chunks[chunkIndex].voxels[voxelIndex] == 0u) {
                 ++importedGiVoxelizedCellCount;
+                importedGiVoxelMin[0] = std::min(importedGiVoxelMin[0], gx);
+                importedGiVoxelMin[1] = std::min(importedGiVoxelMin[1], gy);
+                importedGiVoxelMin[2] = std::min(importedGiVoxelMin[2], gz);
+                importedGiVoxelMax[0] = std::max(importedGiVoxelMax[0], gx);
+                importedGiVoxelMax[1] = std::max(importedGiVoxelMax[1], gy);
+                importedGiVoxelMax[2] = std::max(importedGiVoxelMax[2], gz);
             }
             chunks[chunkIndex].voxels[voxelIndex] = packVoxel(albedo);
         };
-        const auto markPoint = [&](const float p[3], const float albedo[3]) {
-            markCell(
-                static_cast<int>(std::floor((p[0] - voxelGiOriginX) / kVoxelGiCellSize)),
-                static_cast<int>(std::floor((p[1] - voxelGiOriginY) / kVoxelGiCellSize)),
-                static_cast<int>(std::floor((p[2] - voxelGiOriginZ) / kVoxelGiCellSize)),
-                albedo);
-        };
-        constexpr int kMaxFilledCellsPerTriangle = 512;
         for (const ImportedGiTriangle& triangle : m_importedGiTriangles) {
             const float minX = std::min({triangle.p0[0], triangle.p1[0], triangle.p2[0]});
             const float minY = std::min({triangle.p0[1], triangle.p1[1], triangle.p2[1]});
@@ -2359,23 +2364,17 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
             const int gx1 = std::clamp(static_cast<int>(std::floor((maxX - voxelGiOriginX) / kVoxelGiCellSize)) + 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
             const int gy1 = std::clamp(static_cast<int>(std::floor((maxY - voxelGiOriginY) / kVoxelGiCellSize)) + 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
             const int gz1 = std::clamp(static_cast<int>(std::floor((maxZ - voxelGiOriginZ) / kVoxelGiCellSize)) + 1, 0, static_cast<int>(kVoxelGiGridResolution) - 1);
-            const int cellCount = (gx1 - gx0 + 1) * (gy1 - gy0 + 1) * (gz1 - gz0 + 1);
-            if (cellCount > kMaxFilledCellsPerTriangle) {
-                markPoint(triangle.p0, triangle.albedo);
-                markPoint(triangle.p1, triangle.albedo);
-                markPoint(triangle.p2, triangle.albedo);
-                const float center[3] = {
-                    (triangle.p0[0] + triangle.p1[0] + triangle.p2[0]) * (1.0f / 3.0f),
-                    (triangle.p0[1] + triangle.p1[1] + triangle.p2[1]) * (1.0f / 3.0f),
-                    (triangle.p0[2] + triangle.p1[2] + triangle.p2[2]) * (1.0f / 3.0f)
-                };
-                markPoint(center, triangle.albedo);
-                continue;
-            }
             for (int gz = gz0; gz <= gz1; ++gz) {
                 for (int gy = gy0; gy <= gy1; ++gy) {
                     for (int gx = gx0; gx <= gx1; ++gx) {
-                        markCell(gx, gy, gz, triangle.albedo);
+                        const odai::math::Vector3 center{
+                            voxelGiOriginX + (gx + 0.5f) * kVoxelGiCellSize,
+                            voxelGiOriginY + (gy + 0.5f) * kVoxelGiCellSize,
+                            voxelGiOriginZ + (gz + 0.5f) * kVoxelGiCellSize};
+                        if (importedGiTriangleOverlapsCell(triangle.p0, triangle.p1, triangle.p2,
+                                center, kVoxelGiCellSize * 0.5f)) {
+                            markCell(gx, gy, gz, triangle.albedo);
+                        }
                     }
                 }
             }
@@ -2478,7 +2477,13 @@ void RendererBackend::renderFrame(const CameraPose& camera) {
         m_debugImportedGiVoxelizedCellCount = importedGiVoxelizedCellCount;
         if (importedGiVoxelizedCellCount > 0u) {
             VOX_LOGI("render") << "imported GI occupancy voxelized cells="
-                               << importedGiVoxelizedCellCount;
+                               << importedGiVoxelizedCellCount << " gridMin=("
+                               << importedGiVoxelMin[0] << "," << importedGiVoxelMin[1]
+                               << "," << importedGiVoxelMin[2] << ") gridMax=("
+                               << importedGiVoxelMax[0] << "," << importedGiVoxelMax[1]
+                               << "," << importedGiVoxelMax[2] << ") origin=("
+                               << voxelGiOriginX << "," << voxelGiOriginY << ","
+                               << voxelGiOriginZ << ")";
         }
     } else if (!voxelGiNeedsOccupancyUpload) {
         m_voxelGiOccupancyFullRebuildInProgress = false;

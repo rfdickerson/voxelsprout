@@ -1,0 +1,2184 @@
+{
+  "build": "build-linux",
+  "cmake_sha256": "b641d5e641c3d8d029a474380b8a4386dbacde9c9a27c500b949124b4584c78f",
+  "configuration": "Debug",
+  "schema_version": 1,
+  "scope": "Configured targets only; include closure is textual, test association is not coverage.",
+  "source_owners": {
+    "src/anim/animation_sampler.cc": [
+      "odai_anim"
+    ],
+    "src/anim/behavior_program.cc": [
+      "odai_anim"
+    ],
+    "src/anim/character_dynamics.cc": [
+      "odai_anim"
+    ],
+    "src/anim/gpu_pose.cc": [
+      "odai_anim"
+    ],
+    "src/anim/hkx_packfile.cc": [
+      "odai_anim"
+    ],
+    "src/anim/humanoid_rig.cc": [
+      "odai_anim"
+    ],
+    "src/anim/native_program.cc": [
+      "odai_anim"
+    ],
+    "src/anim/pose_graph.cc": [
+      "odai_anim"
+    ],
+    "src/anim/pose_modifiers.cc": [
+      "odai_anim"
+    ],
+    "src/anim/skeleton_io.cc": [
+      "odai_anim"
+    ],
+    "src/anim/skyrim_animation.cc": [
+      "odai_anim"
+    ],
+    "src/audio/audio.cc": [
+      "odai_audio"
+    ],
+    "src/audio/miniaudio_backend.cc": [
+      "odai_audio"
+    ],
+    "src/audio/miniaudio_impl.cc": [
+      "odai_audio"
+    ],
+    "src/audio/null_backend.cc": [
+      "odai_audio"
+    ],
+    "src/audio/wav_writer.cc": [
+      "odai_audio"
+    ],
+    "src/bethesda/bethesda_physics_world.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/bethesda_session.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/condition.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/bethesda/fixed_step_clock.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/gameplay_catalog.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/inventory_ui_flow.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/living_world.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/navigation_simulation.cc": [
+      "odai_tes3_navigation_simulation_tests"
+    ],
+    "src/bethesda/navigation_world.cc": [
+      "odai",
+      "odai_actor_movement_tests",
+      "odai_navigation_tests",
+      "odai_tes3_navigation_simulation_tests"
+    ],
+    "src/bethesda/papyrus_vm.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/pex_reader.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/record_resolver.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/route_checkpoint.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/runtime_ids.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/runtime_world.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/save_game.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/scenario.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/session_papyrus_natives.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/session_tes3_natives.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/session_tes3_progression.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_dialogue.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_items.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_persistent_references.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_quest.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_runtime_records.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_scenario_content.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_scene.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/skyrim_scene_runtime.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/tes3_class_ui_flow.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/tes3_content.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/tes3_level_ui_flow.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/tes3_progression.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/tes3_runtime.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/tes3_script.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/bethesda/vmad_reader.cc": [
+      "odai_bethesda_runtime"
+    ],
+    "src/core/job_system.cc": [
+      "odai_core"
+    ],
+    "src/core/log.cc": [
+      "odai_core"
+    ],
+    "src/core/resource_path.cc": [
+      "odai_core"
+    ],
+    "src/dialogue/dialogue_io.cc": [
+      "odai_dialogue"
+    ],
+    "src/dialogue/dialogue_runtime.cc": [
+      "odai_dialogue"
+    ],
+    "src/dialogue/dialogue_state_io.cc": [
+      "odai_dialogue"
+    ],
+    "src/engine/game_app.cc": [
+      "odai"
+    ],
+    "src/games/bethesda/audio_decode.cc": [
+      "odai",
+      "odai_actor_movement_tests"
+    ],
+    "src/games/bethesda/bethesda_actors.cc": [
+      "odai",
+      "odai_actor_movement_tests"
+    ],
+    "src/games/bethesda/bethesda_app.cc": [
+      "odai"
+    ],
+    "src/games/bethesda/bethesda_collision.cc": [
+      "odai",
+      "odai_tes3_navigation_simulation_tests"
+    ],
+    "src/games/bethesda/bethesda_main.cc": [
+      "odai"
+    ],
+    "src/games/bethesda/newvegas_victor.cc": [
+      "odai"
+    ],
+    "src/games/bethesda/skyrim_first_person.cc": [
+      "odai"
+    ],
+    "src/games/bethesda/traversal_state.cc": [
+      "odai_traversal"
+    ],
+    "src/import/bethesda/actor_records.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/asset_source.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/async_asset_loader.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/bsa_archive.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/cell_builder.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/cell_streamer.cc": [
+      "odai"
+    ],
+    "src/import/bethesda/character_asset_manifest.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/character_builder.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/content_profile.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/content_record_index.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/decoded_texture_cache.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/dialogue_records.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/esm_reader.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/fallout_records.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/image_space_records.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/kf_animation.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/land_lod.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/lz4_frame.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/mod_check.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/nif_banner_cloth.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/nif_particles.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/nif_scene.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/plugin_load_order.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/runtime_item_scene.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/skyrim_animation_assets.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/skyrim_grass.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/skyrim_lod_handoff.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/skyrim_tree_lod.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/spt_scene.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/strings_table.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/tri_morph.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/bethesda/weather_records.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/cell_residency_planner.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/dds.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/imported_scene.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/import/imported_scene_query.cc": [
+      "odai_bethesda_import"
+    ],
+    "src/render/backend/vulkan/buffer_helpers.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/chunk_upload.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/contact_shadows.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/descriptor_buffer.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/descriptors.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/device.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_capture.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_draws.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_graph_core.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_graph_runtime.cc": [
+      "odai_frame_graph_tests",
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_pass_main.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_pass_prepass.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_pass_shadow.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_pass_skinning.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_pass_ssao.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_pass_velocity.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_run.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/frame_ui.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/init.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/init_resources.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/light_clusters.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/pass_gi.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/pass_pipelines.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/pose_compute.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/post_compute.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/screen_space_gi.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/skinning_resources.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/swapchain_targets.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/ui_panels.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/ui_renderer.cc": [
+      "odai_renderer"
+    ],
+    "src/render/backend/vulkan/vma_usage.cc": [
+      "odai_renderer"
+    ],
+    "src/render/frame_graph.cc": [
+      "odai_frame_graph_tests",
+      "odai_renderer"
+    ],
+    "src/render/renderer.cc": [
+      "odai_renderer"
+    ],
+    "src/render/stb_image_impl.cc": [
+      "odai_renderer"
+    ],
+    "src/render/tests/pose_compute_tests.cc": [
+      "odai_pose_compute_tests"
+    ],
+    "src/render/upscale/temporal_upscaler.cc": [
+      "odai_renderer"
+    ],
+    "src/render/upscale/upscale_contract.cc": [
+      "odai_upscale"
+    ],
+    "src/render/upscale/upscale_policy.cc": [
+      "odai_upscale"
+    ],
+    "src/render/upscale/vendor_backends.cc": [
+      "odai_renderer"
+    ],
+    "src/render/video_writer.cc": [
+      "odai_renderer"
+    ],
+    "src/tools/asset_coverage.cc": [
+      "odai_bethesda_probe"
+    ],
+    "src/tools/asset_coverage_report.cc": [
+      "odai_asset_coverage_tests",
+      "odai_bethesda_probe"
+    ],
+    "src/tools/bench_heap_interposer.cc": [
+      "odai_bench_heap"
+    ],
+    "src/tools/bethesda_cooker_main.cc": [
+      "odai_bethesda_cooker"
+    ],
+    "src/tools/bethesda_probe_main.cc": [
+      "odai_bethesda_probe"
+    ],
+    "src/tools/character_coverage.cc": [
+      "odai_bethesda_probe",
+      "odai_character_coverage_tests"
+    ],
+    "src/tools/odai_headless_main.cc": [
+      "odai_headless"
+    ],
+    "src/tools/odai_headless_ui_main.cc": [
+      "odai_headless_ui"
+    ],
+    "src/tools/texture_pack_main.cc": [
+      "odai_texture_pack"
+    ],
+    "src/tools/tri_probe.cc": [
+      "odai_bethesda_probe"
+    ],
+    "src/ui/cached_rich_text.cc": [
+      "odai_ui"
+    ],
+    "src/ui/font.cc": [
+      "odai_ui"
+    ],
+    "src/ui/icon_atlas.cc": [
+      "odai_ui"
+    ],
+    "src/ui/resource_style.cc": [
+      "odai_ui"
+    ],
+    "src/ui/rich_text.cc": [
+      "odai_ui"
+    ],
+    "src/ui/signal.cc": [
+      "odai_ui"
+    ],
+    "src/ui/toast_host.cc": [
+      "odai_ui"
+    ],
+    "src/ui/tooltip.cc": [
+      "odai_ui"
+    ],
+    "src/ui/ui_context.cc": [
+      "odai_ui"
+    ],
+    "src/ui/ui_cursor.cc": [
+      "odai_ui"
+    ],
+    "src/ui/ui_draw_list.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/button.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/context_menu.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/dialogue_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/dropdown.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/event_tracker_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/faction_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/grid_picker_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/icon_button.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/image.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/label.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/minimap_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/modal.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/progress_bar.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/radio_button.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/resource_bar_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/rich_text_view.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/scroll_view.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/selection_inspector_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/slider.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/spinner.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/stack_layout.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/tab_bar.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/tes3_journal_panel.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/text_box.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/toast.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/toggle.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/toolbar.cc": [
+      "odai_ui"
+    ],
+    "src/ui/widgets/window.cc": [
+      "odai_ui"
+    ],
+    "tests/animation_tests.cc": [
+      "odai_animation_tests"
+    ],
+    "tests/asset_coverage_tests.cc": [
+      "odai_asset_coverage_tests"
+    ],
+    "tests/audio_tests.cc": [
+      "odai_audio_tests"
+    ],
+    "tests/bethesda_actor_movement_tests.cc": [
+      "odai_actor_movement_tests"
+    ],
+    "tests/bethesda_import_tests.cc": [
+      "odai_bethesda_import_tests"
+    ],
+    "tests/bethesda_runtime_tests.cc": [
+      "odai_bethesda_runtime_tests"
+    ],
+    "tests/bindless_slot_table_tests.cc": [
+      "odai_bindless_slot_table_tests"
+    ],
+    "tests/cell_residency_planner_tests.cc": [
+      "odai_cell_residency_planner_tests"
+    ],
+    "tests/character_coverage_tests.cc": [
+      "odai_character_coverage_tests"
+    ],
+    "tests/character_dynamics_tests.cc": [
+      "odai_character_dynamics_tests"
+    ],
+    "tests/content_profile_tests.cc": [
+      "odai_content_profile_tests"
+    ],
+    "tests/core_types_tests.cc": [
+      "odai_core_types_tests"
+    ],
+    "tests/dialogue_tests.cc": [
+      "odai_dialogue_tests"
+    ],
+    "tests/engine_frame_stats_tests.cc": [
+      "odai_engine_stats_tests"
+    ],
+    "tests/frame_graph_plain_tests.cc": [
+      "odai_frame_graph_tests"
+    ],
+    "tests/gpu_arena_allocator_tests.cc": [
+      "odai_gpu_arena_allocator_tests"
+    ],
+    "tests/humanoid_rig_tests.cc": [
+      "odai_humanoid_rig_tests"
+    ],
+    "tests/image_space_tests.cc": [
+      "odai_image_space_tests"
+    ],
+    "tests/imported_render_policy_tests.cc": [
+      "odai_imported_render_policy_tests"
+    ],
+    "tests/imported_scene_tests.cc": [
+      "odai_imported_scene_tests"
+    ],
+    "tests/imported_scene_vulkan_smoke.cc": [
+      "odai_imported_scene_vulkan_smoke"
+    ],
+    "tests/job_system_tests.cc": [
+      "odai_job_system_tests"
+    ],
+    "tests/living_world_tests.cc": [
+      "odai_living_world_tests"
+    ],
+    "tests/material_animation_tests.cc": [
+      "odai_material_animation_tests"
+    ],
+    "tests/mod_check_tests.cc": [
+      "odai_mod_check_tests"
+    ],
+    "tests/native_animation_tests.cc": [
+      "odai_native_animation_tests"
+    ],
+    "tests/navigation_world_tests.cc": [
+      "odai_navigation_tests"
+    ],
+    "tests/nif_particle_tests.cc": [
+      "odai_nif_particle_tests"
+    ],
+    "tests/odai_save_tests.cc": [
+      "odai_save_tests"
+    ],
+    "tests/papyrus_vm_tests.cc": [
+      "odai_papyrus_vm_tests"
+    ],
+    "tests/pbr_material_tests.cc": [
+      "odai_pbr_material_tests"
+    ],
+    "tests/pose_graph_tests.cc": [
+      "odai_pose_graph_tests"
+    ],
+    "tests/route_checkpoint_tests.cc": [
+      "odai_route_checkpoint_tests"
+    ],
+    "tests/skyrim_animation_tests.cc": [
+      "odai_skyrim_animation_tests"
+    ],
+    "tests/skyrim_inventory_tests.cc": [
+      "odai_skyrim_inventory_tests"
+    ],
+    "tests/skyrim_persistent_reference_tests.cc": [
+      "odai_skyrim_persistent_reference_tests"
+    ],
+    "tests/swf_font_tests.cc": [
+      "odai_swf_font_tests"
+    ],
+    "tests/taa_depth_tests.cc": [
+      "odai_taa_depth_tests"
+    ],
+    "tests/tes3_content_tests.cc": [
+      "odai_tes3_content_tests"
+    ],
+    "tests/tes3_navigation_simulation_tests.cc": [
+      "odai_tes3_navigation_simulation_tests"
+    ],
+    "tests/tes3_progression_tests.cc": [
+      "odai_tes3_progression_tests"
+    ],
+    "tests/tes3_runtime_tests.cc": [
+      "odai_tes3_runtime_tests"
+    ],
+    "tests/tes3_script_tests.cc": [
+      "odai_tes3_script_tests"
+    ],
+    "tests/traversal_state_tests.cc": [
+      "odai_traversal_state_tests"
+    ],
+    "tests/tri_morph_tests.cc": [
+      "odai_tri_morph_tests"
+    ],
+    "tests/ui_tests.cc": [
+      "odai_ui_tests"
+    ],
+    "tests/upscaler_tests.cc": [
+      "odai_upscaler_tests"
+    ],
+    "tests/world_map_cache_tests.cc": [
+      "odai_world_map_cache_tests"
+    ]
+  },
+  "targets": {
+    "odai": {
+      "dependencies": [
+        "odai_anim",
+        "odai_audio",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue",
+        "odai_renderer",
+        "odai_traversal",
+        "odai_ui",
+        "odai_upscale"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "-Wl,-rpath,<repo>/build-linux/vcpkg_installed/x64-linux/debug/lib:",
+        "libodai_renderer.a",
+        "libodai_audio.a",
+        "libodai_traversal.a",
+        "libodai_bethesda_runtime.a",
+        "-ldl",
+        "libodai_ui.a",
+        "libodai_upscale.a",
+        "vcpkg_installed/x64-linux/debug/lib/libimguid.a",
+        "vcpkg_installed/x64-linux/debug/lib/libvulkan.so",
+        "vcpkg_installed/x64-linux/debug/lib/libglfw3.a",
+        "/usr/lib64/librt.a",
+        "-lm",
+        "-ldl",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/bethesda/navigation_world.cc",
+        "src/engine/game_app.cc",
+        "src/games/bethesda/audio_decode.cc",
+        "src/games/bethesda/bethesda_actors.cc",
+        "src/games/bethesda/bethesda_app.cc",
+        "src/games/bethesda/bethesda_collision.cc",
+        "src/games/bethesda/bethesda_main.cc",
+        "src/games/bethesda/newvegas_victor.cc",
+        "src/games/bethesda/skyrim_first_person.cc",
+        "src/import/bethesda/cell_streamer.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_actor_movement_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_audio",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_bethesda_runtime.a",
+        "libodai_audio.a",
+        "libodai_bethesda_import.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a",
+        "libodai_core.a",
+        "-ldl"
+      ],
+      "sources": [
+        "src/bethesda/navigation_world.cc",
+        "src/games/bethesda/audio_decode.cc",
+        "src/games/bethesda/bethesda_actors.cc",
+        "tests/bethesda_actor_movement_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_anim": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/anim/animation_sampler.cc",
+        "src/anim/behavior_program.cc",
+        "src/anim/character_dynamics.cc",
+        "src/anim/gpu_pose.cc",
+        "src/anim/hkx_packfile.cc",
+        "src/anim/humanoid_rig.cc",
+        "src/anim/native_program.cc",
+        "src/anim/pose_graph.cc",
+        "src/anim/pose_modifiers.cc",
+        "src/anim/skeleton_io.cc",
+        "src/anim/skyrim_animation.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_animation_tests": {
+      "dependencies": [
+        "odai_anim"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_anim.a"
+      ],
+      "sources": [
+        "tests/animation_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_asset_coverage_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/tools/asset_coverage_report.cc",
+        "tests/asset_coverage_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_audio": {
+      "dependencies": [
+        "odai_core"
+      ],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/audio/audio.cc",
+        "src/audio/miniaudio_backend.cc",
+        "src/audio/miniaudio_impl.cc",
+        "src/audio/null_backend.cc",
+        "src/audio/wav_writer.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_audio_tests": {
+      "dependencies": [
+        "odai_audio",
+        "odai_core"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_audio.a",
+        "libodai_core.a",
+        "-ldl"
+      ],
+      "sources": [
+        "tests/audio_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_bench_heap": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/tools/bench_heap_interposer.cc"
+      ],
+      "type": "SHARED_LIBRARY"
+    },
+    "odai_bethesda_cooker": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "-Wl,-rpath,::::::::::::::::::::::",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/tools/bethesda_cooker_main.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_bethesda_import": {
+      "dependencies": [
+        "odai_anim",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/bethesda/condition.cc",
+        "src/import/bethesda/actor_records.cc",
+        "src/import/bethesda/asset_source.cc",
+        "src/import/bethesda/async_asset_loader.cc",
+        "src/import/bethesda/bsa_archive.cc",
+        "src/import/bethesda/cell_builder.cc",
+        "src/import/bethesda/character_asset_manifest.cc",
+        "src/import/bethesda/character_builder.cc",
+        "src/import/bethesda/content_profile.cc",
+        "src/import/bethesda/content_record_index.cc",
+        "src/import/bethesda/decoded_texture_cache.cc",
+        "src/import/bethesda/dialogue_records.cc",
+        "src/import/bethesda/esm_reader.cc",
+        "src/import/bethesda/fallout_records.cc",
+        "src/import/bethesda/image_space_records.cc",
+        "src/import/bethesda/kf_animation.cc",
+        "src/import/bethesda/land_lod.cc",
+        "src/import/bethesda/lz4_frame.cc",
+        "src/import/bethesda/mod_check.cc",
+        "src/import/bethesda/nif_banner_cloth.cc",
+        "src/import/bethesda/nif_particles.cc",
+        "src/import/bethesda/nif_scene.cc",
+        "src/import/bethesda/plugin_load_order.cc",
+        "src/import/bethesda/runtime_item_scene.cc",
+        "src/import/bethesda/skyrim_animation_assets.cc",
+        "src/import/bethesda/skyrim_grass.cc",
+        "src/import/bethesda/skyrim_lod_handoff.cc",
+        "src/import/bethesda/skyrim_tree_lod.cc",
+        "src/import/bethesda/spt_scene.cc",
+        "src/import/bethesda/strings_table.cc",
+        "src/import/bethesda/tri_morph.cc",
+        "src/import/bethesda/weather_records.cc",
+        "src/import/cell_residency_planner.cc",
+        "src/import/dds.cc",
+        "src/import/imported_scene.cc",
+        "src/import/imported_scene_query.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_bethesda_import_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/bethesda_import_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_bethesda_probe": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "-Wl,-rpath,::::::::::::::::::::::",
+        "libodai_bethesda_import.a",
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a",
+        "libodai_core.a"
+      ],
+      "sources": [
+        "src/tools/asset_coverage.cc",
+        "src/tools/asset_coverage_report.cc",
+        "src/tools/bethesda_probe_main.cc",
+        "src/tools/character_coverage.cc",
+        "src/tools/tri_probe.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_bethesda_runtime": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/bethesda/bethesda_physics_world.cc",
+        "src/bethesda/bethesda_session.cc",
+        "src/bethesda/fixed_step_clock.cc",
+        "src/bethesda/gameplay_catalog.cc",
+        "src/bethesda/inventory_ui_flow.cc",
+        "src/bethesda/living_world.cc",
+        "src/bethesda/papyrus_vm.cc",
+        "src/bethesda/pex_reader.cc",
+        "src/bethesda/record_resolver.cc",
+        "src/bethesda/route_checkpoint.cc",
+        "src/bethesda/runtime_ids.cc",
+        "src/bethesda/runtime_world.cc",
+        "src/bethesda/save_game.cc",
+        "src/bethesda/scenario.cc",
+        "src/bethesda/session_papyrus_natives.cc",
+        "src/bethesda/session_tes3_natives.cc",
+        "src/bethesda/session_tes3_progression.cc",
+        "src/bethesda/skyrim_dialogue.cc",
+        "src/bethesda/skyrim_items.cc",
+        "src/bethesda/skyrim_persistent_references.cc",
+        "src/bethesda/skyrim_quest.cc",
+        "src/bethesda/skyrim_runtime_records.cc",
+        "src/bethesda/skyrim_scenario_content.cc",
+        "src/bethesda/skyrim_scene.cc",
+        "src/bethesda/skyrim_scene_runtime.cc",
+        "src/bethesda/tes3_class_ui_flow.cc",
+        "src/bethesda/tes3_content.cc",
+        "src/bethesda/tes3_level_ui_flow.cc",
+        "src/bethesda/tes3_progression.cc",
+        "src/bethesda/tes3_runtime.cc",
+        "src/bethesda/tes3_script.cc",
+        "src/bethesda/vmad_reader.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_bethesda_runtime_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/bethesda_runtime_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_bindless_slot_table_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/bindless_slot_table_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_cell_residency_planner_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/cell_residency_planner_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_character_coverage_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/tools/character_coverage.cc",
+        "tests/character_coverage_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_character_dynamics_tests": {
+      "dependencies": [
+        "odai_anim"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_anim.a"
+      ],
+      "sources": [
+        "tests/character_dynamics_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_content_profile_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/content_profile_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_core": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/core/job_system.cc",
+        "src/core/log.cc",
+        "src/core/resource_path.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_core_types_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/core_types_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_dialogue": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/dialogue/dialogue_io.cc",
+        "src/dialogue/dialogue_runtime.cc",
+        "src/dialogue/dialogue_state_io.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_dialogue_tests": {
+      "dependencies": [
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_dialogue.a"
+      ],
+      "sources": [
+        "tests/dialogue_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_engine_stats_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/engine_frame_stats_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_frame_graph_tests": {
+      "dependencies": [
+        "odai_core"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_core.a"
+      ],
+      "sources": [
+        "src/render/backend/vulkan/frame_graph_runtime.cc",
+        "src/render/frame_graph.cc",
+        "tests/frame_graph_plain_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_gpu_arena_allocator_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/gpu_arena_allocator_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_headless": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/tools/odai_headless_main.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_headless_ui": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/tools/odai_headless_ui_main.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_humanoid_rig_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_anim.a",
+        "libodai_bethesda_import.a",
+        "libodai_anim.a",
+        "libodai_core.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/humanoid_rig_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_image_space_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/image_space_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_imported_render_policy_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/imported_render_policy_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_imported_scene_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/imported_scene_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_imported_scene_vulkan_smoke": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue",
+        "odai_renderer",
+        "odai_ui",
+        "odai_upscale"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "-Wl,-rpath,<repo>/build-linux/vcpkg_installed/x64-linux/debug/lib",
+        "libodai_renderer.a",
+        "libodai_ui.a",
+        "libodai_upscale.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a",
+        "vcpkg_installed/x64-linux/debug/lib/libimguid.a",
+        "vcpkg_installed/x64-linux/debug/lib/libvulkan.so",
+        "vcpkg_installed/x64-linux/debug/lib/libglfw3.a",
+        "/usr/lib64/librt.a",
+        "-lm",
+        "-ldl"
+      ],
+      "sources": [
+        "tests/imported_scene_vulkan_smoke.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_job_system_tests": {
+      "dependencies": [
+        "odai_core"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_core.a"
+      ],
+      "sources": [
+        "tests/job_system_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_living_world_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/living_world_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_material_animation_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/material_animation_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_mod_check_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/mod_check_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_native_animation_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_anim.a",
+        "libodai_bethesda_import.a",
+        "libodai_anim.a",
+        "libodai_core.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/native_animation_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_navigation_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/bethesda/navigation_world.cc",
+        "tests/navigation_world_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_nif_particle_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/nif_particle_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_papyrus_vm_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/papyrus_vm_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_pbr_material_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/pbr_material_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_pose_compute_tests": {
+      "dependencies": [
+        "odai_anim",
+        "slang_shaders"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "-Wl,-rpath,<repo>/build-linux/vcpkg_installed/x64-linux/debug/lib",
+        "libodai_anim.a",
+        "vcpkg_installed/x64-linux/debug/lib/libvulkan.so"
+      ],
+      "sources": [
+        "src/render/tests/pose_compute_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_pose_graph_tests": {
+      "dependencies": [
+        "odai_anim"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_anim.a"
+      ],
+      "sources": [
+        "tests/pose_graph_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_renderer": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue",
+        "odai_ui",
+        "odai_upscale",
+        "slang_shaders"
+      ],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/render/backend/vulkan/buffer_helpers.cc",
+        "src/render/backend/vulkan/chunk_upload.cc",
+        "src/render/backend/vulkan/contact_shadows.cc",
+        "src/render/backend/vulkan/descriptor_buffer.cc",
+        "src/render/backend/vulkan/descriptors.cc",
+        "src/render/backend/vulkan/device.cc",
+        "src/render/backend/vulkan/frame.cc",
+        "src/render/backend/vulkan/frame_capture.cc",
+        "src/render/backend/vulkan/frame_draws.cc",
+        "src/render/backend/vulkan/frame_graph_core.cc",
+        "src/render/backend/vulkan/frame_graph_runtime.cc",
+        "src/render/backend/vulkan/frame_pass_main.cc",
+        "src/render/backend/vulkan/frame_pass_prepass.cc",
+        "src/render/backend/vulkan/frame_pass_shadow.cc",
+        "src/render/backend/vulkan/frame_pass_skinning.cc",
+        "src/render/backend/vulkan/frame_pass_ssao.cc",
+        "src/render/backend/vulkan/frame_pass_velocity.cc",
+        "src/render/backend/vulkan/frame_run.cc",
+        "src/render/backend/vulkan/frame_ui.cc",
+        "src/render/backend/vulkan/init.cc",
+        "src/render/backend/vulkan/init_resources.cc",
+        "src/render/backend/vulkan/light_clusters.cc",
+        "src/render/backend/vulkan/pass_gi.cc",
+        "src/render/backend/vulkan/pass_pipelines.cc",
+        "src/render/backend/vulkan/pose_compute.cc",
+        "src/render/backend/vulkan/post_compute.cc",
+        "src/render/backend/vulkan/screen_space_gi.cc",
+        "src/render/backend/vulkan/skinning_resources.cc",
+        "src/render/backend/vulkan/swapchain_targets.cc",
+        "src/render/backend/vulkan/ui_panels.cc",
+        "src/render/backend/vulkan/ui_renderer.cc",
+        "src/render/backend/vulkan/vma_usage.cc",
+        "src/render/frame_graph.cc",
+        "src/render/renderer.cc",
+        "src/render/stb_image_impl.cc",
+        "src/render/upscale/temporal_upscaler.cc",
+        "src/render/upscale/vendor_backends.cc",
+        "src/render/video_writer.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_route_checkpoint_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/route_checkpoint_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_save_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/odai_save_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_skyrim_animation_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_anim.a",
+        "libodai_bethesda_import.a",
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a",
+        "libodai_core.a"
+      ],
+      "sources": [
+        "tests/skyrim_animation_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_skyrim_inventory_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/skyrim_inventory_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_skyrim_persistent_reference_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/skyrim_persistent_reference_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_swf_font_tests": {
+      "dependencies": [
+        "odai_core",
+        "odai_ui"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_ui.a",
+        "libodai_core.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a"
+      ],
+      "sources": [
+        "tests/swf_font_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_taa_depth_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/taa_depth_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_tes3_content_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/tes3_content_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_tes3_navigation_simulation_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/bethesda/navigation_simulation.cc",
+        "src/bethesda/navigation_world.cc",
+        "src/games/bethesda/bethesda_collision.cc",
+        "tests/tes3_navigation_simulation_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_tes3_progression_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/tes3_progression_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_tes3_runtime_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/tes3_runtime_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_tes3_script_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_bethesda_runtime",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_runtime.a",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/tes3_script_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_texture_pack": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "-Wl,-rpath,::::::::::::::::::::::",
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "src/tools/texture_pack_main.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_traversal": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/games/bethesda/traversal_state.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_traversal_state_tests": {
+      "dependencies": [
+        "odai_traversal"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_traversal.a"
+      ],
+      "sources": [
+        "tests/traversal_state_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_tri_morph_tests": {
+      "dependencies": [
+        "odai_anim",
+        "odai_bethesda_import",
+        "odai_core",
+        "odai_dialogue"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_bethesda_import.a",
+        "libodai_core.a",
+        "libodai_anim.a",
+        "libodai_dialogue.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a",
+        "vcpkg_installed/x64-linux/debug/lib/libJolt.a"
+      ],
+      "sources": [
+        "tests/tri_morph_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_ui": {
+      "dependencies": [
+        "odai_core"
+      ],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/ui/cached_rich_text.cc",
+        "src/ui/font.cc",
+        "src/ui/icon_atlas.cc",
+        "src/ui/resource_style.cc",
+        "src/ui/rich_text.cc",
+        "src/ui/signal.cc",
+        "src/ui/toast_host.cc",
+        "src/ui/tooltip.cc",
+        "src/ui/ui_context.cc",
+        "src/ui/ui_cursor.cc",
+        "src/ui/ui_draw_list.cc",
+        "src/ui/widgets/button.cc",
+        "src/ui/widgets/context_menu.cc",
+        "src/ui/widgets/dialogue_panel.cc",
+        "src/ui/widgets/dropdown.cc",
+        "src/ui/widgets/event_tracker_panel.cc",
+        "src/ui/widgets/faction_panel.cc",
+        "src/ui/widgets/grid_picker_panel.cc",
+        "src/ui/widgets/icon_button.cc",
+        "src/ui/widgets/image.cc",
+        "src/ui/widgets/label.cc",
+        "src/ui/widgets/minimap_panel.cc",
+        "src/ui/widgets/modal.cc",
+        "src/ui/widgets/panel.cc",
+        "src/ui/widgets/progress_bar.cc",
+        "src/ui/widgets/radio_button.cc",
+        "src/ui/widgets/resource_bar_panel.cc",
+        "src/ui/widgets/rich_text_view.cc",
+        "src/ui/widgets/scroll_view.cc",
+        "src/ui/widgets/selection_inspector_panel.cc",
+        "src/ui/widgets/slider.cc",
+        "src/ui/widgets/spinner.cc",
+        "src/ui/widgets/stack_layout.cc",
+        "src/ui/widgets/tab_bar.cc",
+        "src/ui/widgets/tes3_journal_panel.cc",
+        "src/ui/widgets/text_box.cc",
+        "src/ui/widgets/toast.cc",
+        "src/ui/widgets/toggle.cc",
+        "src/ui/widgets/toolbar.cc",
+        "src/ui/widgets/window.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_ui_tests": {
+      "dependencies": [
+        "odai_core",
+        "odai_ui"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_ui.a",
+        "libodai_core.a",
+        "vcpkg_installed/x64-linux/debug/lib/libz.a"
+      ],
+      "sources": [
+        "tests/ui_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_upscale": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "src/render/upscale/upscale_contract.cc",
+        "src/render/upscale/upscale_policy.cc"
+      ],
+      "type": "STATIC_LIBRARY"
+    },
+    "odai_upscaler_tests": {
+      "dependencies": [
+        "odai_upscale"
+      ],
+      "generated": [],
+      "link_fragments": [
+        "libodai_upscale.a"
+      ],
+      "sources": [
+        "tests/upscaler_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "odai_world_map_cache_tests": {
+      "dependencies": [],
+      "generated": [],
+      "link_fragments": [],
+      "sources": [
+        "tests/world_map_cache_tests.cc"
+      ],
+      "type": "EXECUTABLE"
+    },
+    "slang_shaders": {
+      "dependencies": [],
+      "generated": [
+        "build-linux/CMakeFiles/slang_shaders",
+        "build-linux/CMakeFiles/slang_shaders.rule",
+        "build-linux/share/odai/shaders/auto_exposure_histogram.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/auto_exposure_update.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/contact_shadow_depth.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/contact_shadow_resolve.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/contact_shadow_trace.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_fire_particle.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_fire_particle.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_mist_particle.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_mist_particle.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static_depthonly.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static_normaldepth.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static_rt.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static_shadow.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_static_shadow.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_terrain.tesc.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_terrain.tese.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_water.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_water.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_water_normaldepth.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/imported_water_rt.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/light_cluster_cull.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/pose_evaluate.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/screen_space_gi.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/skinned_velocity.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/skinned_velocity.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/skinning.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/sky_cloud.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/sky_cloud.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/skybox.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/skybox.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/ssao.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/ssao_blur.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/ssao_gtao.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/ssao_hbao.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/sun_shafts.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/taa.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/temporal_upscale.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/tone_map.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/tone_map.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/ui.frag.slang.spv.rule",
+        "build-linux/share/odai/shaders/ui.vert.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_inject.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_occupancy.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_propagate.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_restir_candidate.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_restir_resolve.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_restir_spatial.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_restir_temporal.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_sky_exposure.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_surface.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/voxel_gi_surface_rt.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/water_reflection_resolve.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/xegtao_denoise.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/xegtao_main.comp.slang.spv.rule",
+        "build-linux/share/odai/shaders/xegtao_prefilter.comp.slang.spv.rule"
+      ],
+      "link_fragments": [],
+      "sources": [],
+      "type": "UTILITY"
+    }
+  }
+}

@@ -194,28 +194,23 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     float3 bouncedLightSum = float3(0.0, 0.0, 0.0);
     for (int i = 0; i < 6; ++i)
     {
-        const int3 neighborCell = cell + offsets[i];
-        if (!inBounds(neighborCell, dims))
+        // Gather the first visible surface in each direction. One-cell
+        // injection followed by a single diffusion step only reached 64 world
+        // units, starving ordinary Bethesda rooms. Eight cells bounds both
+        // transport distance (256 units) and work without temporal diffusion.
+        for (int distance = 1; distance <= 8; ++distance)
         {
-            continue;
+            const int3 neighborCell = cell + offsets[i] * distance;
+            if (!inBounds(neighborCell, dims)) break;
+            const float4 neighborSample = voxelGiOccupancy.Load(int4(neighborCell, 0));
+            if (neighborSample.x <= 0.5) continue;
+            const float3 surfaceAlbedo = saturate(neighborSample.yzw);
+            const float3 irradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
+            // Equal-area directional quadrature, with source reflectance kept
+            // in linear light. The first occupied cell terminates the ray.
+            bouncedLightSum += surfaceAlbedo * irradiance * (1.0 / 6.0);
+            break;
         }
-
-        const float4 neighborSample = voxelGiOccupancy.Load(int4(neighborCell, 0));
-        if (neighborSample.x <= 0.5)
-        {
-            continue;
-        }
-
-        const float3 surfaceAlbedo = saturate(neighborSample.yzw);
-        const float albedoPeak = max(max(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
-        const float albedoMin = min(min(surfaceAlbedo.x, surfaceAlbedo.y), surfaceAlbedo.z);
-        const float albedoSaturation = (albedoPeak > 0.0001) ? ((albedoPeak - albedoMin) / albedoPeak) : 0.0;
-        const float3 albedoLuma = float3(dot(surfaceAlbedo, float3(0.2126, 0.7152, 0.0722)));
-        // Keep color bleed expressive: preserve source hue and mildly boost saturation.
-        const float3 bounceAlbedo = saturate(lerp(albedoLuma, surfaceAlbedo, 1.35));
-        const float colorBleedBoost = lerp(1.08, 1.60, clamp(albedoSaturation, 0.0, 1.0));
-        const float3 neighborIrradiance = sampleDirectionalSurfaceIrradiance(neighborCell, -offsets[i], dims);
-        bouncedLightSum += bounceAlbedo * (neighborIrradiance * colorBleedBoost);
     }
 
     int openNeighborFaces = 0;
@@ -237,7 +232,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float skyExposure = clamp(voxelGiSkyExposure[dispatchThreadId].x, 0.0, 1.0);
     const float ambientGate = skyExposure * lerp(0.20, 1.0, localOpenRatio);
     // Small SH inject term keeps sky-shadowed outdoor regions from going unnaturally black.
-    const float ambientInjectScale = injectShScale * 0.08;
+    const float ambientInjectScale = camera.interiorFogRange.w > 0.5 ? 0.0 : injectShScale * 0.08;
     const float3 ambientIrradiance =
         evaluateShHemisphereIrradiance(float3(0.0, 1.0, 0.0)) * (ambientInjectScale * ambientGate);
 

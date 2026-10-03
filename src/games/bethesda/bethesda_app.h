@@ -1,4 +1,6 @@
 #pragma once
+#include "bethesda/tes3_level_ui_flow.h"
+#include "bethesda/tes3_class_ui_flow.h"
 
 #include "anim/character_dynamics.h"
 #include "games/bethesda/npc_demo_locomotion.h"
@@ -52,6 +54,7 @@
 #include "ui/widgets/tes3_journal_panel.h"
 #include "import/imported_scene.h"
 #include "bethesda/bethesda_session.h"
+#include "bethesda/inventory_ui_flow.h"
 
 #include <filesystem>
 #include <memory>
@@ -520,6 +523,10 @@ private:
     void pollNavInput(float deltaSeconds);
     void updateGiftMenu();
     void updatePlayerInventory();
+    void syncDroppedItemPresentation();
+    void updateTes3CharacterMenu();
+    void updateTes3MessageBox();
+    [[nodiscard]] bool tes3MessageBoxOpen() const;
     bool settleScenarioSpawn();
     bool m_scenarioSpawnPending = false;
     odai::math::Vector3 m_scenarioSpawnFeet{};
@@ -533,6 +540,8 @@ private:
     // is closed.
     void updateDebugStats();
     void drawPipBoyHud();
+    void drawTes3CharacterMenu();
+    void drawTes3MessageBox();
     // The pause menu. Controller-navigable; returns nothing because every entry
     // acts on app state directly.
     void drawPauseMenu();
@@ -548,6 +557,7 @@ private:
     void syncTes3JournalPanel();
     void drawTes3Journal();
     void updateCamera(float deltaSeconds);
+    [[nodiscard]] bool tes3ControlEnabled(std::string_view control) const;
     // Advances the scripted tour and points the camera. Returns false once the
     // path has run out, which hands the camera back to the player.
     bool updateFlythrough(float deltaSeconds);
@@ -1053,12 +1063,33 @@ private:
     bool m_menuOpen = false;
     std::unique_ptr<ui::Tes3JournalPanel> m_tes3JournalPanel;
     bool m_tes3JournalOpen = false;
+    odai::bethesda::Tes3LevelUiFlow m_tes3LevelUi;
+    odai::bethesda::Tes3ClassUiFlow m_tes3ClassUi;
+    int m_tes3RestHours = 1;
+    bool m_tes3WaitOnly = false;
+    bool m_tes3RestKeyLatch = false;
+    bool m_tes3StatsKeyLatch = false;
+    bool m_tes3TrainingKeyLatch = false;
+    bool m_tes3PersuasionKeyLatch = false;
+    bool m_tes3RepairKeyLatch = false;
+    std::optional<odai::bethesda::BethesdaSession::Tes3RepairOption> m_tes3RepairTool;
+    int m_tes3CharacterMenu = 0;
+    int m_tes3CharacterChoice = 0;
+    int m_tes3RaceStage = 0;
+    int m_tes3MessageBoxChoice = 0;
+    bool m_tes3MessageBoxWasOpen = false;
+    bool m_tes3NameBackspaceLatch = false;
     bool m_tes3JournalKeyLatch = false;
     std::string m_tes3StartQuest;
     std::int32_t m_tes3StartQuestIndex = 0;
     std::string m_tes3PinnedQuest;
     std::size_t m_tes3JournalSyncedVisits = 0u;
     bool m_playerInventoryOpen = false; // Shared gameplay pause for inventory and quest journal.
+    odai::bethesda::InventoryUiFlow m_morrowindInventoryUi;
+    std::unordered_map<odai::bethesda::ObjectId, std::size_t,
+        odai::bethesda::ObjectIdHash> m_droppedItemChunks;
+    std::unordered_set<odai::bethesda::ObjectId,
+        odai::bethesda::ObjectIdHash> m_failedDroppedItemMeshes;
     bool m_skyrimMapOpen = false;
     bool m_mapKeyLatch = false;
     bool m_mapSelectLatch = false;

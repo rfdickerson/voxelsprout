@@ -117,6 +117,7 @@ public:
         JPH::Vec3 externalVelocity = JPH::Vec3::sZero();
         float stepHeightMetres = 0.25f;
         float centreOffsetMetres = 0.0f;
+        std::optional<float> swimLevelUnits;
         bool suspendedByRagdoll = false;
     };
     struct DynamicEntry {
@@ -531,6 +532,18 @@ bool BethesdaPhysicsWorld::setCharacterInput(ObjectId object, const PhysicsChara
     const auto found = m_impl->characters.find(object);
     if (found == m_impl->characters.end()) return false;
     found->second.input = input;
+    return true;
+}
+
+bool BethesdaPhysicsWorld::setCharacterWaterLevel(
+    ObjectId object, std::optional<float> height, float scale) {
+    const auto found = m_impl->characters.find(object);
+    if (found == m_impl->characters.end() || !std::isfinite(scale) || scale <= 0 || scale > 1 ||
+        (height && !std::isfinite(*height))) return false;
+    auto& entry = found->second;
+    entry.swimLevelUnits = height ? std::optional<float>(*height -
+        2 * entry.centreOffsetMetres / kBethesdaUnitsToJoltMetres * scale) : std::nullopt;
+    entry.last.swimming = entry.swimLevelUnits && entry.last.position.y <= *entry.swimLevelUnits + .01f;
     return true;
 }
 
@@ -996,6 +1009,7 @@ bool BethesdaPhysicsWorld::recoverRagdoll(ObjectId object,
     entry.last.velocity = {};
     entry.last.grounded = true;
     entry.last.landed = false;
+    entry.last.fallDistanceUnits = 0;
     entry.externalVelocity = JPH::Vec3::sZero();
     entry.suspendedByRagdoll = false;
     return true;
@@ -1009,18 +1023,27 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
     for (auto& [id, entry] : m_impl->characters) {
         if (entry.suspendedByRagdoll) continue;
         const bool wasGrounded = entry.last.grounded;
+        const bool swimming = entry.swimLevelUnits && entry.last.position.y <= *entry.swimLevelUnits + .01f;
+        const auto characterGravity = swimming ? JPH::Vec3::sZero() : gravity;
         JPH::Vec3 desired = toJoltVector(entry.input.desiredVelocity);
         if (entry.input.animationDriven) desired = toJoltVector(entry.input.rootMotion) / delta;
         const JPH::Vec3 oldVelocity = entry.character->GetLinearVelocity();
         const bool wasSupported = entry.character->IsSupported();
         bool launched = false;
-        if (entry.movementSettings.enabled && !entry.input.animationDriven) {
+        if (!swimming && entry.movementSettings.enabled && !entry.input.animationDriven) {
             float x = desired.GetX(), z = desired.GetZ();
             launched = advanceCharacterMovement(entry.movement, entry.movementSettings,
                 wasSupported, entry.last.landed, entry.input.jumpRequested, delta, x, z);
             desired.SetX(x); desired.SetZ(z); desired.SetY(0);
         }
-        if (wasSupported) {
+        if (swimming) {
+            // Swimming owns vertical locomotion. Discard falling/jump momentum
+            // on entering water, and stop ascent at the imported swim surface.
+            entry.externalVelocity.SetY(0);
+            const float rise = (*entry.swimLevelUnits - entry.last.position.y) * kBethesdaUnitsToJoltMetres / delta;
+            desired.SetY(std::min(desired.GetY(), std::max(0.f, rise)));
+            entry.movement = {};
+        } else if (wasSupported) {
             // A positive controller Y is a jump request. Move it into the
             // external channel once so holding jump cannot reapply it in air.
             if (!entry.movementSettings.enabled && desired.GetY() > 0.0f) {
@@ -1040,9 +1063,9 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
         const JPH::RVec3 before = entry.character->GetPosition();
         entry.character->SetLinearVelocity(desired);
         JPH::CharacterVirtual::ExtendedUpdateSettings settings;
-        settings.mStickToFloorStepDown = JPH::Vec3(0.0f, -entry.stepHeightMetres, 0.0f);
-        settings.mWalkStairsStepUp = JPH::Vec3(0.0f, entry.stepHeightMetres, 0.0f);
-        entry.character->ExtendedUpdate(delta, gravity, settings,
+        settings.mStickToFloorStepDown = swimming ? JPH::Vec3::sZero() : JPH::Vec3(0.0f, -entry.stepHeightMetres, 0.0f);
+        settings.mWalkStairsStepUp = swimming ? JPH::Vec3::sZero() : JPH::Vec3(0.0f, entry.stepHeightMetres, 0.0f);
+        entry.character->ExtendedUpdate(delta, characterGravity, settings,
             m_impl->physics.GetDefaultBroadPhaseLayerFilter(kCharacterLayer),
             m_impl->physics.GetDefaultLayerFilter(kCharacterLayer), JPH::BodyFilter{},
             JPH::ShapeFilter{}, m_impl->allocator);
@@ -1055,8 +1078,13 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
         entry.last.groundNormal = fromJoltVector(entry.character->GetGroundNormal()) *
             kBethesdaUnitsToJoltMetres;
         entry.last.grounded = entry.character->IsSupported();
-        entry.last.falling = !entry.last.grounded && entry.last.velocity.y < 0.0f;
-        entry.last.landed = !wasGrounded && entry.last.grounded;
+        entry.last.swimming = swimming;
+        entry.last.falling = !swimming && !entry.last.grounded && entry.last.velocity.y < 0.0f;
+        entry.last.landed = !swimming && !wasGrounded && entry.last.grounded;
+        if (wasGrounded || swimming) entry.last.fallDistanceUnits = 0;
+        if (!swimming && (!wasGrounded || !entry.last.grounded))
+            entry.last.fallDistanceUnits += std::max(0.0f,
+                float(before.GetY() - after.GetY()) / kBethesdaUnitsToJoltMetres);
         entry.last.leftLedge = wasGrounded && !entry.last.grounded && !launched;
         entry.last.landingImpactMetres = entry.last.landed
             ? std::max(0.f, -(desired - entry.character->GetGroundVelocity()).Dot(entry.character->GetGroundNormal())) : 0.f;
@@ -1074,7 +1102,7 @@ std::vector<std::pair<ObjectId, PhysicsCharacterStep>> BethesdaPhysicsWorld::ste
             std::exp(-(entry.last.grounded ? 3.5f : 0.25f) * delta);
         entry.externalVelocity.SetX(entry.externalVelocity.GetX() * horizontalDamping);
         entry.externalVelocity.SetZ(entry.externalVelocity.GetZ() * horizontalDamping);
-        entry.externalVelocity.SetY(entry.last.grounded
+        entry.externalVelocity.SetY(swimming ? 0.f : entry.last.grounded
                 ? std::max(0.0f, entry.externalVelocity.GetY())
                 : entry.character->GetLinearVelocity().GetY());
         const auto support = m_impl->objectsByUserData.find(entry.character->GetGroundUserData());
@@ -1096,7 +1124,7 @@ std::vector<PhysicsCharacterSnapshot> BethesdaPhysicsWorld::snapshot() const {
     result.reserve(m_impl->characters.size());
     for (const auto& [id, entry] : m_impl->characters) {
         result.push_back({id, entry.last.position, entry.last.rotation, entry.last.velocity,
-            entry.last.groundNormal, entry.last.grounded, entry.last.supportingObject, entry.movement});
+            entry.last.groundNormal, entry.last.grounded, entry.last.supportingObject, entry.movement, entry.last.fallDistanceUnits});
     }
     return result;
 }
@@ -1114,12 +1142,14 @@ bool BethesdaPhysicsWorld::restoreCharacter(
         !std::isfinite(saved.rotation.w) || !std::isfinite(saved.velocity.x) ||
         !std::isfinite(saved.velocity.y) || !std::isfinite(saved.velocity.z) ||
         !std::isfinite(saved.groundNormal.x) || !std::isfinite(saved.groundNormal.y) ||
-        !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement)) {
+        !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement) ||
+        !std::isfinite(saved.fallDistanceUnits) || saved.fallDistanceUnits < 0) {
         outError = "invalid saved Jolt character transform";
         return false;
     }
     if (!validCharacterMovementState(saved.movement)) { outError = "invalid saved movement state"; return false; }
     found->second.movement = saved.movement;
+    found->second.last.fallDistanceUnits = saved.fallDistanceUnits;
     found->second.externalVelocity = JPH::Vec3(0, saved.velocity.y * kBethesdaUnitsToJoltMetres, 0);
     JPH::RVec3 centre = toJoltPosition(saved.position);
     centre += JPH::RVec3(
@@ -1161,7 +1191,8 @@ bool BethesdaPhysicsWorld::restore(
             !std::isfinite(saved.rotation.w) || !std::isfinite(saved.velocity.x) ||
             !std::isfinite(saved.velocity.y) || !std::isfinite(saved.velocity.z) ||
             !std::isfinite(saved.groundNormal.x) || !std::isfinite(saved.groundNormal.y) ||
-            !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement)) {
+            !std::isfinite(saved.groundNormal.z) || !validCharacterMovementState(saved.movement) ||
+            !std::isfinite(saved.fallDistanceUnits) || saved.fallDistanceUnits < 0) {
             outError = "invalid saved Jolt character transform";
             return false;
         }

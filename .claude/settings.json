@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ctest --test-dir cmake-build-linux *)"
-    ]
-  }
-}

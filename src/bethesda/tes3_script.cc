@@ -224,8 +224,8 @@ bool looksLikeFunction(std::string_view symbol) {
     // are discovered from their Call instruction normally.
     return name.starts_with("get") || name == "pcexpelled" ||
         name == "menumode" || name == "cellchanged" ||
-        name == "scriptrunning" || name == "random" || name == "getdistance" ||
-        name == "getinterior" || name == "getlineofsight";
+        name == "scriptrunning" || name == "saydone" || name == "random" || name == "getdistance" ||
+        name == "getinterior" || name == "getlineofsight" || name == "hitonme";
 }
 
 std::optional<double> parseNumber(std::string_view text) {
@@ -541,7 +541,12 @@ Tes3NativeRegistry Tes3NativeRegistry::coreRuntimeRegistry() {
         "rotateworld", "face", "modhealth", "resurrect", "forcejump",
         "clearforcejump", "forcemovejump", "clearforcemovejump",
         "getforcemovejump", "forcesneak", "clearforcesneak", "getforcesneak",
-        "cast", "getspelleffects"};
+        "cast", "getspelleffects", "getblightdisease", "getcommondisease",
+        "getstandingpc", "modregion", "say", "saydone", "hitonme",
+        "enablenamemenu", "enableracemenu", "enableclassmenu",
+        "enablebirthmenu", "enablestatreviewmenu", "enablestatsmenu",
+        "enableinventorymenu", "enablemagicmenu", "enablemapmenu",
+        "showrestmenu", "dontsaveobject", "clearinfoactor", "getdetected"};
     for (const std::string_view name : implemented) {
         result.registerNative({std::string(name), Tes3NativeDisposition::Implemented, true});
     }
@@ -562,7 +567,7 @@ Tes3NativeRegistry Tes3NativeRegistry::coreRuntimeRegistry() {
     constexpr std::string_view presentation[] = {
         "playsound", "playsound3d", "playsoundvp", "playsound3dvp",
         "playloopsound3d", "playloopsound3dvp", "stopsound", "streammusic",
-        "say", "saydone", "playgroup", "loopgroup", "skipanim", "fadein",
+        "playgroup", "loopgroup", "skipanim", "fadein",
         "fadeout", "togglemenus", "title", "playbink"};
     for (const std::string_view name : presentation) {
         result.registerNative({std::string(name), Tes3NativeDisposition::PresentationOnly, false});
@@ -582,17 +587,37 @@ bool Tes3ScriptVm::registerProgram(Tes3ScriptProgram program, std::string& outEr
 }
 
 std::uint64_t Tes3ScriptVm::start(
-    std::string_view program, ObjectId owner, std::string& outError) {
+    std::string_view program, ObjectId owner, std::string& outError,
+    bool repeat, bool local) {
     const std::string id = normalizeTes3Symbol(program);
     const auto found = m_programs.find(id);
     if (found == m_programs.end()) {
         outError = "unknown MWScript program " + id;
         return 0u;
     }
+    if (!found->second.unsupportedOperations.empty()) {
+        const std::string& operation = *found->second.unsupportedOperations.begin();
+        const auto instruction = std::find_if(found->second.instructions.begin(),
+            found->second.instructions.end(), [&](const Tes3Instruction& value) {
+                return value.command == operation ||
+                    (!value.command.empty() && operation.starts_with(value.command + ":")) ||
+                    (!value.expression.empty() &&
+                     normalizeTes3Symbol(value.expression).find(operation) != std::string::npos);
+            });
+        outError = "MWScript " + id + ": line " +
+            std::to_string(instruction == found->second.instructions.end() ? 0u :
+                instruction->sourceLine) + ": target " +
+            (instruction == found->second.instructions.end() || instruction->target.empty()
+                ? owner.toString() : instruction->target) +
+            ": unsupported operation " + operation;
+        return 0u;
+    }
     Tes3ScriptThread thread;
     thread.id = m_nextThreadId++;
     thread.program = id;
     thread.owner = std::move(owner);
+    thread.repeat = repeat;
+    thread.local = local;
     for (const auto& [name, type] : found->second.locals) {
         (void)type;
         thread.locals.emplace(name, Tes3Value::fromNumber(0.0));
@@ -719,6 +744,31 @@ std::optional<Tes3Value> Tes3ScriptVm::evaluate(
             if (token.kind == ExpressionToken::Kind::Number) {
                 return Tes3Value::fromNumber(parseNumber(token.text).value_or(0.0));
             }
+            if ((token.kind == ExpressionToken::Kind::String &&
+                 m_position < m_tokens.size() &&
+                 m_tokens[m_position].kind == ExpressionToken::Kind::Identifier &&
+                 m_tokens[m_position].text.starts_with(".")) ||
+                (token.kind == ExpressionToken::Kind::Identifier &&
+                 token.text.find('.') != std::string::npos)) {
+                std::string reference = token.text;
+                std::string local;
+                if (token.kind == ExpressionToken::Kind::String) {
+                    local = m_tokens[m_position++].text.substr(1u);
+                } else {
+                    const std::size_t dot = reference.find('.');
+                    local = reference.substr(dot + 1u);
+                    reference.resize(dot);
+                }
+                Tes3NativeCall call;
+                call.target = std::move(reference);
+                call.command = "getlocal";
+                call.arguments = {Tes3Value::fromString(std::move(local))};
+                call.tick = m_tick;
+                call.owner = m_thread.owner;
+                const Tes3NativeResult result = m_execute(call);
+                if (!result.error.empty()) m_error = result.error;
+                return result.value;
+            }
             if (token.kind == ExpressionToken::Kind::String &&
                 !(m_position < m_tokens.size() &&
                   m_tokens[m_position].kind == ExpressionToken::Kind::Operator &&
@@ -747,7 +797,8 @@ std::optional<Tes3Value> Tes3ScriptVm::evaluate(
                 function = m_tokens[m_position++].text;
             }
             const Tes3Value known = target.empty() ? m_vm.lookup(function, m_thread) : Tes3Value{};
-            if (target.empty() &&
+            if (target.empty() && normalizeTes3Symbol(function) != "onactivate" &&
+                normalizeTes3Symbol(function) != "hitonme" &&
                 (known.type != Tes3ValueType::None || !looksLikeFunction(function))) return known;
             Tes3NativeCall call;
             call.target = std::move(target);
@@ -770,7 +821,10 @@ std::optional<Tes3Value> Tes3ScriptVm::evaluate(
                 }
             }
             const Tes3NativeResult result = m_execute(call);
-            if (!result.error.empty()) m_error = result.error;
+            if (!result.error.empty()) {
+                m_error = "target " + (call.target.empty() ? call.owner.toString() :
+                    call.target) + ", operation " + call.command + ": " + result.error;
+            }
             return result.value;
         }
 
@@ -792,11 +846,19 @@ std::optional<Tes3Value> Tes3ScriptVm::evaluate(
 
 Tes3VmStepResult Tes3ScriptVm::step(
     std::uint64_t tick, std::uint32_t instructionBudget,
-    const Tes3NativeExecutor& execute) {
+    const Tes3NativeExecutor& execute,
+    std::optional<std::uint64_t> onlyThread) {
     Tes3VmStepResult result;
     for (auto& [threadId, thread] : m_threads) {
-        (void)threadId;
+        if (onlyThread.has_value() && threadId != *onlyThread) continue;
+        if (thread.repeat && thread.state == Tes3ThreadState::Completed &&
+            thread.lastTick != tick) {
+            thread.instruction = 0u;
+            thread.state = Tes3ThreadState::Running;
+        }
         if (thread.state != Tes3ThreadState::Running) continue;
+        if (thread.local && m_localScriptActive && !m_localScriptActive(thread)) continue;
+        thread.lastTick = tick;
         const auto program = m_programs.find(thread.program);
         if (program == m_programs.end()) {
             thread.state = Tes3ThreadState::Failed;
@@ -866,7 +928,9 @@ Tes3VmStepResult Tes3ScriptVm::step(
             const Tes3NativeResult native = execute(call);
             if (!native.error.empty()) {
                 thread.state = Tes3ThreadState::Failed;
-                thread.error = "line " + std::to_string(instruction.sourceLine) + ": " + native.error;
+                thread.error = "line " + std::to_string(instruction.sourceLine) +
+                    ": target " + (call.target.empty() ? call.owner.toString() :
+                        call.target) + ", operation " + call.command + ": " + native.error;
                 result.diagnostics.push_back(thread.program + ": " + thread.error);
                 break;
             }

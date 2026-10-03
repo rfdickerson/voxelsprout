@@ -6,7 +6,7 @@ namespace {
 // Keep these in sync with renderer.cc GI constants.
 constexpr uint32_t kVoxelGiGridResolution = 64u;
 constexpr uint32_t kVoxelGiWorkgroupSize = 4u;
-constexpr uint32_t kVoxelGiPropagationIterations = 8u;
+constexpr uint32_t kVoxelGiPropagationIterations = 1u;
 constexpr uint32_t kVoxelGiChunkResolution = 32u;
 constexpr uint32_t kVoxelGiOccupancyWorkgroupXY = 8u;
 

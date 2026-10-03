@@ -1,5 +1,7 @@
 #pragma once
 
+#include "bethesda/tes3_progression.h"
+
 #include "bethesda/tes3_content.h"
 #include "bethesda/tes3_script.h"
 #include "bethesda/runtime_transform.h"
@@ -76,6 +78,7 @@ private:
 };
 
 struct Tes3DialogueActorState {
+    bool talkedToBefore = false;
     ObjectId object;
     std::string id;
     std::string race;
@@ -86,14 +89,24 @@ struct Tes3DialogueActorState {
     std::int8_t gender = -1;
     float disposition = 50.0f;
     std::map<std::string, double> locals;
+    friend bool operator==(const Tes3DialogueActorState&, const Tes3DialogueActorState&) = default;
 };
 
 struct Tes3DialoguePlayerState {
     ObjectId object;
+    std::string name;
+    std::string race;
+    std::string actorClass;
+    std::string birthsign;
+    std::string head;
+    std::string hair;
+    std::int8_t gender = -1;
     std::map<std::string, std::int8_t> factionRanks;
     std::map<std::string, double> numericFilters;
     std::map<RecordKey, std::int32_t> inventory;
     std::map<std::string, std::int32_t> deathCounts;
+    Tes3ProgressionState progression;
+    friend bool operator==(const Tes3DialoguePlayerState&, const Tes3DialoguePlayerState&) = default;
 };
 
 struct Tes3DialogueChoice {
@@ -115,6 +128,8 @@ struct Tes3DialogueResponse {
 
 struct Tes3DialogueState {
     bool active = false;
+    std::int32_t persuasionTemporary = 0;
+    std::int32_t persuasionPermanent = 0;
     Tes3DialogueActorState actor;
     Tes3DialoguePlayerState player;
     RecordKey currentTopic;
@@ -122,6 +137,7 @@ struct Tes3DialogueState {
     std::set<RecordKey> exhaustedInfos;
     std::int32_t choice = -1;
     bool goodbye = false;
+    std::string messageBoxText;
     std::vector<Tes3DialogueChoice> choices;
     friend bool operator==(const Tes3DialogueState&, const Tes3DialogueState&) = default;
 };
@@ -174,6 +190,12 @@ public:
     void setExternalNativeExecutor(Tes3ExternalNativeExecutor executor) {
         m_externalNative = std::move(executor);
     }
+    void setDialogueEndHook(std::function<void()> hook) { m_dialogueEndHook = std::move(hook); }
+    void setResultTransactionHooks(
+        std::function<void()> begin, std::function<void(bool)> finish) {
+        m_beginResultTransaction = std::move(begin);
+        m_finishResultTransaction = std::move(finish);
+    }
     [[nodiscard]] Tes3VmStepResult step(
         std::uint64_t tick, std::uint32_t instructionBudget = 10000u);
 
@@ -183,15 +205,26 @@ public:
     [[nodiscard]] std::vector<std::string> availableTopics(bool strict = true) const;
     [[nodiscard]] Tes3DialogueResponse selectTopic(
         std::string_view topicId, bool strict = true);
+    [[nodiscard]] Tes3DialogueResponse selectPersuasionResponse(
+        std::string_view responseId, bool strict = true);
     [[nodiscard]] Tes3DialogueResponse answerChoice(
         std::int32_t value, bool strict = true);
     void endDialogue();
+    void recordActorDeath(ObjectId actor, std::string_view baseId, bool dead);
     void dispatchGameplayEvent(
         std::string eventName, ObjectId target,
+        Tes3Value value = Tes3Value::fromNumber(1.0));
+    void dispatchScriptEvent(std::uint64_t threadId, std::string eventName,
         Tes3Value value = Tes3Value::fromNumber(1.0));
 
     bool addTopic(std::string_view topicId);
     [[nodiscard]] const std::set<RecordKey>& knownTopics() const { return m_knownTopics; }
+    [[nodiscard]] const std::map<RecordKey, std::string>& topicResponseActors() const {
+        return m_topicResponseActors;
+    }
+    [[nodiscard]] std::map<RecordKey, std::string>& topicResponseActorsForRestore() {
+        return m_topicResponseActors;
+    }
     [[nodiscard]] std::set<RecordKey>& knownTopicsForRestore() { return m_knownTopics; }
     [[nodiscard]] Tes3Journal& journal() { return m_journal; }
     [[nodiscard]] const Tes3Journal& journal() const { return m_journal; }
@@ -218,9 +251,26 @@ public:
     [[nodiscard]] ObjectId playerObject() const { return m_player; }
     [[nodiscard]] Tes3DialoguePlayerState& playerState() { return m_playerState; }
     [[nodiscard]] const Tes3DialoguePlayerState& playerState() const { return m_playerState; }
+    [[nodiscard]] bool hasPendingResultTransaction() const { return m_pendingResult.has_value(); }
+    // Player progression operates on the same base stats used by MWScript/dialogue.
+    bool initializePlayerProgression(std::string& error);
+    bool usePlayerSkill(int skill, int useType, double scale, std::string& error);
+    bool advancePlayerSkill(int skill, Tes3SkillAdvanceSource source, std::string& error);
+    [[nodiscard]] double playerSkillRequirement(int skill) const;
+    [[nodiscard]] int levelThreshold() const;
+    [[nodiscard]] bool playerLevelReady() const;
+    [[nodiscard]] int playerAttributeGain(int attribute) const;
+    [[nodiscard]] int levelChoiceCount() const;
+    bool openPlayerLevelSelection();
+    bool confirmPlayerLevel(const std::vector<int>& attributes, std::string& error);
+    void synchronizePlayerDialogue();
     void clear();
 
 private:
+    [[nodiscard]] std::map<std::string, double> dialogueActorLocals(
+        const Tes3DialogueActorState& actor) const;
+    [[nodiscard]] std::optional<double> dialogueFunctionValue(int function,
+        const Tes3DialogueActorState& actor, const Tes3DialoguePlayerState& player) const;
     [[nodiscard]] bool matches(
         const Tes3DialogueInfo& info, const Tes3DialogueActorState& actor,
         const Tes3DialoguePlayerState& player, bool strict) const;
@@ -232,6 +282,22 @@ private:
     void discoverTopics(std::string_view response, std::vector<std::string>& outDiscovered);
     [[nodiscard]] Tes3NativeResult executeNative(const Tes3NativeCall& call);
     [[nodiscard]] std::string resultProgramId(const RecordKey& info) const;
+    void finishPendingResult(bool commit);
+
+    struct PendingResult {
+        std::uint64_t threadId = 0u;
+        Tes3Journal journal;
+        std::map<std::uint64_t, Tes3ScriptThread> threads;
+        std::map<std::string, Tes3Value> globals;
+        std::uint64_t nextThreadId = 1u;
+        Tes3DialogueState dialogue;
+        Tes3DialoguePlayerState player;
+        std::set<RecordKey> topics;
+        std::map<RecordKey, std::string> responseActors;
+        std::map<ObjectId, Tes3ReferenceOverride> references;
+        std::map<ObjectId, std::vector<Tes3ActiveSpell>> spells;
+        std::set<std::string> sounds;
+    };
 
     std::shared_ptr<const Tes3ContentStore> m_content;
     ObjectId m_player;
@@ -242,10 +308,15 @@ private:
     Tes3ScriptCheckReport m_scriptCheck;
     Tes3DialogueState m_dialogue;
     std::set<RecordKey> m_knownTopics;
+    std::map<RecordKey, std::string> m_topicResponseActors;
     std::map<ObjectId, Tes3ReferenceOverride> m_referenceOverrides;
     std::map<ObjectId, std::vector<Tes3ActiveSpell>> m_activeSpells;
     std::set<std::string> m_activeSounds;
     Tes3ExternalNativeExecutor m_externalNative;
+    std::function<void()> m_dialogueEndHook;
+    std::function<void()> m_beginResultTransaction;
+    std::function<void(bool)> m_finishResultTransaction;
+    std::optional<PendingResult> m_pendingResult;
     std::uint64_t m_currentTick = 0u;
 };
 

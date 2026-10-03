@@ -270,7 +270,7 @@ public:
     struct VoxelGiDebugSettings {
         float bounceStrength = 1.45f;
         float diffusionSoftness = 0.45f;
-        VoxelGiSurfaceMode surfaceMode = VoxelGiSurfaceMode::RestirSurface;
+        VoxelGiSurfaceMode surfaceMode = VoxelGiSurfaceMode::Legacy;
         int rtSurfaceSampleCount = 2;
         float rtSurfaceBiasScale = 1.0f;
         int restirCandidateCount = 4;
@@ -370,6 +370,15 @@ public:
     [[nodiscard]] bool isAutoExposureEnabled() const { return m_skyDebugSettings.autoExposureEnabled; }
     void setVoxelGiEnabled(bool enabled) { m_voxelGiRequested = enabled; }
     [[nodiscard]] bool isVoxelGiEnabled() const { return m_voxelGiRequested; }
+    void setGlobalIlluminationEnabled(bool enabled) {
+        if (m_screenSpaceGiRequested != enabled) {
+            m_screenSpaceGiHistoryValid = false;
+            m_voxelGiWorldDirty = true;
+            m_voxelGiHasPreviousFrameState = false;
+        }
+        m_screenSpaceGiRequested = enabled;
+        m_voxelGiRequested = enabled;
+    }
     // App-level opt-out of the sun shaft compute pass (a 20-tap radial march per
     // pixel at AO resolution). ANDed with m_sunShaftComputeAvailable; when off,
     // the existing else branch in recordFrame clears the shaft image to black
@@ -383,6 +392,7 @@ public:
     // ~2x cut to main-pass cost.
     void setRequestedMsaaSamples(uint32_t samples) { m_requestedMsaaSamples = samples; }
     // Request a copy while the next frame's swapchain image is still acquired.
+    bool captureVoxelGi(VoxelGiCapture& output);
     bool prepareFrameCapture();
     void recordFrameCapture(VkCommandBuffer commandBuffer, uint32_t imageIndex);
     bool captureLastFrameToFile(const std::string& outputPath);
@@ -1370,6 +1380,7 @@ private:
     };
 
     struct ImportedGiTriangle {
+        std::size_t chunkIndex = 0;
         float p0[3] = {};
         float p1[3] = {};
         float p2[3] = {};
@@ -2096,6 +2107,7 @@ private:
     std::uint32_t m_screenSpaceGiHistoryIndex = 0u;
     bool m_screenSpaceGiHistoryValid = false;
     bool m_screenSpaceGiAvailable = false;
+    bool m_screenSpaceGiRequested = true;
     bool m_screenSpaceGiActive = false;
     VkDescriptorSetLayout m_sunShaftDescriptorSetLayout = VK_NULL_HANDLE;
     DescriptorBufferSet m_sunShaftBufferSet{};

@@ -1,0 +1,3175 @@
+{
+  "build": "build-linux",
+  "cmake_sha256": "b641d5e641c3d8d029a474380b8a4386dbacde9c9a27c500b949124b4584c78f",
+  "configuration": "Debug",
+  "schema_version": 1,
+  "scope": "Configured targets only; include closure is textual, test association is not coverage.",
+  "tests": [
+    {
+      "command": [
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/one_actor.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_actor",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/one_actor.json"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/morrowind_terrain_physics.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_terrain_physics",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/morrowind_terrain_physics.json"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/static_world_physics.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_static_physics",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/static_world_physics.json"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/player_inventory.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_inventory",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/player_inventory.json"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_headless_ui",
+        "<repo>/tests/fixtures/harness/player_inventory_ui.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_ui_inventory",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/inventory_ui_flow.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/runtime_item_scene.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_ui_main.cc",
+        "tests/fixtures/harness/player_inventory_ui.json"
+      ],
+      "targets": [
+        "odai_headless_ui"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/tes3_release_audit_tests.py"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_tes3_release_audit",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "tests/tes3_release_audit_tests.py"
+      ],
+      "targets": []
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/headless_ui_tests.py",
+        "<repo>/build-linux/odai_headless_ui",
+        "<repo>/tests/fixtures/harness/player_inventory_ui.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_ui_replay",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/inventory_ui_flow.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/runtime_item_scene.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_ui_main.cc",
+        "tests/fixtures/harness/player_inventory_ui.json",
+        "tests/headless_ui_tests.py"
+      ],
+      "targets": [
+        "odai_headless_ui"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/headless_runner_replay_tests.py",
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/one_actor.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_actor_replay",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/one_actor.json",
+        "tests/headless_runner_replay_tests.py"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/headless_snapshot_tests.py",
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/one_actor.json",
+        "<repo>/tests/fixtures/harness/player_inventory.json"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_headless_snapshots",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/one_actor.json",
+        "tests/fixtures/harness/player_inventory.json",
+        "tests/headless_snapshot_tests.py"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/harness_capability_tests.py",
+        "<repo>/build-linux/odai_headless",
+        "<repo>/tests/fixtures/harness/one_actor.json",
+        "<repo>/scripts/visual_regression.py"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_harness_scenario_visual",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "scripts/visual_regression.py",
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "src/tools/odai_headless_main.cc",
+        "tests/fixtures/harness/one_actor.json",
+        "tests/harness_capability_tests.py"
+      ],
+      "targets": [
+        "odai_headless"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_imported_scene_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/dds.h",
+        "src/import/imported_scene.h",
+        "src/import/imported_scene_query.h"
+      ],
+      "name": "odai_imported_scene_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/nif_particles.h",
+        "src/import/blend_mode.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/imported_scene_query.h",
+        "src/import/material_animation.h",
+        "src/math/geometry.h",
+        "src/math/math.h",
+        "tests/imported_scene_tests.cc"
+      ],
+      "targets": [
+        "odai_imported_scene_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_character_coverage_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/tools/character_coverage.h"
+      ],
+      "name": "odai_character_coverage_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/content_record_index.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/tri_morph.h",
+        "src/import/blend_mode.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/tools/character_coverage.cc",
+        "src/tools/character_coverage.h",
+        "tests/character_coverage_tests.cc"
+      ],
+      "targets": [
+        "odai_character_coverage_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_asset_coverage_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/content_record_index.h",
+        "src/tools/asset_coverage_report.h"
+      ],
+      "name": "odai_asset_coverage_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/content_record_index.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/tools/asset_coverage_report.cc",
+        "src/tools/asset_coverage_report.h",
+        "tests/asset_coverage_tests.cc"
+      ],
+      "targets": [
+        "odai_asset_coverage_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_tri_morph_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/tri_morph.h"
+      ],
+      "name": "odai_tri_morph_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/tri_morph.h",
+        "tests/tri_morph_tests.cc"
+      ],
+      "targets": [
+        "odai_tri_morph_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_nif_particle_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/nif_particles.h"
+      ],
+      "name": "odai_nif_particle_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/nif_particles.h",
+        "tests/nif_particle_tests.cc"
+      ],
+      "targets": [
+        "odai_nif_particle_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_image_space_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/image_space_records.h"
+      ],
+      "name": "odai_image_space_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/image_space_records.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "tests/image_space_tests.cc"
+      ],
+      "targets": [
+        "odai_image_space_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_material_animation_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/nif_effect_sequence.h",
+        "src/import/bethesda/nif_material_animation.h",
+        "src/import/imported_lighting_material.h"
+      ],
+      "name": "odai_material_animation_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/nif_effect_sequence.h",
+        "src/import/bethesda/nif_material_animation.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_lighting_material.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "tests/material_animation_tests.cc"
+      ],
+      "targets": [
+        "odai_material_animation_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_bethesda_import_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_physics_world.h",
+        "src/core/job_system.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/async_asset_loader.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/fuz.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/land_lod.h",
+        "src/import/bethesda/lz4_frame.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_lod_handoff.h",
+        "src/import/bethesda/skyrim_tree_lod.h",
+        "src/import/bethesda/spt_scene.h",
+        "src/import/bethesda/weather_records.h"
+      ],
+      "name": "odai_bethesda_import_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/runtime_ids.h",
+        "src/core/job_system.h",
+        "src/dialogue/dialogue_types.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/async_asset_loader.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/fuz.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/land_lod.h",
+        "src/import/bethesda/lz4_frame.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_lod_handoff.h",
+        "src/import/bethesda/skyrim_tree_lod.h",
+        "src/import/bethesda/spt_scene.h",
+        "src/import/bethesda/weather_records.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "tests/bethesda_import_tests.cc"
+      ],
+      "targets": [
+        "odai_bethesda_import_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_skyrim_animation_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/hkx_packfile.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/save_game.h",
+        "src/games/bethesda/npc_demo_locomotion.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/skyrim_animation_assets.h"
+      ],
+      "name": "odai_skyrim_animation_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/games/bethesda/npc_demo_locomotion.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/math/math.h",
+        "tests/skyrim_animation_tests.cc"
+      ],
+      "targets": [
+        "odai_skyrim_animation_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_character_dynamics_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/character_dynamics.h"
+      ],
+      "name": "odai_character_dynamics_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/character_dynamics.h",
+        "src/math/math.h",
+        "tests/character_dynamics_tests.cc"
+      ],
+      "targets": [
+        "odai_character_dynamics_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_mod_check_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/plugin_load_order.h"
+      ],
+      "name": "odai_mod_check_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "tests/mod_check_tests.cc"
+      ],
+      "targets": [
+        "odai_mod_check_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_content_profile_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/content_profile.h"
+      ],
+      "name": "odai_content_profile_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "tests/content_profile_tests.cc"
+      ],
+      "targets": [
+        "odai_content_profile_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_traversal_state_tests"
+      ],
+      "direct_test_includes": [
+        "src/games/bethesda/traversal_state.h"
+      ],
+      "name": "odai_traversal_state_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/games/bethesda/traversal_state.h",
+        "tests/traversal_state_tests.cc"
+      ],
+      "targets": [
+        "odai_traversal_state_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_pose_graph_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skyrim_animation.h"
+      ],
+      "name": "odai_pose_graph_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/math/math.h",
+        "tests/pose_graph_tests.cc"
+      ],
+      "targets": [
+        "odai_pose_graph_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_humanoid_rig_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/animation_sampler.h",
+        "src/anim/humanoid_rig.h",
+        "src/import/bethesda/character_builder.h"
+      ],
+      "name": "odai_humanoid_rig_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "tests/humanoid_rig_tests.cc"
+      ],
+      "targets": [
+        "odai_humanoid_rig_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_native_animation_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/native_program.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/character_movement.h",
+        "src/import/bethesda/skyrim_animation_assets.h"
+      ],
+      "name": "odai_native_animation_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/character_movement.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/math/math.h",
+        "tests/native_animation_tests.cc"
+      ],
+      "targets": [
+        "odai_native_animation_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_animation_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/skeleton.h",
+        "src/anim/skeleton_io.h",
+        "src/math/math.h"
+      ],
+      "name": "odai_animation_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/skeleton.h",
+        "src/anim/skeleton_io.h",
+        "src/math/math.h",
+        "tests/animation_tests.cc"
+      ],
+      "targets": [
+        "odai_animation_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_taa_depth_tests"
+      ],
+      "direct_test_includes": [
+        "src/render/taa_depth_policy.h"
+      ],
+      "name": "odai_taa_depth_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/render/taa_depth_policy.h",
+        "tests/taa_depth_tests.cc"
+      ],
+      "targets": [
+        "odai_taa_depth_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_dialogue_tests"
+      ],
+      "direct_test_includes": [
+        "src/dialogue/dialogue_context.h",
+        "src/dialogue/dialogue_io.h",
+        "src/dialogue/dialogue_runtime.h",
+        "src/dialogue/dialogue_state_io.h",
+        "src/dialogue/dialogue_types.h"
+      ],
+      "name": "odai_dialogue_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/dialogue/dialogue_context.h",
+        "src/dialogue/dialogue_io.h",
+        "src/dialogue/dialogue_runtime.h",
+        "src/dialogue/dialogue_state_io.h",
+        "src/dialogue/dialogue_types.h",
+        "tests/dialogue_tests.cc"
+      ],
+      "targets": [
+        "odai_dialogue_tests"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/launcher_tests.py"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_launcher_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "tests/launcher_tests.py"
+      ],
+      "targets": []
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/iridius_bench_tests.py"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_iridius_bench_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "tests/iridius_bench_tests.py"
+      ],
+      "targets": []
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/scripts/render_skyrim_showcase.py",
+        "--odai",
+        "<repo>/build-linux/odai",
+        "--data",
+        "<repo>/build-linux/missing-skyrim-data",
+        "--dry-run"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_skyrim_showcase_manifest_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "scripts/render_skyrim_showcase.py",
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/audio/audio.h",
+        "src/audio/audio_types.h",
+        "src/audio/wav_writer.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/inventory_ui_flow.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/navigation_world.cc",
+        "src/bethesda/navigation_world.h",
+        "src/bethesda/oblivion_presentation.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/record_resolver.h",
+        "src/bethesda/route_checkpoint.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scenario_content.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_class_ui_flow.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_level_ui_flow.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/bethesda/whiterun_presentation.h",
+        "src/core/frame_profiler.h",
+        "src/core/job_system.h",
+        "src/core/lcg.h",
+        "src/core/log.h",
+        "src/core/resource_path.h",
+        "src/core/ring_buffer.h",
+        "src/core/win_timer_resolution.h",
+        "src/dialogue/dialogue_context.h",
+        "src/dialogue/dialogue_runtime.h",
+        "src/dialogue/dialogue_types.h",
+        "src/engine/frame_timing_csv.h",
+        "src/engine/game_app.cc",
+        "src/engine/game_app.h",
+        "src/engine/game_frame_stats.h",
+        "src/engine/tick_timing.h",
+        "src/games/bethesda/audio_decode.cc",
+        "src/games/bethesda/audio_decode.h",
+        "src/games/bethesda/bethesda_actors.cc",
+        "src/games/bethesda/bethesda_actors.h",
+        "src/games/bethesda/bethesda_app.cc",
+        "src/games/bethesda/bethesda_app.h",
+        "src/games/bethesda/bethesda_collision.cc",
+        "src/games/bethesda/bethesda_collision.h",
+        "src/games/bethesda/bethesda_main.cc",
+        "src/games/bethesda/newvegas_victor.cc",
+        "src/games/bethesda/newvegas_victor.h",
+        "src/games/bethesda/npc_demo_locomotion.h",
+        "src/games/bethesda/skyrim_first_person.cc",
+        "src/games/bethesda/traversal_state.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/cell_streamer.cc",
+        "src/import/bethesda/cell_streamer.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/fuz.h",
+        "src/import/bethesda/image_space_records.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/land_lod.h",
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/runtime_item_scene.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/skyrim_lod_handoff.h",
+        "src/import/bethesda/skyrim_tree_lod.h",
+        "src/import/bethesda/strings_table.h",
+        "src/import/bethesda/weather_records.h",
+        "src/import/bethesda/world_map_cache.h",
+        "src/import/blend_mode.h",
+        "src/import/cell_residency_planner.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer.h",
+        "src/render/renderer_types.h",
+        "src/render/upscale/upscale_policy.h",
+        "src/render/video_writer.h",
+        "src/ui/font.h",
+        "src/ui/nav_focus.h",
+        "src/ui/nav_input.h",
+        "src/ui/signal.h",
+        "src/ui/toast_host.h",
+        "src/ui/ui_context.h",
+        "src/ui/ui_cursor.h",
+        "src/ui/ui_draw_list.h",
+        "src/ui/ui_input.h",
+        "src/ui/ui_types.h",
+        "src/ui/widget.h",
+        "src/ui/widgets/tes3_journal_panel.h"
+      ],
+      "targets": [
+        "odai"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_upscaler_tests"
+      ],
+      "direct_test_includes": [
+        "src/render/upscale/upscale_contract.h",
+        "src/render/upscale/upscale_policy.h"
+      ],
+      "name": "odai_upscaler_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "src/render/upscale/upscale_contract.h",
+        "src/render/upscale/upscale_policy.h",
+        "tests/upscaler_tests.cc"
+      ],
+      "targets": [
+        "odai_upscaler_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_cell_residency_planner_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/cell_residency_planner.h"
+      ],
+      "name": "odai_cell_residency_planner_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/cell_residency_planner.h",
+        "tests/cell_residency_planner_tests.cc"
+      ],
+      "targets": [
+        "odai_cell_residency_planner_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_bindless_slot_table_tests"
+      ],
+      "direct_test_includes": [
+        "src/render/bindless_slot_table.h"
+      ],
+      "name": "odai_bindless_slot_table_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/render/bindless_slot_table.h",
+        "tests/bindless_slot_table_tests.cc"
+      ],
+      "targets": [
+        "odai_bindless_slot_table_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_gpu_arena_allocator_tests"
+      ],
+      "direct_test_includes": [
+        "src/render/gpu_arena_allocator.h"
+      ],
+      "name": "odai_gpu_arena_allocator_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/render/gpu_arena_allocator.h",
+        "tests/gpu_arena_allocator_tests.cc"
+      ],
+      "targets": [
+        "odai_gpu_arena_allocator_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_job_system_tests"
+      ],
+      "direct_test_includes": [
+        "src/core/job_system.h"
+      ],
+      "name": "odai_job_system_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/core/job_system.h",
+        "tests/job_system_tests.cc"
+      ],
+      "targets": [
+        "odai_job_system_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_engine_stats_tests"
+      ],
+      "direct_test_includes": [
+        "src/engine/frame_timing_csv.h",
+        "src/engine/game_frame_stats.h"
+      ],
+      "name": "odai_engine_stats_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/core/frame_profiler.h",
+        "src/core/ring_buffer.h",
+        "src/engine/frame_timing_csv.h",
+        "src/engine/game_frame_stats.h",
+        "src/engine/tick_timing.h",
+        "tests/engine_frame_stats_tests.cc"
+      ],
+      "targets": [
+        "odai_engine_stats_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_core_types_tests"
+      ],
+      "direct_test_includes": [
+        "src/core/frame_profiler.h",
+        "src/core/grid3.h",
+        "src/core/hash.h",
+        "src/core/lcg.h",
+        "src/core/ring_buffer.h",
+        "src/math/geometry.h",
+        "src/math/math.h"
+      ],
+      "name": "odai_core_types_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/core/frame_profiler.h",
+        "src/core/grid3.h",
+        "src/core/hash.h",
+        "src/core/lcg.h",
+        "src/core/ring_buffer.h",
+        "src/math/geometry.h",
+        "src/math/math.h",
+        "tests/core_types_tests.cc"
+      ],
+      "targets": [
+        "odai_core_types_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_skyrim_inventory_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/save_game.h"
+      ],
+      "name": "odai_skyrim_inventory_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "tests/skyrim_inventory_tests.cc"
+      ],
+      "targets": [
+        "odai_skyrim_inventory_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_skyrim_persistent_reference_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_persistent_references.h"
+      ],
+      "name": "odai_skyrim_persistent_reference_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_persistent_references.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "tests/skyrim_persistent_reference_tests.cc"
+      ],
+      "targets": [
+        "odai_skyrim_persistent_reference_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_bethesda_runtime_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/oblivion_presentation.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_runtime_records.h",
+        "src/bethesda/vmad_reader.h",
+        "src/bethesda/whiterun_presentation.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/cell_residency_planner.h"
+      ],
+      "name": "odai_bethesda_runtime_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/oblivion_presentation.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_runtime_records.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/bethesda/whiterun_presentation.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/blend_mode.h",
+        "src/import/cell_residency_planner.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "tests/bethesda_runtime_tests.cc"
+      ],
+      "targets": [
+        "odai_bethesda_runtime_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_tes3_content_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/tes3_content.h"
+      ],
+      "name": "odai_tes3_content_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/tes3_content.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "tests/tes3_content_tests.cc"
+      ],
+      "targets": [
+        "odai_tes3_content_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_tes3_script_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/tes3_script.h"
+      ],
+      "name": "odai_tes3_script_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/tes3_script.h",
+        "tests/tes3_script_tests.cc"
+      ],
+      "targets": [
+        "odai_tes3_script_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_tes3_progression_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/tes3_class_ui_flow.h",
+        "src/bethesda/tes3_level_ui_flow.h"
+      ],
+      "name": "odai_tes3_progression_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_class_ui_flow.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_level_ui_flow.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "tests/tes3_progression_tests.cc"
+      ],
+      "targets": [
+        "odai_tes3_progression_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_tes3_runtime_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/tes3_runtime.h"
+      ],
+      "name": "odai_tes3_runtime_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "tests/tes3_runtime_tests.cc"
+      ],
+      "targets": [
+        "odai_tes3_runtime_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_navigation_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/navigation_world.h"
+      ],
+      "name": "odai_navigation_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/bethesda/navigation_world.cc",
+        "src/bethesda/navigation_world.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/blend_mode.h",
+        "src/import/cell_residency_planner.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "tests/navigation_world_tests.cc"
+      ],
+      "targets": [
+        "odai_navigation_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_tes3_navigation_simulation_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/navigation_simulation.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/games/bethesda/bethesda_collision.h"
+      ],
+      "name": "odai_tes3_navigation_simulation_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/navigation_simulation.cc",
+        "src/bethesda/navigation_simulation.h",
+        "src/bethesda/navigation_world.cc",
+        "src/bethesda/navigation_world.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/games/bethesda/bethesda_collision.cc",
+        "src/games/bethesda/bethesda_collision.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/blend_mode.h",
+        "src/import/cell_residency_planner.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "tests/tes3_navigation_simulation_tests.cc"
+      ],
+      "targets": [
+        "odai_tes3_navigation_simulation_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_papyrus_vm_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/runtime_world.h"
+      ],
+      "name": "odai_papyrus_vm_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "tests/papyrus_vm_tests.cc"
+      ],
+      "targets": [
+        "odai_papyrus_vm_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_route_checkpoint_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/route_checkpoint.h"
+      ],
+      "name": "odai_route_checkpoint_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/route_checkpoint.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "tests/route_checkpoint_tests.cc"
+      ],
+      "targets": [
+        "odai_route_checkpoint_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_save_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/save_game.h"
+      ],
+      "name": "odai_save_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "tests/odai_save_tests.cc"
+      ],
+      "targets": [
+        "odai_save_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_living_world_tests"
+      ],
+      "direct_test_includes": [
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/save_game.h"
+      ],
+      "name": "odai_living_world_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/math/math.h",
+        "tests/living_world_tests.cc"
+      ],
+      "targets": [
+        "odai_living_world_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_world_map_cache_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/bethesda/world_map_cache.h"
+      ],
+      "name": "odai_world_map_cache_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/world_map_cache.h",
+        "tests/world_map_cache_tests.cc"
+      ],
+      "targets": [
+        "odai_world_map_cache_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_frame_graph_tests"
+      ],
+      "direct_test_includes": [
+        "src/render/backend/vulkan/frame_graph_runtime.h",
+        "src/render/frame_graph.h"
+      ],
+      "name": "odai_frame_graph_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/core/log.h",
+        "src/render/backend/vulkan/frame_graph_core.h",
+        "src/render/backend/vulkan/frame_graph_runtime.cc",
+        "src/render/backend/vulkan/frame_graph_runtime.h",
+        "src/render/frame_graph.cc",
+        "src/render/frame_graph.h",
+        "tests/frame_graph_plain_tests.cc"
+      ],
+      "targets": [
+        "odai_frame_graph_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_imported_render_policy_tests"
+      ],
+      "direct_test_includes": [
+        "src/render/backend/vulkan/frame_math.h",
+        "src/render/image_space_contrast.h",
+        "src/render/imported_gi.h",
+        "src/render/renderer_types.h",
+        "src/render/water_depth_policy.h",
+        "src/render/weather_wind_policy.h"
+      ],
+      "name": "odai_imported_render_policy_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/backend/vulkan/frame_math.h",
+        "src/render/image_space_contrast.h",
+        "src/render/imported_gi.h",
+        "src/render/renderer_types.h",
+        "src/render/water_depth_policy.h",
+        "src/render/weather_wind_policy.h",
+        "tests/imported_render_policy_tests.cc"
+      ],
+      "targets": [
+        "odai_imported_render_policy_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_pbr_material_tests"
+      ],
+      "direct_test_includes": [
+        "src/import/imported_lighting_material.h",
+        "src/import/imported_scene.h"
+      ],
+      "name": "odai_pbr_material_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/import/bethesda/nif_particles.h",
+        "src/import/blend_mode.h",
+        "src/import/imported_lighting_material.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "tests/pbr_material_tests.cc"
+      ],
+      "targets": [
+        "odai_pbr_material_tests"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/tes3_texture_probe_tests.py",
+        "<repo>/build-linux/odai_bethesda_probe"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_tes3_texture_probe",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/route_checkpoint.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scenario_content.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/dialogue/dialogue_types.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/content_record_index.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/image_space_records.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/strings_table.h",
+        "src/import/bethesda/tri_morph.h",
+        "src/import/bethesda/weather_records.h",
+        "src/import/blend_mode.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "src/tools/asset_coverage.cc",
+        "src/tools/asset_coverage.h",
+        "src/tools/asset_coverage_report.cc",
+        "src/tools/asset_coverage_report.h",
+        "src/tools/bethesda_probe_main.cc",
+        "src/tools/character_coverage.cc",
+        "src/tools/character_coverage.h",
+        "src/tools/tri_probe.cc",
+        "src/tools/tri_probe.h",
+        "tests/tes3_texture_probe_tests.py"
+      ],
+      "targets": [
+        "odai_bethesda_probe"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/tes3_probe_record_tests.py",
+        "<repo>/build-linux/odai_bethesda_probe"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_tes3_probe_records",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/route_checkpoint.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scenario_content.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/dialogue/dialogue_types.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/content_record_index.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/image_space_records.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/strings_table.h",
+        "src/import/bethesda/tri_morph.h",
+        "src/import/bethesda/weather_records.h",
+        "src/import/blend_mode.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "src/tools/asset_coverage.cc",
+        "src/tools/asset_coverage.h",
+        "src/tools/asset_coverage_report.cc",
+        "src/tools/asset_coverage_report.h",
+        "src/tools/bethesda_probe_main.cc",
+        "src/tools/character_coverage.cc",
+        "src/tools/character_coverage.h",
+        "src/tools/tri_probe.cc",
+        "src/tools/tri_probe.h",
+        "tests/tes3_probe_record_tests.py"
+      ],
+      "targets": [
+        "odai_bethesda_probe"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/cmake",
+        "-E",
+        "env",
+        "DISPLAY=",
+        "WAYLAND_DISPLAY=",
+        "<repo>/build-linux/odai",
+        "mod-check",
+        "--help"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_mod_check_headless",
+      "properties": [
+        {
+          "name": "PASS_REGULAR_EXPRESSION",
+          "value": [
+            "odai mod-check --profile"
+          ]
+        },
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/audio/audio.h",
+        "src/audio/audio_types.h",
+        "src/audio/wav_writer.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/inventory_ui_flow.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/navigation_world.cc",
+        "src/bethesda/navigation_world.h",
+        "src/bethesda/oblivion_presentation.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/record_resolver.h",
+        "src/bethesda/route_checkpoint.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scenario_content.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_class_ui_flow.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_level_ui_flow.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/bethesda/whiterun_presentation.h",
+        "src/core/frame_profiler.h",
+        "src/core/job_system.h",
+        "src/core/lcg.h",
+        "src/core/log.h",
+        "src/core/resource_path.h",
+        "src/core/ring_buffer.h",
+        "src/core/win_timer_resolution.h",
+        "src/dialogue/dialogue_context.h",
+        "src/dialogue/dialogue_runtime.h",
+        "src/dialogue/dialogue_types.h",
+        "src/engine/frame_timing_csv.h",
+        "src/engine/game_app.cc",
+        "src/engine/game_app.h",
+        "src/engine/game_frame_stats.h",
+        "src/engine/tick_timing.h",
+        "src/games/bethesda/audio_decode.cc",
+        "src/games/bethesda/audio_decode.h",
+        "src/games/bethesda/bethesda_actors.cc",
+        "src/games/bethesda/bethesda_actors.h",
+        "src/games/bethesda/bethesda_app.cc",
+        "src/games/bethesda/bethesda_app.h",
+        "src/games/bethesda/bethesda_collision.cc",
+        "src/games/bethesda/bethesda_collision.h",
+        "src/games/bethesda/bethesda_main.cc",
+        "src/games/bethesda/newvegas_victor.cc",
+        "src/games/bethesda/newvegas_victor.h",
+        "src/games/bethesda/npc_demo_locomotion.h",
+        "src/games/bethesda/skyrim_first_person.cc",
+        "src/games/bethesda/traversal_state.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/cell_streamer.cc",
+        "src/import/bethesda/cell_streamer.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/fuz.h",
+        "src/import/bethesda/image_space_records.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/land_lod.h",
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/morrowind_terrain.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/runtime_item_scene.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/skyrim_lod_handoff.h",
+        "src/import/bethesda/skyrim_tree_lod.h",
+        "src/import/bethesda/strings_table.h",
+        "src/import/bethesda/weather_records.h",
+        "src/import/bethesda/world_map_cache.h",
+        "src/import/blend_mode.h",
+        "src/import/cell_residency_planner.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer.h",
+        "src/render/renderer_types.h",
+        "src/render/upscale/upscale_policy.h",
+        "src/render/video_writer.h",
+        "src/ui/font.h",
+        "src/ui/nav_focus.h",
+        "src/ui/nav_input.h",
+        "src/ui/signal.h",
+        "src/ui/toast_host.h",
+        "src/ui/ui_context.h",
+        "src/ui/ui_cursor.h",
+        "src/ui/ui_draw_list.h",
+        "src/ui/ui_input.h",
+        "src/ui/ui_types.h",
+        "src/ui/widget.h",
+        "src/ui/widgets/tes3_journal_panel.h"
+      ],
+      "targets": [
+        "odai"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/cmake",
+        "-E",
+        "env",
+        "DISPLAY=",
+        "WAYLAND_DISPLAY=",
+        "<repo>/build-linux/odai_bethesda_probe",
+        "--mod-check",
+        "--help"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_bethesda_probe_mod_check_headless",
+      "properties": [
+        {
+          "name": "PASS_REGULAR_EXPRESSION",
+          "value": [
+            "odai mod-check --profile"
+          ]
+        },
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/route_checkpoint.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/save_game.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scenario_content.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/dialogue/dialogue_types.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/cell_builder.h",
+        "src/import/bethesda/character_asset_manifest.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/content_record_index.h",
+        "src/import/bethesda/decoded_texture_cache.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/image_space_records.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/mod_check.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/strings_table.h",
+        "src/import/bethesda/tri_morph.h",
+        "src/import/bethesda/weather_records.h",
+        "src/import/blend_mode.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "src/tools/asset_coverage.cc",
+        "src/tools/asset_coverage.h",
+        "src/tools/asset_coverage_report.cc",
+        "src/tools/asset_coverage_report.h",
+        "src/tools/bethesda_probe_main.cc",
+        "src/tools/character_coverage.cc",
+        "src/tools/character_coverage.h",
+        "src/tools/tri_probe.cc",
+        "src/tools/tri_probe.h"
+      ],
+      "targets": [
+        "odai_bethesda_probe"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_pose_compute_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/gpu_pose.h"
+      ],
+      "name": "odai_pose_compute_tests",
+      "properties": [
+        {
+          "name": "SKIP_RETURN_CODE",
+          "value": 77
+        },
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/math/math.h",
+        "src/render/tests/pose_compute_tests.cc"
+      ],
+      "targets": [
+        "odai_pose_compute_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_audio_tests"
+      ],
+      "direct_test_includes": [
+        "src/audio/audio.h",
+        "src/audio/wav_writer.h",
+        "src/math/math.h"
+      ],
+      "name": "odai_audio_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/audio/audio.h",
+        "src/audio/audio_types.h",
+        "src/audio/wav_writer.h",
+        "src/math/math.h",
+        "tests/audio_tests.cc"
+      ],
+      "targets": [
+        "odai_audio_tests"
+      ]
+    },
+    {
+      "command": [
+        "/usr/bin/python3.14",
+        "<repo>/tests/bench_heap_tests.py",
+        "<repo>/build-linux/libodai_bench_heap.so"
+      ],
+      "direct_test_includes": [],
+      "name": "odai_bench_heap_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "tests/bench_heap_tests.py"
+      ],
+      "targets": []
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_actor_movement_tests"
+      ],
+      "direct_test_includes": [
+        "src/anim/hkx_packfile.h",
+        "src/bethesda/bethesda_session.h",
+        "src/games/bethesda/bethesda_actors.h",
+        "src/import/bethesda/skyrim_animation_assets.h"
+      ],
+      "name": "odai_actor_movement_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/anim/animation_clip.h",
+        "src/anim/animation_sampler.h",
+        "src/anim/behavior_program.h",
+        "src/anim/character_dynamics.h",
+        "src/anim/gpu_pose.h",
+        "src/anim/hkx_packfile.h",
+        "src/anim/humanoid_rig.h",
+        "src/anim/native_program.h",
+        "src/anim/pose_graph.h",
+        "src/anim/pose_modifiers.h",
+        "src/anim/skeleton.h",
+        "src/anim/skyrim_animation.h",
+        "src/audio/audio.h",
+        "src/audio/audio_types.h",
+        "src/bethesda/bethesda_physics_world.h",
+        "src/bethesda/bethesda_session.h",
+        "src/bethesda/character_movement.h",
+        "src/bethesda/condition.h",
+        "src/bethesda/fixed_step_clock.h",
+        "src/bethesda/gameplay_catalog.h",
+        "src/bethesda/living_world.h",
+        "src/bethesda/navigation_world.cc",
+        "src/bethesda/navigation_world.h",
+        "src/bethesda/papyrus_vm.h",
+        "src/bethesda/pex_reader.h",
+        "src/bethesda/runtime_ids.h",
+        "src/bethesda/runtime_render_delta.h",
+        "src/bethesda/runtime_transform.h",
+        "src/bethesda/runtime_world.h",
+        "src/bethesda/scenario.h",
+        "src/bethesda/skyrim_dialogue.h",
+        "src/bethesda/skyrim_items.h",
+        "src/bethesda/skyrim_quest.h",
+        "src/bethesda/skyrim_scene.h",
+        "src/bethesda/tes3_content.h",
+        "src/bethesda/tes3_progression.h",
+        "src/bethesda/tes3_runtime.h",
+        "src/bethesda/tes3_script.h",
+        "src/bethesda/vmad_reader.h",
+        "src/core/lcg.h",
+        "src/core/log.h",
+        "src/dialogue/dialogue_context.h",
+        "src/dialogue/dialogue_runtime.h",
+        "src/dialogue/dialogue_types.h",
+        "src/games/bethesda/audio_decode.cc",
+        "src/games/bethesda/audio_decode.h",
+        "src/games/bethesda/bethesda_actors.cc",
+        "src/games/bethesda/bethesda_actors.h",
+        "src/import/bethesda/actor_records.h",
+        "src/import/bethesda/asset_source.h",
+        "src/import/bethesda/bsa_archive.h",
+        "src/import/bethesda/character_builder.h",
+        "src/import/bethesda/content_profile.h",
+        "src/import/bethesda/dialogue_records.h",
+        "src/import/bethesda/esm_reader.h",
+        "src/import/bethesda/fallout_records.h",
+        "src/import/bethesda/fuz.h",
+        "src/import/bethesda/kf_animation.h",
+        "src/import/bethesda/nif_particles.h",
+        "src/import/bethesda/nif_scene.h",
+        "src/import/bethesda/plugin_load_order.h",
+        "src/import/bethesda/skyrim_animation_assets.h",
+        "src/import/bethesda/strings_table.h",
+        "src/import/blend_mode.h",
+        "src/import/cell_residency_planner.h",
+        "src/import/dds.h",
+        "src/import/imported_material.h",
+        "src/import/imported_scene.h",
+        "src/import/material_animation.h",
+        "src/math/math.h",
+        "src/render/renderer_types.h",
+        "tests/bethesda_actor_movement_tests.cc"
+      ],
+      "targets": [
+        "odai_actor_movement_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_swf_font_tests"
+      ],
+      "direct_test_includes": [
+        "src/ui/font.h"
+      ],
+      "name": "odai_swf_font_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/ui/font.h",
+        "src/ui/ui_types.h",
+        "tests/swf_font_tests.cc"
+      ],
+      "targets": [
+        "odai_swf_font_tests"
+      ]
+    },
+    {
+      "command": [
+        "<repo>/build-linux/odai_ui_tests"
+      ],
+      "direct_test_includes": [
+        "src/ui/font.h",
+        "src/ui/nav_focus.h",
+        "src/ui/nav_input.h",
+        "src/ui/toast_host.h",
+        "src/ui/ui_draw_list.h",
+        "src/ui/widget.h",
+        "src/ui/widgets/button.h",
+        "src/ui/widgets/slider.h",
+        "src/ui/widgets/tes3_journal_panel.h",
+        "src/ui/widgets/toggle.h"
+      ],
+      "name": "odai_ui_tests",
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "<repo>/build-linux"
+        }
+      ],
+      "source_evidence": [
+        "src/ui/animation.h",
+        "src/ui/font.h",
+        "src/ui/nav_focus.h",
+        "src/ui/nav_input.h",
+        "src/ui/signal.h",
+        "src/ui/toast_host.h",
+        "src/ui/ui_draw_list.h",
+        "src/ui/ui_input.h",
+        "src/ui/ui_types.h",
+        "src/ui/widget.h",
+        "src/ui/widgets/button.h",
+        "src/ui/widgets/slider.h",
+        "src/ui/widgets/tes3_journal_panel.h",
+        "src/ui/widgets/toggle.h",
+        "tests/ui_tests.cc"
+      ],
+      "targets": [
+        "odai_ui_tests"
+      ]
+    }
+  ]
+}

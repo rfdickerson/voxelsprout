@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -138,10 +139,11 @@ void addScript(std::vector<std::uint8_t>& file, const std::string& source) {
     addRecord(file, "SCPT", body);
 }
 
-void addGlobal(std::vector<std::uint8_t>& file, float value) {
+void addGlobal(std::vector<std::uint8_t>& file, float value,
+    const std::string& id = "TR_TestGlobal", char type = 'f') {
     std::vector<std::uint8_t> body;
-    addSubrecord(body, "NAME", "TR_TestGlobal");
-    addSubrecord(body, "FNAM", std::vector<std::uint8_t>{'f'});
+    addSubrecord(body, "NAME", id);
+    addSubrecord(body, "FNAM", std::vector<std::uint8_t>{static_cast<std::uint8_t>(type)});
     std::vector<std::uint8_t> bytes;
     append(bytes, value);
     addSubrecord(body, "FLTV", bytes);
@@ -180,6 +182,7 @@ void addActorAndItem(std::vector<std::uint8_t>& file) {
     std::memcpy(stats.data() + 40u, &magicka, sizeof(magicka));
     std::memcpy(stats.data() + 42u, &fatigue, sizeof(fatigue));
     stats[46u] = 3u;
+    stats[45u] = 12u;
     addSubrecord(actor, "NPDT", std::move(stats));
     std::vector<std::uint8_t> inventory(36u, 0u);
     const std::int32_t count = 2;
@@ -256,6 +259,12 @@ void testContentStore() {
     addInfo(base, "b", "a", "", 20, "Terminal", "QSTF");
     addScript(base, "begin TR_TestScript\nshort state\nend");
     addGlobal(base, 2.0f);
+    addGlobal(base, 427.9f, "short_fraction", 's');
+    addGlobal(base, std::numeric_limits<float>::denorm_min(), "short_denormal", 's');
+    addGlobal(base, std::numeric_limits<float>::quiet_NaN(), "short_nan", 's');
+    addGlobal(base, 1e30f, "short_overflow", 's');
+    addGlobal(base, -123.9f, "long_fraction", 'l');
+    addGlobal(base, 1e30f, "long_overflow", 'l');
     addStatic(base);
     addActorAndItem(base);
     addCell(base, 0x00000042u, false);
@@ -299,16 +308,24 @@ void testContentStore() {
           "SCPT source, bytecode, and locals are retained together");
     check(content.globals().at(makeTes3RecordKey("GLOB", "tr_testglobal")).value == 2.0f,
           "GLOB initial value is typed");
+    const auto global = [&](const char* id) {
+        return content.globals().at(makeTes3RecordKey("GLOB", id)).value;
+    };
+    check(global("short_fraction") == 427 && global("short_denormal") == 0 &&
+              global("short_nan") == 0 && global("short_overflow") == 0 &&
+              global("long_fraction") == -123 &&
+              global("long_overflow") == static_cast<float>(std::numeric_limits<std::int32_t>::min()),
+          "integer globals truncate and narrow TES3 float storage deterministically");
     check(content.findRecord("STAT", "TR_TEST_STAT") != nullptr,
           "generic named records retain later-wins string identity");
     const Tes3ActorDefinition* actor = content.findActor("NPC_", "TR_TEST_ACTOR");
-    check(actor != nullptr && actor->level == 8 && actor->rank == 3 &&
+    check(actor != nullptr && actor->level == 8 && actor->rank == 3 && actor->reputation == 8 &&
               actor->health == 75.0f && actor->magicka == 60.0f &&
               actor->fatigue == 90.0f && actor->attributes.at("strength") == 55.0f &&
               actor->skills.at("block") == 42.0f &&
               actor->faction == makeTes3RecordKey("FACT", "temple") &&
               actor->script == makeTes3RecordKey("SCPT", "TR_TestScript"),
-          "TES3 actor identity, stats, faction, rank, and local script are typed");
+          "TES3 actor identity, stats, calculated faction reputation, rank, and local script are typed");
     check(actor != nullptr && actor->serviceFlags == 0x00001000u &&
               actor->travelDestinations.size() == 1u &&
               actor->travelDestinations[0].cell == "Test Destination" &&
